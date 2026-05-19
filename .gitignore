@@ -1,0 +1,49 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+
+# 本地环境
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Notebook
+.ipynb_checkpoints/
+
+# 构建和报告输出
+build/
+dist/
+*.egg-info/
+coverage/
+.coverage
+reports/runs/
+
+# 数据和密钥
+data/raw/
+data/interim/
+data/processed/
+data/external/
+data/private/
+data/reference_docs/
+data/raw_private/
+data/interim_private/
+data/processed_private/
+reports/private_real/
+config/private_column_overrides.json
+secrets.*
+credentials.*
+token.*
+*.key
+*.pem
+
+# 操作系统和编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
