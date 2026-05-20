@@ -8,10 +8,10 @@
 |---|---|
 | 记录名称 | `csmar_workflow_first_factor_pipeline` |
 | 当前状态 | active |
-| 日期 | 2026-05-19 |
+| 日期 | 2026-05-20 |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
 | 主要产物 | `panel_full/research_panel_2014_2025.parquet`；`price_volume_factors_full/price_volume_factors_2014_2025.parquet` |
-| evaluation | `full_2024_2025` full-sample run + core `metrics_by_year` |
+| evaluation | `full_2024_2025` long-only full-sample run + core `metrics_by_year`；历史 long-short 结果仅作迁移对照 |
 | 公开边界 | CSMAR 明细数据、private reports 和可还原 vendor 数据不公开 |
 
 ## 方法证据
@@ -26,11 +26,12 @@
 
 - 第一批 factor set 是 `price_volume`：momentum、reversal、volatility、amount liquidity、turnover、Amihud illiquidity、amplitude。
 - 默认窗口为 `20, 60, 120`；forward labels 为 `1, 5, 10, 20, 60, 120` 个交易日。
-- 2024-2025 第一版诊断中，反转类因子是主要候选。
-- full breakdown 与当前口径 yearly diagnostic baseline 已校验；2025 年初额外 path 记录来自连续持仓，不是汇总错误。
+- 2024-2025 long-only 第一版诊断中，反转类因子仍是主要候选。
+- 2024 年 `rev_120d` 的 `mean_rankic` 约 0.114，`mean_net_portfolio_return` 约 0.003086；2025 年 `rev_60d` 的 `mean_rankic` 约 0.095，`mean_net_portfolio_return` 约 0.001717。
+- long-only 不变量已检查：`portfolio_mode=long_only`、`short_count=0`、`short_return=0`，0 成本下 `net_portfolio_return == gross_portfolio_return == long_return`。
+- 历史 long-short robustness 不再作为 A 股可执行口径结论；需要按 long-only 重新生成成本和 regime 稳健性。
 
 ## 仍需验证
 
 - 当前 evaluation 是 pipeline 和统计诊断，不是最终投资结论。
-- 尚未完成行业/市值中性化、成本敏感性、风险暴露和 regime 稳健性分析。
-- 早期 924 后 `amihud_60d` 观察只作为历史线索；若进入正式结论，需要重新生成事件切片或转为 regime 稳健性分析。
+- 尚未在 long-only 口径下完成成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。

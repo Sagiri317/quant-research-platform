@@ -175,6 +175,7 @@ def test_evaluation_spec_exposes_core_runtime_options(tmp_path) -> None:
         source_file="data/processed_private/csmar/example.parquet",
         pnl_return_column="forward_return_5d",
         cost_bps=3.5,
+        portfolio_mode="long_only",
         engine="tensor",
         segment_columns=("industry",),
         risk_column="risk_20d",
@@ -185,7 +186,9 @@ def test_evaluation_spec_exposes_core_runtime_options(tmp_path) -> None:
 
     assert spec.pnl_return_column == "forward_return_5d"
     assert spec.weight_configs[0].cost_bps == 3.5
+    assert spec.weight_configs[0].portfolio_mode == "long_only"
     assert spec.weight_configs[0].risk_column == "risk_20d"
+    assert spec.metadata["portfolio_mode"] == "long_only"
     assert spec.engine == "tensor"
     assert spec.segment_columns == ("industry",)
     assert spec.neutralization_config.method == "cross_sectional_ols"
@@ -260,6 +263,8 @@ def test_processed_factor_evaluation_reads_full_factor_file_once(
     assert captured_specs[0].metadata["start_year"] == 2024
     assert captured_specs[0].metadata["end_year"] == 2025
     assert captured_specs[0].metadata["source_file"] == factor_path.as_posix()
+    assert captured_specs[0].metadata["portfolio_mode"] == "long_short"
+    assert captured_specs[0].weight_configs[0].portfolio_mode == "long_short"
     assert captured_specs[0].panel["trade_date"].dt.year.tolist() == [
         2024,
         2025,
@@ -267,6 +272,7 @@ def test_processed_factor_evaluation_reads_full_factor_file_once(
     ]
     assert sorted(label_summary["year"].unique().tolist()) == [2024, 2025]
     assert core_runs[0]["run_id"] == "csmar_2024_2025_forward_return_20d"
+    assert core_runs[0]["portfolio_mode"] == "long_short"
     assert manifest_path.name == "evaluation_manifest.json"
 
 
@@ -304,6 +310,8 @@ def test_run_factor_evaluation_cli_passes_core_runtime_options(
             "forward_return_5d",
             "--cost-bps",
             "2.5",
+            "--portfolio-mode",
+            "long_only",
             "--engine",
             "tensor",
             "--segment-columns",
@@ -322,6 +330,7 @@ def test_run_factor_evaluation_cli_passes_core_runtime_options(
     assert exit_code == 0
     assert captured["pnl_return_column"] == "forward_return_5d"
     assert captured["cost_bps"] == 2.5
+    assert captured["portfolio_mode"] == "long_only"
     assert captured["engine"] == "tensor"
     assert captured["segment_columns"] == ("industry", "market")
     assert captured["risk_column"] == "risk_20d"
@@ -351,3 +360,4 @@ def test_run_factor_evaluation_cli_defaults_to_full_report_root(
     assert captured["report_root"].as_posix() == (
         "reports/private_real/factor_evaluation/full_2024_2025"
     )
+    assert captured["portfolio_mode"] == "long_short"

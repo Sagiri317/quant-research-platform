@@ -22,6 +22,8 @@ SUMMARY_COLUMNS = (
     "top_bottom_spread_mean",
     "top_bottom_spread_hit_rate",
     "group_monotonicity_score",
+    "portfolio_mode",
+    "mean_net_portfolio_return",
     "mean_net_long_short_return",
     "sharpe_like",
     "max_drawdown",
@@ -41,6 +43,10 @@ PERFORMANCE_COLUMNS = (
     "weight_id",
     "cost_id",
     "year",
+    "portfolio_mode",
+    "total_gross_portfolio_return",
+    "total_net_portfolio_return",
+    "mean_net_portfolio_return",
     "mean_net_long_short_return",
     "sharpe_like",
     "max_drawdown",
@@ -53,7 +59,8 @@ MARKDOWN_COLUMNS = (
     "mean_rankic",
     "positive_rankic_rate",
     "top_bottom_spread_mean",
-    "mean_net_long_short_return",
+    "portfolio_mode",
+    "mean_net_portfolio_return",
     "sharpe_like",
 )
 
@@ -151,6 +158,30 @@ def _load_run_summary(run_dir: Path) -> dict[str, Any]:
     return _read_json(path)
 
 
+def _normalize_performance_summary(
+    frame: pd.DataFrame,
+    run: dict[str, Any],
+) -> pd.DataFrame:
+    """Normalize legacy long-short and current portfolio return columns."""
+
+    normalized = frame.copy()
+    portfolio_mode = str(run.get("portfolio_mode") or "long_short")
+    if "portfolio_mode" not in normalized.columns:
+        normalized["portfolio_mode"] = portfolio_mode
+    else:
+        normalized["portfolio_mode"] = normalized["portfolio_mode"].fillna(
+            portfolio_mode
+        )
+    if (
+        "mean_net_portfolio_return" not in normalized.columns
+        and "mean_net_long_short_return" in normalized.columns
+    ):
+        normalized["mean_net_portfolio_return"] = normalized[
+            "mean_net_long_short_return"
+        ]
+    return normalized
+
+
 def _metric_merge_keys(left: pd.DataFrame, right: pd.DataFrame) -> list[str]:
     candidate_keys = [
         "combination_id",
@@ -194,6 +225,7 @@ def _build_one_run_summary(
         ic_summary = _read_metric_csv(run_dir, "ic_summary.csv")
         spread_summary = _read_metric_csv(run_dir, "group_spread_summary.csv")
         performance_summary = _read_metric_csv(run_dir, "performance_summary.csv")
+    performance_summary = _normalize_performance_summary(performance_summary, run)
     performance_columns = [
         column
         for column in PERFORMANCE_COLUMNS

@@ -12,7 +12,7 @@
 |---|---|
 | 数据源 | CSMAR，用户手工导出 |
 | 数据范围 | 2014-2025 interim / panel / factor 已生成 |
-| 评估范围 | 2024-2025 full-sample evaluation；core 年度 breakdown |
+| 评估范围 | 2024-2025 long-only full-sample evaluation；core 年度 breakdown |
 | universe | 第一版 A 股范围，排除 B 股和北交所 |
 | 私有边界 | raw/interim/processed 和 private reports 不公开、不提交 |
 
@@ -52,7 +52,7 @@ reports/private_real/factor_evaluation/
     factor_summary.csv
     factor_summary.md
     core_runs/
-  comparisons/full_vs_yearly_current_2024_2025/
+  comparisons/
 ```
 
 当前规模：
@@ -61,27 +61,27 @@ reports/private_real/factor_evaluation/
 |---|---:|---:|
 | panel Parquet | 1 file | 0.586 GB |
 | factor Parquet | 1 file | 2.318 GB |
-| factor evaluation reports | 1 main report root | 1.159 GB |
+| factor evaluation reports | 1 long-only main root + comparison summaries | 约 0.584 GB，不含已清理的历史 long-short robustness |
 
 2024-2025 evaluation 使用 21 个 price-volume factors、`forward_return_20d` label、5 组分组设置。
 
 ## Evaluation 口径
 
-正式主口径采用 `full_2024_2025`：一次性把 2024-2025 输入传给 `alpha-research-core`，用 `forward_return_20d` 做预测标签、`forward_return_1d` 做 PnL 日收益列，并启用 core 的年度 breakdown。
+正式主口径采用 `full_2024_2025`：一次性把 2024-2025 输入传给 `alpha-research-core`，用 `forward_return_20d` 做预测标签、`forward_return_1d` 做 PnL 日收益列，显式设置 `portfolio_mode=long_only`，并启用 core 的年度 breakdown。
 
-年度 breakdown 不在年底清仓，也不在次年重新初始化组合状态。它先保留连续回测产生的组合路径，再把 `long_short` 日收益按自然年切分，并在每个年度内部重新统计 IC、RankIC、分组收益、PnL、Sharpe、drawdown 和 turnover。因此，2024 年底无法退出的持仓可以自然带入 2025，并按 `can_exit` 约束继续影响 2025 年初 PnL。
+年度 breakdown 不在年底清仓，也不在次年重新初始化组合状态。它先保留连续回测产生的组合路径，再把 `net_portfolio_return` 按自然年切分，并在每个年度内部重新统计 IC、RankIC、分组收益、PnL、Sharpe、drawdown 和 turnover。因此，2024 年底无法退出的持仓可以自然带入 2025，并按 `can_exit` 约束继续影响 2025 年初 PnL。
 
-这个口径与“每年空仓重启”的 yearly independent evaluation 不同。后者只能作为诊断对照，不作为主报告口径。当前同口径校验显示，full 年度 breakdown 与重新生成的 yearly diagnostic baseline 在 IC、RankIC 和分组收益上完全一致；路径型指标只剩很小差异，主要来自 full run 在 2025 年初保留了 2024 年底延续持仓产生的 82 条 `long_short` 记录。
+这个口径与“每年空仓重启”的 yearly independent evaluation 不同。后者只能作为诊断对照，不作为主报告口径。旧 long-short 大结果目录已清理，仅保留轻量迁移对比摘要；当前 long-only 结果的不变量检查显示，`portfolio_mode=long_only`、`short_count=0`、`short_return=0`，且 0 成本下 `net_portfolio_return` 与 `gross_portfolio_return`、`long_return` 完全一致。
 
 ## 当前观察
 
-年度结果里，`rev_20d`、`rev_60d`、`rev_120d` 是第一版最稳定的候选信号。2024 年样本里 `rev_120d` 的 `mean_rankic` 约 0.114，2025 年样本里 `rev_60d` 的 `mean_rankic` 约 0.095。
+long-only 年度结果里，`rev_20d`、`rev_60d`、`rev_120d` 仍是第一版最主要的候选信号。2024 年 `rev_120d` 的 `mean_rankic` 约 0.114，`mean_net_portfolio_return` 约 0.003086；2025 年 `rev_60d` 的 `mean_rankic` 约 0.095，`mean_net_portfolio_return` 约 0.001717。
 
-早期 924 前后事件切片曾显示 regime 差异：924 前反转类因子仍然靠前；924 后 `amihud_60d` 的 `mean_rankic` 约 0.160，`sharpe_like` 约 9.075。对应临时报告目录已清理，这条只作为历史观察保留，后续若要纳入正式报告，需要重新生成事件切片或改为 regime 稳健性分析。
+旧成本敏感性和 924 regime 切片是在 long-short 口径下生成的，已作为历史诊断清理，不再作为 A 股可执行口径结论。下一轮稳健性需要基于 long-only 重新生成。
 
 ## 限制
 
 - 当前只覆盖第一批 price-volume factors。
 - 当前 evaluation 是 2024-2025 full-sample 第一版诊断。
-- 未完成成本、行业中性化、风险暴露、鲁棒性和正式组合约束分析。
+- long-only 主结果已生成；成本敏感性、924 regime、行业中性化、风险暴露和正式组合约束分析仍需在 long-only 口径下继续完成。
 - CSMAR 明细数据和可还原 vendor 数据的报告不公开。

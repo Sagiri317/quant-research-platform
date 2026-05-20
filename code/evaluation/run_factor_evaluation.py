@@ -44,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-groups", type=int, default=5)
     parser.add_argument("--pnl-return-column", default="forward_return_1d")
     parser.add_argument("--cost-bps", type=float, default=0.0)
+    parser.add_argument(
+        "--portfolio-mode",
+        choices=("long_short", "long_only"),
+        default="long_short",
+    )
     parser.add_argument("--engine", default="dataframe")
     parser.add_argument("--segment-columns", default="")
     parser.add_argument("--risk-column", default="")
@@ -68,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         end_date=args.end_date or None,
         pnl_return_column=args.pnl_return_column,
         cost_bps=args.cost_bps,
+        portfolio_mode=args.portfolio_mode,
         engine=args.engine,
         segment_columns=parse_columns(args.segment_columns),
         risk_column=args.risk_column or None,

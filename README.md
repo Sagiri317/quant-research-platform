@@ -53,7 +53,7 @@ conda run -n analysis python code/factors/inspect_factors.py --start-year 2014 -
 
 conda run -n analysis python code/runtime/check_processed_space.py --target-start-year 2014 --target-end-year 2025
 
-conda run -n analysis python code/evaluation/run_factor_evaluation.py --start-year 2024 --end-year 2025 --labels forward_return_20d --factor-set price_volume --all-factors --n-groups 5 --pnl-return-column forward_return_1d
+conda run -n analysis python code/evaluation/run_factor_evaluation.py --start-year 2024 --end-year 2025 --labels forward_return_20d --factor-set price_volume --all-factors --n-groups 5 --pnl-return-column forward_return_1d --portfolio-mode long_only
 conda run -n analysis python code/evaluation/build_factor_summary.py
 ```
 
@@ -63,15 +63,15 @@ conda run -n analysis python code/evaluation/build_factor_summary.py
 reports/private_real/factor_evaluation/full_2024_2025/
 ```
 
-当前主口径是一次性 full run 加 core 年度 breakdown：core 不在年底清仓，只把连续回测产生的日收益按年切分，并在年度内重算 IC、RankIC、分组收益、PnL、Sharpe、drawdown 和 turnover。若要做“每年空仓重启”的诊断，应显式指定独立 `report-root` 另跑 yearly independent evaluation，不作为主报告口径。
+当前 A 股主报告口径是一次性 full run 加 core 年度 breakdown，并显式使用 `--portfolio-mode long_only`。core 不在年底清仓，只把连续回测产生的日收益按年切分，并在年度内重算 IC、RankIC、分组收益、PnL、Sharpe、drawdown 和 turnover。若要做“每年空仓重启”的诊断，应显式指定独立 `report-root` 另跑 yearly independent evaluation，不作为主报告口径。
 
 可选 core 参数已透出到 CLI：
 
 ```powershell
-conda run -n analysis python code/evaluation/run_factor_evaluation.py --start-year 2024 --end-year 2025 --labels forward_return_20d --factor-set price_volume --all-factors --n-groups 5 --pnl-return-column forward_return_1d --cost-bps 2.5 --engine dataframe
+conda run -n analysis python code/evaluation/run_factor_evaluation.py --start-year 2024 --end-year 2025 --labels forward_return_20d --factor-set price_volume --all-factors --n-groups 5 --pnl-return-column forward_return_1d --portfolio-mode long_only --cost-bps 2.5 --engine dataframe
 ```
 
-支持的可选参数包括 `--pnl-return-column`、`--cost-bps`、`--engine`、`--segment-columns`、`--risk-column`、`--neutralization-method`、`--neutralization-group-columns` 和 `--neutralization-exposure-columns`。日期过滤在本项目内存中完成，不生成额外 `core_inputs/` 或 subperiod Parquet。
+支持的可选参数包括 `--pnl-return-column`、`--portfolio-mode`、`--cost-bps`、`--engine`、`--segment-columns`、`--risk-column`、`--neutralization-method`、`--neutralization-group-columns` 和 `--neutralization-exposure-columns`。`--portfolio-mode` 的 CLI 默认值仍跟随 core 为 `long_short`；A 股主报告需要显式传 `long_only`。日期过滤在本项目内存中完成，不生成额外 `core_inputs/` 或 subperiod Parquet。
 
 总体 processed 输出位置：
 

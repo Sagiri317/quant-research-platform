@@ -13,7 +13,7 @@ FOCUS_METRICS = (
     "mean_ic",
     "mean_rankic",
     "top_bottom_spread_mean",
-    "mean_net_long_short_return",
+    "mean_net_portfolio_return",
     "sharpe_like",
     "max_drawdown",
     "mean_turnover",
@@ -91,12 +91,11 @@ def build_markdown_report(comparison: pd.DataFrame) -> str:
 
     matched = comparison["match_status"].eq("both").all()
     lines = [
-        "# full_2024_2025 vs yearly_current diagnostic 指标对比",
+        "# factor summary 指标对比",
         "",
         f"- rows: {len(comparison)}",
         f"- matched keys only: {matched}",
-        "- delta 定义：full-sample 年度 breakdown 指标 "
-        "- current yearly diagnostic 指标。",
+        "- delta 定义：full-summary 指标 - yearly-summary 指标。",
         "",
     ]
     focus = comparison[comparison["metric"].isin(FOCUS_METRICS)].copy()

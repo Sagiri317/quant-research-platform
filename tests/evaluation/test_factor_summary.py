@@ -101,6 +101,8 @@ def test_build_factor_summary_merges_core_metrics_and_labels(tmp_path) -> None:
     assert row["mean_rankic"] == 0.03
     assert row["top_bottom_spread_mean"] == 0.03
     assert row["mean_net_long_short_return"] == 0.004
+    assert row["mean_net_portfolio_return"] == 0.004
+    assert row["portfolio_mode"] == "long_short"
     assert row["label_non_null_rate"] == 0.9
     assert row["n_rows_evaluated"] == 1234
 
@@ -119,6 +121,7 @@ def test_build_factor_summary_handles_full_sample_manifest(tmp_path) -> None:
                         "start_year": 2024,
                         "end_year": 2025,
                         "label": "forward_return_20d",
+                        "portfolio_mode": "long_only",
                         "features": ["mom_20d"],
                         "output_dir": str(run_dir),
                     }
@@ -170,7 +173,8 @@ def test_build_factor_summary_handles_full_sample_manifest(tmp_path) -> None:
         {
             "feature": ["mom_20d", "mom_20d"],
             "year": [2024, 2025],
-            "mean_net_long_short_return": [0.004, 0.005],
+            "portfolio_mode": ["long_only", "long_only"],
+            "mean_net_portfolio_return": [0.004, 0.005],
             "sharpe_like": [1.2, 1.3],
             "max_drawdown": [-0.08, -0.09],
             "mean_turnover": [0.3, 0.4],
@@ -185,6 +189,8 @@ def test_build_factor_summary_handles_full_sample_manifest(tmp_path) -> None:
         "csmar_2024_2025_forward_return_20d",
         "csmar_2024_2025_forward_return_20d",
     ]
+    assert summary["portfolio_mode"].tolist() == ["long_only", "long_only"]
+    assert summary["mean_net_portfolio_return"].tolist() == [0.004, 0.005]
 
 
 def test_build_factor_summary_cli_defaults_to_full_report_root(
@@ -263,7 +269,8 @@ def test_factor_summary_writers_use_stable_outputs_and_excel_safe_csv(tmp_path) 
             "top_bottom_spread_mean": [0.03],
             "top_bottom_spread_hit_rate": [0.55],
             "group_monotonicity_score": [0.8],
-            "mean_net_long_short_return": [0.004],
+            "portfolio_mode": ["long_only"],
+            "mean_net_portfolio_return": [0.004],
             "sharpe_like": [1.2],
             "max_drawdown": [-0.08],
             "mean_turnover": [0.3],

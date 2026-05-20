@@ -13,7 +13,7 @@ Evaluation 层是 `a-share-alpha-lab` 与 `alpha-research-core` 的桥接层。�
 | `run_factor_evaluation.py` | 本项目 evaluation CLI 入口 |
 | `core_bridge.py` | full factor 读取、列发现、`EvaluationSpec` 构造和 core 调用 |
 | `build_factor_summary.py` | 从 core artifacts 汇总 `factor_summary.csv/md` |
-| `compare_factor_summaries.py` | 诊断 full breakdown 与 yearly baseline 的差异 |
+| `compare_factor_summaries.py` | 比较两个 `factor_summary.csv` 的指标差异 |
 
 ## Evaluation 主线
 
@@ -68,7 +68,7 @@ price_volume_factors_full/price_volume_factors_2014_2025.parquet
 + 2025 independent run
 ```
 
-Core 年度 breakdown 不清仓、不重跑组合。它从完整 full run 的 `long_short` path 切片，并在年度内重新计算 metrics。2025 年初如果出现从 2024 年底延续来的持仓 PnL，这是连续回测口径下的预期现象。
+Core 年度 breakdown 不清仓、不重跑组合。它从完整 full run 的 portfolio return path 切片，并在年度内重新计算 metrics。A 股主报告显式使用 `--portfolio-mode long_only`，因此 portfolio return 只来自 long leg；2025 年初如果出现从 2024 年底延续来的持仓 PnL，这是连续回测口径下的预期现象。
 
 默认输出：
 
@@ -80,7 +80,7 @@ reports/private_real/factor_evaluation/
     factor_summary.csv
     factor_summary.md
     core_runs/
-  comparisons/full_vs_yearly_current_2024_2025/
+  comparisons/
 ```
 
 `run_factor_evaluation.py` 支持闭区间日期过滤。本项目读取 full slim factor Parquet 后在内存中截取，不创建 `core_inputs/`，也不生成 subperiod Parquet。若要做事件切片或 yearly independent diagnostic，需要显式指定独立 `--report-root`，避免覆盖正式 full 结果。
@@ -92,6 +92,7 @@ reports/private_real/factor_evaluation/
 | `--labels` | `EvaluationSpec.label_columns` |
 | `--factors` / `--all-factors` | `EvaluationSpec.feature_columns` |
 | `--pnl-return-column` | `EvaluationSpec.pnl_return_column` |
+| `--portfolio-mode` | `WeightConfig.portfolio_mode` |
 | `--cost-bps` | `WeightConfig.cost_bps` |
 | `--engine` | `EvaluationSpec.engine` |
 | `--segment-columns` | `EvaluationSpec.segment_columns` |
@@ -111,7 +112,7 @@ reports/private_real/factor_evaluation/
 | 5 | `core_bridge.make_a_share_evaluation_spec()` | 看懂本项目如何填充 core `EvaluationSpec` |
 | 6 | `core_bridge.run_label_evaluation()` | 看懂每个 label 如何生成一个 core run |
 | 7 | `build_factor_summary.build_factor_summary_frame()` | 看懂 core outputs 如何变成项目级 summary |
-| 8 | `compare_factor_summaries.build_comparison_frame()` | 看懂 full vs diagnostic yearly 的比较口径 |
+| 8 | `compare_factor_summaries.build_comparison_frame()` | 看懂两个 summary 如何按 year / label / feature 比较 |
 
 ## 读源码时的断点建议
 
@@ -129,6 +130,7 @@ reports/private_real/factor_evaluation/
 
 - `evaluation_manifest.json` 是本项目索引，不是 core 标准 `manifest.json`。
 - `factor_summary.csv` 是轻量汇总，不是全部评价明细。
+- `mean_net_portfolio_return` 是当前 summary 主收益列；旧 `mean_net_long_short_return` 只用于兼容历史 long-short 结果。
 - `metrics_by_year` 是 core 的年度 breakdown，不是 yearly independent evaluation。
 - 旧 yearly baseline 没有 `pnl_return_column="forward_return_1d"`，不能拿来判断当前 PnL 口径。
 - 如果要做“每年空仓重启”，必须显式另跑 yearly independent evaluation，不能混入正式 full breakdown。
