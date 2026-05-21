@@ -1,0 +1,5 @@
+id: momentum_60d
+name: 60 日动量
+market: a_share
+expression: return(close, 60)
+description: 60 日收盘价收益，用于动量候选因子。

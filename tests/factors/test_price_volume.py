@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pandas as pd
-from factors.price_volume import (
+
+from quant_research_platform.markets.a_share.factors.price_volume import (
     DEFAULT_PRICE_VOLUME_WINDOWS,
     FIRST_PRICE_VOLUME_FACTOR_FAMILIES,
     add_forward_return_labels,

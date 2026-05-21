@@ -1,37 +1,44 @@
-# Evaluation / Core Handoff 模块地图
+# Evaluation / Core 模块地图
 
-目录：`code/evaluation/`
+主要目录：
+
+```text
+src/quant_research_platform/core/
+src/quant_research_platform/artifacts/
+src/quant_research_platform/api/
+src/quant_research_platform/markets/a_share/evaluation/
+```
 
 ## 职责
 
-Evaluation 层是 `a-share-alpha-lab` 与 `alpha-research-core` 的桥接层。它负责读取本项目 full factor table，按年份或日期在内存中过滤，构造 core `EvaluationSpec`，然后调用 `run_evaluation(spec)`。本项目不修改 core 项目文件。
+Evaluation 层把 market module 生成的 factor / prediction panel 交给平台 core。A 股模块负责读取本项目 full factor table、按年份或日期过滤、构造 `EvaluationSpec`；core 负责执行 `run_evaluation(spec)` 并写出 schema `0.5` artifacts。API 和前端只消费 artifacts 与 `manifest.display`。
 
 ## 关键文件
 
-| 文件 | 作用 |
+| 文件或目录 | 作用 |
 |---|---|
-| `run_factor_evaluation.py` | 本项目 evaluation CLI 入口 |
-| `core_bridge.py` | full factor 读取、列发现、`EvaluationSpec` 构造和 core 调用 |
-| `build_factor_summary.py` | 从 core artifacts 汇总 `factor_summary.csv/md` |
-| `compare_factor_summaries.py` | 比较两个 `factor_summary.csv` 的指标差异 |
+| `src/quant_research_platform/core/` | `EvaluationSpec`、panel validation、evaluation orchestration |
+| `src/quant_research_platform/artifacts/` | writer、loader、display contract、inventory、comparison |
+| `src/quant_research_platform/api/` | local evidence API、CSV preview、downloads、run repository |
+| `src/quant_research_platform/markets/a_share/evaluation/` | A 股 full factor table -> `EvaluationSpec` bridge |
+| `web/` | React/Vite evidence workbench |
 
 ## Evaluation 主线
 
 ```text
-run_factor_evaluation.py
--> parse CLI args
--> core_bridge.run_processed_factor_evaluation()
--> factor_full_path_covering_range()
--> discover factor / label columns
--> read_evaluation_frame()
--> make_a_share_evaluation_spec()
--> alpha_research_core.run_evaluation(spec)
--> build_factor_summary.py
+A-share factor table
+-> market evaluation bridge
+-> EvaluationSpec
+-> run_evaluation(spec)
+-> schema 0.5 artifacts
+-> manifest.display
+-> API evidence / CSV preview / downloads
+-> React workbench
 ```
 
 ## 输入合同
 
-当前输入来源：
+当前 A 股输入来源：
 
 ```text
 data/processed_private/csmar/price_volume_factors_full/
@@ -57,33 +64,18 @@ slim factor Parquet 不保存完整 OHLC、复权价格、公司静态字段、�
 
 ```text
 price_volume_factors_full/price_volume_factors_2014_2025.parquet
--> one full core run for 2024-2025
--> core metrics_by_year
+-> one full core run for selected date range
+-> optional time breakdowns
 ```
 
 不是：
 
 ```text
-2024 independent run
-+ 2025 independent run
+yearly independent run
++ yearly independent run
 ```
 
-Core 年度 breakdown 不清仓、不重跑组合。它从完整 full run 的 portfolio return path 切片，并在年度内重新计算 metrics。A 股主报告显式使用 `--portfolio-mode long_only`，因此 portfolio return 只来自 long leg；2025 年初如果出现从 2024 年底延续来的持仓 PnL，这是连续回测口径下的预期现象。
-
-默认输出：
-
-```text
-reports/private_real/factor_evaluation/
-  full_2024_2025/
-    label_availability.csv
-    evaluation_manifest.json
-    factor_summary.csv
-    factor_summary.md
-    core_runs/
-  comparisons/
-```
-
-`run_factor_evaluation.py` 支持闭区间日期过滤。本项目读取 full slim factor Parquet 后在内存中截取，不创建 `core_inputs/`，也不生成 subperiod Parquet。若要做事件切片或 yearly independent diagnostic，需要显式指定独立 `--report-root`，避免覆盖正式 full 结果。
+年度 breakdown 不清仓、不重跑组合。它从完整 full run 的 portfolio return path 切片，并在年度内重新计算 metrics。A 股 long-only 主报告需要显式使用 `portfolio_mode=long_only`。
 
 ## CLI 到 core 参数映射
 
@@ -93,44 +85,28 @@ reports/private_real/factor_evaluation/
 | `--factors` / `--all-factors` | `EvaluationSpec.feature_columns` |
 | `--pnl-return-column` | `EvaluationSpec.pnl_return_column` |
 | `--portfolio-mode` | `WeightConfig.portfolio_mode` |
-| `--cost-bps` | `WeightConfig.cost_bps` |
+| `--cost-bps` | cost config / weight config |
 | `--engine` | `EvaluationSpec.engine` |
 | `--segment-columns` | `EvaluationSpec.segment_columns` |
-| `--risk-column` | `WeightConfig.risk_column` |
-| `--neutralization-method` | `NeutralizationConfig.method` |
-| `--neutralization-group-columns` | `NeutralizationConfig.group_columns` |
-| `--neutralization-exposure-columns` | `NeutralizationConfig.exposure_columns` |
+| `--risk-column` | risk-scaled weighting input |
+| `--neutralization-method` | neutralization method |
+| `--neutralization-group-columns` | neutralization group columns |
+| `--neutralization-exposure-columns` | neutralization exposure columns |
 
-## 函数阅读路线
+## Artifact / API / Frontend 断点
 
-| 顺序 | 函数 | 阅读目标 |
-|---:|---|---|
-| 1 | `run_factor_evaluation.main()` | 看懂 CLI 参数默认值和传递方式 |
-| 2 | `runtime.paths.factor_full_path_covering_range()` | 看懂请求年份如何匹配 full factor 文件 |
-| 3 | `core_bridge.discover_factor_columns()` / `discover_label_columns()` | 看懂列发现规则 |
-| 4 | `core_bridge.read_evaluation_frame()` | 看懂传给 core 的 DataFrame 包含哪些列 |
-| 5 | `core_bridge.make_a_share_evaluation_spec()` | 看懂本项目如何填充 core `EvaluationSpec` |
-| 6 | `core_bridge.run_label_evaluation()` | 看懂每个 label 如何生成一个 core run |
-| 7 | `build_factor_summary.build_factor_summary_frame()` | 看懂 core outputs 如何变成项目级 summary |
-| 8 | `compare_factor_summaries.build_comparison_frame()` | 看懂两个 summary 如何按 year / label / feature 比较 |
+排查 contract 问题时优先看：
 
-## 读源码时的断点建议
-
-- `parquet_path`
-- `feature_columns`
-- `labels`
-- `range_start` / `range_end`
-- `evaluation_frame.columns`
-- `spec.pnl_return_column`
-- `spec.tradability_config`
-- `spec.time_breakdowns`
-- `output_dir`
+- `artifact_schema_version` 是否为 `0.5`。
+- `manifest.display.schema_version` 是否存在并被 loader / API 校验。
+- 每个可浏览 CSV 是否在 `manifest.display.tables`。
+- 每个下载项是否在 `manifest.display.downloads.items`。
+- ZIP “全选”是否使用 display preset，而不是扫描目录。
+- run switching 和 combination switching 是否更新 summary、charts、CSV preview、downloads 和 report mode。
 
 ## 常见误读
 
-- `evaluation_manifest.json` 是本项目索引，不是 core 标准 `manifest.json`。
+- project-level summary manifest 不是 core 标准 `manifest.json`。
 - `factor_summary.csv` 是轻量汇总，不是全部评价明细。
-- `mean_net_portfolio_return` 是当前 summary 主收益列；旧 `mean_net_long_short_return` 只用于兼容历史 long-short 结果。
 - `metrics_by_year` 是 core 的年度 breakdown，不是 yearly independent evaluation。
-- 旧 yearly baseline 没有 `pnl_return_column="forward_return_1d"`，不能拿来判断当前 PnL 口径。
 - 如果要做“每年空仓重启”，必须显式另跑 yearly independent evaluation，不能混入正式 full breakdown。

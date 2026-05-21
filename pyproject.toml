@@ -1,18 +1,28 @@
 [project]
-name = "a-share-alpha-lab"
+name = "quant-research-platform"
 version = "0.1.0"
-description = "Private CSMAR A-share factor research lab."
+description = "Local multi-market quantitative research platform."
 requires-python = ">=3.11"
 dependencies = [
+  "fastapi",
+  "numpy",
   "pandas",
   "pyarrow",
+  "pydantic",
   "pytest",
   "ruff",
+  "typer",
+  "uvicorn",
 ]
 
+[project.scripts]
+qrp = "quant_research_platform.cli:main"
+
 [tool.pytest.ini_options]
-pythonpath = ["code", "../alpha-research-core/src"]
+pythonpath = ["src"]
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["--import-mode=importlib"]
 
 [tool.ruff]
 line-length = 88

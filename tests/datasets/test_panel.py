@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import pandas as pd
-from datasets import build_panel as panels
-from datasets.build_panel import build_research_panel
-from factors.build_factors import calculate_panel_factors
-from validation.research_panel import check_research_panel
+
+from quant_research_platform.markets.a_share.datasets import build_panel as panels
+from quant_research_platform.markets.a_share.datasets.build_panel import (
+    build_research_panel,
+)
+from quant_research_platform.markets.a_share.factors.build_factors import (
+    calculate_panel_factors,
+)
+from quant_research_platform.markets.a_share.validation.research_panel import (
+    check_research_panel,
+)
 
 
 def test_build_research_panel_adds_lifecycle_turnover_and_execution_flags() -> None:

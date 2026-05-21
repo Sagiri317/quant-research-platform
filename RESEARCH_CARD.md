@@ -1,37 +1,39 @@
-# a-share-alpha-lab 研究证据卡
+# Quant Research Platform 研究证据卡
 
-本卡只保留面试或复盘时最需要的证据链索引；当前进展细节看 [PROJECT_STATUS.md](PROJECT_STATUS.md)，正式研究说明看 [REPORT.md](REPORT.md)。
+本卡只保留面试、复盘或项目交接时最需要的证据链索引；当前迁移状态看 [PROJECT_STATUS.md](PROJECT_STATUS.md)，正式研究说明看 [REPORT.md](REPORT.md)。
 
 ## 核心证据
 
 | 字段 | 内容 |
 |---|---|
-| 记录名称 | `csmar_workflow_first_factor_pipeline` |
-| 当前状态 | active |
-| 日期 | 2026-05-20 |
+| 记录名称 | `quant_research_platform_a_share_module` |
+| 当前状态 | migration active |
+| 日期 | 2026-05-22 |
+| 项目定位 | 本地多市场量化研究平台；A 股为第一版完整 market module |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
 | 主要产物 | `panel_full/research_panel_2014_2025.parquet`；`price_volume_factors_full/price_volume_factors_2014_2025.parquet` |
-| evaluation | `full_2024_2025` long-only full-sample run + core `metrics_by_year`；历史 long-short 结果仅作迁移对照 |
+| evaluation | schema `0.5` core-backed evaluation；`manifest.display` 驱动 API、下载和 evidence workbench |
 | 公开边界 | CSMAR 明细数据、private reports 和可还原 vendor 数据不公开 |
 
 ## 方法证据
 
-- `code/csmar/`：CSMAR raw -> interim，含字段合同和列裁剪。
-- `code/datasets/`：interim -> full research panel，含生命周期、流动性和可交易约束。
-- `code/factors/`：full panel -> price-volume factors + forward labels。
-- `code/evaluation/`：slim factor Parquet -> core `EvaluationSpec` -> `run_evaluation(spec)`。
-- `code/validation/` / `code/runtime/`：质量检查、空间检查和路径合同。
+- `src/quant_research_platform/core/`：`EvaluationSpec`、panel validation、`run_evaluation`。
+- `src/quant_research_platform/artifacts/`：schema `0.5` writer / loader / display contract。
+- `src/quant_research_platform/api/`：本地 evidence API、CSV preview、direct download、ZIP download。
+- `src/quant_research_platform/markets/a_share/`：CSMAR-backed A-share data、factor、validation、evaluation、pipeline contracts。
+- `web/`：本地 React/Vite evidence workbench。
+- `docs/code-map/`：平台源码阅读地图和未来研究路线。
 
-## 结果证据
+## 历史结果证据
 
 - 第一批 factor set 是 `price_volume`：momentum、reversal、volatility、amount liquidity、turnover、Amihud illiquidity、amplitude。
 - 默认窗口为 `20, 60, 120`；forward labels 为 `1, 5, 10, 20, 60, 120` 个交易日。
-- 2024-2025 long-only 第一版诊断中，反转类因子仍是主要候选。
-- 2024 年 `rev_120d` 的 `mean_rankic` 约 0.114，`mean_net_portfolio_return` 约 0.003086；2025 年 `rev_60d` 的 `mean_rankic` 约 0.095，`mean_net_portfolio_return` 约 0.001717。
-- long-only 不变量已检查：`portfolio_mode=long_only`、`short_count=0`、`short_return=0`，0 成本下 `net_portfolio_return == gross_portfolio_return == long_return`。
-- 历史 long-short robustness 不再作为 A 股可执行口径结论；需要按 long-only 重新生成成本和 regime 稳健性。
+- 迁移前 2024-2025 long-only 第一版诊断中，反转类因子是主要候选。
+- 历史 long-only 不变量曾检查通过：`portfolio_mode=long_only`、`short_count=0`、`short_return=0`，0 成本下 `net_portfolio_return == gross_portfolio_return == long_return`。
 
 ## 仍需验证
 
-- 当前 evaluation 是 pipeline 和统计诊断，不是最终投资结论。
-- 尚未在 long-only 口径下完成成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。
+- 迁移后平台路径下的 Python/API/frontend 全量验证。
+- A 股小样本 pipeline snapshot、schema `0.5` artifacts、`manifest.display`、download picker 和 workbench 展示一致性。
+- long-only 成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。
+- ML prediction pipeline 的 time split、防泄漏、model manifest 和失败实验记录。

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
-from evaluation import core_bridge as evaluation
-from evaluation import run_factor_evaluation
+
+from quant_research_platform.markets.a_share.evaluation import core_bridge as evaluation
+from quant_research_platform.markets.a_share.evaluation import run_factor_evaluation
 
 
 def test_discover_factor_and_label_columns_from_slim_parquet(tmp_path) -> None:

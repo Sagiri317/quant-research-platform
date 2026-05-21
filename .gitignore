@@ -19,10 +19,18 @@ env/
 # 构建和报告输出
 build/
 dist/
+node_modules/
+web/node_modules/
+web/dist/
+web/coverage/
+web/playwright-report/
+web/test-results/
+.codex/run-logs/
 *.egg-info/
 coverage/
 .coverage
 reports/runs/
+reports/profiles/
 
 # 数据和密钥
 data/raw/

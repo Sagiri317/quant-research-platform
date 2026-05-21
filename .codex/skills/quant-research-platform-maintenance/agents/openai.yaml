@@ -1,0 +1,7 @@
+interface:
+  display_name: "Quant Research Platform Maintenance"
+  short_description: "Maintain artifact, API, download, and evidence UI contracts"
+  default_prompt: "Use $quant-research-platform-maintenance before changing quant-research-platform artifact contracts, evidence API, downloads, frontend evidence UI, A-share pipeline runs, or generated runs."
+
+policy:
+  allow_implicit_invocation: true

@@ -12,7 +12,7 @@ data/interim_private/csmar/
   raw -> interim 后的内部标准字段，CSV，便于人工核对
 
 data/processed_private/csmar/
-  panel 和 factor Parquet，供研究和 core evaluation 读取
+  panel 和 factor Parquet，供研究和平台 core evaluation 读取
 ```
 
 ## 必要 CSMAR 表
@@ -53,7 +53,7 @@ csmar__daily_market__all_a_ex_bjse__20140101_20181231__export-20260514.csv
 字段映射定义在：
 
 ```text
-code/csmar/contracts.py
+src/quant_research_platform/markets/a_share/csmar/contracts.py
 ```
 
 示例：
@@ -83,7 +83,7 @@ code/csmar/contracts.py
 列裁剪规则定义在：
 
 ```text
-code/csmar/columns.py
+src/quant_research_platform/markets/a_share/csmar/columns.py
 ```
 
 本地可选配置：
@@ -92,7 +92,7 @@ code/csmar/columns.py
 config/private_column_overrides.json
 ```
 
-首次运行 `code/csmar/build_interim.py` 时，如果配置不存在，会自动生成默认模板。JSON 使用内部列名：
+首次运行 A 股 `build_interim.py` 时，如果配置不存在，会自动生成默认模板。JSON 使用内部列名：
 
 ```json
 {
@@ -137,8 +137,9 @@ data/processed_private/csmar/
 ## 验证入口
 
 ```powershell
-conda run -n analysis python code/csmar/inspect_raw_exports.py data/raw_private/csmar
-conda run -n analysis python code/csmar/inspect_interim.py --start-year 2014 --end-year 2025
-conda run -n analysis python code/datasets/inspect_panel.py --start-year 2014 --end-year 2025
-conda run -n analysis python code/factors/inspect_factors.py --start-year 2014 --end-year 2025
+$env:PYTHONPATH="src"
+conda run -n analysis python -m quant_research_platform.markets.a_share.csmar.inspect_raw_exports data/raw_private/csmar
+conda run -n analysis python -m quant_research_platform.markets.a_share.csmar.inspect_interim --start-year 2014 --end-year 2025
+conda run -n analysis python -m quant_research_platform.markets.a_share.datasets.inspect_panel --start-year 2014 --end-year 2025
+conda run -n analysis python -m quant_research_platform.markets.a_share.factors.inspect_factors --start-year 2014 --end-year 2025
 ```

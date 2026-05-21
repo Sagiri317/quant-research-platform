@@ -1,35 +1,40 @@
 # Data Pipeline 模块地图
 
-目录：`code/csmar/`、`code/datasets/`
+目录：
+
+```text
+src/quant_research_platform/markets/a_share/csmar/
+src/quant_research_platform/markets/a_share/datasets/
+```
 
 ## 职责
 
-数据层把用户手工导出的 CSMAR CSV 转成项目内部可复用的 full research panel。它不做因子评价，也不调用 core。
+数据层把用户手工导出的 CSMAR CSV 转成平台内部可复用的 A 股 full research panel。它不做因子评价，也不连接外部 API、网页登录、下载器或凭据。
 
 ## 关键文件
 
 | 文件 | 作用 |
 |---|---|
-| `code/csmar/raw_exports.py` | 描述原始导出文件、metadata 和路径发现 |
-| `code/csmar/contracts.py` | CSMAR 原始表和 interim 表的字段契约 |
-| `code/csmar/columns.py` | 字段命名、slim factor base columns 和列裁剪配置 |
-| `code/csmar/inspect_raw_exports.py` | 检查 raw 导出是否齐全、字段是否满足契约 |
-| `code/csmar/build_interim.py` | raw CSV -> normalized interim CSV |
-| `code/csmar/inspect_interim.py` | 检查 interim 结果质量 |
-| `code/datasets/universe.py` | A 股样本池过滤规则 |
-| `code/datasets/build_panel.py` | interim -> `panel_full/research_panel_2014_2025.parquet` |
-| `code/datasets/inspect_panel.py` | 检查 full panel 行数、字段和质量 |
+| `csmar/raw_exports.py` | 描述原始导出文件、metadata 和路径发现 |
+| `csmar/contracts.py` | CSMAR 原始表和 interim 表的字段契约 |
+| `csmar/columns.py` | 字段命名、slim factor base columns 和列裁剪配置 |
+| `csmar/inspect_raw_exports.py` | 检查 raw 导出是否齐全、字段是否满足契约 |
+| `csmar/build_interim.py` | raw CSV -> normalized interim CSV |
+| `csmar/inspect_interim.py` | 检查 interim 结果质量 |
+| `datasets/universe.py` | A 股样本池过滤规则 |
+| `datasets/build_panel.py` | interim -> `panel_full/research_panel_2014_2025.parquet` |
+| `datasets/inspect_panel.py` | 检查 full panel 行数、字段和质量 |
 
 ## 数据主线
 
 ```text
-/data/raw_private/csmar
+data/raw_private/csmar
 -> inspect_raw_exports.py
 -> build_interim.py
--> /data/interim_private/csmar
+-> data/interim_private/csmar
 -> inspect_interim.py
 -> build_panel.py
--> /data/processed_private/csmar/panel_full/research_panel_2014_2025.parquet
+-> data/processed_private/csmar/panel_full/research_panel_2014_2025.parquet
 -> inspect_panel.py
 ```
 
@@ -72,4 +77,3 @@ daily_market
 - panel 是 full-sample 产物；年份只是筛选维度，不是存储目录维度。
 - `stock_code` 必须保持字符串和前导零，不能让 pandas 自动转成整数。
 - raw / interim / processed 都是私有数据，不应出现在公开报告或 Git 提交中。
-

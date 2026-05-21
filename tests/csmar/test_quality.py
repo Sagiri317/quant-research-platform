@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import pandas as pd
-from validation.common import has_blocking_issues
-from validation.internal_tables import check_benchmark_index_market, check_daily_market
+
+from quant_research_platform.markets.a_share.validation.common import (
+    has_blocking_issues,
+)
+from quant_research_platform.markets.a_share.validation.internal_tables import (
+    check_benchmark_index_market,
+    check_daily_market,
+)
 
 
 def test_daily_market_quality_flags_blocking_issues() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from runtime import storage as space_gate
+from quant_research_platform.markets.a_share.runtime import storage as space_gate
 
 
 def test_evaluate_space_gate_passes_when_estimate_is_smaller_and_fits_disk() -> None:

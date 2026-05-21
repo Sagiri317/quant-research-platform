@@ -1,0 +1,5 @@
+id: liquidity_20d
+name: 20 日流动性
+market: a_share
+expression: rank_cs(mean(amount, 20))
+description: 20 日平均成交额的截面排名。

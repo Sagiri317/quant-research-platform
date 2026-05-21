@@ -1,6 +1,6 @@
 # 私有数据区
 
-本目录是 `a-share-alpha-lab` 的本地私有数据边界。
+本目录是 `quant-research-platform` 的本地私有数据边界。当前第一版完整 market module 是 A 股，数据来自用户手工导出的 CSMAR 文件。
 
 ## 目录职责
 
@@ -24,9 +24,9 @@ processed_private/csmar/
 ```
 
 - interim CSV 仍按年保存，便于人工核对和局部重建。
-- processed panel / factor 是 full-sample Parquet，不再维护按年产物。
+- processed panel / factor 是 full-sample Parquet。
 - panel Parquet 是完整研究主表。
-- slim factor Parquet 是日常 evaluation 入口。
+- slim factor Parquet 是 A 股 evaluation 和 pipeline 输入之一。
 - factor 文件保留 key、过滤列、流动性/规模辅助列、factor columns 和 forward label columns。
 
 ## 禁止用途
@@ -39,4 +39,4 @@ processed_private/csmar/
 ## 相关文档
 
 - CSMAR 数据手册：`docs/csmar_data_manual.md`
-- 源码和 core 对接：`docs/code-map/`
+- 平台源码阅读地图：`docs/code-map/`

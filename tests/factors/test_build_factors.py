@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pandas as pd
-from factors import build_factors as factors
+
+from quant_research_platform.markets.a_share.factors import build_factors as factors
 
 
 def test_select_slim_factor_columns_drops_panel_only_fields() -> None:

@@ -1,0 +1,5 @@
+id: reversal_20d
+name: 20 日反转
+market: a_share
+expression: neg(return(close, 20))
+description: 20 日收盘价收益的相反数，用于反转候选因子。

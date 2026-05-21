@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pandas as pd
-from csmar.columns import (
+
+from quant_research_platform.markets.a_share.csmar.columns import (
     apply_interim_column_rules,
     load_or_create_column_overrides,
 )

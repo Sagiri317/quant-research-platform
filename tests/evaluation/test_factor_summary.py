@@ -4,14 +4,16 @@ import json
 
 import pandas as pd
 import pytest
-from evaluation.build_factor_summary import (
+
+from quant_research_platform.markets.a_share.evaluation import (
+    compare_factor_summaries,
+)
+from quant_research_platform.markets.a_share.evaluation.build_factor_summary import (
     build_factor_summary_frame,
     main,
     write_factor_summary_csv,
     write_factor_summary_markdown,
 )
-from evaluation.compare_factor_summaries import build_comparison_frame
-from evaluation.compare_factor_summaries import main as compare_main
 
 
 def test_build_factor_summary_merges_core_metrics_and_labels(tmp_path) -> None:
@@ -316,7 +318,7 @@ def test_build_comparison_frame_reports_full_minus_yearly_deltas() -> None:
         }
     )
 
-    comparison = build_comparison_frame(yearly, full)
+    comparison = compare_factor_summaries.build_comparison_frame(yearly, full)
 
     rankic = comparison[comparison["metric"].eq("mean_rankic")].iloc[0]
     sharpe = comparison[comparison["metric"].eq("sharpe_like")].iloc[0]
@@ -363,7 +365,7 @@ def test_compare_factor_summaries_cli_defaults_to_current_diagnostic(
     ).to_csv(full_dir / "factor_summary.csv", index=False)
     monkeypatch.chdir(tmp_path)
 
-    exit_code = compare_main([])
+    exit_code = compare_factor_summaries.main([])
 
     assert exit_code == 0
     assert (comparison_dir / "metric_delta_long.csv").exists()

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-from csmar.build_interim import (
+
+from quant_research_platform.markets.a_share.csmar.build_interim import (
     BENCHMARK_INDEX_POOL,
     write_benchmark_index_yearly_files,
     write_interim_single_file,
     write_interim_yearly_files,
 )
-from csmar.contracts import (
+from quant_research_platform.markets.a_share.csmar.contracts import (
     build_raw_export_metadata,
     duplicate_primary_keys,
     inspect_raw_export_file,
@@ -19,11 +20,11 @@ from csmar.contracts import (
     ohlc_violations,
     parse_raw_filename,
 )
-from csmar.raw_exports import (
+from quant_research_platform.markets.a_share.csmar.raw_exports import (
     inspect_raw_export_tree,
     iter_raw_export_files,
 )
-from factors.price_volume import (
+from quant_research_platform.markets.a_share.factors.price_volume import (
     add_forward_return_labels,
     calculate_price_volume_factors,
 )
