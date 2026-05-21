@@ -41,6 +41,8 @@ src/quant_research_platform/
 
 web/                    React/Vite evidence workbench
 config/a_share/         A-share factor templates and pipeline configs
+scripts/local/          本机 API / workbench 启动脚本
+scripts/build/          前端打包和全量验证脚本
 data/                   local private data boundary
 reports/private_real/   local private real-data outputs
 docs/code-map/          source reading map
@@ -72,6 +74,21 @@ npm test -- --run --maxWorkers=1
 npm run lint
 npm run build
 ```
+
+也可以使用根目录脚本：
+
+```powershell
+.\scripts\build\check_all.ps1
+.\scripts\build\build_web.ps1
+```
+
+本机查看 2023-2025 tensor 私有 run：
+
+```powershell
+.\scripts\local\start_private_workbench.ps1
+```
+
+该脚本会把 API 的 `QRP_RUN_ROOTS` 指到 `reports/private_real/factor_evaluation/tensor_2023_2025_smoke/` 下的 `long_only` 和 `long_short` core runs。它只使用相对路径，不提交或复制私有结果。
 
 ## 私有数据边界
 

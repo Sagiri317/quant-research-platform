@@ -26,6 +26,8 @@ Current structure:
 - `src/quant_research_platform/markets/a_share/`: CSMAR-backed A-share ingestion, datasets, factors, validation, evaluation, and pipeline contracts.
 - `src/quant_research_platform/markets/crypto/`: reserved placeholder only.
 - `web/`: React/Vite local evidence workbench.
+- `scripts/local/`: local-only PowerShell launch scripts for API and workbench.
+- `scripts/build/`: local PowerShell build and verification scripts.
 - `docs/code-map/`: source reading map and contract handoff notes.
 
 Hard boundaries:
@@ -57,6 +59,7 @@ src/
 tests/
 web/
 config/
+scripts/
 notebooks/
 reports/
 pyproject.toml

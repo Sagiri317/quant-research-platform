@@ -18,6 +18,7 @@ env/
 
 # 构建和报告输出
 build/
+!scripts/build/
 dist/
 node_modules/
 web/node_modules/
