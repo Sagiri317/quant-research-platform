@@ -12,6 +12,7 @@ const TABLE_PREVIEW_ROW_LIMIT = 20
 export function useTablePreview({
   activePayload,
   activeTableSpec,
+  cacheVersion,
   expanded,
   selectedCombinationId,
   selectedRun,
@@ -19,17 +20,19 @@ export function useTablePreview({
 }: {
   activePayload: TablePayload | undefined
   activeTableSpec: RunTableSpec | undefined
+  cacheVersion?: number
   expanded: boolean
   selectedCombinationId: string
   selectedRun: RunSummary | null
   setEvidenceError: (message: string) => void
 }) {
-  const [loadingTablePreview, setLoadingTablePreview] = useState(false)
+  const [loadingPreviewKey, setLoadingPreviewKey] = useState('')
   const [previewPayloads, setPreviewPayloads] = useState<Record<string, TablePayload>>({})
   const previewKey =
     selectedRun && activeTableSpec
       ? [
           selectedRun.public_run_id,
+          cacheVersion ?? 0,
           activeTableSpec.key,
           activeTableSpec.supportsCombinationFilter ? selectedCombinationId : 'all',
         ].join('::')
@@ -54,7 +57,7 @@ export function useTablePreview({
     let cancelled = false
     async function loadTablePreview() {
       try {
-        setLoadingTablePreview(true)
+        setLoadingPreviewKey(cacheKey)
         const payload = await fetchTablePreview(
           tableSpec.path,
           TABLE_PREVIEW_ROW_LIMIT,
@@ -70,9 +73,7 @@ export function useTablePreview({
           setEvidenceError(messageFrom(caught))
         }
       } finally {
-        if (!cancelled) {
-          setLoadingTablePreview(false)
-        }
+        setLoadingPreviewKey((current) => (current === cacheKey ? '' : current))
       }
     }
     void loadTablePreview()
@@ -90,5 +91,8 @@ export function useTablePreview({
     setEvidenceError,
   ])
 
-  return { loadingTablePreview, previewPayload }
+  return {
+    loadingTablePreview: Boolean(previewKey) && loadingPreviewKey === previewKey,
+    previewPayload,
+  }
 }

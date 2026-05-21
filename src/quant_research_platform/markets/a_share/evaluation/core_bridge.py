@@ -9,6 +9,7 @@ breakdown semantics remain in quant-research-platform core modules.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,7 @@ from quant_research_platform.core import (
     WeightConfig,
     run_evaluation,
 )
+from quant_research_platform.core.contracts import EVALUATION_ENGINES, PORTFOLIO_MODES
 from quant_research_platform.runtime.paths import factor_full_path_covering_range
 
 FACTOR_PREFIXES = (
@@ -41,6 +43,7 @@ LABEL_AVAILABILITY_COLUMNS = (
     "can_enter",
     "can_exit",
 )
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def schema_columns(path: Path) -> tuple[str, ...]:
@@ -386,7 +389,7 @@ def run_label_evaluation(
     run_id = f"csmar_{start_year}_{end_year}_{label_column}"
     if date_id:
         run_id = f"{run_id}_{date_id}"
-    output_dir = output_root / "core_runs" / run_id
+    output_dir = _core_run_output_dir(output_root, run_id)
     spec = make_a_share_evaluation_spec(
         panel=panel,
         feature_columns=feature_columns,
@@ -410,6 +413,18 @@ def run_label_evaluation(
         neutralization_exposure_columns=neutralization_exposure_columns,
     )
     run_evaluation(spec)
+    return output_dir
+
+
+def _core_run_output_dir(output_root: Path, run_id: str) -> Path:
+    """Return a safe core run output path under output_root/core_runs."""
+
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise ValueError(f"unsafe core run_id: {run_id!r}")
+    root = (output_root / "core_runs").resolve()
+    output_dir = (root / run_id).resolve()
+    if output_dir.parent != root:
+        raise ValueError(f"core run output path escaped output root: {output_dir}")
     return output_dir
 
 
@@ -442,6 +457,17 @@ def run_processed_factor_evaluation(
     positions across year-end when tradability permits.
     """
 
+    _validate_run_processed_options(
+        start_year=start_year,
+        end_year=end_year,
+        engine=engine,
+        portfolio_mode=portfolio_mode,
+        requested_labels=requested_labels,
+        n_groups=n_groups,
+        start_date=start_date,
+        end_date=end_date,
+        cost_bps=cost_bps,
+    )
     label_summaries = []
     core_runs: list[dict[str, object]] = []
     parquet_path = factor_full_path_covering_range(
@@ -548,7 +574,7 @@ def run_processed_factor_evaluation(
                 ),
                 "input_file": parquet_path.as_posix(),
                 "input_materialized": False,
-                "output_dir": output_dir.as_posix(),
+                "output_dir": f"core_runs/{run_id}",
             }
         )
 
@@ -561,3 +587,34 @@ def run_processed_factor_evaluation(
         encoding="utf-8",
     )
     return label_summary, manifest_path, core_runs
+
+
+def _validate_run_processed_options(
+    *,
+    start_year: int,
+    end_year: int,
+    engine: str,
+    portfolio_mode: str,
+    requested_labels: tuple[str, ...],
+    n_groups: int,
+    start_date: str | None,
+    end_date: str | None,
+    cost_bps: float,
+) -> None:
+    if start_year > end_year:
+        raise ValueError("start_year must be less than or equal to end_year.")
+    if n_groups < 2:
+        raise ValueError("n_groups must be at least 2.")
+    if cost_bps < 0:
+        raise ValueError("cost_bps must be nonnegative.")
+    if engine not in EVALUATION_ENGINES:
+        raise ValueError(f"engine must be one of {sorted(EVALUATION_ENGINES)}.")
+    if portfolio_mode not in PORTFOLIO_MODES:
+        raise ValueError(f"portfolio_mode must be one of {sorted(PORTFOLIO_MODES)}.")
+    for label in requested_labels:
+        if not RUN_ID_PATTERN.fullmatch(f"csmar_2000_2000_{label}"):
+            raise ValueError(f"unsafe label for core run_id: {label!r}")
+    start = normalize_date_arg(start_date) if start_date else None
+    end = normalize_date_arg(end_date) if end_date else None
+    if start is not None and end is not None and start > end:
+        raise ValueError("start_date must be less than or equal to end_date.")

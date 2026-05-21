@@ -1,4 +1,4 @@
-"""File artifact writer for reproducible research runs."""
+﻿"""File artifact writer for reproducible research runs."""
 
 from __future__ import annotations
 
@@ -39,56 +39,6 @@ class LoadedEvaluationSet(BaseModel):
     summary: dict[str, object]
     tables: dict[str, pd.DataFrame]
     report: str
-
-
-def write_run_artifacts(
-    output_dir: str | Path,
-    summary: dict[str, object],
-    metrics: dict[str, pd.DataFrame],
-) -> ArtifactOutputs:
-    """Write summary JSON, metric CSVs, and a compact Markdown report."""
-
-    destination = Path(output_dir)
-    _timed_artifact_operation(
-        "directory_creation",
-        lambda: destination.mkdir(parents=True, exist_ok=True),
-    )
-
-    summary_path = destination / "summary.json"
-    _timed_artifact_operation(
-        "json_writing",
-        lambda: summary_path.write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        ),
-    )
-
-    metric_paths: dict[str, Path] = {}
-    for name, frame in metrics.items():
-        if not isinstance(frame, pd.DataFrame):
-            raise TypeError(f"metric {name!r} must be a pandas DataFrame.")
-        path = destination / f"{name}.csv"
-        _timed_artifact_operation(
-            "csv_writing",
-            lambda frame=frame, path=path: frame.to_csv(path, index=False),
-        )
-        metric_paths[name] = path
-
-    report_path = destination / "report.md"
-    _timed_artifact_operation(
-        "report_writing",
-        lambda: report_path.write_text(
-            _render_report(summary, metrics),
-            encoding="utf-8",
-        ),
-    )
-
-    return ArtifactOutputs(
-        output_dir=destination,
-        summary_path=summary_path,
-        report_path=report_path,
-        metric_paths=metric_paths,
-    )
 
 
 def write_evaluation_set_artifacts(
@@ -636,33 +586,3 @@ def _validate_relative_posix_path(path: str, *, source: str) -> None:
         or any(part in {"", ".", ".."} for part in parsed.parts)
     ):
         raise ValueError(f"manifest {source} 路径不安全 / unsafe path: {path!r}.")
-
-
-def _render_report(
-    summary: dict[str, object],
-    metrics: dict[str, pd.DataFrame],
-) -> str:
-    lines = [
-        "# Quant Research Core Synthetic Demo",
-        "",
-        "This report is generated from synthetic/toy data only.",
-        "",
-        "## Summary",
-        "",
-    ]
-    for key, value in summary.items():
-        lines.append(f"- `{key}`: {value}")
-    lines.extend(["", "## Metrics", ""])
-    for name, frame in metrics.items():
-        lines.append(f"- `{name}`: {len(frame)} rows")
-    lines.extend(
-        [
-            "",
-            "## Boundary",
-            "",
-            "No real data, API connection, credentials, paper trading, or live trading "
-            "is used in this run.",
-            "",
-        ]
-    )
-    return "\n".join(lines)

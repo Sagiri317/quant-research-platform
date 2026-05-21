@@ -25,6 +25,7 @@ function App() {
     setSelectedId,
     upsertRunAtTop,
   } = useRuns()
+  const [runCacheVersion, setRunCacheVersion] = useState(0)
   const {
     activePayload,
     activeTable,
@@ -43,7 +44,7 @@ function App() {
     setSelectedCombinationId,
     setTablePreviewExpanded,
     tablePreviewExpanded,
-  } = useRunEvidence(selectedRun)
+  } = useRunEvidence(selectedRun, runCacheVersion)
   const [viewMode, setViewMode] = useState<ViewMode>('factor')
   const userSelectedView = useRef(false)
   const [successMessage, setSuccessMessage] = useState('')
@@ -60,6 +61,7 @@ function App() {
   } = useCreateRun({
     onCreated(created) {
       setSuccessMessage('')
+      setRunCacheVersion((version) => version + 1)
       upsertRunAtTop(created)
       setViewMode('results')
       setSuccessMessage(`已生成回测：${created.public_run_id}`)
@@ -70,6 +72,7 @@ function App() {
     downloadError,
     downloadNotice,
     downloadOptions,
+    downloadPresets,
     downloading,
     handleSelectedDownload,
     selectedDownloadItems,
@@ -77,12 +80,12 @@ function App() {
   } = useArtifactDownloads({
     displayDownloads: display?.downloads,
     selectedRun,
-    selectedTableSpecs,
   })
   const canDeleteSelectedRun = selectedRun?.data_stage === 'uploaded_panel'
   const { deleting, handleDeleteSelectedRun } = useDeleteRun({
     canDelete: canDeleteSelectedRun,
     onDeleted(publicRunId) {
+      setRunCacheVersion((version) => version + 1)
       removeRun(publicRunId)
       setSuccessMessage(`已删除回测：${publicRunId}`)
     },
@@ -174,6 +177,7 @@ function App() {
             downloadNotice={downloadNotice}
             downloading={downloading}
             downloadOptions={downloadOptions}
+            downloadPresets={downloadPresets}
             onActiveTableChange={setActiveTable}
             onDelete={handleDeleteSelectedRun}
             onDownload={handleSelectedDownload}

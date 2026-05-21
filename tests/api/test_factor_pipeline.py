@@ -38,7 +38,12 @@ def test_factor_templates_are_loaded_from_config() -> None:
 
 
 def test_pipeline_run_writes_snapshot_and_checkpoints(tmp_path) -> None:
-    client = TestClient(create_app(run_roots=[("platform", "reports/runs")]))
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
     payload = {
         "market": "a_share",
         "run_id": "api_snapshot_smoke",
@@ -50,7 +55,6 @@ def test_pipeline_run_writes_snapshot_and_checkpoints(tmp_path) -> None:
         "cost_bps": 10,
         "pnl_return_column": "forward_return_1d",
         "label_columns": ["forward_return_1d", "forward_return_20d"],
-        "output_root": tmp_path.as_posix(),
     }
 
     created = client.post("/api/pipeline-runs", json=payload)
@@ -78,7 +82,12 @@ def test_pipeline_run_writes_snapshot_and_checkpoints(tmp_path) -> None:
 
 
 def test_pipeline_run_rejects_invalid_expression(tmp_path) -> None:
-    client = TestClient(create_app(run_roots=[("platform", "reports/runs")]))
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
 
     response = client.post(
         "/api/pipeline-runs",
@@ -93,7 +102,6 @@ def test_pipeline_run_rejects_invalid_expression(tmp_path) -> None:
             "cost_bps": 0,
             "pnl_return_column": "forward_return_1d",
             "label_columns": ["forward_return_1d"],
-            "output_root": tmp_path.as_posix(),
         },
     )
 
@@ -102,3 +110,62 @@ def test_pipeline_run_rejects_invalid_expression(tmp_path) -> None:
         "invalid_factor_expression"
     )
     assert not (tmp_path / "bad_expression").exists()
+
+
+def test_pipeline_run_rejects_unsafe_run_id(tmp_path) -> None:
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
+
+    response = client.post(
+        "/api/pipeline-runs",
+        json={
+            "market": "a_share",
+            "run_id": "../outside",
+            "date_start": "2024-01-01",
+            "date_end": "2024-12-31",
+            "factor_expression": "neg(return(close, 20))",
+            "factor_template_id": "custom",
+            "portfolio_mode": "long_only",
+            "cost_bps": 0,
+            "pnl_return_column": "forward_return_1d",
+            "label_columns": ["forward_return_1d"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["blocking"][0]["code"] == "unsafe_run_id"
+    assert not (tmp_path.parent / "outside").exists()
+
+
+def test_pipeline_run_forbids_client_output_root(tmp_path) -> None:
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
+
+    response = client.post(
+        "/api/pipeline-runs",
+        json={
+            "market": "a_share",
+            "run_id": "server_controlled",
+            "date_start": "2024-01-01",
+            "date_end": "2024-12-31",
+            "factor_expression": "neg(return(close, 20))",
+            "factor_template_id": "custom",
+            "portfolio_mode": "long_only",
+            "cost_bps": 0,
+            "pnl_return_column": "forward_return_1d",
+            "label_columns": ["forward_return_1d"],
+            "output_root": (tmp_path / "client").as_posix(),
+        },
+    )
+
+    assert response.status_code == 422
+    assert "output_root" in str(response.json()["detail"])
+    assert not (tmp_path / "server_controlled").exists()

@@ -4,8 +4,8 @@ import {
   type RunSummary,
   type RunTableSpec,
   type RunDisplayChart,
+  type RunDisplayDownloadPreset,
   type TablePayload,
-  reportMarkdownUrl,
 } from './api'
 import { ArtifactDownloads } from './ArtifactDownloads'
 import { CombinationSelector } from './CombinationSelector'
@@ -37,6 +37,7 @@ export function ResultsView({
   downloadNotice,
   downloading,
   downloadOptions,
+  downloadPresets,
   onActiveTableChange,
   onDelete,
   onDownload,
@@ -67,10 +68,11 @@ export function ResultsView({
   downloadNotice: string
   downloading: boolean
   downloadOptions: DownloadOption[]
+  downloadPresets: RunDisplayDownloadPreset[]
   onActiveTableChange: (table: string) => void
   onDelete: () => void
   onDownload: () => void
-  onDownloadPreset: (preset: 'all' | 'report' | 'tables' | 'repro') => void
+  onDownloadPreset: (preset: string) => void
   onSelectedCombinationChange: (combinationId: string) => void
   onToggleDownloadItem: (item: string) => void
   onToggleTablePreview: () => void
@@ -141,6 +143,7 @@ export function ResultsView({
               downloadNotice={downloadNotice}
               downloading={downloading}
               downloadOptions={downloadOptions}
+              downloadPresets={downloadPresets}
               onActiveTableChange={onActiveTableChange}
               onDownload={onDownload}
               onDownloadPreset={onDownloadPreset}
@@ -182,7 +185,7 @@ export function ResultsView({
 
             <section className="boundary">{boundary}</section>
 
-            <ReportSection reportMarkdown={reportMarkdown} run={run} />
+            <ReportSection reportMarkdown={reportMarkdown} />
 
             <CsvBrowser
               activePayload={activePayload}
@@ -203,6 +206,7 @@ export function ResultsView({
               downloadNotice={downloadNotice}
               downloading={downloading}
               downloadOptions={downloadOptions}
+              downloadPresets={downloadPresets}
               onDownload={onDownload}
               onPreset={onDownloadPreset}
               onToggleItem={onToggleDownloadItem}
@@ -223,7 +227,7 @@ function ReportOverview({ run }: { run: RunSummary }) {
         <h3>完整报告</h3>
         <p>
           以阅读模式展开全部图表、指标、表格预览、运行对比和下载入口，用于系统检查这次
-          run 的输入、组合表现和输出文件。
+          运行的输入、组合表现和输出文件。
         </p>
       </div>
       <div className="report-overview-grid">
@@ -247,6 +251,7 @@ function DeliveryTabs({
   downloadNotice,
   downloading,
   downloadOptions,
+  downloadPresets,
   onActiveTableChange,
   onDownload,
   onDownloadPreset,
@@ -272,9 +277,10 @@ function DeliveryTabs({
   downloadNotice: string
   downloading: boolean
   downloadOptions: DownloadOption[]
+  downloadPresets: RunDisplayDownloadPreset[]
   onActiveTableChange: (table: string) => void
   onDownload: () => void
-  onDownloadPreset: (preset: 'all' | 'report' | 'tables' | 'repro') => void
+  onDownloadPreset: (preset: string) => void
   onSelectTab: (tab: DeliveryTab) => void
   onToggleDownloadItem: (item: string) => void
   onToggleTablePreview: () => void
@@ -325,7 +331,7 @@ function DeliveryTabs({
           </>
         ) : null}
         {deliveryTab === 'report' ? (
-          <ReportSection reportMarkdown={reportMarkdown} run={run} />
+          <ReportSection reportMarkdown={reportMarkdown} />
         ) : null}
         {deliveryTab === 'csv' ? (
           <CsvBrowser
@@ -349,6 +355,7 @@ function DeliveryTabs({
             downloadNotice={downloadNotice}
             downloading={downloading}
             downloadOptions={downloadOptions}
+            downloadPresets={downloadPresets}
             onDownload={onDownload}
             onPreset={onDownloadPreset}
             onToggleItem={onToggleDownloadItem}
@@ -362,18 +369,14 @@ function DeliveryTabs({
 
 function ReportSection({
   reportMarkdown,
-  run,
 }: {
   reportMarkdown: string
-  run: RunSummary
 }) {
   return (
     <section className="data-section">
       <div className="section-title">
         <h3>研究报告</h3>
-        <a className="template-link" href={reportMarkdownUrl(run)}>
-          下载报告 Markdown
-        </a>
+        <span>在结果文件下载中选择 report.md</span>
       </div>
       <ReportView markdown={reportMarkdown} />
     </section>
@@ -382,12 +385,12 @@ function ReportSection({
 
 function boundaryText(run: RunSummary, runBoundary?: string): string {
   if (run.data_stage === 'uploaded_panel') {
-    return '本 run 使用用户上传面板在本地评估；平台不下载数据、不连接外部 API、不保存凭据，也不提供投资建议。'
+    return '本次运行使用用户上传面板在本地评估；平台不下载数据、不连接外部 API、不保存凭据，也不提供投资建议。'
   }
   if (run.uses_external_data || run.data_stage === 'approved_offline_real_data') {
-    return '本 run 使用已批准的本地离线真实数据；平台不下载数据、不连接外部 API、不保存凭据，也不提供投资建议。'
+    return '本次运行使用已批准的本地离线真实数据；平台不下载数据、不连接外部 API、不保存凭据，也不提供投资建议。'
   }
-  return runBoundary ?? 'Synthetic/toy 本地结果，仅用于只读展示。'
+  return runBoundary ?? '本地合成示例结果，仅用于只读展示。'
 }
 
 function selectedCombinationMetrics({

@@ -16,7 +16,7 @@ from quant_research_platform.artifacts import (
 from .models import RunIndexRecord, RunRecord, RunRef, RunRoot
 from .run_index import load_run_index
 
-DEFAULT_RUN_ROOT_ALIAS = "core"
+DEFAULT_RUN_ROOT_ALIAS = "platform"
 DEFAULT_RUN_ROOT = Path("reports/runs")
 RUN_ROOTS_ENV = "QRP_RUN_ROOTS"
 
@@ -38,13 +38,15 @@ def run_roots_from_env() -> list[RunRoot]:
         else:
             path = Path(entry)
             roots.append(run_root(path.name or DEFAULT_RUN_ROOT_ALIAS, entry))
-    return roots
+    return require_unique_source_aliases(roots)
 
 
 def normalize_run_roots(run_roots: list[tuple[str, str | Path]]) -> list[RunRoot]:
     """把测试或启动参数传入的 run root tuples 规范化为 RunRoot。"""
 
-    return [run_root(alias, path) for alias, path in run_roots]
+    return require_unique_source_aliases(
+        [run_root(alias, path) for alias, path in run_roots]
+    )
 
 
 def run_root(alias: str, path: str | Path) -> RunRoot:
@@ -53,6 +55,18 @@ def run_root(alias: str, path: str | Path) -> RunRoot:
     if not alias or "/" in alias or "\\" in alias:
         raise ValueError("run root aliases must be non-empty path-safe strings.")
     return RunRoot(alias, Path(path))
+
+
+def require_unique_source_aliases(roots: list[RunRoot]) -> list[RunRoot]:
+    """Reject ambiguous root configuration before run discovery starts."""
+
+    aliases = [root.source_alias for root in roots]
+    duplicates = sorted(
+        alias for alias in set(aliases) if aliases.count(alias) > 1
+    )
+    if duplicates:
+        raise ValueError(f"duplicate run root source aliases: {duplicates}")
+    return roots
 
 
 def discover_runs(run_roots: list[RunRoot]) -> list[RunRecord]:
@@ -67,7 +81,7 @@ def discover_runs(run_roots: list[RunRoot]) -> list[RunRecord]:
             if not child.is_dir() or not (child / "manifest.json").is_file():
                 continue
             run = load_artifacts_or_422(child)
-            run_id = str(run.summary["run_id"])
+            run_id = str(run.summary["evaluation_id"])
             key = (root.source_alias, run_id)
             if key in seen:
                 raise HTTPException(
@@ -95,12 +109,7 @@ def discover_run_indexes(run_roots: list[RunRoot]) -> list[RunIndexRecord]:
         for child in sorted(root.path.iterdir()):
             if not child.is_dir() or not (child / "manifest.json").is_file():
                 continue
-            try:
-                record = load_run_index_or_422(root.source_alias, child)
-            except HTTPException as exc:
-                if is_unsupported_legacy_artifact(exc):
-                    continue
-                raise
+            record = load_run_index_or_422(root.source_alias, child)
             key = (record.ref.source_alias, record.ref.run_id)
             if key in seen:
                 raise HTTPException(
@@ -113,19 +122,6 @@ def discover_run_indexes(run_roots: list[RunRoot]) -> list[RunIndexRecord]:
             seen.add(key)
             records.append(record)
     return sorted(records, key=lambda record: record.ref.public_run_id)
-
-
-def is_unsupported_legacy_artifact(exc: HTTPException) -> bool:
-    """Return true for old generated run artifacts that should not break lists."""
-
-    return (
-        exc.status_code == 422
-        and isinstance(exc.detail, str)
-        and (
-            "unsupported artifact_schema_version" in exc.detail
-            or "manifest display schema_version" in exc.detail
-        )
-    )
 
 
 def discover_run_refs(run_roots: list[RunRoot]) -> list[RunRef]:

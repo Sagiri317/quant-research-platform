@@ -8,6 +8,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from quant_research_platform.artifacts import ARTIFACT_SCHEMA_VERSION
+
 from .catalog import FACTOR_CSV_TEMPLATE
 from .factor_pipeline import (
     PipelineRunRequestPayload,
@@ -33,7 +35,9 @@ def _run_root(alias: str, path: str | Path) -> RunRoot:
 
 
 def _normalize_run_roots(run_roots: list[tuple[str, str | Path]]) -> list[RunRoot]:
-    return [_run_root(alias, path) for alias, path in run_roots]
+    return _require_unique_source_aliases(
+        [_run_root(alias, path) for alias, path in run_roots]
+    )
 
 
 def _run_roots_from_env() -> list[RunRoot]:
@@ -51,10 +55,24 @@ def _run_roots_from_env() -> list[RunRoot]:
         else:
             path = Path(entry)
             roots.append(_run_root(path.name or DEFAULT_RUN_ROOT_ALIAS, entry))
+    return _require_unique_source_aliases(roots)
+
+
+def _require_unique_source_aliases(roots: list[RunRoot]) -> list[RunRoot]:
+    aliases = [root.source_alias for root in roots]
+    duplicates = sorted(
+        alias for alias in set(aliases) if aliases.count(alias) > 1
+    )
+    if duplicates:
+        raise ValueError(f"duplicate run root source aliases: {duplicates}")
     return roots
 
 
-def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI:
+def create_app(
+    run_roots: list[tuple[str, str | Path]] | None = None,
+    *,
+    pipeline_output_root: str | Path | None = None,
+) -> FastAPI:
     """Create the local API app over configured artifact run roots."""
 
     app = FastAPI(
@@ -78,6 +96,11 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
         else _run_roots_from_env()
     )
     pipeline_runs: dict[str, PipelineRunSummaryPayload] = {}
+    configured_pipeline_output_root = (
+        Path(pipeline_output_root)
+        if pipeline_output_root is not None
+        else Path("reports/private_real/pipeline_runs")
+    )
 
     def download_cache_root(source_alias: str) -> Path:
         for root in configured_roots:
@@ -134,7 +157,11 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
     ) -> dict[str, object]:
         """Validate factor settings and write a local pipeline snapshot."""
 
-        return create_pipeline_snapshot_payload(payload, pipeline_runs)
+        return create_pipeline_snapshot_payload(
+            payload,
+            pipeline_runs,
+            output_root=configured_pipeline_output_root,
+        )
 
     @app.get("/api/pipeline-runs/{run_id}")
     def pipeline_run_status(run_id: str) -> dict[str, object]:
@@ -195,6 +222,7 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
         """聚合 report、核心 tables 和 comparison，供 evidence 页面一次加载。"""
 
         from .comparison import comparison_index_frame
+        from .downloads import ensure_download_item_exposed
         from .payloads import (
             evidence_load_table_names,
             evidence_payload_table_names,
@@ -202,13 +230,13 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
             table_payload,
         )
         from .run_repository import (
-            discover_run_indexes,
             find_run_index_record,
             load_artifacts_or_422,
         )
 
-        index_records = discover_run_indexes(configured_roots)
+        index_records = _comparison_index_records()
         index_record = find_run_index_record(index_records, source_alias, run_id)
+        ensure_download_item_exposed(index_record.manifest, "report.md")
         comparison_payload = (
             table_payload(comparison_index_frame(index_records))
             if index_records
@@ -233,6 +261,12 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
         combination_id: str | None = None,
     ) -> dict[str, object]:
         """读取 metrics 目录下的通用 metric table。"""
+
+        expected_path = f"metrics/{metric_name}.csv"
+        if metric_name == "combinations":
+            expected_path = "combinations.csv"
+        if not _display_exposes_table(source_alias, run_id, expected_path):
+            raise HTTPException(status_code=404, detail="metric table not found")
 
         from .payloads import metric_payload
         from .run_repository import load_run
@@ -261,6 +295,10 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
     ) -> dict[str, object]:
         """读取 portfolio 相关 metric table。"""
 
+        expected_path = f"portfolio/{metric_name}.csv"
+        if not _display_exposes_table(source_alias, run_id, expected_path):
+            raise HTTPException(status_code=404, detail="portfolio table not found")
+
         from .payloads import metric_payload
         from .run_repository import load_run
 
@@ -288,6 +326,10 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
     ) -> dict[str, object]:
         """读取 diagnostics 相关 metric table。"""
 
+        expected_path = f"diagnostics/{metric_name}.csv"
+        if not _display_exposes_table(source_alias, run_id, expected_path):
+            raise HTTPException(status_code=404, detail="diagnostic table not found")
+
         from .payloads import metric_payload
         from .run_repository import load_run
 
@@ -304,22 +346,90 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
             offset=offset,
         )
 
+    @app.get("/api/runs/{source_alias}/{run_id}/breakdowns/{group}/{metric_name}")
+    def breakdown_table(
+        source_alias: str,
+        run_id: str,
+        group: str,
+        metric_name: str,
+        limit: int | None = None,
+        offset: int = 0,
+        combination_id: str | None = None,
+    ) -> dict[str, object]:
+        """Read one configured time-breakdown metric table."""
+
+        expected_path = f"{group}/{metric_name}.csv"
+        if not _display_exposes_table(source_alias, run_id, expected_path):
+            raise HTTPException(status_code=404, detail="breakdown table not found")
+
+        from .payloads import metric_payload
+        from .run_repository import load_run
+
+        return metric_payload(
+            load_run(
+                configured_roots,
+                source_alias,
+                run_id,
+                metric_names={metric_name},
+            ),
+            metric_name,
+            combination_id=combination_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def _display_exposes_table(
+        source_alias: str,
+        run_id: str,
+        expected_path: str,
+    ) -> bool:
+        from .run_repository import resolve_run_index_record
+
+        record = resolve_run_index_record(configured_roots, source_alias, run_id)
+        display = record.manifest.get("display")
+        if not isinstance(display, dict):
+            return False
+        if display.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+            raise HTTPException(
+                status_code=422,
+                detail="manifest display schema_version unsupported",
+            )
+        tables = display.get("tables")
+        if not isinstance(tables, list):
+            return False
+        return any(
+            isinstance(table, dict) and table.get("path") == expected_path
+            for table in tables
+        )
+
+    def _comparison_index_records():
+        from .downloads import ensure_download_item_exposed
+        from .run_repository import discover_run_indexes
+
+        records = discover_run_indexes(configured_roots)
+        for record in records:
+            ensure_download_item_exposed(record.manifest, "comparison.csv")
+        return records
+
+    def _comparison_csv_bytes_for_download() -> bytes:
+        from .comparison import comparison_index_csv_bytes
+
+        records = _comparison_index_records()
+        return comparison_index_csv_bytes(records)
+
     @app.get("/api/runs/{source_alias}/{run_id}/artifacts/{artifact_item:path}")
     def artifact_csv(source_alias: str, run_id: str, artifact_item: str) -> Response:
         """以 CSV attachment 形式下载单个 artifact table。"""
 
-        from .downloads import artifact_csv_file_response
+        from .downloads import direct_manifest_download_response
         from .run_repository import resolve_run_index_record
 
-        record = resolve_run_index_record(
-            configured_roots,
-            source_alias,
-            run_id,
-        )
-        response = artifact_csv_file_response(
+        record = resolve_run_index_record(configured_roots, source_alias, run_id)
+        response = direct_manifest_download_response(
             record.manifest,
             record.ref.path,
             artifact_item,
+            comparison_csv=_comparison_csv_bytes_for_download,
         )
         if response is not None:
             return response
@@ -344,9 +454,8 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
     ) -> Response:
         """按前端选择项打包下载 ZIP。"""
 
-        from .comparison import comparison_index_csv_bytes
         from .downloads import selected_download_response
-        from .run_repository import discover_run_indexes, load_run
+        from .run_repository import load_run
 
         return selected_download_response(
             load_run(configured_roots, source_alias, run_id),
@@ -354,7 +463,7 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
             run_id,
             payload.items,
             download_cache_root(source_alias),
-            lambda: comparison_index_csv_bytes(discover_run_indexes(configured_roots)),
+            _comparison_csv_bytes_for_download,
         )
 
     @app.get("/api/runs/{source_alias}/{run_id}/download")
@@ -365,9 +474,8 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
     ) -> Response:
         """按 query items 打包下载 ZIP，供浏览器原生下载流使用。"""
 
-        from .comparison import comparison_index_csv_bytes
         from .downloads import selected_download_response
-        from .run_repository import discover_run_indexes, load_run
+        from .run_repository import load_run
 
         return selected_download_response(
             load_run(configured_roots, source_alias, run_id),
@@ -375,7 +483,7 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
             run_id,
             items,
             download_cache_root(source_alias),
-            lambda: comparison_index_csv_bytes(discover_run_indexes(configured_roots)),
+            _comparison_csv_bytes_for_download,
         )
 
     @app.get("/api/comparison")
@@ -384,9 +492,7 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
 
         from .comparison import comparison_index_frame
         from .payloads import table_payload
-        from .run_repository import discover_run_indexes
-
-        records = discover_run_indexes(configured_roots)
+        records = _comparison_index_records()
         if not records:
             return {"columns": [], "rows": []}
         return table_payload(comparison_index_frame(records))
@@ -395,11 +501,8 @@ def create_app(run_roots: list[tuple[str, str | Path]] | None = None) -> FastAPI
     def comparison_csv() -> Response:
         """以 CSV attachment 形式下载 comparison table。"""
 
-        from .comparison import comparison_index_csv_bytes
-        from .run_repository import discover_run_indexes
-
         return Response(
-            content=comparison_index_csv_bytes(discover_run_indexes(configured_roots)),
+            content=_comparison_csv_bytes_for_download(),
             media_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": 'attachment; filename="comparison.csv"'

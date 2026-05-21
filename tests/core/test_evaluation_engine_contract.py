@@ -8,6 +8,7 @@ from quant_research_platform.core.contracts import (
     EvaluationSpec,
     ExecutionConfig,
     NeutralizationConfig,
+    TensorBatchConfig,
     TradabilityConfig,
     WeightConfig,
 )
@@ -100,9 +101,13 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
     display = manifest["display"]
     table_keys = {table["key"] for table in display["tables"]}
     assert {"combinations", "ic", "returns", "pnl"}.issubset(table_keys)
-    assert {
-        chart["id"] for chart in display["charts"]
-    } == {"pnl", "ic_rankic", "return_turnover_cost"}
+    assert {chart["id"] for chart in display["charts"]} == {
+        "pnl",
+        "ic_rankic",
+        "net_portfolio_return",
+        "turnover",
+        "cost",
+    }
     all_download = next(
         preset for preset in display["downloads"]["presets"] if preset["key"] == "all"
     )
@@ -279,6 +284,86 @@ def test_run_evaluation_batches_features_for_same_label_weight_and_cost(
     assert result.summary["n_combinations"] == 2
     assert cross_section_calls == 1
     assert portfolio_calls == 1
+
+
+def test_tensor_engine_uses_tensor_metric_path(tmp_path, monkeypatch):
+    import quant_research_platform.core.evaluation as evaluation
+
+    def fail_dataframe_cross_section(*args, **kwargs):
+        raise AssertionError("tensor engine must not use dataframe cross-section")
+
+    def fail_dataframe_portfolio(*args, **kwargs):
+        raise AssertionError("tensor engine must not use dataframe portfolio")
+
+    monkeypatch.setattr(
+        evaluation,
+        "evaluate_ic_and_grouped_returns_from_validated_panel",
+        fail_dataframe_cross_section,
+    )
+    monkeypatch.setattr(
+        evaluation,
+        "_simulate_weighted_long_short_returns_and_cost_from_validated_panel",
+        fail_dataframe_portfolio,
+    )
+    spec = EvaluationSpec(
+        panel=_factor_panel(),
+        feature_columns=("factor",),
+        label_columns=("forward_return",),
+        metadata=_metadata("tensor_engine_run"),
+        n_groups=2,
+        engine="tensor",
+        output_dir=tmp_path,
+    )
+
+    result = run_evaluation(spec)
+
+    assert result.summary["engine"] == "tensor"
+    assert not result.metrics["returns"].empty
+    assert not result.metrics["pnl"].empty
+
+
+def test_tensor_engine_passes_configured_value_dtype_to_tensor_conversion(
+    tmp_path,
+    monkeypatch,
+):
+    import quant_research_platform.core.evaluation as evaluation
+
+    cross_section_dtypes: list[str] = []
+    portfolio_dtypes: list[str] = []
+    original_panel_to_tensor = evaluation.panel_to_tensor
+    original_portfolio = evaluation.build_tensor_portfolio_artifacts
+
+    def spy_panel_to_tensor(*args, **kwargs):
+        cross_section_dtypes.append(kwargs.get("value_dtype", "float64"))
+        return original_panel_to_tensor(*args, **kwargs)
+
+    def spy_tensor_portfolio(*args, **kwargs):
+        portfolio_dtypes.append(kwargs.get("value_dtype", "float64"))
+        return original_portfolio(*args, **kwargs)
+
+    monkeypatch.setattr(evaluation, "panel_to_tensor", spy_panel_to_tensor)
+    monkeypatch.setattr(
+        evaluation,
+        "build_tensor_portfolio_artifacts",
+        spy_tensor_portfolio,
+    )
+    spec = EvaluationSpec(
+        panel=_factor_panel(),
+        feature_columns=("factor",),
+        label_columns=("forward_return",),
+        metadata=_metadata("tensor_dtype_run"),
+        n_groups=2,
+        engine="tensor",
+        tensor_config=TensorBatchConfig(value_dtype="float32"),
+        output_dir=tmp_path,
+    )
+
+    run_evaluation(spec)
+
+    assert cross_section_dtypes
+    assert portfolio_dtypes
+    assert set(cross_section_dtypes) == {"float32"}
+    assert set(portfolio_dtypes) == {"float32"}
 
 
 def test_feature_set_combination_ids_are_mapped_once_per_feature(monkeypatch):

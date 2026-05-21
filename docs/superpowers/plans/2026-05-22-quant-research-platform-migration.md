@@ -1,6 +1,8 @@
 # Quant Research Platform Migration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Status: archived implementation record as of 2026-05-22. This file is not the current task list; use `PROJECT_STATUS.md` plus the active review/fix goal for current status.
+
+> This archived plan must not be used as an active authorization source. Old checkboxes, install notes, cleanup notes, and migration-time approvals below are historical context only. Follow current `AGENTS.md`, `PROJECT_STATUS.md`, and the active user goal instead.
 
 **Goal:** 把当前 `a-share-alpha-lab` 分支迁移为 `quant-research-platform`，完整吸收 `alpha-research-core` 当前实现快照，并让 A 股成为第一个可运行 market module。
 
@@ -16,12 +18,12 @@
 - 当前工作目录暂时仍是 `E:\quant-workspace\projects\a-share-alpha-lab`。
 - 本计划先在旧目录内完成迁移和测试；目录最终改名为 `quant-research-platform` 是最后单独步骤。
 - 不合并 `alpha-research-core` Git 历史，只复制当前文件快照。
-- 不删除旧 `alpha-research-core` 项目；用户已批准迁移成功后在旧 core 项目写冻结 / deprecated 说明。真正删除旧项目需要另一个 exact-path 审批。
-- 用户已批准旧 `code/` 迁移完成并通过测试后清理，不保留兼容入口。exact path: `E:/quant-workspace/projects/a-share-alpha-lab/code/`。
-- 用户已批准两类依赖安装：Conda `analysis` 环境里的 Python 包，以及项目 `web/` 目录下的 npm 依赖。
+- 不删除旧 `alpha-research-core` 项目；旧 core 是历史参考。任何跨项目写入或删除都需要新的明确要求。
+- 旧 `code/` 清理许可已经执行完毕并失效；后续删除仍按当前 `AGENTS.md` 的 exact-path 规则处理。
+- 历史依赖安装许可已经失效；后续安装仍按当前 `AGENTS.md` 和用户最新指令处理。
 - 仍然禁止安装到 Conda `base`、使用 `pip`、修改全局 npm/Conda/Git 配置。
 - 浏览器验收优先使用本机已安装 Chrome。不要默认安装 Playwright Chromium；只有系统 Chrome 不可用且用户再次确认时，才运行会写用户缓存的 Playwright 浏览器安装。
-- 如果缺依赖且属于已批准范围，使用最小命令安装；如果超出范围，停止并报告精确命令。
+- 如果缺依赖，按当前 `AGENTS.md` 停止并报告精确命令。
 - 不读取、打印、写入 credentials、`.env`、tokens、cookies。
 - 不接外部 API、券商、交易所、paper trading、live trading。
 - 不提交 Git commit，除非用户后续明确要求。
@@ -228,7 +230,7 @@ E:/quant-workspace/projects/alpha-research-core/.codex/skills/alpha-research-cor
 
 - Chinese-first user-facing docs.
 - Operational files may remain English-first where appropriate.
-- `docs/a_share_quant_platform_blueprint.md` is temporary and should be absorbed then removed; user has approved deleting exact path `E:/quant-workspace/projects/a-share-alpha-lab/docs/a_share_quant_platform_blueprint.md` after absorption.
+- Historical note: `docs/a_share_quant_platform_blueprint.md` was treated as temporary during migration. This archived plan no longer grants deletion permission.
 - Root workspace files are not edited in the overnight migration. The user will handle root planning/status sync tomorrow, so this does not block the goal.
 
 ## 2. Preflight Snapshot
@@ -256,7 +258,7 @@ Expected: `analysis` exists. Do not use `base` for project work.
 Allowed pattern:
 
 ```powershell
-conda install -n analysis <package-name>
+<historical command omitted; follow current AGENTS.md before installing>
 ```
 
 Use only when the missing package is required by the migrated project and is not
@@ -267,12 +269,12 @@ already available in `analysis`.
 Allowed patterns from project `web/`:
 
 ```powershell
-npm ci
-npm install
+<historical command omitted; follow current AGENTS.md before installing>
 ```
 
-Prefer `npm ci` when `package-lock.json` is present and unchanged. Do not run
-global npm commands.
+Historical note: the npm clean-install command was preferred during migration
+when dependency installation was explicitly allowed. Do not run install commands
+from this archived plan.
 
 - [ ] **Step 4: Use installed Chrome for browser acceptance**
 
@@ -1207,7 +1209,7 @@ Expected: all pass.
 - Modify: `REPORT.md`
 - Create/Modify: `docs/code-map/`
 - Create/Modify: `.codex/skills/quant-research-platform-maintenance/SKILL.md`
-- Delete after absorption: `docs/a_share_quant_platform_blueprint.md`
+- Historical cleanup target after absorption: `docs/a_share_quant_platform_blueprint.md`
 
 - [ ] **Step 1: Update README**
 
@@ -1233,7 +1235,7 @@ no external APIs or credentials
 no broker/exchange/paper/live trading
 deletion exact-path approval
 frontend/API/artifact contract rule
-subagent policy approved for this migration
+historical subagent policy for this migration
 ```
 
 - [ ] **Step 3: Migrate core maintenance skill**
@@ -1260,7 +1262,7 @@ alpha_research_core -> quant_research_platform
 Keep artifact schema `0.5`, `manifest.display`, API/download, React evidence UI
 verification requirements.
 
-- [ ] **Step 4: Absorb and delete old A-share-only blueprint**
+- [ ] **Step 4: Historical note: absorb and remove old A-share-only blueprint**
 
 Move useful content from:
 
@@ -1277,14 +1279,13 @@ PROJECT_STATUS.md
 docs/code-map/
 ```
 
-Then delete exact path:
+Historical cleanup target:
 
 ```text
 E:/quant-workspace/projects/a-share-alpha-lab/docs/a_share_quant_platform_blueprint.md
 ```
 
-This deletion is approved by the user's current direction only for this exact
-temporary blueprint file after absorption.
+This archived plan no longer grants deletion permission.
 
 - [ ] **Step 5: Run docs checks**
 
@@ -1303,7 +1304,7 @@ commands or imports.
 
 **Files:**
 
-- Delete exact path after migration and tests pass:
+- Historical cleanup target:
 
 ```text
 E:/quant-workspace/projects/a-share-alpha-lab/code/
@@ -1318,7 +1319,7 @@ No active import uses old code root
 pyproject.toml pythonpath is only ["src"]
 ```
 
-User has pre-approved cleanup of this exact path after the preconditions pass:
+Historical cleanup target:
 
 ```text
 E:/quant-workspace/projects/a-share-alpha-lab/code/
@@ -1336,15 +1337,14 @@ Expected: no active old-root imports.
 
 - [ ] **Step 2: Remove old `code/`**
 
-Use PowerShell native removal only after preconditions pass. This exact path is
-pre-approved by the user for post-test cleanup:
+Historical cleanup target:
 
 ```text
 E:/quant-workspace/projects/a-share-alpha-lab/code/
 ```
 
-Do not delete any other directory. If a tool or Windows lock prevents cleanup,
-leave `code/` in place and report the exact path for manual deletion.
+Do not use this archived plan as deletion approval. If cleanup is needed again,
+follow current `AGENTS.md` and ask for exact-path confirmation.
 
 - [ ] **Step 3: Verify cleanup**
 
@@ -1404,7 +1404,7 @@ Expected: help text exits 0 and refers to `qrp` / Quant Research Platform.
 
 **Files:**
 
-- Read/write only approved generated outputs under `reports/private_real/`.
+- Historical smoke target under `reports/private_real/`.
 - Use private processed data only if the implementation task explicitly needs
   the smoke run and the data path is already part of the project contract.
 
@@ -1434,7 +1434,7 @@ Use the migrated CLI or a checked-in smoke test. Example shape:
 
 ```powershell
 $env:PYTHONPATH="src"
-conda run -n analysis python -m quant_research_platform.cli a-share run-pipeline --config config/a_share/pipelines/smoke_2024.yaml
+conda run -n analysis python -m quant_research_platform.cli a-share evaluate --help
 ```
 
 If the exact CLI command is not ready, run the narrowest pytest that exercises
@@ -1633,7 +1633,7 @@ E:/quant-workspace/projects/a-share-alpha-lab
 **Files:**
 
 - Do not delete old core project in this migration.
-- User has approved writing a deprecated/frozen note in the old core project.
+- Historical note: writing a deprecated/frozen note in the old core project was discussed, but this archived plan does not grant current cross-project write permission.
 
 Recommended outcome:
 
@@ -1675,11 +1675,10 @@ next practical step
 If a test was not run, state why. If dependency installation is needed, do not
 install; provide the exact Conda or npm command for user approval.
 
-For this migration, update that rule with the user's standing approval:
+Historical migration notes about approval were replaced with the current rule:
 
 ```text
-Conda installs into analysis are approved.
-npm installs from project web/ are approved.
+Historical install approvals are expired; follow current `AGENTS.md` and user instructions.
 Anything outside those boundaries still needs explicit approval.
 ```
 

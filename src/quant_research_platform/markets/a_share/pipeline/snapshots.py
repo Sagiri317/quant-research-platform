@@ -52,16 +52,31 @@ def write_run_snapshot(
 
 
 def _resolve_run_dir(output_root: Path, run_id: str, *, overwrite: bool) -> Path:
-    base = output_root / run_id
+    root = output_root.resolve()
+    base = (root / run_id).resolve()
+    if not _is_relative_to(base, root):
+        raise PipelineSnapshotError(f"unsafe run_id would write outside root: {run_id}")
     if overwrite or not base.exists():
         return base
 
     for _ in range(100):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        candidate = output_root / f"{run_id}_{stamp}"
+        candidate = (root / f"{run_id}_{stamp}").resolve()
+        if not _is_relative_to(candidate, root):
+            raise PipelineSnapshotError(
+                f"unsafe run_id would write outside root: {run_id}"
+            )
         if not candidate.exists():
             return candidate
     raise PipelineSnapshotError(f"could not create unique run directory for {run_id}")
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _format_yaml(values: dict[str, Any]) -> str:

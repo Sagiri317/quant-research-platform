@@ -15,7 +15,7 @@ import {
 } from './runEvidenceState'
 import { useTablePreview } from './useTablePreview'
 
-export function useRunEvidence(selectedRun: RunSummary | null) {
+export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0) {
   const [runState, setRunState] = useState<RunState>(EMPTY_RUN_STATE)
   const [activeTable, setActiveTable] = useState('IC')
   const [selectedCombinationId, setSelectedCombinationId] = useState('')
@@ -31,7 +31,7 @@ export function useRunEvidence(selectedRun: RunSummary | null) {
       return
     }
     const run = selectedRun
-    const cacheKey = run.public_run_id
+    const cacheKey = `${run.public_run_id}::${cacheVersion}`
     const cached = runCache.current.get(cacheKey)
     if (cached) {
       const tableSpecs = runTableSpecsFromDisplay(run, cached.display)
@@ -92,10 +92,12 @@ export function useRunEvidence(selectedRun: RunSummary | null) {
     return () => {
       cancelled = true
     }
-  }, [selectedRun])
+  }, [cacheVersion, selectedRun])
 
   const selectedRunKey = selectedRun?.public_run_id ?? ''
-  const runStateMatchesSelectedRun = selectedRunKey !== '' && runStateRunId === selectedRunKey
+  const selectedRunCacheKey = selectedRunKey ? `${selectedRunKey}::${cacheVersion}` : ''
+  const runStateMatchesSelectedRun =
+    selectedRunCacheKey !== '' && runStateRunId === selectedRunCacheKey
   const exposedRunState = runStateMatchesSelectedRun ? runState : EMPTY_RUN_STATE
   const allTableSpecs = useMemo(
     () =>
@@ -123,6 +125,7 @@ export function useRunEvidence(selectedRun: RunSummary | null) {
     activePayload: baseActivePayload,
     activeTableSpec,
     expanded: tablePreviewExpanded,
+    cacheVersion,
     selectedCombinationId,
     selectedRun,
     setEvidenceError,

@@ -179,6 +179,121 @@ describe('api client', () => {
     expect(specs[0].supportsCombinationFilter).toBe(false)
   })
 
+  test('runTableSpecsFromDisplay maps breakdown tables to preview JSON routes', () => {
+    const specs = runTableSpecsFromDisplay(
+      {
+        source_alias: 'core',
+        run_id: 'demo',
+        public_run_id: 'core/demo',
+        project: 'quant-research-platform',
+        kind: 'factor',
+        domain: 'core_synthetic',
+        data_stage: 'synthetic_only',
+        uses_external_data: false,
+        n_rows_evaluated: 600,
+        weight_method: 'equal_weight_quantile',
+        mean_turnover: 1,
+        total_cost: 0,
+      },
+      {
+        schema_version: '0.5',
+        charts: [],
+        downloads: { items: [], presets: [] },
+        tables: [
+          {
+            download_item: 'metrics_by_year/performance_summary_by_year.csv',
+            group: 'breakdown',
+            key: 'performance_by_year',
+            label: '按年绩效',
+            path: 'metrics_by_year/performance_summary_by_year.csv',
+            supports_combination_filter: true,
+          },
+        ],
+      },
+    )
+
+    expect(specs[0].path).toBe(
+      '/api/runs/core/demo/breakdowns/metrics_by_year/performance_summary_by_year',
+    )
+  })
+
+  test('runTableSpecsFromDisplay rejects unsupported table path shapes', () => {
+    expect(() =>
+      runTableSpecsFromDisplay(
+        {
+          source_alias: 'core',
+          run_id: 'demo',
+          public_run_id: 'core/demo',
+          project: 'quant-research-platform',
+          kind: 'factor',
+          domain: 'core_synthetic',
+          data_stage: 'synthetic_only',
+          uses_external_data: false,
+          n_rows_evaluated: 600,
+          weight_method: 'equal_weight_quantile',
+          mean_turnover: 1,
+          total_cost: 0,
+        },
+        {
+          schema_version: '0.5',
+          charts: [],
+          downloads: { items: [], presets: [] },
+          tables: [
+            {
+              download_item: 'custom/alpha.csv',
+              group: 'custom',
+              key: 'custom_alpha',
+              label: '自定义 Alpha',
+              path: 'custom/alpha.csv',
+              supports_combination_filter: true,
+            },
+          ],
+        },
+      ),
+    ).toThrow('Unsupported display table path')
+  })
+
+  test('fetch helpers stringify structured FastAPI validation details', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({
+        detail: {
+          blocking: [
+            {
+              code: 'invalid_factor_expression',
+              message: 'unsupported expression',
+            },
+          ],
+        },
+      }),
+    } as Response)
+
+    await expect(getPipelineRunStatus('bad')).rejects.toThrow(
+      'invalid_factor_expression: unsupported expression',
+    )
+  })
+
+  test('fetch helpers stringify FastAPI list validation details', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({
+        detail: [
+          {
+            loc: ['body', 'run_id'],
+            msg: 'Field required',
+            type: 'missing',
+          },
+        ],
+      }),
+    } as Response)
+
+    await expect(getPipelineRunStatus('bad')).rejects.toThrow(
+      'body.run_id: Field required',
+    )
+  })
+
   test('selectedArtifactsDownloadUrl uses query items for native browser downloads', () => {
     const url = selectedArtifactsDownloadUrl(
       {

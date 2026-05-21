@@ -109,6 +109,8 @@ combination_id, feature, label, weight_id, cost_id
 
 FastAPI layer 聚合本地 run roots，提供 run list、evidence payload、CSV preview、direct artifact download、ZIP download 和 comparison。API 只暴露当前 evaluation-set artifacts 和动态 comparison，不通过 endpoint 暴露未进入 `manifest.display` 的隐式文件。
 
+API-visible run identity is `(source_alias, run_id)`. Run list、evidence routes、CSV preview、direct downloads、ZIP cache、comparison 和 React state 都必须保留 `source_alias`，不能只按 `run_id` 折叠。
+
 平台边界：
 
 - API 是本地研究辅助，不是部署服务。

@@ -24,7 +24,6 @@ SUMMARY_COLUMNS = (
     "group_monotonicity_score",
     "portfolio_mode",
     "mean_net_portfolio_return",
-    "mean_net_long_short_return",
     "sharpe_like",
     "max_drawdown",
     "mean_turnover",
@@ -44,10 +43,7 @@ PERFORMANCE_COLUMNS = (
     "cost_id",
     "year",
     "portfolio_mode",
-    "total_gross_portfolio_return",
-    "total_net_portfolio_return",
     "mean_net_portfolio_return",
-    "mean_net_long_short_return",
     "sharpe_like",
     "max_drawdown",
     "mean_turnover",
@@ -93,16 +89,26 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _resolve_run_dir(output_dir: str, report_root: Path) -> Path:
+    core_runs_root = (report_root / "core_runs").resolve()
     path = Path(output_dir)
-    if path.is_absolute():
-        return path
-    cwd_relative = Path.cwd() / path
-    if cwd_relative.exists():
-        return cwd_relative
-    sibling_core_run = report_root / "core_runs" / path.name
-    if sibling_core_run.exists():
-        return sibling_core_run
-    return report_root / path
+    candidates = [path] if path.is_absolute() else [
+        report_root / path,
+        core_runs_root / path.name,
+    ]
+    valid_candidates: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if core_runs_root not in resolved.parents:
+            continue
+        valid_candidates.append(resolved)
+        if resolved.exists():
+            return resolved
+    if valid_candidates:
+        return valid_candidates[0]
+    raise ValueError(
+        "core run output_dir must resolve under report_root/core_runs: "
+        f"{output_dir}"
+    )
 
 
 def _read_metric_csv(run_dir: Path, filename: str) -> pd.DataFrame:
@@ -162,7 +168,7 @@ def _normalize_performance_summary(
     frame: pd.DataFrame,
     run: dict[str, Any],
 ) -> pd.DataFrame:
-    """Normalize legacy long-short and current portfolio return columns."""
+    """Normalize current performance summary columns."""
 
     normalized = frame.copy()
     portfolio_mode = str(run.get("portfolio_mode") or "long_short")
@@ -172,13 +178,6 @@ def _normalize_performance_summary(
         normalized["portfolio_mode"] = normalized["portfolio_mode"].fillna(
             portfolio_mode
         )
-    if (
-        "mean_net_portfolio_return" not in normalized.columns
-        and "mean_net_long_short_return" in normalized.columns
-    ):
-        normalized["mean_net_portfolio_return"] = normalized[
-            "mean_net_long_short_return"
-        ]
     return normalized
 
 

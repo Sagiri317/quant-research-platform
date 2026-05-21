@@ -36,7 +36,17 @@ from quant_research_platform.engines.dataframe.portfolio import (
     summarize_exposure,
     summarize_performance,
 )
-from quant_research_platform.engines.tensor.conversion import panel_to_tensor_batch
+from quant_research_platform.engines.tensor.conversion import (
+    panel_to_tensor,
+    panel_to_tensor_batch,
+)
+from quant_research_platform.engines.tensor.cross_section import (
+    evaluate_ic_and_grouped_returns_tensor,
+)
+from quant_research_platform.engines.tensor.portfolio import (
+    build_tensor_portfolio_artifacts,
+    summarize_tensor_exposure_from_path,
+)
 
 POSITION_ARTIFACT_POLICY = "nonzero_positions_with_flat_timestamp_marker"
 
@@ -89,7 +99,12 @@ def run_evaluation(spec: EvaluationSpec) -> EvaluationSetResult:
             for cost_index, cost_config in enumerate(spec.cost_configs):
                 weight_id = f"w{weight_index}"
                 cost_id = f"c{cost_index}"
-                raw_metrics = _run_dataframe_feature_set(
+                runner = (
+                    _run_tensor_feature_set
+                    if spec.engine == "tensor"
+                    else _run_dataframe_feature_set
+                )
+                raw_metrics = runner(
                     spec=spec,
                     validated_panel=validated_panels[label],
                     label=label,
@@ -283,6 +298,123 @@ def _run_dataframe_feature_set(
     return metrics
 
 
+def _run_tensor_feature_set(
+    *,
+    spec: EvaluationSpec,
+    validated_panel: pd.DataFrame,
+    label: str,
+    weight_id: str,
+    cost_id: str,
+    weight_config,
+    cost_config,
+    pnl_return_column: str,
+) -> dict[str, pd.DataFrame]:
+    panel_spec = PanelSpec(
+        feature_columns=spec.feature_columns,
+        label_column=label,
+        timestamp_column=spec.timestamp_column,
+        asset_column=spec.asset_column,
+    )
+    panel, neutralization_diagnostics = measure_stage(
+        "metric",
+        "neutralization",
+        lambda: apply_neutralization(
+            validated_panel,
+            panel_spec,
+            spec.neutralization_config,
+        ),
+    )
+    ic, grouped_returns = _evaluate_tensor_cross_section_metrics_for_spec(
+        panel=panel,
+        panel_spec=panel_spec,
+        n_groups=spec.n_groups,
+        segment_columns=spec.segment_columns,
+        value_dtype=spec.tensor_config.value_dtype,
+    )
+    portfolio_artifacts = measure_stage(
+        "metric",
+        "tensor_portfolio_artifacts",
+        lambda: build_tensor_portfolio_artifacts(
+            panel,
+            panel_spec,
+            weight_config,
+            cost_config,
+            segment_columns=spec.segment_columns,
+            portfolio_features=spec.feature_columns,
+            tradability_config=spec.tradability_config,
+            pnl_return_column=pnl_return_column,
+            value_dtype=spec.tensor_config.value_dtype,
+        ),
+    )
+    returns = portfolio_artifacts.returns.copy()
+    if "label" in returns.columns:
+        returns["pnl_return_column"] = returns["label"]
+        returns["label"] = label
+    pnl = measure_stage(
+        "metric",
+        "pnl",
+        lambda: calculate_cumulative_pnl(
+            returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    performance_summary = measure_stage(
+        "metric",
+        "performance_summary",
+        lambda: summarize_performance(
+            returns,
+            pnl,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    ic_summary = measure_stage(
+        "metric",
+        "ic_summary",
+        lambda: summarize_ic(ic, segment_columns=spec.segment_columns),
+    )
+    group_spread_summary = measure_stage(
+        "metric",
+        "group_spread_summary",
+        lambda: summarize_group_spread(
+            grouped_returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    exposure_summary = measure_stage(
+        "metric",
+        "exposure_summary",
+        lambda: summarize_tensor_exposure_from_path(
+            portfolio_artifacts.exposure_path,
+            returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    metrics = {
+        "ic": ic,
+        "ic_summary": ic_summary,
+        "grouped_returns": grouped_returns,
+        "group_spread_summary": group_spread_summary,
+        "performance_summary": performance_summary,
+        "exposure_summary": exposure_summary,
+        "positions": portfolio_artifacts.positions,
+        "turnover": portfolio_artifacts.turnover,
+        "returns": returns,
+        "pnl": pnl,
+        "cost_breakdown": portfolio_artifacts.cost_breakdown,
+        "weight_diagnostics": portfolio_artifacts.diagnostics,
+        "neutralization_diagnostics": neutralization_diagnostics,
+    }
+    if spec.time_breakdowns:
+        metrics.update(
+            build_time_breakdown_metrics(
+                metrics,
+                time_breakdowns=spec.time_breakdowns,
+                segment_columns=spec.segment_columns,
+            )
+        )
+    return metrics
+
+
 def _metrics_for_feature(
     metrics: dict[str, pd.DataFrame],
     feature: str,
@@ -408,6 +540,36 @@ def _evaluate_cross_section_metrics_for_spec(
             spec=panel_spec,
             n_groups=n_groups,
             segment_columns=list(segment_columns),
+        ),
+    )
+
+
+def _evaluate_tensor_cross_section_metrics_for_spec(
+    *,
+    panel: pd.DataFrame,
+    panel_spec: PanelSpec,
+    n_groups: int,
+    segment_columns: tuple[str, ...],
+    value_dtype: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not segment_columns:
+        return measure_stage(
+            "metric",
+            "tensor_cross_section_metrics",
+            lambda: evaluate_ic_and_grouped_returns_tensor(
+                panel_to_tensor(panel, panel_spec, value_dtype=value_dtype),
+                n_groups=n_groups,
+            ),
+        )
+    return measure_stage(
+        "metric",
+        "tensor_cross_section_metrics",
+        lambda: _evaluate_tensor_cross_section_metrics_by_segment(
+            panel=panel,
+            spec=panel_spec,
+            n_groups=n_groups,
+            segment_columns=list(segment_columns),
+            value_dtype=value_dtype,
         ),
     )
 
@@ -723,6 +885,47 @@ def _evaluate_cross_section_metrics_by_segment(
     ic, grouped_returns = evaluate_ic_and_grouped_returns_from_validated_panel(
         panel.iloc[0:0],
         spec,
+        n_groups=n_groups,
+    )
+    for frame in (ic, grouped_returns):
+        for offset, column in enumerate(segment_columns):
+            frame.insert(offset, column, pd.Series(dtype="object"))
+    return ic, grouped_returns
+
+
+def _evaluate_tensor_cross_section_metrics_by_segment(
+    *,
+    panel: pd.DataFrame,
+    spec,
+    n_groups: int,
+    segment_columns: list[str],
+    value_dtype: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ic_frames: list[pd.DataFrame] = []
+    grouped_return_frames: list[pd.DataFrame] = []
+    grouped = panel.groupby(segment_columns, sort=True, dropna=False)
+    for segment_values, segment_frame in grouped:
+        if not isinstance(segment_values, tuple):
+            segment_values = (segment_values,)
+        ic, grouped_returns = evaluate_ic_and_grouped_returns_tensor(
+            panel_to_tensor(segment_frame, spec, value_dtype=value_dtype),
+            n_groups=n_groups,
+        )
+        for frame in (ic, grouped_returns):
+            for offset, (column, value) in enumerate(
+                zip(segment_columns, segment_values, strict=True)
+            ):
+                frame.insert(offset, column, value)
+        ic_frames.append(ic)
+        grouped_return_frames.append(grouped_returns)
+    if ic_frames:
+        return (
+            pd.concat(ic_frames, ignore_index=True),
+            pd.concat(grouped_return_frames, ignore_index=True),
+        )
+
+    ic, grouped_returns = evaluate_ic_and_grouped_returns_tensor(
+        panel_to_tensor(panel.iloc[0:0], spec, value_dtype=value_dtype),
         n_groups=n_groups,
     )
     for frame in (ic, grouped_returns):

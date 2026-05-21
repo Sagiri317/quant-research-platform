@@ -38,7 +38,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=("long_short", "long_only"),
         default="long_short",
     )
-    parser.add_argument("--engine", default="dataframe")
+    parser.add_argument(
+        "--engine",
+        choices=("dataframe", "tensor"),
+        default="dataframe",
+    )
     parser.add_argument("--segment-columns", default="")
     parser.add_argument("--risk-column", default="")
     parser.add_argument("--neutralization-method", default="none")

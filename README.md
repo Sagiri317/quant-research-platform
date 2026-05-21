@@ -61,6 +61,7 @@ conda run -n analysis python -m ruff check src tests
 CLI 入口：
 
 ```powershell
+$env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
 conda run -n analysis python -m quant_research_platform.cli --help
 conda run -n analysis python -m quant_research_platform.cli a-share --help
@@ -82,13 +83,14 @@ npm run build
 .\scripts\build\build_web.ps1
 ```
 
-本机查看 2023-2025 tensor 私有 run：
+本机查看 2023-2025 私有 smoke run：
 
 ```powershell
 .\scripts\local\start_private_workbench.ps1
+.\scripts\local\stop_workbench.ps1
 ```
 
-该脚本会把 API 的 `QRP_RUN_ROOTS` 指到 `reports/private_real/factor_evaluation/tensor_2023_2025_smoke/` 下的 `long_only` 和 `long_short` core runs。它只使用相对路径，不提交或复制私有结果。
+启动脚本会把 API 的 `QRP_RUN_ROOTS` 指到 `reports/private_real/factor_evaluation/` 下的 2023-2025 `tensor` / `dataframe`、`long_only` / `long_short` 四组 core runs。它只使用相对路径，不提交或复制私有结果；如果端口被其他项目占用，脚本会停止并要求换端口或先处理占用进程。
 
 ## 私有数据边界
 
@@ -106,6 +108,8 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 ## Artifact 和 Workbench 合同
 
 平台输出的 evaluation run 使用 artifact schema `0.5`。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。
+
+本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
 
 新增或修改 artifacts 时必须同时检查：
 

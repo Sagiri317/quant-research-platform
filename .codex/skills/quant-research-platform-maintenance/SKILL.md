@@ -34,7 +34,8 @@ For broad changes, stabilize the artifact contract before changing the UI. Do no
 2. Update writer output, loader validation, lightweight run index validation, API payload/download behavior, frontend consumers, tests, docs, and code maps in the same round.
 3. Remove legacy compatibility in one pass when old generated runs are no longer supported. Delete fallback logic from loader, run index, comparison, inventory, tests, docs, and frontend mocks together.
 4. Wire user-facing artifacts through `manifest.display`; do not add backend-only, frontend-only, or direct-link-only files.
-5. Review the diff by surface: core artifact contract, API/download, frontend UI, A-share pipeline, tests/fixtures, docs/skills/gitignore, and generated or temporary outputs.
+5. Preserve API-visible run identity as `(source_alias, run_id)` across run list, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend route state.
+6. Review the diff by surface: core artifact contract, API/download, frontend UI, A-share pipeline, tests/fixtures, docs/skills/gitignore, and generated or temporary outputs.
 
 Current artifact schema is `0.5`. Treat unsupported or legacy artifact schemas as regeneration candidates, not compatibility targets, unless the user explicitly asks to reintroduce compatibility.
 
@@ -61,6 +62,7 @@ Do not call a broad artifact/API/frontend refactor complete until every gate bel
 ### API and Download
 
 - Run list, run evidence, CSV preview, direct CSV download, ZIP download, and comparison endpoints all consume the same contract.
+- Multi-root APIs and frontend state must not collapse runs by `run_id` alone; `source_alias` is part of the identity.
 - Direct CSV links validate display schema and exposed download items.
 - ZIP item selection validates against the manifest before creating cache paths or writing temporary ZIP files.
 - Bad or stale runs are rejected or excluded at the earliest reasonable entry point, not after the frontend has already selected them.
@@ -118,7 +120,7 @@ For frontend evidence-workbench changes, run a real-browser pass against local F
 - Pipeline Builder validates required fields and does not imply deployment or trading;
 - at least one narrow viewport is checked for overlap, clipped labels, and unusable controls.
 
-After browser acceptance, stop the local services and remove only validation temporary outputs such as runtime logs, Playwright downloads/screenshots, and download cache files. Do not remove generated runs, profiles, or dependencies as part of validation cleanup.
+After browser acceptance, stop the local services and list any validation temporary outputs such as runtime logs, Playwright downloads/screenshots, and download cache files before cleanup. Follow project deletion rules: remove only exact approved paths or single explicitly named files. Do not remove generated runs, profiles, or dependencies as part of validation cleanup.
 
 ## Generated Runs
 
@@ -135,9 +137,11 @@ $env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
 conda run -n analysis python -m pytest -q
 conda run -n analysis python -m ruff check src tests
+Push-Location web
 npm test -- --run --maxWorkers=1
 npm run lint
 npm run build
+Pop-Location
 git diff --check
 ```
 

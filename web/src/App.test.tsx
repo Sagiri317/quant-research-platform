@@ -9,6 +9,7 @@ import {
 } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import App from './App'
+import type { RunSummary } from './api'
 import {
   displayPayload,
   evidencePayload,
@@ -16,6 +17,7 @@ import {
   tablePayload,
   tableResponse,
 } from './testFixtures'
+import { useRunEvidence } from './useRunEvidence'
 
 const originalFetch = globalThis.fetch
 
@@ -160,8 +162,6 @@ describe('App', () => {
     expect(await screen.findByTestId('net-portfolio-return-chart')).toBeInTheDocument()
     expect(screen.queryByTestId('turnover-chart')).not.toBeInTheDocument()
     expect(screen.queryByTestId('cost-chart')).not.toBeInTheDocument()
-    expect(screen.getByText('快速诊断摘要')).toBeInTheDocument()
-
     fireEvent.click(screen.getByRole('button', { name: '换手率' }))
     expect(screen.getByTestId('turnover-chart')).toBeInTheDocument()
     expect(screen.queryByTestId('net-portfolio-return-chart')).not.toBeInTheDocument()
@@ -344,10 +344,7 @@ describe('App', () => {
     expect(globalThis.fetch).not.toHaveBeenCalledWith(
       'http://127.0.0.1:8000/api/runs/core/demo/metrics/ic',
     )
-    expect(screen.getByRole('link', { name: '下载运行对比 CSV' })).toHaveAttribute(
-      'href',
-      'http://127.0.0.1:8000/api/comparison.csv',
-    )
+    expect(screen.getByText('在结果文件下载中选择 comparison.csv')).toBeInTheDocument()
     const comparisonTable = screen.getByRole('table', { name: '运行对比表格' })
     expect(within(comparisonTable).getByText('n_rows_evaluated')).toBeInTheDocument()
     expect(
@@ -956,7 +953,7 @@ describe('App', () => {
     expect(screen.getByText(/浏览器已接管下载/)).toBeInTheDocument()
     const anchor = anchorClick.mock.contexts[0] as HTMLAnchorElement
     expect(anchor.href).toBe(
-      'http://127.0.0.1:8000/api/runs/core/demo/download?items=report.md&items=comparison.csv&items=metrics%2Fic.csv',
+      'http://127.0.0.1:8000/api/runs/core/demo/download?items=report.md&items=metrics%2Fic.csv',
     )
     expect(anchorClick).toHaveBeenCalled()
     expect(globalThis.fetch).not.toHaveBeenCalledWith(
@@ -1097,14 +1094,21 @@ describe('App', () => {
         expect.objectContaining({ method: 'DELETE' }),
       )
     })
-    expect(confirm).toHaveBeenCalled()
+    expect(confirm).toHaveBeenCalledWith(
+      [
+        '确认删除回测 core/uploaded_demo？',
+        '仅允许删除用户上传面板（data_stage=uploaded_panel）且位于当前运行根目录（run root）下的本地结果目录。',
+      ].join('\n'),
+    )
     expect(screen.queryByText('core/uploaded_demo')).not.toBeInTheDocument()
     expect(await screen.findByText('已删除回测：core/uploaded_demo')).toBeInTheDocument()
   })
 
   test('renders tables downloads and charts from evidence display manifest', async () => {
     const tables = {
-      custom_alpha: tablePayload([{ timestamp: '2026-01-01', alpha_score: 0.7 }]),
+      performance_summary: tablePayload([
+        { timestamp: '2026-01-01', alpha_score: 0.7 },
+      ]),
       pnl: tablePayload([
         {
           timestamp: '2026-01-01',
@@ -1120,6 +1124,7 @@ describe('App', () => {
         id: 'custom_pnl',
         include_zero: true,
         kind: 'line',
+        section: 'primary',
         series: [
           {
             color: '#2563eb',
@@ -1168,14 +1173,14 @@ describe('App', () => {
     expect(await screen.findByText('Manifest PnL')).toBeInTheDocument()
     expect(screen.queryByTestId('ic-rankic-chart')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: '结果文件下载' }))
-    expect(screen.getByRole('checkbox', { name: '自定义 Alpha CSV' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '绩效汇总 CSV' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: 'CSV 明细' }))
     expect(screen.getByRole('combobox', { name: '选择明细表' })).toHaveValue(
-      'custom_alpha',
+      'performance_summary',
     )
     expect(screen.getByRole('link', { name: '下载当前 CSV' })).toHaveAttribute(
       'href',
-      'http://127.0.0.1:8000/api/runs/core/manifest_demo/artifacts/metrics/custom_alpha.csv',
+      'http://127.0.0.1:8000/api/runs/core/manifest_demo/artifacts/metrics/performance_summary.csv',
     )
   })
 
@@ -1400,6 +1405,65 @@ describe('App', () => {
       ([input]) => String(input).endsWith('/api/runs/core/first/evidence'),
     )
     expect(firstEvidenceCalls).toHaveLength(1)
+  })
+
+  test('reloads evidence for the same public run id after cache version changes', async () => {
+    const run: RunSummary = {
+      source_alias: 'core',
+      run_id: 'uploaded_demo',
+      public_run_id: 'core/uploaded_demo',
+      project: 'quant-research-platform',
+      kind: 'factor',
+      domain: 'user_upload',
+      data_stage: 'uploaded_panel',
+      uses_external_data: true,
+      n_rows_evaluated: 4,
+      weight_method: 'equal_weight_quantile',
+      mean_turnover: 1,
+      total_cost: 0,
+    }
+    let evidenceCalls = 0
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/runs/core/uploaded_demo/evidence')) {
+        evidenceCalls += 1
+        return jsonResponse(
+          evidencePayload({
+            reportMarkdown: `# Uploaded Report ${evidenceCalls}`,
+            summary: {
+              run_id: 'uploaded_demo',
+              project: 'quant-research-platform',
+              kind: 'factor',
+              domain: 'user_upload',
+              data_stage: 'uploaded_panel',
+              uses_external_data: true,
+              n_rows_evaluated: 4,
+            },
+          }),
+        )
+      }
+      return tableResponse([])
+    }) as typeof fetch
+
+    function EvidenceProbe({
+      cacheVersion,
+    }: {
+      cacheVersion: number
+    }) {
+      const { runState } = useRunEvidence(run, cacheVersion)
+      return <div data-testid="report-markdown">{runState.reportMarkdown}</div>
+    }
+
+    const { rerender } = render(<EvidenceProbe cacheVersion={0} />)
+
+    expect(await screen.findByText('# Uploaded Report 1')).toBeInTheDocument()
+    rerender(<EvidenceProbe cacheVersion={1} />)
+
+    expect(await screen.findByText('# Uploaded Report 2')).toBeInTheDocument()
+    const evidenceFetches = vi.mocked(globalThis.fetch).mock.calls.filter(
+      ([input]) => String(input).endsWith('/api/runs/core/uploaded_demo/evidence'),
+    )
+    expect(evidenceFetches).toHaveLength(2)
   })
 
   test('formats chart values as percentages and toggles series from the legend', async () => {

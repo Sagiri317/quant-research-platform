@@ -1,3 +1,4 @@
+import type { RunDisplayDownloadPreset } from './api'
 import type { DownloadOption } from './downloads'
 
 export function ArtifactDownloads({
@@ -5,6 +6,7 @@ export function ArtifactDownloads({
   downloadNotice,
   downloading,
   downloadOptions,
+  downloadPresets,
   onDownload,
   onPreset,
   onToggleItem,
@@ -14,8 +16,9 @@ export function ArtifactDownloads({
   downloadNotice: string
   downloading: boolean
   downloadOptions: DownloadOption[]
+  downloadPresets: RunDisplayDownloadPreset[]
   onDownload: () => void
-  onPreset: (preset: 'all' | 'report' | 'tables' | 'repro') => void
+  onPreset: (preset: string) => void
   onToggleItem: (item: string) => void
   selectedItems: string[]
 }) {
@@ -32,39 +35,21 @@ export function ArtifactDownloads({
             <span>选择一个预设，或在下面逐项勾选。</span>
           </div>
           <div className="download-actions" aria-label="下载预设">
-            <button
-              className="preset-button"
-              onClick={() => onPreset('all')}
-              type="button"
-            >
-              全选
-            </button>
-            <button
-              className="preset-button"
-              onClick={() => onPreset('report')}
-              type="button"
-            >
-              仅报告
-            </button>
-            <button
-              className="preset-button"
-              onClick={() => onPreset('tables')}
-              type="button"
-            >
-              仅表格
-            </button>
-            <button
-              className="preset-button"
-              onClick={() => onPreset('repro')}
-              type="button"
-            >
-              复现包
-            </button>
+            {downloadPresets.map((preset) => (
+              <button
+                className="preset-button"
+                key={preset.key}
+                onClick={() => onPreset(preset.key)}
+                type="button"
+              >
+                {preset.label}
+              </button>
+            ))}
           </div>
         </div>
         <div className="download-picker-head">
           <strong>选择内容</strong>
-            <span>{selectedItems.length} 项已选</span>
+          <span>{selectedItems.length} 项已选</span>
         </div>
         <div className="download-grid">
           {downloadOptions.map((option) => {

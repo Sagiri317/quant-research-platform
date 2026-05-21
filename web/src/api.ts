@@ -5,7 +5,6 @@ const API_BASE_URL = (
 ).replace(/\/$/, '')
 
 export const FACTOR_CSV_TEMPLATE_URL = `${API_BASE_URL}/api/templates/factor-csv`
-export const COMPARISON_CSV_URL = `${API_BASE_URL}/api/comparison.csv`
 
 export type RunSummary = {
   source_alias: string
@@ -124,7 +123,6 @@ export type PipelineRunRequest = {
   factor_template_id?: string
   label_columns: string[]
   market: string
-  output_root?: string
   pnl_return_column: string
   portfolio_mode: string
   run_id: string
@@ -175,6 +173,7 @@ export type RunDisplayChart = {
   id: string
   include_zero?: boolean
   kind: 'line' | 'bar'
+  section?: 'primary' | 'diagnostic' | string
   series: RunDisplayChartSeries[]
   table: string
   title: string
@@ -189,7 +188,7 @@ export type RunDisplayDownloadItem = {
 }
 
 export type RunDisplayDownloadPreset = {
-  key: 'all' | 'report' | 'tables' | 'repro'
+  key: string
   label: string
   items: string[]
 }
@@ -318,16 +317,23 @@ function tableApiPath(run: RunSummary, table: RunDisplayTable): string {
   if (table.path.startsWith('diagnostics/')) {
     return `${prefix}/diagnostics/${encodeURIComponent(metricName)}`
   }
-  return `${prefix}/metrics/${encodeURIComponent(metricName)}`
+  if (
+    table.path.startsWith('metrics_by_year/') ||
+    table.path.startsWith('metrics_by_quarter/') ||
+    table.path.startsWith('metrics_by_month/')
+  ) {
+    const [group] = table.path.split('/')
+    return `${prefix}/breakdowns/${encodeURIComponent(group)}/${encodeURIComponent(metricName)}`
+  }
+  if (table.path.startsWith('metrics/')) {
+    return `${prefix}/metrics/${encodeURIComponent(metricName)}`
+  }
+  throw new Error(`Unsupported display table path: ${table.path}`)
 }
 
 export function artifactDownloadUrl(run: RunSummary, downloadItem: string): string {
   const encodedItem = downloadItem.split('/').map(encodeURIComponent).join('/')
   return `${API_BASE_URL}${runApiPath(run)}/artifacts/${encodedItem}`
-}
-
-export function reportMarkdownUrl(run: RunSummary): string {
-  return `${API_BASE_URL}${runApiPath(run)}/report.md`
 }
 
 function runApiPath(run: RunSummary): string {
@@ -345,9 +351,58 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 async function errorMessage(response: Response): Promise<string> {
   try {
-    const payload = (await response.json()) as { detail?: string }
-    return payload.detail ?? `Request failed with status ${response.status}`
+    const payload = (await response.json()) as { detail?: unknown }
+    return formatErrorDetail(payload.detail) ?? `Request failed with status ${response.status}`
   } catch {
     return `Request failed with status ${response.status}`
   }
+}
+
+function formatErrorDetail(detail: unknown): string | null {
+  if (typeof detail === 'string') {
+    return detail
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((issue) => formatFastApiIssue(issue))
+      .filter((message): message is string => Boolean(message))
+    return messages.length > 0 ? messages.join('; ') : JSON.stringify(detail)
+  }
+  if (!detail || typeof detail !== 'object') {
+    return null
+  }
+  if ('blocking' in detail && Array.isArray(detail.blocking)) {
+    const messages = detail.blocking
+      .map((issue) => formatValidationIssue(issue))
+      .filter((message): message is string => Boolean(message))
+    if (messages.length > 0) {
+      return messages.join('; ')
+    }
+  }
+  return JSON.stringify(detail)
+}
+
+function formatFastApiIssue(issue: unknown): string | null {
+  if (!issue || typeof issue !== 'object') {
+    return null
+  }
+  const message = 'msg' in issue ? String(issue.msg) : ''
+  const rawLoc = 'loc' in issue ? issue.loc : undefined
+  const loc = Array.isArray(rawLoc) ? rawLoc.map(String).join('.') : ''
+  if (loc && message) {
+    return `${loc}: ${message}`
+  }
+  return message || null
+}
+
+function formatValidationIssue(issue: unknown): string | null {
+  if (!issue || typeof issue !== 'object') {
+    return null
+  }
+  const code = 'code' in issue ? String(issue.code) : ''
+  const message = 'message' in issue ? String(issue.message) : ''
+  if (code && message) {
+    return `${code}: ${message}`
+  }
+  return message || code || null
 }

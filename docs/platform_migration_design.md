@@ -1,6 +1,8 @@
 # Quant Research Platform 迁移设计
 
-本文记录把当前 `a-share-alpha-lab` 改造为 `quant-research-platform` 的已确认设计。它是迁移设计，不是实施计划；真正动代码前还需要单独写任务级实施计划，并按测试门槛验收。
+> Status: archived design record as of 2026-05-22. This file is historical context only and does not grant current install, deletion, or cross-project edit permission. Follow current `AGENTS.md`, `PROJECT_STATUS.md`, and the active user goal.
+
+本文记录把当前 `a-share-alpha-lab` 改造为 `quant-research-platform` 的历史确认设计。它是迁移设计记录，不是当前实施计划。
 
 ## 1. 目标
 
@@ -29,7 +31,7 @@
 
 当前本地目录可以先继续叫 `a-share-alpha-lab`，避免当前 Codex 会话路径中断。等迁移和测试通过后，目录改名为 `quant-research-platform` 由用户自己执行；目录未改名不阻塞夜间迁移 goal。
 
-`alpha-research-core` 不合并 Git 历史，只复制当前代码快照。用户已批准在旧 core 项目里写冻结 / deprecated 说明，但不删除旧 core；删除旧 core 需要迁移完成后单独审批 exact path。
+`alpha-research-core` 不合并 Git 历史，只复制当前代码快照。历史讨论中曾考虑在旧 core 项目里写冻结 / deprecated 说明，但本归档文档不构成当前跨项目写入授权；删除旧 core 需要迁移完成后单独审批 exact path。
 
 ## 3. 目标目录结构
 
@@ -89,7 +91,7 @@ docs/
 
 迁移后只使用 `src/` 作为 Python 源码根目录。`pyproject.toml` 应改为只认 `pythonpath = ["src"]`，不能再包含 `../alpha-research-core/src`。
 
-旧 `code/` 只是迁移来源。用户已批准在迁移、import 修改、测试和文档都完成后清理旧 `code/`，不保留兼容入口。清理范围只限旧源码目录 `E:/quant-workspace/projects/a-share-alpha-lab/code/`，不包括 `data/`、`reports/`、`docs/`、`notebooks/`、`config/`。
+旧 `code/` 只是迁移来源。历史迁移阶段曾允许清理旧 `code/`，且该迁移动作已结束；本归档文档不再提供当前删除授权。后续任何清理仍按当前 `AGENTS.md` 的 exact-path 规则处理。
 
 ## 4. 目录审计原则
 
@@ -374,7 +376,7 @@ GET  /evaluation-runs/{id}/downloads/{item_id}
 - 旧 core 项目 skill：`.codex/skills/alpha-research-core-maintenance/SKILL.md`；
 - Windows/Conda、frontend design、React best practices、TDD、verification、parallel agents 等相关全局 skill。
 
-用户已允许使用多个子智能体，包括超过 5 个，只要任务确实独立。
+历史迁移阶段曾允许使用多个子智能体，包括超过 5 个；后续并行策略以当前 `AGENTS.md` 和用户最新指令为准。
 
 适合拆分的并行工作流：
 
@@ -450,9 +452,9 @@ npm run build
 - `docs/code-map/`：源码导航。
 - `.codex/skills/`：基于旧 core skill 改成平台维护 skill。
 
-当前 `docs/a_share_quant_platform_blueprint.md` 是临时前置文档。有效内容应吸收到平台文档里，然后删除这个 A 股单项目蓝图。
+历史上 `docs/a_share_quant_platform_blueprint.md` 是临时前置文档。该文件的有用内容已吸收到平台文档；本归档设计不再提供删除授权。
 
-用户已批准删除这个临时蓝图 exact path：
+历史路径：
 
 ```text
 E:/quant-workspace/projects/a-share-alpha-lab/docs/a_share_quant_platform_blueprint.md
@@ -486,14 +488,14 @@ workspace root 的 planning/status 同步由用户明天再做，不阻塞夜间
 - 模拟盘或实盘；
 - 删除旧 `alpha-research-core` 项目。
 
-## 19. 依赖安装授权边界
+## 19. 历史依赖安装边界
 
-用户已批准两类项目内依赖安装：
+迁移期间曾讨论过两类项目内依赖安装：
 
 - Python 包可以安装到 Conda `analysis` 环境；
 - 前端依赖可以在项目 `web/` 目录下通过 npm 安装。
 
-执行时仍要遵守这些边界：
+该历史记录不构成当前安装授权。后续执行仍要遵守当前 `AGENTS.md` 和用户最新指令：
 
 - 不安装到 Conda `base`；
 - 不使用 `pip`，除非用户后续明确批准并接受 Conda/pip 混用风险；

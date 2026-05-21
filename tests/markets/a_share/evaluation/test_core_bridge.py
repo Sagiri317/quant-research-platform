@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.markets.a_share.evaluation import core_bridge as evaluation
 from quant_research_platform.markets.a_share.evaluation import run_factor_evaluation
@@ -274,7 +275,37 @@ def test_processed_factor_evaluation_reads_full_factor_file_once(
     assert sorted(label_summary["year"].unique().tolist()) == [2024, 2025]
     assert core_runs[0]["run_id"] == "csmar_2024_2025_forward_return_20d"
     assert core_runs[0]["portfolio_mode"] == "long_short"
+    assert core_runs[0]["output_dir"] == (
+        "core_runs/csmar_2024_2025_forward_return_20d"
+    )
     assert manifest_path.name == "evaluation_manifest.json"
+
+
+def test_run_label_evaluation_rejects_unsafe_label_in_run_id(tmp_path):
+    panel = pd.DataFrame(
+        {
+            "stock_code": ["000001", "000002"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "eligible": [True, True],
+            "can_enter": [True, True],
+            "can_exit": [True, True],
+            "rev_20d": [0.1, 0.2],
+            "forward_return_1d": [0.001, 0.002],
+            "forward_return_20d/evil": [0.01, 0.02],
+        }
+    )
+
+    with pytest.raises(ValueError, match="unsafe core run_id"):
+        evaluation.run_label_evaluation(
+            panel=panel,
+            source_file="factor.parquet",
+            start_year=2024,
+            end_year=2024,
+            label_column="forward_return_20d/evil",
+            feature_columns=("rev_20d",),
+            output_root=tmp_path / "reports",
+            n_groups=2,
+        )
 
 
 def test_run_factor_evaluation_cli_passes_core_runtime_options(
@@ -338,6 +369,116 @@ def test_run_factor_evaluation_cli_passes_core_runtime_options(
     assert captured["neutralization_method"] == "cross_sectional_ols"
     assert captured["neutralization_group_columns"] == ("industry",)
     assert captured["neutralization_exposure_columns"] == ("ln_mktcap", "beta")
+
+
+def test_run_factor_evaluation_cli_rejects_invalid_engine_before_io() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        run_factor_evaluation.main(["--engine", "bad"])
+
+    assert exc_info.value.code == 2
+
+
+def test_processed_factor_evaluation_rejects_invalid_options_before_parquet_io(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    def fail_if_parquet_path_is_resolved(*args, **kwargs):
+        raise AssertionError("invalid options must fail before private parquet IO")
+
+    monkeypatch.setattr(
+        evaluation,
+        "factor_full_path_covering_range",
+        fail_if_parquet_path_is_resolved,
+    )
+
+    with pytest.raises(ValueError, match="engine"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2024,
+            end_year=2025,
+            requested_labels=("forward_return_20d",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=5,
+            engine="bad",
+        )
+
+    with pytest.raises(ValueError, match="portfolio_mode"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2024,
+            end_year=2025,
+            requested_labels=("forward_return_20d",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=5,
+            portfolio_mode="bad",
+        )
+
+    with pytest.raises(ValueError, match="unsafe label"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2024,
+            end_year=2025,
+            requested_labels=("forward_return_20d/evil",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=5,
+        )
+
+    with pytest.raises(ValueError, match="n_groups"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2024,
+            end_year=2025,
+            requested_labels=("forward_return_20d",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=1,
+        )
+
+    with pytest.raises(ValueError, match="cost_bps"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2024,
+            end_year=2025,
+            requested_labels=("forward_return_20d",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=5,
+            cost_bps=-0.1,
+        )
+
+    with pytest.raises(ValueError, match="start_year"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2025,
+            end_year=2024,
+            requested_labels=("forward_return_20d",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=5,
+        )
+
+    with pytest.raises(ValueError, match="start_date"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2024,
+            end_year=2025,
+            requested_labels=("forward_return_20d",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=5,
+            start_date="2025-01-01",
+            end_date="2024-12-31",
+        )
 
 
 def test_run_factor_evaluation_cli_defaults_to_full_report_root(

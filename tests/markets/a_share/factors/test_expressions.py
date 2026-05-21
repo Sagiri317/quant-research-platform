@@ -33,3 +33,20 @@ def test_parse_rejects_unknown_field():
 def test_parse_rejects_unknown_function():
     with pytest.raises(FactorExpressionError):
         parse_factor_expression("eval(close)")
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "return(close)",
+        "return(close, high)",
+        "return(return(close, 20), 5)",
+        "mean(amount, 0)",
+        "neg(close, high)",
+        "neutralize(close)",
+        "neutralize(close, mean(amount, 20))",
+    ],
+)
+def test_parse_rejects_invalid_function_arguments(expression):
+    with pytest.raises(FactorExpressionError):
+        parse_factor_expression(expression)

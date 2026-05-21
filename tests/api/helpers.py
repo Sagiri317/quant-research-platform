@@ -25,6 +25,7 @@ def write_evaluation_set(
     turnover: list[float] | None = None,
     cost: list[float] | None = None,
     n_rows_evaluated: int = 12,
+    time_breakdowns: tuple[str, ...] = (),
 ) -> None:
     """Write a minimal valid evaluation-set artifact for tests."""
 
@@ -46,7 +47,10 @@ def write_evaluation_set(
         "data_stage": data_stage,
         "uses_external_data": uses_external_data,
     }
-    _write_json(output_dir / "manifest.json", _manifest(metadata=metadata))
+    _write_json(
+        output_dir / "manifest.json",
+        _manifest(metadata=metadata, time_breakdowns=time_breakdowns),
+    )
     _write_json(output_dir / "config.json", {"metadata": metadata, "n_groups": 2})
     _write_json(
         output_dir / "summary.json",
@@ -129,6 +133,8 @@ def write_evaluation_set(
         output_dir / "metrics" / "performance_summary.csv",
         index=False,
     )
+    if "year" in time_breakdowns:
+        _write_year_breakdown_tables(output_dir, net_returns, turnover, cost)
     _with_dims(_diagnostics_frame()).to_csv(
         output_dir / "diagnostics" / "weight_diagnostics.csv",
         index=False,
@@ -140,7 +146,11 @@ def write_evaluation_set(
     (output_dir / "report.md").write_text("# Report\n", encoding="utf-8")
 
 
-def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
+def _manifest(
+    *,
+    metadata: dict[str, object],
+    time_breakdowns: tuple[str, ...] = (),
+) -> dict[str, object]:
     artifacts = {
         "manifest": "manifest.json",
         "config": "config.json",
@@ -169,6 +179,16 @@ def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
         },
         "report": "report.md",
     }
+    if "year" in time_breakdowns:
+        artifacts["metrics_by_year"] = {
+            "ic_summary_by_year": "metrics_by_year/ic_summary_by_year.csv",
+            "group_spread_summary_by_year": (
+                "metrics_by_year/group_spread_summary_by_year.csv"
+            ),
+            "performance_summary_by_year": (
+                "metrics_by_year/performance_summary_by_year.csv"
+            ),
+        }
     return {
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "artifact_type": "evaluation_set",
@@ -290,6 +310,33 @@ def _group_spread_summary_frame() -> pd.DataFrame:
             "top_bottom_spread_hit_rate": [1.0],
             "group_monotonicity_score": [1.0],
         }
+    )
+
+
+def _write_year_breakdown_tables(
+    output_dir: Path,
+    net_returns: list[float],
+    turnover: list[float],
+    cost: list[float],
+) -> None:
+    breakdown_dir = output_dir / "metrics_by_year"
+    breakdown_dir.mkdir()
+    _with_dims(_ic_summary_frame(ic_values=[0.4], rankic_values=[0.5])).assign(
+        year=2026
+    ).to_csv(breakdown_dir / "ic_summary_by_year.csv", index=False)
+    _with_dims(_group_spread_summary_frame()).assign(year=2026).to_csv(
+        breakdown_dir / "group_spread_summary_by_year.csv",
+        index=False,
+    )
+    _with_dims(
+        _performance_summary_frame(
+            net_returns=net_returns,
+            turnover=turnover,
+            cost=cost,
+        )
+    ).assign(year=2026).to_csv(
+        breakdown_dir / "performance_summary_by_year.csv",
+        index=False,
     )
 
 

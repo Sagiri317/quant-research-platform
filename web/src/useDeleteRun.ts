@@ -21,7 +21,12 @@ export function useDeleteRun({
     if (!selectedRun || !canDelete) {
       return
     }
-    const confirmed = window.confirm(`确认删除回测 ${selectedRun.public_run_id}？`)
+    const confirmed = window.confirm(
+      [
+        `确认删除回测 ${selectedRun.public_run_id}？`,
+        '仅允许删除用户上传面板（data_stage=uploaded_panel）且位于当前运行根目录（run root）下的本地结果目录。',
+      ].join('\n'),
+    )
     if (!confirmed) {
       return
     }

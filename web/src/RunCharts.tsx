@@ -18,7 +18,6 @@ export function RunCharts({
   const renderableCharts = useMemo(
     () =>
       charts
-        .flatMap(expandChart)
         .filter((chart) => isRenderableChart(chart, tables)),
     [charts, tables],
   )
@@ -60,7 +59,6 @@ export function RunCharts({
               </div>
               {renderChart(selectedDiagnostic, tables)}
             </section>
-            <DiagnosticSummary tables={tables} />
           </div>
         ) : null}
       </section>
@@ -98,109 +96,8 @@ function renderChart(
   )
 }
 
-function expandChart(chart: RunDisplayChart): RunDisplayChart[] {
-  if (chart.id !== 'return_turnover_cost') {
-    return [chart]
-  }
-  return chart.series.map((series) => ({
-    ...chart,
-    description: returnDiagnosticDescription(series.key),
-    id: series.key,
-    include_zero: true,
-    series: [series],
-    title: returnDiagnosticTitle(series.key),
-  }))
-}
-
-function returnDiagnosticTitle(key: string): string {
-  if (key === 'net_portfolio_return') {
-    return '单期净收益'
-  }
-  if (key === 'turnover') {
-    return '换手率'
-  }
-  if (key === 'cost') {
-    return '单期成本'
-  }
-  return key
-}
-
 function isDiagnosticChart(chart: RunDisplayChart): boolean {
-  return ['cost', 'net_portfolio_return', 'turnover'].includes(chart.id)
-}
-
-function DiagnosticSummary({ tables }: { tables: Record<string, TablePayload> }) {
-  const rows = tables.returns?.rows ?? []
-  const turnover = meanNumeric(rows, 'turnover')
-  const cost = sumNumeric(rows, 'cost')
-  const maxCost = maxNumeric(rows, 'cost')
-  return (
-    <section className="diagnostic-summary">
-      <div>
-        <h3>快速诊断摘要</h3>
-        <p>快速解释交易摩擦和成本拖累。</p>
-      </div>
-      <div className="diagnostic-note">
-        <strong>平均换手</strong>
-        <span>{formatDiagnosticNumber(turnover)}</span>
-      </div>
-      <div className="diagnostic-note">
-        <strong>累计成本</strong>
-        <span>{formatDiagnosticNumber(cost)}</span>
-      </div>
-      <div className="diagnostic-note">
-        <strong>最大单期成本</strong>
-        <span>{formatDiagnosticNumber(maxCost)}</span>
-      </div>
-    </section>
-  )
-}
-
-function meanNumeric(rows: Record<string, unknown>[], key: string): number | undefined {
-  const values = numericColumn(rows, key)
-  if (values.length === 0) {
-    return undefined
-  }
-  return values.reduce((total, value) => total + value, 0) / values.length
-}
-
-function sumNumeric(rows: Record<string, unknown>[], key: string): number | undefined {
-  const values = numericColumn(rows, key)
-  if (values.length === 0) {
-    return undefined
-  }
-  return values.reduce((total, value) => total + value, 0)
-}
-
-function maxNumeric(rows: Record<string, unknown>[], key: string): number | undefined {
-  const values = numericColumn(rows, key)
-  return values.length === 0 ? undefined : Math.max(...values)
-}
-
-function numericColumn(rows: Record<string, unknown>[], key: string): number[] {
-  return rows
-    .map((row) => row[key])
-    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
-}
-
-function formatDiagnosticNumber(value: number | undefined): string {
-  if (value === undefined) {
-    return '--'
-  }
-  return value.toLocaleString('en-US', { maximumFractionDigits: 4 })
-}
-
-function returnDiagnosticDescription(key: string): string {
-  if (key === 'net_portfolio_return') {
-    return '每期组合净收益'
-  }
-  if (key === 'turnover') {
-    return '每期换手强度'
-  }
-  if (key === 'cost') {
-    return '每期成本拖累'
-  }
-  return '组合收益诊断'
+  return chart.section === 'diagnostic'
 }
 
 function effectiveChartKind(

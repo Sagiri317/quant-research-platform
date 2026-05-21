@@ -12,6 +12,7 @@ Project purpose:
 - A-share is the first complete market module, backed by local private CSMAR data.
 - Core evaluation, artifact schema `0.5`, local API, downloads, and React evidence workbench live inside this project.
 - Crypto and other markets are placeholders only until separately designed and tested.
+- Sibling project `../alpha-research-core` is historical reference only. Do not make it a runtime dependency or active source after migration unless the user explicitly asks.
 - Code and public-safe aggregate summaries may later be published after review.
 - CSMAR raw/interim/processed data and private real reports remain private.
 
@@ -75,7 +76,9 @@ data/processed_private/
 reports/private_real/
 ```
 
-Do not delete files or directories unless the user explicitly approves the exact path. The temporary migration blueprint `docs/a_share_quant_platform_blueprint.md` may be deleted only after its useful content has been absorbed, because the user approved that exact path for this migration.
+Do not delete files or directories unless the user explicitly approves the exact path.
+
+Product-side exception: the local workbench may expose `DELETE /api/runs/{source_alias}/{run_id}` only for user-created evaluation artifacts whose `summary.data_stage` is exactly `uploaded_panel`. The backend must resolve the run through configured run roots, require the run directory to be an immediate child of that root, require `manifest.json` to exist inside that directory, and reject all non-uploaded or out-of-root paths. This exception is limited to local uploaded run cleanup and does not authorize broad filesystem deletion, private data deletion, recursive cleanup scripts, or deletion outside configured run roots.
 
 ## 3. Paths and Portability
 
@@ -100,7 +103,6 @@ Rules:
 - Use only Conda for Python dependency management.
 - Do not use `pip` or `python -m pip`.
 - Do not install, update, or remove dependencies unless the user has approved the exact boundary.
-- During the approved migration only, Conda installs into `analysis` and npm installs from project `web/` are allowed when required by the migrated project; anything outside those boundaries still needs explicit approval.
 - Do not create additional environments without explicit user approval.
 
 Common checks:
@@ -143,6 +145,7 @@ Platform evaluation contract:
 - Market modules produce explicit DataFrames or Parquet inputs.
 - Core receives `EvaluationSpec` and runs `run_evaluation(spec)`.
 - Evaluation artifacts use schema `0.5`.
+- API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` in run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend routing.
 - `manifest.display` is the source of truth for API evidence, CSV preview, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
 - Do not create frontend-only or backend-only artifact shortcuts that bypass `manifest.display`.
 
@@ -177,19 +180,7 @@ Do not run slow, network-heavy, destructive, or environment-changing commands wi
 
 Root handoff rule: if this project changes its current topic, phase, milestone, blocker, next step, public readiness, or data/API/Git/Conda/privacy boundary, record an `open` signal in [PROJECT_STATUS.md](PROJECT_STATUS.md). Do not edit workspace-root planning or status files from this project unless explicitly asked.
 
-## 8. Migration Subagent Policy
-
-The user approved multi-agent work for the quant-research-platform migration. When multiple workers are active:
-
-- Stay within the ownership paths assigned in the migration plan.
-- Do not revert or overwrite edits made by other workers.
-- Inspect `git status` before edits and again before final reporting.
-- Coordinate through docs/status notes only when they are in your ownership.
-- The main integrator must review combined diffs before claiming the migration is complete.
-
-This policy does not weaken deletion, dependency, secrets, Git, private data, or external API restrictions.
-
-## 9. Forbidden Operations
+## 8. Forbidden Operations
 
 Do not:
 

@@ -77,21 +77,23 @@ yearly independent run
 
 年度 breakdown 不清仓、不重跑组合。它从完整 full run 的 portfolio return path 切片，并在年度内重新计算 metrics。A 股 long-only 主报告需要显式使用 `portfolio_mode=long_only`。
 
-## CLI 到 core 参数映射
+## 顶层 `evaluate-parquet` CLI 到 core 参数映射
 
 | CLI 参数 | core 字段 |
 |---|---|
-| `--labels` | `EvaluationSpec.label_columns` |
-| `--factors` / `--all-factors` | `EvaluationSpec.feature_columns` |
+| `--label` | `EvaluationSpec.label_columns` |
+| `--feature` | `EvaluationSpec.feature_columns` |
 | `--pnl-return-column` | `EvaluationSpec.pnl_return_column` |
 | `--portfolio-mode` | `WeightConfig.portfolio_mode` |
 | `--cost-bps` | cost config / weight config |
 | `--engine` | `EvaluationSpec.engine` |
-| `--segment-columns` | `EvaluationSpec.segment_columns` |
+| `--segment-column` | `EvaluationSpec.segment_columns` |
 | `--risk-column` | risk-scaled weighting input |
-| `--neutralization-method` | neutralization method |
-| `--neutralization-group-columns` | neutralization group columns |
-| `--neutralization-exposure-columns` | neutralization exposure columns |
+
+A 股专用脚本 `quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`
+仍使用复数参数 `--labels`、`--factors`、`--all-factors`、`--segment-columns`。
+顶层 `qrp a-share evaluate` 当前是统一 CLI 下的帮助入口，正式 A 股端到端
+pipeline 命令仍在后续阶段补齐。
 
 ## Artifact / API / Frontend 断点
 
@@ -102,6 +104,7 @@ yearly independent run
 - 每个可浏览 CSV 是否在 `manifest.display.tables`。
 - 每个下载项是否在 `manifest.display.downloads.items`。
 - ZIP “全选”是否使用 display preset，而不是扫描目录。
+- run identity 是否始终保留 `(source_alias, run_id)`，不能只按 `run_id` 折叠。
 - run switching 和 combination switching 是否更新 summary、charts、CSV preview、downloads 和 report mode。
 
 ## 常见误读

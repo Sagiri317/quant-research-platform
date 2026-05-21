@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 
-import { COMPARISON_CSV_URL, type TablePayload } from './api'
+import { type TablePayload } from './api'
 import { DataTable } from './components'
 
 const COMPARISON_PREVIEW_COLUMNS = [
@@ -33,9 +33,7 @@ export function RunComparison({
       <div className="section-title">
         <h3>运行对比</h3>
         <div className="section-actions">
-          <a className="template-link" href={COMPARISON_CSV_URL}>
-            下载运行对比 CSV
-          </a>
+          <span>在结果文件下载中选择 comparison.csv</span>
           <span>独立指标排名</span>
         </div>
       </div>

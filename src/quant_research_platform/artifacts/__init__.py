@@ -7,7 +7,6 @@ from quant_research_platform.artifacts.writer import (
     load_evaluation_set,
     validate_display_manifest,
     write_evaluation_set_artifacts,
-    write_run_artifacts,
 )
 
 __all__ = [
@@ -17,5 +16,4 @@ __all__ = [
     "load_evaluation_set",
     "validate_display_manifest",
     "write_evaluation_set_artifacts",
-    "write_run_artifacts",
 ]

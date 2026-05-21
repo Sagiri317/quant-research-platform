@@ -25,6 +25,11 @@ from quant_research_platform.io.parquet_panel import (
 )
 
 app = typer.Typer(add_completion=False)
+a_share_app = typer.Typer(
+    add_completion=False,
+    help="A-share local research pipeline commands.",
+)
+app.add_typer(a_share_app, name="a-share")
 N_GROUPS_OPTION = typer.Option(5, "--n-groups", help="Number of factor groups.")
 COST_BPS_OPTION = typer.Option(5.0, "--cost-bps", help="Cost in basis points.")
 WEIGHT_METHOD_OPTION = typer.Option(
@@ -172,6 +177,47 @@ ENGINE_OPTION = typer.Option(
     "--engine",
     help="Evaluation engine: dataframe or tensor. Default uses dataframe reference.",
 )
+
+
+@a_share_app.command("build-interim")
+def a_share_build_interim_help() -> None:
+    """Show the current A-share interim builder entrypoint."""
+
+    typer.echo(
+        "Run with: python -m "
+        "quant_research_platform.markets.a_share.csmar.build_interim --help"
+    )
+
+
+@a_share_app.command("build-panel")
+def a_share_build_panel_help() -> None:
+    """Show the current A-share research-panel builder entrypoint."""
+
+    typer.echo(
+        "Run with: python -m "
+        "quant_research_platform.markets.a_share.datasets.build_panel --help"
+    )
+
+
+@a_share_app.command("build-factors")
+def a_share_build_factors_help() -> None:
+    """Show the current A-share factor-table builder entrypoint."""
+
+    typer.echo(
+        "Run with: python -m "
+        "quant_research_platform.markets.a_share.factors.build_factors --help"
+    )
+
+
+@a_share_app.command("evaluate")
+def a_share_evaluate_help() -> None:
+    """Show the current A-share factor-evaluation entrypoint."""
+
+    typer.echo(
+        "Run with: python -m "
+        "quant_research_platform.markets.a_share.evaluation."
+        "run_factor_evaluation --help"
+    )
 
 @app.command("compare")
 def compare_runs(

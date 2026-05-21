@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from quant_research_platform.artifacts.comparison import compare_evaluation_sets
+from quant_research_platform.artifacts.writer import load_evaluation_set
 from tests.api.helpers import write_evaluation_set
 
 
@@ -49,3 +50,59 @@ def test_compare_evaluation_sets_summarizes_multiple_output_directories(tmp_path
 def test_compare_evaluation_sets_requires_at_least_one_run_directory():
     with pytest.raises(ValueError, match="at least one run directory"):
         compare_evaluation_sets([])
+
+
+def test_compare_evaluation_sets_requires_schema_evaluation_id(tmp_path):
+    run_dir = tmp_path / "run_without_id"
+    write_evaluation_set(run_dir, evaluation_id="run_without_id")
+    loaded = load_evaluation_set(run_dir)
+    loaded.summary.pop("evaluation_id")
+
+    from quant_research_platform.artifacts import comparison as comparison_module
+
+    with pytest.raises(ValueError, match="evaluation_id"):
+        comparison_module._summarize_run(loaded)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["project", "kind", "n_rows_evaluated", "n_combinations"],
+)
+def test_compare_evaluation_sets_requires_current_summary_fields(tmp_path, field):
+    run_dir = tmp_path / f"run_without_{field}"
+    write_evaluation_set(run_dir, evaluation_id="run_without_field")
+    loaded = load_evaluation_set(run_dir)
+    loaded.summary.pop(field)
+
+    from quant_research_platform.artifacts import comparison as comparison_module
+
+    with pytest.raises(ValueError, match=field):
+        comparison_module._summarize_run(loaded)
+
+
+def test_compare_evaluation_sets_requires_weight_method(tmp_path):
+    run_dir = tmp_path / "run_without_weight_method"
+    write_evaluation_set(run_dir, evaluation_id="run_without_weight_method")
+    loaded = load_evaluation_set(run_dir)
+    loaded.summary["weight_configs"] = [{}]
+
+    from quant_research_platform.artifacts import comparison as comparison_module
+
+    with pytest.raises(ValueError, match="weight_configs"):
+        comparison_module._summarize_run(loaded)
+
+
+def test_compare_evaluation_sets_ignores_retired_weight_cost_bps_fallback(tmp_path):
+    run_dir = tmp_path / "run_with_retired_weight_cost_bps"
+    write_evaluation_set(run_dir, evaluation_id="run_with_retired_weight_cost_bps")
+    loaded = load_evaluation_set(run_dir)
+    loaded.summary["cost_configs"] = [{}]
+    loaded.summary["weight_configs"] = [
+        {"method": "equal_weight_quantile", "cost_bps": 99.0}
+    ]
+
+    from quant_research_platform.artifacts import comparison as comparison_module
+
+    record = comparison_module._summarize_run(loaded)
+
+    assert record["cost_bps"] == 0.0

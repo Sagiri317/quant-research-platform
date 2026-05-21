@@ -7,7 +7,7 @@
 | 字段 | 内容 |
 |---|---|
 | 记录名称 | `quant_research_platform_a_share_module` |
-| 当前状态 | migration active |
+| 当前状态 | platform migration closed; review/fix loop active |
 | 日期 | 2026-05-22 |
 | 项目定位 | 本地多市场量化研究平台；A 股为第一版完整 market module |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
@@ -33,7 +33,7 @@
 
 ## 仍需验证
 
-- 迁移后平台路径下的 Python/API/frontend 全量验证。
-- A 股小样本 pipeline snapshot、schema `0.5` artifacts、`manifest.display`、download picker 和 workbench 展示一致性。
+- 平台路径下的 Python/API/frontend 全面 review 与修复闭环。
+- A 股小样本 pipeline、schema `0.5` artifacts、`manifest.display`、download picker 和 workbench 展示一致性；验证需同时覆盖 tensor / dataframe 与 long-only / long-short。
 - long-only 成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。
 - ML prediction pipeline 的 time split、防泄漏、model manifest 和失败实验记录。

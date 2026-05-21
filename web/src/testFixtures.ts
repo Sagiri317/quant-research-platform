@@ -124,6 +124,7 @@ export function displayPayload(
         id: 'pnl',
         include_zero: true,
         kind: 'line',
+        section: 'primary',
         series: [
           {
             color: '#2563eb',
@@ -146,6 +147,7 @@ export function displayPayload(
         description: 'IC 和 RankIC 的时间序列',
         id: 'ic_rankic',
         kind: 'line',
+        section: 'primary',
         series: [
           { color: '#2563eb', key: 'ic', label: 'ic' },
           { color: '#059669', key: 'rankic', label: 'rankic' },
@@ -156,20 +158,45 @@ export function displayPayload(
       },
       {
         description: '单期收益、换手和成本',
-        id: 'return_turnover_cost',
+        id: 'net_portfolio_return',
         include_zero: true,
         kind: 'bar',
+        section: 'diagnostic',
         series: [
           {
             color: '#2563eb',
             key: 'net_portfolio_return',
             label: 'net_portfolio_return',
           },
-          { color: '#f59e0b', key: 'turnover', label: 'turnover' },
-          { color: '#dc2626', key: 'cost', label: 'cost' },
         ],
         table: 'returns',
         title: '收益 / 换手 / 成本',
+        x: 'timestamp',
+      },
+      {
+        description: '每期换手强度',
+        id: 'turnover',
+        include_zero: true,
+        kind: 'bar',
+        section: 'diagnostic',
+        series: [
+          { color: '#f59e0b', key: 'turnover', label: 'turnover' },
+        ],
+        table: 'returns',
+        title: '换手率',
+        x: 'timestamp',
+      },
+      {
+        description: '每期成本拖累',
+        id: 'cost',
+        include_zero: true,
+        kind: 'bar',
+        section: 'diagnostic',
+        series: [
+          { color: '#dc2626', key: 'cost', label: 'cost' },
+        ],
+        table: 'returns',
+        title: '单期成本',
         x: 'timestamp',
       },
     ],

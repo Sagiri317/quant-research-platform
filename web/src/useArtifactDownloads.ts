@@ -2,10 +2,10 @@ import { useState } from 'react'
 import {
   type RunSummary,
   type RunDisplayDownloads,
-  type RunTableSpec,
   selectedArtifactsDownloadUrl,
 } from './api'
 import {
+  buildDownloadPresets,
   buildDownloadOptions,
   defaultDownloadItems,
   presetDownloadItems,
@@ -13,29 +13,42 @@ import {
 } from './downloads'
 import { messageFrom } from './format'
 
-type DownloadPreset = 'all' | 'report' | 'tables' | 'repro'
 type DownloadSelectionByKey = Record<string, string[]>
+type RunMessageState = {
+  key: string
+  message: string
+}
 
 export function useArtifactDownloads({
   displayDownloads,
   selectedRun,
-  selectedTableSpecs,
 }: {
   displayDownloads?: RunDisplayDownloads
   selectedRun: RunSummary | null
-  selectedTableSpecs: RunTableSpec[]
 }) {
   const [selectedDownloadItemsByKey, setSelectedDownloadItemsByKey] =
     useState<DownloadSelectionByKey>({})
-  const [downloadError, setDownloadError] = useState('')
-  const [downloadNotice, setDownloadNotice] = useState('')
+  const [downloadErrorState, setDownloadErrorState] = useState<RunMessageState>({
+    key: '',
+    message: '',
+  })
+  const [downloadNoticeState, setDownloadNoticeState] = useState<RunMessageState>({
+    key: '',
+    message: '',
+  })
   const [downloading, setDownloading] = useState(false)
-  const downloadOptions = buildDownloadOptions(selectedTableSpecs, displayDownloads)
+  const downloadOptions = buildDownloadOptions(displayDownloads)
+  const downloadPresets = buildDownloadPresets(displayDownloads)
   const selectionKey = selectedRun
     ? `${selectedRun.public_run_id}:${downloadOptions.map((option) => option.item).join('|')}`
     : ''
+  const messageKey = selectedRun?.public_run_id ?? ''
   const selectedDownloadItems =
     selectedDownloadItemsByKey[selectionKey] ?? defaultDownloadItems(displayDownloads)
+  const downloadError =
+    downloadErrorState.key === messageKey ? downloadErrorState.message : ''
+  const downloadNotice =
+    downloadNoticeState.key === messageKey ? downloadNoticeState.message : ''
 
   function setSelectedDownloadItems(items: string[]) {
     setSelectedDownloadItemsByKey((previous) => ({
@@ -44,30 +57,18 @@ export function useArtifactDownloads({
     }))
   }
 
-  function applyDownloadPreset(preset: DownloadPreset) {
+  function setDownloadError(message: string) {
+    setDownloadErrorState({ key: messageKey, message })
+  }
+
+  function setDownloadNotice(message: string) {
+    setDownloadNoticeState({ key: messageKey, message })
+  }
+
+  function applyDownloadPreset(preset: string) {
     setDownloadNotice('')
     const manifestItems = presetDownloadItems(displayDownloads, preset)
-    if (manifestItems) {
-      setSelectedDownloadItems(manifestItems)
-    } else if (preset === 'all') {
-      setSelectedDownloadItems(downloadOptions.map((option) => option.item))
-    } else if (preset === 'report') {
-      setSelectedDownloadItems(['report.md'])
-    } else if (preset === 'tables') {
-      setSelectedDownloadItems([
-        'comparison.csv',
-        ...selectedTableSpecs.map((spec) => spec.downloadItem),
-      ])
-    } else {
-      setSelectedDownloadItems([
-        'report.md',
-        'comparison.csv',
-        'manifest.json',
-        'config.json',
-        'summary.json',
-        ...selectedTableSpecs.map((spec) => spec.downloadItem),
-      ])
-    }
+    setSelectedDownloadItems(manifestItems.length > 0 ? manifestItems : [])
   }
 
   function toggleDownloadItem(item: string) {
@@ -111,6 +112,7 @@ export function useArtifactDownloads({
     downloadError,
     downloadNotice,
     downloadOptions,
+    downloadPresets,
     downloading,
     handleSelectedDownload,
     selectedDownloadItems,

@@ -73,6 +73,7 @@ def build_tensor_weighted_positions(
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     pnl_return_column: str | None = None,
+    value_dtype: str = "float64",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build timestamp-level positions from tensor signal arrays.
 
@@ -88,6 +89,7 @@ def build_tensor_weighted_positions(
         portfolio_features=portfolio_features,
         tradability_config=tradability_config,
         pnl_return_column=pnl_return_column,
+        value_dtype=value_dtype,
     )
     return artifacts.positions, artifacts.diagnostics
 
@@ -102,9 +104,11 @@ def build_tensor_portfolio_artifacts(
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     pnl_return_column: str | None = None,
+    value_dtype: str = "float64",
 ) -> TensorPortfolioArtifacts:
     """Build tensor portfolio artifacts without retaining dense path matrices."""
 
+    dtype = _validate_value_dtype(value_dtype)
     _validate_segment_columns(panel, segment_columns)
     _validate_weight_columns(panel, weight_config)
     if cost_config is None:
@@ -147,6 +151,7 @@ def build_tensor_portfolio_artifacts(
                     weight_config=weight_config,
                     tradability_config=tradability_config,
                     pnl_return_column=pnl_return_column,
+                    value_dtype=dtype,
                 )
             ),
             sample_memory=False,
@@ -883,7 +888,7 @@ def _assign_ranked_position_weights(
     ranked_indices: np.ndarray,
     weight_config: WeightConfig,
 ) -> tuple[np.ndarray, int, int, str]:
-    positions = np.zeros(len(assets), dtype="float64")
+    positions = np.zeros(len(assets), dtype=feature_values.dtype)
     fallback_reason = ""
     long_count = 0
     short_count = 0
@@ -1035,15 +1040,17 @@ def _prepare_timestamp_position_input(
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,
     pnl_return_column: str | None = None,
+    value_dtype: np.dtype | str = "float64",
 ) -> _TimestampPositionInput:
     pnl_return_column = pnl_return_column or spec.label_column
+    dtype = _validate_value_dtype(str(value_dtype))
     asset_values = timestamp_frame[spec.asset_column].to_numpy(
         dtype=str,
         copy=False,
     )
     assets = tuple(asset_values.tolist())
     feature_matrix = timestamp_frame.loc[:, list(features)].to_numpy(
-        dtype="float64",
+        dtype=dtype,
         copy=False,
     )
     return _TimestampPositionInput(
@@ -1054,12 +1061,12 @@ def _prepare_timestamp_position_input(
             for offset, feature in enumerate(features)
         },
         label_values=timestamp_frame[pnl_return_column].to_numpy(
-            dtype="float64",
+            dtype=dtype,
             copy=False,
         ),
         risk_values=(
             timestamp_frame[str(weight_config.risk_column)].to_numpy(
-                dtype="float64",
+                dtype=dtype,
                 copy=False,
             )
             if weight_config.method == "inverse_vol_scaled_quantile"
@@ -1078,5 +1085,11 @@ def _prepare_timestamp_position_input(
             tradability_config.can_exit_column,
         ),
     )
+
+
+def _validate_value_dtype(value_dtype: str) -> np.dtype:
+    if value_dtype not in {"float32", "float64"}:
+        raise ValueError("value_dtype must be one of ['float32', 'float64'].")
+    return np.dtype(value_dtype)
 
 

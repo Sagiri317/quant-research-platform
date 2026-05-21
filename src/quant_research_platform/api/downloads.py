@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 import zipfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -17,39 +18,62 @@ from quant_research_platform.artifacts import (
 )
 
 
-def artifact_csv_file_response(
+def direct_manifest_download_response(
     manifest: dict[str, object],
     output_dir: Path,
     artifact_item: str,
-) -> FileResponse | None:
-    """从 manifest 解析单个 artifact CSV 文件并返回文件响应。"""
+    comparison_csv: Callable[[], bytes] | None = None,
+) -> Response:
+    """Return a display-exposed item using only the lightweight manifest."""
 
     validate_download_item_name(artifact_item)
-    _require_supported_display_manifest(manifest)
-    relative_path = display_table_download_path(manifest, artifact_item)
+    ensure_download_item_exposed(manifest, artifact_item)
+    if artifact_item == "comparison.csv":
+        if comparison_csv is None:
+            raise HTTPException(status_code=422, detail="comparison.csv 不可用。")
+        return Response(
+            content=comparison_csv(),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="comparison.csv"'
+            },
+        )
+    relative_path = artifact_relative_path_from_manifest(manifest, artifact_item)
     if relative_path is None:
-        return None
-    path = (output_dir / relative_path).resolve()
-    resolved_output_dir = output_dir.resolve()
-    if resolved_output_dir not in path.parents:
-        raise HTTPException(status_code=422, detail=f"下载项路径越界：{artifact_item}")
+        raise HTTPException(status_code=422, detail=f"未知下载项：{artifact_item}")
+    if artifact_item in {"report.md", "manifest.json", "config.json", "summary.json"}:
+        relative_path = artifact_item
+    path = _resolve_artifact_path(output_dir, relative_path, artifact_item)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
     return FileResponse(
         path,
-        media_type="text/csv; charset=utf-8",
-        filename=PurePosixPath(relative_path).name,
+        media_type=_media_type_for_item(artifact_item),
+        filename=PurePosixPath(artifact_item).name,
     )
 
 
 def report_markdown_response(run: LoadedEvaluationSet) -> Response:
     """返回 report.md 的 Markdown download response。"""
 
+    if "report.md" not in display_download_items(run.manifest):
+        raise HTTPException(status_code=404, detail="report not found")
     return Response(
         content=run.report,
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="report.md"'},
     )
+
+
+def ensure_download_item_exposed(manifest: dict[str, object], item: str) -> None:
+    """Require one item to be present in manifest.display.downloads.items."""
+
+    validate_download_item_name(item)
+    if item not in display_download_items(manifest):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{item} is not exposed by manifest display downloads",
+        )
 
 
 def selected_download_response(
@@ -104,21 +128,25 @@ def _write_selected_zip(
     zip_path: Path,
 ) -> None:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = zip_path.with_suffix(".tmp")
-    with zipfile.ZipFile(
-        temporary_path,
-        mode="w",
-        compression=zipfile.ZIP_STORED,
-    ) as archive:
-        for item in unique_items:
-            validate_download_item_name(item)
-            source_path = download_item_path(run, item)
-            if source_path is not None:
-                archive.write(source_path, item)
-                continue
-            content, _, _ = download_item(run, item, comparison_csv)
-            archive.writestr(item, content)
-    temporary_path.replace(zip_path)
+    temporary_path = zip_path.with_name(f"{zip_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with zipfile.ZipFile(
+            temporary_path,
+            mode="w",
+            compression=zipfile.ZIP_STORED,
+        ) as archive:
+            for item in unique_items:
+                validate_download_item_name(item)
+                source_path = download_item_path(run, item)
+                if source_path is not None:
+                    archive.write(source_path, item)
+                    continue
+                content, _, _ = download_item(run, item, comparison_csv)
+                archive.writestr(item, content)
+        temporary_path.replace(zip_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def _selected_zip_cache_path(
@@ -247,10 +275,7 @@ def download_item_path(run: LoadedEvaluationSet, item: str) -> Path | None:
     path = artifact_relative_path(run, item, artifacts)
     if path is None:
         return None
-    candidate = (run.output_dir / path).resolve()
-    output_dir = run.output_dir.resolve()
-    if output_dir not in candidate.parents and candidate != output_dir:
-        raise HTTPException(status_code=422, detail=f"下载项路径越界：{item}")
+    candidate = _resolve_artifact_path(run.output_dir, path, item)
     if not candidate.is_file():
         raise HTTPException(status_code=422, detail=f"下载项文件不存在：{item}")
     return candidate
@@ -263,9 +288,6 @@ def artifact_relative_path(
 ) -> str | None:
     validate_download_item_name(item)
     if item in {"report.md", "manifest.json", "config.json", "summary.json"}:
-        value = artifacts.get(item.replace(".json", "").replace(".md", ""))
-        if isinstance(value, str):
-            return value
         return item
     display = run.manifest.get("display")
     if isinstance(display, dict):
@@ -281,33 +303,39 @@ def artifact_relative_path(
     return None
 
 
-def display_table_download_path(
+def artifact_relative_path_from_manifest(
     manifest: dict[str, object],
     item: str,
 ) -> str | None:
-    """Resolve a table download item through manifest.display."""
-
     validate_download_item_name(item)
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         return None
+    if item in {"report.md", "manifest.json", "config.json", "summary.json"}:
+        return item
     display = manifest.get("display")
-    if not isinstance(display, dict):
-        return None
-    downloads = display.get("downloads")
-    if not isinstance(downloads, dict):
-        return None
-    for option in downloads.get("items", []):
-        if not isinstance(option, dict) or option.get("item") != item:
-            continue
-        if option.get("kind") != "table":
-            return None
-        table_name = option.get("table")
-        if not isinstance(table_name, str):
-            return None
-        relative_path = table_relative_path(artifacts, table_name)
-        return relative_path if relative_path == item else None
+    if isinstance(display, dict):
+        downloads = display.get("downloads")
+        if isinstance(downloads, dict):
+            for option in downloads.get("items", []):
+                if not isinstance(option, dict) or option.get("item") != item:
+                    continue
+                table_name = option.get("table")
+                if not isinstance(table_name, str):
+                    return None
+                return table_relative_path(artifacts, table_name)
     return None
+
+
+def _resolve_artifact_path(output_dir: Path, relative_path: str, item: str) -> Path:
+    candidate = (output_dir / relative_path).resolve()
+    resolved_output_dir = output_dir.resolve()
+    if (
+        resolved_output_dir not in candidate.parents
+        and candidate != resolved_output_dir
+    ):
+        raise HTTPException(status_code=422, detail=f"下载项路径越界：{item}")
+    return candidate
 
 
 def table_relative_path(

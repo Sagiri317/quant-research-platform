@@ -14,9 +14,15 @@ from quant_research_platform.engines.tensor.layout import (
 )
 
 
-def panel_to_tensor(frame: pd.DataFrame, spec: PanelSpec) -> PanelTensor:
+def panel_to_tensor(
+    frame: pd.DataFrame,
+    spec: PanelSpec,
+    *,
+    value_dtype: str = "float64",
+) -> PanelTensor:
     """Convert a long panel into time x asset x feature arrays."""
 
+    dtype = _validate_value_dtype(value_dtype)
     panel = validate_panel(frame, spec)
     timestamps = tuple(
         pd.Timestamp(value) for value in panel[spec.timestamp_column].unique()
@@ -26,9 +32,9 @@ def panel_to_tensor(frame: pd.DataFrame, spec: PanelSpec) -> PanelTensor:
     feature_values = np.full(
         (len(timestamps), len(assets), len(features)),
         np.nan,
-        dtype="float64",
+        dtype=dtype,
     )
-    label_values = np.full((len(timestamps), len(assets)), np.nan, dtype="float64")
+    label_values = np.full((len(timestamps), len(assets)), np.nan, dtype=dtype)
 
     time_codes = pd.Categorical(
         panel[spec.timestamp_column],
@@ -36,11 +42,11 @@ def panel_to_tensor(frame: pd.DataFrame, spec: PanelSpec) -> PanelTensor:
     ).codes
     asset_codes = pd.Categorical(panel[spec.asset_column], categories=assets).codes
     feature_values[time_codes, asset_codes, :] = panel[list(features)].to_numpy(
-        dtype="float64",
+        dtype=dtype,
         copy=False,
     )
     label_values[time_codes, asset_codes] = panel[spec.label_column].to_numpy(
-        dtype="float64",
+        dtype=dtype,
         copy=False,
     )
 

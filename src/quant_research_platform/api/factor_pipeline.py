@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from quant_research_platform.markets.a_share.factors.expressions import (
     FactorExpressionError,
@@ -41,6 +41,8 @@ class FactorTemplatePayload(BaseModel):
 class PipelineRunRequestPayload(BaseModel):
     """Frontend request for a controlled local pipeline snapshot."""
 
+    model_config = ConfigDict(extra="forbid")
+
     market: str = "a_share"
     run_id: str
     date_start: str
@@ -51,7 +53,6 @@ class PipelineRunRequestPayload(BaseModel):
     cost_bps: float = 0.0
     pnl_return_column: str = "forward_return_1d"
     label_columns: list[str] = Field(default_factory=lambda: ["forward_return_1d"])
-    output_root: str | None = None
 
 
 class PipelineRunSummaryPayload(BaseModel):
@@ -111,10 +112,12 @@ def list_factor_template_payloads(market: str = "a_share") -> list[dict[str, Any
 def create_pipeline_snapshot_payload(
     payload: PipelineRunRequestPayload,
     pipeline_runs: dict[str, PipelineRunSummaryPayload],
+    *,
+    output_root: Path = DEFAULT_OUTPUT_ROOT,
 ) -> dict[str, Any]:
     """Validate a frontend pipeline request and write a small run snapshot."""
 
-    config = _pipeline_config_from_payload(payload)
+    config = _pipeline_config_from_payload(payload, output_root=output_root)
     validation = validate_pipeline_config(config)
     if validation.has_blocking:
         detail = {
@@ -175,12 +178,11 @@ def pipeline_checkpoint_payloads(
     return [payload.model_dump() for payload in payloads]
 
 
-def _pipeline_config_from_payload(payload: PipelineRunRequestPayload) -> PipelineConfig:
-    output_root = (
-        Path(payload.output_root)
-        if payload.output_root
-        else DEFAULT_OUTPUT_ROOT
-    )
+def _pipeline_config_from_payload(
+    payload: PipelineRunRequestPayload,
+    *,
+    output_root: Path,
+) -> PipelineConfig:
     return PipelineConfig(
         market=payload.market,
         run_id=payload.run_id,

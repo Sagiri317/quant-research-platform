@@ -131,6 +131,8 @@ result = run_evaluation(spec)
 
 `output_dir` 应使用 repo-relative path，不写机器绝对路径。
 
+`run_id` 是单个 evaluation set 内的稳定 ID。通过本地 API 暴露多个 run root 时，前端、下载、comparison 和缓存使用 `(source_alias, run_id)` 作为完整身份；不要只按 `run_id` 判断同一个 run。
+
 ## 5. Parquet Helper
 
 如果上游已经生成本地 Parquet，可用 helper 读取必要列并构造 `EvaluationSpec`。Core 只读取显式传入的本地文件，不生成这些 Parquet。

@@ -32,6 +32,8 @@ ALLOWED_FUNCTIONS = frozenset(
         "neutralize",
     }
 )
+WINDOW_FUNCTIONS = frozenset({"return", "mean", "std"})
+UNARY_FUNCTIONS = frozenset({"rank_cs", "zscore_cs", "neg"})
 
 
 class FactorExpressionError(ValueError):
@@ -104,11 +106,53 @@ def _parse_call(node: ast.Call, dependencies: set[str]) -> dict[str, Any]:
         raise FactorExpressionError(f"unsupported function: {function_name}")
     if node.keywords:
         raise FactorExpressionError("keyword arguments are not supported")
+    args = [_parse_node(arg, dependencies) for arg in node.args]
+    _validate_function_args(function_name, args)
     return {
         "type": "call",
         "name": function_name,
-        "args": [_parse_node(arg, dependencies) for arg in node.args],
+        "args": args,
     }
+
+
+def _validate_function_args(function_name: str, args: list[dict[str, Any]]) -> None:
+    if function_name in WINDOW_FUNCTIONS:
+        if len(args) != 2:
+            raise FactorExpressionError(
+                f"{function_name} expects exactly 2 arguments"
+            )
+        if args[0]["type"] != "field":
+            raise FactorExpressionError(
+                f"{function_name} first argument must be a field"
+            )
+        if not _is_positive_integer_constant(args[1]):
+            raise FactorExpressionError(
+                f"{function_name} window argument must be a positive integer"
+            )
+        return
+    if function_name in UNARY_FUNCTIONS:
+        if len(args) != 1:
+            raise FactorExpressionError(
+                f"{function_name} expects exactly 1 argument"
+            )
+        return
+    if function_name == "neutralize":
+        if len(args) != 2:
+            raise FactorExpressionError("neutralize expects exactly 2 arguments")
+        if args[1]["type"] != "field":
+            raise FactorExpressionError(
+                "neutralize second argument must be a field"
+            )
+
+
+def _is_positive_integer_constant(arg: dict[str, Any]) -> bool:
+    value = arg.get("value")
+    return (
+        arg.get("type") == "constant"
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value > 0
+    )
 
 
 def _parse_field(node: ast.Name, dependencies: set[str]) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +17,7 @@ IssueSeverity = Literal["blocking", "warning"]
 SUPPORTED_MARKETS = frozenset({"a_share"})
 SUPPORTED_PORTFOLIO_MODES = frozenset({"long_only", "long_short"})
 DEFAULT_OUTPUT_ROOT = Path("reports/private_real/pipeline_runs")
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass
@@ -140,6 +142,28 @@ def validate_pipeline_config(config: PipelineConfig) -> PipelineValidation:
                 code="unsupported_portfolio_mode",
                 message=f"unsupported portfolio_mode: {config.portfolio_mode}",
                 field="portfolio_mode",
+            )
+        )
+
+    if not config.run_id:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="missing_run_id",
+                message="run_id is required",
+                field="run_id",
+            )
+        )
+    elif not RUN_ID_PATTERN.fullmatch(config.run_id):
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="unsafe_run_id",
+                message=(
+                    "run_id may only contain ASCII letters, numbers, "
+                    "underscores, and hyphens"
+                ),
+                field="run_id",
             )
         )
 

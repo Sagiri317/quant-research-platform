@@ -310,9 +310,11 @@ def weight_method(summary: dict[str, object]) -> str:
     configs = summary.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
-        if isinstance(first, dict) and first.get("method") is not None:
-            return str(first["method"])
-    return "unknown"
+        if isinstance(first, dict) and isinstance(first.get("method"), str):
+            method = first["method"]
+            if method:
+                return method
+    raise HTTPException(status_code=422, detail="summary weight_configs invalid")
 
 
 def portfolio_mode(summary: dict[str, object]) -> str:
@@ -321,9 +323,11 @@ def portfolio_mode(summary: dict[str, object]) -> str:
     configs = summary.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
-        if isinstance(first, dict) and first.get("portfolio_mode") is not None:
-            return str(first["portfolio_mode"])
-    return "unknown"
+        if isinstance(first, dict) and isinstance(first.get("portfolio_mode"), str):
+            mode = first["portfolio_mode"]
+            if mode:
+                return mode
+    raise HTTPException(status_code=422, detail="summary weight_configs invalid")
 
 
 def label_columns(summary: dict[str, object]) -> list[str]:

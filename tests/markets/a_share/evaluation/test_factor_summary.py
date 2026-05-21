@@ -9,6 +9,7 @@ from quant_research_platform.markets.a_share.evaluation import (
     compare_factor_summaries,
 )
 from quant_research_platform.markets.a_share.evaluation.build_factor_summary import (
+    PERFORMANCE_COLUMNS,
     build_factor_summary_frame,
     main,
     write_factor_summary_csv,
@@ -87,7 +88,7 @@ def test_build_factor_summary_merges_core_metrics_and_labels(tmp_path) -> None:
         {
             "feature": ["mom_20d"],
             "periods": [250],
-            "mean_net_long_short_return": [0.004],
+            "mean_net_portfolio_return": [0.004],
             "sharpe_like": [1.2],
             "max_drawdown": [-0.08],
             "mean_turnover": [0.3],
@@ -102,7 +103,6 @@ def test_build_factor_summary_merges_core_metrics_and_labels(tmp_path) -> None:
     assert row["feature"] == "mom_20d"
     assert row["mean_rankic"] == 0.03
     assert row["top_bottom_spread_mean"] == 0.03
-    assert row["mean_net_long_short_return"] == 0.004
     assert row["mean_net_portfolio_return"] == 0.004
     assert row["portfolio_mode"] == "long_short"
     assert row["label_non_null_rate"] == 0.9
@@ -195,6 +195,33 @@ def test_build_factor_summary_handles_full_sample_manifest(tmp_path) -> None:
     assert summary["mean_net_portfolio_return"].tolist() == [0.004, 0.005]
 
 
+def test_build_factor_summary_rejects_run_dir_outside_report_root(tmp_path) -> None:
+    report_root = tmp_path / "factor_evaluation"
+    outside_run = tmp_path / "outside" / "run"
+    outside_run.mkdir(parents=True)
+    report_root.mkdir(parents=True)
+    (report_root / "evaluation_manifest.json").write_text(
+        json.dumps(
+            {
+                "core_runs": [
+                    {
+                        "run_id": "run",
+                        "start_year": 2024,
+                        "end_year": 2024,
+                        "label": "forward_return_20d",
+                        "features": ["mom_20d"],
+                        "output_dir": str(outside_run),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="report_root/core_runs"):
+        build_factor_summary_frame(report_root)
+
+
 def test_build_factor_summary_cli_defaults_to_full_report_root(
     tmp_path,
     monkeypatch,
@@ -242,7 +269,7 @@ def test_build_factor_summary_cli_defaults_to_full_report_root(
     pd.DataFrame(
         {
             "feature": ["mom_20d"],
-            "mean_net_long_short_return": [0.004],
+            "mean_net_portfolio_return": [0.004],
             "sharpe_like": [1.2],
             "max_drawdown": [-0.08],
             "mean_turnover": [0.3],
@@ -294,6 +321,16 @@ def test_factor_summary_writers_use_stable_outputs_and_excel_safe_csv(tmp_path) 
     markdown = md_path.read_text(encoding="utf-8")
     assert "# 因子评估汇总" in markdown
     assert "amihud_20d" in markdown
+
+
+def test_factor_summary_contract_excludes_retired_performance_columns() -> None:
+    retired = {
+        "total_gross_portfolio_return",
+        "total_net_portfolio_return",
+        "mean_net_long_short_return",
+    }
+
+    assert retired.isdisjoint(PERFORMANCE_COLUMNS)
 
 
 def test_build_comparison_frame_reports_full_minus_yearly_deltas() -> None:

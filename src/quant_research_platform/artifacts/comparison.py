@@ -55,7 +55,6 @@ def _summarize_run(run: LoadedEvaluationSet) -> dict[str, object]:
     return _comparison_record(
         summary=run.summary,
         metrics=run.tables,
-        fallback_run_id=run.output_dir.name,
     )
 
 
@@ -63,7 +62,6 @@ def _summarize_result(result: EvaluationSetResult) -> dict[str, object]:
     return _comparison_record(
         summary=result.summary,
         metrics=result.metrics,
-        fallback_run_id=result.artifacts.output_dir.name,
     )
 
 
@@ -71,19 +69,18 @@ def _comparison_record(
     *,
     summary: dict[str, object],
     metrics: dict[str, pd.DataFrame],
-    fallback_run_id: str,
 ) -> dict[str, object]:
-    combinations = metrics.get("combinations")
-    if combinations is None:
-        combinations = pd.DataFrame()
+    evaluation_id = summary.get("evaluation_id")
+    if not isinstance(evaluation_id, str) or not evaluation_id:
+        raise ValueError("summary must contain a non-empty evaluation_id.")
     performance = metrics["performance_summary"]
     ic_summary = metrics["ic_summary"]
     return {
-        "evaluation_id": str(summary.get("evaluation_id", fallback_run_id)),
-        "project": str(summary.get("project", "unknown")),
-        "kind": str(summary.get("kind", "unknown")),
-        "n_rows_evaluated": int(summary.get("n_rows_evaluated", 0)),
-        "n_combinations": int(summary.get("n_combinations", len(combinations))),
+        "evaluation_id": evaluation_id,
+        "project": _required_string(summary, "project"),
+        "kind": _required_string(summary, "kind"),
+        "n_rows_evaluated": _required_int(summary, "n_rows_evaluated"),
+        "n_combinations": _required_int(summary, "n_combinations"),
         "weight_method": _weight_method(summary),
         "cost_bps": _weight_cost_bps(summary),
         "mean_ic": _mean_numeric(ic_summary, "mean_ic"),
@@ -97,13 +94,27 @@ def _comparison_record(
     }
 
 
+def _required_string(summary: dict[str, object], field: str) -> str:
+    value = summary.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"summary must contain a non-empty {field}.")
+    return value
+
+
+def _required_int(summary: dict[str, object], field: str) -> int:
+    value = summary.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"summary must contain integer {field}.")
+    return value
+
+
 def _weight_method(summary: dict[str, object]) -> str:
     configs = summary.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
-        if isinstance(first, dict) and first.get("method") is not None:
+        if isinstance(first, dict) and isinstance(first.get("method"), str):
             return str(first["method"])
-    return "unknown"
+    raise ValueError("summary weight_configs must include a non-empty method.")
 
 
 def _weight_cost_bps(summary: dict[str, object]) -> float:
@@ -122,11 +133,6 @@ def _weight_cost_bps(summary: dict[str, object]) -> float:
         )
         if detailed_cost:
             return detailed_cost
-    configs = summary.get("weight_configs")
-    if isinstance(configs, list) and configs:
-        first = configs[0]
-        if isinstance(first, dict) and first.get("cost_bps") is not None:
-            return float(first["cost_bps"])
     return 0.0
 
 
