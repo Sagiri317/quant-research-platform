@@ -95,6 +95,22 @@ A 股专用脚本 `quant_research_platform.markets.a_share.evaluation.run_factor
 顶层 `qrp a-share evaluate` 当前是统一 CLI 下的帮助入口，正式 A 股端到端
 pipeline 命令仍在后续阶段补齐。
 
+A 股日期过滤验收应直接调用专用脚本：
+
+```powershell
+conda run -n analysis python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation `
+  --start-year 2023 `
+  --end-year 2025 `
+  --start-date 2024-01-01 `
+  --end-date 2024-12-31 `
+  --factors mom_20d,vol_20d,amihud_20d `
+  --labels forward_return_5d,forward_return_20d `
+  --portfolio-mode long_only `
+  --engine dataframe
+```
+
+`--start-year/--end-year` 定位 processed factor 文件；`--start-date/--end-date` 对 `trade_date` 做行过滤。不要用临时裁剪 Parquet 加 `evaluate-parquet` 代替 A 股 adapter 验收。
+
 ## Artifact / API / Frontend 断点
 
 排查 contract 问题时优先看：

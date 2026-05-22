@@ -46,6 +46,18 @@ local approved data
 -> reports and research evidence
 ```
 
+## A 股流程接口
+
+A 股是当前唯一 enabled market module。它的真实私有数据流程分三层：
+
+1. `quant_research_platform.markets.a_share.datasets.build_panel`：从 CSMAR interim yearly CSV 生成 `research_panel_<start_year>_<end_year>.parquet`。
+2. `quant_research_platform.markets.a_share.factors.build_factors`：从 full panel 生成 `price_volume_factors_<start_year>_<end_year>.parquet`。
+3. `quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`：读取覆盖年份区间的 slim factor Parquet，并可用 `--start-date/--end-date` 对 `trade_date` 做评估阶段过滤，再通过 `EvaluationSpec` 调用 core。
+
+`evaluate-parquet` 属于通用 core adapter，不保留 A 股 adapter 的 label availability summary、覆盖文件选择和私有 pipeline metadata。验证 A 股全流程或生成 A 股私有 runs 时，应优先使用 A 股专用评估入口。
+
+前端 `Pipeline Builder` 目前只写本地配置快照和 checkpoint，不等同于执行完整 A 股 pipeline。后续要把“写因子表达式和配置后一键全流程”做完整，需要把该页面接到上述 A 股 build/evaluate 编排，而不是只调用 snapshot endpoint。
+
 ## 源码布局
 
 ```text

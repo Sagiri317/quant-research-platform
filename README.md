@@ -68,6 +68,42 @@ conda run -n analysis python -m quant_research_platform.cli a-share --help
 conda run -n analysis python -m quant_research_platform.cli evaluate-parquet --help
 ```
 
+## A 股专用接口
+
+A 股真实私有数据流程优先使用 market module 自己的入口，不要为了日期过滤临时绕到通用 `evaluate-parquet`。
+
+```powershell
+$env:PYTHONUTF8="1"
+$env:PYTHONPATH="src"
+
+# raw/interim 已存在时，按年份生成 full research panel
+conda run -n analysis python -m quant_research_platform.markets.a_share.datasets.build_panel `
+  --start-year 2014 `
+  --end-year 2025 `
+  --end-date 2025-12-31
+
+# 从 full panel 生成 slim factor/label Parquet
+conda run -n analysis python -m quant_research_platform.markets.a_share.factors.build_factors `
+  --start-year 2014 `
+  --end-year 2025 `
+  --windows 20,60,120 `
+  --horizons 1,5,10,20,60,120
+
+# 用 A 股 adapter 评估；start-year/end-year 定位覆盖文件，start-date/end-date 做行过滤
+conda run -n analysis python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation `
+  --start-year 2023 `
+  --end-year 2025 `
+  --start-date 2024-01-01 `
+  --end-date 2024-12-31 `
+  --factors mom_20d,vol_20d,amihud_20d `
+  --labels forward_return_5d,forward_return_20d `
+  --portfolio-mode long_only `
+  --engine dataframe `
+  --report-root reports/private_real/factor_evaluation/example_2024_dataframe_long_only
+```
+
+`start_year/end_year` 用于寻找 `data/processed_private/csmar/price_volume_factors_full/price_volume_factors_<start>_<end>.parquet`，如果精确文件不存在，会选择能覆盖该年份区间的更宽文件。`start_date/end_date` 是评估阶段的 `trade_date` 过滤。通用 `evaluate-parquet` 仅用于非 A 股 adapter 的本地 Parquet 验收或外部输入，不是 A 股全流程主入口。
+
 前端验证在 `web/` 下运行：
 
 ```powershell

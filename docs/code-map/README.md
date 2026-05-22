@@ -7,6 +7,7 @@
 | 文档 | 说明 |
 |---|---|
 | [platform-roadmap.md](platform-roadmap.md) | 平台路线、A 股模块、ML prediction、风险、regime、workbench 和未来模拟盘边界 |
+| [a-share-interface.md](a-share-interface.md) | A 股 build panel / build factors / run evaluation 接口，以及前端 pipeline snapshot 边界 |
 | [data-pipeline.md](data-pipeline.md) | CSMAR raw -> interim -> full research panel |
 | [factors.md](factors.md) | full panel -> price-volume factors -> forward labels |
 | [evaluation.md](evaluation.md) | market module -> `EvaluationSpec` -> platform core evaluation / artifacts |
@@ -17,10 +18,11 @@
 按平台数据流读：
 
 1. [platform-roadmap.md](platform-roadmap.md)：看懂平台身份、边界和后续研究路线。
-2. [data-pipeline.md](data-pipeline.md)：看懂 raw CSMAR 如何进入 interim，再形成 full panel。
-3. [factors.md](factors.md)：看懂 panel 如何变成 slim factor table 和 forward labels。
-4. [evaluation.md](evaluation.md)：看懂 A 股模块如何构造 `EvaluationSpec` 并调用 core。
-5. [validation-runtime.md](validation-runtime.md)：看懂每一层产物如何检查、空间如何估算。
+2. [a-share-interface.md](a-share-interface.md)：看懂 A 股当前可执行入口和前端 snapshot 边界。
+3. [data-pipeline.md](data-pipeline.md)：看懂 raw CSMAR 如何进入 interim，再形成 full panel。
+4. [factors.md](factors.md)：看懂 panel 如何变成 slim factor table 和 forward labels。
+5. [evaluation.md](evaluation.md)：看懂 A 股模块如何构造 `EvaluationSpec` 并调用 core。
+6. [validation-runtime.md](validation-runtime.md)：看懂每一层产物如何检查、空间如何估算。
 
 如果只想调试某个现象，可以反向读：
 

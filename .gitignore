@@ -26,6 +26,7 @@ web/dist/
 web/coverage/
 web/playwright-report/
 web/test-results/
+.playwright-cli/
 .codex/run-logs/
 *.egg-info/
 coverage/

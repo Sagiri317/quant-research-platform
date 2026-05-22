@@ -11,7 +11,7 @@
 | Conda 环境 | `analysis` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 interim / full panel / full factor 已有历史产物；迁移后仍遵守私有边界 |
 | 平台合同 | core evaluation、artifact schema `0.5`、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间 |
-| 前端状态 | 本地 workbench 已中文化；因子表达式/模板快照可从因子研究台传入流程配置页 |
+| 前端状态 | 本地 workbench 已中文化；因子表达式/模板快照可从因子研究台传入流程配置页；当前流程配置仍是 snapshot，不是完整 pipeline executor |
 | 市场范围 | A 股 enabled；crypto / other markets 为 planned placeholder，不代表真实支持 |
 | 私有边界 | CSMAR raw/interim/processed 和 `reports/private_real/` 不提交、不公开 |
 | 交易边界 | 不做投资建议、paper trading、live trading、券商/交易所/API 连接或部署服务 |
@@ -29,6 +29,7 @@
 - `.codex/skills/quant-research-platform-maintenance/` 记录后续维护 artifact/API/download/frontend 合同时必须执行的 gates。
 - React workbench 已改为中文界面，并补上“因子表达式/模板 -> 流程配置”的前端状态传递。
 - 本地 API 与前端服务已用小范围 smoke 验证；2023-2025 私有 smoke 已覆盖 tensor / dataframe 与 long-only / long-short，提交前仍以完整 Python 和 frontend 检查作为准入。
+- A 股真实私有 runs 的主入口是 `python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`；通用 `evaluate-parquet` 只作为 core/外部 Parquet adapter 验收，不替代 A 股 adapter 验收。
 
 ## 当前研究资产
 
@@ -58,7 +59,7 @@
 ## 下一步
 
 1. 继续执行 review -> 修复 -> 验证循环，直到 artifact/display/download、API、web、A-share、文档和项目 skill 不再出现实质性问题。
-2. 继续完善流程配置页，把 label、组合口径、日期、成本、run metadata 等字段全部接入真实配置快照，而不是只停留在局部表单。
+2. 继续完善流程配置页，把 label、组合口径、日期、成本、run metadata 等字段全部接入真实配置快照；后续再设计长任务编排，把页面接到 A 股 build/evaluate 专用入口。
 3. 在 long-only 口径下重跑成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。
 4. 基于迁移后的平台结构设计 ML prediction pipeline；建议使用 high reasoning effort，因为它会同时影响数据合同、label 口径、防泄漏、私有边界和 core handoff。
 5. 阶段性 commit 后，用户可手动考虑目录改名：旧本地目录名 -> `quant-research-platform`；仓库远端名称可等本地迁移稳定后再改。
@@ -68,12 +69,6 @@
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
-| 2026-05-15 | structure | 子项目主结构从 `src/` + `scripts/` 改为 `code/` workflow-first。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-15 |
-| 2026-05-15 | milestone | 项目进入 CSMAR 私有真实数据重建和 2024-2025 factor evaluation 阶段。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-15 |
-| 2026-05-18 | milestone | 2014-2025 数据层已重建；2024-2025 yearly evaluation 和 2024 年 924 前后事件切片已生成。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-18 |
-| 2026-05-19 | planning | 已完成 full panel/factor Parquet、core bridge、date filtering、code map 和 long-only 主口径前置整理。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-19 |
-| 2026-05-20 | milestone | core 支持 long-only 后，A 股 long-only full run 已生成并通过历史不变量检查；历史 long-short 仅保留为迁移对照。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-21 |
-| 2026-05-21 | planning | 待按 schema `0.5` 重新生成 2023-2025 `long_only` / `long_short` 正式 run；因子标准化先由 A 股侧定义。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-21 |
 | 2026-05-21 | planning | 项目定位从单一 A 股因子研究项目收口为 A 股量化研究平台入口；临时平台蓝图记录数据、因子、ML prediction、风险、regime、core evaluation、evidence workbench 和未来模拟盘边界。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
 | 2026-05-22 | migration | 项目身份迁移为 `quant-research-platform`；A 股为第一版 enabled market module；core evaluation、schema `0.5` artifacts、API/download 和 React evidence workbench 成为平台内置能力；旧目录名等待用户后续手动改名。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
 | 2026-05-22 | milestone | 平台迁移、前端中文化、小步美化、因子表达式到流程配置快照闭环已完成；2023-2025 tensor / dataframe 与 long-only / long-short 小样本 smoke 已生成并进入 review 收口。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |

@@ -21,6 +21,7 @@ Start by reading project `AGENTS.md`, then inspect only the files touched by the
 | Display contract | `src/quant_research_platform/artifacts/display.py` |
 | Evidence API and downloads | `src/quant_research_platform/api/payloads.py`, `api/downloads.py`, `api/app.py`, `api/run_index.py` |
 | A-share pipeline runs | `src/quant_research_platform/markets/a_share/pipeline/`, `config/a_share/pipelines/` |
+| A-share private evaluation | `src/quant_research_platform/markets/a_share/evaluation/run_factor_evaluation.py`, `evaluation/core_bridge.py`, `runtime/paths.py` |
 | Frontend evidence UI | `web/src/runEvidenceState.ts`, `ResultsView.tsx`, `RunCharts.tsx`, `ArtifactDownloads.tsx`, `CsvBrowser.tsx` |
 | Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/code-map/` |
 
@@ -83,6 +84,8 @@ Do not call a broad artifact/API/frontend refactor complete until every gate bel
 - Frontend fixtures either come from a checked backend fixture snapshot or are intentionally kept in sync with `manifest.display` rules.
 - New validation rules have one positive path and at least one negative test.
 - A-share pipeline snapshots record config, warnings, and summary without overwriting existing private runs by default.
+- A-share real-data acceptance uses `python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`; use generic `evaluate-parquet` only for core/adapter checks, not as a substitute for A-share adapter validation.
+- Date-filtered A-share runs should exercise both `--start-year/--end-year` coverage-file selection and `--start-date/--end-date` row filtering when that behavior is in scope.
 
 ### Docs and Diff Hygiene
 
@@ -118,6 +121,7 @@ For frontend evidence-workbench changes, run a real-browser pass against local F
 - all-items download starts a browser ZIP download without `Failed to fetch`;
 - Factor Studio shows A-share enabled and crypto planned/disabled;
 - Pipeline Builder validates required fields and does not imply deployment or trading;
+- Pipeline Builder is currently a snapshot flow, not a full A-share pipeline executor. Browser copy, docs, and tests should not claim one-click full execution until build/evaluate orchestration is wired.
 - at least one narrow viewport is checked for overlap, clipped labels, and unusable controls.
 
 After browser acceptance, stop the local services and list any validation temporary outputs such as runtime logs, Playwright downloads/screenshots, and download cache files before cleanup. Follow project deletion rules: remove only exact approved paths or single explicitly named files. Do not remove generated runs, profiles, or dependencies as part of validation cleanup.

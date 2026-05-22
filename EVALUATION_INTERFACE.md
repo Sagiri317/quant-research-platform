@@ -169,7 +169,37 @@ result = run_evaluation(spec)
 - 文件共享 `timestamp/asset` key 且非 key required columns 互补时，按列 join。
 - required column 重复导致语义不清时，core 报错，不猜测。
 
-## 6. CLI evaluate-parquet
+## 6. A 股专用评估入口
+
+A 股 market module 已有专用 adapter，真实 CSMAR processed factor run 应优先走：
+
+```powershell
+$env:PYTHONUTF8="1"
+$env:PYTHONPATH="src"
+conda run -n analysis python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation `
+  --processed-root data/processed_private/csmar `
+  --report-root reports/private_real/factor_evaluation/a_share_2024_dataframe_long_only `
+  --start-year 2023 `
+  --end-year 2025 `
+  --start-date 2024-01-01 `
+  --end-date 2024-12-31 `
+  --factors mom_20d,vol_20d,amihud_20d `
+  --labels forward_return_5d,forward_return_20d `
+  --pnl-return-column forward_return_1d `
+  --portfolio-mode long_only `
+  --engine dataframe
+```
+
+这个入口的语义是：
+
+- `--start-year/--end-year` 用来定位 `price_volume_factors_<start>_<end>.parquet`；若精确文件不存在，会选择覆盖该年份范围的更宽 full factor 文件。
+- `--start-date/--end-date` 用来对 `trade_date` 做评估阶段行过滤。
+- 每个 label 生成一个 core run，输出在 `--report-root/core_runs/` 下。
+- 这里会保留 A 股 adapter metadata、label availability summary、portfolio mode、engine、date filter 和 source file 信息。
+
+`evaluate-parquet` 是通用 core adapter，适合外部本地 Parquet、临时输入验收或非 A 股市场模块；验证 A 股全流程时不要用它替代 A 股专用入口。
+
+## 7. CLI evaluate-parquet
 
 `evaluate-parquet` 是本地命令行入口。
 
@@ -203,7 +233,7 @@ conda run -n analysis python -m quant_research_platform.cli evaluate-parquet `
 
 去掉 `--dry-run` 后正式生成 artifacts。
 
-## 7. 输出 Artifacts
+## 8. 输出 Artifacts
 
 一个 evaluation set 输出一个目录：
 
@@ -232,7 +262,7 @@ diagnostics/neutralization_diagnostics.csv
 
 `manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.5"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。
 
-## 8. Core 不负责的边界
+## 9. Core 不负责的边界
 
 Core 不负责：
 
