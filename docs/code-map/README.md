@@ -1,12 +1,12 @@
 # Code Map 总览
 
-本目录是 `quant-research-platform` 的源码阅读地图，不替代研究报告或数据手册。项目边界看 [../../README.md](../../README.md)，当前事实看 [../../PROJECT_STATUS.md](../../PROJECT_STATUS.md)，CSMAR 字段口径看 [../csmar_data_manual.md](../csmar_data_manual.md)。
+本目录是 `quant-research-platform` 的源码阅读地图，不替代研究报告、数据手册或长期功能池。项目边界看 [../../README.md](../../README.md)，当前事实看 [../../PROJECT_STATUS.md](../../PROJECT_STATUS.md)，后续能力池看 [../future-capabilities.md](../future-capabilities.md)，CSMAR 字段口径看 [../csmar_data_manual.md](../csmar_data_manual.md)。
 
 ## 阅读入口
 
 | 文档 | 说明 |
 |---|---|
-| [platform-roadmap.md](platform-roadmap.md) | 平台路线、A 股模块、ML prediction、风险、regime、workbench 和未来模拟盘边界 |
+| [platform-flow.md](platform-flow.md) | 平台接口、入口参数、A 股核心流向和未来 crypto 高频构想图 |
 | [a-share-interface.md](a-share-interface.md) | A 股 build panel / build factors / run evaluation 接口，以及前端 pipeline snapshot 边界 |
 | [data-pipeline.md](data-pipeline.md) | CSMAR raw -> interim -> full research panel |
 | [factors.md](factors.md) | full panel -> price-volume factors -> forward labels |
@@ -17,7 +17,7 @@
 
 按平台数据流读：
 
-1. [platform-roadmap.md](platform-roadmap.md)：看懂平台身份、边界和后续研究路线。
+1. [../future-capabilities.md](../future-capabilities.md)：看懂平台长期能力边界和后续研究路线。
 2. [a-share-interface.md](a-share-interface.md)：看懂 A 股当前可执行入口和前端 snapshot 边界。
 3. [data-pipeline.md](data-pipeline.md)：看懂 raw CSMAR 如何进入 interim，再形成 full panel。
 4. [factors.md](factors.md)：看懂 panel 如何变成 slim factor table 和 forward labels。

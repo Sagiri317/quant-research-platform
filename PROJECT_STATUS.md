@@ -18,13 +18,14 @@
 
 ## 本轮迁移状态
 
-本轮目标是把项目身份从单一 A 股研究项目切换为 `quant-research-platform`。迁移计划见 `docs/superpowers/plans/2026-05-22-quant-research-platform-migration.md`，该计划现在作为历史执行记录保留，不再作为当前待办清单。
+本轮目标是把项目身份从单一 A 股研究项目切换为 `quant-research-platform`。长期后续功能池收敛在 `docs/future-capabilities.md`；历史迁移计划和历史迁移设计已由 Git 历史保留，不再作为当前待办清单。
 
 当前阶段已完成可提交的迁移闭环：
 
 - 用户入口文档改为 Chinese-first 的平台说明。
 - `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、core contract、artifact schema `0.5`、`manifest.display`、API/download/frontend 边界。
-- `docs/code-map/` 吸收原 A 股平台蓝图中的可复用路线，保留 A 股、ML prediction、风险、regime、workbench 和未来模拟盘边界，但不把模拟盘写成当前范围。
+- `docs/future-capabilities.md` 收敛原 A 股平台蓝图、旧 core 后续能力总结和迁移设计中的长期路线，保留 A 股、ML prediction、风险、regime、workbench 和未来模拟盘边界，但不把模拟盘写成当前范围。
+- `docs/architecture-refactor-design.md` 记录下一轮 contract-first 架构重构设计，冻结 `EvaluationSpec`、`run_evaluation`、schema `0.5`、API route 和前端下载合同。
 - 项目级 `AGENTS.md` 增加 `src/quant_research_platform/` 结构、Conda `analysis`、私有数据、无外部 API/凭据、无交易、exact-path deletion、frontend/API/artifact contract、旧 core 仅作参考、`source_alias + run_id` 运行身份边界。
 - `.codex/skills/quant-research-platform-maintenance/` 记录后续维护 artifact/API/download/frontend 合同时必须执行的 gates。
 - React workbench 已改为中文界面，并补上“因子表达式/模板 -> 流程配置”的前端状态传递。
@@ -58,12 +59,13 @@
 
 ## 下一步
 
-1. 继续执行 review -> 修复 -> 验证循环，直到 artifact/display/download、API、web、A-share、文档和项目 skill 不再出现实质性问题。
-2. 继续完善流程配置页，把 label、组合口径、日期、成本、run metadata 等字段全部接入真实配置快照；后续再设计长任务编排，把页面接到 A 股 build/evaluate 专用入口。
-3. 在 long-only 口径下重跑成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。
-4. 基于迁移后的平台结构设计 ML prediction pipeline；建议使用 high reasoning effort，因为它会同时影响数据合同、label 口径、防泄漏、私有边界和 core handoff。
-5. 阶段性 commit 后，用户可手动考虑目录改名：旧本地目录名 -> `quant-research-platform`；仓库远端名称可等本地迁移稳定后再改。
-6. 可清理未使用的 Vite 默认前端资源，但需要单独确认具体路径：`web/src/assets/hero.png`、`web/src/assets/react.svg`、`web/src/assets/vite.svg`。
+1. 先审阅并确认 `docs/architecture-refactor-design.md`，再把它拆成可执行的分阶段重构计划。
+2. 继续执行 review -> 修复 -> 验证循环，直到 artifact/display/download、API、web、A-share、文档和项目 skill 不再出现实质性问题。
+3. 继续完善流程配置页，把 label、组合口径、日期、成本、run metadata 等字段全部接入真实配置快照；后续再设计长任务编排，把页面接到 A 股 build/evaluate 专用入口。
+4. 在 long-only 口径下重跑成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。
+5. 基于迁移后的平台结构设计 ML prediction pipeline；建议使用 high reasoning effort，因为它会同时影响数据合同、label 口径、防泄漏、私有边界和 core handoff。
+6. 阶段性 commit 后，用户可手动考虑目录改名：旧本地目录名 -> `quant-research-platform`；仓库远端名称可等本地迁移稳定后再改。
+7. 可清理未使用的 Vite 默认前端资源，但需要单独确认具体路径：`web/src/assets/hero.png`、`web/src/assets/react.svg`、`web/src/assets/vite.svg`。
 
 ## Root Handoff / 根目录回传信号
 
