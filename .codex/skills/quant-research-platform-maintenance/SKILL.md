@@ -9,7 +9,7 @@ description: Use when changing quant-research-platform artifact schema, manifest
 
 Keep generated evaluation artifacts as the source of truth, `manifest.display` as the UI/download contract, and the React evidence workbench as a consumer of that contract. Do not restore old schema fallbacks or hidden frontend business logic.
 
-Project `AGENTS.md` owns hard safety boundaries: local-only scope, Conda environment, data/API/secrets limits, forbidden operations, private CSMAR boundaries, and high-level code ownership. This skill owns the operational workflow for artifact contract, evidence API, download packaging, frontend evidence UI, generated runs, and docs/code-map synchronization.
+Project `AGENTS.md` owns hard safety boundaries: local-only scope, Conda environment, data/API/secrets limits, forbidden operations, private CSMAR boundaries, and high-level code ownership. This skill owns the operational workflow for artifact contract, evidence API, download packaging, frontend evidence UI, generated runs, and docs/code-map plus architecture-doc synchronization.
 
 ## Entry Points
 
@@ -23,7 +23,7 @@ Start by reading project `AGENTS.md`, then inspect only the files touched by the
 | A-share pipeline runs | `src/quant_research_platform/markets/a_share/pipeline/`, `config/a_share/pipelines/` |
 | A-share private evaluation | `src/quant_research_platform/markets/a_share/evaluation/run_factor_evaluation.py`, `evaluation/core_bridge.py`, `runtime/paths.py` |
 | Frontend evidence UI | `web/src/runEvidenceState.ts`, `ResultsView.tsx`, `RunCharts.tsx`, `ArtifactDownloads.tsx`, `CsvBrowser.tsx` |
-| Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/code-map/` |
+| Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/architecture/`, `docs/code-map/` |
 
 Use PowerShell `Select-String` when `rg` is unavailable or denied.
 
@@ -90,7 +90,7 @@ Do not call a broad artifact/API/frontend refactor complete until every gate bel
 
 ### Docs and Diff Hygiene
 
-- `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, and `docs/code-map/` describe the same current contract.
+- `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/architecture/`, and `docs/code-map/` describe the same current contract and phase boundary.
 - Search changed files for retired terms and fields before final response: `artifacts.xlsx`, old `total_*_portfolio_return` fields, old schema versions, retired endpoint names, and old UI terminology.
 - Review untracked files explicitly. Project-local skills and new source files must be included; generated runs, logs, screenshots, caches, build output, and temporary scripts must not be included.
 - Root handoff rows may be closed only after the root workspace has actually synchronized the signal.

@@ -2,7 +2,7 @@
 
 Rules for Codex work in `quant-research-platform`.
 
-This file is for safety and execution boundaries only. Project narrative belongs in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md), [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md), [REPORT.md](REPORT.md), [RESEARCH_CARD.md](RESEARCH_CARD.md), and [PROJECT_STATUS.md](PROJECT_STATUS.md).
+This file is for safety and execution boundaries only. Project narrative belongs in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md), [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md), [REPORT.md](REPORT.md), [RESEARCH_CARD.md](RESEARCH_CARD.md), [PROJECT_STATUS.md](PROJECT_STATUS.md), and [docs/architecture/](docs/architecture/).
 
 ## 1. Scope
 
@@ -29,6 +29,7 @@ Current structure:
 - `web/`: React/Vite local evidence workbench.
 - `scripts/local/`: local-only PowerShell launch scripts for API and workbench.
 - `scripts/build/`: local PowerShell build and verification scripts.
+- `docs/architecture/`: architecture blueprint, future capabilities, standards, Phase 1 refactor design, implementation checklist, and directory-rename handoff.
 - `docs/code-map/`: source reading map and contract handoff notes.
 
 Hard boundaries:
@@ -177,6 +178,8 @@ Do not run slow, network-heavy, destructive, or environment-changing commands wi
 - [REPORT.md](REPORT.md): formal research report.
 - [RESEARCH_CARD.md](RESEARCH_CARD.md): evidence ledger.
 - [PROJECT_STATUS.md](PROJECT_STATUS.md): current local status, next tasks, decisions, and root handoff.
+- [docs/architecture/README.md](docs/architecture/README.md): architecture document index and new-session reading order.
+- [docs/architecture/handoff-before-directory-rename.md](docs/architecture/handoff-before-directory-rename.md): directory-rename and new-conversation handoff.
 - [docs/csmar_data_manual.md](docs/csmar_data_manual.md): CSMAR download, fields, data rules, schema, and private report template.
 - [docs/code-map/](docs/code-map/): source reading map.
 - [docs/code-map/a-share-interface.md](docs/code-map/a-share-interface.md): A-share build/evaluate entrypoints and frontend snapshot boundary.

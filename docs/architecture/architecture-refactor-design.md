@@ -1,12 +1,12 @@
 # Architecture Refactor Design / 架构重构设计
 
-本文定义 `quant-research-platform` 下一轮架构重构的设计基线。目标是让平台更模块化、可扩展、简洁，同时保护当前已经跑通的 A 股主流程、artifact schema `0.5`、本地 API、下载和前端 evidence workbench。
+本文定义 `quant-research-platform` 下一轮架构重构的设计基线。目标是把当前实现推进到 [target-directory-structure.md](target-directory-structure.md) 的 Phase 1，同时保护当前已经跑通的 A 股主流程、artifact schema `0.5`、本地 API、下载和前端 evidence workbench。
 
-本文是设计文档，不是已实现状态。实施前需要再写分阶段计划和测试清单。
+本文是设计文档，不是已实现状态。逐项执行、验收和测试矩阵见 [phase-1-implementation-checklist.md](phase-1-implementation-checklist.md)。
 
 ## 1. 背景
 
-当前迁移已经把 A 股数据流程、core evaluation、schema `0.5` artifacts、FastAPI API 和 React workbench 放进 `quant_research_platform` 命名空间。A 股主链路已经清楚：
+当前迁移已经把 A 股数据流程、评价内核、schema `0.5` artifacts、FastAPI API 和 React workbench 放进 `quant_research_platform` 命名空间。A 股主链路已经清楚：
 
 ```text
 CSMAR raw/interim
@@ -19,16 +19,16 @@ CSMAR raw/interim
 -> API / workbench / downloads
 ```
 
-接下来要实现 Factor Factory、真实 Pipeline Runner、风险、组合、ML、regime、多市场和未来 crypto 高频能力。现有结构能支撑当前 A 股评估，但继续往上叠功能会让 core、artifacts、API 和前端边界变乱。
+后续能力池会覆盖 Factor Factory、真实 Pipeline Runner、风险、组合、ML、regime、多市场、专业回测、网站化和实盘等长期方向。本文只处理其中的 Phase 1 研究平台重构：先把 evaluations、artifacts、API、本地 workbench 和 A 股 pipeline runner 边界拆清楚，避免继续在现有结构上堆功能。
 
 ## 2. 重构目标
 
 目标：
 
 - 保持当前 public contract 稳定。
-- 把 core 计算和 artifact persistence 解耦。
+- 把 evaluations 计算和 artifact persistence 解耦。
 - 把 artifacts 的 schema、display、validation、writer、loader 拆清楚。
-- 把 FastAPI routes 从 `api/app.py` 拆到按领域分组的 routers。
+- 把 FastAPI routes 从当前 `api/app.py` 拆到清晰的 API routes / services 边界，并按领域分组。
 - 给 A 股补出真实 pipeline runner 的扩展位置。
 - 为 Factor Factory、ML、risk、portfolio、regime 留出独立 research 层。
 - 让前端按 Evidence、Pipeline、Factor Factory 等工作区分区，而不是让单一页面继续膨胀。
@@ -38,8 +38,9 @@ CSMAR raw/interim
 - 不重写 A 股 CSMAR raw/interim/panel/factor 算法。
 - 不升级 artifact schema 版本，除非实施中发现必须新增 schema 字段。
 - 不引入数据库、队列、认证、部署、外部行情 API、券商 API、模拟盘或实盘。
+- 不创建 repo-level `apps/`、`storage/`、`identity/`、`tenancy/`、`jobs/`、`workers/` 等 Phase 2 平台域。
 - 不把 crypto 高频硬塞进当前日频 `EvaluationSpec`。
-- 不恢复旧 core 兼容逻辑或旧 generated run schema fallback。
+- 不恢复旧 evaluation 兼容逻辑或旧 generated run schema fallback。
 
 ## 3. 必须冻结的当前合同
 
@@ -64,7 +65,7 @@ from quant_research_platform import EvaluationSpec, WeightConfig, run_evaluation
 
 - `run_evaluation(spec)` 内部可以委托给新的 `evaluate_to_payload(spec)`。
 - 新增 `EvaluationRunPayload` 或 `EvaluationSetPayload`。
-- 新增内部 module，例如 `core/runner.py`、`core/evaluator.py`、`core/payloads.py`、`core/validation.py`。
+- 新增内部 module，例如 `evaluations/evaluation_runner.py`、`evaluations/evaluation_payload.py`、`evaluations/evaluation_result.py`、`evaluations/panel_validation.py`。
 
 ### Artifact contract
 
@@ -82,7 +83,7 @@ from quant_research_platform import EvaluationSpec, WeightConfig, run_evaluation
 
 - `artifacts/writer.py` 可以拆成 `schema.py`、`validate.py`、`writer.py`。
 - display validation 可以从 writer 中移出。
-- writer 可以只接收结构化 payload，不直接理解 core 执行细节。
+- writer 可以只接收结构化 payload，不直接理解 evaluations 执行细节。
 
 ### HTTP API contract
 
@@ -96,9 +97,9 @@ from quant_research_platform import EvaluationSpec, WeightConfig, run_evaluation
 
 允许内部变化：
 
-- `api/app.py` 只保留 `create_app()` 和 router 装配。
-- 现有 endpoint handler 可以移动到 `api/routes/`。
-- repository、download、pipeline、comparison 逻辑可以移动到 `api/services/`。
+- API app 入口只保留 `create_app()` 和 router 装配。
+- 现有 endpoint handler 可以先移动到 `src/quant_research_platform/api/routes/`。
+- repository、download、pipeline、comparison 逻辑可以先移动到 `src/quant_research_platform/api/services/`。
 
 ### Frontend contract
 
@@ -113,102 +114,96 @@ from quant_research_platform import EvaluationSpec, WeightConfig, run_evaluation
 
 允许内部变化：
 
-- `web/src` 可以按 feature 拆分。
+- `web/` 可以按 feature 拆分。
 - CSS 可以逐步拆分，但不作为第一阶段重构的阻塞项。
 - Factor Factory / Pipeline Runner 页面可以后续新增，不与 P0/P1 混做。
 
 ## 4. 目标模块结构
 
-目标结构：
+目标结构以 [target-directory-structure.md](target-directory-structure.md) 的 Phase 1 为准。本轮只重构本地研究平台；未来 `apps/web`、`apps/api`、`apps/workers` 和 `apps/schedulers` 是 Phase 2 网站化边界，不在本文实施范围内。
 
 ```text
-src/quant_research_platform/
-  core/
-    contracts.py
-    runner.py
-    evaluator.py
-    payloads.py
-    results.py
-    validation.py
-    neutralization.py
-    panel.py
-    period_breakdowns.py
-    profiling.py
+web/
+  evidence/
+  pipeline/
+  factor_factory/
+  uploads/
+  shared/
 
-  engines/
-    base.py
-    registry.py
-    common/
+src/quant_research_platform/
+  evaluations/
+    evaluation_spec.py
+    evaluation_runner.py
+    evaluation_payload.py
+    evaluation_result.py
+    evaluation_metrics.py
+    portfolio_evaluation.py
+    panel_validation.py
+    neutralization.py
+    period_breakdowns.py
+    evaluation_report.py
+
+  kernels/
+    kernel_protocol.py
+    kernel_registry.py
     dataframe/
     tensor/
+    gpu/
+    distributed/
 
   artifacts/
-    schema.py
-    display.py
-    validate.py
-    writer.py
-    loader.py
-    inventory.py
-    comparison.py
+    artifact_schema.py
+    display_manifest.py
+    manifest_validation.py
+    artifact_writer.py
+    artifact_loader.py
+    artifact_inventory.py
+    artifact_comparison.py
+    artifact_package.py
 
   markets/
-    a_share/
-      csmar/
-      datasets/
-      factors/
-      labels/
-      risk/
-      regime/
-      evaluation/
-      pipeline/
-        config.py
-        runner.py
-        snapshots.py
-        checkpoints.py
-    crypto/
+    common/
+    asset_classes/
+    instruments/
+    venues/
+    data_sources/
+    implementations/
 
   research/
+    factors/
     factor_factory/
     models/
-    portfolio/
+    reinforcement_learning/
+    portfolios/
     risk/
-    regime/
+    regimes/
+    experiments/
+    validation/
 
-  api/
-    app.py
-    routes/
-      health.py
-      markets.py
-      pipeline.py
-      runs.py
-      artifacts.py
-      downloads.py
-      comparison.py
-      uploads.py
-    services/
-      run_repository.py
-      pipeline_service.py
-      download_service.py
-
-  io/
-  cli/
+  datasets/
+  pipelines/
   runtime/
+  interfaces/
+    api/
+    cli/
+    sdk/
 ```
 
 这个结构的关键点：
 
 - `markets/*` 负责数据许可、字段、market rules、factor/label/risk/regime input。
 - `research/*` 负责生产候选信号、模型预测、组合方案和风险诊断。
-- `core/*` 负责 market-neutral evaluation。
+- `evaluations/*` 负责 market-neutral evaluation 和评价结果合同。
+- `kernels/*` 负责 DataFrame、tensor、GPU、distributed 等底层数值计算实现。
 - `artifacts/*` 负责 schema/display/persistence。
-- `api/*` 负责把 artifacts 和 pipeline 状态暴露给本地前端。
-- `web/*` 负责用户交互，不承担研究计算。
+- API 边界负责把 artifacts 和 pipeline 状态暴露给本地前端；现有实现可以先在 `src/quant_research_platform/api/` 内拆 routes/services，是否迁到 `interfaces/api/` 由实施计划单独决定。
+- `web/*` 负责本地用户交互，不承担研究计算；最终网站化时再迁到 `apps/web`。
 
-## 5. Core 重构设计
+## 5. Evaluations 重构设计
 
 ### 当前问题
 
-`core/evaluation.py` 同时承担：
+当前 `core/evaluation.py` 同时承担：
 
 - spec 校验；
 - panel 校验；
@@ -219,7 +214,7 @@ src/quant_research_platform/
 - report 渲染；
 - `EvaluationSetResult` 构造。
 
-这让后续 Factor Factory、ML prediction、optimizer、risk diagnostics 很难复用“只计算不落盘”的能力。
+这让后续 Factor Factory、ML prediction、optimizer、risk diagnostics 很难复用“只计算不落盘”的能力。目标目录中这部分迁入 `evaluations/`。
 
 ### 目标设计
 
@@ -255,7 +250,7 @@ def run_evaluation(spec: EvaluationSpec) -> EvaluationSetResult:
 
 ### 当前问题
 
-`artifacts/writer.py` 同时做：
+当前 `artifacts/writer.py` 同时做：
 
 - schema 常量；
 - 写 JSON / CSV / Markdown；
@@ -268,25 +263,25 @@ def run_evaluation(spec: EvaluationSpec) -> EvaluationSetResult:
 拆成：
 
 ```text
-artifacts/schema.py
+artifacts/artifact_schema.py
   ARTIFACT_SCHEMA_VERSION
   artifact table path contract
   known metadata artifacts
 
-artifacts/display.py
+artifacts/display_manifest.py
   build_display_manifest
 
-artifacts/validate.py
+artifacts/manifest_validation.py
   validate_artifact_manifest
   validate_display_manifest
   validate_display_chart_columns
   validate_display_paths
 
-artifacts/writer.py
+artifacts/artifact_writer.py
   write_evaluation_set_artifacts
   write_json / write_csv / write_report
 
-artifacts/loader.py
+artifacts/artifact_loader.py
   load_evaluation_set
 ```
 
@@ -300,11 +295,11 @@ artifacts/loader.py
 
 ### 当前问题
 
-`api/app.py` 包含 route 注册、run root 配置、pipeline snapshot、run list、evidence、preview、download、comparison 等多类职责。
+当前 `api/app.py` 包含 route 注册、run root 配置、pipeline snapshot、run list、evidence、preview、download、comparison 等多类职责。
 
 ### 目标设计
 
-`api/app.py` 只负责：
+API app 入口只负责：
 
 - 创建 FastAPI app。
 - 读取 run root 和 pipeline root 配置。
@@ -314,22 +309,22 @@ artifacts/loader.py
 routes 拆分：
 
 ```text
-routes/health.py       health and root config
-routes/markets.py      markets and capabilities
-routes/pipeline.py     factor templates, pipeline run snapshots, future runner
-routes/runs.py         run list, evidence, uploaded run create/delete
-routes/artifacts.py    table preview and direct artifact routes
-routes/downloads.py    direct report and ZIP package
-routes/comparison.py   comparison JSON and CSV
-routes/uploads.py      optional CSV upload helpers
+src/quant_research_platform/api/routes/health.py       health and root config
+src/quant_research_platform/api/routes/markets.py      markets and capabilities
+src/quant_research_platform/api/routes/pipeline.py     factor templates, pipeline run snapshots, future runner
+src/quant_research_platform/api/routes/runs.py         run list, evidence, uploaded run create/delete
+src/quant_research_platform/api/routes/artifacts.py    table preview and direct artifact routes
+src/quant_research_platform/api/routes/downloads.py    direct report and ZIP package
+src/quant_research_platform/api/routes/comparison.py   comparison JSON and CSV
+src/quant_research_platform/api/routes/uploads.py      optional CSV upload helpers
 ```
 
 services 拆分：
 
 ```text
-services/run_repository.py
-services/download_service.py
-services/pipeline_service.py
+src/quant_research_platform/api/services/run_repository.py
+src/quant_research_platform/api/services/download_service.py
+src/quant_research_platform/api/services/pipeline_service.py
 ```
 
 重构时保持所有 route path 不变。先搬代码，后改设计。
@@ -374,7 +369,7 @@ runner 必须具备：
 
 ## 9. Research 层设计
 
-`research/` 是后续功能的扩展层，不应把 Factor Factory、ML、optimizer 都塞进 core。
+`research/` 是后续功能的扩展层，不应把 Factor Factory、ML、optimizer 都塞进 evaluations。
 
 第一批目录：
 
@@ -390,7 +385,7 @@ research/models/
   manifests.py
   predictions.py
 
-research/portfolio/
+research/portfolios/
   constraints.py
   optimizers.py
   diagnostics.py
@@ -400,7 +395,7 @@ research/risk/
   covariance.py
   attribution.py
 
-research/regime/
+research/regimes/
   definitions.py
   diagnostics.py
 ```
@@ -408,7 +403,7 @@ research/regime/
 原则：
 
 - research 层可以生成新列、新表、新配置。
-- research 层不直接重写 core PnL 或 IC 逻辑。
+- research 层不直接重写 evaluations 的 PnL 或 IC 逻辑。
 - 输出如果要进入前端，必须写成 artifact/display 可消费的结构。
 
 ## 10. Frontend 重构设计
@@ -418,7 +413,7 @@ research/regime/
 ```text
 web/src/features/evidence/
 web/src/features/pipeline/
-web/src/features/factorFactory/
+web/src/features/factor_factory/
 web/src/features/uploads/
 web/src/shared/
 ```
@@ -435,12 +430,15 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 
 ## 11. 分阶段实施计划
 
+本节的 `P0-P5` 是当前重构实施阶段，不等同于 [future-capabilities.md](future-capabilities.md) 的能力池优先级 `C0-C8`。
+每个阶段的具体任务、验收项、负例和测试命令见 [phase-1-implementation-checklist.md](phase-1-implementation-checklist.md)。
+
 ### P0: 合同冻结和文档基线
 
 交付：
 
 - 本设计文档。
-- `docs/future-capabilities.md`。
+- `docs/architecture/future-capabilities.md`。
 - `docs/code-map/platform-flow.md` 和可拖拽 HTML。
 - 删除历史迁移计划、历史迁移设计、错位 roadmap。
 - 更新 status 和 code-map 入口。
@@ -451,18 +449,19 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 - `git diff --check` 通过。
 - Markdown 本地链接检查通过。
 
-### P1: Core payload boundary
+### P1: Evaluation payload boundary
 
 交付：
 
-- 新增 `core/payloads.py`。
+- 新增 `evaluations/evaluation_payload.py`。
+- 新增 `evaluations/evaluation_runner.py`。
 - 新增 `evaluate_to_payload(spec)`。
 - `run_evaluation(spec)` 保持兼容。
 - 现有 tests 通过或只做低风险断言调整。
 
 验收：
 
-- core tests 通过。
+- evaluation tests 通过。
 - artifact contract tests 通过。
 - A 股 adapter tests 通过。
 - `run_evaluation` 仍写出 schema `0.5` artifacts。
@@ -471,9 +470,9 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 
 交付：
 
-- `artifacts/schema.py`。
-- `artifacts/validate.py`。
-- 瘦身 `artifacts/writer.py`。
+- `artifacts/artifact_schema.py`。
+- `artifacts/manifest_validation.py`。
+- 瘦身 `artifacts/artifact_writer.py`。
 - loader、API 和 tests 共用 validation。
 
 验收：
@@ -486,9 +485,9 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 
 交付：
 
-- `api/routes/*`。
-- `api/services/*`。
-- `api/app.py` 只装配 app 和 routers。
+- `src/quant_research_platform/api/routes/*`。
+- `src/quant_research_platform/api/services/*`。
+- `src/quant_research_platform/api/app.py` 只装配 app 和 routers。
 
 验收：
 
@@ -501,7 +500,7 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 
 交付：
 
-- `markets/a_share/pipeline/runner.py`。
+- `markets/implementations/a_shares/pipeline_runner.py` 或等价 Phase 1 A 股 pipeline runner。
 - checkpoint model。
 - pipeline API 接 runner 的轻量执行模式。
 
@@ -533,9 +532,9 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 
 每阶段至少覆盖：
 
-- `conda run -n analysis python -m pytest -q tests/core tests/artifacts`
+- `conda run -n analysis python -m pytest -q tests/evaluations tests/artifacts`
 - `conda run -n analysis python -m pytest -q tests/api`
-- A 股相关变更时跑 `tests/markets/a_share`
+- A 股相关变更时跑 `tests/markets`
 - 前端变更时在 `web/` 跑 `npm test -- --run --maxWorkers=1`
 - 前端结构或下载变更时跑 `npm run lint` 和 `npm run build`
 - 文档变更时跑 `git diff --check` 和本地链接检查
@@ -564,7 +563,7 @@ npm run build
 
 主要风险：
 
-- 拆 core 时改变结果表列或组合维度。
+- 拆 evaluations 时改变结果表列或组合维度。
 - 拆 artifacts 时破坏 `manifest.display`。
 - 拆 API 时 route path 或 `source_alias` 语义丢失。
 - 前端拆分时出现 stale evidence 或下载项不一致。
@@ -583,7 +582,7 @@ npm run build
 
 实施前需要用户确认：
 
-- 是否接受 `evaluate_to_payload(spec)` 作为 core 内部中间边界。
+- 是否接受 `evaluate_to_payload(spec)` 作为 evaluations 内部中间边界。
 - 是否接受 API route path 不变、内部 routers 可移动。
 - 是否接受 P4 runner 先从“processed 已存在”轻量模式开始，而不是第一版就全量 build raw/interim/panel/factors。
 - 是否接受 Factor Factory 第一版只用受控 registry 和小参数网格，不接任意 Python。
