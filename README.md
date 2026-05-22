@@ -22,6 +22,7 @@ local approved data
 - A 股是第一版完整 market module，数据源边界是用户手工导出的本地 CSMAR 文件。
 - core evaluation、artifact writer / loader、schema `0.5`、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
 - Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为辅助输入方式保留。
+- Pipeline Builder 当前只生成因子表达式/配置快照，不执行完整 A 股 build/evaluate 编排；一键全流程需要后续接入执行层。
 - crypto 和其他市场只保留接口预留，不代表已支持真实数据或交易。
 
 ## 当前结构

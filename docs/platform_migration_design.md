@@ -175,7 +175,9 @@ core 保持 market-neutral，只评价显式传入的列。
 
 ## 7. Pipeline 模型
 
-平台既要支持分步检查，也要支持一键全流程。
+目标平台最终既要支持分步检查，也要支持一键全流程。当前已落地的
+Pipeline Builder 仍是因子表达式/配置快照流，不执行完整 A 股
+build/evaluate 编排；一键全流程需要后续接入执行层后再开放。
 
 分步模式示例：
 
@@ -187,11 +189,8 @@ qrp a-share evaluate
 qrp serve
 ```
 
-一键模式示例：
-
-```powershell
-qrp a-share run-pipeline --config config/a_share/pipelines/full_2023_2025.yaml
-```
+未来一键模式应读取受控配置文件并串联 build/evaluate/checkpoint，
+但当前命令名和 CLI 入口尚未实现，文档不提供可执行命令示例。
 
 一键模式不是黑箱。内部仍然按阶段运行，并保存 checkpoint：
 

@@ -46,7 +46,7 @@ def evaluate_ic_by_timestamp(frame: pd.DataFrame, spec: PanelSpec) -> pd.DataFra
     records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
         for feature in spec.feature_columns:
-            pair = timestamp_frame[[feature, spec.label_column]].dropna()
+            pair = _finite_pair(timestamp_frame, feature, spec.label_column)
             n_obs = len(pair)
             ic = np.nan
             rankic = np.nan
@@ -111,7 +111,7 @@ def evaluate_ic_and_grouped_returns_from_validated_panel(
                 dtype="float64",
                 copy=False,
             )
-            valid_mask = ~pd.isna(feature_values) & ~pd.isna(label_values)
+            valid_mask = np.isfinite(feature_values) & np.isfinite(label_values)
             feature_valid = feature_values[valid_mask]
             label_valid = label_values[valid_mask]
             n_obs = len(feature_valid)
@@ -171,7 +171,7 @@ def analyze_grouped_returns(
     records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
         for feature in spec.feature_columns:
-            pair = timestamp_frame[[feature, spec.label_column]].dropna()
+            pair = _finite_pair(timestamp_frame, feature, spec.label_column)
             if len(pair) < 2:
                 continue
             groups = _assign_groups(pair[feature], n_groups).to_numpy()
@@ -190,6 +190,11 @@ def analyze_grouped_returns(
                 )
 
     return pd.DataFrame.from_records(records, columns=GROUPED_RETURN_COLUMNS)
+
+
+def _finite_pair(frame: pd.DataFrame, feature: str, label: str) -> pd.DataFrame:
+    pair = frame[[feature, label]].apply(pd.to_numeric, errors="coerce")
+    return pair[np.isfinite(pair[feature]) & np.isfinite(pair[label])]
 
 
 def summarize_ic(

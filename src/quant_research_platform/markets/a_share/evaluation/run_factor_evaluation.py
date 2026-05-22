@@ -20,7 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--processed-root", default="data/processed_private/csmar")
     parser.add_argument(
         "--report-root",
-        default="reports/private_real/factor_evaluation/full_2024_2025",
+        default=None,
+        help=(
+            "Output root. Defaults to "
+            "reports/private_real/factor_evaluation/full_<start-year>_<end-year>."
+        ),
     )
     parser.add_argument("--start-year", type=int, default=2024)
     parser.add_argument("--end-year", type=int, default=2025)
@@ -53,9 +57,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.factor_set != "price_volume":
         print(f"ERROR: unsupported factor set: {args.factor_set}")
         return 2
+    report_root = (
+        Path(args.report_root)
+        if args.report_root
+        else Path("reports/private_real/factor_evaluation")
+        / f"full_{args.start_year}_{args.end_year}"
+    )
     _, manifest_path, core_runs = run_processed_factor_evaluation(
         processed_root=Path(args.processed_root),
-        report_root=Path(args.report_root),
+        report_root=report_root,
         start_year=args.start_year,
         end_year=args.end_year,
         requested_labels=parse_columns(args.labels),
@@ -82,7 +92,6 @@ def main(argv: list[str] | None = None) -> int:
             f"label={run['label']} features={len(run['features'])} "
             f"output={run['output_dir']}"
         )
-    report_root = Path(args.report_root)
     print(f"wrote {report_root / 'label_availability.csv'}")
     print(f"wrote {manifest_path}")
     return 0

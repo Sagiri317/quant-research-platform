@@ -248,6 +248,7 @@ def create_app(
                 metric_names=evidence_load_table_names(index_record.manifest),
             ),
             comparison_payload,
+            ref=index_record.ref,
             eager_table_names=evidence_payload_table_names(index_record.manifest),
         )
 

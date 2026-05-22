@@ -66,6 +66,7 @@ Do not call a broad artifact/API/frontend refactor complete until every gate bel
 - Multi-root APIs and frontend state must not collapse runs by `run_id` alone; `source_alias` is part of the identity.
 - Direct CSV links validate display schema and exposed download items.
 - ZIP item selection validates against the manifest before creating cache paths or writing temporary ZIP files.
+- Uploaded-run deletion must be tightly gated: allow only `summary.data_stage == "uploaded_panel"`, resolve the run through configured run roots, require the run directory to be an immediate child of the selected root, require `manifest.json` inside the run directory, and reject all non-uploaded or out-of-root paths.
 - Bad or stale runs are rejected or excluded at the earliest reasonable entry point, not after the frontend has already selected them.
 
 ### Frontend State
@@ -104,6 +105,7 @@ For artifact and API changes, cover these surfaces:
 
 - producer and loader: schema version, required tables, required columns, `manifest.display` validation, path safety, and rejection of retired fields;
 - API and download: run list, run evidence, table preview, direct CSV download, selected ZIP download, all-items ZIP download, comparison download, unknown items, unsafe paths, and cache behavior;
+- uploaded-run deletion: one positive uploaded-panel cleanup path, plus negative tests for private/generated runs, missing manifests, unknown roots, unsafe run IDs, and out-of-root traversal attempts;
 - frontend state units: run identity matching, first valid combination, combination filtering, disabled tab correction, display-driven table specs, chart range readouts, chart empty states, and selected artifact URLs;
 - upload or create-run flow: required columns, `pnl_return_column`, engine selection, time breakdowns, and user-facing validation messages.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 DEFAULT_PRICE_VOLUME_WINDOWS: tuple[int, ...] = (20, 60, 120)
@@ -77,7 +78,13 @@ def calculate_price_volume_factors(
         result[f"turnover_{window}d"] = grouped[turnover_column].transform(
             lambda series, w=rolling_window: series.rolling(w, min_periods=w).mean()
         )
-        illiquidity = result[return_column].abs() / result[amount_column]
+        amount = pd.to_numeric(result[amount_column], errors="coerce")
+        denominator = amount.where(amount != 0.0)
+        returns = pd.to_numeric(result[return_column], errors="coerce")
+        illiquidity = (returns.abs() / denominator).replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
         result[f"amihud_{window}d"] = illiquidity.groupby(
             result[asset_column], sort=False
         ).transform(

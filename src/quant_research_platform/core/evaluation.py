@@ -632,8 +632,27 @@ def _combination_record(
     cost_config,
     metrics: dict[str, pd.DataFrame],
 ) -> dict[str, object]:
-    performance = _first_row(metrics["performance_summary"])
-    ic_summary = _first_row(metrics["ic_summary"])
+    performance = _aggregate_combination_metrics(
+        metrics["performance_summary"],
+        {
+            "final_cumulative_net_return": "mean",
+            "sharpe_like": "mean",
+            "sortino_like": "mean",
+            "max_drawdown": "min",
+            "win_rate": "mean",
+            "mean_turnover": "mean",
+            "total_cost": "sum",
+        },
+    )
+    ic_summary = _aggregate_combination_metrics(
+        metrics["ic_summary"],
+        {
+            "mean_ic": "mean",
+            "mean_rankic": "mean",
+            "icir": "mean",
+            "rankicir": "mean",
+        },
+    )
     return {
         "combination_id": combination_id,
         "feature": feature,
@@ -646,19 +665,43 @@ def _combination_record(
         "cost_bps": _effective_cost_bps(weight_config, cost_config),
         "mean_ic": ic_summary.get("mean_ic", 0.0),
         "mean_rankic": ic_summary.get("mean_rankic", 0.0),
+        "icir": ic_summary.get("icir", 0.0),
+        "rankicir": ic_summary.get("rankicir", 0.0),
         "final_cumulative_net_return": performance.get(
             "final_cumulative_net_return",
             0.0,
         ),
         "sharpe_like": performance.get("sharpe_like", 0.0),
+        "sortino_like": performance.get("sortino_like", 0.0),
         "max_drawdown": performance.get("max_drawdown", 0.0),
+        "win_rate": performance.get("win_rate", 0.0),
+        "mean_turnover": performance.get("mean_turnover", 0.0),
+        "total_cost": performance.get("total_cost", 0.0),
     }
 
 
-def _first_row(frame: pd.DataFrame) -> dict[str, object]:
+def _aggregate_combination_metrics(
+    frame: pd.DataFrame,
+    aggregations: dict[str, str],
+) -> dict[str, object]:
     if frame.empty:
         return {}
-    return frame.iloc[0].to_dict()
+    output: dict[str, object] = {}
+    for column, aggregation in aggregations.items():
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if values.empty:
+            output[column] = 0.0
+        elif aggregation == "mean":
+            output[column] = float(values.mean())
+        elif aggregation == "sum":
+            output[column] = float(values.sum())
+        elif aggregation == "min":
+            output[column] = float(values.min())
+        else:
+            raise ValueError(f"unsupported aggregation: {aggregation}")
+    return output
 
 
 def _effective_cost_bps(weight_config, cost_config) -> float:

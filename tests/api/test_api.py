@@ -135,6 +135,9 @@ def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
 
     assert evidence.status_code == 200
     assert evidence.json()["summary"]["evaluation_id"] == "demo"
+    assert evidence.json()["summary"]["run_id"] == "demo"
+    assert evidence.json()["summary"]["source_alias"] == "core"
+    assert evidence.json()["summary"]["public_run_id"] == "core/demo"
     assert evidence.json()["summary"]["domain"] == "core_synthetic"
     assert ic.status_code == 200
     assert {"combination_id", "timestamp", "feature", "label", "ic"}.issubset(
@@ -296,6 +299,9 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
     assert response.status_code == 200
     payload = response.json()
     assert payload["summary"]["evaluation_id"] == "demo"
+    assert payload["summary"]["run_id"] == "demo"
+    assert payload["summary"]["source_alias"] == "core"
+    assert payload["summary"]["public_run_id"] == "core/demo"
     assert payload["report"]["markdown"] == "# Report\n"
     assert {"combination_id", "timestamp", "feature", "label", "ic"}.issubset(
         payload["tables"]["ic"]["columns"]
@@ -364,6 +370,23 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
         "core/demo",
         "core/other",
     ]
+
+
+def test_api_run_evidence_summary_keeps_source_alias_for_duplicate_run_ids(tmp_path):
+    core_root = tmp_path / "core"
+    crypto_root = tmp_path / "crypto"
+    write_evaluation_set(core_root / "demo", run_id="demo", domain="core_synthetic")
+    write_evaluation_set(crypto_root / "demo", run_id="demo", domain="crypto")
+    client = TestClient(
+        create_app(run_roots=[("core", core_root), ("crypto", crypto_root)])
+    )
+
+    response = client.get("/api/runs/crypto/demo/evidence")
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["run_id"] == "demo"
+    assert response.json()["summary"]["source_alias"] == "crypto"
+    assert response.json()["summary"]["public_run_id"] == "crypto/demo"
 
 
 def test_api_evidence_eager_tables_follow_display_charts(tmp_path):

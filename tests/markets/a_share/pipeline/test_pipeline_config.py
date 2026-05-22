@@ -111,6 +111,56 @@ def test_validation_classifies_market_and_portfolio_issues(tmp_path):
     )
 
 
+def test_validation_rejects_invalid_dates_cost_and_labels(tmp_path):
+    reverse_dates = _valid_config(tmp_path)
+    reverse_dates.date_start = "2025-01-01"
+    reverse_dates.date_end = "2024-12-31"
+    malformed_date = _valid_config(tmp_path)
+    malformed_date.date_start = "not-a-date"
+    compact_date = _valid_config(tmp_path)
+    compact_date.date_start = "20240101"
+    week_date = _valid_config(tmp_path)
+    week_date.date_start = "2024-W01-1"
+    negative_cost = _valid_config(tmp_path)
+    negative_cost.cost_bps = -0.1
+    missing_labels = _valid_config(tmp_path)
+    missing_labels.label_columns = ()
+    unsafe_label = _valid_config(tmp_path)
+    unsafe_label.label_columns = ("forward-return-1d",)
+    missing_pnl = _valid_config(tmp_path)
+    missing_pnl.pnl_return_column = ""
+    unsafe_pnl = _valid_config(tmp_path)
+    unsafe_pnl.pnl_return_column = "forward-return-1d"
+
+    cases = [
+        (reverse_dates, "invalid_date_range"),
+        (malformed_date, "invalid_date"),
+        (compact_date, "invalid_date"),
+        (week_date, "invalid_date"),
+        (negative_cost, "negative_cost_bps"),
+        (missing_labels, "missing_label_columns"),
+        (unsafe_label, "unsafe_label_column"),
+        (missing_pnl, "missing_pnl_return_column"),
+        (unsafe_pnl, "unsafe_pnl_return_column"),
+    ]
+    for config, code in cases:
+        validation = validate_pipeline_config(config)
+
+        assert any(issue.code == code for issue in validation.blocking)
+        with pytest.raises(PipelineSnapshotError):
+            write_run_snapshot(config)
+
+
+def test_validation_allows_separate_label_and_pnl_return_columns(tmp_path):
+    config = _valid_config(tmp_path)
+    config.label_columns = ("forward_return_20d",)
+    config.pnl_return_column = "forward_return_1d"
+
+    validation = validate_pipeline_config(config)
+
+    assert not validation.has_blocking
+
+
 def test_warning_issue_is_recorded(tmp_path):
     config = _valid_config(tmp_path)
     config.diagnostics = ("industry_neutrality",)

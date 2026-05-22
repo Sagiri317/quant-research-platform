@@ -593,6 +593,74 @@ def test_segmented_prediction_turnover_resets_between_splits(tmp_path):
     assert first_by_split.loc["test", "turnover"] == pytest.approx(2.0)
 
 
+def test_segmented_combinations_use_aggregate_summary_metrics(tmp_path):
+    prediction_panel = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-01-01",
+                    "2026-01-01",
+                    "2026-01-02",
+                    "2026-01-02",
+                    "2026-01-03",
+                    "2026-01-03",
+                    "2026-01-04",
+                    "2026-01-04",
+                ]
+            ),
+            "asset": ["A", "B", "A", "B", "A", "B", "A", "B"],
+            "split": ["validation"] * 4 + ["test"] * 4,
+            "prediction": [1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
+            "forward_return": [0.02, -0.01, -0.02, 0.03, 0.04, -0.01, 0.01, 0.0],
+            "forward_return_1d": [0.02, -0.01, -0.02, 0.03, 0.04, -0.01, 0.01, 0.0],
+        }
+    )
+    spec = EvaluationSpec(
+        panel=prediction_panel,
+        feature_columns=("prediction",),
+        label_columns=("forward_return",),
+        metadata={
+            **_metadata("prediction_segment_summary_run"),
+            "kind": "prediction",
+        },
+        n_groups=2,
+        weight_configs=(
+            WeightConfig(
+                method="equal_weight_quantile",
+                direction="long_high",
+                top_quantile=0.5,
+                bottom_quantile=0.5,
+                cost_bps=10.0,
+            ),
+        ),
+        segment_columns=("split",),
+        output_dir=tmp_path,
+    )
+
+    result = run_evaluation(spec)
+    combinations = pd.read_csv(tmp_path / "combinations.csv")
+
+    assert len(combinations) == 1
+    assert combinations.loc[0, "final_cumulative_net_return"] == pytest.approx(
+        result.metrics["performance_summary"]["final_cumulative_net_return"].mean()
+    )
+    assert combinations.loc[0, "sharpe_like"] == pytest.approx(
+        result.metrics["performance_summary"]["sharpe_like"].mean()
+    )
+    assert combinations.loc[0, "max_drawdown"] == pytest.approx(
+        result.metrics["performance_summary"]["max_drawdown"].min()
+    )
+    assert combinations.loc[0, "total_cost"] == pytest.approx(
+        result.metrics["performance_summary"]["total_cost"].sum()
+    )
+    assert combinations.loc[0, "mean_ic"] == pytest.approx(
+        result.metrics["ic_summary"]["mean_ic"].mean()
+    )
+    assert combinations.loc[0, "rankicir"] == pytest.approx(
+        result.metrics["ic_summary"]["rankicir"].mean()
+    )
+
+
 def test_evaluation_spec_requires_minimum_run_metadata() -> None:
     with pytest.raises(ValueError, match="metadata is missing required fields: domain"):
         EvaluationSpec(

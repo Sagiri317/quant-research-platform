@@ -96,6 +96,7 @@ def run_evidence_payload(
     run: LoadedEvaluationSet,
     comparison_payload: dict[str, object],
     *,
+    ref: RunRef,
     eager_table_names: set[str] | None = None,
 ) -> dict[str, object]:
     """构造 evidence 页面一次加载所需的 report、comparison 和 tables。"""
@@ -106,7 +107,7 @@ def run_evidence_payload(
         else eager_table_names
     )
     return {
-        "summary": run.summary,
+        "summary": evidence_summary_payload(run.summary, ref),
         "report": {"markdown": run.report},
         "comparison": comparison_payload,
         "display": run.manifest["display"],
@@ -117,6 +118,17 @@ def run_evidence_payload(
             if metric_name in table_names
         },
     }
+
+
+def evidence_summary_payload(
+    summary: dict[str, object],
+    ref: RunRef,
+) -> dict[str, object]:
+    payload = dict(summary)
+    payload["source_alias"] = ref.source_alias
+    payload["run_id"] = ref.run_id
+    payload["public_run_id"] = ref.public_run_id
+    return payload
 
 
 def evidence_load_table_names(manifest: dict[str, object]) -> set[str]:

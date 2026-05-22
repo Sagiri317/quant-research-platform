@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +19,8 @@ SUPPORTED_MARKETS = frozenset({"a_share"})
 SUPPORTED_PORTFOLIO_MODES = frozenset({"long_only", "long_short"})
 DEFAULT_OUTPUT_ROOT = Path("reports/private_real/pipeline_runs")
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 @dataclass
@@ -77,6 +80,21 @@ class PipelineConfig:
 
 def validate_pipeline_config(config: PipelineConfig) -> PipelineValidation:
     result = PipelineValidation()
+    start_date = _validate_iso_date(
+        result,
+        config.date_start,
+        field="date_start",
+    )
+    end_date = _validate_iso_date(result, config.date_end, field="date_end")
+    if start_date is not None and end_date is not None and start_date > end_date:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="invalid_date_range",
+                message="date_start must be earlier than or equal to date_end",
+                field="date_start",
+            )
+        )
 
     if not config.market:
         result.blocking.append(
@@ -145,6 +163,62 @@ def validate_pipeline_config(config: PipelineConfig) -> PipelineValidation:
             )
         )
 
+    if config.cost_bps < 0:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="negative_cost_bps",
+                message="cost_bps must be nonnegative",
+                field="cost_bps",
+            )
+        )
+
+    if not config.label_columns:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="missing_label_columns",
+                message="label_columns must contain at least one label",
+                field="label_columns",
+            )
+        )
+    else:
+        for label_column in config.label_columns:
+            if not COLUMN_NAME_PATTERN.fullmatch(label_column):
+                result.blocking.append(
+                    ValidationIssue(
+                        severity="blocking",
+                        code="unsafe_label_column",
+                        message=(
+                            "label columns may only contain ASCII letters, "
+                            "numbers, and underscores, and may not start with a number"
+                        ),
+                        field="label_columns",
+                    )
+                )
+                break
+
+    if not config.pnl_return_column:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="missing_pnl_return_column",
+                message="pnl_return_column is required",
+                field="pnl_return_column",
+            )
+        )
+    elif not COLUMN_NAME_PATTERN.fullmatch(config.pnl_return_column):
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="unsafe_pnl_return_column",
+                message=(
+                    "pnl_return_column may only contain ASCII letters, numbers, "
+                    "and underscores, and may not start with a number"
+                ),
+                field="pnl_return_column",
+            )
+        )
     if not config.run_id:
         result.blocking.append(
             ValidationIssue(
@@ -168,3 +242,43 @@ def validate_pipeline_config(config: PipelineConfig) -> PipelineValidation:
         )
 
     return result
+
+
+def _validate_iso_date(
+    result: PipelineValidation,
+    value: str,
+    *,
+    field: str,
+) -> date | None:
+    if not value:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code=f"missing_{field}",
+                message=f"{field} is required",
+                field=field,
+            )
+        )
+        return None
+    if not DATE_PATTERN.fullmatch(value):
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="invalid_date",
+                message=f"{field} must use YYYY-MM-DD format",
+                field=field,
+            )
+        )
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="invalid_date",
+                message=f"{field} must use YYYY-MM-DD format",
+                field=field,
+            )
+        )
+        return None

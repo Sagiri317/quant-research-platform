@@ -503,3 +503,28 @@ def test_run_factor_evaluation_cli_defaults_to_full_report_root(
         "reports/private_real/factor_evaluation/full_2024_2025"
     )
     assert captured["portfolio_mode"] == "long_short"
+
+
+def test_run_factor_evaluation_cli_derives_default_report_root_from_years(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def fake_run_processed_factor_evaluation(**kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame(), "manifest.json", []
+
+    monkeypatch.setattr(
+        run_factor_evaluation,
+        "run_processed_factor_evaluation",
+        fake_run_processed_factor_evaluation,
+    )
+
+    exit_code = run_factor_evaluation.main(
+        ["--start-year", "2023", "--end-year", "2025"]
+    )
+
+    assert exit_code == 0
+    assert captured["report_root"].as_posix() == (
+        "reports/private_real/factor_evaluation/full_2023_2025"
+    )

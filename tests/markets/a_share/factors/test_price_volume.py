@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.markets.a_share.factors.price_volume import (
@@ -52,6 +53,17 @@ def test_price_volume_factors_use_past_window_by_asset() -> None:
     assert first_asset.loc[2, "turnover_2d"] > 0
     assert first_asset.loc[2, "amihud_2d"] >= 0
     assert first_asset.loc[2, "amplitude_2d"] > 0
+
+
+def test_amihud_factor_treats_zero_amount_as_missing() -> None:
+    frame = make_mock_bar_panel()
+    frame.loc[frame["stock_code"] == "000001.SZ", "amount"] = 0.0
+
+    result = calculate_price_volume_factors(frame, windows=(2,))
+
+    first_asset = result[result["stock_code"] == "000001.SZ"].reset_index(drop=True)
+    assert first_asset["amihud_2d"].isna().all()
+    assert np.isfinite(result["amihud_2d"].dropna()).all()
 
 
 def test_forward_return_labels_use_next_execution_price() -> None:
