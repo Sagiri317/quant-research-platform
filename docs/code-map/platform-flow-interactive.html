@@ -210,7 +210,7 @@
       n("N22","run_repository","api","已实现 service","interfaces/api/services/run_repository.py","run roots、source_alias + run_id、loader wrapper、受控删除。",1080,590),
       n("N23","FastAPI create_app","api","已实现本地 app","interfaces/api/app.py","配置 app state 并注册 routers。",1320,590),
       n("N24","runs/evidence/table APIs","api","已实现 routes","routes/runs.py, routes/artifacts.py","run list、evidence、table preview、artifact route。",80,760),
-      n("N25","direct/ZIP downloads","api","已实现 routes/services","routes/downloads.py, services/download_service.py","只下载 manifest.display 暴露项。",330,760),
+      n("N25","direct/ZIP downloads","api","已实现 artifact/API 边界","artifacts/artifact_package.py, routes/downloads.py, services/download_service.py","只下载 manifest.display 暴露项；ZIP packaging 规则在 artifacts 层。",330,760),
       n("N26","comparison APIs","api","已实现 routes/services","routes/comparison.py, services/comparison_service.py","API-visible runs comparison。",590,760),
       n("N27","CSV upload API","api","保留入口","routes/uploads.py, services/upload_service.py","factor CSV template 与本地 CSV upload；不是 A 股主流程。",820,760),
       n("N28","React workbench","frontend","已实现前端入口","web/src/App.tsx","本地 evidence workbench，只消费 API。",1070,760),

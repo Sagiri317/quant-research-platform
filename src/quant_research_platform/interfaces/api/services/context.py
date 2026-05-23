@@ -7,12 +7,13 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
+from quant_research_platform.artifacts.artifact_package import (
+    ArtifactPackageError,
+    require_manifest_display_download_item,
+)
 from quant_research_platform.interfaces.api.models import RunRoot
 from quant_research_platform.interfaces.api.services.comparison_service import (
     comparison_index_csv_bytes,
-)
-from quant_research_platform.interfaces.api.services.download_service import (
-    ensure_download_item_exposed,
 )
 from quant_research_platform.interfaces.api.services.pipeline_service import (
     PipelineRunSummaryPayload,
@@ -49,14 +50,17 @@ class ApiContext:
         exposed_records = []
         for record in records:
             try:
-                ensure_download_item_exposed(record.manifest, "comparison.csv")
-            except HTTPException:
+                require_manifest_display_download_item(
+                    record.manifest,
+                    "comparison.csv",
+                )
+            except ArtifactPackageError as exc:
                 if (
                     required_ref is not None
                     and record.ref.source_alias == required_ref.source_alias
                     and record.ref.run_id == required_ref.run_id
                 ):
-                    raise
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
                 continue
             exposed_records.append(record)
         return exposed_records

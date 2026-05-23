@@ -140,7 +140,7 @@ Phase 1 中 `interfaces/api` 是本地 FastAPI 适配层；Phase 2 的 `apps/api
 - React frontend 只消费 API 返回的数据模型，不直接读本地文件，不重新计算 IC、RankIC、positions 或 turnover。
 - Factor/Pipeline Studio 只发起受控 pipeline 请求，不连接外部数据源或交易接口。
 - Factor Factory 前端浏览只展示 API / artifact 结果，不在前端重新计算 IC、PnL、positions 或 turnover。
-- 后续仍需单独处理的架构债包括 frontend feature split、artifact ZIP packaging 下沉到 artifacts，以及 eligibility / tradability 诊断可见化。
+- 已完成 artifact ZIP packaging 下沉到 artifacts；后续仍需单独处理的架构债包括 frontend feature split、完整 A 股 build runner 以及 eligibility / tradability 诊断可见化。
 
 ## Comparison
 

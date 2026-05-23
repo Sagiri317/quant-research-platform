@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from quant_research_platform.artifacts import load_evaluation_set
 from quant_research_platform.interfaces.api.app import create_app
 from quant_research_platform.interfaces.api.models import RunRoot
+from quant_research_platform.interfaces.api.services import download_service
 from quant_research_platform.interfaces.api.services.download_service import (
     selected_download_response,
 )
@@ -23,6 +24,23 @@ from quant_research_platform.interfaces.api.services.run_repository import (
     normalize_run_roots,
 )
 from tests.interfaces.api.artifact_run_fixtures import write_evaluation_set
+
+
+def test_download_service_does_not_keep_legacy_artifact_helper_entries():
+    legacy_helpers = {
+        "artifact_relative_path",
+        "artifact_relative_path_from_manifest",
+        "display_download_items",
+        "download_item",
+        "download_item_path",
+        "ensure_download_item_exposed",
+        "json_bytes",
+        "table_relative_path",
+        "validate_cache_path_segment",
+        "validate_download_item_name",
+    }
+
+    assert legacy_helpers.isdisjoint(set(dir(download_service)))
 
 
 def test_api_lists_runs_from_multiple_aliased_roots(tmp_path):
@@ -1094,6 +1112,18 @@ def test_api_report_markdown_requires_canonical_report_artifact(tmp_path):
 
     assert response.status_code == 422
     assert "Private Report" not in response.text
+
+
+def test_api_report_markdown_returns_422_when_file_missing(tmp_path):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    (run_dir / "report.md").unlink()
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/report.md")
+
+    assert response.status_code == 422
 
 
 def test_api_evidence_report_must_be_exposed_by_display_downloads(tmp_path):

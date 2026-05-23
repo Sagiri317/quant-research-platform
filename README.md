@@ -158,7 +158,7 @@ Phase 1 验收结论见 [docs/architecture/phase-1-acceptance-record.md](docs/ar
 - A 股 processed-existing pipeline runner 小样本示例和 old/new 比较；
 - Factor Factory 小样本示例。
 
-本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)，当前优先级包括：前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
+本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。当前 ZIP packaging 规则已下沉到 `artifacts/`；下一批优先级仍包括前端 feature split、eligibility / tradability 诊断可见化和完整 A 股 build runner。
 
 新增或修改 artifacts 时必须同时检查：
 

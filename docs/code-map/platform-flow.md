@@ -137,7 +137,7 @@ CSMAR raw CSV
 | N22 | `run_repository` | 已实现 API service | `src/quant_research_platform/interfaces/api/services/run_repository.py` | 管理 run roots、`source_alias + run_id` 身份、run index、加载和受控 uploaded-run 删除。 |
 | N23 | FastAPI `create_app` | 已实现本地 app 装配 | `src/quant_research_platform/interfaces/api/app.py` | 配置 run roots、pipeline roots、Factor Factory root 和 routers；不是 Phase 2 可部署 `apps/api`。 |
 | N24 | runs/evidence/table APIs | 已实现 routes | `src/quant_research_platform/interfaces/api/routes/runs.py`, `artifacts.py` | 暴露 run list、evidence payload、metrics/portfolio/diagnostics/breakdowns preview 和单项 artifact route。 |
-| N25 | direct/ZIP downloads | 已实现 routes/services | `src/quant_research_platform/interfaces/api/routes/downloads.py`, `services/download_service.py` | direct download 和 ZIP download 只允许 `manifest.display.downloads.items` 暴露的文件。 |
+| N25 | direct/ZIP downloads | 已实现 artifact/API 边界 | `src/quant_research_platform/artifacts/artifact_package.py`, `src/quant_research_platform/interfaces/api/routes/downloads.py`, `services/download_service.py` | direct download 和 ZIP download 只允许 `manifest.display.downloads.items` 暴露的文件；ZIP packaging 规则在 artifacts 层，API service 返回 HTTP response。 |
 | N26 | comparison APIs | 已实现 routes/services | `src/quant_research_platform/interfaces/api/routes/comparison.py`, `services/comparison_service.py` | 汇总 API-visible runs 的 comparison JSON 和 CSV；保留 `source_alias`。 |
 | N27 | CSV upload API | 保留入口 | `src/quant_research_platform/interfaces/api/routes/uploads.py`, `services/upload_service.py` | 本地调试/兼容入口；提供 factor CSV template，并从用户上传 CSV 构造 `EvaluationSpec`，不是 A 股主流程。 |
 | N28 | React workbench | 已实现前端入口 | `web/src/App.tsx` | 本地 evidence workbench；消费 API，不直接读本地文件，不重算 IC、PnL、positions 或 turnover。 |
@@ -275,7 +275,7 @@ CSMAR raw CSV
 
 1. 完整 A 股 build runner：`processed_existing` 已实现，但 raw/interim/panel/factors 全链路重建不应混入当前 runner。
 2. 前端 feature split：当前 `web/src` 仍是平铺文件，后续可按 Evidence、Pipeline、Factor Factory、Uploads、shared 拆分。
-3. Artifact ZIP packaging 下沉：当前 ZIP packaging 在 API service，后续可抽到 `artifacts/` 纯函数。
+3. Artifact ZIP packaging 下沉：selected ZIP packaging 规则已下沉到 `artifacts/artifact_package.py`，后续新增下载项仍必须经过 `manifest.display`。
 4. Eligibility / tradability 可见诊断：当前列进入 panel/factor/evaluation，后续应增加覆盖数和过滤影响 artifact。
 5. ML prediction / risk / regime / portfolio optimization：属于 research layer 后续能力，不是 Phase 1 阻塞项。
 6. Crypto 和其他市场：只能作为 planned / disabled 能力表述；不得保留空 implementation package。

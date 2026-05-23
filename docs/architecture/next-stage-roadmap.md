@@ -100,6 +100,11 @@ src/quant_research_platform/artifacts/artifact_package.py
 - `comparison.csv` 动态生成逻辑保持清晰边界。
 - API tests 不降覆盖。
 
+Implementation note:
+
+- Selected ZIP packaging rules now live in `src/quant_research_platform/artifacts/artifact_package.py`.
+- API download service remains responsible for HTTP responses and dynamic API-visible content such as `comparison.csv`.
+
 ## N4 前端 Feature Split
 
 目标：

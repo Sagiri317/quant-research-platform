@@ -43,7 +43,7 @@ Phase 1 验收口径下已补齐：
 
 Phase 1 之后下一阶段设计：
 
-1. 前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
+1. Artifact ZIP packaging 下沉已在 N3 工作树完成；后续继续做前端 feature split、完整 A 股 build runner、eligibility / tradability 诊断可见化。
 2. 完整 A 股 build runner、ML prediction pipeline、风险/中性化扩展等后续能力需要按 `docs/architecture/next-stage-roadmap.md` 单独设计和验收。
 
 ## 当前研究资产
@@ -102,3 +102,4 @@ Phase 1 之后下一阶段设计：
 | 2026-05-24 | docs sync | 已重构 `docs/code-map/`，删除旧 code-map 分片，新增 A 股 pipeline 与 evaluation/artifact/API 合同地图；同步根文档、architecture 文档和状态文件的 Phase 1 当前表述。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
 | 2026-05-24 | architecture docs | 已合并最终目录结构和未来能力池为 `target-architecture-and-capabilities.md`，新增 `phase-1-acceptance-record.md` 和 `next-stage-roadmap.md`，删除旧 Phase 1 设计、任务拆解和交接文档；下一阶段任务已提上日程。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
 | 2026-05-24 | root docs sync | 已按当前前后端代码、API route、目录结构、文档新结构同步根目录文档，统一 Phase 1 验收记录、下一阶段路线图和 code-map 口径。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
+| 2026-05-24 | architecture debt | N3 Artifact ZIP packaging 下沉完成：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`，API download service 保留 HTTP response adapter 职责；未触碰 N1 runner 或 web。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
