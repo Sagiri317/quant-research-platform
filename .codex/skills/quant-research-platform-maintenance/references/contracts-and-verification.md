@@ -66,6 +66,16 @@ Do not document stale `scripts/local/` or `scripts/build/` command paths.
 
 `scripts/phase1_acceptance.py` is a private Phase 1 acceptance helper. Use it only when the task intentionally covers acceptance baseline renaming, 2024 acceptance run regeneration, compact comparison, or Factor Factory smoke under `reports/private_real/`. It is not a routine check for docs-only, source-only, or public-safe work.
 
+## Docs and Code-Map Drift Checks
+
+When docs describe artifact, API, download, frontend, A-share pipeline, or Factor Factory contracts, verify them against code before preserving names or commands:
+
+- Check FastAPI route coverage against `docs/code-map/platform-flow.md`; include route additions such as upload templates, delete routes, comparison, pipeline, and Factor Factory endpoints.
+- Check referenced source/doc/script paths in root docs, `docs/architecture/`, and `docs/code-map/`; future-target paths must be explicitly described as planned or suggested, not current files.
+- Search for retired document names, old code-map fragments, stale module paths, stale script directories, retired schema fields, and hidden frontend/backend shortcuts.
+- Run Markdown link checks for root docs plus `docs/`, and use `git diff --check` before claiming the docs are synchronized.
+- For docs-only work, prefer lightweight import/route checks over private acceptance runs; do not use `scripts/phase1_acceptance.py` unless private Phase 1 evidence regeneration is in scope.
+
 ## Automated Test Surfaces
 
 For every new validation rule, add one positive path and at least one negative path when code changes are in scope. For retired behavior, prefer an absence or rejection test; keyword searches are only a backstop.

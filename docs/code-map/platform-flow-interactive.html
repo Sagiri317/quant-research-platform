@@ -1,1056 +1,418 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>平台接口与核心流向交互图</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quant Research Platform Code Map</title>
   <style>
     :root {
-      --bg: #f5f2ea;
-      --ink: #18211f;
-      --muted: #5f6a64;
-      --line: #a8b0a9;
-      --panel: #fffdf7;
-      --panel-2: #ece7dc;
-      --accent: #0f7f77;
-      --accent-2: #b6422d;
-      --done: #0d6f65;
-      --todo: #9a4936;
-      --shadow: 0 18px 45px rgba(37, 40, 36, 0.12);
-      --radius: 8px;
+      --bg: #f7f9fb;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #5f6b7a;
+      --line: #d9e1ea;
+      --green: #0d6f65;
+      --blue: #2f68b1;
+      --amber: #a8660a;
+      --purple: #7056b8;
+      --red: #b33a3a;
+      --shadow: 0 10px 26px rgba(23, 32, 42, 0.12);
     }
-
-    * {
-      box-sizing: border-box;
-    }
-
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      min-height: 100vh;
-      background:
-        linear-gradient(90deg, rgba(24, 33, 31, 0.035) 1px, transparent 1px),
-        linear-gradient(rgba(24, 33, 31, 0.035) 1px, transparent 1px),
-        var(--bg);
-      background-size: 24px 24px;
+      font: 14px/1.5 "Segoe UI", Arial, sans-serif;
       color: var(--ink);
-      font-family: "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
-      overflow: hidden;
+      background: var(--bg);
     }
-
-    .app {
-      display: grid;
-      grid-template-columns: 1fr 360px;
-      grid-template-rows: auto 1fr;
-      min-height: 100vh;
-    }
-
     header {
-      grid-column: 1 / -1;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 18px;
-      padding: 14px 18px;
-      border-bottom: 1px solid rgba(24, 33, 31, 0.12);
-      background: rgba(255, 253, 247, 0.92);
-      backdrop-filter: blur(10px);
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
     }
-
-    h1 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 700;
-      letter-spacing: 0;
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .subtitle { color: var(--muted); margin: 0; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(720px, 1fr) 430px;
+      min-height: calc(100vh - 75px);
     }
-
-    .subtitle {
-      margin-top: 3px;
-      color: var(--muted);
-      font-size: 12px;
+    .canvas-wrap {
+      position: relative;
+      overflow: hidden;
+      border-right: 1px solid var(--line);
+      background:
+        linear-gradient(rgba(23, 32, 42, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 32, 42, 0.05) 1px, transparent 1px);
+      background-size: 24px 24px;
     }
-
-    .tabs {
+    .toolbar {
+      position: absolute;
+      z-index: 5;
+      left: 14px;
+      top: 14px;
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
-      justify-content: flex-end;
+      max-width: calc(100% - 28px);
     }
-
-    button {
-      border: 1px solid rgba(24, 33, 31, 0.18);
+    button, select, input {
+      border: 1px solid var(--line);
       background: var(--panel);
       color: var(--ink);
-      min-height: 34px;
-      padding: 7px 12px;
       border-radius: 6px;
+      padding: 7px 10px;
       font: inherit;
-      font-size: 13px;
-      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(23, 32, 42, 0.05);
     }
-
-    button:hover {
-      border-color: rgba(15, 127, 119, 0.55);
-      color: var(--accent);
-    }
-
-    button.active {
-      background: var(--accent);
-      color: white;
-      border-color: var(--accent);
-    }
-
-    .canvas-shell {
-      position: relative;
-      min-width: 0;
-      overflow: hidden;
-    }
-
-    .toolbar {
-      position: absolute;
-      z-index: 4;
-      top: 16px;
-      left: 16px;
-      display: flex;
-      gap: 8px;
-      padding: 8px;
-      border: 1px solid rgba(24, 33, 31, 0.12);
-      border-radius: var(--radius);
-      background: rgba(255, 253, 247, 0.9);
-      box-shadow: var(--shadow);
-    }
-
-    .toolbar button {
-      min-width: 34px;
-      padding: 6px 9px;
-    }
-
-    .legend {
-      position: absolute;
-      z-index: 4;
-      left: 16px;
-      bottom: 16px;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      padding: 9px 11px;
-      border: 1px solid rgba(24, 33, 31, 0.12);
-      border-radius: var(--radius);
-      background: rgba(255, 253, 247, 0.92);
-      color: var(--muted);
-      font-size: 12px;
-      box-shadow: var(--shadow);
-    }
-
-    .legend span {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .sample-line {
-      width: 28px;
-      height: 0;
-      border-top: 2px solid var(--done);
-    }
-
-    .sample-line.todo {
-      border-top: 2px dashed var(--todo);
-    }
-
-    svg {
-      width: 100%;
-      height: calc(100vh - 64px);
-      display: block;
-      cursor: grab;
-      user-select: none;
-    }
-
-    svg.dragging {
-      cursor: grabbing;
-    }
-
+    button { cursor: pointer; }
+    input { width: 230px; }
+    svg { width: 100%; height: 100%; display: block; }
     .edge {
+      stroke: #7b8794;
+      stroke-width: 2;
       fill: none;
-      stroke: var(--done);
-      stroke-width: 2.2;
-      marker-end: url(#arrowDone);
+      marker-end: url(#arrow);
+      opacity: 0.86;
       cursor: pointer;
     }
-
-    .edge.todo {
-      stroke: var(--todo);
-      stroke-dasharray: 8 7;
-      marker-end: url(#arrowTodo);
-    }
-
-    .edge:hover {
-      stroke-width: 3.2;
-    }
-
-    .edge.evaluation {
-      stroke-width: 3.3;
-    }
-
-    .node {
-      cursor: move;
-    }
-
+    .edge.active { stroke: var(--red); stroke-width: 4; opacity: 1; }
     .node rect {
       fill: var(--panel);
-      stroke: rgba(24, 33, 31, 0.18);
-      stroke-width: 1.2;
+      stroke: var(--line);
+      stroke-width: 1.5;
       rx: 8;
-      filter: drop-shadow(0 10px 14px rgba(37, 40, 36, 0.10));
+      filter: drop-shadow(0 4px 8px rgba(23, 32, 42, 0.12));
     }
-
-    .node.done rect {
-      stroke: rgba(13, 111, 101, 0.5);
-    }
-
-    .node.evaluation rect {
-      fill: #e8f6f2;
-      stroke: rgba(13, 111, 101, 0.82);
-      stroke-width: 2.2;
-    }
-
-    .node.todo rect {
-      stroke: rgba(154, 73, 54, 0.55);
-      fill: #fff7f1;
-    }
-
-    .node.selected rect {
-      stroke-width: 2.4;
-      stroke: var(--accent);
-    }
-
-    .node-title {
-      fill: var(--ink);
-      font-size: 13px;
-      font-weight: 700;
-      pointer-events: none;
-    }
-
-    .node-kind {
-      fill: var(--muted);
-      font-size: 11px;
-      pointer-events: none;
-    }
-
+    .node text { pointer-events: none; }
+    .node .id { font-size: 11px; fill: var(--muted); }
+    .node .label { font-size: 13px; font-weight: 700; fill: var(--ink); }
+    .node.active rect { stroke: var(--red); stroke-width: 3; }
+    .node[data-group="a_share"] rect { stroke: var(--green); }
+    .node[data-group="evaluation"] rect { stroke: var(--blue); }
+    .node[data-group="api"] rect { stroke: var(--purple); }
+    .node[data-group="frontend"] rect { stroke: #377f9d; }
+    .node[data-group="pipeline"] rect { stroke: var(--amber); }
+    .node[data-group="factory"] rect { stroke: #8f5d24; }
+    .node[data-group="cli"] rect { stroke: #59636f; }
     aside {
-      min-width: 0;
-      border-left: 1px solid rgba(24, 33, 31, 0.12);
-      background: rgba(255, 253, 247, 0.94);
-      padding: 18px;
       overflow: auto;
-      height: calc(100vh - 64px);
-    }
-
-    .detail-card {
-      border: 1px solid rgba(24, 33, 31, 0.12);
-      border-radius: var(--radius);
+      padding: 18px;
       background: var(--panel);
-      padding: 16px;
-      box-shadow: var(--shadow);
     }
-
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 700;
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 14px;
+      box-shadow: 0 2px 6px rgba(23, 32, 42, 0.04);
     }
-
-    .detail-card h2 {
-      margin: 10px 0 8px;
-      font-size: 20px;
-      line-height: 1.25;
-    }
-
-    .detail-card p {
-      margin: 8px 0;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.65;
-    }
-
+    .card h2 { font-size: 18px; margin: 0 0 8px; }
+    .card h3 { font-size: 15px; margin: 14px 0 6px; }
     .meta {
-      display: grid;
-      gap: 8px;
-      margin-top: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 8px 0;
     }
-
-    .meta-row {
-      padding: 9px 10px;
-      border-radius: 6px;
-      background: var(--panel-2);
-      font-size: 12px;
-      line-height: 1.5;
-      overflow-wrap: anywhere;
-    }
-
-    .meta-row strong {
-      display: block;
-      margin-bottom: 3px;
-      color: var(--ink);
-    }
-
-    .notes {
-      margin-top: 16px;
-      display: grid;
-      gap: 8px;
-    }
-
-    .note {
-      border-left: 3px solid var(--accent);
-      padding: 8px 10px;
-      background: rgba(15, 127, 119, 0.07);
+    .tag {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
       color: var(--muted);
+      background: #f8fafc;
       font-size: 12px;
-      line-height: 1.6;
     }
-
-    @media (max-width: 960px) {
-      .app {
-        grid-template-columns: 1fr;
-        grid-template-rows: auto 58vh auto;
-      }
-
-      header {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-
-      .tabs {
-        justify-content: flex-start;
-      }
-
-      svg {
-        height: 58vh;
-      }
-
-      aside {
-        border-left: 0;
-        border-top: 1px solid rgba(24, 33, 31, 0.12);
-        height: auto;
-        max-height: none;
-      }
+    code { background: #f1f5f9; padding: 1px 4px; border-radius: 4px; }
+    ul { padding-left: 18px; }
+    .list-item {
+      padding: 7px 0;
+      border-bottom: 1px solid #edf1f5;
+      cursor: pointer;
+    }
+    .list-item:last-child { border-bottom: 0; }
+    .list-item strong { display: block; }
+    .muted { color: var(--muted); }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      .canvas-wrap { height: 760px; border-right: 0; border-bottom: 1px solid var(--line); }
     }
   </style>
 </head>
 <body>
-  <div class="app">
-    <header>
-      <div>
-        <h1>平台接口与核心流向交互图</h1>
-        <div class="subtitle">拖动节点调整布局，滚轮缩放，拖拽空白处平移，点击节点或边查看说明。</div>
-      </div>
-      <div class="tabs" id="tabs"></div>
-    </header>
-
-    <main class="canvas-shell">
+  <header>
+    <h1>Quant Research Platform Code Map</h1>
+    <p class="subtitle">当前 Phase 1 代码事实：A 股数据链路、evaluation artifacts、API/download/frontend、processed-existing runner 和 Factor Factory。</p>
+  </header>
+  <main class="layout">
+    <section class="canvas-wrap" id="canvasWrap">
       <div class="toolbar">
-        <button type="button" id="zoomIn" title="放大">＋</button>
-        <button type="button" id="zoomOut" title="缩小">－</button>
-        <button type="button" id="resetView" title="重置视图">重置</button>
+        <select id="groupFilter" aria-label="分组筛选">
+          <option value="all">全部分组</option>
+          <option value="a_share">A 股数据</option>
+          <option value="evaluation">Evaluation / Artifacts</option>
+          <option value="api">API</option>
+          <option value="frontend">Frontend</option>
+          <option value="pipeline">Pipeline</option>
+          <option value="factory">Factor Factory</option>
+          <option value="cli">CLI</option>
+        </select>
+        <input id="searchBox" placeholder="搜索节点、边、文件或入口" />
+        <button id="resetBtn" type="button">重置视图</button>
       </div>
-      <svg id="graph" aria-label="交互式流程图">
+      <svg id="map" viewBox="0 0 1600 1120" role="img" aria-label="Quant Research Platform code map">
         <defs>
-          <marker id="arrowDone" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
-            <path d="M2,2 L10,6 L2,10 Z" fill="#0d6f65"></path>
-          </marker>
-          <marker id="arrowTodo" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
-            <path d="M2,2 L10,6 L2,10 Z" fill="#9a4936"></path>
+          <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8794"></path>
           </marker>
         </defs>
-        <g id="viewport">
-          <g id="edges"></g>
-          <g id="nodes"></g>
-        </g>
+        <g id="viewport"></g>
       </svg>
-      <div class="legend">
-        <span><i class="sample-line"></i>已实现</span>
-        <span><i class="sample-line todo"></i>待实现或待验证</span>
-        <span><i class="sample-line" style="border-top-width:3px"></i>A股核心主链路</span>
-      </div>
-    </main>
-
+    </section>
     <aside>
-      <div class="detail-card" id="detail"></div>
-      <div class="notes" id="viewNotes"></div>
+      <div class="card" id="detail">
+        <h2>选择节点或边</h2>
+        <p class="muted">点击图中节点或边查看功能、状态、代码位置和边界说明。也可以用搜索框过滤。</p>
+      </div>
+      <div class="card">
+        <h2>节点索引</h2>
+        <div id="nodeList"></div>
+      </div>
+      <div class="card">
+        <h2>边索引</h2>
+        <div id="edgeList"></div>
+      </div>
     </aside>
-  </div>
-
+  </main>
   <script>
-    const W = 220;
-    const H = 72;
+    const nodes = [
+      n("N01","CSMAR raw CSV","a_share","已实现私有输入","data/raw_private/csmar/","用户手工导出的 CSMAR 原始文件；不提交、不公开、不自动下载。",80,80),
+      n("N02","build_interim CLI","a_share","已实现入口","markets/implementations/a_share/csmar/build_interim.py","标准化 raw CSV，写出 interim CSV。",290,80),
+      n("N03","interim CSV","a_share","已实现私有产物","data/interim_private/csmar/","可审计中间层，供 panel builder 读取。",500,80),
+      n("N04","build_panel CLI","a_share","已实现入口","markets/implementations/a_share/datasets/build_panel.py","从 interim yearly CSV 构建 full research panel。",710,80),
+      n("N05","build_panel_full_from_interim","a_share","已实现函数","datasets/build_panel.py","合并行情、基础信息、市值并生成 universe/tradability 列。",930,80),
+      n("N06","research panel Parquet","a_share","已实现私有产物","data/processed_private/csmar/panel_full/","宽表研究面板，供 factor builder 读取。",1190,80),
+      n("N07","build_factors CLI","a_share","已实现入口","markets/implementations/a_share/factors/build_factors.py","从 panel 生成 slim factor and label table。",80,250),
+      n("N08","calculate_price_volume_factor_full","a_share","已实现函数","factors/build_factors.py","计算 price-volume factors 和 forward labels。",320,250),
+      n("N09","factor and label Parquet","a_share","已实现私有产物","data/processed_private/csmar/price_volume_factors_full/","A 股 adapter、runner 和 Factor Factory 的主要输入。",610,250),
+      n("N10","A 股 run_factor_evaluation CLI","a_share","已实现入口","evaluation/run_factor_evaluation.py","按年份定位 factor file，按日期过滤 trade_date。",900,250),
+      n("N11","run_processed_factor_evaluation","a_share","已实现编排","evaluation/evaluation_adapter.py","覆盖文件选择、label availability、逐 label evaluation run。",1190,250),
+      n("N12","read_evaluation_frame / read_factor_frame","a_share","已实现读取","evaluation/evaluation_adapter.py","读取所需列并保留 factor、label、PnL、risk、tradability。",80,420),
+      n("N13","EvaluationSpec","evaluation","已实现 public contract","evaluations/evaluation_spec.py","统一 evaluation 输入合同。",380,420),
+      n("N14","evaluate_to_payload","evaluation","已实现内部边界","evaluations/evaluation_runner.py","纯计算 payload，不写 artifacts。",610,420),
+      n("N15","run_evaluation","evaluation","已实现 public entrypoint","evaluations/evaluation_runner.py","对外稳定入口，连接 payload 和 writer。",850,420),
+      n("N16","DataFrame / Tensor kernels","evaluation","已实现计算路径","kernels/dataframe/, kernels/tensor/","数值计算实现，不依赖 API 或 market module。",1070,420),
+      n("N17","write_evaluation_set_artifacts","evaluation","已实现 writer","artifacts/artifact_writer.py","写 schema 0.5 evaluation-set artifacts。",1320,420),
+      n("N18","EvaluationSetResult","evaluation","已实现结果对象","evaluations/evaluation_result.py","run_evaluation 返回对象。",80,590),
+      n("N19","schema 0.5 run directory","evaluation","已实现产物合同","reports/private_real/factor_evaluation/, reports/runs/","completed evaluation-set artifacts。",330,590),
+      n("N20","manifest.display","evaluation","已实现展示合同","artifacts/display_manifest.py, manifest_validation.py","API、downloads、CSV preview、charts、frontend 的唯一展示合同。",600,590),
+      n("N21","load_evaluation_set","evaluation","已实现 loader","artifacts/artifact_loader.py","严格读取 schema 0.5 artifacts。",850,590),
+      n("N22","run_repository","api","已实现 service","interfaces/api/services/run_repository.py","run roots、source_alias + run_id、loader wrapper、受控删除。",1080,590),
+      n("N23","FastAPI create_app","api","已实现本地 app","interfaces/api/app.py","配置 app state 并注册 routers。",1320,590),
+      n("N24","runs/evidence/table APIs","api","已实现 routes","routes/runs.py, routes/artifacts.py","run list、evidence、table preview、artifact route。",80,760),
+      n("N25","direct/ZIP downloads","api","已实现 routes/services","routes/downloads.py, services/download_service.py","只下载 manifest.display 暴露项。",330,760),
+      n("N26","comparison APIs","api","已实现 routes/services","routes/comparison.py, services/comparison_service.py","API-visible runs comparison。",590,760),
+      n("N27","CSV upload API","api","保留入口","routes/uploads.py, services/upload_service.py","factor CSV template 与本地 CSV upload；不是 A 股主流程。",820,760),
+      n("N28","React workbench","frontend","已实现前端入口","web/src/App.tsx","本地 evidence workbench，只消费 API。",1070,760),
+      n("N29","ArtifactDownloads","frontend","已实现下载 UI","web/src/ArtifactDownloads.tsx","display-driven direct/ZIP download。",1320,760),
+      n("N30","Factor Studio","frontend","已实现前端入口","web/src/FactorStudio.tsx","受控 factor draft。",80,930),
+      n("N31","Pipeline Builder","frontend","已实现前端入口","web/src/PipelineBuilder.tsx","当前 UI 提交 snapshot；后端同一 API 支持 processed-existing。",300,930),
+      n("N32","POST /api/pipeline-runs","pipeline","已实现 API","routes/pipeline.py, services/pipeline_service.py","支持 snapshot 和 processed_existing。",540,930),
+      n("N33","pipeline snapshot","pipeline","已实现产物","reports/private_real/pipeline_runs/","run_config.yaml、warnings.json、summary.md。",780,930),
+      n("N34","processed-existing runner","pipeline","已实现轻量模式","pipelines/a_share/runner.py","调用 A 股 adapter，不重建 raw/interim/panel/factors。",1020,930),
+      n("N35","Factor template registry","factory","已实现 registry","research/factor_factory/factor_registry.py","受控 templates、inputs、outputs、capabilities。",1260,930),
+      n("N36","Factor Factory batch runner","factory","已实现第一版","research/factor_factory/batch_runner.py","批量调用 processed-existing runner。",80,1070),
+      n("N37","Factor Factory artifacts","factory","已实现 artifact 0.1","research/factor_factory/reports.py","candidate_summary、failed_candidates、manifest.display。",330,1070),
+      n("N38","Factor Factory APIs","factory","已实现 routes","routes/factor_factory.py","浏览和下载 Factor Factory display artifacts。",590,1070),
+      n("N39","qrp CLI","cli","已实现入口","interfaces/cli/commands.py","evaluate-parquet、compare、a-share help commands。",850,1070),
+      n("N40","write_run_comparison","cli","已实现离线比较","artifacts/artifact_comparison.py","qrp compare 的离线 comparison writer。",1080,1070)
+    ];
 
-    const views = {
-      platform: {
-        title: '全平台',
-        subtitle: '平台全局接口、A股链路、evaluation、artifact、API、前端和待实现 runner。',
-        notes: [
-          '这张图适合检查平台边界和入口暴露是否一致。',
-          '虚线集中在 Pipeline Builder 到真实 A股 runner 的缺口。'
-        ],
-        nodes: [
-          n('raw', 'CSMAR 原始 CSV', '数据', '私有 raw 数据入口，不提交。', 'data/raw_private/csmar/', 'done', 40, 170),
-          n('interim_cli', 'build_interim CLI', '入口', '标准化 CSMAR raw 到 interim。', 'markets/implementations/a_share/csmar/build_interim.py', 'done', 300, 170),
-          n('interim', 'interim 标准化 CSV', '数据', '审计层标准化数据。', 'data/interim_private/csmar/', 'done', 560, 170),
-          n('panel_cli', 'build_panel CLI', '入口', '从 interim 构建 full research panel。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 820, 170),
-          n('panel_func', 'build_panel_full_from_interim', '函数', 'A股 panel 构建函数级入口。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 1080, 170),
-          n('panel_file', 'research panel Parquet', '数据', '供因子构建读取的宽表。', 'data/processed_private/csmar/panel_full/', 'done', 1340, 170),
-          n('factors_cli', 'build_factors CLI', '入口', '从 panel 生成因子和 label。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1600, 170),
-          n('factors_func', 'calculate_price_volume_factor_full', '函数', 'A股因子和 label 计算入口。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1860, 170),
-          n('factor_file', 'factor and label Parquet', '数据', 'slim factor table。', 'processed_private/csmar/price_volume_factors_full/', 'done', 2120, 170),
-          n('eval_cli', 'run_factor_evaluation CLI', '入口', 'A股专用评估入口。', 'markets/implementations/a_share/evaluation/run_factor_evaluation.py', 'done', 2380, 170),
-          n('processed_eval', 'run_processed_factor_evaluation', '函数', '定位覆盖年份的 factor Parquet，汇总 label 可用性，并逐 label 调 evaluation layer。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2640, 60),
-          n('read_frame', 'read_evaluation_frame / read_factor_frame', '接口', '读取并过滤 evaluation 需要的 A股 factor table 列。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2640, 170),
-          n('spec', 'EvaluationSpec', '核心输入', '统一评估输入契约。', 'evaluations/evaluation_spec.py', 'done', 2900, 170),
-          n('evaluation', 'run_evaluation', '核心入口', 'evaluation layer 评估主入口。', 'evaluations/evaluation_runner.py', 'done', 3160, 170),
-          n('engine_df', 'DataFrame evaluator', '引擎', 'DataFrame 评估路径。', 'kernels/dataframe/', 'done', 3420, 90),
-          n('engine_tensor', 'Tensor evaluator', '引擎', 'Tensor 评估路径。', 'kernels/tensor/', 'done', 3420, 250),
-          n('eval_tables', 'tables / summary / report', '中间结果', 'run_evaluation 内部汇总出的 artifact writer 输入。', 'evaluations/evaluation_runner.py', 'done', 3680, 170),
-          n('writer', 'write_evaluation_set_artifacts', '函数', '写出 schema 0.5 artifacts。', 'artifacts/artifact_writer.py', 'done', 3940, 170),
-          n('result', 'EvaluationSetResult', '核心输出', 'run_evaluation 返回对象，包含 summary、metrics、combinations 和 artifact 路径引用。', 'evaluations/evaluation_result.py', 'done', 4200, 290),
-          n('run_dir', 'schema 0.5 run directory', '产物', 'summary、metrics、portfolio、diagnostics、report、manifest。', 'reports/private_real/factor_evaluation/', 'done', 4200, 120),
-          n('manifest', 'manifest.display', '契约', 'display_manifest.py 构建展示契约，manifest_validation.py 校验 display。', 'artifacts/display_manifest.py + artifacts/manifest_validation.py', 'done', 4460, 70),
-          n('repo', 'run_repository', '模块', 'run root、identity、索引、加载和删除。', 'api/services/run_repository.py', 'done', 4460, 270),
-          n('loader', 'load_evaluation_set', '函数', 'artifact_loader.py 提供加载入口并复用 schema/display validation。', 'artifacts/artifact_loader.py', 'done', 4720, 270),
-          n('api', 'FastAPI local app', '入口', '本地 evidence API。', 'api/app.py', 'done', 4980, 170),
-          n('api_runs', 'runs/evidence APIs', '入口', 'run 列表、证据、CSV 预览。', 'api/app.py', 'done', 5240, 80),
-          n('api_download', 'download APIs', '入口', '直接下载和 ZIP 下载。', 'api/services/download_service.py', 'done', 5240, 250),
-          n('api_compare', 'comparison APIs', '入口', '多 run 对比 JSON/CSV。', 'api/app.py', 'done', 5240, 420),
-          n('web', 'React workbench', '入口', '本地前端工作台。', 'web/src/App.tsx', 'done', 5500, 170),
-          n('runs_ui', 'Results UI', '页面', '浏览 runs、图表、表格、报告。', 'web/src/ResultsView.tsx', 'done', 5760, 170),
-          n('download_ui', 'ArtifactDownloads', '组件', 'manifest.display 驱动下载。', 'web/src/ArtifactDownloads.tsx', 'done', 6020, 250),
-          n('factor_studio', 'Factor Studio', '页面', '因子表达式草稿入口。', 'web/src/App.tsx', 'done', 5500, -20),
-          n('pipeline_builder', 'Pipeline Builder', '页面', '提交因子表达式和 pipeline 配置。', 'web/src/PipelineBuilder.tsx', 'done', 5760, -20),
-          n('pipeline_api', 'POST pipeline snapshot', '入口', '当前只保存配置快照。', 'api/app.py', 'done', 6020, -20),
-          n('pipeline_store', 'pipeline snapshot', '存储', '保存 pipeline 配置和 checkpoint；配置样例位于 config/a_share/pipelines/。', 'reports/private_real/pipeline_runs/', 'done', 6280, -20),
-          n('runner_light', 'A股 Pipeline Runner', '轻量入口', '支持 processed-existing 评价；完整 build runner 仍属后续设计。', 'pipelines/a_share/runner.py', 'done', 6280, 90),
-          n('upload_api', 'POST uploaded panel run', '入口', '上传 CSV 评估保留入口。', 'api/app.py', 'done', 4980, 420),
-          n('upload_service', 'create_uploaded_run', '函数', '上传 CSV 转 EvaluationSpec。', 'api/services/upload_service.py', 'done', 5240, 590),
-          n('qrp', 'qrp CLI', '入口', 'Typer 总入口。', 'cli/commands.py', 'done', 2900, 520),
-          n('qrp_ashare', 'qrp a-share 命令组', '入口', '当前子命令提示对应模块 CLI 用法。', 'cli/commands.py', 'done', 3160, 500),
-          n('qrp_eval', 'qrp evaluate-parquet', '入口', '通用 Parquet 适配检查。', 'cli/commands.py', 'done', 3160, 620),
-          n('qrp_compare', 'qrp compare', '入口', '离线比较多个 run。', 'cli/commands.py', 'done', 3160, 760),
-          n('aux_cli', 'A股辅助/诊断 CLI', '入口', 'inspect、summary、space gate 等模块 CLI，读取各阶段产物做检查或汇总。', 'markets/implementations/a_share/*', 'done', 1860, 520),
-          n('compare_writer', 'write_run_comparison', '函数', '离线写出 comparison。', 'artifacts/artifact_comparison.py', 'done', 3420, 760)
-        ],
-        edges: [
-          e('raw', 'interim_cli', 'raw 进入标准化入口'),
-          e('interim_cli', 'interim', '写出 interim'),
-          e('interim', 'panel_cli', 'panel CLI 读取 interim'),
-          e('panel_cli', 'panel_func', 'CLI 调用 panel 函数'),
-          e('panel_func', 'panel_file', '写出 research panel'),
-          e('panel_file', 'factors_cli', '因子 CLI 读取 panel'),
-          e('factors_cli', 'factors_func', 'CLI 调用因子函数'),
-          e('factors_func', 'factor_file', '写出 factor and label table'),
-          e('factor_file', 'eval_cli', 'A股评估读取 factor table'),
-          e('eval_cli', 'processed_eval', '进入 A股评估编排函数'),
-          e('processed_eval', 'read_frame', '读取和过滤 factor table'),
-          e('read_frame', 'spec', '生成 EvaluationSpec'),
-          e('spec', 'evaluation', '进入 evaluation layer'),
-          e('evaluation', 'engine_df', 'DataFrame 路径'),
-          e('evaluation', 'engine_tensor', 'Tensor 路径'),
-          e('engine_df', 'eval_tables', '生成指标表和 summary'),
-          e('engine_tensor', 'eval_tables', '生成指标表和 summary'),
-          e('eval_tables', 'writer', '交给 artifact writer'),
-          e('writer', 'run_dir', '写出 run directory'),
-          e('writer', 'result', '返回包含 artifact 引用的结果对象'),
-          e('run_dir', 'manifest', '包含 display 契约'),
-          e('run_dir', 'repo', 'run root 发现'),
-          e('repo', 'loader', '按 run identity 加载'),
-          e('repo', 'api', 'app 持有 run repository 能力'),
-          e('loader', 'api_runs', '组装 evidence payload'),
-          e('manifest', 'api_runs', '限制展示表'),
-          e('manifest', 'api_download', '限制下载项'),
-          e('api', 'api_runs', '挂载 evidence 接口'),
-          e('api', 'api_download', '挂载下载接口'),
-          e('api', 'api_compare', '挂载比较接口'),
-          e('api', 'upload_api', '挂载上传 run 入口'),
-          e('api', 'pipeline_api', '挂载 pipeline snapshot 入口'),
-          e('upload_api', 'upload_service', '上传入口调用 service'),
-          e('upload_service', 'spec', '上传 CSV 转 evaluation spec'),
-          e('web', 'runs_ui', '前端进入结果页'),
-          e('runs_ui', 'api_runs', '读取 run 和 evidence'),
-          e('runs_ui', 'download_ui', '结果页挂下载组件'),
-          e('download_ui', 'api_download', '调用下载 API'),
-          e('factor_studio', 'pipeline_builder', '表达式草稿传配置'),
-          e('pipeline_builder', 'pipeline_api', '提交 snapshot'),
-          e('pipeline_api', 'pipeline_store', '保存 checkpoint'),
-          e('qrp', 'qrp_ashare', '暴露 A股命令组帮助入口'),
-          e('qrp', 'qrp_eval', '分发通用 Parquet 评估'),
-          e('qrp_eval', 'spec', '通用 Parquet 转 EvaluationSpec'),
-          e('qrp', 'qrp_compare', '分发离线比较'),
-          e('aux_cli', 'raw', 'inspect_raw_exports 读取 raw'),
-          e('aux_cli', 'interim', 'inspect_interim 读取 interim'),
-          e('aux_cli', 'panel_file', 'inspect_panel 读取 panel'),
-          e('aux_cli', 'factor_file', 'inspect_factors 读取 factor table'),
-          e('aux_cli', 'run_dir', 'summary/compare 读取 evaluation runs'),
-          e('qrp_compare', 'compare_writer', '不调用 API，直接写比较'),
-          e('compare_writer', 'run_dir', '比较结果写入文件'),
-          e('pipeline_builder', 'runner_light', '传入 processed-existing 配置'),
-          e('pipeline_api', 'runner_light', '执行轻量评价入口'),
-          e('runner_light', 'eval_cli', '复用 A股专用评估'),
-          e('runner_light', 'repo', '暴露嵌套 evaluation runs')
-        ]
-      },
+    const edges = [
+      e("E01","N01","N02","raw CSV 进入 build_interim；代码不自动下载或登录 CSMAR。"),
+      e("E02","N02","N03","build_interim 写出标准化 interim CSV。"),
+      e("E03","N03","N04","panel builder 读取 interim，不直接读 raw。"),
+      e("E04","N04","N05","CLI 调用函数级 panel builder。"),
+      e("E05","N05","N06","写出 full research panel 和 tradability 列。"),
+      e("E06","N06","N07","factor CLI 读取 full panel。"),
+      e("E07","N07","N08","按 windows/horizons 调用 factor builder。"),
+      e("E08","N08","N09","写 slim factor and label Parquet。"),
+      e("E09","N09","N10","A 股评估入口读取 processed factor table。"),
+      e("E10","N10","N11","CLI 参数进入 A 股 adapter 编排。"),
+      e("E11","N11","N12","adapter 定位覆盖文件并读取 evaluation frame。"),
+      e("E12","N12","N13","构造 EvaluationSpec，保留 A 股 metadata。"),
+      e("E13","N13","N15","所有 adapter 最终进入 run_evaluation。"),
+      e("E14","N15","N14","run_evaluation 先生成纯计算 payload。"),
+      e("E15","N14","N16","payload 计算阶段调用 kernels。"),
+      e("E16","N16","N14","kernels 返回表格、summary 和 report 输入。"),
+      e("E17","N14","N17","writer 消费结构化 payload。"),
+      e("E18","N15","N17","public entrypoint 连接计算和写盘。"),
+      e("E19","N17","N19","写 schema 0.5 artifact directory。"),
+      e("E20","N17","N18","返回 EvaluationSetResult。"),
+      e("E21","N19","N20","manifest.json 中的 display 成为展示合同。"),
+      e("E22","N19","N21","loader 严格读取 completed run。"),
+      e("E23","N21","N22","repository 通过 loader 建立 run index。"),
+      e("E24","N22","N23","app state 注入 run roots 和 services。"),
+      e("E25","N20","N24","evidence/table API 只暴露 display tables。"),
+      e("E26","N20","N25","download API 只暴露 display download items。"),
+      e("E27","N23","N24","FastAPI 注册 runs/artifacts routes。"),
+      e("E28","N23","N25","FastAPI 注册 download routes。"),
+      e("E29","N23","N26","FastAPI 注册 comparison routes。"),
+      e("E30","N23","N27","CSV upload 保留入口。","保留入口"),
+      e("E31","N27","N13","upload service 构造 EvaluationSpec。"),
+      e("E32","N24","N28","React workbench 获取 runs/evidence/table payload。"),
+      e("E33","N25","N29","ArtifactDownloads 调用 direct/ZIP endpoints。"),
+      e("E34","N28","N29","download UI 随 run/combination state 更新。"),
+      e("E35","N30","N31","Factor draft 传入 Pipeline Builder。"),
+      e("E36","N35","N30","template registry 供 Factor Studio 展示。"),
+      e("E37","N31","N32","Pipeline Builder 提交 pipeline request。"),
+      e("E38","N32","N33","snapshot 模式写配置快照。"),
+      e("E39","N32","N34","processed_existing 模式调用轻量 runner。","已实现轻量模式"),
+      e("E40","N34","N11","runner 调用 A 股 adapter，不绕过 market module。","已实现轻量模式"),
+      e("E41","N35","N36","registry 展开 Factor Factory candidates。"),
+      e("E42","N36","N34","batch runner 逐 candidate 调用 runner。","已实现轻量模式"),
+      e("E43","N36","N37","写 candidate summary 和 failed candidate log。"),
+      e("E44","N37","N38","Factor Factory API 读取 display artifacts。"),
+      e("E45","N38","N28","workbench 浏览 Factor Factory results。"),
+      e("E46","N39","N10","qrp a-share evaluate 是帮助/跳转入口。","已实现入口"),
+      e("E47","N39","N13","qrp evaluate-parquet 构造 EvaluationSpec。"),
+      e("E48","N39","N40","qrp compare 调用离线 comparison writer。"),
+      e("E49","N40","N19","comparison writer 读取 completed run directory。")
+    ];
 
-      ashareCore: {
-        title: 'A股核心',
-        subtitle: '只包含当前已经实现的数据到回测结果主链路。',
-        notes: [
-          '这张图是你理解因子流程核心代码的最短路线。',
-          '这里不包含 API、前端、下载、上传 CSV 和 future runner。'
-        ],
-        nodes: [
-          n('raw', 'CSMAR 原始 CSV', '数据', '私有原始导出文件。', 'data/raw_private/csmar/', 'done', 80, 190),
-          n('interim_cli', 'build_interim CLI', '入口', 'raw 到 interim 的标准化入口。', 'markets/implementations/a_share/csmar/build_interim.py', 'done', 340, 190),
-          n('interim', 'interim 标准化 CSV', '数据', '字段和日期标准化后的审计层。', 'data/interim_private/csmar/', 'done', 600, 190),
-          n('panel_cli', 'build_panel CLI', '入口', '从 interim 构建 full panel。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 860, 190),
-          n('panel_func', 'build_panel_full_from_interim', '函数', 'panel 构建函数级入口。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 1120, 190),
-          n('panel', 'research panel Parquet', '数据', '宽表研究面板。', 'processed_private/csmar/panel_full/', 'done', 1380, 190),
-          n('factor_cli', 'build_factors CLI', '入口', '从 panel 计算因子和 label。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1640, 190),
-          n('factor_func', 'calculate_price_volume_factor_full', '函数', '因子和 label 计算函数。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1900, 190),
-          n('factor_file', 'factor and label Parquet', '数据', 'slim factor table。', 'processed_private/csmar/price_volume_factors_full/', 'done', 2160, 190),
-          n('eval_cli', 'run_factor_evaluation CLI', '入口', 'A股专用评估入口。', 'markets/implementations/a_share/evaluation/run_factor_evaluation.py', 'done', 2420, 190),
-          n('processed_eval', 'run_processed_factor_evaluation', '函数', '定位 factor Parquet、汇总 label 可用性并逐 label 调 evaluation layer。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2680, 80),
-          n('adapter', 'read_evaluation_frame / read_factor_frame', '接口', '读取并过滤 A股 factor table。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2680, 190),
-          n('spec', 'EvaluationSpec', '核心输入', '统一评估输入契约。', 'evaluations/evaluation_spec.py', 'done', 2940, 190),
-          n('evaluation', 'run_evaluation', '核心入口', '执行评估。', 'evaluations/evaluation_runner.py', 'done', 3200, 190),
-          n('kernel', 'DataFrame/Tensor', '计算引擎', '两种实现路径，同一评估口径。', 'kernels/', 'done', 3460, 190),
-          n('eval_tables', 'tables / summary / report', '中间结果', 'artifact writer 的输入。', 'evaluations/evaluation_runner.py', 'done', 3720, 190),
-          n('writer', 'write_evaluation_set_artifacts', '函数', '写出 schema 0.5 artifacts。', 'artifacts/artifact_writer.py', 'done', 3980, 190),
-          n('result', 'EvaluationSetResult', '核心输出', 'run_evaluation 返回对象。', 'evaluations/evaluation_result.py', 'done', 4240, 90),
-          n('artifacts', 'schema 0.5 artifacts', '回测结果', 'summary、metrics、portfolio、diagnostics、breakdowns、report、comparison、manifest。', 'artifacts/artifact_writer.py', 'done', 4240, 250)
-        ],
-        edges: [
-          e('raw', 'interim_cli', '读取 CSMAR raw'),
-          e('interim_cli', 'interim', '标准化写出 interim'),
-          e('interim', 'panel_cli', '读取 interim'),
-          e('panel_cli', 'panel_func', '调用 panel 函数'),
-          e('panel_func', 'panel', '写出 research panel'),
-          e('panel', 'factor_cli', '读取 panel'),
-          e('factor_cli', 'factor_func', '调用因子函数'),
-          e('factor_func', 'factor_file', '写出 slim factor table'),
-          e('factor_file', 'eval_cli', 'A股评估入口读取'),
-          e('eval_cli', 'processed_eval', '进入 A股评估编排函数'),
-          e('processed_eval', 'adapter', '读取和过滤 factor table'),
-          e('adapter', 'spec', '生成 EvaluationSpec'),
-          e('spec', 'evaluation', '进入 evaluation layer'),
-          e('evaluation', 'kernel', '选择 DataFrame 或 Tensor'),
-          e('kernel', 'eval_tables', '生成表、summary 和报告文本'),
-          e('eval_tables', 'writer', '交给 artifact writer'),
-          e('writer', 'artifacts', '写出回测结果'),
-          e('writer', 'result', '返回结果对象')
-        ]
-      },
+    function n(id,label,group,status,path,description,x,y){ return {id,label,group,status,path,description,x,y}; }
+    function e(id,from,to,description,status="已实现"){ return {id,from,to,description,status}; }
 
-      futureCrypto: {
-        title: 'A股 + Crypto 构想',
-        subtitle: '用未来 crypto 高频数据反推现有接口是否合理。',
-        notes: [
-          '实线是当前 A股或 evaluation layer 已有能力；虚线是 crypto 高频可能需要新增的层。',
-          '关键设计问题是：crypto 高频能否落到 EvaluationSpec，还是需要 IntradayEvaluationSpec / BacktestSpec。'
-        ],
-        nodes: [
-          n('ashare_raw', 'A股 CSMAR 日频 CSV', '数据', '当前 A股私有日频数据入口。', 'data/raw_private/csmar/', 'done', 80, 110),
-          n('ashare_panel', 'A股 daily research panel', '数据', '当前已实现的日频面板。', 'processed_private/csmar/panel_full/', 'done', 360, 110),
-          n('ashare_factor', 'A股 daily factor/label', '数据', '当前已实现的日频因子和 label 表。', 'price_volume_factors_full/', 'done', 640, 110),
-          n('ashare_adapter', 'A股 market adapter', '接口', 'read_factor_frame 把 A股表转为 evaluation layer 输入。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 920, 110),
-          n('spec', 'EvaluationSpec', '现有共用', '日频截面评估可复用的 evaluation layer 输入契约。', 'evaluations/evaluation_spec.py', 'done', 1220, 220),
-          n('evaluation', 'run_evaluation', '现有共用', '现有评估主入口。', 'evaluations/evaluation_runner.py', 'done', 1500, 220),
-          n('kernel', 'DataFrame/Tensor kernels', '现有共用', '现有计算引擎。', 'kernels/', 'done', 1780, 220),
-          n('result', 'EvaluationSetResult', '现有共用', '统一结果对象。', 'evaluations/evaluation_result.py', 'done', 2060, 220),
-          n('artifacts', '统一 artifacts', '目标', '尽量复用 schema 0.5 或后续版本。', 'artifacts/', 'done', 2340, 220),
-          n('crypto_raw', 'Crypto trades/orderbook/bars', '未来数据', '高频成交、盘口、bar 数据。', '待设计', 'todo', 80, 420),
-          n('crypto_store', 'crypto normalized store', '待实现', '私有边界、字段、时间戳和分区规则。', '待新增', 'todo', 360, 420),
-          n('crypto_resample', 'resample and alignment', '待实现', '重采样、时钟对齐、缺口处理。', '待新增', 'todo', 640, 420),
-          n('crypto_features', 'intraday features/labels', '待实现', '高频特征、label、交易成本输入。', '待新增', 'todo', 920, 420),
-          n('crypto_adapter', 'crypto market adapter', '待实现', '把 crypto 高频表映射为 evaluation layer 输入。', '待新增', 'todo', 1220, 420),
-          n('intraday_spec', 'IntradayEvaluationSpec / BacktestSpec', '可能新增', '事件驱动、仓位路径、撮合、滑点等可能需要新契约。', '待新增', 'todo', 1500, 420),
-          n('future_core', 'run_backtest 或 evaluation 扩展', '待实现', '高频回测不能假设当前日频 evaluator 原样可用。', '待新增', 'todo', 1780, 420),
-          n('future_engine', 'intraday/backtest kernel', '待实现', '高频专用引擎应尽量输出统一结果对象。', '待新增', 'todo', 2060, 420)
-        ],
-        edges: [
-          e('ashare_raw', 'ashare_panel', '当前 A股日频 panel 链路'),
-          e('ashare_panel', 'ashare_factor', '当前 A股因子和 label 链路'),
-          e('ashare_factor', 'ashare_adapter', 'A股 adapter 读取 factor table'),
-          e('ashare_adapter', 'spec', '当前可进入 EvaluationSpec'),
-          e('spec', 'evaluation', '复用现有 evaluation layer'),
-          e('evaluation', 'kernel', '复用现有引擎'),
-          e('kernel', 'result', '复用统一结果'),
-          e('result', 'artifacts', '复用统一 artifacts'),
-          e('crypto_raw', 'crypto_store', '设计高频私有数据边界', 'todo'),
-          e('crypto_store', 'crypto_resample', '重采样和对齐', 'todo'),
-          e('crypto_resample', 'crypto_features', '生成高频特征和 label', 'todo'),
-          e('crypto_features', 'crypto_adapter', '进入 crypto adapter', 'todo'),
-          e('crypto_adapter', 'spec', '可复用时进入 EvaluationSpec', 'todo'),
-          e('crypto_adapter', 'intraday_spec', '复杂高频回测可能需要新 spec', 'todo'),
-          e('intraday_spec', 'future_core', '进入新增或扩展后的 evaluation layer 入口', 'todo'),
-          e('future_core', 'future_engine', '调度高频或回测引擎', 'todo'),
-          e('future_engine', 'result', '尽量输出统一结果对象', 'todo')
-        ]
+    const viewport = document.getElementById("viewport");
+    const detail = document.getElementById("detail");
+    const nodeList = document.getElementById("nodeList");
+    const edgeList = document.getElementById("edgeList");
+    const groupFilter = document.getElementById("groupFilter");
+    const searchBox = document.getElementById("searchBox");
+    const resetBtn = document.getElementById("resetBtn");
+    let activeId = null;
+    let pan = {x: 0, y: 0};
+    let zoom = 1;
+    let drag = null;
+
+    function render() {
+      viewport.innerHTML = "";
+      viewport.setAttribute("transform", `translate(${pan.x} ${pan.y}) scale(${zoom})`);
+      const visible = visibleNodes();
+      const visibleIds = new Set(visible.map(node => node.id));
+      for (const edge of edges) {
+        if (!visibleIds.has(edge.from) || !visibleIds.has(edge.to)) continue;
+        const from = nodes.find(node => node.id === edge.from);
+        const to = nodes.find(node => node.id === edge.to);
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        const x1 = from.x + 170, y1 = from.y + 34, x2 = to.x, y2 = to.y + 34;
+        const mx = (x1 + x2) / 2;
+        path.setAttribute("d", `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+        path.setAttribute("class", `edge ${activeId === edge.id ? "active" : ""}`);
+        path.addEventListener("click", event => { event.stopPropagation(); selectEdge(edge.id); });
+        viewport.appendChild(path);
       }
-    };
-
-    const PLATFORM_CORE_NODE_IDS = new Set([
-      'raw',
-      'interim_cli',
-      'interim',
-      'panel_cli',
-      'panel_func',
-      'panel_file',
-      'factors_cli',
-      'factors_func',
-      'factor_file',
-      'eval_cli',
-      'processed_eval',
-      'read_frame',
-      'spec',
-      'evaluation',
-      'engine_df',
-      'engine_tensor',
-      'eval_tables',
-      'writer',
-      'result',
-      'run_dir',
-    ]);
-
-    const PLATFORM_CORE_EDGE_KEYS = new Set([
-      'raw->interim_cli',
-      'interim_cli->interim',
-      'interim->panel_cli',
-      'panel_cli->panel_func',
-      'panel_func->panel_file',
-      'panel_file->factors_cli',
-      'factors_cli->factors_func',
-      'factors_func->factor_file',
-      'factor_file->eval_cli',
-      'eval_cli->processed_eval',
-      'processed_eval->read_frame',
-      'read_frame->spec',
-      'spec->evaluation',
-      'evaluation->engine_df',
-      'evaluation->engine_tensor',
-      'engine_df->eval_tables',
-      'engine_tensor->eval_tables',
-      'eval_tables->writer',
-      'writer->run_dir',
-      'writer->result',
-    ]);
-
-    const NODE_USAGE = {
-      interim_cli: {
-        title: '调用方法',
-        body: 'python -m quant_research_platform.markets.implementations.a_share.csmar.build_interim --raw-root data/raw_private/csmar --output-root data/interim_private/csmar --start-date 2014-01-01 --end-date 2025-12-31',
-        params: '--raw-root, --output-root, --override-path, --start-date, --end-date, --chunksize'
-      },
-      panel_cli: {
-        title: '调用方法',
-        body: 'python -m quant_research_platform.markets.implementations.a_share.datasets.build_panel --interim-root data/interim_private/csmar --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --end-date 2025-12-31',
-        params: '--interim-root, --processed-root, --start-year, --end-year, --end-date, --min-listing-trading-days'
-      },
-      factors_cli: {
-        title: '调用方法',
-        body: 'python -m quant_research_platform.markets.implementations.a_share.factors.build_factors --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --factor-set price_volume --windows 20,60,120 --horizons 1,5,10,20,60,120',
-        params: '--processed-root, --start-year, --end-year, --factor-set, --windows, --horizons'
-      },
-      factor_cli: {
-        title: '调用方法',
-        body: 'python -m quant_research_platform.markets.implementations.a_share.factors.build_factors --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --factor-set price_volume --windows 20,60,120 --horizons 1,5,10,20,60,120',
-        params: '--processed-root, --start-year, --end-year, --factor-set, --windows, --horizons'
-      },
-      eval_cli: {
-        title: '调用方法',
-        body: 'python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation --processed-root data/processed_private/csmar --start-year 2023 --end-year 2025 --start-date 2023-01-01 --end-date 2025-12-31 --labels forward_return_20d --factors mom_20d,vol_20d --portfolio-mode long_short --engine tensor --cost-bps 5',
-        params: '--processed-root, --report-root, --start-year, --end-year, --start-date, --end-date, --labels, --factors, --factor-set, --all-factors, --n-groups, --pnl-return-column, --cost-bps, --portfolio-mode, --engine, --segment-columns, --risk-column, --neutralization-method, --neutralization-group-columns, --neutralization-exposure-columns'
-      },
-      qrp_ashare: {
-        title: '调用方法',
-        body: 'qrp a-share evaluate',
-        params: '当前子命令是帮助/跳转入口，会提示对应 python -m quant_research_platform.markets.implementations.a_share... 模块 CLI。'
-      },
-      qrp: {
-        title: '调用方法',
-        body: 'qrp ... 或 python -m quant_research_platform.interfaces.cli ...',
-        params: '总入口；可用子命令包括 a-share build-interim/build-panel/build-factors/evaluate、evaluate-parquet、compare。'
-      },
-      qrp_eval: {
-        title: '调用方法',
-        body: 'qrp evaluate-parquet --parquet-path data/example.parquet --timestamp-column trade_date --asset-column stock_code --feature mom_20d --label forward_return_20d --pnl-return-column forward_return_1d --output reports/runs/example --engine dataframe',
-        params: '--parquet-path, --timestamp-column, --asset-column, --feature, --label, --pnl-return-column, --segment-column, --time-breakdown, --output, --evaluation-id, --project, --kind, --domain, --data-stage, --uses-external-data/--no-uses-external-data, --n-groups, --weight-method, --direction, --portfolio-mode, --top-quantile, --bottom-quantile, --cost-bps, --risk-column, --eligibility-column, --can-enter-column, --can-exit-column, --engine, --dry-run'
-      },
-      qrp_compare: {
-        title: '调用方法',
-        body: 'qrp compare reports/runs/run_a reports/runs/run_b --output reports/runs/comparison.csv',
-        params: '位置参数是一个或多个 evaluation-set artifact 目录；--output 指定 comparison CSV。'
-      },
-      pipeline_api: {
-        title: 'HTTP 调用',
-        body: 'POST /api/pipeline-runs',
-        params: 'JSON 字段：market, run_id, date_start, date_end, factor_expression, factor_template_id, portfolio_mode, cost_bps, pnl_return_column, label_columns。当前只写 snapshot。'
-      },
-      upload_api: {
-        title: 'HTTP 调用',
-        body: 'POST /api/runs',
-        params: 'JSON 字段：run_id, project, domain, csv_text, timestamp_column, asset_column, feature_columns, label_columns, pnl_return_column, segment_columns, time_breakdowns, engine, n_groups, weight/cost/tradability 参数。'
-      },
-      api_download: {
-        title: 'HTTP 调用',
-        body: 'GET /api/runs/{source_alias}/{run_id}/download?items=report.md&items=summary.json 或 POST 同一路径传 {"items":["report.md"]}',
-        params: 'items 必须来自 manifest.display.downloads.items。'
-      },
-      api_runs: {
-        title: 'HTTP 调用',
-        body: 'GET /api/runs；GET /api/runs/{source_alias}/{run_id}/evidence；GET metrics/portfolio/diagnostics/breakdowns 预览接口。',
-        params: 'run identity 必须同时包含 source_alias 和 run_id。'
-      },
-      api_compare: {
-        title: 'HTTP 调用',
-        body: 'GET /api/comparison；GET /api/comparison.csv',
-        params: '比较 API 面向 API-visible run index。'
-      },
-      aux_cli: {
-        title: '调用方法',
-        body: 'python -m quant_research_platform.markets.implementations.a_share.csmar.inspect_raw_exports data/raw_private/csmar；python -m quant_research_platform.markets.implementations.a_share.csmar.inspect_interim --interim-root data/interim_private/csmar；python -m quant_research_platform.markets.implementations.a_share.datasets.inspect_panel --processed-root data/processed_private/csmar；python -m quant_research_platform.markets.implementations.a_share.factors.inspect_factors --processed-root data/processed_private/csmar；python -m quant_research_platform.markets.implementations.a_share.evaluation.build_factor_summary --report-root reports/private_real/factor_evaluation/full_2024_2025；python -m quant_research_platform.markets.implementations.a_share.evaluation.compare_factor_summaries --yearly-summary yearly.csv --full-summary full.csv --output-dir reports/private_real/factor_evaluation/comparisons/example；python -m quant_research_platform.markets.implementations.a_share.runtime.check_processed_space --processed-root data/processed_private/csmar --interim-root data/interim_private/csmar',
-        params: 'inspect_raw_exports: root, --write-metadata；inspect_interim/inspect_panel/inspect_factors: --*-root, --start-year, --end-year；build_factor_summary: --report-root, --output-csv, --output-md；compare_factor_summaries: --yearly-summary, --full-summary, --output-dir；check_processed_space: --processed-root, --interim-root, observed/target year range, --legacy-processed-gb, --max-legacy-ratio, --max-free-ratio。'
+      for (const node of visible) {
+        const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        g.setAttribute("class", `node ${activeId === node.id ? "active" : ""}`);
+        g.setAttribute("data-group", node.group);
+        g.setAttribute("transform", `translate(${node.x} ${node.y})`);
+        g.addEventListener("click", event => { event.stopPropagation(); selectNode(node.id); });
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rect.setAttribute("width", "180");
+        rect.setAttribute("height", "70");
+        const idText = text(12, 19, node.id, "id");
+        const labelText = text(12, 41, node.label.length > 22 ? node.label.slice(0, 21) + "..." : node.label, "label");
+        const statusText = text(12, 60, node.status, "id");
+        g.append(rect, idText, labelText, statusText);
+        viewport.appendChild(g);
       }
-    };
-
-    function n(id, label, kind, desc, path, status, x, y) {
-      return { id, label, kind, desc, path, status, x, y, w: W, h: H };
+      renderLists();
     }
 
-    function e(from, to, label, status = 'done') {
-      return { from, to, label, status };
+    function text(x,y,value,cls){
+      const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      t.setAttribute("x", x);
+      t.setAttribute("y", y);
+      t.setAttribute("class", cls);
+      t.textContent = value;
+      return t;
     }
 
-    const svg = document.getElementById('graph');
-    const viewport = document.getElementById('viewport');
-    const edgeLayer = document.getElementById('edges');
-    const nodeLayer = document.getElementById('nodes');
-    const detail = document.getElementById('detail');
-    const tabs = document.getElementById('tabs');
-    const viewNotes = document.getElementById('viewNotes');
+    function visibleNodes() {
+      const group = groupFilter.value;
+      const q = searchBox.value.trim().toLowerCase();
+      return nodes.filter(node => {
+        const groupOk = group === "all" || node.group === group;
+        const textOk = !q || [node.id,node.label,node.group,node.status,node.path,node.description].join(" ").toLowerCase().includes(q);
+        return groupOk && textOk;
+      });
+    }
 
-    let activeView = 'platform';
-    let selected = null;
-    let scale = 0.42;
-    let pan = { x: 34, y: 94 };
-    let dragNode = null;
-    let panStart = null;
+    function renderLists() {
+      const visible = visibleNodes();
+      const visibleIds = new Set(visible.map(node => node.id));
+      nodeList.innerHTML = visible.map(node => `<div class="list-item" data-node="${node.id}"><strong>${node.id} ${node.label}</strong><span class="muted">${node.path}</span></div>`).join("");
+      edgeList.innerHTML = edges
+        .filter(edge => visibleIds.has(edge.from) && visibleIds.has(edge.to))
+        .map(edge => `<div class="list-item" data-edge="${edge.id}"><strong>${edge.id} ${edge.from} -> ${edge.to}</strong><span class="muted">${edge.status} · ${edge.description}</span></div>`)
+        .join("");
+      nodeList.querySelectorAll("[data-node]").forEach(el => el.addEventListener("click", () => selectNode(el.dataset.node)));
+      edgeList.querySelectorAll("[data-edge]").forEach(el => el.addEventListener("click", () => selectEdge(el.dataset.edge)));
+    }
 
-    Object.entries(views).forEach(([key, view]) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = view.title;
-      btn.dataset.view = key;
-      btn.addEventListener('click', () => switchView(key));
-      tabs.appendChild(btn);
-    });
+    function selectNode(id) {
+      activeId = id;
+      const node = nodes.find(item => item.id === id);
+      detail.innerHTML = `
+        <div class="meta"><span class="tag">${node.id}</span><span class="tag">${node.group}</span><span class="tag">${node.status}</span></div>
+        <h2>${node.label}</h2>
+        <p>${node.description}</p>
+        <h3>代码位置</h3>
+        <p><code>${node.path}</code></p>
+        <h3>相关边</h3>
+        <ul>${edges.filter(edge => edge.from === id || edge.to === id).map(edge => `<li><button type="button" data-edge="${edge.id}">${edge.id}</button> ${edge.from} -> ${edge.to}: ${edge.description}</li>`).join("")}</ul>
+      `;
+      detail.querySelectorAll("[data-edge]").forEach(el => el.addEventListener("click", () => selectEdge(el.dataset.edge)));
+      render();
+    }
 
-    document.getElementById('zoomIn').addEventListener('click', () => zoomBy(1.15));
-    document.getElementById('zoomOut').addEventListener('click', () => zoomBy(0.87));
-    document.getElementById('resetView').addEventListener('click', () => resetView());
+    function selectEdge(id) {
+      activeId = id;
+      const edge = edges.find(item => item.id === id);
+      const from = nodes.find(node => node.id === edge.from);
+      const to = nodes.find(node => node.id === edge.to);
+      detail.innerHTML = `
+        <div class="meta"><span class="tag">${edge.id}</span><span class="tag">${edge.status}</span></div>
+        <h2>${from.label} -> ${to.label}</h2>
+        <p>${edge.description}</p>
+        <h3>From</h3>
+        <p><button type="button" data-node="${from.id}">${from.id}</button> <code>${from.path}</code></p>
+        <h3>To</h3>
+        <p><button type="button" data-node="${to.id}">${to.id}</button> <code>${to.path}</code></p>
+      `;
+      detail.querySelectorAll("[data-node]").forEach(el => el.addEventListener("click", () => selectNode(el.dataset.node)));
+      render();
+    }
 
-    svg.addEventListener('wheel', (event) => {
+    document.getElementById("map").addEventListener("wheel", event => {
       event.preventDefault();
-      const factor = event.deltaY < 0 ? 1.1 : 0.9;
-      const before = screenToWorld(event.clientX, event.clientY);
-      scale = clamp(scale * factor, 0.18, 1.8);
-      const after = screenToWorld(event.clientX, event.clientY);
-      pan.x += (after.x - before.x) * scale;
-      pan.y += (after.y - before.y) * scale;
-      updateTransform();
-    }, { passive: false });
-
-    svg.addEventListener('pointerdown', (event) => {
-      if (event.target.closest && event.target.closest('.node')) return;
-      svg.setPointerCapture(event.pointerId);
-      panStart = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
-      svg.classList.add('dragging');
+      zoom = Math.max(0.55, Math.min(1.8, zoom + (event.deltaY < 0 ? 0.08 : -0.08)));
+      render();
+    }, {passive:false});
+    document.getElementById("map").addEventListener("pointerdown", event => {
+      drag = {x:event.clientX, y:event.clientY, panX:pan.x, panY:pan.y};
     });
-
-    svg.addEventListener('pointermove', (event) => {
-      if (dragNode) {
-        const world = screenToWorld(event.clientX, event.clientY);
-        dragNode.node.x = world.x - dragNode.offsetX;
-        dragNode.node.y = world.y - dragNode.offsetY;
-        draw();
-        return;
-      }
-      if (panStart) {
-        pan.x = panStart.panX + event.clientX - panStart.x;
-        pan.y = panStart.panY + event.clientY - panStart.y;
-        updateTransform();
-      }
+    window.addEventListener("pointermove", event => {
+      if (!drag) return;
+      pan = {x: drag.panX + event.clientX - drag.x, y: drag.panY + event.clientY - drag.y};
+      render();
     });
-
-    svg.addEventListener('pointerup', (event) => {
-      if (dragNode) {
-        dragNode = null;
-      }
-      if (panStart) {
-        panStart = null;
-        svg.classList.remove('dragging');
-      }
-      try {
-        svg.releasePointerCapture(event.pointerId);
-      } catch (_) {
-        // Ignore if the pointer was captured by a node.
-      }
-    });
-
-    function switchView(key) {
-      activeView = key;
-      selected = null;
-      resetView(false);
-      draw();
-      showDefaultDetail();
-      document.querySelectorAll('.tabs button').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.view === key);
-      });
-      viewNotes.innerHTML = '';
-      views[key].notes.forEach(text => {
-        const div = document.createElement('div');
-        div.className = 'note';
-        div.textContent = text;
-        viewNotes.appendChild(div);
-      });
-    }
-
-    function resetView(redraw = true) {
-      const view = views[activeView];
-      const maxX = Math.max(...view.nodes.map(node => node.x + node.w), 1000);
-      const minX = Math.min(...view.nodes.map(node => node.x), 0);
-      const width = Math.max(1, maxX - minX);
-      const svgWidth = svg.clientWidth || 1200;
-      scale = clamp((svgWidth - 120) / width, 0.2, 0.9);
-      pan = { x: 48 - minX * scale, y: 105 };
-      updateTransform();
-      if (redraw) draw();
-    }
-
-    function zoomBy(factor) {
-      scale = clamp(scale * factor, 0.18, 1.8);
-      updateTransform();
-    }
-
-    function updateTransform() {
-      viewport.setAttribute('transform', `translate(${pan.x} ${pan.y}) scale(${scale})`);
-    }
-
-    function draw() {
-      edgeLayer.innerHTML = '';
-      nodeLayer.innerHTML = '';
-      const view = views[activeView];
-      const nodeMap = new Map(view.nodes.map(node => [node.id, node]));
-
-      view.edges.forEach((edge, index) => {
-        const from = nodeMap.get(edge.from);
-        const to = nodeMap.get(edge.to);
-        if (!from || !to) return;
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        const start = anchor(from, to);
-        const end = anchor(to, from);
-        const midX = (start.x + end.x) / 2;
-        const curve = Math.max(40, Math.abs(end.x - start.x) * 0.25);
-        path.setAttribute('d', `M ${start.x} ${start.y} C ${start.x + curve} ${start.y}, ${end.x - curve} ${end.y}, ${end.x} ${end.y}`);
-        path.setAttribute('class', `edge ${edge.status === 'todo' ? 'todo' : ''} ${isCoreEdge(edge) ? 'evaluation' : ''}`);
-        path.dataset.edgeIndex = index;
-        path.addEventListener('click', (event) => {
-          event.stopPropagation();
-          selected = { type: 'edge', edge };
-          showEdge(edge, from, to);
-        });
-        edgeLayer.appendChild(path);
-      });
-
-      view.nodes.forEach(node => {
-        const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        group.setAttribute('class', `node ${node.status} ${isCoreNode(node) ? 'evaluation' : ''} ${selected?.node?.id === node.id ? 'selected' : ''}`);
-        group.setAttribute('transform', `translate(${node.x} ${node.y})`);
-        group.dataset.nodeId = node.id;
-
-        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        rect.setAttribute('width', node.w);
-        rect.setAttribute('height', node.h);
-        group.appendChild(rect);
-
-        const kind = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        kind.setAttribute('class', 'node-kind');
-        kind.setAttribute('x', 14);
-        kind.setAttribute('y', 20);
-        kind.textContent = `${node.kind} · ${node.status === 'todo' ? '待实现' : '已实现'}`;
-        group.appendChild(kind);
-
-        const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        title.setAttribute('class', 'node-title');
-        title.setAttribute('x', 14);
-        title.setAttribute('y', 42);
-        wrapText(title, node.label, node.w - 28, 16);
-        group.appendChild(title);
-
-        group.addEventListener('pointerdown', (event) => {
-          event.stopPropagation();
-          svg.setPointerCapture(event.pointerId);
-          const world = screenToWorld(event.clientX, event.clientY);
-          dragNode = {
-            node,
-            offsetX: world.x - node.x,
-            offsetY: world.y - node.y
-          };
-          selected = { type: 'node', node };
-          showNode(node);
-          draw();
-        });
-
-        group.addEventListener('click', (event) => {
-          event.stopPropagation();
-          selected = { type: 'node', node };
-          showNode(node);
-          draw();
-        });
-
-        nodeLayer.appendChild(group);
-      });
-    }
-
-    function anchor(from, to) {
-      const cx = from.x + from.w / 2;
-      const cy = from.y + from.h / 2;
-      const tx = to.x + to.w / 2;
-      const ty = to.y + to.h / 2;
-      if (Math.abs(tx - cx) >= Math.abs(ty - cy)) {
-        return {
-          x: tx >= cx ? from.x + from.w : from.x,
-          y: cy
-        };
-      }
-      return {
-        x: cx,
-        y: ty >= cy ? from.y + from.h : from.y
-      };
-    }
-
-    function isCoreNode(node) {
-      return activeView === 'platform' && PLATFORM_CORE_NODE_IDS.has(node.id);
-    }
-
-    function isCoreEdge(edge) {
-      return (
-        activeView === 'platform' &&
-        PLATFORM_CORE_EDGE_KEYS.has(`${edge.from}->${edge.to}`)
-      );
-    }
-
-    function wrapText(textElement, text, maxWidth, lineHeight) {
-      const words = splitLabel(text);
-      let line = '';
-      let y = Number(textElement.getAttribute('y'));
-      let tspan = newTspan(textElement, y);
-      words.forEach(word => {
-        const test = line ? `${line}${word}` : word;
-        tspan.textContent = test;
-        if (tspan.getComputedTextLength() > maxWidth && line) {
-          tspan.textContent = line;
-          line = word;
-          y += lineHeight;
-          tspan = newTspan(textElement, y);
-          tspan.textContent = word;
-        } else {
-          line = test;
-        }
-      });
-    }
-
-    function splitLabel(text) {
-      if (/[\u4e00-\u9fa5]/.test(text)) {
-        return Array.from(text);
-      }
-      return text
-        .split(/([\s_\/-]+)/)
-        .flatMap(part => part.length > 18 ? part.match(/.{1,12}/g) : [part])
-        .filter(Boolean);
-    }
-
-    function newTspan(textElement, y) {
-      const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
-      tspan.setAttribute('x', textElement.getAttribute('x'));
-      tspan.setAttribute('y', y);
-      textElement.appendChild(tspan);
-      return tspan;
-    }
-
-    function screenToWorld(clientX, clientY) {
-      const rect = svg.getBoundingClientRect();
-      return {
-        x: (clientX - rect.left - pan.x) / scale,
-        y: (clientY - rect.top - pan.y) / scale
-      };
-    }
-
-    function clamp(value, min, max) {
-      return Math.max(min, Math.min(max, value));
-    }
-
-    function showDefaultDetail() {
-      const view = views[activeView];
-      detail.innerHTML = `
-        <div class="eyebrow">当前视图</div>
-        <h2>${escapeHtml(view.title)}</h2>
-        <p>${escapeHtml(view.subtitle)}</p>
-        <div class="meta">
-          <div class="meta-row"><strong>操作</strong>拖动节点调整布局；滚轮缩放；拖拽空白处平移；点击节点或边查看说明。</div>
-          <div class="meta-row"><strong>状态</strong>实线为已实现，虚线为待实现或待验证。</div>
-        </div>
-      `;
-    }
-
-    function showNode(node) {
-      const usage = NODE_USAGE[node.id];
-      detail.innerHTML = `
-        <div class="eyebrow">${isCoreNode(node) ? 'A股核心主链路 · ' : ''}${node.status === 'todo' ? '待实现节点' : '已实现节点'}</div>
-        <h2>${escapeHtml(node.label)}</h2>
-        <p>${escapeHtml(node.desc)}</p>
-        <div class="meta">
-          <div class="meta-row"><strong>类型</strong>${escapeHtml(node.kind)}</div>
-          <div class="meta-row"><strong>代码或位置</strong>${escapeHtml(node.path)}</div>
-          <div class="meta-row"><strong>节点 ID</strong>${escapeHtml(node.id)}</div>
-          ${usage ? `<div class="meta-row"><strong>${escapeHtml(usage.title)}</strong>${escapeHtml(usage.body)}</div>` : ''}
-          ${usage ? `<div class="meta-row"><strong>关键参数</strong>${escapeHtml(usage.params)}</div>` : ''}
-        </div>
-      `;
-    }
-
-    function showEdge(edge, from, to) {
-      detail.innerHTML = `
-        <div class="eyebrow">${isCoreEdge(edge) ? 'A股核心主链路 · ' : ''}${edge.status === 'todo' ? '待实现边' : '已实现边'}</div>
-        <h2>${escapeHtml(from.label)} → ${escapeHtml(to.label)}</h2>
-        <p>${escapeHtml(edge.label)}</p>
-        <div class="meta">
-          <div class="meta-row"><strong>起点</strong>${escapeHtml(from.label)}</div>
-          <div class="meta-row"><strong>终点</strong>${escapeHtml(to.label)}</div>
-          <div class="meta-row"><strong>状态</strong>${edge.status === 'todo' ? '待实现或待验证' : '已实现'}</div>
-        </div>
-      `;
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-    }
-
-    window.addEventListener('resize', () => updateTransform());
-    switchView('platform');
+    window.addEventListener("pointerup", () => { drag = null; });
+    groupFilter.addEventListener("change", render);
+    searchBox.addEventListener("input", render);
+    resetBtn.addEventListener("click", () => { pan = {x:0,y:0}; zoom = 1; searchBox.value = ""; groupFilter.value = "all"; activeId = null; render(); });
+    render();
   </script>
 </body>
 </html>

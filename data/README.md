@@ -38,5 +38,5 @@ processed_private/csmar/
 
 ## 相关文档
 
-- CSMAR 数据手册：`docs/csmar_data_manual.md`
-- 平台源码阅读地图：`docs/code-map/`
+- CSMAR 数据手册：[../docs/csmar_data_manual.md](../docs/csmar_data_manual.md)
+- 平台源码阅读地图：[../docs/code-map/README.md](../docs/code-map/README.md)

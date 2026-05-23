@@ -1,36 +1,48 @@
 # Code Map 总览
 
-本目录是 `quant-research-platform` 的源码阅读地图，不替代研究报告、数据手册或长期功能池。项目边界看 [../../README.md](../../README.md)，当前事实看 [../../PROJECT_STATUS.md](../../PROJECT_STATUS.md)，后续能力池看 [../architecture/future-capabilities.md](../architecture/future-capabilities.md)，CSMAR 字段口径看 [../csmar_data_manual.md](../csmar_data_manual.md)。
+本目录是 `quant-research-platform` 的源码阅读地图。它记录当前代码事实，不替代研究报告、数据手册、架构蓝图或项目状态。
 
-## 阅读入口
+入口文档：
 
-| 文档 | 说明 |
+- 项目边界：[../../README.md](../../README.md)
+- 当前事实：[../../PROJECT_STATUS.md](../../PROJECT_STATUS.md)
+- 架构边界：[../architecture/README.md](../architecture/README.md)
+- CSMAR 字段口径：[../csmar_data_manual.md](../csmar_data_manual.md)
+
+## 当前文件
+
+| 文档 | 用途 |
 |---|---|
-| [platform-flow.md](platform-flow.md) | 平台接口、入口参数、A 股核心流向和未来 crypto 高频构想图 |
-| [a-share-interface.md](a-share-interface.md) | A 股 build panel / build factors / run evaluation 接口，以及前端 pipeline snapshot 边界 |
-| [data-pipeline.md](data-pipeline.md) | CSMAR raw -> interim -> full research panel |
-| [factors.md](factors.md) | full panel -> price-volume factors -> forward labels |
-| [evaluation.md](evaluation.md) | market module -> `EvaluationSpec` -> platform evaluation / artifacts |
-| [validation-runtime.md](validation-runtime.md) | validation checks、space gate 和生成产物复核 |
+| [platform-flow.md](platform-flow.md) | 当前平台全局地图；包含 Phase 1 已实现链路、节点说明、边说明、API/CLI/前端入口和 Phase 1 后续架构债 |
+| [platform-flow-interactive.html](platform-flow-interactive.html) | 与 `platform-flow.md` 同步的可浏览交互图；支持按分组筛选节点、查看节点和边说明 |
+| [a-share-data-and-pipeline.md](a-share-data-and-pipeline.md) | A 股 CSMAR raw/interim/panel/factor/processed-existing pipeline、Factor Factory 和 validation/runtime 的代码地图 |
+| [evaluation-artifacts-api.md](evaluation-artifacts-api.md) | Evaluation contract、schema `0.5` artifacts、`manifest.display`、API/download/frontend 合同地图 |
 
-## 推荐源码阅读顺序
+## 推荐阅读顺序
 
-按平台数据流读：
+按新人接手顺序：
 
-1. [../architecture/future-capabilities.md](../architecture/future-capabilities.md)：看懂平台长期能力边界和后续研究路线。
-2. [a-share-interface.md](a-share-interface.md)：看懂 A 股当前可执行入口和前端 snapshot 边界。
-3. [data-pipeline.md](data-pipeline.md)：看懂 raw CSMAR 如何进入 interim，再形成 full panel。
-4. [factors.md](factors.md)：看懂 panel 如何变成 slim factor table 和 forward labels。
-5. [evaluation.md](evaluation.md)：看懂 A 股模块如何构造 `EvaluationSpec` 并调用平台 evaluation 入口。
-6. [validation-runtime.md](validation-runtime.md)：看懂每一层产物如何检查、空间如何估算。
+1. [platform-flow.md](platform-flow.md)：先建立全局链路、入口和边界。
+2. [a-share-data-and-pipeline.md](a-share-data-and-pipeline.md)：看懂 A 股私有数据如何进入 processed factor table，以及 Phase 1 runner 的真实范围。
+3. [evaluation-artifacts-api.md](evaluation-artifacts-api.md)：看懂 `EvaluationSpec -> artifacts -> API -> workbench` 的合同。
+4. [platform-flow-interactive.html](platform-flow-interactive.html)：需要查节点、边或入口时用浏览器浏览。
 
-如果只想调试某个现象，可以反向读：
+## 按问题定位
 
 | 现象 | 先读 |
 |---|---|
-| 原始 CSV 列名或编码不对 | `data-pipeline.md` |
-| panel 行数或 eligible / can_enter / can_exit 不对 | `data-pipeline.md` -> `validation-runtime.md` |
-| factor 缺列、label 缺失、滚动窗口异常 | `factors.md` -> `validation-runtime.md` |
-| evaluation run 没有 schema `0.5` 或 `manifest.display` | `evaluation.md` |
-| PnL、turnover、download 或 workbench 口径不对 | `evaluation.md` -> `ARCHITECTURE.md` |
-| 磁盘空间不够或误留旧产物 | `validation-runtime.md` |
+| 不知道当前平台哪些能力已经实现 | `platform-flow.md` |
+| 原始 CSV、interim、panel 或 factor table 口径不清楚 | `a-share-data-and-pipeline.md` |
+| Pipeline Builder 到底是 snapshot 还是 runner | `platform-flow.md` -> `a-share-data-and-pipeline.md` |
+| Factor Factory 候选、失败日志或本地浏览入口不清楚 | `a-share-data-and-pipeline.md` |
+| evaluation run 没有 schema `0.5` 或 `manifest.display` | `evaluation-artifacts-api.md` |
+| PnL、turnover、download、ZIP 或 workbench 展示不一致 | `evaluation-artifacts-api.md` |
+| API 里 `source_alias + run_id` 身份丢失 | `evaluation-artifacts-api.md` -> `platform-flow.md` |
+| 后续架构债和 Phase 2/Future 边界不清楚 | `platform-flow.md` |
+
+## 维护规则
+
+- `platform-flow.md` 和 `platform-flow-interactive.html` 必须同步维护。
+- 新增用户可见 artifact、API、download、frontend table/chart 时，同步 `evaluation-artifacts-api.md`。
+- 修改 A 股 raw/interim/panel/factor/runner/Factor Factory 时，同步 `a-share-data-and-pipeline.md`。
+- 不在 code-map 中记录一次性 run id、临时文件、完整私有路径或不可公开的 CSMAR 明细。

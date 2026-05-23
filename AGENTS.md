@@ -28,8 +28,8 @@ Current structure:
 - `src/quant_research_platform/pipelines/a_share/`: A-share workflow orchestration, runner, checkpoint, snapshots, and step registry.
 - `web/`: React/Vite local evidence workbench.
 - `scripts/`: local-only PowerShell launch scripts, build checks, and acceptance helpers.
-- `docs/architecture/`: architecture blueprint, future capabilities, standards, Phase 1 refactor design, implementation checklist, and directory-rename handoff.
-- `docs/code-map/`: source reading map and contract handoff notes.
+- `docs/architecture/`: target architecture and capabilities, engineering and quant research standards, Phase 1 acceptance record, and next-stage roadmap.
+- `docs/code-map/`: current source reading map, including platform flow, A-share data/pipeline, and evaluation/artifact/API/frontend contracts.
 
 - Do not create repo-level `apps/api` in Phase 1; it is a future deployable app shell for Phase 2.
 - Do not create empty Future directories or empty market implementations merely as planning markers.
@@ -181,10 +181,11 @@ Do not run slow, network-heavy, destructive, or environment-changing commands wi
 - [RESEARCH_CARD.md](RESEARCH_CARD.md): evidence ledger.
 - [PROJECT_STATUS.md](PROJECT_STATUS.md): current local status, next tasks, decisions, and root handoff.
 - [docs/architecture/README.md](docs/architecture/README.md): architecture document index and new-session reading order.
-- [docs/architecture/handoff-before-directory-rename.md](docs/architecture/handoff-before-directory-rename.md): directory-rename and new-conversation handoff.
+- [docs/architecture/target-architecture-and-capabilities.md](docs/architecture/target-architecture-and-capabilities.md): final target architecture and future capability boundary.
+- [docs/architecture/phase-1-acceptance-record.md](docs/architecture/phase-1-acceptance-record.md): Phase 1 implemented scope and acceptance evidence.
+- [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md): next-stage architecture debt and task priorities.
 - [docs/csmar_data_manual.md](docs/csmar_data_manual.md): CSMAR download, fields, data rules, schema, and private report template.
-- [docs/code-map/](docs/code-map/): source reading map.
-- [docs/code-map/a-share-interface.md](docs/code-map/a-share-interface.md): A-share build/evaluate entrypoints and frontend snapshot boundary.
+- [docs/code-map/](docs/code-map/): current source reading map, including platform flow, A-share data/pipeline, and evaluation/artifact/API/frontend contracts.
 - `.codex/skills/quant-research-platform-maintenance/SKILL.md`: project-local maintenance workflow for artifact/API/frontend contract changes.
 
 Root handoff rule: if this project changes its current topic, phase, milestone, blocker, next step, public readiness, or data/API/Git/Conda/privacy boundary, record an `open` signal in [PROJECT_STATUS.md](PROJECT_STATUS.md). Do not edit workspace-root planning or status files from this project unless explicitly asked.

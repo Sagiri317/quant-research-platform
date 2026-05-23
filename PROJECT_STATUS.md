@@ -18,16 +18,15 @@
 
 ## 本轮迁移状态
 
-本轮目标是把项目身份从单一 A 股研究项目切换为 `quant-research-platform`。长期后续功能池收敛在 `docs/architecture/future-capabilities.md`；历史迁移计划和历史迁移设计已由 Git 历史保留，不再作为当前待办清单。
+本轮目标是把项目身份从单一 A 股研究项目切换为 `quant-research-platform`。最终功能和架构目标已收敛在 `docs/architecture/target-architecture-and-capabilities.md`；历史迁移计划、历史迁移设计和旧 Phase 1 任务拆解已由当前验收记录替代，不再作为当前待办清单。
 
-当前阶段已完成可提交的迁移、核心合同闭环、Factor Factory 前端浏览入口和 P4/P5 小样本示例。Phase 1 最终验收仍以 `docs/architecture/phase-1-implementation-checklist.md` 为准：
+当前阶段已完成可提交的迁移、核心合同闭环、Factor Factory 前端浏览入口和 P4/P5 小样本示例。2026-05-23 已完成 Phase 1 代码功能复核；2026-05-24 已同步 `docs/code-map/`、`docs/architecture/` 和项目根目录文档的当前架构表述。验收结论见 `docs/architecture/phase-1-acceptance-record.md`；下一阶段任务见 `docs/architecture/next-stage-roadmap.md`。Phase 1 功能已实现并通过测试：
 
 - 用户入口文档改为 Chinese-first 的平台说明。
 - `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、artifact schema `0.5`、`manifest.display`、API/download/frontend 边界。
-- `docs/architecture/future-capabilities.md` 收敛原 A 股平台蓝图、旧 evaluation 后续能力总结和迁移设计中的长期路线，保留 A 股、ML prediction、风险、regime、workbench 和未来模拟盘边界，但不把模拟盘写成当前范围。
-- `docs/architecture/architecture-refactor-design.md` 记录下一轮 contract-first 架构重构设计，冻结 `EvaluationSpec`、`run_evaluation`、schema `0.5`、API route 和前端下载合同。
-- `docs/architecture/phase-1-implementation-checklist.md` 把 Phase 1 重构拆成可执行任务、验收项、注册表分级、偏差审计和测试矩阵。
-- `docs/architecture/handoff-before-directory-rename.md` 已降级为历史交接记录；当前阅读入口以本文件和 `docs/architecture/README.md` 为准。
+- `docs/architecture/target-architecture-and-capabilities.md` 合并最终目录结构与未来能力池，保留 A 股、ML prediction、风险、regime、workbench、未来模拟盘和商业化平台边界，但不把未来能力写成当前已实现范围。
+- `docs/architecture/phase-1-acceptance-record.md` 记录 Phase 1 已实现范围、冻结合同、测试证据和后续架构债。
+- `docs/architecture/next-stage-roadmap.md` 把 Phase 1 后的架构债提上日程，按任务列出目标、非目标、验收口径和测试边界。
 - 项目级 `AGENTS.md` 增加 `src/quant_research_platform/` 结构、Conda `analysis`、私有数据、无外部 API/凭据、无交易、exact-path deletion、frontend/API/artifact contract、旧 evaluation reference 仅作参考、`source_alias + run_id` 运行身份边界。
 - `.codex/skills/quant-research-platform-maintenance/` 记录后续维护 artifact/API/download/frontend 合同时必须执行的 gates。
 - React workbench 已改为中文界面，并补上“因子表达式/模板 -> 流程配置”的前端状态传递。
@@ -36,16 +35,16 @@
 - A 股真实私有 runs 必须走 A 股专用 adapter：`python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`。通用 `evaluate-parquet` 只作为平台 evaluation / 外部 Parquet adapter 验收，不替代 A 股 adapter 验收。
 - P4/P5 本地示例入口为 `scripts/phase1_acceptance.py`：`run` 复跑 2024 A 股 adapter acceptance runs，`compare` 低内存比较 old/new，`factory-smoke` 生成 Factor Factory candidate summary。
 
-Architecture checklist 口径下已补齐：
+Phase 1 验收口径下已补齐：
 
 1. Factor Factory 本地 workbench 浏览入口。
 2. A 股 processed-existing pipeline runner 小样本示例和 old/new 比较。
 3. Factor Factory 小样本示例，生成 candidate summary 和 failed candidate log。
 
-仍需单独同步或后续设计：
+Phase 1 之后下一阶段设计：
 
-1. 根目录状态同步：本项目只记录 open handoff signal，workspace-root 文件需单独同步。
-2. 前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
+1. 前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
+2. 完整 A 股 build runner、ML prediction pipeline、风险/中性化扩展等后续能力需要按 `docs/architecture/next-stage-roadmap.md` 单独设计和验收。
 
 ## 当前研究资产
 
@@ -70,16 +69,15 @@ Architecture checklist 口径下已补齐：
 - 2024-2025 long-only full run 已生成，包含 evaluation 年度 breakdown。
 - long-only 不变量曾检查通过：`portfolio_mode=long_only`、`short_count=0`、`short_return=0`，0 成本下 long/gross/net return 一致。
 
-迁移后曾按 `src/quant_research_platform/`、API、web、pipeline 和 docs 合同完成一轮 review/fix 与验证；2026-05-23 又进一步收紧目录决策，并已执行到 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`。旧路径残留扫描、后端测试、ruff、前端 test/lint/build、CLI help、A 股 adapter help、API app import 和 `git diff --check` 已通过；根目录状态同步和新的 Phase 2/扩展设计仍需单独执行。
+迁移后曾按 `src/quant_research_platform/`、API、web、pipeline 和 docs 合同完成一轮 review/fix 与验证；2026-05-23 又进一步收紧目录决策，并已执行到 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`。旧路径残留扫描、Phase 1 相关后端测试、完整 pytest、ruff、前端 test/lint/build、CLI help、A 股 adapter help、API app import、architecture Markdown 链接检查和 `git diff --check` 已通过。2026-05-24 又完成 code-map 重构审计、项目文档一致性同步和当前 API/contract 轻量导入检查；新的 Phase 2/扩展设计仍需单独执行。
 
 ## 下一步
 
-1. 同步 root workspace 状态；本项目已记录 open handoff signal，不在本轮直接编辑 workspace-root 文件。
-2. 单独设计前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
-3. 继续扩展前先保留当前 P4/P5 smoke 命令作为回归门槛。
-4. 目录已在 `quant-research-platform`，后续不要把目录改名混入 Phase 1 收口。
-5. Phase 1 之后如继续扩展，应单独设计完整 A 股 build runner、ML prediction pipeline、风险/中性化扩展等后续能力。
-6. 可清理未使用的 Vite 默认前端资源，但需要单独确认具体路径：`web/src/assets/hero.png`、`web/src/assets/react.svg`、`web/src/assets/vite.svg`。
+1. 按 `docs/architecture/next-stage-roadmap.md` 先做完整 A 股 build runner 和 eligibility / tradability 诊断可见化。
+2. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并把新增能力写进明确验收口径。
+3. 目录已在 `quant-research-platform`，后续不要把目录改名混入 Phase 1 收口。
+4. Phase 1 之后如继续扩展，应单独设计 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因等后续能力。
+5. 可清理未使用的 Vite 默认前端资源，但需要单独确认具体路径：`web/src/assets/hero.png`、`web/src/assets/react.svg`、`web/src/assets/vite.svg`。
 
 ## 已执行的结构决策
 
@@ -96,8 +94,11 @@ Architecture checklist 口径下已补齐：
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
 | 2026-05-21 | planning | 项目定位从单一 A 股因子研究项目收口为 A 股量化研究平台入口；临时平台蓝图记录数据、因子、ML prediction、风险、regime、evaluation、evidence workbench 和未来模拟盘边界。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-22 |
-| 2026-05-22 | migration | 项目身份迁移为 `quant-research-platform`；A 股为第一版 enabled market module；evaluation、schema `0.5` artifacts、API/download 和 React evidence workbench 成为平台内置能力；旧目录名等待用户后续手动改名。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-22 |
+| 2026-05-22 | migration | 项目身份迁移为 `quant-research-platform`；A 股为第一版 enabled market module；evaluation、schema `0.5` artifacts、API/download 和 React evidence workbench 成为平台内置能力。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-22 |
 | 2026-05-22 | milestone | 平台迁移、前端中文化、小步美化、因子表达式到流程配置快照闭环已完成；2023-2025 tensor / dataframe 与 long-only / long-short 小样本 smoke 已生成并进入 review 收口。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-22 |
-| 2026-05-23 | handoff | 目录迁移交接文档已转为历史记录；当前目录为 `quant-research-platform`；Phase 1 核心结构、合同、P5 workbench 和 P4/P5 示例已在本项目内复验；仍需单独同步根目录状态。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
-| 2026-05-23 | phase1 | Phase 1 目标结构已执行并完成复验：旧路径残留扫描、后端测试、ruff、前端 test/lint/build、CLI help、A 股 adapter help、API app import、`git diff --check`、Factor Factory workbench、2024 acceptance old/new 比较和 Factor Factory smoke 均通过；后续架构债另列。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
-| 2026-05-23 | architecture decision | 已执行 Phase 1 严格目标结构：`interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`；不创建 Phase 2 `apps/api`，不保留空 `markets/crypto` 实现，不提前创建空 Future 目录。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-23 | handoff | 目录迁移交接文档已转为历史记录；当前目录为 `quant-research-platform`；Phase 1 核心结构、合同、P5 workbench 和 P4/P5 示例已在本项目内复验；仍需单独同步根目录状态。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
+| 2026-05-23 | phase1 | Phase 1 目标结构已执行并完成复验：旧路径残留扫描、后端测试、ruff、前端 test/lint/build、CLI help、A 股 adapter help、API app import、`git diff --check`、Factor Factory workbench、2024 acceptance old/new 比较和 Factor Factory smoke 均通过；后续架构债另列。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
+| 2026-05-23 | architecture decision | 已执行 Phase 1 严格目标结构：`interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`；不创建 Phase 2 `apps/api`，不保留空 `markets/crypto` 实现，不提前创建空 Future 目录。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
+| 2026-05-24 | docs sync | 已重构 `docs/code-map/`，删除旧 code-map 分片，新增 A 股 pipeline 与 evaluation/artifact/API 合同地图；同步根文档、architecture 文档和状态文件的 Phase 1 当前表述。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
+| 2026-05-24 | architecture docs | 已合并最终目录结构和未来能力池为 `target-architecture-and-capabilities.md`，新增 `phase-1-acceptance-record.md` 和 `next-stage-roadmap.md`，删除旧 Phase 1 设计、任务拆解和交接文档；下一阶段任务已提上日程。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
+| 2026-05-24 | root docs sync | 已按当前前后端代码、API route、目录结构、文档新结构同步根目录文档，统一 Phase 1 验收记录、下一阶段路线图和 code-map 口径。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |

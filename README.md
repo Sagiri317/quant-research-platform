@@ -22,7 +22,7 @@ local approved data
 - A 股是第一版完整 market module，数据源边界是用户手工导出的本地 CSMAR 文件。
 - evaluation layer、artifact writer / loader、schema `0.5`、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
 - Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为辅助输入方式保留。
-- Pipeline Builder 当前只生成因子表达式/配置快照，不执行完整 A 股 build/evaluate 编排；一键全流程需要后续接入执行层。
+- Pipeline Builder 默认生成因子表达式/配置快照；后端同一入口已支持 `execution_mode=processed_existing`，可在已有 processed factor table 上调用 A 股轻量 runner，但不执行完整 raw/interim/panel/factors 重建。
 - Factor Factory 已有后端 registry、批量评价、API 轻量入口和本地 workbench 浏览入口；P4/P5 小样本示例由 `scripts/phase1_acceptance.py` 统一复跑和比较。
 - crypto 和其他市场只显示为 planned / disabled，不代表已支持真实数据或交易，也不保留空实现包。
 
@@ -152,13 +152,13 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 
 本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
 
-Phase 1 验收以 [docs/architecture/phase-1-implementation-checklist.md](docs/architecture/phase-1-implementation-checklist.md) 为准。2026-05-23 已补齐：
+Phase 1 验收结论见 [docs/architecture/phase-1-acceptance-record.md](docs/architecture/phase-1-acceptance-record.md)。2026-05-23 已完成代码复核和测试验收；Phase 1 功能已补齐：
 
 - Factor Factory 本地 workbench 浏览入口；
 - A 股 processed-existing pipeline runner 小样本示例和 old/new 比较；
 - Factor Factory 小样本示例。
 
-仍需单独同步的是 root workspace 状态回传，以及后续架构债：前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
+本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)，当前优先级包括：前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
 
 新增或修改 artifacts 时必须同时检查：
 

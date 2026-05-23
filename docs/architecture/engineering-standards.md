@@ -1,6 +1,6 @@
 # Engineering Standards / 工程规范
 
-本文定义 `quant-research-platform` 的横切工程规则。它回答模块如何依赖、合同如何版本化、错误如何分类、测试如何守边界，以及未来扩展如何接入；目录归属以 [target-directory-structure.md](target-directory-structure.md) 为准。
+本文定义 `quant-research-platform` 的横切工程规则。它回答模块如何依赖、合同如何版本化、错误如何分类、测试如何守边界，以及未来扩展如何接入；目录归属以 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md) 为准。
 
 ## 1. 模块边界
 

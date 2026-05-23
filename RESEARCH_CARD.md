@@ -7,8 +7,8 @@
 | 字段 | 内容 |
 |---|---|
 | 记录名称 | `quant_research_platform_a_share_module` |
-| 当前状态 | platform migration closed; review/fix loop active |
-| 日期 | 2026-05-22 |
+| 当前状态 | Phase 1 required code functionality implemented and verified; code-map, architecture docs, and root docs synchronized |
+| 日期 | 2026-05-24 |
 | 项目定位 | 本地多市场量化研究平台；A 股为第一版完整 market module |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
 | 主要产物 | `panel_full/research_panel_2014_2025.parquet`；`price_volume_factors_full/price_volume_factors_2014_2025.parquet` |
@@ -23,7 +23,7 @@
 - `src/quant_research_platform/markets/implementations/a_share/`：CSMAR-backed A-share data、factor、validation、evaluation adapter。
 - `src/quant_research_platform/pipelines/a_share/`：A 股 workflow runner、checkpoint 和 pipeline contracts。
 - `web/`：本地 React/Vite evidence workbench。
-- `docs/code-map/`：平台源码阅读地图和未来研究路线。
+- `docs/code-map/`：当前平台全局地图、A 股数据/pipeline 地图、evaluation/artifact/API/frontend 合同地图。
 
 ## 历史结果证据
 
@@ -32,9 +32,8 @@
 - 历史 2024-2025 long-only 第一版诊断中，反转类因子是主要候选。
 - 历史 long-only 不变量曾检查通过：`portfolio_mode=long_only`、`short_count=0`、`short_return=0`，0 成本下 `net_portfolio_return == gross_portfolio_return == long_return`。
 
-## 仍需验证
+## 下一阶段事项
 
-- 平台路径下的 Python/API/frontend 全面 review 与修复闭环。
-- A 股小样本 pipeline、schema `0.5` artifacts、`manifest.display`、download picker 和 workbench 展示一致性；验证需同时覆盖 tensor / dataframe 与 long-only / long-short。
-- long-only 成本敏感性、924 regime、行业/市值中性化、风险暴露和正式组合约束分析。
-- ML prediction pipeline 的 time split、防泄漏、model manifest 和失败实验记录。
+- 前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化属于 Phase 1 之后的架构债。
+- long-only 成本敏感性、regime、行业/市值中性化、风险暴露和正式组合约束分析仍需单独研究。
+- ML prediction pipeline 的 time split、防泄漏、model manifest 和失败实验记录仍需单独设计。
