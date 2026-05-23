@@ -11,5 +11,6 @@ Phase 1 已完成代码功能复核和文档收口；验收结论已沉淀到 [p
 3. [quant-research-standards.md](quant-research-standards.md)：point-in-time、universe、tradability、成本、容量、统计验证和复现规则。
 4. [phase-1-acceptance-record.md](phase-1-acceptance-record.md)：Phase 1 已实现功能、验收证据、冻结合同和遗留架构债。
 5. [next-stage-roadmap.md](next-stage-roadmap.md)：Phase 1 之后的下一阶段任务、验收口径和测试边界。
+6. [next-stage-worktree-plan.md](next-stage-worktree-plan.md)：下一阶段 N1-N4 的分支、工作树、依赖和最低验收拆分。
 
 本目录中的文档是设计和治理依据，不代表所有目录或能力都已经实现。
