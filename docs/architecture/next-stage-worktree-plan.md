@@ -117,6 +117,7 @@ Pop-Location
 git diff --check
 ```
 
-## 当前首个执行计划
+## 当前执行计划
 
-首个详细实施计划是 [../superpowers/plans/2026-05-24-a-share-build-runner.md](../superpowers/plans/2026-05-24-a-share-build-runner.md)。
+- N1 详细实施计划：[../superpowers/plans/2026-05-24-a-share-build-runner.md](../superpowers/plans/2026-05-24-a-share-build-runner.md)。
+- N4 详细实施计划：[../superpowers/plans/2026-05-24-frontend-feature-split.md](../superpowers/plans/2026-05-24-frontend-feature-split.md)。
