@@ -144,8 +144,9 @@ def test_default_api_run_list_exposes_default_pipeline_root(tmp_path, monkeypatc
     assert response.json()[0]["public_run_id"] == "pipeline/demo"
 
 
-def test_api_invalid_run_index_error_hides_local_paths(tmp_path):
+def test_api_run_list_skips_invalid_run_index_without_exposing_paths(tmp_path):
     runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
     broken = runs_root / "broken"
     broken.mkdir(parents=True)
     (broken / "manifest.json").write_text(
@@ -156,10 +157,10 @@ def test_api_invalid_run_index_error_hides_local_paths(tmp_path):
 
     response = client.get("/api/runs")
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
     assert str(runs_root) not in response.text
     assert "summary.json" not in response.text
-    assert response.json()["detail"] == "artifact run index is incomplete or invalid"
 
 
 def test_api_lists_runs_with_lightweight_index(tmp_path, monkeypatch):
@@ -184,7 +185,7 @@ def test_api_lists_runs_with_lightweight_index(tmp_path, monkeypatch):
     assert response.json()[0]["public_run_id"] == "platform/demo"
 
 
-def test_api_run_list_rejects_unsupported_legacy_schema_runs(tmp_path):
+def test_api_run_list_skips_unsupported_legacy_schema_runs(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
     write_evaluation_set(runs_root / "legacy", run_id="legacy")
@@ -197,8 +198,8 @@ def test_api_run_list_rejects_unsupported_legacy_schema_runs(tmp_path):
 
     response = client.get("/api/runs")
 
-    assert response.status_code == 422
-    assert "unsupported artifact_schema_version" in response.json()["detail"]
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/demo"]
 
 
 def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
@@ -299,6 +300,40 @@ def test_api_metric_endpoint_loads_only_selected_run_artifacts(tmp_path, monkeyp
 
     assert response.status_code == 200
     assert loaded_run_dirs == ["run_b"]
+
+
+def test_api_metric_endpoint_ignores_unrelated_broken_run_index(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
+    broken = runs_root / "broken"
+    broken.mkdir(parents=True)
+    (broken / "manifest.json").write_text(
+        json.dumps({"artifact_schema_version": "0.5"}),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/good/metrics/ic")
+
+    assert response.status_code == 200
+    assert response.json()["rows"]
+
+
+def test_api_target_broken_run_index_still_returns_422(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
+    broken = runs_root / "broken"
+    broken.mkdir(parents=True)
+    (broken / "manifest.json").write_text(
+        json.dumps({"artifact_schema_version": "0.5"}),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/broken/evidence")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "artifact run index is incomplete or invalid"
 
 
 def test_api_metric_endpoint_returns_limited_preview_rows(tmp_path):
@@ -929,8 +964,9 @@ def test_api_rejects_unsupported_display_schema_at_app_entry_points(tmp_path):
     assert zip_get.status_code == 422
 
 
-def test_api_run_index_rejects_unsupported_display_schema(tmp_path):
+def test_api_run_index_skips_unsupported_display_schema(tmp_path):
     runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
     run_dir = runs_root / "demo"
     write_evaluation_set(run_dir, run_id="demo")
     manifest_path = run_dir / "manifest.json"
@@ -941,8 +977,12 @@ def test_api_run_index_rejects_unsupported_display_schema(tmp_path):
 
     response = client.get("/api/runs")
 
-    assert response.status_code == 422
-    assert "display schema_version" in response.json()["detail"]
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
+
+    target = client.get("/api/runs/platform/demo/evidence")
+    assert target.status_code == 422
+    assert "display schema_version" in target.json()["detail"]
 
 
 def test_api_breakdown_preview_rejects_wrong_group(tmp_path):
@@ -1303,6 +1343,26 @@ def test_api_downloads_single_selected_artifact_as_zip(tmp_path):
         ).read_bytes()
 
 
+def test_api_selected_artifact_zip_cache_hashes_long_identity_segments(tmp_path):
+    runs_root = tmp_path / "runs"
+    run_id = "run_" + ("20240101_" * 12)
+    source_alias = "source_" + ("private_acceptance_" * 5)
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    response = selected_download_response(
+        load_evaluation_set(runs_root / "demo"),
+        source_alias,
+        run_id,
+        ["report.md"],
+        tmp_path / "download_cache",
+        lambda: b"",
+    )
+
+    assert response.status_code == 200
+    cache_files = list((tmp_path / "download_cache").glob("**/*.zip"))
+    assert len(cache_files) == 1
+    assert len(str(cache_files[0])) < 240
+
+
 def test_api_returns_chinese_error_for_bad_uploaded_csv(tmp_path):
     runs_root = tmp_path / "runs"
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
@@ -1389,8 +1449,9 @@ def test_api_returns_comparison_for_discovered_runs(tmp_path):
     assert "rank_mean_final_return" in payload["columns"]
 
 
-def test_api_run_list_rejects_missing_weight_method(tmp_path):
+def test_api_run_list_skips_run_with_missing_weight_method(tmp_path):
     runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
     summary_path = run_dir / "summary.json"
@@ -1401,12 +1462,13 @@ def test_api_run_list_rejects_missing_weight_method(tmp_path):
 
     response = client.get("/api/runs")
 
-    assert response.status_code == 422
-    assert "summary weight_configs invalid" in response.json()["detail"]
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
 
 
-def test_api_comparison_rejects_missing_weight_method(tmp_path):
+def test_api_comparison_skips_run_with_missing_weight_method(tmp_path):
     runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
     summary_path = run_dir / "summary.json"
@@ -1417,8 +1479,10 @@ def test_api_comparison_rejects_missing_weight_method(tmp_path):
 
     response = client.get("/api/comparison")
 
-    assert response.status_code == 422
-    assert "summary weight_configs invalid" in response.json()["detail"]
+    assert response.status_code == 200
+    assert [row["public_run_id"] for row in response.json()["rows"]] == [
+        "platform/good"
+    ]
 
 
 def test_api_downloads_dynamic_comparison_csv(tmp_path):
@@ -1437,8 +1501,9 @@ def test_api_downloads_dynamic_comparison_csv(tmp_path):
     assert "platform/run_b" in response.text
 
 
-def test_api_comparison_csv_requires_display_download_item(tmp_path):
+def test_api_comparison_csv_skips_run_without_display_download_item(tmp_path):
     runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
     _remove_display_download_item(run_dir / "manifest.json", "comparison.csv")
@@ -1446,12 +1511,14 @@ def test_api_comparison_csv_requires_display_download_item(tmp_path):
 
     response = client.get("/api/comparison.csv")
 
-    assert response.status_code == 422
-    assert "comparison.csv is not exposed" in response.json()["detail"]
+    assert response.status_code == 200
+    assert "platform/good" in response.text
+    assert "platform/run_a" not in response.text
 
 
-def test_api_comparison_json_requires_display_download_item(tmp_path):
+def test_api_comparison_json_skips_run_without_display_download_item(tmp_path):
     runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
     _remove_display_download_item(run_dir / "manifest.json", "comparison.csv")
@@ -1459,8 +1526,10 @@ def test_api_comparison_json_requires_display_download_item(tmp_path):
 
     response = client.get("/api/comparison")
 
-    assert response.status_code == 422
-    assert "comparison.csv is not exposed" in response.json()["detail"]
+    assert response.status_code == 200
+    assert [row["public_run_id"] for row in response.json()["rows"]] == [
+        "platform/good"
+    ]
 
 
 def test_api_evidence_comparison_requires_display_download_item(tmp_path):
@@ -1476,7 +1545,7 @@ def test_api_evidence_comparison_requires_display_download_item(tmp_path):
     assert "comparison.csv is not exposed" in response.json()["detail"]
 
 
-def test_api_selected_zip_comparison_csv_requires_all_runs_to_expose_item(tmp_path):
+def test_api_selected_zip_comparison_csv_skips_unexposed_comparison_runs(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "run_a", run_id="run_a", net_returns=[0.01])
     run_b = runs_root / "run_b"
@@ -1489,9 +1558,11 @@ def test_api_selected_zip_comparison_csv_requires_all_runs_to_expose_item(tmp_pa
         json={"items": ["comparison.csv"]},
     )
 
-    assert response.status_code == 422
-    assert "comparison.csv is not exposed" in response.json()["detail"]
-    assert not (tmp_path / "download_cache").exists()
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        comparison = archive.read("comparison.csv").decode("utf-8")
+    assert "platform/run_a" in comparison
+    assert "platform/run_b" not in comparison
 
 
 def test_api_comparison_keeps_duplicate_run_ids_from_different_sources(tmp_path):
@@ -1572,8 +1643,9 @@ def test_api_allows_local_vite_origin(tmp_path):
     )
 
 
-def test_api_maps_invalid_artifact_contract_to_422(tmp_path):
+def test_api_run_list_skips_invalid_artifact_contract(tmp_path):
     runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
     write_evaluation_set(runs_root / "broken", run_id="broken")
     summary_path = runs_root / "broken" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -1583,8 +1655,12 @@ def test_api_maps_invalid_artifact_contract_to_422(tmp_path):
 
     response = client.get("/api/runs")
 
-    assert response.status_code == 422
-    assert "summary.json is missing required fields" in response.json()["detail"]
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
+
+    target = client.get("/api/runs/platform/broken/evidence")
+    assert target.status_code == 422
+    assert "summary.json is missing required fields" in target.json()["detail"]
 
 
 def _remove_display_download_item(manifest_path, item_name: str) -> None:

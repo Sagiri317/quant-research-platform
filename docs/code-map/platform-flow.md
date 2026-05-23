@@ -304,7 +304,7 @@ flowchart LR
 | `qrp compare` | 已实现入口 | `src/quant_research_platform/interfaces/cli/commands.py` | 离线比较多个 evaluation-set run。 |
 | `write_run_comparison` | 已实现接口 | `src/quant_research_platform/artifacts/artifact_comparison.py` | `qrp compare` 使用的对比写出函数。 |
 | A股 processed-existing Pipeline Runner | 已实现轻量入口 | `src/quant_research_platform/pipelines/a_share/runner.py` | 使用已存在 processed factor table 调用 A股 evaluation adapter，写出 checkpoint 和 runtime summary；full build raw/interim/panel/factors 仍是后续能力。 |
-| Factor Factory 第一版 | 已实现后端/API轻量入口 | `src/quant_research_platform/research/factor_factory/` | 从受控 factor template registry 生成候选，批量调用 processed-existing runner，并写出 candidate summary 与 failed candidate log；独立前端浏览工作区仍属于后续 feature 拆分。 |
+| Factor Factory 第一版 | 已实现轻量入口 | `src/quant_research_platform/research/factor_factory/`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py`, `web/src/FactorFactoryRuns.tsx` | 已有受控 factor template registry、批量 processed-existing 评价、candidate summary、failed candidate log、API 浏览/下载入口和本地 workbench 浏览入口。 |
 
 ## 边说明
 
@@ -543,6 +543,9 @@ flowchart LR
 1. `Pipeline Builder -> A股 full build runner`：前端目前默认写配置快照；后端已有 processed-existing 轻量 runner，但还不承诺一键触发完整 raw/interim/panel/factors build。
 2. `A股 Pipeline Runner -> build/repository`：runner 已能调用 A股 evaluation adapter；pipeline output root 下的嵌套 evaluation runs 可被 run repository 暴露，panel/factor 构建仍需后续设计。
 3. 因子表达式执行：Factor Factory 第一版只允许受控 registry 和已存在 processed factor column 映射；任意 Python、自定义列计算和参数网格扩展不属于当前已实现范围。
+4. 前端 feature split：当前 `web/src` 仍是平铺入口，后续可按 Evidence、Pipeline、Factor Factory、Uploads 和 shared 拆分。
+5. Artifact ZIP packaging：当前下载打包仍在 API service，后续可下沉到 `artifacts/` 纯函数层。
+6. Eligibility / tradability diagnostics：当前列已进入 panel/factor/evaluation，后续应把过滤覆盖数作为可见诊断 artifact。
 
 ## 自查结论
 

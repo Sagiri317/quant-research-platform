@@ -85,6 +85,22 @@ def test_blocking_issue_prevents_snapshot(tmp_path):
         write_run_snapshot(config)
 
 
+def test_snapshot_rejects_bare_processed_column_expression(tmp_path):
+    config = _valid_config(tmp_path)
+    config.factor_expression = "rev_20d"
+    config.factor_template_id = "custom"
+    config.factor_template_source = None
+
+    validation = validate_pipeline_config(config)
+
+    assert validation.has_blocking
+    assert any(
+        issue.code == "invalid_factor_expression" for issue in validation.blocking
+    )
+    with pytest.raises(PipelineSnapshotError):
+        write_run_snapshot(config)
+
+
 def test_validation_classifies_market_and_portfolio_issues(tmp_path):
     missing_market = _valid_config(tmp_path)
     missing_market.market = ""

@@ -41,6 +41,7 @@ export type TablePayload = {
   total_rows?: number
   offset?: number
   limit?: number | null
+  has_more?: boolean
 }
 
 export type RunDetail = {
@@ -154,6 +155,45 @@ export type PipelineCheckpointSummary = {
   failure_code?: string
   warnings?: Record<string, unknown>[]
   blocking_issues?: Record<string, unknown>[]
+}
+
+export type FactorFactoryRunSummary = {
+  artifact_schema_version: string
+  artifact_type: string
+  candidate_count: number
+  created_at?: string
+  failed_count: number
+  run_id: string
+  success_count: number
+}
+
+export type FactorFactoryDisplayTable = {
+  download_item: string
+  group: string
+  key: string
+  label: string
+  path: string
+}
+
+export type FactorFactoryDownloadItem = {
+  item: string
+  kind: string
+  label: string
+  table?: string
+}
+
+export type FactorFactoryDisplay = {
+  schema_version: string
+  downloads: {
+    items: FactorFactoryDownloadItem[]
+    presets: RunDisplayDownloadPreset[]
+  }
+  tables: FactorFactoryDisplayTable[]
+}
+
+export type FactorFactoryRunDetail = {
+  display: FactorFactoryDisplay
+  run: FactorFactoryRunSummary
 }
 
 export type RunTableSpec = {
@@ -284,6 +324,33 @@ export async function getPipelineCheckpoints(
   )
 }
 
+export async function listFactorFactoryRuns(): Promise<FactorFactoryRunSummary[]> {
+  return fetchJson<FactorFactoryRunSummary[]>('/api/factor-factory-runs')
+}
+
+export async function fetchFactorFactoryRun(
+  runId: string,
+): Promise<FactorFactoryRunDetail> {
+  return fetchJson<FactorFactoryRunDetail>(
+    `/api/factor-factory-runs/${encodeURIComponent(runId)}`,
+  )
+}
+
+export async function fetchFactorFactoryTable(
+  runId: string,
+  tableKey: string,
+  limit: number,
+  offset = 0,
+): Promise<TablePayload> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  })
+  return fetchJson<TablePayload>(
+    `/api/factor-factory-runs/${encodeURIComponent(runId)}/tables/${encodeURIComponent(tableKey)}?${params.toString()}`,
+  )
+}
+
 export async function deleteRun(run: RunSummary): Promise<void> {
   await fetchJson<{ deleted: string }>(runApiPath(run), {
     method: 'DELETE',
@@ -347,6 +414,15 @@ function tableApiPath(run: RunSummary, table: RunDisplayTable): string {
 export function artifactDownloadUrl(run: RunSummary, downloadItem: string): string {
   const encodedItem = downloadItem.split('/').map(encodeURIComponent).join('/')
   return `${API_BASE_URL}${runApiPath(run)}/artifacts/${encodedItem}`
+}
+
+export function factorFactoryArtifactDownloadUrl(
+  runId: string,
+  downloadItem: string,
+): string {
+  const encodedRunId = encodeURIComponent(runId)
+  const encodedItem = downloadItem.split('/').map(encodeURIComponent).join('/')
+  return `${API_BASE_URL}/api/factor-factory-runs/${encodedRunId}/artifacts/${encodedItem}`
 }
 
 function runApiPath(run: RunSummary): string {

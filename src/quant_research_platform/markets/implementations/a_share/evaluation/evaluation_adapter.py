@@ -49,6 +49,9 @@ LABEL_AVAILABILITY_COLUMNS = (
 )
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 FORWARD_RETURN_LABEL_PATTERN = re.compile(r"^forward_return_\d+d$")
+PIPELINE_EVALUATION_MANIFEST_SCHEMA_VERSION = "0.1"
+PIPELINE_EVALUATION_MANIFEST_TYPE = "a_share_pipeline_evaluation_manifest"
+DEFAULT_A_SHARE_SOURCE_ALIAS = "a_share"
 
 
 def schema_columns(path: Path) -> tuple[str, ...]:
@@ -479,6 +482,8 @@ def run_processed_factor_evaluation(
     neutralization_method: str = "none",
     neutralization_group_columns: tuple[str, ...] = (),
     neutralization_exposure_columns: tuple[str, ...] = (),
+    source_alias: str = DEFAULT_A_SHARE_SOURCE_ALIAS,
+    manifest_run_id: str | None = None,
 ) -> tuple[pd.DataFrame, Path, list[dict[str, object]]]:
     """在一个全样本 slim factor Parquet file 上运行 evaluation layer。
 
@@ -521,6 +526,7 @@ def run_processed_factor_evaluation(
     missing_factors = sorted(set(feature_columns).difference(available_factors))
     if missing_factors:
         raise ValueError(f"missing factors in {parquet_path}: {missing_factors}")
+    input_reference = _processed_factor_input_reference(parquet_path)
 
     range_start = start_date or f"{start_year}-01-01"
     range_end = end_date or f"{end_year}-12-31"
@@ -601,7 +607,7 @@ def run_processed_factor_evaluation(
                 "neutralization_exposure_columns": list(
                     neutralization_exposure_columns
                 ),
-                "input_file": parquet_path.as_posix(),
+                **input_reference,
                 "input_materialized": False,
                 "output_dir": f"evaluation_runs/{run_id}",
             }
@@ -611,9 +617,33 @@ def run_processed_factor_evaluation(
     write_csv_utf8_sig(report_root / "label_availability.csv", label_summary)
     manifest_path = report_root / "evaluation_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_identity = manifest_run_id or _default_manifest_run_id(
+        report_root,
+        source_alias=source_alias,
+    )
     manifest_path.write_text(
         json.dumps(
-            {"evaluation_runs": evaluation_runs},
+            {
+                "schema_version": PIPELINE_EVALUATION_MANIFEST_SCHEMA_VERSION,
+                "artifact_type": PIPELINE_EVALUATION_MANIFEST_TYPE,
+                "source_alias": source_alias,
+                "run_id": manifest_identity,
+                "evaluation_runs": evaluation_runs,
+                "artifacts": {
+                    "label_availability": "label_availability.csv",
+                    "evaluation_runs_root": "evaluation_runs",
+                },
+                "display": {
+                    "schema_version": PIPELINE_EVALUATION_MANIFEST_SCHEMA_VERSION,
+                    "tables": [
+                        {
+                            "key": "label_availability",
+                            "label": "Label availability",
+                            "path": "label_availability.csv",
+                        }
+                    ],
+                },
+            },
             ensure_ascii=False,
             indent=2,
         )
@@ -621,6 +651,24 @@ def run_processed_factor_evaluation(
         encoding="utf-8",
     )
     return label_summary, manifest_path, evaluation_runs
+
+
+def _processed_factor_input_reference(parquet_path: Path) -> dict[str, object]:
+    """Return private-path-safe metadata for the processed factor input."""
+
+    match = re.search(r"_(\d{4})_(\d{4})\.parquet$", parquet_path.name)
+    reference: dict[str, object] = {"input_source": "processed_factor_table"}
+    if match:
+        reference["input_year_range"] = f"{match.group(1)}_{match.group(2)}"
+    return reference
+
+
+def _default_manifest_run_id(report_root: Path, *, source_alias: str) -> str:
+    """Derive API-visible manifest identity for full and nested pipeline reports."""
+
+    if source_alias == "pipeline" and report_root.name == "evaluation":
+        return report_root.parent.name
+    return report_root.name
 
 
 def _validate_run_processed_options(

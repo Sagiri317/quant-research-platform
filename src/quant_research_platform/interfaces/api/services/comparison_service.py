@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from fastapi import HTTPException
 
 from quant_research_platform.artifacts import LoadedEvaluationSet
 from quant_research_platform.interfaces.api.models import (
@@ -22,7 +23,14 @@ from quant_research_platform.interfaces.api.payloads import (
 def comparison_frame(records: list[RunRecord]) -> pd.DataFrame:
     """从完整 artifact records 构造带排名的 comparison DataFrame。"""
 
-    rows = [comparison_record(record.ref, record.artifacts) for record in records]
+    rows = []
+    for record in records:
+        try:
+            rows.append(comparison_record(record.ref, record.artifacts))
+        except HTTPException:
+            continue
+    if not rows:
+        return pd.DataFrame()
     frame = pd.DataFrame.from_records(rows).sort_values("public_run_id")
     return add_metric_ranks(frame.reset_index(drop=True))
 
@@ -37,7 +45,14 @@ def comparison_csv_bytes(records: list[RunRecord]) -> bytes:
 def comparison_index_frame(records: list[RunIndexRecord]) -> pd.DataFrame:
     """从轻量 run index 构造带排名的 comparison DataFrame。"""
 
-    rows = [comparison_index_record(record) for record in records]
+    rows = []
+    for record in records:
+        try:
+            rows.append(comparison_index_record(record))
+        except HTTPException:
+            continue
+    if not rows:
+        return pd.DataFrame()
     frame = pd.DataFrame.from_records(rows).sort_values("public_run_id")
     return add_metric_ranks(frame.reset_index(drop=True))
 

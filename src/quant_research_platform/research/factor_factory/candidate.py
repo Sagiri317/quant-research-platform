@@ -99,6 +99,7 @@ def _safe_failure_reason(reason: str | None) -> str:
         r"([A-Za-z]:)?/?(?:[^,\s:;]+/)*(?:raw_private|interim_private|processed_private|private_real)(?:/[^,\s:;]*)*",
         "[private-path]",
         sanitized,
+        flags=re.IGNORECASE,
     )
     return sanitized
 

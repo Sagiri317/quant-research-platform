@@ -100,7 +100,13 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
     assert manifest["artifacts"]["combinations"] == "combinations.csv"
     display = manifest["display"]
     table_keys = {table["key"] for table in display["tables"]}
-    assert {"combinations", "ic", "returns", "pnl"}.issubset(table_keys)
+    assert {
+        "combinations",
+        "ic",
+        "returns",
+        "pnl",
+        "weight_diagnostics",
+    }.issubset(table_keys)
     assert {chart["id"] for chart in display["charts"]} == {
         "pnl",
         "ic_rankic",
@@ -133,6 +139,15 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
         "weight_diagnostics",
         "neutralization_diagnostics",
     }
+    weight_diagnostics = result.metrics["weight_diagnostics"]
+    assert {
+        "universe_count",
+        "eligible_count",
+        "can_enter_count",
+        "can_exit_count",
+        "entry_blocked_count",
+        "exit_blocked_count",
+    }.issubset(weight_diagnostics.columns)
     assert set(pd.read_csv(expected_paths["positions"])["feature"]) == {
         "factor",
         "alt_factor",

@@ -9,6 +9,7 @@ import {
 } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import App from './App'
+import { FactorFactoryRuns } from './FactorFactoryRuns'
 import type { RunSummary } from './api'
 import {
   displayPayload,
@@ -45,6 +46,7 @@ describe('App', () => {
       'aria-pressed',
       'true',
     )
+    expect(screen.getByRole('button', { name: '因子工厂' })).toBeInTheDocument()
     expect(screen.getByText('A 股')).toBeInTheDocument()
     expect(screen.getByText('加密资产预留')).toBeInTheDocument()
     expect(screen.getAllByText('neg(return(close, 20))').length).toBeGreaterThan(0)
@@ -64,6 +66,443 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'CSV 上传（开发）' }))
     expect(screen.getByText('开发用 CSV 上传')).toBeInTheDocument()
+  })
+
+  test('renders Factor Factory runs without leaking private filesystem paths', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/runs')) {
+        return jsonResponse([])
+      }
+      if (url.endsWith('/api/factor-factory-runs')) {
+        return jsonResponse([
+          {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 2,
+            failed_count: 1,
+            run_id: 'factory_demo',
+            success_count: 1,
+          },
+        ])
+      }
+      if (url.endsWith('/api/factor-factory-runs/factory_demo')) {
+        return jsonResponse({
+          display: {
+            schema_version: '0.1',
+            downloads: {
+              items: [
+                {
+                  item: 'candidate_summary.csv',
+                  kind: 'table',
+                  label: 'Candidate summary',
+                  table: 'candidate_summary',
+                },
+              ],
+              presets: [],
+            },
+            tables: [
+              {
+                download_item: 'candidate_summary.csv',
+                group: 'candidate',
+                key: 'candidate_summary',
+                label: 'Candidate summary',
+                path: 'candidate_summary.csv',
+              },
+            ],
+          },
+          run: {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 2,
+            failed_count: 1,
+            run_id: 'factory_demo',
+            success_count: 1,
+          },
+        })
+      }
+      if (
+        url.endsWith(
+          '/api/factor-factory-runs/factory_demo/tables/candidate_summary?limit=50&offset=0',
+        )
+      ) {
+        return jsonResponse({
+          columns: ['candidate_id', 'status', 'run_ref', 'failure_reason'],
+          rows: [
+            {
+              candidate_id: 'reversal_20d@1',
+              failure_reason: '',
+              run_ref: 'pipeline/reversal_20d',
+              status: 'success',
+            },
+            {
+              candidate_id: 'momentum_60d@1',
+              failure_reason: 'invalid expression',
+              run_ref: '',
+              status: 'failed',
+            },
+          ],
+          total_rows: 2,
+        })
+      }
+      return tableResponse([])
+    }) as typeof fetch
+
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '因子工厂' }))
+
+    expect(await screen.findByText('Factor Factory')).toBeInTheDocument()
+    expect((await screen.findAllByText('factory_demo')).length).toBeGreaterThan(0)
+    expect(await screen.findByText('reversal_20d@1')).toBeInTheDocument()
+    expect(screen.getByText('momentum_60d@1')).toBeInTheDocument()
+    expect(screen.getByText('pipeline/reversal_20d')).toBeInTheDocument()
+    expect(screen.queryByText(/reports\/private_real/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/E:\\/)).not.toBeInTheDocument()
+  })
+
+  test('keeps Factor Factory detail and downloads visible when table preview fails', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/factor-factory-runs')) {
+        return jsonResponse([
+          {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 2,
+            failed_count: 0,
+            run_id: 'factory_preview_error',
+            success_count: 2,
+          },
+        ])
+      }
+      if (url.endsWith('/api/factor-factory-runs/factory_preview_error')) {
+        return jsonResponse({
+          display: {
+            schema_version: '0.1',
+            downloads: {
+              items: [
+                {
+                  item: 'candidate_summary.csv',
+                  kind: 'table',
+                  label: 'Candidate summary CSV',
+                  table: 'candidate_summary',
+                },
+              ],
+              presets: [],
+            },
+            tables: [
+              {
+                download_item: 'candidate_summary.csv',
+                group: 'candidate',
+                key: 'candidate_summary',
+                label: 'Candidate summary',
+                path: 'candidate_summary.csv',
+              },
+            ],
+          },
+          run: {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 2,
+            failed_count: 0,
+            run_id: 'factory_preview_error',
+            success_count: 2,
+          },
+        })
+      }
+      if (
+        url.endsWith(
+          '/api/factor-factory-runs/factory_preview_error/tables/candidate_summary?limit=50&offset=0',
+        )
+      ) {
+        return Promise.resolve({
+          ok: false,
+          status: 422,
+          json: async () => ({ detail: 'preview table is unavailable' }),
+        } as Response)
+      }
+      return jsonResponse({ columns: [], rows: [] })
+    }) as typeof fetch
+
+    render(<FactorFactoryRuns />)
+
+    expect(await screen.findByRole('heading', { name: 'factory_preview_error' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Candidate summary CSV' })).toHaveAttribute(
+      'href',
+      'http://127.0.0.1:8000/api/factor-factory-runs/factory_preview_error/artifacts/candidate_summary.csv',
+    )
+    expect(await screen.findByText('preview table is unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Table preview is unavailable. Downloads remain available.')).toBeInTheDocument()
+  })
+
+  test('chooses a preview table from display tables and renders Factor Factory preset downloads', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/factor-factory-runs')) {
+        return jsonResponse([
+          {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 1,
+            failed_count: 0,
+            run_id: 'factory_display_driven',
+            success_count: 1,
+          },
+        ])
+      }
+      if (url.endsWith('/api/factor-factory-runs/factory_display_driven')) {
+        return jsonResponse({
+          display: {
+            schema_version: '0.1',
+            downloads: {
+              items: [
+                {
+                  item: 'analysis_summary.csv',
+                  kind: 'table',
+                  label: 'Analysis summary CSV',
+                  table: 'analysis_summary',
+                },
+                {
+                  item: 'manifest.json',
+                  kind: 'json',
+                  label: 'Manifest JSON',
+                },
+              ],
+              presets: [
+                {
+                  key: 'review_bundle',
+                  label: 'Review bundle',
+                  items: ['analysis_summary.csv', 'manifest.json'],
+                },
+              ],
+            },
+            tables: [
+              {
+                download_item: 'analysis_summary.csv',
+                group: 'candidate',
+                key: 'analysis_summary',
+                label: 'Analysis summary',
+                path: 'analysis_summary.csv',
+              },
+            ],
+          },
+          run: {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 1,
+            failed_count: 0,
+            run_id: 'factory_display_driven',
+            success_count: 1,
+          },
+        })
+      }
+      if (
+        url.endsWith(
+          '/api/factor-factory-runs/factory_display_driven/tables/analysis_summary?limit=50&offset=0',
+        )
+      ) {
+        return jsonResponse({
+          columns: ['candidate_id', 'status', 'score'],
+          rows: [{ candidate_id: 'display_candidate', score: 0.4, status: 'success' }],
+          total_rows: 1,
+        })
+      }
+      if (url.includes('/tables/candidate_summary')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: 'candidate_summary should not be requested' }),
+        } as Response)
+      }
+      return jsonResponse({ columns: [], rows: [] })
+    }) as typeof fetch
+
+    render(<FactorFactoryRuns />)
+
+    expect(await screen.findByText('display_candidate')).toBeInTheDocument()
+    expect(screen.getByText('score')).toBeInTheDocument()
+    expect(screen.getByText('0.4')).toBeInTheDocument()
+    expect(screen.getByText('Analysis summary')).toBeInTheDocument()
+    expect(screen.getByText('Review bundle')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Analysis summary CSV' })).toHaveAttribute(
+      'href',
+      'http://127.0.0.1:8000/api/factor-factory-runs/factory_display_driven/artifacts/analysis_summary.csv',
+    )
+    expect(screen.getByRole('link', { name: 'manifest.json' })).toHaveAttribute(
+      'href',
+      'http://127.0.0.1:8000/api/factor-factory-runs/factory_display_driven/artifacts/manifest.json',
+    )
+    expect(globalThis.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('/tables/candidate_summary'),
+    )
+  })
+
+  test('enables Factor Factory pagination from total rows when has_more is omitted', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/factor-factory-runs')) {
+        return jsonResponse([
+          {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 75,
+            failed_count: 0,
+            run_id: 'factory_total_rows',
+            success_count: 75,
+          },
+        ])
+      }
+      if (url.endsWith('/api/factor-factory-runs/factory_total_rows')) {
+        return jsonResponse({
+          display: {
+            schema_version: '0.1',
+            downloads: { items: [], presets: [] },
+            tables: [
+              {
+                group: 'candidate',
+                key: 'analysis_summary',
+                label: 'Analysis summary',
+                path: 'analysis_summary.csv',
+              },
+            ],
+          },
+          run: {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 75,
+            failed_count: 0,
+            run_id: 'factory_total_rows',
+            success_count: 75,
+          },
+        })
+      }
+      if (
+        url.endsWith(
+          '/api/factor-factory-runs/factory_total_rows/tables/analysis_summary?limit=50&offset=0',
+        )
+      ) {
+        return jsonResponse({
+          columns: ['candidate_id', 'score'],
+          rows: [{ candidate_id: 'page_1_candidate', score: 0.1 }],
+          total_rows: 75,
+        })
+      }
+      if (
+        url.endsWith(
+          '/api/factor-factory-runs/factory_total_rows/tables/analysis_summary?limit=50&offset=50',
+        )
+      ) {
+        return jsonResponse({
+          columns: ['candidate_id', 'score'],
+          rows: [{ candidate_id: 'page_2_candidate', score: 0.2 }],
+          total_rows: 75,
+        })
+      }
+      return jsonResponse({ columns: [], rows: [] })
+    }) as typeof fetch
+
+    render(<FactorFactoryRuns />)
+
+    expect(await screen.findByText('page_1_candidate')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+
+    expect(await screen.findByText('page_2_candidate')).toBeInTheDocument()
+  })
+
+  test('clears stale Factor Factory detail when switching to a failing run', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/factor-factory-runs')) {
+        return jsonResponse([
+          {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 1,
+            failed_count: 0,
+            run_id: 'factory_a',
+            success_count: 1,
+          },
+          {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 1,
+            failed_count: 1,
+            run_id: 'factory_b',
+            success_count: 0,
+          },
+        ])
+      }
+      if (url.endsWith('/api/factor-factory-runs/factory_a')) {
+        return jsonResponse({
+          display: {
+            schema_version: '0.1',
+            downloads: {
+              items: [
+                {
+                  item: 'candidate_summary.csv',
+                  kind: 'table',
+                  label: 'Candidate summary A',
+                  table: 'candidate_summary',
+                },
+              ],
+              presets: [],
+            },
+            tables: [
+              {
+                download_item: 'candidate_summary.csv',
+                group: 'candidate',
+                key: 'candidate_summary',
+                label: 'Candidate summary A',
+                path: 'candidate_summary.csv',
+              },
+            ],
+          },
+          run: {
+            artifact_schema_version: '0.1',
+            artifact_type: 'factor_factory_run',
+            candidate_count: 1,
+            failed_count: 0,
+            run_id: 'factory_a',
+            success_count: 1,
+          },
+        })
+      }
+      if (
+        url.endsWith(
+          '/api/factor-factory-runs/factory_a/tables/candidate_summary?limit=50&offset=0',
+        )
+      ) {
+        return jsonResponse({
+          columns: ['candidate_id', 'status', 'run_ref', 'failure_reason'],
+          rows: [
+            {
+              candidate_id: 'candidate_a',
+              failure_reason: '',
+              run_ref: 'pipeline/a',
+              status: 'success',
+            },
+          ],
+        })
+      }
+      if (url.endsWith('/api/factor-factory-runs/factory_b')) {
+        return Promise.resolve({
+          ok: false,
+          status: 422,
+          json: async () => ({ detail: 'factory_b broken' }),
+        } as Response)
+      }
+      return jsonResponse({ columns: [], rows: [] })
+    }) as typeof fetch
+
+    render(<FactorFactoryRuns />)
+
+    expect(await screen.findByText('candidate_a')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /factory_b/ }))
+
+    await waitFor(() => expect(screen.getByText('factory_b broken')).toBeInTheDocument())
+    expect(screen.queryByText('candidate_a')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Candidate summary A' })).not.toBeInTheDocument()
   })
 
   test('passes the edited factor expression into the pipeline snapshot request', async () => {

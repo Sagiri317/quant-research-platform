@@ -129,7 +129,11 @@ def create_pipeline_snapshot_payload(
     """校验前端 pipeline 请求，并写出 snapshot 或执行轻量 runner。"""
 
     config = _pipeline_config_from_payload(payload, output_root=output_root)
-    validation = validate_pipeline_config(config)
+    allow_processed_expression = payload.execution_mode == "processed_existing"
+    validation = validate_pipeline_config(
+        config,
+        allow_processed_factor_expression=allow_processed_expression,
+    )
     if validation.has_blocking:
         detail = {
             "blocking": [asdict(issue) for issue in validation.blocking],

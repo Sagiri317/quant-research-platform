@@ -87,7 +87,10 @@ def discover_runs(run_roots: list[RunRoot]) -> list[RunRecord]:
         if not root.path.is_dir():
             continue
         for run_dir in _iter_evaluation_run_dirs(root.path):
-            run = load_artifacts_or_422(run_dir)
+            try:
+                run = load_artifacts_or_422(run_dir)
+            except HTTPException:
+                continue
             run_id = str(run.summary["evaluation_id"])
             key = (root.source_alias, run_id)
             if key in seen:
@@ -114,7 +117,10 @@ def discover_run_indexes(run_roots: list[RunRoot]) -> list[RunIndexRecord]:
         if not root.path.is_dir():
             continue
         for run_dir in _iter_evaluation_run_dirs(root.path):
-            record = load_run_index_or_422(root.source_alias, run_dir)
+            try:
+                record = load_run_index_or_422(root.source_alias, run_dir)
+            except HTTPException:
+                continue
             key = (record.ref.source_alias, record.ref.run_id)
             if key in seen:
                 raise HTTPException(
@@ -182,11 +188,27 @@ def resolve_run_index_record(
 ) -> RunIndexRecord:
     """在配置的 run roots 中解析一个轻量 run index record。"""
 
-    return find_run_index_record(
-        discover_run_indexes(run_roots),
-        source_alias,
-        run_id,
-    )
+    root = _find_run_root(run_roots, source_alias)
+    if not root.path.is_dir():
+        raise HTTPException(status_code=404, detail="run not found")
+
+    for run_dir in _iter_evaluation_run_dirs(root.path):
+        try:
+            record = load_run_index_or_422(root.source_alias, run_dir)
+        except HTTPException:
+            if run_dir.name == run_id:
+                raise
+            continue
+        if record.ref.run_id == run_id:
+            return record
+    raise HTTPException(status_code=404, detail="run not found")
+
+
+def _find_run_root(run_roots: list[RunRoot], source_alias: str) -> RunRoot:
+    for root in run_roots:
+        if root.source_alias == source_alias:
+            return root
+    raise HTTPException(status_code=404, detail="run not found")
 
 
 def find_run_record(

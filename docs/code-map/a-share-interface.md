@@ -29,20 +29,22 @@ conda run -n analysis python -m quant_research_platform.markets.implementations.
 
 `build_factors` 使用 `--start-year/--end-year` 定位 full panel 文件并输出 slim factor table。`--windows` 和 `--horizons` 控制 price-volume factor windows 与 forward-return labels。
 
-`run_factor_evaluation` 使用 `--start-year/--end-year` 找 processed factor Parquet。若精确年份文件不存在，`factor_full_path_covering_range()` 会选择覆盖该年份范围的更宽文件。`--start-date/--end-date` 是评估阶段的 `trade_date` 行过滤。
+`run_factor_evaluation` 使用 `--start-year/--end-year` 找 processed factor Parquet。若精确年份文件不存在，`factor_full_path_covering_range()` 会选择覆盖该年份范围的更宽文件。`--start-date/--end-date` 是 evaluation 阶段的 `trade_date` 行过滤。
 
-## 验收口径
+## 验收路径
 
 A 股验收应区分两类入口：
 
 - A 股全流程或私有 runs：使用 `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`。
-- 通用 evaluation/外部本地 Parquet 验收：使用 `quant_research_platform.interfaces.cli evaluate-parquet`。
+- 通用 evaluation 或外部本地 Parquet 验收：使用 `quant_research_platform.interfaces.cli evaluate-parquet`。
 
 不要用临时裁剪 Parquet + `evaluate-parquet` 替代 A 股全流程验收；那只能证明 generic evaluation adapter、artifact、API、frontend 链路可用，不能证明 A 股 adapter 的覆盖文件选择、日期过滤、label availability summary 和 private run metadata 正确。
 
-## 前端状态
+`scripts/phase1_acceptance.py` 是 Phase 1 私有验收辅助脚本，边界是 acceptance run 重命名、2024 小样本 run 生成、小文件对比和 Factor Factory smoke。它会触碰 `reports/private_real/` 下的私有验证产物，不应作为日常轻量单元检查或公开数据验证命令。
 
-`web/src/PipelineBuilder.tsx` 目前提交 `POST /api/pipeline-runs`，后端只写 pipeline snapshot：
+## Pipeline Builder 和 API
+
+`web/src/PipelineBuilder.tsx` 当前默认提交 `POST /api/pipeline-runs`，请求未显式设置 `execution_mode` 时后端使用 `snapshot`，只写出配置快照：
 
 ```text
 run_config.yaml
@@ -50,4 +52,6 @@ warnings.json
 summary.md
 ```
 
-这不是完整执行 pipeline。后续要实现“一步到位”的前端流程，需要把 Pipeline Builder 接到 A 股 build/evaluate 编排，并为长任务、产物索引、失败恢复和内存控制设计明确状态模型。
+后端 `src/quant_research_platform/interfaces/api/services/pipeline_service.py` 同一入口也支持 `execution_mode=processed_existing`。该模式调用 `src/quant_research_platform/pipelines/a_share/runner.py` 的轻量 runner，在已有 processed factor table 上执行 A 股 evaluation adapter，并写出 runner checkpoints、runtime summary 与 evaluation manifest。
+
+因此，前端文案和常规手动操作应描述为“默认 snapshot”；API/后端文档可说明存在 `processed_existing` 轻量 runner。不要把它表述为完整端到端 build/evaluate 编排，也不要暗示它会重新构建 raw/interim/processed 数据层。

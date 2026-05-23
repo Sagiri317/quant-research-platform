@@ -26,9 +26,15 @@ class PipelineSnapshot:
 
 
 def write_run_snapshot(
-    config: PipelineConfig, *, overwrite: bool = False
+    config: PipelineConfig,
+    *,
+    overwrite: bool = False,
+    allow_processed_factor_expression: bool = False,
 ) -> PipelineSnapshot:
-    validation = validate_pipeline_config(config)
+    validation = validate_pipeline_config(
+        config,
+        allow_processed_factor_expression=allow_processed_factor_expression,
+    )
     if validation.has_blocking:
         codes = ", ".join(issue.code for issue in validation.blocking)
         raise PipelineSnapshotError(f"blocking config issues prevent snapshot: {codes}")
@@ -37,7 +43,11 @@ def write_run_snapshot(
     run_dir.mkdir(parents=True, exist_ok=overwrite)
 
     (run_dir / "run_config.yaml").write_text(
-        _format_yaml(config.to_snapshot_dict()),
+        _format_yaml(
+            config.to_snapshot_dict(
+                allow_processed_factor_expression=allow_processed_factor_expression
+            )
+        ),
         encoding="utf-8",
     )
     (run_dir / "warnings.json").write_text(

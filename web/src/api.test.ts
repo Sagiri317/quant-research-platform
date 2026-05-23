@@ -2,9 +2,13 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   fetchRuns,
   fetchTablePreview,
+  fetchFactorFactoryRun,
+  fetchFactorFactoryTable,
+  factorFactoryArtifactDownloadUrl,
   createPipelineRun,
   getPipelineCheckpoints,
   getPipelineRunStatus,
+  listFactorFactoryRuns,
   listFactorTemplates,
   listMarkets,
   runTableSpecsFromDisplay,
@@ -133,6 +137,103 @@ describe('api client', () => {
 
     expect(globalThis.fetch).toHaveBeenCalledWith('http://127.0.0.1:8000/api/runs')
     expect(runs[0].public_run_id).toBe('core/demo')
+  })
+
+  test('reads Factor Factory runs, detail, table preview, and downloads', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/factor-factory-runs')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              artifact_schema_version: '0.1',
+              artifact_type: 'factor_factory_run',
+              candidate_count: 2,
+              failed_count: 1,
+              run_id: 'factory_demo',
+              success_count: 1,
+            },
+          ],
+        } as Response)
+      }
+      if (url.endsWith('/api/factor-factory-runs/factory_demo')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            display: {
+              schema_version: '0.1',
+              downloads: {
+                items: [
+                  {
+                    item: 'candidate_summary.csv',
+                    kind: 'table',
+                    label: 'Candidate summary',
+                    table: 'candidate_summary',
+                  },
+                ],
+                presets: [],
+              },
+              tables: [
+                {
+                  download_item: 'candidate_summary.csv',
+                  group: 'candidate',
+                  key: 'candidate_summary',
+                  label: 'Candidate summary',
+                  path: 'candidate_summary.csv',
+                },
+              ],
+            },
+            run: {
+              artifact_schema_version: '0.1',
+              artifact_type: 'factor_factory_run',
+              candidate_count: 2,
+              failed_count: 1,
+              run_id: 'factory_demo',
+              success_count: 1,
+            },
+          }),
+        } as Response)
+      }
+      if (
+        url.endsWith(
+          '/api/factor-factory-runs/factory_demo/tables/candidate_summary?limit=20&offset=40',
+        )
+      ) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: ['candidate_id', 'status', 'run_ref'],
+            rows: [
+              {
+                candidate_id: 'reversal_20d@1',
+                run_ref: 'pipeline/reversal_20d',
+                status: 'success',
+              },
+            ],
+          }),
+        } as Response)
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response)
+    }) as typeof fetch
+
+    await expect(listFactorFactoryRuns()).resolves.toMatchObject([
+      { run_id: 'factory_demo', success_count: 1 },
+    ])
+    await expect(fetchFactorFactoryRun('factory_demo')).resolves.toMatchObject({
+      run: { candidate_count: 2 },
+      display: { schema_version: '0.1' },
+    })
+    await expect(
+      fetchFactorFactoryTable('factory_demo', 'candidate_summary', 20, 40),
+    ).resolves.toMatchObject({
+      rows: [{ candidate_id: 'reversal_20d@1' }],
+    })
+    expect(
+      factorFactoryArtifactDownloadUrl('factory_demo', 'candidate_summary.csv'),
+    ).toBe(
+      'http://127.0.0.1:8000/api/factor-factory-runs/factory_demo/artifacts/candidate_summary.csv',
+    )
   })
 
   test('fetchTablePreview throws a readable error when the backend rejects a request', async () => {

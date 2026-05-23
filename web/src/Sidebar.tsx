@@ -1,11 +1,18 @@
 import type { RunSummary } from './api'
 
-export type ViewMode = 'factor' | 'pipeline' | 'checkpoints' | 'results' | 'create'
+export type ViewMode =
+  | 'factor'
+  | 'factory'
+  | 'pipeline'
+  | 'checkpoints'
+  | 'results'
+  | 'create'
 
 const VIEW_LABELS: Record<ViewMode, string> = {
   checkpoints: '数据检查点',
   create: 'CSV 上传（开发）',
   factor: '因子工作台',
+  factory: '因子工厂',
   pipeline: '流程配置',
   results: '证据工作台',
 }
@@ -30,19 +37,19 @@ export function Sidebar({
         <h1>研究证据工作台</h1>
       </div>
       <div className="mode-actions" aria-label="页面模式">
-        {(['factor', 'pipeline', 'checkpoints', 'results', 'create'] as ViewMode[]).map(
-          (mode) => (
-            <button
-              aria-pressed={viewMode === mode}
-              className={viewMode === mode ? 'mode active' : 'mode'}
-              key={mode}
-              onClick={() => onViewModeChange(mode)}
-              type="button"
-            >
-              {VIEW_LABELS[mode]}
-            </button>
-          ),
-        )}
+        {(
+          ['factor', 'factory', 'pipeline', 'checkpoints', 'results', 'create'] as ViewMode[]
+        ).map((mode) => (
+          <button
+            aria-pressed={viewMode === mode}
+            className={viewMode === mode ? 'mode active' : 'mode'}
+            key={mode}
+            onClick={() => onViewModeChange(mode)}
+            type="button"
+          >
+            {VIEW_LABELS[mode]}
+          </button>
+        ))}
       </div>
       {viewMode === 'results' ? (
         <div className="run-list">

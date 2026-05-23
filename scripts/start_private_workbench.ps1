@@ -1,21 +1,35 @@
+﻿# 用途：同时启动本地 evidence API 和 React/Vite workbench。
+# 行为：记录 API/Web 进程快照到 .codex/run-logs/workbench-pids.json，便于 stop_workbench.ps1 精准停止。
+# 注意：不会安装依赖；若端口已被非本项目进程占用，会直接报错。
 param(
     [string]$ApiHost = "127.0.0.1",
     [int]$ApiPort = 8000,
     [string]$WebHost = "127.0.0.1",
     [int]$WebPort = 5173,
     [string]$CondaEnv = "analysis",
-    [string]$RunRoots = ""
+    [string]$RunRoots = "",
+    [string]$PipelineOutputRoot = "",
+    [string]$FactorFactoryRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
-$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LogRoot = Join-Path $ProjectRoot ".codex\run-logs"
 $PidFile = Join-Path $LogRoot "workbench-pids.json"
 New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 
-if (-not $RunRoots) {
+if ((-not $RunRoots) -or (-not $PipelineOutputRoot) -or (-not $FactorFactoryRoot)) {
+    # 未显式传参时，使用本机 private reports 的默认 API 读取/写入位置。
     . (Join-Path $PSScriptRoot "private_run_roots.ps1")
-    $RunRoots = $QrpPrivateRunRoots
+    if (-not $RunRoots) {
+        $RunRoots = $QrpPrivateRunRoots
+    }
+    if (-not $PipelineOutputRoot) {
+        $PipelineOutputRoot = $QrpPipelineOutputRoot
+    }
+    if (-not $FactorFactoryRoot) {
+        $FactorFactoryRoot = $QrpFactorFactoryRoot
+    }
 }
 
 function Test-PortListening {
@@ -66,6 +80,7 @@ function Test-ProcessSnapshotMatch {
 }
 
 function Test-ProjectListener {
+    # 确认端口监听进程是否来自本脚本上次记录，避免误复用别的服务。
     param([int]$Port)
     $listenerPid = Get-ListenerProcessId -Port $Port
     if ($null -eq $listenerPid) {
@@ -87,14 +102,19 @@ function Test-ProjectListener {
 }
 
 function Test-RecordedRunRoots {
+    # 端口已被本项目占用时，还要确认 run roots 与本次启动请求一致。
     if (-not (Test-Path $PidFile)) {
         return $false
     }
     $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
-    return $record.projectRoot -eq $ProjectRoot -and $record.runRoots -eq $RunRoots
+    return $record.projectRoot -eq $ProjectRoot -and
+        $record.runRoots -eq $RunRoots -and
+        $record.pipelineOutputRoot -eq $PipelineOutputRoot -and
+        $record.factorFactoryRoot -eq $FactorFactoryRoot
 }
 
 function Assert-PortAvailableOrOwned {
+    # 允许复用同配置的本项目服务；拒绝复用未知服务或不同 roots 的旧服务。
     param(
         [int]$Port,
         [string]$Name
@@ -107,7 +127,7 @@ function Assert-PortAvailableOrOwned {
             Write-Host "$Name already listening on port $Port for this project"
             return
         }
-        throw "$Name port $Port is already listening for this project, but recorded run roots differ. Run scripts\local\stop_workbench.ps1 first or choose another port."
+        throw "$Name port $Port is already listening for this project, but recorded runtime roots differ. Run scripts\stop_workbench.ps1 first or choose another port."
     }
     throw "$Name port $Port is already listening, but it is not recorded as this project. Choose another port or stop that process first."
 }
@@ -126,6 +146,8 @@ if (Test-PortListening -Port $ApiPort) {
     $env:PYTHONPATH = "src"
     $env:PYTHONUTF8 = "1"
     $env:QRP_RUN_ROOTS = $RunRoots
+    $env:QRP_PIPELINE_OUTPUT_ROOT = $PipelineOutputRoot
+    $env:QRP_FACTOR_FACTORY_ROOT = $FactorFactoryRoot
     $apiProcess = Start-Process `
         -FilePath "conda" `
         -ArgumentList @(
@@ -191,6 +213,8 @@ Write-Host "Logs: $LogRoot"
     webPid = $webPid
     webProcess = $webProcessSnapshot
     runRoots = $RunRoots
+    pipelineOutputRoot = $PipelineOutputRoot
+    factorFactoryRoot = $FactorFactoryRoot
     startedAt = (Get-Date).ToString("o")
 } | ConvertTo-Json | Set-Content -Path $PidFile -Encoding UTF8
 Write-Host "PID file: $PidFile"

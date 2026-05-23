@@ -258,6 +258,93 @@ def test_load_evaluation_set_rejects_unknown_display_download_item(tmp_path):
         load_evaluation_set(tmp_path)
 
 
+def test_writer_rejects_missing_required_table_before_writing(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    write_evaluation_set(source)
+    loaded = load_evaluation_set(source)
+    tables = dict(loaded.tables)
+    tables.pop("pnl")
+
+    with pytest.raises(ValueError, match="missing required evaluation-set tables"):
+        write_evaluation_set_artifacts(
+            target,
+            manifest=loaded.manifest,
+            config=loaded.config,
+            summary=loaded.summary,
+            tables=tables,
+            report=loaded.report,
+        )
+
+    assert not (target / "manifest.json").exists()
+
+
+def test_writer_rejects_display_chart_missing_columns_before_writing(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    write_evaluation_set(source)
+    loaded = load_evaluation_set(source)
+    manifest = json.loads(json.dumps(loaded.manifest))
+    manifest["display"]["charts"].append(
+        {
+            "id": "bad-chart",
+            "title": "Bad chart",
+            "kind": "line",
+            "table": "ic",
+            "x": "timestamp",
+            "series": [{"key": "missing_ic_column", "label": "Missing"}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="bad-chart"):
+        write_evaluation_set_artifacts(
+            target,
+            manifest=manifest,
+            config=loaded.config,
+            summary=loaded.summary,
+            tables=loaded.tables,
+            report=loaded.report,
+        )
+
+    assert not (target / "manifest.json").exists()
+
+
+def test_writer_rejects_display_table_missing_from_write_payload(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    write_evaluation_set(source)
+    loaded = load_evaluation_set(source)
+    tables = dict(loaded.tables)
+    manifest = json.loads(json.dumps(loaded.manifest))
+    manifest["artifacts"]["metrics_by_year"] = {
+        "ic_summary_by_year": "metrics_by_year/ic_summary_by_year.csv",
+        "group_spread_summary_by_year": (
+            "metrics_by_year/group_spread_summary_by_year.csv"
+        ),
+        "performance_summary_by_year": (
+            "metrics_by_year/performance_summary_by_year.csv"
+        ),
+    }
+    manifest["display"] = build_display_manifest(
+        manifest["artifacts"],
+        schema_version=ARTIFACT_SCHEMA_VERSION,
+    )
+    tables["ic_summary_by_year"] = tables["ic_summary"].copy()
+    tables["group_spread_summary_by_year"] = tables["group_spread_summary"].copy()
+
+    with pytest.raises(ValueError, match="display artifact tables missing"):
+        write_evaluation_set_artifacts(
+            target,
+            manifest=manifest,
+            config=loaded.config,
+            summary=loaded.summary,
+            tables=tables,
+            report=loaded.report,
+        )
+
+    assert not (target / "manifest.json").exists()
+
+
 def test_load_evaluation_set_rejects_display_chart_for_unknown_table(tmp_path):
     write_evaluation_set(tmp_path)
     manifest_path = tmp_path / "manifest.json"

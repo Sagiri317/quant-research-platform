@@ -46,9 +46,9 @@ def list_factor_factory_runs(request: Request) -> list[dict[str, object]]:
             continue
         try:
             run_dir = _resolve_run_dir(root, child.name)
+            manifest = _load_manifest(run_dir / "manifest.json")
         except HTTPException:
             continue
-        manifest = _load_manifest(run_dir / "manifest.json")
         runs.append(_summary_payload(child.name, manifest))
     return runs
 
@@ -60,7 +60,7 @@ def factor_factory_run_detail(run_id: str, request: Request) -> dict[str, object
     run_dir = _resolve_run_dir(api_context(request).factor_factory_root, run_id)
     manifest = _load_manifest(run_dir / "manifest.json")
     return {
-        **_summary_payload(run_id, manifest),
+        "run": _summary_payload(run_id, manifest),
         "display": _manifest_display(manifest),
     }
 
@@ -70,6 +70,8 @@ def factor_factory_table(
     run_id: str,
     table_key: str,
     request: Request,
+    limit: int = 100,
+    offset: int = 0,
 ) -> dict[str, object]:
     """按 manifest.display 暴露 Factor Factory 表格预览。"""
 
@@ -77,7 +79,7 @@ def factor_factory_table(
     manifest = _load_manifest(run_dir / "manifest.json")
     table = _display_table(manifest, table_key)
     path = _resolve_artifact_path(run_dir, str(table["path"]))
-    return table_payload(pd.read_csv(path))
+    return _csv_table_payload(path, limit=limit, offset=offset)
 
 
 @router.get("/api/factor-factory-runs/{run_id}/artifacts/{artifact_item:path}")
@@ -93,6 +95,7 @@ def factor_factory_artifact(
     if artifact_item not in _download_items(manifest):
         raise HTTPException(status_code=422, detail="download item is not exposed")
     path = _resolve_artifact_path(run_dir, artifact_item)
+    _validate_public_artifact_content(path)
     return FileResponse(path, filename=Path(artifact_item).name)
 
 
@@ -253,7 +256,7 @@ def _validate_manifest_path(relative_path: str) -> None:
 
 def _validate_private_display_text(value: object) -> None:
     if isinstance(value, str):
-        normalized = value.replace("\\", "/")
+        normalized = value.replace("\\", "/").lower()
         if any(marker in normalized for marker in PRIVATE_TEXT_MARKERS):
             raise HTTPException(
                 status_code=422,
@@ -267,6 +270,64 @@ def _validate_private_display_text(value: object) -> None:
     if isinstance(value, list):
         for child in value:
             _validate_private_display_text(child)
+
+
+def _validate_public_artifact_content(path: Path) -> None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                _validate_private_display_text(line)
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="factor factory artifact must be UTF-8 text",
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="factor factory artifact not found",
+        ) from exc
+
+
+def _csv_table_payload(path: Path, *, limit: int, offset: int) -> dict[str, object]:
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be nonnegative")
+    if limit < 1:
+        raise HTTPException(status_code=422, detail="limit must be positive")
+    if limit > 1000:
+        raise HTTPException(status_code=422, detail="limit must be at most 1000")
+    try:
+        read_frame = pd.read_csv(
+            path,
+            skiprows=lambda row_index: 0 < row_index <= offset,
+            nrows=limit + 1,
+        )
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="factor factory artifact must be UTF-8 text",
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="factor factory artifact not found",
+        ) from exc
+    has_more = len(read_frame) > limit
+    frame = read_frame.iloc[:limit].copy()
+    _validate_public_table_frame(frame)
+    payload = table_payload(frame)
+    payload["offset"] = offset
+    payload["limit"] = limit
+    payload["has_more"] = has_more
+    if not has_more:
+        payload["total_rows"] = offset + len(frame)
+    return payload
+
+
+def _validate_public_table_frame(frame: pd.DataFrame) -> None:
+    _validate_private_display_text(list(frame.columns))
+    for row in frame.to_dict(orient="records"):
+        _validate_private_display_text(row)
 
 
 def _resolve_artifact_path(run_dir: Path, relative_path: str) -> Path:

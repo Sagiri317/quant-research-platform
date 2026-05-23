@@ -16,10 +16,13 @@ from quant_research_platform.artifacts.artifact_schema import (
     EVALUATION_SET_DIAGNOSTIC_TABLES,
     EVALUATION_SET_METRIC_TABLES,
     EVALUATION_SET_PORTFOLIO_TABLES,
+    EVALUATION_SET_REQUIRED_TABLES,
     build_evaluation_set_artifact_paths,
 )
 from quant_research_platform.artifacts.display_manifest import build_display_manifest
 from quant_research_platform.artifacts.manifest_validation import (
+    evaluation_set_csv_paths,
+    validate_display_chart_columns,
     validate_display_manifest,
     validate_evaluation_set_table_columns,
 )
@@ -65,8 +68,11 @@ def write_evaluation_set_artifacts(
     elif artifact_paths is not None:
         raise ValueError("provide either manifest or artifact_paths, not both.")
 
+    _validate_required_evaluation_set_tables(tables)
     validate_evaluation_set_table_columns(tables)
     validate_display_manifest(manifest)
+    _validate_manifest_tables_available(manifest, tables)
+    validate_display_chart_columns(manifest, tables)
 
     destination = Path(output_dir)
     metrics_dir = destination / "metrics"
@@ -151,6 +157,24 @@ def _evaluation_set_table_path(
         if name.endswith(f"_by_{period}"):
             return output_dir / f"metrics_by_{period}" / f"{name}.csv"
     return metrics_dir / f"{name}.csv"
+
+
+def _validate_required_evaluation_set_tables(tables: dict[str, pd.DataFrame]) -> None:
+    missing = sorted(set(EVALUATION_SET_REQUIRED_TABLES).difference(tables))
+    if missing:
+        raise ValueError(f"missing required evaluation-set tables: {missing}.")
+
+
+def _validate_manifest_tables_available(
+    manifest: dict[str, object],
+    tables: dict[str, pd.DataFrame],
+) -> None:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return
+    missing = sorted(set(evaluation_set_csv_paths(artifacts)).difference(tables))
+    if missing:
+        raise ValueError(f"display artifact tables missing from payload: {missing}.")
 
 
 def build_evaluation_set_manifest(

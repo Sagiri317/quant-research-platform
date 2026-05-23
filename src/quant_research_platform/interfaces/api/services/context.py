@@ -42,13 +42,24 @@ class ApiContext:
             detail=f"unknown run source: {source_alias}",
         )
 
-    def comparison_index_records(self):
+    def comparison_index_records(self, *, required_ref=None):
         """返回可参与 comparison 的 run index records。"""
 
         records = discover_run_indexes(self.run_roots)
+        exposed_records = []
         for record in records:
-            ensure_download_item_exposed(record.manifest, "comparison.csv")
-        return records
+            try:
+                ensure_download_item_exposed(record.manifest, "comparison.csv")
+            except HTTPException:
+                if (
+                    required_ref is not None
+                    and record.ref.source_alias == required_ref.source_alias
+                    and record.ref.run_id == required_ref.run_id
+                ):
+                    raise
+                continue
+            exposed_records.append(record)
+        return exposed_records
 
     def comparison_csv_bytes_for_download(self) -> bytes:
         """返回 direct 和 ZIP download 共用的 comparison CSV bytes。"""

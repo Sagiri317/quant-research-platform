@@ -11,7 +11,7 @@
 | Conda 环境 | `analysis` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 interim / full panel / full factor 已有历史产物；迁移后仍遵守私有边界 |
 | 平台合同 | evaluation contract、artifact schema `0.5`、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间 |
-| 前端状态 | 本地 workbench 已中文化；因子表达式/模板快照可从因子研究台传入流程配置页；当前流程配置默认仍是 snapshot，后端仅支持 processed-existing 轻量 runner，不是完整 pipeline executor |
+| 前端状态 | 本地 workbench 已中文化；因子表达式/模板快照可从因子研究台传入流程配置页；当前流程配置默认仍是 snapshot，后端支持 processed-existing 轻量 runner；Factor Factory 已有本地浏览入口 |
 | 市场范围 | A 股 enabled；crypto / other markets 为 planned / disabled，不代表真实支持，也不保留空实现包 |
 | 私有边界 | CSMAR raw/interim/processed 和 `reports/private_real/` 不提交、不公开 |
 | 交易边界 | 不做投资建议、paper trading、live trading、券商/交易所/API 连接或部署服务 |
@@ -20,7 +20,7 @@
 
 本轮目标是把项目身份从单一 A 股研究项目切换为 `quant-research-platform`。长期后续功能池收敛在 `docs/architecture/future-capabilities.md`；历史迁移计划和历史迁移设计已由 Git 历史保留，不再作为当前待办清单。
 
-当前阶段已完成可提交的迁移闭环：
+当前阶段已完成可提交的迁移、核心合同闭环、Factor Factory 前端浏览入口和 P4/P5 小样本示例。Phase 1 最终验收仍以 `docs/architecture/phase-1-implementation-checklist.md` 为准：
 
 - 用户入口文档改为 Chinese-first 的平台说明。
 - `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、artifact schema `0.5`、`manifest.display`、API/download/frontend 边界。
@@ -31,8 +31,21 @@
 - 项目级 `AGENTS.md` 增加 `src/quant_research_platform/` 结构、Conda `analysis`、私有数据、无外部 API/凭据、无交易、exact-path deletion、frontend/API/artifact contract、旧 evaluation reference 仅作参考、`source_alias + run_id` 运行身份边界。
 - `.codex/skills/quant-research-platform-maintenance/` 记录后续维护 artifact/API/download/frontend 合同时必须执行的 gates。
 - React workbench 已改为中文界面，并补上“因子表达式/模板 -> 流程配置”的前端状态传递。
-- 本地 API 与前端服务已用小范围 smoke 验证；2023-2025 私有 smoke 已覆盖 tensor / dataframe 与 long-only / long-short，提交前仍以完整 Python 和 frontend 检查作为准入。
+- React workbench 已补上 Factor Factory run browser；前端只展示 API / artifact 结果，不重新计算 IC、PnL、positions 或 turnover。
+- 本地 API 与前端服务已用小范围 smoke 验证；2023-2025 私有 smoke 已覆盖 tensor / dataframe 与 long-only / long-short；2026-05-23 又复跑 2024 acceptance 小样本并生成 old/new 比较，提交前仍以完整 Python 和 frontend 检查作为准入。
 - A 股真实私有 runs 必须走 A 股专用 adapter：`python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`。通用 `evaluate-parquet` 只作为平台 evaluation / 外部 Parquet adapter 验收，不替代 A 股 adapter 验收。
+- P4/P5 本地示例入口为 `scripts/phase1_acceptance.py`：`run` 复跑 2024 A 股 adapter acceptance runs，`compare` 低内存比较 old/new，`factory-smoke` 生成 Factor Factory candidate summary。
+
+Architecture checklist 口径下已补齐：
+
+1. Factor Factory 本地 workbench 浏览入口。
+2. A 股 processed-existing pipeline runner 小样本示例和 old/new 比较。
+3. Factor Factory 小样本示例，生成 candidate summary 和 failed candidate log。
+
+仍需单独同步或后续设计：
+
+1. 根目录状态同步：本项目只记录 open handoff signal，workspace-root 文件需单独同步。
+2. 前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
 
 ## 当前研究资产
 
@@ -61,10 +74,12 @@
 
 ## 下一步
 
-1. 根目录状态同步仍需单独执行；本项目已记录 open handoff signal，不在本轮直接编辑 workspace-root 文件。
-2. 目录已在 `quant-research-platform`，后续不要把目录改名混入 Phase 1 收口。
-3. Phase 1 之后如继续扩展，应单独设计前端 feature 拆分、完整 A 股 build runner、ML prediction pipeline、风险/中性化扩展等后续能力。
-4. 可清理未使用的 Vite 默认前端资源，但需要单独确认具体路径：`web/src/assets/hero.png`、`web/src/assets/react.svg`、`web/src/assets/vite.svg`。
+1. 同步 root workspace 状态；本项目已记录 open handoff signal，不在本轮直接编辑 workspace-root 文件。
+2. 单独设计前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
+3. 继续扩展前先保留当前 P4/P5 smoke 命令作为回归门槛。
+4. 目录已在 `quant-research-platform`，后续不要把目录改名混入 Phase 1 收口。
+5. Phase 1 之后如继续扩展，应单独设计完整 A 股 build runner、ML prediction pipeline、风险/中性化扩展等后续能力。
+6. 可清理未使用的 Vite 默认前端资源，但需要单独确认具体路径：`web/src/assets/hero.png`、`web/src/assets/react.svg`、`web/src/assets/vite.svg`。
 
 ## 已执行的结构决策
 
@@ -83,6 +98,6 @@
 | 2026-05-21 | planning | 项目定位从单一 A 股因子研究项目收口为 A 股量化研究平台入口；临时平台蓝图记录数据、因子、ML prediction、风险、regime、evaluation、evidence workbench 和未来模拟盘边界。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-22 |
 | 2026-05-22 | migration | 项目身份迁移为 `quant-research-platform`；A 股为第一版 enabled market module；evaluation、schema `0.5` artifacts、API/download 和 React evidence workbench 成为平台内置能力；旧目录名等待用户后续手动改名。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-22 |
 | 2026-05-22 | milestone | 平台迁移、前端中文化、小步美化、因子表达式到流程配置快照闭环已完成；2023-2025 tensor / dataframe 与 long-only / long-short 小样本 smoke 已生成并进入 review 收口。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-22 |
-| 2026-05-23 | handoff | 目录迁移交接文档已转为历史记录；当前目录为 `quant-research-platform`，Phase 1 review/fix loop 已在本项目内完成收口，根目录状态同步仍需单独执行。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
-| 2026-05-23 | phase1 | Phase 1 严格目标结构已执行并完成本项目内复验：旧路径残留扫描、后端测试、ruff、前端 test/lint/build、CLI help、A 股 adapter help、API app import 和 `git diff --check` 均通过；根目录同步仍待单独执行。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-23 | handoff | 目录迁移交接文档已转为历史记录；当前目录为 `quant-research-platform`；Phase 1 核心结构、合同、P5 workbench 和 P4/P5 示例已在本项目内复验；仍需单独同步根目录状态。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-23 | phase1 | Phase 1 目标结构已执行并完成复验：旧路径残留扫描、后端测试、ruff、前端 test/lint/build、CLI help、A 股 adapter help、API app import、`git diff --check`、Factor Factory workbench、2024 acceptance old/new 比较和 Factor Factory smoke 均通过；后续架构债另列。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
 | 2026-05-23 | architecture decision | 已执行 Phase 1 严格目标结构：`interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`；不创建 Phase 2 `apps/api`，不保留空 `markets/crypto` 实现，不提前创建空 Future 目录。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |

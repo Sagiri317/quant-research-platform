@@ -187,10 +187,21 @@ def _selected_zip_cache_path(
         fingerprint.append(f"{item}\0dynamic")
     digest = hashlib.sha256("\n".join(fingerprint).encode("utf-8")).hexdigest()[:16]
     resolved_cache_root = cache_root.resolve()
-    zip_path = (resolved_cache_root / source_alias / run_id / f"{digest}.zip").resolve()
+    zip_path = (
+        resolved_cache_root
+        / _cache_identity_segment(source_alias)
+        / _cache_identity_segment(run_id)
+        / f"{digest}.zip"
+    ).resolve()
     if resolved_cache_root not in zip_path.parents:
         raise HTTPException(status_code=422, detail="download cache path out of bounds")
     return zip_path
+
+
+def _cache_identity_segment(value: str) -> str:
+    if len(value) <= 32:
+        return value
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def download_item(

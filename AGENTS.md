@@ -27,8 +27,7 @@ Current structure:
 - `src/quant_research_platform/markets/implementations/a_share/`: CSMAR-backed A-share market implementation, including data fields, factors, labels, validation, runtime helpers, and evaluation adapter.
 - `src/quant_research_platform/pipelines/a_share/`: A-share workflow orchestration, runner, checkpoint, snapshots, and step registry.
 - `web/`: React/Vite local evidence workbench.
-- `scripts/local/`: local-only PowerShell launch scripts for API and workbench.
-- `scripts/build/`: local PowerShell build and verification scripts.
+- `scripts/`: local-only PowerShell launch scripts, build checks, and acceptance helpers.
 - `docs/architecture/`: architecture blueprint, future capabilities, standards, Phase 1 refactor design, implementation checklist, and directory-rename handoff.
 - `docs/code-map/`: source reading map and contract handoff notes.
 
@@ -151,7 +150,7 @@ Platform evaluation contract:
 - Evaluation artifacts use schema `0.5`.
 - A-share full/private evaluation runs should use `python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`, not the generic `evaluate-parquet` CLI. Use `--start-year/--end-year` to locate the processed factor file and `--start-date/--end-date` for `trade_date` filtering.
 - Use generic `evaluate-parquet` only for external/local Parquet adapter checks or non-A-share inputs. Do not treat a temporary sliced Parquet plus `evaluate-parquet` as proof that the A-share adapter pipeline works.
-- The current frontend Pipeline Builder writes configuration snapshots through `POST /api/pipeline-runs`; it is not yet a full pipeline executor.
+- The current frontend Pipeline Builder defaults to a configuration snapshot flow through `POST /api/pipeline-runs`; the backend also supports `execution_mode=processed_existing` as a lightweight runner over existing processed A-share factor data.
 - API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` in run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend routing.
 - `manifest.display` is the source of truth for API evidence, CSV preview, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
 - Do not create frontend-only or backend-only artifact shortcuts that bypass `manifest.display`.

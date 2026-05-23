@@ -23,6 +23,7 @@ local approved data
 - evaluation layer、artifact writer / loader、schema `0.5`、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
 - Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为辅助输入方式保留。
 - Pipeline Builder 当前只生成因子表达式/配置快照，不执行完整 A 股 build/evaluate 编排；一键全流程需要后续接入执行层。
+- Factor Factory 已有后端 registry、批量评价、API 轻量入口和本地 workbench 浏览入口；P4/P5 小样本示例由 `scripts/phase1_acceptance.py` 统一复跑和比较。
 - crypto 和其他市场只显示为 planned / disabled，不代表已支持真实数据或交易，也不保留空实现包。
 
 ## 当前结构
@@ -47,8 +48,7 @@ src/quant_research_platform/
 
 web/                    React/Vite evidence workbench
 config/a_share/         A-share factor templates and pipeline configs
-scripts/local/          本机 API / workbench 启动脚本
-scripts/build/          前端打包和全量验证脚本
+scripts/                本机启动、验收、检查脚本
 data/                   local private data boundary
 reports/private_real/   local private real-data outputs
 docs/code-map/          source reading map
@@ -118,21 +118,20 @@ npm run lint
 npm run build
 ```
 
-也可以使用根目录脚本：
+完整检查可以使用根目录脚本：
 
 ```powershell
-.\scripts\build\check_all.ps1
-.\scripts\build\build_web.ps1
+.\scripts\check_all.ps1
 ```
 
-本机查看 2023-2025 私有 smoke run：
+本机查看本地私有 runs：
 
 ```powershell
-.\scripts\local\start_private_workbench.ps1
-.\scripts\local\stop_workbench.ps1
+.\scripts\start_private_workbench.ps1
+.\scripts\stop_workbench.ps1
 ```
 
-启动脚本会把 API 的 `QRP_RUN_ROOTS` 指到 `reports/private_real/factor_evaluation/` 下的 2023-2025 `tensor` / `dataframe`、`long_only` / `long_short` 四组 evaluation runs。它只使用相对路径，不提交或复制私有结果；如果端口被其他项目占用，脚本会停止并要求换端口或先处理占用进程。
+启动脚本会加载 `scripts/private_run_roots.ps1` 中声明的本机 private roots，包括 evaluation acceptance runs、pipeline runs 和 Factor Factory runs。它只使用相对路径，不提交或复制私有结果；如果端口被其他项目占用，脚本会停止并要求换端口或先处理占用进程。
 
 ## 私有数据边界
 
@@ -152,6 +151,14 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 平台输出的 evaluation run 使用 artifact schema `0.5`。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。
 
 本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
+
+Phase 1 验收以 [docs/architecture/phase-1-implementation-checklist.md](docs/architecture/phase-1-implementation-checklist.md) 为准。2026-05-23 已补齐：
+
+- Factor Factory 本地 workbench 浏览入口；
+- A 股 processed-existing pipeline runner 小样本示例和 old/new 比较；
+- Factor Factory 小样本示例。
+
+仍需单独同步的是 root workspace 状态回传，以及后续架构债：前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化。
 
 新增或修改 artifacts 时必须同时检查：
 

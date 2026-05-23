@@ -16,7 +16,6 @@ from quant_research_platform.interfaces.api.services.download_service import (
 from quant_research_platform.interfaces.api.services.run_repository import (
     delete_uploaded_run,
     discover_run_indexes,
-    find_run_index_record,
     load_artifacts_or_422,
     load_run,
     resolve_run_index_record,
@@ -29,10 +28,13 @@ router = APIRouter()
 def list_runs(request: Request) -> list[dict[str, object]]:
     """列出可浏览的 run index，供前端首页和 run list 使用。"""
 
-    return [
-        payloads.run_index_payload(record)
-        for record in discover_run_indexes(api_context(request).run_roots)
-    ]
+    runs = []
+    for record in discover_run_indexes(api_context(request).run_roots):
+        try:
+            runs.append(payloads.run_index_payload(record))
+        except HTTPException:
+            continue
+    return runs
 
 
 @router.delete("/api/runs/{source_alias}/{run_id}")
@@ -47,9 +49,10 @@ def run_evidence(source_alias: str, run_id: str, request: Request) -> dict[str, 
     """聚合 report、核心 tables 和 comparison，供 evidence 页面一次加载。"""
 
     context = api_context(request)
-    index_records = context.comparison_index_records()
-    index_record = find_run_index_record(index_records, source_alias, run_id)
+    index_record = resolve_run_index_record(context.run_roots, source_alias, run_id)
     ensure_download_item_exposed(index_record.manifest, "report.md")
+    ensure_download_item_exposed(index_record.manifest, "comparison.csv")
+    index_records = context.comparison_index_records(required_ref=index_record.ref)
     comparison_payload = (
         payloads.table_payload(comparison_index_frame(index_records))
         if index_records

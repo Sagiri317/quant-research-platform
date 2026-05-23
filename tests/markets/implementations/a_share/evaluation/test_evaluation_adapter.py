@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
@@ -313,7 +315,97 @@ def test_processed_factor_evaluation_reads_full_factor_file_once(
     assert evaluation_runs[0]["output_dir"] == (
         "evaluation_runs/csmar_2024_2025_forward_return_20d"
     )
+    assert "input_file" not in evaluation_runs[0]
+    assert evaluation_runs[0]["input_source"] == "processed_factor_table"
+    assert evaluation_runs[0]["input_year_range"] == "2014_2025"
     assert manifest_path.name == "evaluation_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_text = json.dumps(manifest)
+    assert "data/processed_private" not in manifest_text
+    assert factor_path.as_posix() not in manifest_text
+
+
+def test_processed_factor_evaluation_manifest_uses_full_report_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    processed_root = tmp_path / "processed"
+    factor_dir = processed_root / "price_volume_factors_full"
+    factor_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "stock_code": ["000001", "000002"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "eligible": [True, True],
+            "can_enter": [True, True],
+            "can_exit": [True, True],
+            "rev_20d": [0.1, 0.2],
+            "forward_return_1d": [0.001, 0.002],
+        }
+    ).to_parquet(
+        factor_dir / "price_volume_factors_2024_2024.parquet",
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda _spec: None)
+
+    _, manifest_path, _ = evaluation.run_processed_factor_evaluation(
+        processed_root=processed_root,
+        report_root=tmp_path / "factor_evaluation" / "full_2024_2024",
+        start_year=2024,
+        end_year=2024,
+        requested_labels=("forward_return_1d",),
+        requested_factors=("rev_20d",),
+        all_factors=False,
+        n_groups=2,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_alias"] == "a_share"
+    assert manifest["run_id"] == "full_2024_2024"
+
+
+def test_processed_factor_evaluation_manifest_preserves_pipeline_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    processed_root = tmp_path / "processed"
+    factor_dir = processed_root / "price_volume_factors_full"
+    factor_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "stock_code": ["000001", "000002"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "eligible": [True, True],
+            "can_enter": [True, True],
+            "can_exit": [True, True],
+            "rev_20d": [0.1, 0.2],
+            "forward_return_1d": [0.001, 0.002],
+        }
+    ).to_parquet(
+        factor_dir / "price_volume_factors_2024_2024.parquet",
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda _spec: None)
+
+    _, manifest_path, _ = evaluation.run_processed_factor_evaluation(
+        processed_root=processed_root,
+        report_root=tmp_path / "pipeline_run" / "evaluation",
+        start_year=2024,
+        end_year=2024,
+        requested_labels=("forward_return_1d",),
+        requested_factors=("rev_20d",),
+        all_factors=False,
+        n_groups=2,
+        source_alias="pipeline",
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_alias"] == "pipeline"
+    assert manifest["run_id"] == "pipeline_run"
 
 
 def test_run_label_evaluation_rejects_unsafe_label_in_run_id(tmp_path):

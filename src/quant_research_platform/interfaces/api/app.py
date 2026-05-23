@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -29,6 +30,8 @@ from quant_research_platform.interfaces.api.services.run_repository import (
 )
 
 DEFAULT_RUN_ROOT_ALIAS = _DEFAULT_RUN_ROOT_ALIAS
+PIPELINE_OUTPUT_ROOT_ENV = "QRP_PIPELINE_OUTPUT_ROOT"
+FACTOR_FACTORY_ROOT_ENV = "QRP_FACTOR_FACTORY_ROOT"
 
 
 def create_app(
@@ -62,12 +65,22 @@ def create_app(
     pipeline_root = (
         Path(pipeline_output_root)
         if pipeline_output_root is not None
-        else Path("reports/private_real/pipeline_runs")
+        else Path(
+            os.environ.get(
+                PIPELINE_OUTPUT_ROOT_ENV,
+                "reports/private_real/pipeline_runs",
+            )
+        )
     )
     factor_factory_output_root = (
         Path(factor_factory_root)
         if factor_factory_root is not None
-        else Path("reports/private_real/factor_factory")
+        else Path(
+            os.environ.get(
+                FACTOR_FACTORY_ROOT_ENV,
+                "reports/private_real/factor_factory",
+            )
+        )
     )
     if all(
         root.source_alias != "pipeline" for root in configured_roots

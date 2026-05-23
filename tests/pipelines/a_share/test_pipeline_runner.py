@@ -5,6 +5,10 @@ import json
 import pandas as pd
 import pytest
 
+from quant_research_platform.interfaces.api.models import RunRoot
+from quant_research_platform.interfaces.api.services.run_repository import (
+    discover_run_indexes,
+)
 from quant_research_platform.pipelines.a_share.config import PipelineConfig
 from quant_research_platform.pipelines.a_share.pipeline_step_registry import (
     get_pipeline_step_contract,
@@ -60,7 +64,7 @@ def test_processed_existing_runner_calls_a_share_adapter_and_writes_runtime_summ
         label_summary = pd.DataFrame(
             [
                 {"year": 2024, "label": "forward_return_1d", "rows": 4},
-                {"year": 2024, "label": "forward_return_20d", "rows": 4},
+                {"year": 2024, "label": "forward_return_20d", "rows": 6},
             ]
         )
         label_summary.to_csv(report_root / "label_availability.csv", index=False)
@@ -104,12 +108,13 @@ def test_processed_existing_runner_calls_a_share_adapter_and_writes_runtime_summ
     assert calls[0]["end_date"] == "2024-12-31"
     assert calls[0]["n_groups"] == 3
     assert calls[0]["engine"] == "tensor"
+    assert calls[0]["source_alias"] == "pipeline"
     summary = json.loads(result.runtime_summary_path.read_text(encoding="utf-8"))
     assert summary["status"] == "ready"
     assert summary["execution_mode"] == "processed_existing"
     assert summary["failed_step"] is None
     assert summary["checkpoints"][1]["key"] == "processed_evaluation"
-    assert summary["checkpoints"][1]["row_count"] == 4
+    assert summary["checkpoints"][1]["row_count"] == 10
     checkpoints = json.loads(
         (result.run_dir / "checkpoints.json").read_text(encoding="utf-8")
     )
@@ -210,6 +215,47 @@ def test_processed_existing_runner_records_sanitized_failure_code(
     assert "private table" not in json.dumps(checkpoints)
 
 
+def test_processed_existing_runner_smoke_writes_schema_artifacts_and_index(
+    tmp_path,
+) -> None:
+    processed_root = tmp_path / "processed"
+    output_root = tmp_path / "pipeline_runs"
+    _write_tiny_processed_factor_table(processed_root)
+    config = PipelineConfig(
+        market="a_share",
+        run_id="e2e_run",
+        date_start="2024-01-02",
+        date_end="2024-01-09",
+        factor_expression="rev_20d",
+        factor_template_id="custom",
+        portfolio_mode="long_short",
+        cost_bps=0.0,
+        pnl_return_column="forward_return_1d",
+        label_columns=("forward_return_1d",),
+        engine="dataframe",
+        output_root=output_root,
+    )
+
+    result = run_processed_existing_pipeline(
+        config,
+        processed_root=processed_root,
+        n_groups=2,
+    )
+
+    assert result.status == "ready"
+    assert result.checkpoints[1].row_count == 36
+    manifest = json.loads(result.evaluation_manifest_path.read_text(encoding="utf-8"))
+    assert manifest["artifact_type"] == "a_share_pipeline_evaluation_manifest"
+    assert manifest["schema_version"] == "0.1"
+    assert manifest["source_alias"] == "pipeline"
+    assert manifest["run_id"] == "e2e_run"
+    assert manifest["display"]["tables"][0]["key"] == "label_availability"
+    records = discover_run_indexes([RunRoot("pipeline", output_root)])
+    assert [record.ref.public_run_id for record in records] == [
+        "pipeline/csmar_2024_2024_forward_return_1d_20240102_20240109"
+    ]
+
+
 def test_processed_existing_factor_resolution_requires_known_template_or_column(
     tmp_path,
 ) -> None:
@@ -223,3 +269,58 @@ def test_processed_existing_factor_resolution_requires_known_template_or_column(
     config.factor_expression = "neg(return(close, 20))"
     with pytest.raises(PipelineRunnerError, match="processed_existing mode"):
         resolve_processed_factor_columns(config)
+
+
+def test_processed_existing_runner_allows_existing_column_expression(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = _valid_config(tmp_path)
+    config.factor_template_id = "custom"
+    config.factor_template_source = None
+    config.factor_expression = "custom_factor_1"
+
+    def fake_run_processed_factor_evaluation(**kwargs):
+        label_summary = pd.DataFrame({"label": ["forward_return_1d"], "rows": [8]})
+        report_root = kwargs["report_root"]
+        report_root.mkdir(parents=True)
+        manifest_path = report_root / "evaluation_manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        return label_summary, manifest_path, []
+
+    monkeypatch.setattr(
+        "quant_research_platform.pipelines.a_share.runner."
+        "run_processed_factor_evaluation",
+        fake_run_processed_factor_evaluation,
+    )
+
+    result = run_processed_existing_pipeline(config, processed_root=tmp_path)
+
+    run_config = (result.run_dir / "run_config.yaml").read_text(encoding="utf-8")
+    assert result.status == "ready"
+    assert "kind: processed_column" in run_config
+    assert "column: custom_factor_1" in run_config
+
+
+def _write_tiny_processed_factor_table(processed_root) -> None:
+    factor_dir = processed_root / "price_volume_factors_full"
+    factor_dir.mkdir(parents=True)
+    rows = []
+    for date_index, trade_date in enumerate(pd.bdate_range("2024-01-02", periods=6)):
+        for asset_index in range(6):
+            rows.append(
+                {
+                    "stock_code": f"00000{asset_index}",
+                    "trade_date": trade_date,
+                    "eligible": True,
+                    "can_enter": True,
+                    "can_exit": True,
+                    "rev_20d": float(asset_index - date_index),
+                    "forward_return_1d": float((asset_index - 2) / 1000),
+                }
+            )
+    pd.DataFrame(rows).to_parquet(
+        factor_dir / "price_volume_factors_2024_2024.parquet",
+        engine="pyarrow",
+        index=False,
+    )

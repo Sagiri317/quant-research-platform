@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import './App.css'
 import { CreateRunPanel } from './CreateRunPanel'
 import { DataCheckpoints } from './DataCheckpoints'
+import { FactorFactoryRuns } from './FactorFactoryRuns'
 import { FactorStudio } from './FactorStudio'
 import { PipelineBuilder } from './PipelineBuilder'
 import { ResultsView } from './ResultsView'
@@ -137,6 +138,7 @@ function App() {
             onOpenPipeline={openPipelineFromFactorStudio}
           />
         ) : null}
+        {viewMode === 'factory' ? <FactorFactoryRuns /> : null}
         {viewMode === 'pipeline' ? (
           <PipelineBuilder
             factorDraft={factorDraft}

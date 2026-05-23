@@ -1,4 +1,4 @@
-"""读取并校验受控 factor template registry。"""
+"""读取并校验 Phase 1 A 股受控 factor template registry。"""
 
 from __future__ import annotations
 

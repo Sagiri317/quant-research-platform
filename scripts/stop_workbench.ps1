@@ -1,3 +1,5 @@
+﻿# 用途：停止由 start_private_workbench.ps1 记录的本项目 API/Web 进程。
+# 安全边界：只停止 PID 文件中记录且进程快照匹配的进程；不会按端口盲目杀进程。
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [int[]]$Ports = @(8000, 5173),
@@ -6,7 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $ProjectRoot) {
-    $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+    $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 $LogRoot = Join-Path $ProjectRoot ".codex\run-logs"
 $PidFile = Join-Path $LogRoot "workbench-pids.json"
@@ -47,6 +49,7 @@ function Get-ProcessSnapshot {
 }
 
 function Test-RecordedProcess {
+    # 用 PID、命令行和创建时间三者匹配，降低误杀同 PID 复用进程的风险。
     param([int]$ProcessId)
     $current = Get-ProcessSnapshot -ProcessId $ProcessId
     if ($null -eq $current) {
@@ -94,7 +97,7 @@ foreach ($processId in $processIds) {
     }
     $description = "pid=$processId name=$($process.ProcessName)"
     if (-not (Test-ProjectProcess -ProcessId $processId)) {
-        Write-Host "Skipped $description because it was not recorded by scripts\local\start_private_workbench.ps1"
+        Write-Host "Skipped $description because it was not recorded by scripts\start_private_workbench.ps1"
         continue
     }
     if ($PSCmdlet.ShouldProcess($description, "Stop local workbench process")) {

@@ -1,4 +1,4 @@
-"""批量评估 processed-existing factor candidates。"""
+"""批量评估 Phase 1 A 股 processed-existing factor candidates。"""
 
 from __future__ import annotations
 

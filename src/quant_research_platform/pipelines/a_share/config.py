@@ -70,9 +70,16 @@ class PipelineConfig:
         payload["diagnostics"] = tuple(payload.get("diagnostics", ()))
         return cls(**payload)
 
-    def to_snapshot_dict(self) -> dict[str, Any]:
+    def to_snapshot_dict(
+        self,
+        *,
+        allow_processed_factor_expression: bool = False,
+    ) -> dict[str, Any]:
         payload = asdict(self)
-        expression = expressions.parse_factor_expression(self.factor_expression)
+        expression = _parse_factor_expression_or_column(
+            self.factor_expression,
+            allow_processed_column=allow_processed_factor_expression,
+        )
         payload["output_root"] = self.output_root.as_posix()
         payload["label_columns"] = list(self.label_columns)
         payload["diagnostics"] = list(self.diagnostics)
@@ -81,7 +88,11 @@ class PipelineConfig:
         return payload
 
 
-def validate_pipeline_config(config: PipelineConfig) -> PipelineValidation:
+def validate_pipeline_config(
+    config: PipelineConfig,
+    *,
+    allow_processed_factor_expression: bool = False,
+) -> PipelineValidation:
     result = PipelineValidation()
     start_date = _validate_iso_date(
         result,
@@ -129,7 +140,10 @@ def validate_pipeline_config(config: PipelineConfig) -> PipelineValidation:
         )
     else:
         try:
-            expression = expressions.parse_factor_expression(config.factor_expression)
+            expression = _parse_factor_expression_or_column(
+                config.factor_expression,
+                allow_processed_column=allow_processed_factor_expression,
+            )
         except expressions.FactorExpressionError as exc:
             result.blocking.append(
                 ValidationIssue(
@@ -270,6 +284,32 @@ def validate_pipeline_config(config: PipelineConfig) -> PipelineValidation:
         )
 
     return result
+
+
+def _parse_factor_expression_or_column(
+    value: str,
+    *,
+    allow_processed_column: bool = False,
+):
+    try:
+        return expressions.parse_factor_expression(value)
+    except expressions.FactorExpressionError:
+        if allow_processed_column and COLUMN_NAME_PATTERN.fullmatch(value):
+            return _ParsedProcessedColumn(value)
+        raise
+
+
+@dataclass(frozen=True)
+class _ParsedProcessedColumn:
+    column: str
+
+    @property
+    def dependencies(self) -> frozenset[str]:
+        return frozenset({self.column})
+
+    @property
+    def parsed(self) -> dict[str, str]:
+        return {"kind": "processed_column", "column": self.column}
 
 
 def _validate_iso_date(

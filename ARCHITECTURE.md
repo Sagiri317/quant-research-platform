@@ -56,7 +56,9 @@ A 股是当前唯一 enabled market module。它的真实私有数据流程入�
 
 `evaluate-parquet` 属于通用 generic evaluation adapter，不保留 A 股 adapter 的 label availability summary、覆盖文件选择和私有 pipeline metadata。验证 A 股全流程或生成 A 股私有 runs 时，应优先使用 A 股专用评估入口。
 
-前端 `Pipeline Builder` 目前只写本地配置快照和 checkpoint，不等同于执行完整 A 股 pipeline。后续要把“写因子表达式和配置后一键全流程”做完整，需要把该页面接到上述 A 股 build/evaluate 编排，而不是只调用 snapshot endpoint。
+前端 `Pipeline Builder` 目前只写本地配置快照和 checkpoint，不等同于执行完整 A 股 pipeline。后端已支持 `execution_mode=processed_existing` 的轻量 runner，但前端默认仍是 snapshot；后续要把“写因子表达式和配置后一键全流程”做完整，需要把该页面接到上述 A 股 build/evaluate 编排，而不是只调用 snapshot endpoint。
+
+Factor Factory 当前已有后端 registry、批量评价、API 轻量入口和本地 workbench 浏览入口。P4/P5 小样本示例通过 `scripts/phase1_acceptance.py` 复跑 A 股 processed-existing acceptance runs、生成 Factor Factory candidate summary，并输出 old/new 比较报告。
 
 ## 源码布局
 
@@ -137,6 +139,8 @@ Phase 1 中 `interfaces/api` 是本地 FastAPI 适配层；Phase 2 的 `apps/api
 - 删除接口只能按项目规则处理明确允许删除的本地 uploaded artifacts。
 - React frontend 只消费 API 返回的数据模型，不直接读本地文件，不重新计算 IC、RankIC、positions 或 turnover。
 - Factor/Pipeline Studio 只发起受控 pipeline 请求，不连接外部数据源或交易接口。
+- Factor Factory 前端浏览只展示 API / artifact 结果，不在前端重新计算 IC、PnL、positions 或 turnover。
+- 后续仍需单独处理的架构债包括 frontend feature split、artifact ZIP packaging 下沉到 artifacts，以及 eligibility / tradability 诊断可见化。
 
 ## Comparison
 

@@ -84,12 +84,19 @@ def run_processed_existing_pipeline(
     """用已存在 processed factor table 运行 A 股 evaluation adapter。"""
 
     started = time.perf_counter()
-    validation = validate_pipeline_config(config)
+    validation = validate_pipeline_config(
+        config,
+        allow_processed_factor_expression=True,
+    )
     if validation.has_blocking:
         raise PipelineRunnerError(_blocking_issue_message(validation.blocking))
     feature_columns = resolve_processed_factor_columns(config)
     try:
-        snapshot = write_run_snapshot(config, overwrite=overwrite)
+        snapshot = write_run_snapshot(
+            config,
+            overwrite=overwrite,
+            allow_processed_factor_expression=True,
+        )
     except PipelineSnapshotError as exc:
         raise PipelineRunnerError(str(exc)) from exc
 
@@ -121,6 +128,7 @@ def run_processed_existing_pipeline(
             cost_bps=config.cost_bps,
             portfolio_mode=config.portfolio_mode,
             engine=config.engine,
+            source_alias="pipeline",
         )
     except Exception as exc:
         failure_code = _failure_code_from_exception(exc)
@@ -150,7 +158,7 @@ def run_processed_existing_pipeline(
             failure_code=failure_code,
         ) from exc
 
-    row_count = int(label_summary["rows"].max()) if "rows" in label_summary else None
+    row_count = int(label_summary["rows"].sum()) if "rows" in label_summary else None
     checkpoints.append(
         PipelineCheckpoint(
             key="processed_evaluation",
