@@ -1714,7 +1714,7 @@ tbody tr:hover {
   }
 }
 
-/* Porcelain Evidence Workbench redesign */
+/* Evidence Workbench 视觉重构 */
 .workspace {
   --surface-0: #f2f5f8;
   --surface-1: #ffffff;
@@ -2251,7 +2251,7 @@ tbody tr:hover {
   }
 }
 
-/* Small Chinese UI polish */
+/* 中文界面细节优化 */
 .workspace {
   --surface-0: #f3f6f8;
   --surface-1: #ffffff;

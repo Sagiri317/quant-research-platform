@@ -29,7 +29,7 @@ approved local data
 - DataFrame / Parquet / CSV input adapter。
 - A 股 CSMAR-backed market module。
 - schema `0.5` artifacts、`manifest.display`、API、下载和 React evidence workbench。
-- 多市场接口骨架；`crypto` 当前只是 placeholder。
+- 多市场接口骨架；crypto 当前只能显示为 planned / disabled，不保留空实现包。
 
 硬边界：
 

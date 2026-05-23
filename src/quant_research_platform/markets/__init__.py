@@ -1,1 +1,1 @@
-"""Market modules for Quant Research Platform."""
+"""定义 Quant Research Platform 的 market modules。"""

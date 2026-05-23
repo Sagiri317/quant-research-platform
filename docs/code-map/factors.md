@@ -3,7 +3,7 @@
 目录：
 
 ```text
-src/quant_research_platform/markets/a_share/factors/
+src/quant_research_platform/markets/implementations/a_share/factors/
 ```
 
 ## 职责

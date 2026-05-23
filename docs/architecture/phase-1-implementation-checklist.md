@@ -11,6 +11,7 @@
 - Phase 1 不创建 repo-level `apps/`、`storage/`、`identity/`、`tenancy/`、`jobs/`、`workers/` 等 Phase 2 平台域。
 - Phase 1 不接外部行情、vendor API、券商 API、模拟盘、实盘、凭据或部署服务。
 - 新增用户可见输出必须进入 `manifest.display` 或先设计新的 artifact/display 合同。
+- 本轮已批准最终 Phase 1 结构：本地 API 在 `interfaces/api/`，CLI 在 `interfaces/cli/`，通用 reader 在 `datasets/`，A 股市场实现是 `markets/implementations/a_share/`，A 股 workflow runner 是 `pipelines/a_share/`；不保留空 `markets/crypto/` 实现，不提前创建空 Future 目录。
 - 测试先跑窄范围；真实私有数据验证小样本优先。
 
 ## 2. P0: 合同冻结和文档基线
@@ -58,9 +59,9 @@
 
 | 任务 | 交付 | 验收 | 测试/检查 |
 |---|---|---|---|
-| app 装配瘦身 | `src/quant_research_platform/api/app.py` 只保留 `create_app()` 和 router 装配 | route path 不变 | API route tests |
-| routes 分组 | `api/routes/runs.py`、`evidence.py`、`downloads.py`、`comparison.py`、`pipeline.py` 等 | request parsing 和 response formatting 清晰 | API tests |
-| services 分组 | `api/services/run_repository.py`、`download_service.py`、`pipeline_service.py` | 业务逻辑不堆在 route handler | 单元/集成测试 |
+| app 装配瘦身 | `src/quant_research_platform/interfaces/api/app.py` 只保留 `create_app()` 和 router 装配 | route path 不变 | API route tests |
+| routes 分组 | `interfaces/api/routes/runs.py`、`artifacts.py`、`downloads.py`、`comparison.py`、`pipeline.py` 等 | request parsing 和 response formatting 清晰 | API tests |
+| services 分组 | `interfaces/api/services/run_repository.py`、`download_service.py`、`pipeline_service.py` | 业务逻辑不堆在 route handler | 单元/集成测试 |
 | display 驱动 | CSV preview、direct download、ZIP download 都走 `manifest.display` | 无后端隐藏下载、无前端私有 shortcut | 下载正/负例 |
 | run identity | 所有 API 保留 `(source_alias, run_id)` | 多 root run 不按 `run_id` 合并 | API identity tests |
 
@@ -73,7 +74,7 @@
 
 | 任务 | 交付 | 验收 | 测试/检查 |
 |---|---|---|---|
-| runner 入口 | A 股专用 pipeline runner | 可从 processed 已存在的轻量模式开始 | 小样本 smoke |
+| runner 入口 | `src/quant_research_platform/pipelines/a_share/` 下的 A 股专用 pipeline runner | 可从 processed 已存在的轻量模式开始 | 小样本 smoke |
 | checkpoint | checkpoint model / snapshot | 记录完成步骤、输出路径、warning、blocking issue | checkpoint 单测 |
 | pipeline step registry | `pipeline_step_registry.py` 或等价内部结构 | build/evaluate/export 等 step 可声明 name、version、inputs、outputs | registry 单测 |
 | 不覆盖规则 | 默认不覆盖已有正式输出 | 重跑不会破坏 private run | overwrite negative test |
@@ -129,9 +130,9 @@ Phase 1 每阶段按影响面选择最小测试集：
 $env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
 conda run -n analysis python -m pytest -q tests/artifacts
-conda run -n analysis python -m pytest -q tests/api
-conda run -n analysis python -m pytest -q tests/markets
-conda run -n analysis python -m pytest -q tests/core tests/engines
+conda run -n analysis python -m pytest -q tests/interfaces/api
+conda run -n analysis python -m pytest -q tests/markets/implementations tests/pipelines
+conda run -n analysis python -m pytest -q tests/evaluations tests/kernels
 ```
 
 前端变更：

@@ -10,27 +10,30 @@ Project purpose:
 
 - Local multi-market quantitative research platform.
 - A-share is the first complete market module, backed by local private CSMAR data.
-- Core evaluation, artifact schema `0.5`, local API, downloads, and React evidence workbench live inside this project.
-- Crypto and other markets are placeholders only until separately designed and tested.
+- Evaluation layer, artifact schema `0.5`, local API, downloads, and React evidence workbench live inside this project.
+- Crypto and other markets are planned/disabled only until separately designed and tested; do not keep empty implementation packages for them.
 - Sibling project `../alpha-research-core` is historical reference only. Do not make it a runtime dependency or active source after migration unless the user explicitly asks.
 - Code and public-safe aggregate summaries may later be published after review.
 - CSMAR raw/interim/processed data and private real reports remain private.
 
 Current structure:
 
-- `src/quant_research_platform/core/`: evaluation contracts, panel validation, run orchestration, and result objects.
-- `src/quant_research_platform/engines/`: DataFrame and tensor helper implementations.
+- `src/quant_research_platform/evaluations/`: evaluation contracts, panel validation, run orchestration, and result objects.
+- `src/quant_research_platform/kernels/`: DataFrame and tensor helper implementations.
 - `src/quant_research_platform/artifacts/`: schema `0.5` writer, loader, inventory, comparison, and `manifest.display`.
-- `src/quant_research_platform/api/`: local FastAPI evidence API, run repository, CSV preview, and downloads.
-- `src/quant_research_platform/cli/`: `qrp` / `python -m quant_research_platform.cli` commands.
-- `src/quant_research_platform/io/`: explicit CSV / Parquet input helpers.
-- `src/quant_research_platform/markets/a_share/`: CSMAR-backed A-share ingestion, datasets, factors, validation, evaluation, and pipeline contracts.
-- `src/quant_research_platform/markets/crypto/`: reserved placeholder only.
+- `src/quant_research_platform/interfaces/api/`: local FastAPI evidence API routes, service layer, CSV preview, and downloads.
+- `src/quant_research_platform/interfaces/cli/`: `qrp` / `python -m quant_research_platform.interfaces.cli` commands.
+- `src/quant_research_platform/datasets/`: generic CSV / Parquet readers and dataset access helpers.
+- `src/quant_research_platform/markets/implementations/a_share/`: CSMAR-backed A-share market implementation, including data fields, factors, labels, validation, runtime helpers, and evaluation adapter.
+- `src/quant_research_platform/pipelines/a_share/`: A-share workflow orchestration, runner, checkpoint, snapshots, and step registry.
 - `web/`: React/Vite local evidence workbench.
 - `scripts/local/`: local-only PowerShell launch scripts for API and workbench.
 - `scripts/build/`: local PowerShell build and verification scripts.
 - `docs/architecture/`: architecture blueprint, future capabilities, standards, Phase 1 refactor design, implementation checklist, and directory-rename handoff.
 - `docs/code-map/`: source reading map and contract handoff notes.
+
+- Do not create repo-level `apps/api` in Phase 1; it is a future deployable app shell for Phase 2.
+- Do not create empty Future directories or empty market implementations merely as planning markers.
 
 Hard boundaries:
 
@@ -144,9 +147,9 @@ Current processed contract:
 Platform evaluation contract:
 
 - Market modules produce explicit DataFrames or Parquet inputs.
-- Core receives `EvaluationSpec` and runs `run_evaluation(spec)`.
+- Evaluation layer receives `EvaluationSpec` and runs `run_evaluation(spec)`.
 - Evaluation artifacts use schema `0.5`.
-- A-share full/private evaluation runs should use `python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`, not the generic `evaluate-parquet` CLI. Use `--start-year/--end-year` to locate the processed factor file and `--start-date/--end-date` for `trade_date` filtering.
+- A-share full/private evaluation runs should use `python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`, not the generic `evaluate-parquet` CLI. Use `--start-year/--end-year` to locate the processed factor file and `--start-date/--end-date` for `trade_date` filtering.
 - Use generic `evaluate-parquet` only for external/local Parquet adapter checks or non-A-share inputs. Do not treat a temporary sliced Parquet plus `evaluate-parquet` as proof that the A-share adapter pipeline works.
 - The current frontend Pipeline Builder writes configuration snapshots through `POST /api/pipeline-runs`; it is not yet a full pipeline executor.
 - API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` in run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend routing.
@@ -164,7 +167,7 @@ Important test surfaces:
 - processed panel construction.
 - price-volume factor and forward label logic.
 - A-share pipeline config snapshots and factor expression parsing.
-- core evaluation contract, artifact schema `0.5`, and `manifest.display`.
+- evaluation layer contract, artifact schema `0.5`, and `manifest.display`.
 - API evidence, CSV preview, direct download, ZIP download, and comparison endpoints.
 - React evidence workbench state, run switching, combination switching, and download picker parity.
 
@@ -174,7 +177,7 @@ Do not run slow, network-heavy, destructive, or environment-changing commands wi
 
 - [README.md](README.md): current platform entry.
 - [ARCHITECTURE.md](ARCHITECTURE.md): platform architecture and module boundaries.
-- [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md): core evaluation input/output contract.
+- [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md): evaluation layer input/output contract.
 - [REPORT.md](REPORT.md): formal research report.
 - [RESEARCH_CARD.md](RESEARCH_CARD.md): evidence ledger.
 - [PROJECT_STATUS.md](PROJECT_STATUS.md): current local status, next tasks, decisions, and root handoff.

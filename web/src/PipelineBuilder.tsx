@@ -40,7 +40,7 @@ export function PipelineBuilder({
         run_id: runId,
       })
       setStatus(created)
-      setCheckpoints(await getPipelineCheckpoints(created.run_id))
+      setCheckpoints(await getPipelineCheckpoints(created.run_ref ?? created.run_id))
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '流程快照生成失败')
     } finally {
@@ -130,7 +130,11 @@ export function PipelineBuilder({
       <div className="studio-panel">
         <div className="form-section-title">
           <h3>输出目录</h3>
-          <p>{status?.snapshot_path ?? 'reports/private_real/pipeline_runs'}</p>
+          <p>
+            {status?.run_ref
+              ? `pipeline/${status.run_ref}`
+              : 'pipeline/(pending)'}
+          </p>
         </div>
         <div className="checkpoint-list">
           {checkpoints.length === 0 ? (
@@ -142,7 +146,7 @@ export function PipelineBuilder({
           ) : (
             checkpoints.map((checkpoint) => (
               <span className={`checkpoint ${checkpoint.status}`} key={checkpoint.key}>
-                {checkpoint.label}
+                {checkpoint.artifact ?? checkpoint.label}
               </span>
             ))
           )}

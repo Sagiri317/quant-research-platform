@@ -17,11 +17,12 @@ Start by reading project `AGENTS.md`, then inspect only the files touched by the
 
 | Surface | Start here |
 | --- | --- |
-| Artifact schema and loader | `src/quant_research_platform/artifacts/writer.py` |
-| Display contract | `src/quant_research_platform/artifacts/display.py` |
-| Evidence API and downloads | `src/quant_research_platform/api/payloads.py`, `api/downloads.py`, `api/app.py`, `api/run_index.py` |
-| A-share pipeline runs | `src/quant_research_platform/markets/a_share/pipeline/`, `config/a_share/pipelines/` |
-| A-share private evaluation | `src/quant_research_platform/markets/a_share/evaluation/run_factor_evaluation.py`, `evaluation/core_bridge.py`, `runtime/paths.py` |
+| Artifact schema and loader | `src/quant_research_platform/artifacts/artifact_writer.py`, `artifact_loader.py`, `artifact_schema.py` |
+| Display contract | `src/quant_research_platform/artifacts/display_manifest.py` |
+| Evidence API and downloads | `src/quant_research_platform/interfaces/api/routes/`, `interfaces/api/services/`, `interfaces/api/app.py`, `interfaces/api/run_index.py` |
+| A-share pipeline runs | `src/quant_research_platform/pipelines/a_share/`, `config/a_share/pipelines/` |
+| A-share private evaluation | `src/quant_research_platform/markets/implementations/a_share/evaluation/run_factor_evaluation.py`, `evaluation/evaluation_adapter.py`, `runtime/paths.py` |
+| Factor Factory | `src/quant_research_platform/research/factor_factory/`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py`, `tests/research/factor_factory/`, `tests/interfaces/api/test_factor_factory_api.py` |
 | Frontend evidence UI | `web/src/runEvidenceState.ts`, `ResultsView.tsx`, `RunCharts.tsx`, `ArtifactDownloads.tsx`, `CsvBrowser.tsx` |
 | Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/architecture/`, `docs/code-map/` |
 
@@ -85,8 +86,9 @@ Do not call a broad artifact/API/frontend refactor complete until every gate bel
 - Frontend fixtures either come from a checked backend fixture snapshot or are intentionally kept in sync with `manifest.display` rules.
 - New validation rules have one positive path and at least one negative test.
 - A-share pipeline snapshots record config, warnings, and summary without overwriting existing private runs by default.
-- A-share real-data acceptance uses `python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`; use generic `evaluate-parquet` only for core/adapter checks, not as a substitute for A-share adapter validation.
+- A-share real-data acceptance uses `python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation` after the approved structural migration; use generic `evaluate-parquet` only for evaluation-layer or adapter checks, not as a substitute for A-share adapter validation.
 - Date-filtered A-share runs should exercise both `--start-year/--end-year` coverage-file selection and `--start-date/--end-date` row filtering when that behavior is in scope.
+- Factor Factory writes each batch into a distinct factory run directory, does not overwrite existing candidate reports by default, exposes only `run_ref` and `manifest.display` artifacts through the API, and sanitizes private raw/interim/processed/report paths from candidate summaries and failed logs.
 
 ### Docs and Diff Hygiene
 

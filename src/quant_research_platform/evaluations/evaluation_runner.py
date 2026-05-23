@@ -1,0 +1,874 @@
+"""核心 factor 和 prediction signal evaluation runner。"""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+from pathlib import Path
+
+import pandas as pd
+
+from quant_research_platform.artifacts.artifact_writer import (
+    write_evaluation_set_artifacts,
+)
+from quant_research_platform.evaluations.evaluation_payload import EvaluationRunPayload
+from quant_research_platform.evaluations.evaluation_result import EvaluationSetResult
+from quant_research_platform.evaluations.evaluation_spec import EvaluationSpec
+from quant_research_platform.evaluations.neutralization import apply_neutralization
+from quant_research_platform.evaluations.panel_validation import (
+    PanelSpec,
+    validate_evaluation_set_pnl_return_column,
+    validate_evaluation_spec_columns,
+    validate_panel,
+)
+from quant_research_platform.evaluations.period_breakdowns import (
+    PERIOD_BREAKDOWN_POLICY,
+    build_time_breakdown_metrics,
+)
+from quant_research_platform.kernels.dataframe.cross_section import (
+    evaluate_ic_and_grouped_returns_from_validated_panel,
+    summarize_group_spread,
+    summarize_ic,
+)
+from quant_research_platform.kernels.dataframe.portfolio import (
+    _simulate_weighted_long_short_returns_and_cost_from_validated_panel,
+    calculate_cumulative_pnl,
+    summarize_exposure,
+    summarize_performance,
+)
+from quant_research_platform.kernels.kernel_registry import get_kernel_descriptor
+from quant_research_platform.kernels.tensor.conversion import (
+    panel_to_tensor,
+    panel_to_tensor_batch,
+)
+from quant_research_platform.kernels.tensor.cross_section import (
+    evaluate_ic_and_grouped_returns_tensor,
+)
+from quant_research_platform.kernels.tensor.portfolio import (
+    build_tensor_portfolio_artifacts,
+    summarize_tensor_exposure_from_path,
+)
+from quant_research_platform.runtime.profiling import (
+    StageProfiler,
+    active_stage_profiler,
+    measure_stage,
+)
+
+POSITION_ARTIFACT_POLICY = "nonzero_positions_with_flat_timestamp_marker"
+
+
+def run_evaluation(spec: EvaluationSpec) -> EvaluationSetResult:
+    """运行 batch-native evaluation set 并写入 evaluation-set artifacts。"""
+
+    if not isinstance(spec, EvaluationSpec):
+        raise TypeError("spec must be an EvaluationSpec.")
+    if active_stage_profiler() is None and (
+        spec.profile_config.enabled or spec.profile_config.write_artifacts
+    ):
+        profiler = StageProfiler(
+            spec.profile_config,
+            metadata=_evaluation_set_profile_metadata(spec),
+        )
+        with profiler:
+            result = run_evaluation(spec)
+        if spec.profile_config.write_artifacts:
+            output_dir = spec.profile_config.output_dir or spec.output_dir
+            profiler.write_artifacts(output_dir)
+        return result
+    payload = evaluate_to_payload(spec)
+    artifacts = write_evaluation_set_artifacts(
+        spec.output_dir,
+        config=payload.config,
+        summary=payload.summary,
+        tables=payload.tables,
+        report=payload.report,
+    )
+    return EvaluationSetResult(
+        summary=payload.summary,
+        metrics={
+            name: frame
+            for name, frame in payload.tables.items()
+            if name != "combinations"
+        },
+        artifacts=artifacts,
+        combinations=payload.tables["combinations"],
+        combinations_path=artifacts.metric_paths["combinations"],
+    )
+
+
+def evaluate_to_payload(spec: EvaluationSpec) -> EvaluationRunPayload:
+    """计算 evaluation-set payload tables，但不写入 artifacts。"""
+
+    if not isinstance(spec, EvaluationSpec):
+        raise TypeError("spec must be an EvaluationSpec.")
+    validate_evaluation_spec_columns(spec)
+    pnl_return_column = validate_evaluation_set_pnl_return_column(spec)
+    kernel = get_kernel_descriptor(spec.engine)
+    if kernel.uses_tensor_layout:
+        measure_stage(
+            "engine",
+            "tensor_conversion",
+            lambda: _prepare_tensor_batch(spec),
+        )
+    validated_panels = _validate_panels_by_label(spec)
+    all_tables: dict[str, list[pd.DataFrame]] = {
+        "ic": [],
+        "ic_summary": [],
+        "grouped_returns": [],
+        "group_spread_summary": [],
+        "performance_summary": [],
+        "exposure_summary": [],
+        "positions": [],
+        "turnover": [],
+        "returns": [],
+        "pnl": [],
+        "cost_breakdown": [],
+        "weight_diagnostics": [],
+        "neutralization_diagnostics": [],
+    }
+    combination_records: list[dict[str, object]] = []
+    for label in spec.label_columns:
+        for weight_index, weight_config in enumerate(spec.weight_configs):
+            for cost_index, cost_config in enumerate(spec.cost_configs):
+                weight_id = f"w{weight_index}"
+                cost_id = f"c{cost_index}"
+                runner = (
+                    _run_tensor_feature_set
+                    if kernel.uses_tensor_layout
+                    else _run_dataframe_feature_set
+                )
+                raw_metrics = runner(
+                    spec=spec,
+                    validated_panel=validated_panels[label],
+                    label=label,
+                    weight_id=weight_id,
+                    cost_id=cost_id,
+                    weight_config=weight_config,
+                    cost_config=cost_config,
+                    pnl_return_column=pnl_return_column,
+                )
+                dimensioned_metrics = {
+                    name: _add_feature_set_combination_columns(
+                        frame,
+                        label=label,
+                        weight_id=weight_id,
+                        cost_id=cost_id,
+                    )
+                    for name, frame in raw_metrics.items()
+                }
+                for name, frame in dimensioned_metrics.items():
+                    all_tables.setdefault(name, []).append(frame)
+                for feature in spec.feature_columns:
+                    combination_id = _combination_id(
+                        feature=feature,
+                        label=label,
+                        weight_id=weight_id,
+                        cost_id=cost_id,
+                    )
+                    feature_metrics = _metrics_for_feature(raw_metrics, feature)
+                    combination_records.append(
+                        _combination_record(
+                            combination_id=combination_id,
+                            feature=feature,
+                            label=label,
+                            weight_id=weight_id,
+                            cost_id=cost_id,
+                            weight_config=weight_config,
+                            cost_config=cost_config,
+                            metrics=feature_metrics,
+                        )
+                    )
+
+    tables = {
+        name: pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        for name, frames in all_tables.items()
+    }
+    combinations = pd.DataFrame.from_records(combination_records)
+    tables["combinations"] = combinations
+    summary = _build_evaluation_set_summary(
+        spec=spec,
+        pnl_return_column=pnl_return_column,
+        tables=tables,
+        combinations=combinations,
+    )
+    config = _build_evaluation_set_config(
+        spec=spec,
+        pnl_return_column=pnl_return_column,
+    )
+    return EvaluationRunPayload(
+        summary=summary,
+        config=config,
+        tables=tables,
+        report=_render_evaluation_set_report(summary, tables),
+    )
+
+
+def _run_dataframe_feature_set(
+    *,
+    spec: EvaluationSpec,
+    validated_panel: pd.DataFrame,
+    label: str,
+    weight_id: str,
+    cost_id: str,
+    weight_config,
+    cost_config,
+    pnl_return_column: str,
+) -> dict[str, pd.DataFrame]:
+    panel_spec = PanelSpec(
+        feature_columns=spec.feature_columns,
+        label_column=label,
+        timestamp_column=spec.timestamp_column,
+        asset_column=spec.asset_column,
+    )
+    panel, neutralization_diagnostics = measure_stage(
+        "metric",
+        "neutralization",
+        lambda: apply_neutralization(
+            validated_panel,
+            panel_spec,
+            spec.neutralization_config,
+        ),
+    )
+    ic, grouped_returns = _evaluate_cross_section_metrics_for_spec(
+        panel=panel,
+        panel_spec=panel_spec,
+        n_groups=spec.n_groups,
+        segment_columns=spec.segment_columns,
+    )
+    positions, turnover, returns, diagnostics, cost_breakdown = (
+        _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+            panel,
+            panel_spec,
+            weight_config,
+            segment_columns=spec.segment_columns,
+            portfolio_features=spec.feature_columns,
+            tradability_config=spec.tradability_config,
+            cost_config=cost_config,
+            pnl_return_column=pnl_return_column,
+        )
+    )
+    returns = returns.copy()
+    if "label" in returns.columns:
+        returns["pnl_return_column"] = returns["label"]
+        returns["label"] = label
+    pnl = measure_stage(
+        "metric",
+        "pnl",
+        lambda: calculate_cumulative_pnl(
+            returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    performance_summary = measure_stage(
+        "metric",
+        "performance_summary",
+        lambda: summarize_performance(
+            returns,
+            pnl,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    ic_summary = measure_stage(
+        "metric",
+        "ic_summary",
+        lambda: summarize_ic(ic, segment_columns=spec.segment_columns),
+    )
+    group_spread_summary = measure_stage(
+        "metric",
+        "group_spread_summary",
+        lambda: summarize_group_spread(
+            grouped_returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    exposure_summary = measure_stage(
+        "metric",
+        "exposure_summary",
+        lambda: summarize_exposure(
+            positions,
+            returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    metrics = {
+        "ic": ic,
+        "ic_summary": ic_summary,
+        "grouped_returns": grouped_returns,
+        "group_spread_summary": group_spread_summary,
+        "performance_summary": performance_summary,
+        "exposure_summary": exposure_summary,
+        "positions": positions,
+        "turnover": turnover,
+        "returns": returns,
+        "pnl": pnl,
+        "cost_breakdown": cost_breakdown,
+        "weight_diagnostics": diagnostics,
+        "neutralization_diagnostics": neutralization_diagnostics,
+    }
+    if spec.time_breakdowns:
+        metrics.update(
+            build_time_breakdown_metrics(
+                metrics,
+                time_breakdowns=spec.time_breakdowns,
+                segment_columns=spec.segment_columns,
+            )
+        )
+    return metrics
+
+
+def _run_tensor_feature_set(
+    *,
+    spec: EvaluationSpec,
+    validated_panel: pd.DataFrame,
+    label: str,
+    weight_id: str,
+    cost_id: str,
+    weight_config,
+    cost_config,
+    pnl_return_column: str,
+) -> dict[str, pd.DataFrame]:
+    panel_spec = PanelSpec(
+        feature_columns=spec.feature_columns,
+        label_column=label,
+        timestamp_column=spec.timestamp_column,
+        asset_column=spec.asset_column,
+    )
+    panel, neutralization_diagnostics = measure_stage(
+        "metric",
+        "neutralization",
+        lambda: apply_neutralization(
+            validated_panel,
+            panel_spec,
+            spec.neutralization_config,
+        ),
+    )
+    ic, grouped_returns = _evaluate_tensor_cross_section_metrics_for_spec(
+        panel=panel,
+        panel_spec=panel_spec,
+        n_groups=spec.n_groups,
+        segment_columns=spec.segment_columns,
+        value_dtype=spec.tensor_config.value_dtype,
+    )
+    portfolio_artifacts = measure_stage(
+        "metric",
+        "tensor_portfolio_artifacts",
+        lambda: build_tensor_portfolio_artifacts(
+            panel,
+            panel_spec,
+            weight_config,
+            cost_config,
+            segment_columns=spec.segment_columns,
+            portfolio_features=spec.feature_columns,
+            tradability_config=spec.tradability_config,
+            pnl_return_column=pnl_return_column,
+            value_dtype=spec.tensor_config.value_dtype,
+        ),
+    )
+    returns = portfolio_artifacts.returns.copy()
+    if "label" in returns.columns:
+        returns["pnl_return_column"] = returns["label"]
+        returns["label"] = label
+    pnl = measure_stage(
+        "metric",
+        "pnl",
+        lambda: calculate_cumulative_pnl(
+            returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    performance_summary = measure_stage(
+        "metric",
+        "performance_summary",
+        lambda: summarize_performance(
+            returns,
+            pnl,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    ic_summary = measure_stage(
+        "metric",
+        "ic_summary",
+        lambda: summarize_ic(ic, segment_columns=spec.segment_columns),
+    )
+    group_spread_summary = measure_stage(
+        "metric",
+        "group_spread_summary",
+        lambda: summarize_group_spread(
+            grouped_returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    exposure_summary = measure_stage(
+        "metric",
+        "exposure_summary",
+        lambda: summarize_tensor_exposure_from_path(
+            portfolio_artifacts.exposure_path,
+            returns,
+            segment_columns=spec.segment_columns,
+        ),
+    )
+    metrics = {
+        "ic": ic,
+        "ic_summary": ic_summary,
+        "grouped_returns": grouped_returns,
+        "group_spread_summary": group_spread_summary,
+        "performance_summary": performance_summary,
+        "exposure_summary": exposure_summary,
+        "positions": portfolio_artifacts.positions,
+        "turnover": portfolio_artifacts.turnover,
+        "returns": returns,
+        "pnl": pnl,
+        "cost_breakdown": portfolio_artifacts.cost_breakdown,
+        "weight_diagnostics": portfolio_artifacts.diagnostics,
+        "neutralization_diagnostics": neutralization_diagnostics,
+    }
+    if spec.time_breakdowns:
+        metrics.update(
+            build_time_breakdown_metrics(
+                metrics,
+                time_breakdowns=spec.time_breakdowns,
+                segment_columns=spec.segment_columns,
+            )
+        )
+    return metrics
+
+
+def _metrics_for_feature(
+    metrics: dict[str, pd.DataFrame],
+    feature: str,
+) -> dict[str, pd.DataFrame]:
+    return {
+        name: (
+            frame[frame["feature"] == feature]
+            if "feature" in frame.columns
+            else frame
+        )
+        for name, frame in metrics.items()
+    }
+
+
+def _evaluation_set_profile_metadata(spec: EvaluationSpec) -> dict[str, object]:
+    return {
+        "engine": spec.engine,
+        "rows": int(len(spec.panel)),
+        "features": len(spec.feature_columns),
+        "labels": len(spec.label_columns),
+        "combinations": (
+            len(spec.feature_columns)
+            * len(spec.label_columns)
+            * len(spec.weight_configs)
+            * len(spec.cost_configs)
+        ),
+        "evaluation_id": str(spec.metadata.get("run_id", Path(spec.output_dir).name)),
+    }
+
+
+def _prepare_tensor_batch(spec: EvaluationSpec) -> None:
+    panel_to_tensor_batch(
+        spec.panel,
+        timestamp_column=spec.timestamp_column,
+        asset_column=spec.asset_column,
+        signal_columns=spec.feature_columns,
+        label_columns=spec.label_columns,
+        value_dtype=spec.tensor_config.value_dtype,
+    )
+
+
+def _validate_panels_by_label(spec: EvaluationSpec) -> dict[str, pd.DataFrame]:
+    return {
+        label: measure_stage(
+            "metric",
+            "panel_validation",
+            lambda label=label: validate_panel(
+                spec.panel,
+                PanelSpec(
+                    feature_columns=spec.feature_columns,
+                    label_column=label,
+                    timestamp_column=spec.timestamp_column,
+                    asset_column=spec.asset_column,
+                ),
+            ),
+        )
+        for label in spec.label_columns
+    }
+
+
+def _evaluate_cross_section_metrics_for_spec(
+    *,
+    panel: pd.DataFrame,
+    panel_spec: PanelSpec,
+    n_groups: int,
+    segment_columns: tuple[str, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not segment_columns:
+        return measure_stage(
+            "metric",
+            "cross_section_metrics",
+            lambda: evaluate_ic_and_grouped_returns_from_validated_panel(
+                panel,
+                panel_spec,
+                n_groups=n_groups,
+            ),
+        )
+    return measure_stage(
+        "metric",
+        "cross_section_metrics",
+        lambda: _evaluate_cross_section_metrics_by_segment(
+            panel=panel,
+            spec=panel_spec,
+            n_groups=n_groups,
+            segment_columns=list(segment_columns),
+        ),
+    )
+
+
+def _evaluate_tensor_cross_section_metrics_for_spec(
+    *,
+    panel: pd.DataFrame,
+    panel_spec: PanelSpec,
+    n_groups: int,
+    segment_columns: tuple[str, ...],
+    value_dtype: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not segment_columns:
+        return measure_stage(
+            "metric",
+            "tensor_cross_section_metrics",
+            lambda: evaluate_ic_and_grouped_returns_tensor(
+                panel_to_tensor(panel, panel_spec, value_dtype=value_dtype),
+                n_groups=n_groups,
+            ),
+        )
+    return measure_stage(
+        "metric",
+        "tensor_cross_section_metrics",
+        lambda: _evaluate_tensor_cross_section_metrics_by_segment(
+            panel=panel,
+            spec=panel_spec,
+            n_groups=n_groups,
+            segment_columns=list(segment_columns),
+            value_dtype=value_dtype,
+        ),
+    )
+
+
+def _add_feature_set_combination_columns(
+    frame: pd.DataFrame,
+    *,
+    label: str,
+    weight_id: str,
+    cost_id: str,
+) -> pd.DataFrame:
+    result = frame.copy()
+    if "feature" not in result.columns:
+        result["feature"] = pd.Series(dtype="object", index=result.index)
+    result["feature"] = result["feature"].astype(str)
+    feature_to_combination_id = {
+        feature: _combination_id(
+            feature=feature,
+            label=label,
+            weight_id=weight_id,
+            cost_id=cost_id,
+        )
+        for feature in result["feature"].drop_duplicates()
+    }
+    result["combination_id"] = result["feature"].map(feature_to_combination_id)
+    result["label"] = label
+    result["weight_id"] = weight_id
+    result["cost_id"] = cost_id
+    dimension_columns = ["combination_id", "feature", "label", "weight_id", "cost_id"]
+    remaining_columns = [
+        column for column in result.columns if column not in dimension_columns
+    ]
+    return result[dimension_columns + remaining_columns]
+
+
+def _combination_id(
+    *,
+    feature: str,
+    label: str,
+    weight_id: str,
+    cost_id: str,
+) -> str:
+    return "__".join(
+        _slug(value) for value in (feature, label, weight_id, cost_id)
+    )
+
+
+def _slug(value: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in value)
+
+
+def _combination_record(
+    *,
+    combination_id: str,
+    feature: str,
+    label: str,
+    weight_id: str,
+    cost_id: str,
+    weight_config,
+    cost_config,
+    metrics: dict[str, pd.DataFrame],
+) -> dict[str, object]:
+    performance = _aggregate_combination_metrics(
+        metrics["performance_summary"],
+        {
+            "final_cumulative_net_return": "mean",
+            "sharpe_like": "mean",
+            "sortino_like": "mean",
+            "max_drawdown": "min",
+            "win_rate": "mean",
+            "mean_turnover": "mean",
+            "total_cost": "sum",
+        },
+    )
+    ic_summary = _aggregate_combination_metrics(
+        metrics["ic_summary"],
+        {
+            "mean_ic": "mean",
+            "mean_rankic": "mean",
+            "icir": "mean",
+            "rankicir": "mean",
+        },
+    )
+    return {
+        "combination_id": combination_id,
+        "feature": feature,
+        "label": label,
+        "weight_id": weight_id,
+        "cost_id": cost_id,
+        "weight_method": weight_config.method,
+        "direction": weight_config.direction,
+        "portfolio_mode": weight_config.portfolio_mode,
+        "cost_bps": _effective_cost_bps(weight_config, cost_config),
+        "mean_ic": ic_summary.get("mean_ic", 0.0),
+        "mean_rankic": ic_summary.get("mean_rankic", 0.0),
+        "icir": ic_summary.get("icir", 0.0),
+        "rankicir": ic_summary.get("rankicir", 0.0),
+        "final_cumulative_net_return": performance.get(
+            "final_cumulative_net_return",
+            0.0,
+        ),
+        "sharpe_like": performance.get("sharpe_like", 0.0),
+        "sortino_like": performance.get("sortino_like", 0.0),
+        "max_drawdown": performance.get("max_drawdown", 0.0),
+        "win_rate": performance.get("win_rate", 0.0),
+        "mean_turnover": performance.get("mean_turnover", 0.0),
+        "total_cost": performance.get("total_cost", 0.0),
+    }
+
+
+def _aggregate_combination_metrics(
+    frame: pd.DataFrame,
+    aggregations: dict[str, str],
+) -> dict[str, object]:
+    if frame.empty:
+        return {}
+    output: dict[str, object] = {}
+    for column, aggregation in aggregations.items():
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if values.empty:
+            output[column] = 0.0
+        elif aggregation == "mean":
+            output[column] = float(values.mean())
+        elif aggregation == "sum":
+            output[column] = float(values.sum())
+        elif aggregation == "min":
+            output[column] = float(values.min())
+        else:
+            raise ValueError(f"unsupported aggregation: {aggregation}")
+    return output
+
+
+def _effective_cost_bps(weight_config, cost_config) -> float:
+    return float(
+        weight_config.cost_bps
+        + cost_config.buy_cost_bps
+        + cost_config.sell_cost_bps
+        + cost_config.slippage_bps
+        + (cost_config.spread_bps or 0.0)
+    )
+
+
+def _build_evaluation_set_summary(
+    *,
+    spec: EvaluationSpec,
+    pnl_return_column: str,
+    tables: dict[str, pd.DataFrame],
+    combinations: pd.DataFrame,
+) -> dict[str, object]:
+    evaluation_id = str(spec.metadata.get("run_id", Path(spec.output_dir).name))
+    return {
+        "evaluation_id": evaluation_id,
+        "project": spec.metadata["project"],
+        "kind": spec.metadata["kind"],
+        "domain": spec.metadata["domain"],
+        "data_stage": spec.metadata["data_stage"],
+        "uses_external_data": spec.metadata["uses_external_data"],
+        "schema": {
+            "timestamp_column": spec.timestamp_column,
+            "asset_column": spec.asset_column,
+            "feature_columns": list(spec.feature_columns),
+            "label_columns": list(spec.label_columns),
+            "pnl_return_column": pnl_return_column,
+        },
+        "n_rows_evaluated": int(len(spec.panel)),
+        "n_combinations": int(len(combinations)),
+        "n_groups": int(spec.n_groups),
+        "segment_columns": list(spec.segment_columns),
+        "breakdown_enabled": bool(spec.time_breakdowns),
+        "breakdown_columns": list(spec.time_breakdowns),
+        "period_breakdown_policy": PERIOD_BREAKDOWN_POLICY,
+        "engine": spec.engine,
+        "weight_configs": [asdict(config) for config in spec.weight_configs],
+        "execution_config": asdict(spec.execution_config),
+        "tradability_config": asdict(spec.tradability_config),
+        "cost_configs": [asdict(config) for config in spec.cost_configs],
+        "neutralization_config": asdict(spec.neutralization_config),
+        "time_semantics_config": asdict(spec.time_semantics_config),
+        "tensor_config": asdict(spec.tensor_config),
+        "tables": {name: int(len(frame)) for name, frame in tables.items()},
+        "position_artifact_policy": POSITION_ARTIFACT_POLICY,
+        "boundary": spec.domain_notes.get(
+            "boundary",
+            "No real data, API connection, credentials, paper trading, live trading, "
+            "or investment advice is provided by this evaluation layer.",
+        ),
+    }
+
+
+def _build_evaluation_set_config(
+    *,
+    spec: EvaluationSpec,
+    pnl_return_column: str,
+) -> dict[str, object]:
+    return {
+        "metadata": spec.metadata,
+        "domain_notes": spec.domain_notes,
+        "schema": {
+            "timestamp_column": spec.timestamp_column,
+            "asset_column": spec.asset_column,
+            "feature_columns": list(spec.feature_columns),
+            "label_columns": list(spec.label_columns),
+            "pnl_return_column": pnl_return_column,
+        },
+        "n_groups": spec.n_groups,
+        "segment_columns": list(spec.segment_columns),
+        "time_breakdowns": list(spec.time_breakdowns),
+        "engine": spec.engine,
+        "weight_configs": [asdict(config) for config in spec.weight_configs],
+        "execution_config": asdict(spec.execution_config),
+        "tradability_config": asdict(spec.tradability_config),
+        "cost_configs": [asdict(config) for config in spec.cost_configs],
+        "neutralization_config": asdict(spec.neutralization_config),
+        "time_semantics_config": asdict(spec.time_semantics_config),
+        "tensor_config": asdict(spec.tensor_config),
+    }
+
+
+def _render_evaluation_set_report(
+    summary: dict[str, object],
+    tables: dict[str, pd.DataFrame],
+) -> str:
+    lines = [
+        "# Evaluation Set Report",
+        "",
+        "This report summarizes one batch-native evaluation set.",
+        "",
+        "## Summary",
+        "",
+        f"- evaluation_id: {summary['evaluation_id']}",
+        f"- n_combinations: {summary['n_combinations']}",
+        f"- engine: {summary['engine']}",
+        "",
+        "## Tables",
+        "",
+    ]
+    for name, frame in tables.items():
+        lines.append(f"- {name}: {len(frame)} rows")
+    lines.extend(["", "## Boundary", "", str(summary["boundary"]), ""])
+    return "\n".join(lines)
+
+
+def _evaluate_cross_section_metrics_by_segment(
+    *,
+    panel: pd.DataFrame,
+    spec,
+    n_groups: int,
+    segment_columns: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ic_frames: list[pd.DataFrame] = []
+    grouped_return_frames: list[pd.DataFrame] = []
+    grouped = panel.groupby(segment_columns, sort=True, dropna=False)
+    for segment_values, segment_frame in grouped:
+        if not isinstance(segment_values, tuple):
+            segment_values = (segment_values,)
+        ic, grouped_returns = evaluate_ic_and_grouped_returns_from_validated_panel(
+            segment_frame,
+            spec,
+            n_groups=n_groups,
+        )
+        for frame in (ic, grouped_returns):
+            for offset, (column, value) in enumerate(
+                zip(segment_columns, segment_values, strict=True)
+            ):
+                frame.insert(offset, column, value)
+        ic_frames.append(ic)
+        grouped_return_frames.append(grouped_returns)
+    if ic_frames:
+        return (
+            pd.concat(ic_frames, ignore_index=True),
+            pd.concat(grouped_return_frames, ignore_index=True),
+        )
+
+    ic, grouped_returns = evaluate_ic_and_grouped_returns_from_validated_panel(
+        panel.iloc[0:0],
+        spec,
+        n_groups=n_groups,
+    )
+    for frame in (ic, grouped_returns):
+        for offset, column in enumerate(segment_columns):
+            frame.insert(offset, column, pd.Series(dtype="object"))
+    return ic, grouped_returns
+
+
+def _evaluate_tensor_cross_section_metrics_by_segment(
+    *,
+    panel: pd.DataFrame,
+    spec,
+    n_groups: int,
+    segment_columns: list[str],
+    value_dtype: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ic_frames: list[pd.DataFrame] = []
+    grouped_return_frames: list[pd.DataFrame] = []
+    grouped = panel.groupby(segment_columns, sort=True, dropna=False)
+    for segment_values, segment_frame in grouped:
+        if not isinstance(segment_values, tuple):
+            segment_values = (segment_values,)
+        ic, grouped_returns = evaluate_ic_and_grouped_returns_tensor(
+            panel_to_tensor(segment_frame, spec, value_dtype=value_dtype),
+            n_groups=n_groups,
+        )
+        for frame in (ic, grouped_returns):
+            for offset, (column, value) in enumerate(
+                zip(segment_columns, segment_values, strict=True)
+            ):
+                frame.insert(offset, column, value)
+        ic_frames.append(ic)
+        grouped_return_frames.append(grouped_returns)
+    if ic_frames:
+        return (
+            pd.concat(ic_frames, ignore_index=True),
+            pd.concat(grouped_return_frames, ignore_index=True),
+        )
+
+    ic, grouped_returns = evaluate_ic_and_grouped_returns_tensor(
+        panel_to_tensor(panel.iloc[0:0], spec, value_dtype=value_dtype),
+        n_groups=n_groups,
+    )
+    for frame in (ic, grouped_returns):
+        for offset, column in enumerate(segment_columns):
+            frame.insert(offset, column, pd.Series(dtype="object"))
+    return ic, grouped_returns

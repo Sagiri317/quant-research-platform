@@ -13,18 +13,17 @@
 # ---
 
 # %% [markdown]
-# ## Quant Research Platform Synthetic A-share Demo
+# ## Quant Research Platform A 股合成数据演示
 #
-# This notebook demonstrates the post-migration local platform contract:
+# 本 notebook 演示迁移后的本地平台合同：
 #
-# synthetic A-share-like panel -> `EvaluationSpec` -> platform core evaluation.
+# A 股风格合成 panel -> `EvaluationSpec` -> platform evaluation layer。
 #
-# It uses only toy data, writes artifacts to a temporary directory, and does not
-# read private CSMAR files, call vendor APIs, use credentials, automate trading,
-# or provide investment advice.
+# 它只使用 toy data，把 artifacts 写入临时目录；不读取私有 CSMAR 文件，
+# 不调用 vendor API，不使用 credentials，不自动交易，也不提供投资建议。
 
 # %% [markdown]
-# ### 1. Prepare Imports
+# ### 1. 准备导入
 
 # %%
 from pathlib import Path
@@ -41,7 +40,7 @@ src_path = project_root / "src"
 if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
-from quant_research_platform.core import (  # noqa: E402
+from quant_research_platform import (  # noqa: E402
     CostConfig,
     EvaluationSpec,
     WeightConfig,
@@ -49,7 +48,7 @@ from quant_research_platform.core import (  # noqa: E402
 )
 
 # %% [markdown]
-# ### 2. Generate A Small Synthetic Panel
+# ### 2. 生成小型合成 panel
 
 # %%
 rng = np.random.default_rng(42)
@@ -88,7 +87,7 @@ panel.groupby("stock_code").agg(
 ).head()
 
 # %% [markdown]
-# ### 3. Run The Platform Core Evaluation
+# ### 3. 运行平台 evaluation layer
 
 # %%
 with TemporaryDirectory() as tmpdir:
@@ -147,9 +146,8 @@ performance_columns = [
 performance[[column for column in performance_columns if column in performance]]
 
 # %% [markdown]
-# ### Boundary
+# ### 边界
 #
-# This notebook is a synthetic/toy research demo only. It does not use or imply
-# real A-share data, benchmark data, vendor data, external downloads, API
-# connections, credentials, paper trading, live trading, production automation,
-# or investment advice.
+# 本 notebook 只是 synthetic/toy research demo；不使用或暗示真实 A 股数据、
+# benchmark data、vendor data、外部下载、API 连接、credentials、paper trading、
+# live trading、production automation 或投资建议。

@@ -52,9 +52,10 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '流程配置' }))
     expect(screen.getByLabelText('运行编号')).toHaveValue('a_share_reversal_smoke')
-    expect(screen.getByText('reports/private_real/pipeline_runs')).toBeInTheDocument()
+    expect(screen.getByText('pipeline/(pending)')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '数据检查点' }))
+    expect(screen.getByText('pipeline/a_share_reversal_smoke')).toBeInTheDocument()
     expect(screen.getByText('run_config.yaml')).toBeInTheDocument()
     expect(screen.getByText('评估清单')).toBeInTheDocument()
 
@@ -79,11 +80,15 @@ describe('App', () => {
         pipelineRequest = JSON.parse(String(init.body))
         return jsonResponse({
           run_id: pipelineRequest?.run_id,
-          snapshot_path: 'reports/private_real/pipeline_runs/a_share_reversal_smoke',
+          run_ref: 'a_share_reversal_smoke_20260523',
           status: 'ready',
         })
       }
-      if (url.endsWith('/api/pipeline-runs/a_share_reversal_smoke/checkpoints')) {
+      if (
+        url.endsWith(
+          '/api/pipeline-runs/a_share_reversal_smoke_20260523/checkpoints',
+        )
+      ) {
         return jsonResponse([])
       }
       return tableResponse([])
@@ -107,6 +112,7 @@ describe('App', () => {
         factor_template_id: 'reversal_20d',
       })
     })
+    expect(screen.getByText('pipeline/a_share_reversal_smoke_20260523')).toBeInTheDocument()
   })
 
   test('defaults to an interview workbench with compact diagnostic charts and delivery tabs', async () => {

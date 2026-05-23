@@ -3,3 +3,8 @@ name: 20 日流动性
 market: a_share
 expression: rank_cs(mean(amount, 20))
 description: 20 日平均成交额的截面排名。
+grid_parameter: window
+grid_values: 20,60
+expression_template: rank_cs(mean(amount, {window}))
+output_column_template: avg_amount_{window}d
+availability_rule: trade_date_close

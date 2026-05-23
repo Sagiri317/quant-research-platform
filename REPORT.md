@@ -2,7 +2,7 @@
 
 ## 摘要
 
-本项目已经收口为本地多市场量化研究平台。第一版完整 market module 是 A 股：平台把用户已批准的本地 CSMAR 数据整理为 research panel、factor / label table、pipeline snapshot 和 core-backed evaluation artifacts，并通过本地 API 与 React evidence workbench 展示。
+本项目已经收口为本地多市场量化研究平台。第一版完整 market module 是 A 股：平台把用户已批准的本地 CSMAR 数据整理为 research panel、factor / label table、pipeline snapshot 和 evaluation-layer-backed evaluation artifacts，并通过本地 API 与 React evidence workbench 展示。
 
 当前报告是流程、数据资产和研究证据说明，不构成投资建议，不代表最终因子结论，也不表示 paper trading、live trading 或生产部署已经获批。
 
@@ -46,13 +46,13 @@ reports/private_real/factor_evaluation/
     factor_summary.csv
     factor_summary.md
   smoke_2023_2025_tensor_long_only/
-    core_runs/
+    evaluation_runs/
   smoke_2023_2025_tensor_long_short/
-    core_runs/
+    evaluation_runs/
   smoke_2023_2025_dataframe_long_only/
-    core_runs/
+    evaluation_runs/
   smoke_2023_2025_dataframe_long_short/
-    core_runs/
+    evaluation_runs/
   comparisons/
 ```
 
@@ -66,7 +66,7 @@ reports/private_real/factor_evaluation/
 - `pnl_return_column` 用于 portfolio returns、PnL、performance summary 和 time breakdown。
 - A 股主报告在 long-only 场景下必须显式选择 `portfolio_mode=long_only`。
 
-历史 `full_2024_2025` 是一次性把 2024-2025 输入传给 core，用 `forward_return_20d` 做预测标签、`forward_return_1d` 做 PnL 日收益列，并启用年度 breakdown。年度 breakdown 是连续回测路径上的自然年切片，不是每年空仓重启。
+历史 `full_2024_2025` 是一次性把 2024-2025 输入传给 evaluation layer，用 `forward_return_20d` 做预测标签、`forward_return_1d` 做 PnL 日收益列，并启用年度 breakdown。年度 breakdown 是连续回测路径上的自然年切片，不是每年空仓重启。
 
 ## 当前观察
 

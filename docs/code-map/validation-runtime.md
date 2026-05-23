@@ -3,8 +3,8 @@
 目录：
 
 ```text
-src/quant_research_platform/markets/a_share/validation/
-src/quant_research_platform/markets/a_share/runtime/
+src/quant_research_platform/markets/implementations/a_share/validation/
+src/quant_research_platform/markets/implementations/a_share/runtime/
 ```
 
 ## 职责
@@ -15,7 +15,7 @@ Validation 和 runtime 层用于复核私有生成产物，避免在大文件生
 
 | 文件 | 作用 |
 |---|---|
-| `validation/common.py` | shared validation helpers |
+| `validation/quality_report.py` | quality report models and shared validation helpers |
 | `validation/internal_tables.py` | interim / internal table checks |
 | `validation/research_panel.py` | research panel checks |
 | `validation/factor_tables.py` | factor table checks |

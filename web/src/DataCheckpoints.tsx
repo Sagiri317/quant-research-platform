@@ -20,7 +20,7 @@ export function DataCheckpoints() {
       <div className="studio-panel">
         <div className="form-section-title">
           <h3>运行快照</h3>
-          <p>reports/private_real/pipeline_runs/a_share_reversal_smoke</p>
+          <p>pipeline/a_share_reversal_smoke</p>
         </div>
         <div className="checkpoint-list">
           {CHECKPOINTS.map(([label, status]) => (

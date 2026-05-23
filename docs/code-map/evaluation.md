@@ -1,33 +1,33 @@
-# Evaluation / Core 模块地图
+# Evaluation 模块地图
 
 主要目录：
 
 ```text
-src/quant_research_platform/core/
+src/quant_research_platform/evaluations/
 src/quant_research_platform/artifacts/
-src/quant_research_platform/api/
-src/quant_research_platform/markets/a_share/evaluation/
+src/quant_research_platform/interfaces/api/
+src/quant_research_platform/markets/implementations/a_share/evaluation/
 ```
 
 ## 职责
 
-Evaluation 层把 market module 生成的 factor / prediction panel 交给平台 core。A 股模块负责读取本项目 full factor table、按年份或日期过滤、构造 `EvaluationSpec`；core 负责执行 `run_evaluation(spec)` 并写出 schema `0.5` artifacts。API 和前端只消费 artifacts 与 `manifest.display`。
+Evaluation 层把 market module 生成的 factor / prediction panel 交给平台 evaluation layer。A 股模块负责读取本项目 full factor table、按年份或日期过滤、构造 `EvaluationSpec`；evaluation 负责执行 `run_evaluation(spec)` 并写出 schema `0.5` artifacts。API 和前端只消费 artifacts 与 `manifest.display`。
 
 ## 关键文件
 
 | 文件或目录 | 作用 |
 |---|---|
-| `src/quant_research_platform/core/` | `EvaluationSpec`、panel validation、evaluation orchestration |
+| `src/quant_research_platform/evaluations/` | `EvaluationSpec`、panel validation、evaluation orchestration |
 | `src/quant_research_platform/artifacts/` | writer、loader、display contract、inventory、comparison |
-| `src/quant_research_platform/api/` | local evidence API、CSV preview、downloads、run repository |
-| `src/quant_research_platform/markets/a_share/evaluation/` | A 股 full factor table -> `EvaluationSpec` bridge |
+| `src/quant_research_platform/interfaces/api/` | local evidence API、CSV preview、downloads、run repository |
+| `src/quant_research_platform/markets/implementations/a_share/evaluation/` | A 股 full factor table -> `EvaluationSpec` adapter |
 | `web/` | React/Vite evidence workbench |
 
 ## Evaluation 主线
 
 ```text
 A-share factor table
--> market evaluation bridge
+-> market evaluation adapter
 -> EvaluationSpec
 -> run_evaluation(spec)
 -> schema 0.5 artifacts
@@ -64,7 +64,7 @@ slim factor Parquet 不保存完整 OHLC、复权价格、公司静态字段、�
 
 ```text
 price_volume_factors_full/price_volume_factors_2014_2025.parquet
--> one full core run for selected date range
+-> one full evaluation run for selected date range
 -> optional time breakdowns
 ```
 
@@ -77,9 +77,9 @@ yearly independent run
 
 年度 breakdown 不清仓、不重跑组合。它从完整 full run 的 portfolio return path 切片，并在年度内重新计算 metrics。A 股 long-only 主报告需要显式使用 `portfolio_mode=long_only`。
 
-## 顶层 `evaluate-parquet` CLI 到 core 参数映射
+## 顶层 `evaluate-parquet` CLI 到 evaluation 参数映射
 
-| CLI 参数 | core 字段 |
+| CLI 参数 | evaluation 字段 |
 |---|---|
 | `--label` | `EvaluationSpec.label_columns` |
 | `--feature` | `EvaluationSpec.feature_columns` |
@@ -90,7 +90,7 @@ yearly independent run
 | `--segment-column` | `EvaluationSpec.segment_columns` |
 | `--risk-column` | risk-scaled weighting input |
 
-A 股专用脚本 `quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`
+A 股专用脚本 `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`
 仍使用复数参数 `--labels`、`--factors`、`--all-factors`、`--segment-columns`。
 顶层 `qrp a-share evaluate` 当前是统一 CLI 下的帮助入口，正式 A 股端到端
 pipeline 命令仍在后续阶段补齐。
@@ -98,7 +98,7 @@ pipeline 命令仍在后续阶段补齐。
 A 股日期过滤验收应直接调用专用脚本：
 
 ```powershell
-conda run -n analysis python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation `
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation `
   --start-year 2023 `
   --end-year 2025 `
   --start-date 2024-01-01 `
@@ -125,7 +125,7 @@ conda run -n analysis python -m quant_research_platform.markets.a_share.evaluati
 
 ## 常见误读
 
-- project-level summary manifest 不是 core 标准 `manifest.json`。
+- project-level summary manifest 不是 evaluation 标准 `manifest.json`。
 - `factor_summary.csv` 是轻量汇总，不是全部评价明细。
-- `metrics_by_year` 是 core 的年度 breakdown，不是 yearly independent evaluation。
+- `metrics_by_year` 是 evaluation layer 的年度 breakdown，不是 yearly independent evaluation。
 - 如果要做“每年空仓重启”，必须显式另跑 yearly independent evaluation，不能混入正式 full breakdown。

@@ -1,6 +1,6 @@
 # A 股接口地图
 
-本页记录 A 股 market module 的当前可执行接口。它是私有 CSMAR 数据流程的入口地图，不替代 `EVALUATION_INTERFACE.md` 的 core contract。
+本页记录 A 股 market module 的当前可执行接口。它是私有 CSMAR 数据流程的入口地图，不替代 `EVALUATION_INTERFACE.md` 的 evaluation contract。
 
 ## 生产流程
 
@@ -11,7 +11,7 @@ data/interim_private/csmar/
 -> factors.build_factors
 -> data/processed_private/csmar/price_volume_factors_full/price_volume_factors_<start_year>_<end_year>.parquet
 -> evaluation.run_factor_evaluation
--> reports/private_real/factor_evaluation/<run_set>/core_runs/<run_id>/
+-> reports/private_real/factor_evaluation/<run_set>/evaluation_runs/<run_id>/
 ```
 
 ## 命令入口
@@ -20,9 +20,9 @@ data/interim_private/csmar/
 $env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
 
-conda run -n analysis python -m quant_research_platform.markets.a_share.datasets.build_panel --help
-conda run -n analysis python -m quant_research_platform.markets.a_share.factors.build_factors --help
-conda run -n analysis python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation --help
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.datasets.build_panel --help
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.factors.build_factors --help
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation --help
 ```
 
 `build_panel` 使用 `--start-year/--end-year` 读取 interim yearly CSV，并用 `--end-date` 选择 market-cap snapshot。
@@ -35,10 +35,10 @@ conda run -n analysis python -m quant_research_platform.markets.a_share.evaluati
 
 A 股验收应区分两类入口：
 
-- A 股全流程或私有 runs：使用 `quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`。
-- 通用 core/外部本地 Parquet 验收：使用 `quant_research_platform.cli evaluate-parquet`。
+- A 股全流程或私有 runs：使用 `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`。
+- 通用 evaluation/外部本地 Parquet 验收：使用 `quant_research_platform.interfaces.cli evaluate-parquet`。
 
-不要用临时裁剪 Parquet + `evaluate-parquet` 替代 A 股全流程验收；那只能证明 core adapter、artifact、API、frontend 链路可用，不能证明 A 股 adapter 的覆盖文件选择、日期过滤、label availability summary 和 private run metadata 正确。
+不要用临时裁剪 Parquet + `evaluate-parquet` 替代 A 股全流程验收；那只能证明 generic evaluation adapter、artifact、API、frontend 链路可用，不能证明 A 股 adapter 的覆盖文件选择、日期过滤、label availability summary 和 private run metadata 正确。
 
 ## 前端状态
 

@@ -1,6 +1,6 @@
 # Quant Research Platform
 
-本项目是本地多市场量化研究平台。当前第一版完整 market module 是 A 股：它把用户已批准的本地 CSMAR 数据转换为可复现的 research panel、factor table、pipeline snapshot 和 evaluation artifacts，并在同一项目内提供 core evaluation、artifact contract、FastAPI evidence API 和 React evidence workbench。
+本项目是本地多市场量化研究平台。当前第一版完整 market module 是 A 股：它把用户已批准的本地 CSMAR 数据转换为可复现的 research panel、factor table、pipeline snapshot 和 evaluation artifacts，并在同一项目内提供 evaluation layer、artifact contract、FastAPI evidence API 和 React evidence workbench。
 
 本项目仍保留严格边界：它不是投资建议、实盘交易、paper trading、生产交易系统或部署服务；不登录 CSMAR，不自动下载数据，不连接券商、交易所、外部行情 API，不处理账号、密码、cookie、token 或 `.env`。
 
@@ -11,7 +11,7 @@ local approved data
 -> market module
 -> research panel
 -> factor / label / prediction inputs
--> core evaluation
+-> evaluation layer
 -> schema 0.5 artifacts
 -> API / downloads / evidence workbench
 -> report and research evidence
@@ -20,25 +20,30 @@ local approved data
 当前能力：
 
 - A 股是第一版完整 market module，数据源边界是用户手工导出的本地 CSMAR 文件。
-- core evaluation、artifact writer / loader、schema `0.5`、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
+- evaluation layer、artifact writer / loader、schema `0.5`、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
 - Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为辅助输入方式保留。
 - Pipeline Builder 当前只生成因子表达式/配置快照，不执行完整 A 股 build/evaluate 编排；一键全流程需要后续接入执行层。
-- crypto 和其他市场只保留接口预留，不代表已支持真实数据或交易。
+- crypto 和其他市场只显示为 planned / disabled，不代表已支持真实数据或交易，也不保留空实现包。
 
 ## 当前结构
 
+Phase 1 只落地本地研究平台结构，不创建 `apps/api`，也不保留空 `markets/crypto/` 实现。
+
 ```text
 src/quant_research_platform/
-  core/                 EvaluationSpec、run_evaluation 和 panel contract
-  engines/              DataFrame / tensor evaluation helpers
+  evaluations/           EvaluationSpec、run_evaluation 和 panel contract
+  kernels/              DataFrame / tensor evaluation helpers
   artifacts/            schema 0.5 artifact writer、loader、display contract
-  api/                  local FastAPI evidence API、downloads、run repository
-  cli/                  qrp command entry
-  io/                   explicit local CSV / Parquet input helpers
+  interfaces/
+    api/                local FastAPI evidence API、downloads、run repository
+    cli/                qrp command entry
+  datasets/             generic CSV / Parquet readers
   markets/
-    a_share/            CSMAR-backed A-share market module
-    crypto/             reserved placeholder only
-  research/             future shared research contracts
+    implementations/
+      a_share/          CSMAR-backed A-share market module
+  pipelines/
+    a_share/            A-share workflow runner and checkpoints
+  research/             Factor Factory and future research contracts
 
 web/                    React/Vite evidence workbench
 config/a_share/         A-share factor templates and pipeline configs
@@ -64,9 +69,9 @@ CLI 入口：
 ```powershell
 $env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
-conda run -n analysis python -m quant_research_platform.cli --help
-conda run -n analysis python -m quant_research_platform.cli a-share --help
-conda run -n analysis python -m quant_research_platform.cli evaluate-parquet --help
+conda run -n analysis python -m quant_research_platform.interfaces.cli --help
+conda run -n analysis python -m quant_research_platform.interfaces.cli a-share --help
+conda run -n analysis python -m quant_research_platform.interfaces.cli evaluate-parquet --help
 ```
 
 ## A 股专用接口
@@ -78,20 +83,20 @@ $env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
 
 # raw/interim 已存在时，按年份生成 full research panel
-conda run -n analysis python -m quant_research_platform.markets.a_share.datasets.build_panel `
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.datasets.build_panel `
   --start-year 2014 `
   --end-year 2025 `
   --end-date 2025-12-31
 
 # 从 full panel 生成 slim factor/label Parquet
-conda run -n analysis python -m quant_research_platform.markets.a_share.factors.build_factors `
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.factors.build_factors `
   --start-year 2014 `
   --end-year 2025 `
   --windows 20,60,120 `
   --horizons 1,5,10,20,60,120
 
 # 用 A 股 adapter 评估；start-year/end-year 定位覆盖文件，start-date/end-date 做行过滤
-conda run -n analysis python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation `
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation `
   --start-year 2023 `
   --end-year 2025 `
   --start-date 2024-01-01 `
@@ -127,7 +132,7 @@ npm run build
 .\scripts\local\stop_workbench.ps1
 ```
 
-启动脚本会把 API 的 `QRP_RUN_ROOTS` 指到 `reports/private_real/factor_evaluation/` 下的 2023-2025 `tensor` / `dataframe`、`long_only` / `long_short` 四组 core runs。它只使用相对路径，不提交或复制私有结果；如果端口被其他项目占用，脚本会停止并要求换端口或先处理占用进程。
+启动脚本会把 API 的 `QRP_RUN_ROOTS` 指到 `reports/private_real/factor_evaluation/` 下的 2023-2025 `tensor` / `dataframe`、`long_only` / `long_short` 四组 evaluation runs。它只使用相对路径，不提交或复制私有结果；如果端口被其他项目占用，脚本会停止并要求换端口或先处理占用进程。
 
 ## 私有数据边界
 

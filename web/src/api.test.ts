@@ -48,20 +48,33 @@ describe('api client', () => {
       if (url.endsWith('/api/pipeline-runs') && init?.method === 'POST') {
         return Promise.resolve({
           ok: true,
-          json: async () => ({ run_id: 'a_share_reversal_smoke', status: 'queued' }),
+          json: async () => ({
+            run_id: 'a_share_reversal_smoke',
+            run_ref: 'a_share_reversal_smoke_20260523',
+            status: 'queued',
+          }),
         } as Response)
       }
       if (url.endsWith('/api/pipeline-runs/a_share_reversal_smoke')) {
         return Promise.resolve({
           ok: true,
-          json: async () => ({ run_id: 'a_share_reversal_smoke', status: 'ready' }),
+          json: async () => ({
+            run_id: 'a_share_reversal_smoke',
+            run_ref: 'a_share_reversal_smoke_20260523',
+            status: 'ready',
+          }),
         } as Response)
       }
       if (url.endsWith('/api/pipeline-runs/a_share_reversal_smoke/checkpoints')) {
         return Promise.resolve({
           ok: true,
           json: async () => [
-            { key: 'run_config', label: 'Run config', status: 'ready' },
+            {
+              key: 'run_config',
+              label: 'Run config',
+              status: 'ready',
+              artifact: 'run_config.yaml',
+            },
           ],
         } as Response)
       }
@@ -82,11 +95,16 @@ describe('api client', () => {
         portfolio_mode: 'long_only',
         run_id: 'a_share_reversal_smoke',
       }),
-    ).resolves.toMatchObject({ status: 'queued' })
+    ).resolves.toMatchObject({
+      run_ref: 'a_share_reversal_smoke_20260523',
+      status: 'queued',
+    })
     await expect(getPipelineRunStatus('a_share_reversal_smoke')).resolves.toMatchObject({
       status: 'ready',
     })
-    await expect(getPipelineCheckpoints('a_share_reversal_smoke')).resolves.toHaveLength(1)
+    await expect(getPipelineCheckpoints('a_share_reversal_smoke')).resolves.toMatchObject([
+      { artifact: 'run_config.yaml' },
+    ])
   })
 
   test('fetchRuns reads the run index from the backend', async () => {

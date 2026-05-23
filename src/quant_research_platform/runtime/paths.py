@@ -1,4 +1,4 @@
-﻿"""Shared processed-data path helpers."""
+"""提供 processed-data path helpers。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def panel_full_path(processed_root: Path, start_year: int, end_year: int) -> Path:
-    """Return the full-sample processed research panel path."""
+    """返回 full-sample processed research panel path。"""
 
     return (
         processed_root
@@ -20,7 +20,7 @@ def factor_full_exact_path(
     start_year: int,
     end_year: int,
 ) -> Path:
-    """Return the exact slim full-sample price-volume factor path."""
+    """返回精确的 slim full-sample price-volume factor path。"""
 
     return (
         processed_root
@@ -34,7 +34,7 @@ def factor_full_path_covering_range(
     start_year: int,
     end_year: int,
 ) -> Path:
-    """Return an exact or wider full factor file covering the requested years."""
+    """返回覆盖请求年份的精确或更宽 full factor file。"""
 
     exact = factor_full_exact_path(processed_root, start_year, end_year)
     if exact.exists():

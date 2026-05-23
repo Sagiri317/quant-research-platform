@@ -8,7 +8,11 @@ from quant_research_platform.artifacts import (
     ARTIFACT_SCHEMA_VERSION,
     load_evaluation_set,
 )
-from quant_research_platform.core import EvaluationSpec, WeightConfig, run_evaluation
+from quant_research_platform.evaluations import (
+    EvaluationSpec,
+    WeightConfig,
+    run_evaluation,
+)
 
 
 def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
@@ -23,7 +27,7 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
             "evaluation_id": "evaluation_demo",
             "project": "quant-research-platform",
             "kind": "factor",
-            "domain": "core_synthetic",
+            "domain": "evaluation_synthetic",
             "data_stage": "synthetic_only",
             "uses_external_data": False,
         },
@@ -79,7 +83,7 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
 
 
 def test_public_api_does_not_export_single_evaluation_contracts():
-    import quant_research_platform.core as quant_research_platform
+    import quant_research_platform.evaluations as quant_research_platform
 
     assert not hasattr(quant_research_platform, "EvaluationRequest")
     assert not hasattr(quant_research_platform, "run_factor_evaluation")

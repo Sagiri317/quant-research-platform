@@ -1,10 +1,10 @@
 # Quant Research Platform 架构说明
 
-`quant-research-platform` 是本地多市场量化研究平台。上游 market module 负责市场数据、信号、label、预测和研究语境；core evaluation 负责从 long-format panel 到 schema `0.5` artifacts 的统一评价流程；API 和 React workbench 只消费 artifacts 与 `manifest.display`。
+`quant-research-platform` 是本地多市场量化研究平台。上游 market module 负责市场数据、信号、label、预测和研究语境；evaluation layer 负责从 long-format panel 到 schema `0.5` artifacts 的统一评价流程；API 和 React workbench 只消费 artifacts 与 `manifest.display`。
 
 ## 职责边界
 
-平台 core 负责：
+平台 evaluation layer 负责：
 
 - `EvaluationSpec`、`WeightConfig`、`ExecutionConfig`、`TradabilityConfig`、`CostConfig`、`NeutralizationConfig`。
 - long panel schema validation。
@@ -48,31 +48,36 @@ local approved data
 
 ## A 股流程接口
 
-A 股是当前唯一 enabled market module。它的真实私有数据流程分三层：
+A 股是当前唯一 enabled market module。它的真实私有数据流程入口分三层：
 
-1. `quant_research_platform.markets.a_share.datasets.build_panel`：从 CSMAR interim yearly CSV 生成 `research_panel_<start_year>_<end_year>.parquet`。
-2. `quant_research_platform.markets.a_share.factors.build_factors`：从 full panel 生成 `price_volume_factors_<start_year>_<end_year>.parquet`。
-3. `quant_research_platform.markets.a_share.evaluation.run_factor_evaluation`：读取覆盖年份区间的 slim factor Parquet，并可用 `--start-date/--end-date` 对 `trade_date` 做评估阶段过滤，再通过 `EvaluationSpec` 调用 core。
+1. `quant_research_platform.markets.implementations.a_share.datasets.build_panel`：从 CSMAR interim yearly CSV 生成 `research_panel_<start_year>_<end_year>.parquet`。
+2. `quant_research_platform.markets.implementations.a_share.factors.build_factors`：从 full panel 生成 `price_volume_factors_<start_year>_<end_year>.parquet`。
+3. `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`：读取覆盖年份区间的 slim factor Parquet，并可用 `--start-date/--end-date` 对 `trade_date` 做评估阶段过滤，再通过 `EvaluationSpec` 调用 evaluation layer。
 
-`evaluate-parquet` 属于通用 core adapter，不保留 A 股 adapter 的 label availability summary、覆盖文件选择和私有 pipeline metadata。验证 A 股全流程或生成 A 股私有 runs 时，应优先使用 A 股专用评估入口。
+`evaluate-parquet` 属于通用 generic evaluation adapter，不保留 A 股 adapter 的 label availability summary、覆盖文件选择和私有 pipeline metadata。验证 A 股全流程或生成 A 股私有 runs 时，应优先使用 A 股专用评估入口。
 
 前端 `Pipeline Builder` 目前只写本地配置快照和 checkpoint，不等同于执行完整 A 股 pipeline。后续要把“写因子表达式和配置后一键全流程”做完整，需要把该页面接到上述 A 股 build/evaluate 编排，而不是只调用 snapshot endpoint。
 
 ## 源码布局
 
+当前 Phase 1 结构不创建 `apps/api`，也不保留空 `markets/crypto/` 实现。
+
 ```text
 src/quant_research_platform/
   __init__.py
-  core/                 contracts、panel validation、evaluation、results、breakdowns
-  engines/              dataframe reference path and tensor helpers
+  evaluations/          contracts、panel validation、evaluation_runner、results、breakdowns
+  kernels/              dataframe reference path and tensor helpers
   artifacts/            writer、loader、display contract、inventory、comparison
-  io/                   explicit local CSV / Parquet helpers
-  cli/                  qrp command entry
-  api/                  local FastAPI evidence platform
+  datasets/             generic CSV / Parquet readers
+  interfaces/
+    api/                local FastAPI evidence platform
+    cli/                qrp command entry
   markets/
-    a_share/            CSMAR-backed A-share market module
-    crypto/             reserved placeholder only
-  research/             shared future research contracts
+    implementations/
+      a_share/          CSMAR-backed A-share market module
+  pipelines/
+    a_share/            A-share workflow runner and checkpoints
+  research/             Factor Factory and future research contracts
   runtime/              shared runtime helpers
 
 web/                    React/Vite local workbench
@@ -122,6 +127,8 @@ combination_id, feature, label, weight_id, cost_id
 FastAPI layer 聚合本地 run roots，提供 run list、evidence payload、CSV preview、direct artifact download、ZIP download 和 comparison。API 只暴露当前 evaluation-set artifacts 和动态 comparison，不通过 endpoint 暴露未进入 `manifest.display` 的隐式文件。
 
 API-visible run identity is `(source_alias, run_id)`. Run list、evidence routes、CSV preview、direct downloads、ZIP cache、comparison 和 React state 都必须保留 `source_alias`，不能只按 `run_id` 折叠。
+
+Phase 1 中 `interfaces/api` 是本地 FastAPI 适配层；Phase 2 的 `apps/api` 是未来可部署 HTTP 应用装配层。两个 API 目录职责不同，不应合并，也不应在 Phase 1 提前创建 `apps/api`。
 
 平台边界：
 

@@ -6,12 +6,33 @@ from pathlib import PurePosixPath
 import pandas as pd
 import pytest
 
-from quant_research_platform.api.run_index import load_run_index
 from quant_research_platform.artifacts import (
     ARTIFACT_SCHEMA_VERSION,
     load_evaluation_set,
 )
-from tests.artifacts.helpers import write_evaluation_set
+from quant_research_platform.artifacts.artifact_comparison import (
+    compare_evaluation_sets,
+)
+from quant_research_platform.artifacts.artifact_inventory import index_evaluation_sets
+from quant_research_platform.artifacts.artifact_loader import (
+    load_evaluation_set as load_evaluation_set_from_target_module,
+)
+from quant_research_platform.artifacts.artifact_schema import (
+    EVALUATION_SET_ARTIFACT_TYPE,
+    EVALUATION_SET_REQUIRED_TABLES,
+)
+from quant_research_platform.artifacts.artifact_type_registry import (
+    get_artifact_type_contract,
+)
+from quant_research_platform.artifacts.artifact_writer import (
+    write_evaluation_set_artifacts,
+)
+from quant_research_platform.artifacts.display_manifest import build_display_manifest
+from quant_research_platform.artifacts.manifest_validation import (
+    validate_display_manifest,
+)
+from quant_research_platform.interfaces.api.run_index import load_run_index
+from tests.artifacts.artifact_fixtures import write_evaluation_set
 
 
 def test_load_evaluation_set_reads_manifest_summary_tables_and_report(tmp_path):
@@ -23,11 +44,11 @@ def test_load_evaluation_set_reads_manifest_summary_tables_and_report(tmp_path):
     assert loaded.manifest["evaluation_id"] == "run_a"
     assert loaded.manifest["artifact_schema_version"] == ARTIFACT_SCHEMA_VERSION
     assert loaded.manifest["artifact_type"] == "evaluation_set"
-    assert loaded.manifest["domain"] == "core_synthetic"
+    assert loaded.manifest["domain"] == "evaluation_synthetic"
     assert loaded.manifest["data_stage"] == "synthetic_only"
     assert loaded.manifest["uses_external_data"] is False
     assert loaded.summary["artifact_schema_version"] == ARTIFACT_SCHEMA_VERSION
-    assert loaded.summary["domain"] == "core_synthetic"
+    assert loaded.summary["domain"] == "evaluation_synthetic"
     assert loaded.summary["uses_external_data"] is False
     assert loaded.summary["n_rows_evaluated"] == 12
     assert set(loaded.tables) == {
@@ -48,6 +69,28 @@ def test_load_evaluation_set_reads_manifest_summary_tables_and_report(tmp_path):
     }
     assert loaded.tables["ic"]["ic"].tolist() == [0.4]
     assert loaded.report == "# Report\n"
+
+
+def test_artifact_split_modules_expose_current_evaluation_set_contract():
+    contract = get_artifact_type_contract("evaluation_set")
+
+    assert EVALUATION_SET_ARTIFACT_TYPE == "evaluation_set"
+    assert "combinations" in EVALUATION_SET_REQUIRED_TABLES
+    assert contract.name == "evaluation_set"
+    assert contract.version == ARTIFACT_SCHEMA_VERSION
+    assert contract.inputs == ("EvaluationRunPayload",)
+    assert "manifest.json" in contract.outputs
+    assert "metrics/ic.csv" in contract.downloads
+    assert "metrics_by_year/performance_summary_by_year.csv" in contract.downloads
+    assert "ic" not in contract.downloads
+    assert "display" in contract.capabilities
+    assert set(contract.tables) == set(EVALUATION_SET_REQUIRED_TABLES)
+    assert callable(load_evaluation_set_from_target_module)
+    assert callable(compare_evaluation_sets)
+    assert callable(index_evaluation_sets)
+    assert callable(build_display_manifest)
+    assert callable(validate_display_manifest)
+    assert callable(write_evaluation_set_artifacts)
 
 
 def test_manifest_artifact_paths_are_portable_relative_paths(tmp_path):
@@ -263,7 +306,7 @@ def test_load_run_index_rejects_metric_path_that_escapes_run_dir(tmp_path):
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="unsafe"):
-        load_run_index("core", tmp_path)
+        load_run_index("platform", tmp_path)
 
 
 def test_load_evaluation_set_rejects_display_chart_for_missing_columns(tmp_path):

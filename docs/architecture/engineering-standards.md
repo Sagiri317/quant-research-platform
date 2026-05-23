@@ -201,7 +201,8 @@ src/quant_research_platform                          # 平台领域代码，负�
 
 - `apps/*` 可以依赖 `src/quant_research_platform/*`，反向依赖禁止。
 - `apps/*` 里只允许薄装配代码，不能出现因子公式、评价指标、撮合逻辑、交易风控或数据清洗主逻辑。
-- 本地 Phase 1 可以保留 `web/` 和 `src/quant_research_platform/api/`，但面向部署的最终结构应迁到 `apps/web` 和 `apps/api`。
+- 本地 Phase 1 保留 `web/` 作为当前 workbench；本地 FastAPI 适配迁到 `src/quant_research_platform/interfaces/api/`，不再以旧顶层 API 包作为目标位置。
+- Phase 2 才创建 repo-level `apps/api`，它是可部署 HTTP 应用装配层；Phase 1 的 `interfaces/api` 是本地接口适配层，二者功能不重叠。
 - `interfaces/` 是平台代码中的交互合同和适配层，不是长期可部署应用目录。
 
 ## 11. Storage 和 Repository 规则

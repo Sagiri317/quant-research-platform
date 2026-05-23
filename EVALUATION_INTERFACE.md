@@ -1,8 +1,8 @@
 # Evaluation 接口说明
 
-本文是 `quant-research-platform` 内部 market module 和外部本地研究脚本接入 core evaluation 的接口文档。它只定义 core 需要什么输入、如何调用、会写出什么结果；不绑定具体市场，也不处理真实数据许可、下载、凭据或交易。
+本文是 `quant-research-platform` 内部 market module 和外部本地研究脚本接入 evaluation layer 的接口文档。它只定义 evaluation layer 需要什么输入、如何调用、会写出什么结果；不绑定具体市场，也不处理真实数据许可、下载、凭据或交易。
 
-Core 的职责是评价已经构造好的 factor / prediction panel，并写出标准 evaluation-set artifacts。Core 不下载数据、不清洗 vendor/raw data、不读取 credentials、不训练 ML model，也不判断真实市场 alpha。
+Evaluation layer 的职责是评价已经构造好的 factor / prediction panel，并写出标准 evaluation-set artifacts。它不下载数据、不清洗 vendor/raw data、不读取 credentials、不训练 ML model，也不判断真实市场 alpha。
 
 ## 1. 统一 Contract
 
@@ -81,9 +81,9 @@ Panel 必须是 `timestamp x asset` long format。每行代表一个资产在一
 
 默认规则：
 
-- 如果显式传入 `pnl_return_column`，core 使用该列计算 PnL。
-- 如果未显式传入，core 默认查找 `forward_return_1d`。
-- 如果两者都没有，core 拒绝运行。
+- 如果显式传入 `pnl_return_column`，evaluation layer 使用该列计算 PnL。
+- 如果未显式传入，evaluation layer 默认查找 `forward_return_1d`。
+- 如果两者都没有，evaluation layer 拒绝运行。
 - 5d / 20d / 60d 等 longer-horizon label 只作为 diagnostics，不自动当作真实日频 PnL 曲线。
 
 ## 4. Python API
@@ -135,7 +135,7 @@ result = run_evaluation(spec)
 
 ## 5. Parquet Helper
 
-如果上游已经生成本地 Parquet，可用 helper 读取必要列并构造 `EvaluationSpec`。Core 只读取显式传入的本地文件，不生成这些 Parquet。
+如果上游已经生成本地 Parquet，可用 helper 读取必要列并构造 `EvaluationSpec`。Evaluation layer 只读取显式传入的本地文件，不生成这些 Parquet。
 
 ```python
 from quant_research_platform import make_parquet_evaluation_spec, run_evaluation
@@ -167,16 +167,16 @@ result = run_evaluation(spec)
 
 - 每个文件都包含本次 evaluation 所需列时，按行 concat。
 - 文件共享 `timestamp/asset` key 且非 key required columns 互补时，按列 join。
-- required column 重复导致语义不清时，core 报错，不猜测。
+- required column 重复导致语义不清时，evaluation layer 报错，不猜测。
 
 ## 6. A 股专用评估入口
 
-A 股 market module 已有专用 adapter，真实 CSMAR processed factor run 应优先走：
+A 股 market module 已有专用 adapter，真实 CSMAR processed factor run 应优先走 A 股专用入口：
 
 ```powershell
 $env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
-conda run -n analysis python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation `
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation `
   --processed-root data/processed_private/csmar `
   --report-root reports/private_real/factor_evaluation/a_share_2024_dataframe_long_only `
   --start-year 2023 `
@@ -194,21 +194,21 @@ conda run -n analysis python -m quant_research_platform.markets.a_share.evaluati
 
 - `--start-year/--end-year` 用来定位 `price_volume_factors_<start>_<end>.parquet`；若精确文件不存在，会选择覆盖该年份范围的更宽 full factor 文件。
 - `--start-date/--end-date` 用来对 `trade_date` 做评估阶段行过滤。
-- 每个 label 生成一个 core run，输出在 `--report-root/core_runs/` 下。
+- 每个 label 生成一个 evaluation run，输出在 `--report-root/evaluation_runs/` 下。
 - 这里会保留 A 股 adapter metadata、label availability summary、portfolio mode、engine、date filter 和 source file 信息。
 
-`evaluate-parquet` 是通用 core adapter，适合外部本地 Parquet、临时输入验收或非 A 股市场模块；验证 A 股全流程时不要用它替代 A 股专用入口。
+`evaluate-parquet` 是通用 generic evaluation adapter，适合外部本地 Parquet、临时输入验收或非 A 股市场模块；验证 A 股全流程时不要用它替代 A 股专用入口。
 
 ## 7. CLI evaluate-parquet
 
-`evaluate-parquet` 是本地命令行入口。
+`evaluate-parquet` 是本地命令行入口：
 
 先 dry-run：
 
 ```powershell
 $env:PYTHONUTF8="1"
 $env:PYTHONPATH="src"
-conda run -n analysis python -m quant_research_platform.cli evaluate-parquet `
+conda run -n analysis python -m quant_research_platform.interfaces.cli evaluate-parquet `
   --dry-run `
   --parquet-path data/processed_private/csmar/price_volume_factors_full/price_volume_factors_2014_2025.parquet `
   --timestamp-column trade_date `
@@ -262,9 +262,9 @@ diagnostics/neutralization_diagnostics.csv
 
 `manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.5"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。
 
-## 9. Core 不负责的边界
+## 9. Evaluation Layer 不负责的边界
 
-Core 不负责：
+Evaluation layer 不负责：
 
 - 下载真实数据；
 - 连接外部 API；

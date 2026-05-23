@@ -187,7 +187,7 @@
       stroke-width: 3.2;
     }
 
-    .edge.core {
+    .edge.evaluation {
       stroke-width: 3.3;
     }
 
@@ -207,7 +207,7 @@
       stroke: rgba(13, 111, 101, 0.5);
     }
 
-    .node.core rect {
+    .node.evaluation rect {
       fill: #e8f6f2;
       stroke: rgba(13, 111, 101, 0.82);
       stroke-width: 2.2;
@@ -389,38 +389,38 @@
     const views = {
       platform: {
         title: '全平台',
-        subtitle: '平台全局接口、A股链路、core、artifact、API、前端和待实现 runner。',
+        subtitle: '平台全局接口、A股链路、evaluation、artifact、API、前端和待实现 runner。',
         notes: [
           '这张图适合检查平台边界和入口暴露是否一致。',
           '虚线集中在 Pipeline Builder 到真实 A股 runner 的缺口。'
         ],
         nodes: [
           n('raw', 'CSMAR 原始 CSV', '数据', '私有 raw 数据入口，不提交。', 'data/raw_private/csmar/', 'done', 40, 170),
-          n('interim_cli', 'build_interim CLI', '入口', '标准化 CSMAR raw 到 interim。', 'markets/a_share/csmar/build_interim.py', 'done', 300, 170),
+          n('interim_cli', 'build_interim CLI', '入口', '标准化 CSMAR raw 到 interim。', 'markets/implementations/a_share/csmar/build_interim.py', 'done', 300, 170),
           n('interim', 'interim 标准化 CSV', '数据', '审计层标准化数据。', 'data/interim_private/csmar/', 'done', 560, 170),
-          n('panel_cli', 'build_panel CLI', '入口', '从 interim 构建 full research panel。', 'markets/a_share/datasets/build_panel.py', 'done', 820, 170),
-          n('panel_func', 'build_panel_full_from_interim', '函数', 'A股 panel 构建函数级入口。', 'markets/a_share/datasets/build_panel.py', 'done', 1080, 170),
+          n('panel_cli', 'build_panel CLI', '入口', '从 interim 构建 full research panel。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 820, 170),
+          n('panel_func', 'build_panel_full_from_interim', '函数', 'A股 panel 构建函数级入口。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 1080, 170),
           n('panel_file', 'research panel Parquet', '数据', '供因子构建读取的宽表。', 'data/processed_private/csmar/panel_full/', 'done', 1340, 170),
-          n('factors_cli', 'build_factors CLI', '入口', '从 panel 生成因子和 label。', 'markets/a_share/factors/build_factors.py', 'done', 1600, 170),
-          n('factors_func', 'calculate_price_volume_factor_full', '函数', 'A股因子和 label 计算入口。', 'markets/a_share/factors/build_factors.py', 'done', 1860, 170),
+          n('factors_cli', 'build_factors CLI', '入口', '从 panel 生成因子和 label。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1600, 170),
+          n('factors_func', 'calculate_price_volume_factor_full', '函数', 'A股因子和 label 计算入口。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1860, 170),
           n('factor_file', 'factor and label Parquet', '数据', 'slim factor table。', 'processed_private/csmar/price_volume_factors_full/', 'done', 2120, 170),
-          n('eval_cli', 'run_factor_evaluation CLI', '入口', 'A股专用评估入口。', 'markets/a_share/evaluation/run_factor_evaluation.py', 'done', 2380, 170),
-          n('processed_eval', 'run_processed_factor_evaluation', '函数', '定位覆盖年份的 factor Parquet，汇总 label 可用性，并逐 label 调 core。', 'markets/a_share/evaluation/core_bridge.py', 'done', 2640, 60),
-          n('read_frame', 'read_evaluation_frame / read_factor_frame', '接口', '读取并过滤 core 需要的 A股 factor table 列。', 'markets/a_share/evaluation/core_bridge.py', 'done', 2640, 170),
-          n('spec', 'EvaluationSpec', '核心输入', '统一评估输入契约。', 'core/contracts.py', 'done', 2900, 170),
-          n('core', 'run_evaluation', '核心入口', 'core 评估主入口。', 'core/evaluation.py', 'done', 3160, 170),
-          n('engine_df', 'DataFrame evaluator', '引擎', 'DataFrame 评估路径。', 'engines/dataframe/', 'done', 3420, 90),
-          n('engine_tensor', 'Tensor evaluator', '引擎', 'Tensor 评估路径。', 'engines/tensor/', 'done', 3420, 250),
-          n('eval_tables', 'tables / summary / report', '中间结果', 'run_evaluation 内部汇总出的 artifact writer 输入。', 'core/evaluation.py', 'done', 3680, 170),
-          n('writer', 'write_evaluation_set_artifacts', '函数', '写出 schema 0.5 artifacts。', 'artifacts/writer.py', 'done', 3940, 170),
-          n('result', 'EvaluationSetResult', '核心输出', 'run_evaluation 返回对象，包含 summary、metrics、combinations 和 artifact 路径引用。', 'core/results.py', 'done', 4200, 290),
+          n('eval_cli', 'run_factor_evaluation CLI', '入口', 'A股专用评估入口。', 'markets/implementations/a_share/evaluation/run_factor_evaluation.py', 'done', 2380, 170),
+          n('processed_eval', 'run_processed_factor_evaluation', '函数', '定位覆盖年份的 factor Parquet，汇总 label 可用性，并逐 label 调 evaluation layer。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2640, 60),
+          n('read_frame', 'read_evaluation_frame / read_factor_frame', '接口', '读取并过滤 evaluation 需要的 A股 factor table 列。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2640, 170),
+          n('spec', 'EvaluationSpec', '核心输入', '统一评估输入契约。', 'evaluations/evaluation_spec.py', 'done', 2900, 170),
+          n('evaluation', 'run_evaluation', '核心入口', 'evaluation layer 评估主入口。', 'evaluations/evaluation_runner.py', 'done', 3160, 170),
+          n('engine_df', 'DataFrame evaluator', '引擎', 'DataFrame 评估路径。', 'kernels/dataframe/', 'done', 3420, 90),
+          n('engine_tensor', 'Tensor evaluator', '引擎', 'Tensor 评估路径。', 'kernels/tensor/', 'done', 3420, 250),
+          n('eval_tables', 'tables / summary / report', '中间结果', 'run_evaluation 内部汇总出的 artifact writer 输入。', 'evaluations/evaluation_runner.py', 'done', 3680, 170),
+          n('writer', 'write_evaluation_set_artifacts', '函数', '写出 schema 0.5 artifacts。', 'artifacts/artifact_writer.py', 'done', 3940, 170),
+          n('result', 'EvaluationSetResult', '核心输出', 'run_evaluation 返回对象，包含 summary、metrics、combinations 和 artifact 路径引用。', 'evaluations/evaluation_result.py', 'done', 4200, 290),
           n('run_dir', 'schema 0.5 run directory', '产物', 'summary、metrics、portfolio、diagnostics、report、manifest。', 'reports/private_real/factor_evaluation/', 'done', 4200, 120),
-          n('manifest', 'manifest.display', '契约', 'display.py 构建展示契约，writer.py 在加载和校验 artifact 时验证 display。', 'artifacts/display.py + artifacts/writer.py', 'done', 4460, 70),
-          n('repo', 'run_repository', '模块', 'run root、identity、索引、加载和删除。', 'api/run_repository.py', 'done', 4460, 270),
-          n('loader', 'load_evaluation_set', '函数', 'loader.py 提供导出入口，实际加载实现位于 writer.py。', 'artifacts/loader.py + artifacts/writer.py', 'done', 4720, 270),
+          n('manifest', 'manifest.display', '契约', 'display_manifest.py 构建展示契约，manifest_validation.py 校验 display。', 'artifacts/display_manifest.py + artifacts/manifest_validation.py', 'done', 4460, 70),
+          n('repo', 'run_repository', '模块', 'run root、identity、索引、加载和删除。', 'api/services/run_repository.py', 'done', 4460, 270),
+          n('loader', 'load_evaluation_set', '函数', 'artifact_loader.py 提供加载入口并复用 schema/display validation。', 'artifacts/artifact_loader.py', 'done', 4720, 270),
           n('api', 'FastAPI local app', '入口', '本地 evidence API。', 'api/app.py', 'done', 4980, 170),
           n('api_runs', 'runs/evidence APIs', '入口', 'run 列表、证据、CSV 预览。', 'api/app.py', 'done', 5240, 80),
-          n('api_download', 'download APIs', '入口', '直接下载和 ZIP 下载。', 'api/downloads.py', 'done', 5240, 250),
+          n('api_download', 'download APIs', '入口', '直接下载和 ZIP 下载。', 'api/services/download_service.py', 'done', 5240, 250),
           n('api_compare', 'comparison APIs', '入口', '多 run 对比 JSON/CSV。', 'api/app.py', 'done', 5240, 420),
           n('web', 'React workbench', '入口', '本地前端工作台。', 'web/src/App.tsx', 'done', 5500, 170),
           n('runs_ui', 'Results UI', '页面', '浏览 runs、图表、表格、报告。', 'web/src/ResultsView.tsx', 'done', 5760, 170),
@@ -429,15 +429,15 @@
           n('pipeline_builder', 'Pipeline Builder', '页面', '提交因子表达式和 pipeline 配置。', 'web/src/PipelineBuilder.tsx', 'done', 5760, -20),
           n('pipeline_api', 'POST pipeline snapshot', '入口', '当前只保存配置快照。', 'api/app.py', 'done', 6020, -20),
           n('pipeline_store', 'pipeline snapshot', '存储', '保存 pipeline 配置和 checkpoint；配置样例位于 config/a_share/pipelines/。', 'reports/private_real/pipeline_runs/', 'done', 6280, -20),
-          n('runner_todo', 'A股 Pipeline Runner', '待实现入口', '让前端配置触发真实 A股全流程。', '待新增', 'todo', 6280, 90),
+          n('runner_light', 'A股 Pipeline Runner', '轻量入口', '支持 processed-existing 评价；完整 build runner 仍属后续设计。', 'pipelines/a_share/runner.py', 'done', 6280, 90),
           n('upload_api', 'POST uploaded panel run', '入口', '上传 CSV 评估保留入口。', 'api/app.py', 'done', 4980, 420),
-          n('upload_service', 'create_uploaded_run', '函数', '上传 CSV 转 EvaluationSpec。', 'api/uploads.py', 'done', 5240, 590),
+          n('upload_service', 'create_uploaded_run', '函数', '上传 CSV 转 EvaluationSpec。', 'api/services/upload_service.py', 'done', 5240, 590),
           n('qrp', 'qrp CLI', '入口', 'Typer 总入口。', 'cli/commands.py', 'done', 2900, 520),
           n('qrp_ashare', 'qrp a-share 命令组', '入口', '当前子命令提示对应模块 CLI 用法。', 'cli/commands.py', 'done', 3160, 500),
           n('qrp_eval', 'qrp evaluate-parquet', '入口', '通用 Parquet 适配检查。', 'cli/commands.py', 'done', 3160, 620),
           n('qrp_compare', 'qrp compare', '入口', '离线比较多个 run。', 'cli/commands.py', 'done', 3160, 760),
-          n('aux_cli', 'A股辅助/诊断 CLI', '入口', 'inspect、summary、space gate 等模块 CLI，读取各阶段产物做检查或汇总。', 'markets/a_share/*', 'done', 1860, 520),
-          n('compare_writer', 'write_run_comparison', '函数', '离线写出 comparison。', 'artifacts/comparison.py', 'done', 3420, 760)
+          n('aux_cli', 'A股辅助/诊断 CLI', '入口', 'inspect、summary、space gate 等模块 CLI，读取各阶段产物做检查或汇总。', 'markets/implementations/a_share/*', 'done', 1860, 520),
+          n('compare_writer', 'write_run_comparison', '函数', '离线写出 comparison。', 'artifacts/artifact_comparison.py', 'done', 3420, 760)
         ],
         edges: [
           e('raw', 'interim_cli', 'raw 进入标准化入口'),
@@ -452,9 +452,9 @@
           e('eval_cli', 'processed_eval', '进入 A股评估编排函数'),
           e('processed_eval', 'read_frame', '读取和过滤 factor table'),
           e('read_frame', 'spec', '生成 EvaluationSpec'),
-          e('spec', 'core', '进入 core'),
-          e('core', 'engine_df', 'DataFrame 路径'),
-          e('core', 'engine_tensor', 'Tensor 路径'),
+          e('spec', 'evaluation', '进入 evaluation layer'),
+          e('evaluation', 'engine_df', 'DataFrame 路径'),
+          e('evaluation', 'engine_tensor', 'Tensor 路径'),
           e('engine_df', 'eval_tables', '生成指标表和 summary'),
           e('engine_tensor', 'eval_tables', '生成指标表和 summary'),
           e('eval_tables', 'writer', '交给 artifact writer'),
@@ -473,7 +473,7 @@
           e('api', 'upload_api', '挂载上传 run 入口'),
           e('api', 'pipeline_api', '挂载 pipeline snapshot 入口'),
           e('upload_api', 'upload_service', '上传入口调用 service'),
-          e('upload_service', 'spec', '上传 CSV 转 core spec'),
+          e('upload_service', 'spec', '上传 CSV 转 evaluation spec'),
           e('web', 'runs_ui', '前端进入结果页'),
           e('runs_ui', 'api_runs', '读取 run 和 evidence'),
           e('runs_ui', 'download_ui', '结果页挂下载组件'),
@@ -492,12 +492,10 @@
           e('aux_cli', 'run_dir', 'summary/compare 读取 evaluation runs'),
           e('qrp_compare', 'compare_writer', '不调用 API，直接写比较'),
           e('compare_writer', 'run_dir', '比较结果写入文件'),
-          e('pipeline_builder', 'runner_todo', '未来触发真实 A股 runner', 'todo'),
-          e('pipeline_api', 'runner_todo', 'snapshot 入口升级为执行入口', 'todo'),
-          e('runner_todo', 'panel_func', '未来调用或复用 panel 构建', 'todo'),
-          e('runner_todo', 'factors_func', '未来执行因子计算', 'todo'),
-          e('runner_todo', 'eval_cli', '未来进入 A股专用评估', 'todo'),
-          e('runner_todo', 'repo', '未来把 run 暴露给前端', 'todo')
+          e('pipeline_builder', 'runner_light', '传入 processed-existing 配置'),
+          e('pipeline_api', 'runner_light', '执行轻量评价入口'),
+          e('runner_light', 'eval_cli', '复用 A股专用评估'),
+          e('runner_light', 'repo', '暴露嵌套 evaluation runs')
         ]
       },
 
@@ -510,24 +508,24 @@
         ],
         nodes: [
           n('raw', 'CSMAR 原始 CSV', '数据', '私有原始导出文件。', 'data/raw_private/csmar/', 'done', 80, 190),
-          n('interim_cli', 'build_interim CLI', '入口', 'raw 到 interim 的标准化入口。', 'markets/a_share/csmar/build_interim.py', 'done', 340, 190),
+          n('interim_cli', 'build_interim CLI', '入口', 'raw 到 interim 的标准化入口。', 'markets/implementations/a_share/csmar/build_interim.py', 'done', 340, 190),
           n('interim', 'interim 标准化 CSV', '数据', '字段和日期标准化后的审计层。', 'data/interim_private/csmar/', 'done', 600, 190),
-          n('panel_cli', 'build_panel CLI', '入口', '从 interim 构建 full panel。', 'markets/a_share/datasets/build_panel.py', 'done', 860, 190),
-          n('panel_func', 'build_panel_full_from_interim', '函数', 'panel 构建函数级入口。', 'markets/a_share/datasets/build_panel.py', 'done', 1120, 190),
+          n('panel_cli', 'build_panel CLI', '入口', '从 interim 构建 full panel。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 860, 190),
+          n('panel_func', 'build_panel_full_from_interim', '函数', 'panel 构建函数级入口。', 'markets/implementations/a_share/datasets/build_panel.py', 'done', 1120, 190),
           n('panel', 'research panel Parquet', '数据', '宽表研究面板。', 'processed_private/csmar/panel_full/', 'done', 1380, 190),
-          n('factor_cli', 'build_factors CLI', '入口', '从 panel 计算因子和 label。', 'markets/a_share/factors/build_factors.py', 'done', 1640, 190),
-          n('factor_func', 'calculate_price_volume_factor_full', '函数', '因子和 label 计算函数。', 'markets/a_share/factors/build_factors.py', 'done', 1900, 190),
+          n('factor_cli', 'build_factors CLI', '入口', '从 panel 计算因子和 label。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1640, 190),
+          n('factor_func', 'calculate_price_volume_factor_full', '函数', '因子和 label 计算函数。', 'markets/implementations/a_share/factors/build_factors.py', 'done', 1900, 190),
           n('factor_file', 'factor and label Parquet', '数据', 'slim factor table。', 'processed_private/csmar/price_volume_factors_full/', 'done', 2160, 190),
-          n('eval_cli', 'run_factor_evaluation CLI', '入口', 'A股专用评估入口。', 'markets/a_share/evaluation/run_factor_evaluation.py', 'done', 2420, 190),
-          n('processed_eval', 'run_processed_factor_evaluation', '函数', '定位 factor Parquet、汇总 label 可用性并逐 label 调 core。', 'markets/a_share/evaluation/core_bridge.py', 'done', 2680, 80),
-          n('bridge', 'read_evaluation_frame / read_factor_frame', '接口', '读取并过滤 A股 factor table。', 'markets/a_share/evaluation/core_bridge.py', 'done', 2680, 190),
-          n('spec', 'EvaluationSpec', '核心输入', '统一评估输入契约。', 'core/contracts.py', 'done', 2940, 190),
-          n('core', 'run_evaluation', '核心入口', '执行评估。', 'core/evaluation.py', 'done', 3200, 190),
-          n('engine', 'DataFrame/Tensor', '计算引擎', '两种实现路径，同一评估口径。', 'engines/', 'done', 3460, 190),
-          n('eval_tables', 'tables / summary / report', '中间结果', 'artifact writer 的输入。', 'core/evaluation.py', 'done', 3720, 190),
-          n('writer', 'write_evaluation_set_artifacts', '函数', '写出 schema 0.5 artifacts。', 'artifacts/writer.py', 'done', 3980, 190),
-          n('result', 'EvaluationSetResult', '核心输出', 'run_evaluation 返回对象。', 'core/results.py', 'done', 4240, 90),
-          n('artifacts', 'schema 0.5 artifacts', '回测结果', 'summary、metrics、portfolio、diagnostics、breakdowns、report、comparison、manifest。', 'artifacts/writer.py', 'done', 4240, 250)
+          n('eval_cli', 'run_factor_evaluation CLI', '入口', 'A股专用评估入口。', 'markets/implementations/a_share/evaluation/run_factor_evaluation.py', 'done', 2420, 190),
+          n('processed_eval', 'run_processed_factor_evaluation', '函数', '定位 factor Parquet、汇总 label 可用性并逐 label 调 evaluation layer。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2680, 80),
+          n('adapter', 'read_evaluation_frame / read_factor_frame', '接口', '读取并过滤 A股 factor table。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 2680, 190),
+          n('spec', 'EvaluationSpec', '核心输入', '统一评估输入契约。', 'evaluations/evaluation_spec.py', 'done', 2940, 190),
+          n('evaluation', 'run_evaluation', '核心入口', '执行评估。', 'evaluations/evaluation_runner.py', 'done', 3200, 190),
+          n('kernel', 'DataFrame/Tensor', '计算引擎', '两种实现路径，同一评估口径。', 'kernels/', 'done', 3460, 190),
+          n('eval_tables', 'tables / summary / report', '中间结果', 'artifact writer 的输入。', 'evaluations/evaluation_runner.py', 'done', 3720, 190),
+          n('writer', 'write_evaluation_set_artifacts', '函数', '写出 schema 0.5 artifacts。', 'artifacts/artifact_writer.py', 'done', 3980, 190),
+          n('result', 'EvaluationSetResult', '核心输出', 'run_evaluation 返回对象。', 'evaluations/evaluation_result.py', 'done', 4240, 90),
+          n('artifacts', 'schema 0.5 artifacts', '回测结果', 'summary、metrics、portfolio、diagnostics、breakdowns、report、comparison、manifest。', 'artifacts/artifact_writer.py', 'done', 4240, 250)
         ],
         edges: [
           e('raw', 'interim_cli', '读取 CSMAR raw'),
@@ -540,11 +538,11 @@
           e('factor_func', 'factor_file', '写出 slim factor table'),
           e('factor_file', 'eval_cli', 'A股评估入口读取'),
           e('eval_cli', 'processed_eval', '进入 A股评估编排函数'),
-          e('processed_eval', 'bridge', '读取和过滤 factor table'),
-          e('bridge', 'spec', '生成 EvaluationSpec'),
-          e('spec', 'core', '进入 core'),
-          e('core', 'engine', '选择 DataFrame 或 Tensor'),
-          e('engine', 'eval_tables', '生成表、summary 和报告文本'),
+          e('processed_eval', 'adapter', '读取和过滤 factor table'),
+          e('adapter', 'spec', '生成 EvaluationSpec'),
+          e('spec', 'evaluation', '进入 evaluation layer'),
+          e('evaluation', 'kernel', '选择 DataFrame 或 Tensor'),
+          e('kernel', 'eval_tables', '生成表、summary 和报告文本'),
           e('eval_tables', 'writer', '交给 artifact writer'),
           e('writer', 'artifacts', '写出回测结果'),
           e('writer', 'result', '返回结果对象')
@@ -555,36 +553,36 @@
         title: 'A股 + Crypto 构想',
         subtitle: '用未来 crypto 高频数据反推现有接口是否合理。',
         notes: [
-          '实线是当前 A股或 core 已有能力；虚线是 crypto 高频可能需要新增的层。',
+          '实线是当前 A股或 evaluation layer 已有能力；虚线是 crypto 高频可能需要新增的层。',
           '关键设计问题是：crypto 高频能否落到 EvaluationSpec，还是需要 IntradayEvaluationSpec / BacktestSpec。'
         ],
         nodes: [
           n('ashare_raw', 'A股 CSMAR 日频 CSV', '数据', '当前 A股私有日频数据入口。', 'data/raw_private/csmar/', 'done', 80, 110),
           n('ashare_panel', 'A股 daily research panel', '数据', '当前已实现的日频面板。', 'processed_private/csmar/panel_full/', 'done', 360, 110),
           n('ashare_factor', 'A股 daily factor/label', '数据', '当前已实现的日频因子和 label 表。', 'price_volume_factors_full/', 'done', 640, 110),
-          n('ashare_adapter', 'A股 market adapter', '接口', 'read_factor_frame 把 A股表转为 core 输入。', 'markets/a_share/evaluation/core_bridge.py', 'done', 920, 110),
-          n('spec', 'EvaluationSpec', '现有共用', '日频截面评估可复用的 core 输入契约。', 'core/contracts.py', 'done', 1220, 220),
-          n('core', 'run_evaluation', '现有共用', '现有评估主入口。', 'core/evaluation.py', 'done', 1500, 220),
-          n('engine', 'DataFrame/Tensor engines', '现有共用', '现有计算引擎。', 'engines/', 'done', 1780, 220),
-          n('result', 'EvaluationSetResult', '现有共用', '统一结果对象。', 'core/results.py', 'done', 2060, 220),
+          n('ashare_adapter', 'A股 market adapter', '接口', 'read_factor_frame 把 A股表转为 evaluation layer 输入。', 'markets/implementations/a_share/evaluation/evaluation_adapter.py', 'done', 920, 110),
+          n('spec', 'EvaluationSpec', '现有共用', '日频截面评估可复用的 evaluation layer 输入契约。', 'evaluations/evaluation_spec.py', 'done', 1220, 220),
+          n('evaluation', 'run_evaluation', '现有共用', '现有评估主入口。', 'evaluations/evaluation_runner.py', 'done', 1500, 220),
+          n('kernel', 'DataFrame/Tensor kernels', '现有共用', '现有计算引擎。', 'kernels/', 'done', 1780, 220),
+          n('result', 'EvaluationSetResult', '现有共用', '统一结果对象。', 'evaluations/evaluation_result.py', 'done', 2060, 220),
           n('artifacts', '统一 artifacts', '目标', '尽量复用 schema 0.5 或后续版本。', 'artifacts/', 'done', 2340, 220),
           n('crypto_raw', 'Crypto trades/orderbook/bars', '未来数据', '高频成交、盘口、bar 数据。', '待设计', 'todo', 80, 420),
           n('crypto_store', 'crypto normalized store', '待实现', '私有边界、字段、时间戳和分区规则。', '待新增', 'todo', 360, 420),
           n('crypto_resample', 'resample and alignment', '待实现', '重采样、时钟对齐、缺口处理。', '待新增', 'todo', 640, 420),
           n('crypto_features', 'intraday features/labels', '待实现', '高频特征、label、交易成本输入。', '待新增', 'todo', 920, 420),
-          n('crypto_adapter', 'crypto market adapter', '待实现', '把 crypto 高频表映射为 core 输入。', '待新增', 'todo', 1220, 420),
+          n('crypto_adapter', 'crypto market adapter', '待实现', '把 crypto 高频表映射为 evaluation layer 输入。', '待新增', 'todo', 1220, 420),
           n('intraday_spec', 'IntradayEvaluationSpec / BacktestSpec', '可能新增', '事件驱动、仓位路径、撮合、滑点等可能需要新契约。', '待新增', 'todo', 1500, 420),
-          n('future_core', 'run_backtest 或 core 扩展', '待实现', '高频回测不能假设当前日频 evaluator 原样可用。', '待新增', 'todo', 1780, 420),
-          n('future_engine', 'intraday/backtest engine', '待实现', '高频专用引擎应尽量输出统一结果对象。', '待新增', 'todo', 2060, 420)
+          n('future_core', 'run_backtest 或 evaluation 扩展', '待实现', '高频回测不能假设当前日频 evaluator 原样可用。', '待新增', 'todo', 1780, 420),
+          n('future_engine', 'intraday/backtest kernel', '待实现', '高频专用引擎应尽量输出统一结果对象。', '待新增', 'todo', 2060, 420)
         ],
         edges: [
           e('ashare_raw', 'ashare_panel', '当前 A股日频 panel 链路'),
           e('ashare_panel', 'ashare_factor', '当前 A股因子和 label 链路'),
           e('ashare_factor', 'ashare_adapter', 'A股 adapter 读取 factor table'),
           e('ashare_adapter', 'spec', '当前可进入 EvaluationSpec'),
-          e('spec', 'core', '复用现有 core'),
-          e('core', 'engine', '复用现有引擎'),
-          e('engine', 'result', '复用统一结果'),
+          e('spec', 'evaluation', '复用现有 evaluation layer'),
+          e('evaluation', 'kernel', '复用现有引擎'),
+          e('kernel', 'result', '复用统一结果'),
           e('result', 'artifacts', '复用统一 artifacts'),
           e('crypto_raw', 'crypto_store', '设计高频私有数据边界', 'todo'),
           e('crypto_store', 'crypto_resample', '重采样和对齐', 'todo'),
@@ -592,7 +590,7 @@
           e('crypto_features', 'crypto_adapter', '进入 crypto adapter', 'todo'),
           e('crypto_adapter', 'spec', '可复用时进入 EvaluationSpec', 'todo'),
           e('crypto_adapter', 'intraday_spec', '复杂高频回测可能需要新 spec', 'todo'),
-          e('intraday_spec', 'future_core', '进入新增或扩展后的 core 入口', 'todo'),
+          e('intraday_spec', 'future_core', '进入新增或扩展后的 evaluation layer 入口', 'todo'),
           e('future_core', 'future_engine', '调度高频或回测引擎', 'todo'),
           e('future_engine', 'result', '尽量输出统一结果对象', 'todo')
         ]
@@ -613,7 +611,7 @@
       'processed_eval',
       'read_frame',
       'spec',
-      'core',
+      'evaluation',
       'engine_df',
       'engine_tensor',
       'eval_tables',
@@ -635,9 +633,9 @@
       'eval_cli->processed_eval',
       'processed_eval->read_frame',
       'read_frame->spec',
-      'spec->core',
-      'core->engine_df',
-      'core->engine_tensor',
+      'spec->evaluation',
+      'evaluation->engine_df',
+      'evaluation->engine_tensor',
       'engine_df->eval_tables',
       'engine_tensor->eval_tables',
       'eval_tables->writer',
@@ -648,37 +646,37 @@
     const NODE_USAGE = {
       interim_cli: {
         title: '调用方法',
-        body: 'python -m quant_research_platform.markets.a_share.csmar.build_interim --raw-root data/raw_private/csmar --output-root data/interim_private/csmar --start-date 2014-01-01 --end-date 2025-12-31',
+        body: 'python -m quant_research_platform.markets.implementations.a_share.csmar.build_interim --raw-root data/raw_private/csmar --output-root data/interim_private/csmar --start-date 2014-01-01 --end-date 2025-12-31',
         params: '--raw-root, --output-root, --override-path, --start-date, --end-date, --chunksize'
       },
       panel_cli: {
         title: '调用方法',
-        body: 'python -m quant_research_platform.markets.a_share.datasets.build_panel --interim-root data/interim_private/csmar --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --end-date 2025-12-31',
+        body: 'python -m quant_research_platform.markets.implementations.a_share.datasets.build_panel --interim-root data/interim_private/csmar --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --end-date 2025-12-31',
         params: '--interim-root, --processed-root, --start-year, --end-year, --end-date, --min-listing-trading-days'
       },
       factors_cli: {
         title: '调用方法',
-        body: 'python -m quant_research_platform.markets.a_share.factors.build_factors --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --factor-set price_volume --windows 20,60,120 --horizons 1,5,10,20,60,120',
+        body: 'python -m quant_research_platform.markets.implementations.a_share.factors.build_factors --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --factor-set price_volume --windows 20,60,120 --horizons 1,5,10,20,60,120',
         params: '--processed-root, --start-year, --end-year, --factor-set, --windows, --horizons'
       },
       factor_cli: {
         title: '调用方法',
-        body: 'python -m quant_research_platform.markets.a_share.factors.build_factors --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --factor-set price_volume --windows 20,60,120 --horizons 1,5,10,20,60,120',
+        body: 'python -m quant_research_platform.markets.implementations.a_share.factors.build_factors --processed-root data/processed_private/csmar --start-year 2014 --end-year 2025 --factor-set price_volume --windows 20,60,120 --horizons 1,5,10,20,60,120',
         params: '--processed-root, --start-year, --end-year, --factor-set, --windows, --horizons'
       },
       eval_cli: {
         title: '调用方法',
-        body: 'python -m quant_research_platform.markets.a_share.evaluation.run_factor_evaluation --processed-root data/processed_private/csmar --start-year 2023 --end-year 2025 --start-date 2023-01-01 --end-date 2025-12-31 --labels forward_return_20d --factors mom_20d,vol_20d --portfolio-mode long_short --engine tensor --cost-bps 5',
+        body: 'python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation --processed-root data/processed_private/csmar --start-year 2023 --end-year 2025 --start-date 2023-01-01 --end-date 2025-12-31 --labels forward_return_20d --factors mom_20d,vol_20d --portfolio-mode long_short --engine tensor --cost-bps 5',
         params: '--processed-root, --report-root, --start-year, --end-year, --start-date, --end-date, --labels, --factors, --factor-set, --all-factors, --n-groups, --pnl-return-column, --cost-bps, --portfolio-mode, --engine, --segment-columns, --risk-column, --neutralization-method, --neutralization-group-columns, --neutralization-exposure-columns'
       },
       qrp_ashare: {
         title: '调用方法',
         body: 'qrp a-share evaluate',
-        params: '当前子命令是帮助/跳转入口，会提示对应 python -m quant_research_platform.markets.a_share... 模块 CLI。'
+        params: '当前子命令是帮助/跳转入口，会提示对应 python -m quant_research_platform.markets.implementations.a_share... 模块 CLI。'
       },
       qrp: {
         title: '调用方法',
-        body: 'qrp ... 或 python -m quant_research_platform.cli ...',
+        body: 'qrp ... 或 python -m quant_research_platform.interfaces.cli ...',
         params: '总入口；可用子命令包括 a-share build-interim/build-panel/build-factors/evaluate、evaluate-parquet、compare。'
       },
       qrp_eval: {
@@ -718,7 +716,7 @@
       },
       aux_cli: {
         title: '调用方法',
-        body: 'python -m quant_research_platform.markets.a_share.csmar.inspect_raw_exports data/raw_private/csmar；python -m quant_research_platform.markets.a_share.csmar.inspect_interim --interim-root data/interim_private/csmar；python -m quant_research_platform.markets.a_share.datasets.inspect_panel --processed-root data/processed_private/csmar；python -m quant_research_platform.markets.a_share.factors.inspect_factors --processed-root data/processed_private/csmar；python -m quant_research_platform.markets.a_share.evaluation.build_factor_summary --report-root reports/private_real/factor_evaluation/full_2024_2025；python -m quant_research_platform.markets.a_share.evaluation.compare_factor_summaries --yearly-summary yearly.csv --full-summary full.csv --output-dir reports/private_real/factor_evaluation/comparisons/example；python -m quant_research_platform.markets.a_share.runtime.check_processed_space --processed-root data/processed_private/csmar --interim-root data/interim_private/csmar',
+        body: 'python -m quant_research_platform.markets.implementations.a_share.csmar.inspect_raw_exports data/raw_private/csmar；python -m quant_research_platform.markets.implementations.a_share.csmar.inspect_interim --interim-root data/interim_private/csmar；python -m quant_research_platform.markets.implementations.a_share.datasets.inspect_panel --processed-root data/processed_private/csmar；python -m quant_research_platform.markets.implementations.a_share.factors.inspect_factors --processed-root data/processed_private/csmar；python -m quant_research_platform.markets.implementations.a_share.evaluation.build_factor_summary --report-root reports/private_real/factor_evaluation/full_2024_2025；python -m quant_research_platform.markets.implementations.a_share.evaluation.compare_factor_summaries --yearly-summary yearly.csv --full-summary full.csv --output-dir reports/private_real/factor_evaluation/comparisons/example；python -m quant_research_platform.markets.implementations.a_share.runtime.check_processed_space --processed-root data/processed_private/csmar --interim-root data/interim_private/csmar',
         params: 'inspect_raw_exports: root, --write-metadata；inspect_interim/inspect_panel/inspect_factors: --*-root, --start-year, --end-year；build_factor_summary: --report-root, --output-csv, --output-md；compare_factor_summaries: --yearly-summary, --full-summary, --output-dir；check_processed_space: --processed-root, --interim-root, observed/target year range, --legacy-processed-gb, --max-legacy-ratio, --max-free-ratio。'
       }
     };
@@ -862,7 +860,7 @@
         const midX = (start.x + end.x) / 2;
         const curve = Math.max(40, Math.abs(end.x - start.x) * 0.25);
         path.setAttribute('d', `M ${start.x} ${start.y} C ${start.x + curve} ${start.y}, ${end.x - curve} ${end.y}, ${end.x} ${end.y}`);
-        path.setAttribute('class', `edge ${edge.status === 'todo' ? 'todo' : ''} ${isCoreEdge(edge) ? 'core' : ''}`);
+        path.setAttribute('class', `edge ${edge.status === 'todo' ? 'todo' : ''} ${isCoreEdge(edge) ? 'evaluation' : ''}`);
         path.dataset.edgeIndex = index;
         path.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -874,7 +872,7 @@
 
       view.nodes.forEach(node => {
         const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        group.setAttribute('class', `node ${node.status} ${isCoreNode(node) ? 'core' : ''} ${selected?.node?.id === node.id ? 'selected' : ''}`);
+        group.setAttribute('class', `node ${node.status} ${isCoreNode(node) ? 'evaluation' : ''} ${selected?.node?.id === node.id ? 'selected' : ''}`);
         group.setAttribute('transform', `translate(${node.x} ${node.y})`);
         group.dataset.nodeId = node.id;
 

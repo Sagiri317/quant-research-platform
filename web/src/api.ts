@@ -109,10 +109,16 @@ export type MarketCapability = {
 export type FactorTemplate = {
   id: string
   name: string
+  version: string
   market: string
   expression: string
   description?: string
   dependencies?: string[]
+  inputs?: string[]
+  outputs?: string[]
+  capabilities?: string[]
+  grid_parameter?: string
+  grid_values?: string[]
 }
 
 export type PipelineRunRequest = {
@@ -125,6 +131,7 @@ export type PipelineRunRequest = {
   market: string
   pnl_return_column: string
   portfolio_mode: string
+  processed_factor_column?: string
   run_id: string
 }
 
@@ -132,15 +139,21 @@ export type PipelineRunSummary = {
   run_id: string
   status: 'queued' | 'running' | 'ready' | 'failed' | string
   message?: string
-  snapshot_path?: string
+  run_ref?: string
+  warnings?: Record<string, unknown>[]
 }
 
 export type PipelineCheckpointSummary = {
   key: string
   label: string
   status: 'pending' | 'ready' | 'warning' | 'blocked' | string
-  path?: string
+  artifact?: string
   message?: string
+  duration_seconds?: number
+  row_count?: number
+  failure_code?: string
+  warnings?: Record<string, unknown>[]
+  blocking_issues?: Record<string, unknown>[]
 }
 
 export type RunTableSpec = {

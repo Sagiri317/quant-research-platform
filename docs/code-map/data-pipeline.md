@@ -3,8 +3,8 @@
 目录：
 
 ```text
-src/quant_research_platform/markets/a_share/csmar/
-src/quant_research_platform/markets/a_share/datasets/
+src/quant_research_platform/markets/implementations/a_share/csmar/
+src/quant_research_platform/markets/implementations/a_share/datasets/
 ```
 
 ## 职责

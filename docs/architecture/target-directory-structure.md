@@ -31,7 +31,7 @@ apps/                                                # 可部署应用入口集�
 src/quant_research_platform/                         # 可复用平台领域代码，承载研究、评价、市场、数据、产物、流水线和平台域
 ```
 
-当前 Phase 1 可以暂时保留现有 `web/` 和 `src/quant_research_platform/api/`，但长期迁移目标应是 `apps/web` 与 `apps/api`。`interfaces/` 在 Python package 内只保留 SDK、notebook entrypoints、API 合同适配和本地装配薄层，不作为最终可部署应用目录，也不承载完整前端应用。
+本轮已批准的 Phase 1 目标是：本地 FastAPI 适配迁到 `src/quant_research_platform/interfaces/api/`，CLI 迁到 `src/quant_research_platform/interfaces/cli/`，通用 reader 迁到 `src/quant_research_platform/datasets/`，A 股市场实现迁到 `src/quant_research_platform/markets/implementations/a_share/`，A 股 workflow runner 迁到 `src/quant_research_platform/pipelines/a_share/`，并且不创建 repo-level `apps/api`。`interfaces/` 在 Python package 内只保留 SDK、notebook entrypoints、API 合同适配和本地装配薄层，不作为最终可部署应用目录，也不承载完整前端应用；真正可部署的 HTTP 应用入口属于 Phase 2 的 `apps/api`。
 
 ## 2. Phase 1: Research Platform Refactor
 
@@ -180,7 +180,7 @@ runtime/                                             # 本地运行时层，负�
 
 ```text
 interfaces/                                          # 用户和外部系统入口适配集合，承载 API 合同、CLI、SDK 和 notebook entrypoints
-  api/                                               # 本地 HTTP 服务接口，承载 FastAPI routes、services、evidence、downloads 和 pipeline endpoints；最终部署入口迁到 apps/api
+  api/                                               # 本地 HTTP 服务接口，承载 FastAPI routes、services、evidence、downloads 和 pipeline endpoints；Phase 2 可部署应用入口另建 apps/api
   cli/                                               # 命令行接口，承载研究、评价、pipeline、artifact 检查和服务启动命令
   sdk/                                               # Python SDK 预留，提供 notebook、外部脚本和未来插件可调用的稳定接口
 ```

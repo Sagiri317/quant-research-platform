@@ -81,7 +81,7 @@ from quant_research_platform import EvaluationSpec, WeightConfig, run_evaluation
 
 允许内部变化：
 
-- `artifacts/writer.py` 可以拆成 `schema.py`、`validate.py`、`writer.py`。
+- artifact writer 已按 Phase 1 拆成 `artifact_schema.py`、`manifest_validation.py`、`artifact_writer.py`。
 - display validation 可以从 writer 中移出。
 - writer 可以只接收结构化 payload，不直接理解 evaluations 执行细节。
 
@@ -98,8 +98,8 @@ from quant_research_platform import EvaluationSpec, WeightConfig, run_evaluation
 允许内部变化：
 
 - API app 入口只保留 `create_app()` 和 router 装配。
-- 现有 endpoint handler 可以先移动到 `src/quant_research_platform/api/routes/`。
-- repository、download、pipeline、comparison 逻辑可以先移动到 `src/quant_research_platform/api/services/`。
+- endpoint handler 迁到 `src/quant_research_platform/interfaces/api/routes/`。
+- repository、download、pipeline、comparison 逻辑迁到 `src/quant_research_platform/interfaces/api/services/`。
 
 ### Frontend contract
 
@@ -121,6 +121,16 @@ from quant_research_platform import EvaluationSpec, WeightConfig, run_evaluation
 ## 4. 目标模块结构
 
 目标结构以 [target-directory-structure.md](target-directory-structure.md) 的 Phase 1 为准。本轮只重构本地研究平台；未来 `apps/web`、`apps/api`、`apps/workers` 和 `apps/schedulers` 是 Phase 2 网站化边界，不在本文实施范围内。
+
+本轮已批准的目录决策：
+
+- Phase 1 把当前本地 API 代码迁到 `src/quant_research_platform/interfaces/api/`；它是本地 workbench 的 HTTP 适配层，不是 Phase 2 可部署应用。
+- Phase 1 把当前 CLI 代码迁到 `src/quant_research_platform/interfaces/cli/`；`qrp` 和 `python -m quant_research_platform.interfaces.cli` 是命令入口。
+- Phase 1 把当前通用 CSV / Parquet input helpers 迁到 `src/quant_research_platform/datasets/`。
+- Phase 1 把 A 股可运行市场实现迁到 `src/quant_research_platform/markets/implementations/a_share/`。
+- Phase 1 把 A 股 workflow orchestration / runner 迁到 `src/quant_research_platform/pipelines/a_share/`，不要放在 market facts 目录下。
+- 不保留空 crypto market implementation package；crypto / other markets 在真实设计和测试前只在能力、API payload 或前端文案中显示为 planned / disabled。
+- 空的 Future 目录不需要提前创建；只有真实代码、合同或测试出现时才落地。
 
 ```text
 web/
@@ -196,18 +206,19 @@ src/quant_research_platform/
 - `evaluations/*` 负责 market-neutral evaluation 和评价结果合同。
 - `kernels/*` 负责 DataFrame、tensor、GPU、distributed 等底层数值计算实现。
 - `artifacts/*` 负责 schema/display/persistence。
-- API 边界负责把 artifacts 和 pipeline 状态暴露给本地前端；现有实现可以先在 `src/quant_research_platform/api/` 内拆 routes/services，是否迁到 `interfaces/api/` 由实施计划单独决定。
+- `interfaces/api/` 负责把 artifacts 和 pipeline 状态暴露给本地前端；Phase 1 不再把旧顶层 API 包作为最终代码位置。
+- `pipelines/a_share/` 负责 A 股 workflow orchestration、runner、checkpoint 和 step registry；`markets/implementations/a_share/` 只保留市场数据、字段、规则、因子、label、validation 和 evaluation adapter 等市场实现。
 - `web/*` 负责本地用户交互，不承担研究计算；最终网站化时再迁到 `apps/web`。
 
 ## 5. Evaluations 重构设计
 
 ### 当前问题
 
-当前 `core/evaluation.py` 同时承担：
+重构前旧 evaluation runner 同时承担：
 
 - spec 校验；
 - panel 校验；
-- DataFrame / tensor engine 分派；
+- DataFrame / tensor kernel 分派；
 - table 汇总；
 - summary / config / manifest 生成；
 - artifact 写入；
@@ -248,9 +259,9 @@ def run_evaluation(spec: EvaluationSpec) -> EvaluationSetResult:
 
 ## 6. Artifact 重构设计
 
-### 当前问题
+### 重构前问题
 
-当前 `artifacts/writer.py` 同时做：
+重构前单体 writer 模块同时做：
 
 - schema 常量；
 - 写 JSON / CSV / Markdown；
@@ -309,22 +320,22 @@ API app 入口只负责：
 routes 拆分：
 
 ```text
-src/quant_research_platform/api/routes/health.py       health and root config
-src/quant_research_platform/api/routes/markets.py      markets and capabilities
-src/quant_research_platform/api/routes/pipeline.py     factor templates, pipeline run snapshots, future runner
-src/quant_research_platform/api/routes/runs.py         run list, evidence, uploaded run create/delete
-src/quant_research_platform/api/routes/artifacts.py    table preview and direct artifact routes
-src/quant_research_platform/api/routes/downloads.py    direct report and ZIP package
-src/quant_research_platform/api/routes/comparison.py   comparison JSON and CSV
-src/quant_research_platform/api/routes/uploads.py      optional CSV upload helpers
+src/quant_research_platform/interfaces/api/routes/health.py       health and root config
+src/quant_research_platform/interfaces/api/routes/markets.py      markets and capabilities
+src/quant_research_platform/interfaces/api/routes/pipeline.py     factor templates, pipeline run snapshots, future runner
+src/quant_research_platform/interfaces/api/routes/runs.py         run list, evidence, uploaded run create/delete
+src/quant_research_platform/interfaces/api/routes/artifacts.py    table preview and direct artifact routes
+src/quant_research_platform/interfaces/api/routes/downloads.py    direct report and ZIP package
+src/quant_research_platform/interfaces/api/routes/comparison.py   comparison JSON and CSV
+src/quant_research_platform/interfaces/api/routes/uploads.py      optional CSV upload helpers
 ```
 
 services 拆分：
 
 ```text
-src/quant_research_platform/api/services/run_repository.py
-src/quant_research_platform/api/services/download_service.py
-src/quant_research_platform/api/services/pipeline_service.py
+src/quant_research_platform/interfaces/api/services/run_repository.py
+src/quant_research_platform/interfaces/api/services/download_service.py
+src/quant_research_platform/interfaces/api/services/pipeline_service.py
 ```
 
 重构时保持所有 route path 不变。先搬代码，后改设计。
@@ -485,9 +496,9 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 
 交付：
 
-- `src/quant_research_platform/api/routes/*`。
-- `src/quant_research_platform/api/services/*`。
-- `src/quant_research_platform/api/app.py` 只装配 app 和 routers。
+- `src/quant_research_platform/interfaces/api/routes/*`。
+- `src/quant_research_platform/interfaces/api/services/*`。
+- `src/quant_research_platform/interfaces/api/app.py` 只装配 app 和 routers。
 
 验收：
 
@@ -500,7 +511,7 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 
 交付：
 
-- `markets/implementations/a_shares/pipeline_runner.py` 或等价 Phase 1 A 股 pipeline runner。
+- `src/quant_research_platform/pipelines/a_share/runner.py`。
 - checkpoint model。
 - pipeline API 接 runner 的轻量执行模式。
 
@@ -533,8 +544,9 @@ CSS 可先保持一个文件，等页面边界稳定后再拆 feature CSS，避�
 每阶段至少覆盖：
 
 - `conda run -n analysis python -m pytest -q tests/evaluations tests/artifacts`
-- `conda run -n analysis python -m pytest -q tests/api`
-- A 股相关变更时跑 `tests/markets`
+- `conda run -n analysis python -m pytest -q tests/interfaces/api`
+- A 股 market implementation 相关变更时跑 `tests/markets/implementations`
+- A 股 pipeline 相关变更时跑 `tests/pipelines`
 - 前端变更时在 `web/` 跑 `npm test -- --run --maxWorkers=1`
 - 前端结构或下载变更时跑 `npm run lint` 和 `npm run build`
 - 文档变更时跑 `git diff --check` 和本地链接检查

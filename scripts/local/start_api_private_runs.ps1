@@ -18,4 +18,4 @@ $env:PYTHONPATH = "src"
 $env:PYTHONUTF8 = "1"
 $env:QRP_RUN_ROOTS = $RunRoots
 
-conda run -n $CondaEnv python -m uvicorn quant_research_platform.api.app:app --host $ApiHost --port $Port
+conda run -n $CondaEnv python -m uvicorn quant_research_platform.interfaces.api.app:app --host $ApiHost --port $Port

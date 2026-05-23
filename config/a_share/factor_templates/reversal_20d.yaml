@@ -3,3 +3,8 @@ name: 20 日反转
 market: a_share
 expression: neg(return(close, 20))
 description: 20 日收盘价收益的相反数，用于反转候选因子。
+grid_parameter: window
+grid_values: 20,60
+expression_template: neg(return(close, {window}))
+output_column_template: rev_{window}d
+availability_rule: trade_date_close

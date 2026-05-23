@@ -130,7 +130,7 @@ if (Test-PortListening -Port $ApiPort) {
         -FilePath "conda" `
         -ArgumentList @(
             "run", "-n", $CondaEnv, "python", "-m", "uvicorn",
-            "quant_research_platform.api.app:app",
+            "quant_research_platform.interfaces.api.app:app",
             "--host", $ApiHost,
             "--port", "$ApiPort"
         ) `

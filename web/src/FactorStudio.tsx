@@ -2,30 +2,6 @@ import { useEffect, useState } from 'react'
 import { listFactorTemplates, type FactorTemplate } from './api'
 import type { FactorDraft } from './factorDraft'
 
-const FALLBACK_TEMPLATES: FactorTemplate[] = [
-  {
-    dependencies: ['close'],
-    expression: 'neg(return(close, 20))',
-    id: 'reversal_20d',
-    market: 'a_share',
-    name: '20 日反转',
-  },
-  {
-    dependencies: ['close'],
-    expression: 'return(close, 60)',
-    id: 'momentum_60d',
-    market: 'a_share',
-    name: '60 日动量',
-  },
-  {
-    dependencies: ['amount'],
-    expression: 'rank_cs(mean(amount, 20))',
-    id: 'liquidity_20d',
-    market: 'a_share',
-    name: '20 日流动性',
-  },
-]
-
 export function FactorStudio({
   draft,
   onDraftChange,
@@ -35,9 +11,9 @@ export function FactorStudio({
   onDraftChange: (draft: FactorDraft) => void
   onOpenPipeline: () => void
 }) {
-  const [templates, setTemplates] = useState(FALLBACK_TEMPLATES)
+  const [templates, setTemplates] = useState<FactorTemplate[]>([])
   const activeTemplate =
-    templates.find((template) => template.id === draft.templateId) ?? templates[0]
+    templates.find((template) => template.id === draft.templateId) ?? null
 
   useEffect(() => {
     let cancelled = false
@@ -48,7 +24,7 @@ export function FactorStudio({
         }
       })
       .catch(() => {
-        // Keep local templates when the API server is not running.
+        // API server 未运行时不伪造 registry 之外的模板。
       })
     return () => {
       cancelled = true
@@ -83,12 +59,14 @@ export function FactorStudio({
       <div className="studio-panel">
         <div className="form-section-title">
           <h3>因子模板</h3>
-          <p>内置 A 股因子草稿可直接修改，再进入流程配置。</p>
+          <p>后端 registry 返回的 A 股模板可直接修改，再进入流程配置。</p>
         </div>
         <div className="template-grid">
           {templates.map((template) => (
             <button
-              className={template.id === activeTemplate.id ? 'template active' : 'template'}
+              className={
+                template.id === activeTemplate?.id ? 'template active' : 'template'
+              }
               key={template.id}
               onClick={() => selectTemplate(template)}
               type="button"
@@ -115,7 +93,7 @@ export function FactorStudio({
         <div className="dependency-row" aria-label="依赖字段">
           {(draft.dependencies.length > 0
             ? draft.dependencies
-            : activeTemplate.dependencies ?? []
+            : activeTemplate?.dependencies ?? []
           ).map((dependency) => (
             <span key={dependency}>{dependency}</span>
           ))}
