@@ -64,4 +64,3 @@ def test_validate_panel_rejects_missing_or_non_numeric_research_columns() -> Non
         validate_panel(missing, spec)
     with pytest.raises(TypeError, match="must be numeric"):
         validate_panel(non_numeric, spec)
-

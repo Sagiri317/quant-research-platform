@@ -182,4 +182,3 @@ def _public_function_name(name: str) -> str:
     if name == _RETURN_INTERNAL_NAME:
         return "return"
     return name
-
