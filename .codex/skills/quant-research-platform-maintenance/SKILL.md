@@ -32,8 +32,10 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 | A-share private evaluation | `src/quant_research_platform/markets/implementations/a_share/evaluation/run_factor_evaluation.py`, `evaluation/evaluation_adapter.py` |
 | A-share Pipeline Builder API | `src/quant_research_platform/interfaces/api/routes/pipeline.py`, `interfaces/api/services/pipeline_service.py`, `src/quant_research_platform/pipelines/a_share/` |
 | Factor Factory schema `0.1` | `src/quant_research_platform/research/factor_factory/`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py` |
-| Frontend evidence workbench | `web/src/App.tsx`, `ResultsView.tsx`, `RunCharts.tsx`, `ArtifactDownloads.tsx`, `CsvBrowser.tsx`, `runEvidenceState.ts` |
-| Frontend creation surfaces | `web/src/CreateRunPanel.tsx`, `CreateRunGuide.tsx`, `FactorStudio.tsx`, `FactorFactoryRuns.tsx`, `PipelineBuilder.tsx`, `api.ts` |
+| Frontend shell | `web/src/shell/App.tsx`, `web/src/shell/App.test.tsx` |
+| Frontend evidence workbench | `web/src/features/evidence/ResultsView.tsx`, `web/src/features/evidence/RunCharts.tsx`, `web/src/features/evidence/ArtifactDownloads.tsx`, `web/src/features/evidence/CsvBrowser.tsx`, `web/src/features/evidence/runEvidenceState.ts`, `web/src/features/evidence/useRunEvidence.ts` |
+| Frontend creation surfaces | `web/src/features/uploads/`, `web/src/features/factor-studio/`, `web/src/features/factor-factory/`, `web/src/features/pipeline/`, `web/src/features/runs/` |
+| Frontend shared contracts | `web/src/shared/api/api.ts`, `web/src/shared/factorDraft.ts`, `web/src/shared/ui/components.tsx`, `web/src/shared/downloads.ts`, `web/src/shared/format.ts` |
 | Local scripts | `scripts/check_all.ps1`, `scripts/start_private_workbench.ps1`, `scripts/start_api_private_runs.ps1`, `scripts/start_web.ps1`, `scripts/stop_workbench.ps1`, `scripts/private_run_roots.ps1`, `scripts/playwright_cli_project.ps1`, `scripts/phase1_acceptance.py` |
 | Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/architecture/`, `docs/code-map/` |
 
@@ -47,6 +49,7 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 - Preserve API-visible evaluation run identity as `(source_alias, run_id)` across run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend route state.
 - Pipeline Builder defaults to snapshot creation through `POST /api/pipeline-snapshots`. Executable A-share pipeline requests use `POST /api/pipeline-runs` with `start_from`; every executable run continues through evaluation.
 - Factor Studio and Pipeline Builder must keep A-share enabled and crypto/other markets disabled or planned until real modules exist.
+- Frontend dependency direction is `shell -> features -> shared`; `web/src/shared/*` must not import from `features/*` or `shell/*`, and cross-feature imports should stay rare.
 - Generated runs under `reports/private_real/`, `reports/runs/`, and `reports/profiles/` are evidence, not authority docs. Regenerate stale runs instead of weakening loaders.
 
 ## Workflow

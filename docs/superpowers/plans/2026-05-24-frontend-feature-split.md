@@ -4,7 +4,7 @@
 
 **Goal:** Split the flat `web/src` React workbench into feature and shared folders without changing API contracts, visual hierarchy, or frontend business behavior.
 
-**Architecture:** Keep `App` as the composition boundary, move API/types/shared UI first, then move one feature at a time: evidence, pipeline, factor studio, factor factory, and uploads. Use relative imports inside each feature and avoid broad barrel imports that hide dependencies or increase bundle risk.
+**Architecture:** Keep the workbench shell as the composition boundary, move API/types/shared UI first, then move one feature at a time: evidence, pipeline, factor studio, factor factory, uploads, and runs. Use relative imports inside each feature and avoid broad barrel imports that hide dependencies or increase bundle risk.
 
 **Tech Stack:** React 19, TypeScript, Vite, Vitest, Testing Library, Recharts, Framer Motion, ESLint, PowerShell on Windows.
 
@@ -32,7 +32,7 @@ Do not:
 
 ```text
 web/src/
-  app/
+  shell/
     App.tsx
     App.test.tsx
   features/
@@ -62,7 +62,6 @@ web/src/
       PipelineBuilder.tsx
     factor-studio/
       FactorStudio.tsx
-      factorDraft.ts
     factor-factory/
       FactorFactoryRuns.tsx
     uploads/
@@ -71,17 +70,17 @@ web/src/
       CsvPreviewPanel.tsx
       CsvUploadField.tsx
       runForm.ts
+      useCreateRun.ts
     runs/
       Sidebar.tsx
       useDeleteRun.ts
       useRuns.ts
-    create-run/
-      useCreateRun.ts
   shared/
     api/
       api.ts
       api.test.ts
     downloads.ts
+    factorDraft.ts
     format.ts
     testFixtures.ts
     ui/
@@ -96,11 +95,13 @@ Rationale:
 
 - `features/evidence/` owns evidence state, charts, CSV preview, comparison, report view, and artifact download UI.
 - `features/pipeline/` owns Pipeline Builder and Data Checkpoints.
-- `features/factor-studio/` owns template editing and factor draft state.
+- `features/factor-studio/` owns template editing.
 - `features/factor-factory/` owns Factor Factory run browsing.
 - `features/uploads/` owns the development CSV upload flow.
 - `features/runs/` owns run list/sidebar/delete hooks.
+- `shell/` owns top-level workbench composition and view state. It is named `shell` instead of `app` to avoid confusion with future repo-level `apps/web` or framework-specific `src/app` routing.
 - `shared/api/` owns backend request types and fetch helpers.
+- `shared/factorDraft.ts` owns the factor draft state shared by Factor Studio and Pipeline Builder.
 - `shared/ui/` owns small reusable fields, metrics, chart panels, and tables.
 
 ## Preflight
@@ -207,7 +208,7 @@ Run:
 
 ```powershell
 Push-Location web
-npm test -- --run --maxWorkers=1 src/shared/api/api.test.ts src/App.test.tsx
+npm test -- --run --maxWorkers=1 src/shared/api/api.test.ts src/shell/App.test.tsx
 Pop-Location
 ```
 
@@ -227,7 +228,7 @@ git commit -m "refactor(web): move shared api utilities"
 **Files:**
 - Move evidence components and hooks listed in the target structure.
 - Move tests into `web/src/features/evidence/__tests__/`.
-- Modify imports in moved files and `web/src/app/App.tsx` after Task 3.
+- Modify imports in moved files and `web/src/shell/App.tsx` after Task 3.
 
 - [ ] **Step 1: Move evidence files**
 
@@ -308,21 +309,21 @@ git add web/src
 git commit -m "refactor(web): split evidence feature"
 ```
 
-## Task 3: Move App Composition
+## Task 3: Move Workbench Shell Composition
 
 **Files:**
-- Move: `web/src/App.tsx` -> `web/src/app/App.tsx`
-- Move: `web/src/App.test.tsx` -> `web/src/app/App.test.tsx`
+- Move: `web/src/App.tsx` -> `web/src/shell/App.tsx`
+- Move: `web/src/App.test.tsx` -> `web/src/shell/App.test.tsx`
 - Modify: `web/src/main.tsx`
 
-- [ ] **Step 1: Move app files**
+- [ ] **Step 1: Move shell files**
 
 Run:
 
 ```powershell
-New-Item -ItemType Directory -Force "web/src/app" | Out-Null
-git mv "web/src/App.tsx" "web/src/app/App.tsx"
-git mv "web/src/App.test.tsx" "web/src/app/App.test.tsx"
+New-Item -ItemType Directory -Force "web/src/shell" | Out-Null
+git mv "web/src/App.tsx" "web/src/shell/App.tsx"
+git mv "web/src/App.test.tsx" "web/src/shell/App.test.tsx"
 ```
 
 - [ ] **Step 2: Update `main.tsx`**
@@ -336,10 +337,10 @@ import App from './App.tsx'
 to:
 
 ```ts
-import App from './app/App.tsx'
+import App from './shell/App.tsx'
 ```
 
-- [ ] **Step 3: Update `app/App.tsx` imports**
+- [ ] **Step 3: Update `shell/App.tsx` imports**
 
 Apply these target imports:
 
@@ -354,9 +355,9 @@ import { Sidebar, type ViewMode } from '../features/runs/Sidebar'
 import {
   DEFAULT_FACTOR_DRAFT,
   type FactorDraft,
-} from '../features/factor-studio/factorDraft'
+} from '../shared/factorDraft'
 import { useArtifactDownloads } from '../features/evidence/useArtifactDownloads'
-import { useCreateRun } from '../features/create-run/useCreateRun'
+import { useCreateRun } from '../features/uploads/useCreateRun'
 import { useDeleteRun } from '../features/runs/useDeleteRun'
 import { useRunEvidence } from '../features/evidence/useRunEvidence'
 import { useRuns } from '../features/runs/useRuns'
@@ -370,7 +371,7 @@ Task 3 will temporarily fail until Tasks 4-7 move the remaining feature files. D
 - Move: `web/src/DataCheckpoints.tsx` -> `web/src/features/pipeline/DataCheckpoints.tsx`
 - Move: `web/src/PipelineBuilder.tsx` -> `web/src/features/pipeline/PipelineBuilder.tsx`
 - Move: `web/src/FactorStudio.tsx` -> `web/src/features/factor-studio/FactorStudio.tsx`
-- Move: `web/src/factorDraft.ts` -> `web/src/features/factor-studio/factorDraft.ts`
+- Move: `web/src/factorDraft.ts` -> `web/src/shared/factorDraft.ts`
 
 - [ ] **Step 1: Move pipeline and factor studio files**
 
@@ -381,7 +382,7 @@ New-Item -ItemType Directory -Force "web/src/features/pipeline","web/src/feature
 git mv "web/src/DataCheckpoints.tsx" "web/src/features/pipeline/DataCheckpoints.tsx"
 git mv "web/src/PipelineBuilder.tsx" "web/src/features/pipeline/PipelineBuilder.tsx"
 git mv "web/src/FactorStudio.tsx" "web/src/features/factor-studio/FactorStudio.tsx"
-git mv "web/src/factorDraft.ts" "web/src/features/factor-studio/factorDraft.ts"
+git mv "web/src/factorDraft.ts" "web/src/shared/factorDraft.ts"
 ```
 
 - [ ] **Step 2: Update imports**
@@ -391,11 +392,11 @@ Apply:
 ```text
 web/src/features/pipeline/PipelineBuilder.tsx:
   './api' -> '../../shared/api/api'
-  './factorDraft' -> '../factor-studio/factorDraft'
+  './factorDraft' -> '../../shared/factorDraft'
 
 web/src/features/factor-studio/FactorStudio.tsx:
   './api' -> '../../shared/api/api'
-  './factorDraft' -> './factorDraft'
+  './factorDraft' -> '../../shared/factorDraft'
 ```
 
 - [ ] **Step 3: Check imports**
@@ -403,7 +404,7 @@ web/src/features/factor-studio/FactorStudio.tsx:
 Run:
 
 ```powershell
-rg -n "from './api'|from './factorDraft'" web/src/features/pipeline web/src/features/factor-studio web/src/app
+rg -n "from './api'|from './factorDraft'|from '../factor-studio/factorDraft'" web/src/features/pipeline web/src/features/factor-studio web/src/shell
 ```
 
 Expected: no stale root-relative imports.
@@ -432,7 +433,7 @@ In `web/src/features/factor-factory/FactorFactoryRuns.tsx`, apply:
 
 - [ ] **Step 3: Keep Factor Factory behavior covered by App test**
 
-Do not extract new logic during this move. Existing `app/App.test.tsx` cases should still cover:
+Do not extract new logic during this move. Existing `shell/App.test.tsx` cases should still cover:
 
 ```text
 renders Factor Factory runs without leaking private filesystem paths
@@ -447,14 +448,14 @@ clears stale Factor Factory detail when switching to a failing run
 **Files:**
 - Move uploads files into `web/src/features/uploads/`
 - Move run list/delete files into `web/src/features/runs/`
-- Move create-run hook into `web/src/features/create-run/`
+- Move create-run hook into `web/src/features/uploads/`
 
 - [ ] **Step 1: Move upload files**
 
 Run:
 
 ```powershell
-New-Item -ItemType Directory -Force "web/src/features/uploads","web/src/features/runs","web/src/features/create-run" | Out-Null
+New-Item -ItemType Directory -Force "web/src/features/uploads","web/src/features/runs" | Out-Null
 git mv "web/src/CreateRunGuide.tsx" "web/src/features/uploads/CreateRunGuide.tsx"
 git mv "web/src/CreateRunPanel.tsx" "web/src/features/uploads/CreateRunPanel.tsx"
 git mv "web/src/CsvPreviewPanel.tsx" "web/src/features/uploads/CsvPreviewPanel.tsx"
@@ -463,7 +464,7 @@ git mv "web/src/runForm.ts" "web/src/features/uploads/runForm.ts"
 git mv "web/src/Sidebar.tsx" "web/src/features/runs/Sidebar.tsx"
 git mv "web/src/useDeleteRun.ts" "web/src/features/runs/useDeleteRun.ts"
 git mv "web/src/useRuns.ts" "web/src/features/runs/useRuns.ts"
-git mv "web/src/useCreateRun.ts" "web/src/features/create-run/useCreateRun.ts"
+git mv "web/src/useCreateRun.ts" "web/src/features/uploads/useCreateRun.ts"
 ```
 
 - [ ] **Step 2: Update upload imports**
@@ -507,13 +508,13 @@ web/src/features/runs/useRuns.ts:
   './api' -> '../../shared/api/api'
   './format' -> '../../shared/format'
 
-web/src/features/create-run/useCreateRun.ts:
+web/src/features/uploads/useCreateRun.ts:
   './api' -> '../../shared/api/api'
   './format' -> '../../shared/format'
-  './runForm' -> '../uploads/runForm'
+  './runForm' stays './runForm'
 ```
 
-- [ ] **Step 4: Update `app/App.tsx` upload import**
+- [ ] **Step 4: Update `shell/App.tsx` upload import**
 
 Add:
 
@@ -526,11 +527,11 @@ Remove any stale `CreateRunPanel` root import.
 ## Task 7: Repair Tests And Root Imports
 
 **Files:**
-- Modify: `web/src/app/App.test.tsx`
+- Modify: `web/src/shell/App.test.tsx`
 - Modify moved tests under `web/src/features/evidence/__tests__/`
 - Modify any stale imports found by search.
 
-- [ ] **Step 1: Update `app/App.test.tsx` imports**
+- [ ] **Step 1: Update `shell/App.test.tsx` imports**
 
 Apply:
 
@@ -636,7 +637,7 @@ Under N4 in `docs/architecture/next-stage-roadmap.md`, add:
 ```markdown
 Implementation note:
 
-- `web/src` is split into `app/`, `features/`, and `shared/` folders.
+- `web/src` is split into `shell/`, `features/`, and `shared/` folders.
 - Evidence, pipeline, factor studio, Factor Factory, uploads, runs, API, and shared UI keep the same contracts and behavior.
 ```
 

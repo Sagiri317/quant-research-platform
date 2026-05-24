@@ -15,7 +15,7 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 
 ### `factor_factory_run` schema `0.1`
 
-- Source files: `src/quant_research_platform/research/factor_factory/reports.py`, `batch_runner.py`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py`, `web/src/FactorFactoryRuns.tsx`, `web/src/api.ts`.
+- Source files: `src/quant_research_platform/research/factor_factory/reports.py`, `batch_runner.py`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py`, `web/src/features/factor-factory/FactorFactoryRuns.tsx`, `web/src/shared/api/api.ts`.
 - Writer emits `artifact_schema_version="0.1"` and `artifact_type="factor_factory_run"`.
 - API detail routes must reject wrong artifact types, wrong schema versions, missing/invalid `display`, unsafe paths, and stale manifests.
 - API and frontend should expose candidate summaries through `run_ref` and `manifest.display`, not raw private paths.
@@ -38,7 +38,8 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 - Display-manifest table paths cover top-level, metrics, portfolio, diagnostics, and breakdown tables; top-level tables such as `combinations.csv` must have a preview route.
 - Disabled or unavailable tabs reset to the first valid tab.
 - PnL and IC / RankIC remain primary evidence charts. Turnover, single-period return, and cost diagnostics stay subordinate or switchable.
-- `web/src/FactorStudio.tsx` and `web/src/PipelineBuilder.tsx` must keep A-share as the enabled market and crypto/other markets disabled or planned until real modules exist.
+- `web/src/features/factor-studio/FactorStudio.tsx` and `web/src/features/pipeline/PipelineBuilder.tsx` must keep A-share as the enabled market and crypto/other markets disabled or planned until real modules exist.
+- Frontend dependencies must follow `shell -> features -> shared`; `shared/*` must not import from `features/*` or `shell/*`.
 - Frontend creation surfaces should not imply deployment, trading, paper trading, or one-click full raw-data rebuilds.
 
 ## A-share Pipeline and Runtime Boundaries

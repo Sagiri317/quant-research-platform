@@ -214,20 +214,30 @@ Comparison 提供独立指标排名，不提供综合评分：
 
 | 文件 | 职责 |
 |---|---|
-| `web/src/App.tsx` | Workbench shell、view state、top-level layout。 |
-| `web/src/api.ts` | API types and request helpers。 |
-| `web/src/useRuns.ts` | run list fetch。 |
-| `web/src/useRunEvidence.ts` | evidence fetch。 |
-| `web/src/runEvidenceState.ts` | run/combination switching state helpers。 |
-| `web/src/ResultsView.tsx` | summary、tables、charts、report view composition。 |
-| `web/src/CsvBrowser.tsx` / `CsvPreviewPanel.tsx` | API table preview。 |
-| `web/src/RunCharts.tsx` | display-driven charts。 |
-| `web/src/ArtifactDownloads.tsx` | display-driven direct/ZIP downloads。 |
-| `web/src/RunComparison.tsx` | comparison UI。 |
-| `web/src/CreateRunPanel.tsx` | CSV upload local entry。 |
-| `web/src/FactorStudio.tsx` | factor expression draft。 |
-| `web/src/PipelineBuilder.tsx` | pipeline snapshot request UI。 |
-| `web/src/FactorFactoryRuns.tsx` | Factor Factory run browser。 |
+| `web/src/shell/App.tsx` | Workbench shell、view state、top-level layout。 |
+| `web/src/shared/api/api.ts` | API types and request helpers。 |
+| `web/src/features/runs/useRuns.ts` | run list fetch。 |
+| `web/src/features/evidence/useRunEvidence.ts` | evidence fetch。 |
+| `web/src/features/evidence/runEvidenceState.ts` | run/combination switching state helpers。 |
+| `web/src/features/evidence/ResultsView.tsx` | summary、tables、charts、report view composition。 |
+| `web/src/features/evidence/CsvBrowser.tsx` / `web/src/features/uploads/CsvPreviewPanel.tsx` | API table preview。 |
+| `web/src/features/evidence/RunCharts.tsx` | display-driven charts。 |
+| `web/src/features/evidence/ArtifactDownloads.tsx` | display-driven direct/ZIP downloads。 |
+| `web/src/features/evidence/RunComparison.tsx` | comparison UI。 |
+| `web/src/features/uploads/CreateRunPanel.tsx` | CSV upload local entry。 |
+| `web/src/features/factor-studio/FactorStudio.tsx` | factor expression draft。 |
+| `web/src/features/pipeline/PipelineBuilder.tsx` | pipeline snapshot request UI。 |
+| `web/src/features/factor-factory/FactorFactoryRuns.tsx` | Factor Factory run browser。 |
+| `web/src/shared/factorDraft.ts` | Factor Studio 和 Pipeline Builder 共享的 factor draft state type/default。 |
+
+前端结构：
+
+- `web/src/shell/` 只负责 workbench 组合、view mode 和跨 feature 协调。
+- `web/src/features/*/` 负责 feature-local UI、hooks、state helpers 和 tests。
+- `web/src/shared/*` 负责 API types/helpers、共享 feature state types、通用 UI、formatting、downloads 和 test fixtures。
+- 依赖方向是 `shell -> features -> shared`；`shared/*` 不反向依赖 feature 或 shell。
+- 跨 feature import 应保持少量；优先通过 shell 组合，或把真正共用的 helper 上移到 `shared/`。
+- 不急于增加 broad barrel exports；只有 feature public surface 稳定后才做有意筛选的 export。
 
 Frontend rules:
 

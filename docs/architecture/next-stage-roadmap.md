@@ -9,7 +9,7 @@
 | N1 | A 股 start-from pipeline runner | P0 | merged to `main` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
 | N2 | Eligibility / tradability 诊断可视化 | P0 | next | 让覆盖、过滤原因和影响进入 artifact/API/frontend |
 | N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
-| N4 | 前端 feature split | P1 | planned | 拆分当前平铺 workbench，降低后续功能耦合 |
+| N4 | 前端 feature split | P1 | implemented in worktree | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 
@@ -119,9 +119,13 @@ Implementation note:
 ```text
 web/src/features/evidence/
 web/src/features/pipeline/
+web/src/features/factor-studio/
 web/src/features/factor-factory/
 web/src/features/uploads/
-web/src/shared/
+web/src/features/runs/
+web/src/shell/
+web/src/shared/api/
+web/src/shared/ui/
 ```
 
 非目标：

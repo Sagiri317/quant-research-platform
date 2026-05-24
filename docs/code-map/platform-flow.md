@@ -103,12 +103,12 @@ Canonical implementation:
 | N09 | Artifact ZIP package | 已实现 | `src/quant_research_platform/artifacts/artifact_package.py` | display download items 的文件收集、校验和 ZIP item 打包规则 |
 | N10 | Run repository | 已实现 | `src/quant_research_platform/interfaces/api/services/run_repository.py` | API-visible run index，身份为 `(source_alias, run_id)` |
 | N11 | Evidence API | 已实现 | `src/quant_research_platform/interfaces/api/routes/` | runs, evidence, previews, downloads, comparison |
-| N12 | Pipeline Builder | 已实现 | `web/src/PipelineBuilder.tsx` | 当前提交 configuration snapshot |
+| N12 | Pipeline Builder | 已实现 | `web/src/features/pipeline/PipelineBuilder.tsx` | 当前提交 configuration snapshot |
 | N13 | Pipeline snapshots | 已实现 | `src/quant_research_platform/pipelines/a_share/snapshots.py` | 写 `run_config.yaml`、`warnings.json`、`summary.md` |
 | N14 | Factor template registry | 已实现 | `src/quant_research_platform/research/factor_factory/factor_registry.py` | 受控 factor templates |
 | N15 | Factor Factory batch runner | 已实现 | `src/quant_research_platform/research/factor_factory/batch_runner.py` | 通过 `run_a_share_pipeline(start_from="existing_factors")` 批量评估候选 |
 | N16 | Factor Factory API | 已实现 | `src/quant_research_platform/interfaces/api/routes/factor_factory.py` | 浏览 factory runs、tables 和 downloads |
-| N17 | React workbench | 已实现 | `web/src/App.tsx` | 本地 evidence workbench，消费 API 和 display contract |
+| N17 | React workbench | 已实现 | `web/src/shell/App.tsx` | 本地 evidence workbench，消费 API 和 display contract |
 | N18 | `qrp` CLI | 已实现 | `src/quant_research_platform/interfaces/cli/commands.py` | Typer 总入口，含 evaluation、comparison 和 A 股帮助入口 |
 
 ## HTTP API 清单
@@ -164,22 +164,21 @@ Canonical implementation:
 
 | 入口 | 状态 | 说明 |
 |---|---|---|
-| `web/src/App.tsx` | 已实现 | Workbench shell |
-| `web/src/ResultsView.tsx` | 已实现 | Runs、summary、tables、charts、report |
-| `web/src/ArtifactDownloads.tsx` | 已实现 | display-driven direct/ZIP download |
-| `web/src/FactorStudio.tsx` | 已实现 | 受控 factor draft |
-| `web/src/PipelineBuilder.tsx` | 已实现 | Configuration snapshot submission UI |
-| `web/src/FactorFactoryRuns.tsx` | 已实现 | Factor Factory run browser |
-| `web/src/CreateRunPanel.tsx` | 保留入口 | CSV upload local debug / compatibility |
+| `web/src/shell/App.tsx` | 已实现 | Workbench shell |
+| `web/src/features/evidence/ResultsView.tsx` | 已实现 | Runs、summary、tables、charts、report |
+| `web/src/features/evidence/ArtifactDownloads.tsx` | 已实现 | display-driven direct/ZIP download |
+| `web/src/features/factor-studio/FactorStudio.tsx` | 已实现 | 受控 factor draft |
+| `web/src/features/pipeline/PipelineBuilder.tsx` | 已实现 | Configuration snapshot submission UI |
+| `web/src/features/factor-factory/FactorFactoryRuns.tsx` | 已实现 | Factor Factory run browser |
+| `web/src/features/uploads/CreateRunPanel.tsx` | 保留入口 | CSV upload local debug / compatibility |
 
 ## Phase 1 后续架构债
 
 这些不是 Phase 1 清单内未完成项，而是 Phase 1 之后应单独设计的工作：
 
-1. 前端 feature split：当前 `web/src` 仍是平铺文件，后续可按 Evidence、Pipeline、Factor Factory、Uploads、shared 拆分。
-2. Eligibility / tradability 可见诊断：当前列进入 panel/factor/evaluation，后续应增加覆盖数和过滤影响 artifact。
-3. ML prediction / risk / regime / portfolio optimization：属于 research layer 后续能力，不是 Phase 1 阻塞项。
-4. Crypto 和其他市场：只能作为 planned / disabled 能力表述；不得保留空 implementation package。
+1. Eligibility / tradability 可见诊断：当前列进入 panel/factor/evaluation，后续应增加覆盖数和过滤影响 artifact。
+2. ML prediction / risk / regime / portfolio optimization：属于 research layer 后续能力，不是 Phase 1 阻塞项。
+3. Crypto 和其他市场：只能作为 planned / disabled 能力表述；不得保留空 implementation package。
 
 ## 自查结论
 

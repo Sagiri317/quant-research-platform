@@ -26,13 +26,13 @@
 |---|---|---|---|
 | `codex/a-share-build-runner` | N1 A 股 start-from runner | merged to `main` | snapshot/run split、`start_from` runner、完整 checkpoint 链和 Factor Factory existing-factors start layer 已落地 |
 | `codex/artifact-zip-packaging` | N3 ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py` |
+| `codex/frontend-feature-split` | N4 前端 feature split | complete in worktree | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
 
 ## 建议后续分支
 
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
 | `codex/tradability-artifacts` | N2 后端 artifact/API 诊断 | evaluation artifact display、A 股 adapter diagnostics、API preview/download tests、docs/code-map | 基于当前 `main`；消费 N1 runner 和 N3 packaging 边界 | 中。会改 artifact/display/API |
-| `codex/frontend-feature-split` | N4 前端 feature split | `web/src` 目录重组、frontend tests、code-map | 可先于 N2 frontend 做 | 中。会移动大量 frontend 文件 |
 | `codex/tradability-workbench` | N2 frontend 展示 | frontend evidence/workbench 展示新增 diagnostics | 依赖 `codex/tradability-artifacts`；最好基于 N4 后结构 | 中。会碰 frontend evidence state |
 | `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N2 诊断 artifact/display 模式稳定 | 中到高。需要先写详细计划 |
 | `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但不能混入 N2/N5 | 中到高。合同设计优先 |
@@ -44,17 +44,13 @@
    - 新增表必须通过 `manifest.display.tables` 和 downloads 暴露。
    - API preview、direct download、ZIP download 不得绕过 display contract。
 
-2. `codex/frontend-feature-split`
-   - 在继续给 workbench 加 diagnostics UI 前做更稳。
-   - 只移动和重组 frontend，不改变 API contract，不新增业务计算。
-
-3. `codex/tradability-workbench`
+2. `codex/tradability-workbench`
    - 消费 N2 后端 diagnostics artifact/API。
    - 前端只展示，不重新计算 eligibility、tradability、IC、PnL、positions 或 turnover。
 
-4. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
+3. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
    - 两者都应先写独立计划。
-   - 不建议和 N2/N4 同时抢同一批 artifact/API/frontend 文件。
+   - 不建议和 N2 frontend 同时抢同一批 artifact/API/frontend 文件。
 
 ## 不建议并行的组合
 

@@ -155,6 +155,16 @@ Platform evaluation contract:
 - `manifest.display` is the source of truth for API evidence, CSV preview, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
 - Do not create frontend-only or backend-only artifact shortcuts that bypass `manifest.display`.
 
+Frontend workbench structure:
+
+- `web/src/shell/` owns top-level React workbench composition, view mode, and cross-feature coordination.
+- `web/src/features/*/` owns feature-local UI, hooks, state helpers, and tests.
+- `web/src/shared/*` owns reusable API types/helpers, shared feature state types, UI primitives, formatting, downloads, and test fixtures.
+- Allowed dependency direction is `shell -> features -> shared`.
+- `web/src/shared/*` must not import from `features/*` or `shell/*`.
+- Cross-feature imports should stay rare; prefer shell composition or moving genuinely shared helpers into `shared/`.
+- Do not add broad barrel exports unless a feature has a stable public surface and the exports are intentionally curated.
+
 ## 6. Testing
 
 Run the narrowest relevant tests first.
