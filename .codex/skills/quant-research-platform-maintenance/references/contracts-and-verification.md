@@ -63,11 +63,14 @@ All local launch and verification helpers now live directly under `scripts/`:
 - `scripts/start_web.ps1`
 - `scripts/stop_workbench.ps1`
 - `scripts/private_run_roots.ps1`
+- `scripts/playwright_cli_project.ps1`
 - `scripts/phase1_acceptance.py`
 
 Do not document stale `scripts/local/` or `scripts/build/` command paths.
 
 `scripts/phase1_acceptance.py` is a private Phase 1 acceptance helper. Use it only when the task intentionally covers acceptance baseline renaming, 2024 acceptance run regeneration, compact comparison, or Factor Factory smoke under `reports/private_real/`. It is not a routine check for docs-only, source-only, or public-safe work.
+
+Use `scripts/playwright_cli_project.ps1` for Playwright CLI browser checks in this repository. It runs the global Codex Playwright wrapper from `.playwright-cli/`, keeping generated screenshots, traces, PDFs, videos, and binary response bodies under the ignored project-local Playwright workspace instead of creating top-level `output/`.
 
 ## Docs and Code-Map Drift Checks
 

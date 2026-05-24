@@ -34,7 +34,7 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 | Factor Factory schema `0.1` | `src/quant_research_platform/research/factor_factory/`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py` |
 | Frontend evidence workbench | `web/src/App.tsx`, `ResultsView.tsx`, `RunCharts.tsx`, `ArtifactDownloads.tsx`, `CsvBrowser.tsx`, `runEvidenceState.ts` |
 | Frontend creation surfaces | `web/src/CreateRunPanel.tsx`, `CreateRunGuide.tsx`, `FactorStudio.tsx`, `FactorFactoryRuns.tsx`, `PipelineBuilder.tsx`, `api.ts` |
-| Local scripts | `scripts/check_all.ps1`, `scripts/start_private_workbench.ps1`, `scripts/start_api_private_runs.ps1`, `scripts/start_web.ps1`, `scripts/stop_workbench.ps1`, `scripts/private_run_roots.ps1`, `scripts/phase1_acceptance.py` |
+| Local scripts | `scripts/check_all.ps1`, `scripts/start_private_workbench.ps1`, `scripts/start_api_private_runs.ps1`, `scripts/start_web.ps1`, `scripts/stop_workbench.ps1`, `scripts/private_run_roots.ps1`, `scripts/playwright_cli_project.ps1`, `scripts/phase1_acceptance.py` |
 | Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/architecture/`, `docs/code-map/` |
 
 ## Core Rules
@@ -76,7 +76,7 @@ git diff --check
 
 Use `scripts/phase1_acceptance.py` only for Phase 1 private acceptance tasks that intentionally touch `reports/private_real/`: `rename-baseline`, `run`, `compare`, or `factory-smoke`. It is not a routine unit-test substitute, and it should not be used for public-safe or source-only documentation checks.
 
-For frontend evidence-workbench changes, run browser acceptance only when the UI behavior changed. Start/stop local services with the flat `scripts/` PowerShell launchers, then list any logs, downloads, screenshots, or cache outputs before cleanup. Follow project deletion rules exactly.
+For frontend evidence-workbench changes, run browser acceptance only when the UI behavior changed. Start/stop local services with the flat `scripts/` PowerShell launchers. Use `scripts/playwright_cli_project.ps1` for Playwright CLI work in this repository so screenshots, traces, PDFs, videos, and binary response bodies land under ignored `.playwright-cli/` instead of a top-level `output/` directory. List any logs, downloads, screenshots, or cache outputs before cleanup. Follow project deletion rules exactly.
 
 ## Reference Loading
 
