@@ -147,6 +147,22 @@ Evaluation run 使用 artifact schema `0.5`。`manifest.display` 是 API、下�
 
 本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
 
+Phase 1 验收结论见 [docs/architecture/phase-1-acceptance-record.md](docs/architecture/phase-1-acceptance-record.md)。2026-05-23 已完成代码复核和测试验收；Phase 1 功能已补齐：
+
+- Factor Factory 本地 workbench 浏览入口；
+- A 股 existing-factors start layer 小样本示例和 old/new 比较；
+- Factor Factory 小样本示例。
+
+本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。当前 A 股 pipeline 对外合同是 snapshot vs run：snapshot 只保存配置，run 只用 `start_from` 决定开始层，并固定运行到 evaluation。当前 ZIP packaging 规则已下沉到 `artifacts/`；下一批优先级仍包括前端 feature split、eligibility / tradability 诊断可见化、risk/regime/cost/capacity 和 ML prediction handoff。
+
+新增或修改 artifacts 时必须同时检查：
+
+- writer / loader 是否仍只接受当前 schema；
+- `manifest.display.tables`、downloads、presets、charts 是否覆盖实际展示项；
+- API evidence、direct download、ZIP download 是否只暴露 display contract 中的条目；
+- 前端 run switching / combination switching 是否不会显示旧状态；
+- docs 和 code map 是否同步。
+
 ## 阅读顺序
 
 1. [PROJECT_STATUS.md](PROJECT_STATUS.md)

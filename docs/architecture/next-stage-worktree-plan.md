@@ -12,3 +12,5 @@ Current N1 contract:
 - Canonical runner: `src/quant_research_platform/pipelines/a_share/runner.py::run_a_share_pipeline`.
 
 Do not treat this file as the current implementation checklist.
+
+N3 Artifact ZIP packaging has already merged to `main`. N4 frontend feature split and N2 eligibility / tradability diagnostics remain separate follow-up workstreams. New work should use [next-stage-roadmap.md](next-stage-roadmap.md) as the planning source and keep external pipeline language to snapshot vs run plus `run.start_from`.

@@ -8,7 +8,7 @@
 |---|---|---:|---|---|
 | N1 | A 股 start-from pipeline runner | P0 | implemented in `codex/a-share-build-runner` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
 | N2 | Eligibility / tradability 诊断可视化 | P0 | next | 让覆盖、过滤原因和影响进入 artifact/API/frontend |
-| N3 | Artifact ZIP packaging 下沉 | P1 | planned | 把下载打包规则从 API service 下沉到 `artifacts/` |
+| N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
 | N4 | 前端 feature split | P1 | planned | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
@@ -43,6 +43,7 @@ rebuild_interim  -> build_interim -> build_panel -> build_factors -> evaluation
 验收边界：
 
 - 每一步有 checkpoint、status、duration；row count、warnings、blocking issues 在可取得时写入。
+- Checkpoints 展示完整链路，未执行层和失败后的后续层标为 `skipped`。
 - 失败后能读取最后状态并明确 failed step。
 - 默认不覆盖已有 run dir。
 - API 拒绝退休字段。
@@ -101,6 +102,11 @@ src/quant_research_platform/artifacts/artifact_package.py
 - ZIP cache identity 继续包含 `source_alias` 和 `run_id`。
 - `comparison.csv` 动态生成逻辑保持清晰边界。
 - API tests 不降覆盖。
+
+Implementation note:
+
+- Selected ZIP packaging rules now live in `src/quant_research_platform/artifacts/artifact_package.py`.
+- API download service remains responsible for HTTP responses and dynamic API-visible content such as `comparison.csv`.
 
 ## N4 前端 Feature Split
 

@@ -5,14 +5,15 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from quant_research_platform.artifacts import ARTIFACT_SCHEMA_VERSION
+from quant_research_platform.artifacts.artifact_package import (
+    ArtifactPackageError,
+    require_manifest_display_download_item,
+)
 from quant_research_platform.interfaces.api import payloads
 from quant_research_platform.interfaces.api.services.comparison_service import (
     comparison_index_frame,
 )
 from quant_research_platform.interfaces.api.services.context import api_context
-from quant_research_platform.interfaces.api.services.download_service import (
-    ensure_download_item_exposed,
-)
 from quant_research_platform.interfaces.api.services.run_repository import (
     delete_uploaded_run,
     discover_run_indexes,
@@ -50,8 +51,8 @@ def run_evidence(source_alias: str, run_id: str, request: Request) -> dict[str, 
 
     context = api_context(request)
     index_record = resolve_run_index_record(context.run_roots, source_alias, run_id)
-    ensure_download_item_exposed(index_record.manifest, "report.md")
-    ensure_download_item_exposed(index_record.manifest, "comparison.csv")
+    _require_manifest_display_download_item(index_record.manifest, "report.md")
+    _require_manifest_display_download_item(index_record.manifest, "comparison.csv")
     index_records = context.comparison_index_records(required_ref=index_record.ref)
     comparison_payload = (
         payloads.table_payload(comparison_index_frame(index_records))
@@ -224,6 +225,16 @@ def _display_exposes_table(
         isinstance(table, dict) and table.get("path") == expected_path
         for table in tables
     )
+
+
+def _require_manifest_display_download_item(
+    manifest: dict[str, object],
+    item: str,
+) -> None:
+    try:
+        require_manifest_display_download_item(manifest, item)
+    except ArtifactPackageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 __all__ = ["router"]

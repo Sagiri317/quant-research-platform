@@ -121,6 +121,7 @@ metrics_by_month/
 | `artifact_loader.py` | `LoadedEvaluationSet`, `load_evaluation_set` | 严格读取 completed run。 |
 | `artifact_inventory.py` | `index_evaluation_sets` | 离线 run inventory。 |
 | `artifact_comparison.py` | `compare_evaluation_sets`, `write_run_comparison` | 离线 run comparison。 |
+| `artifact_package.py` | `build_selected_artifact_zip`, `require_manifest_display_download_item`, `resolve_manifest_display_artifact_path` | manifest.display download gate、direct artifact path resolution、selected ZIP file collection、dynamic item handling、cache fingerprint、ZIP writing。 |
 
 明确不支持：
 
@@ -156,7 +157,7 @@ API 和 frontend 不允许绕过它访问隐式文件。
 |---|---|---|
 | `ApiContext` | `interfaces/api/services/context.py` | app state 中的 run roots、pipeline root、Factor Factory root 和 cache root resolver。 |
 | `run_repository.py` | `interfaces/api/services/run_repository.py` | run roots、run discovery、run index、loader wrapper、uploaded-run delete。 |
-| `download_service.py` | `interfaces/api/services/download_service.py` | direct download、report download、selected ZIP、cache path、download item validation。 |
+| `download_service.py` | `interfaces/api/services/download_service.py` | direct download、report download 和 selected ZIP 的 HTTP response adapter。 |
 | `comparison_service.py` | `interfaces/api/services/comparison_service.py` | API-visible comparison JSON/CSV。 |
 | `pipeline_service.py` | `interfaces/api/services/pipeline_service.py` | factor templates、pipeline snapshots、`start_from` pipeline run dispatch。 |
 | `upload_service.py` | `interfaces/api/services/upload_service.py` | CSV upload -> `EvaluationSpec` -> evaluation run。 |
@@ -194,6 +195,8 @@ Direct download 和 ZIP download 必须满足：
 - `comparison.csv` is generated dynamically from API-visible runs when requested。
 - unknown item is rejected before writing cache。
 - removed workbook `artifacts.xlsx` returns 404 / not exposed。
+
+ZIP packaging rules live in `artifacts/artifact_package.py`; API routes only parse requests, resolve API-visible dynamic items such as `comparison.csv`, and return HTTP responses.
 
 ## Comparison Contract
 

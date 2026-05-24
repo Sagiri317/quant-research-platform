@@ -144,7 +144,16 @@ def run_a_share_pipeline(
     ]
     evaluation_manifest_path: Path | None = None
 
-    for step in _steps_for_start_from(config.start_from):
+    all_steps = _all_steps()
+    start_index = _start_step_index(config.start_from)
+    checkpoints.extend(
+        _skipped_checkpoints(
+            all_steps[:start_index],
+            message=f"skipped by start_from={config.start_from}",
+        )
+    )
+
+    for step_index, step in enumerate(all_steps[start_index:], start=start_index):
         step_started = time.perf_counter()
         try:
             if step.key == "evaluate":
@@ -170,9 +179,16 @@ def run_a_share_pipeline(
                     key=step.key,
                     label=step.label,
                     status="failed",
+                    artifact=step.artifact,
                     message=message,
                     duration_seconds=_elapsed(step_started),
                     failure_code=failure_code,
+                )
+            )
+            checkpoints.extend(
+                _skipped_checkpoints(
+                    all_steps[step_index + 1 :],
+                    message=f"skipped after failed step={step.key}",
                 )
             )
             _write_runtime_summary(
@@ -252,8 +268,8 @@ def resolve_processed_factor_columns(config: PipelineConfig) -> tuple[str, ...]:
     )
 
 
-def _steps_for_start_from(start_from: str) -> tuple[_StepSpec, ...]:
-    steps = (
+def _all_steps() -> tuple[_StepSpec, ...]:
+    return (
         _StepSpec(
             key="build_interim",
             label="A-share interim build",
@@ -279,13 +295,33 @@ def _steps_for_start_from(start_from: str) -> tuple[_StepSpec, ...]:
             artifact="evaluation/evaluation_manifest.json",
         ),
     )
+
+
+def _start_step_index(start_from: str) -> int:
     start_index = {
         "rebuild_interim": 0,
         "rebuild_panel": 1,
         "rebuild_factors": 2,
         "existing_factors": 3,
     }[start_from]
-    return steps[start_index:]
+    return start_index
+
+
+def _skipped_checkpoints(
+    steps: tuple[_StepSpec, ...],
+    *,
+    message: str,
+) -> list[PipelineCheckpoint]:
+    return [
+        PipelineCheckpoint(
+            key=step.key,
+            label=step.label,
+            status="skipped",
+            artifact=step.artifact,
+            message=message,
+        )
+        for step in steps
+    ]
 
 
 def _validate_rebuild_outputs(

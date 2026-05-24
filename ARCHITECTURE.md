@@ -126,4 +126,23 @@ metrics_by_month/
 
 Phase 1 中 `interfaces/api` 是本地 FastAPI 适配层。未来 `apps/api` 是可部署 HTTP 应用装配层，两者职责不同，不在当前阶段创建或合并。
 
-后续仍需单独设计的架构债包括 frontend feature split、artifact ZIP packaging 下沉到 `artifacts/`、eligibility / tradability 诊断可视化、risk/regime/cost/capacity 扩展和 ML prediction handoff。
+平台边界：
+
+- API 是本地研究辅助，不是部署服务。
+- `POST /api/runs` 只从用户提供的本地输入构造 `EvaluationSpec`。
+- 删除接口只能按项目规则处理明确允许删除的本地 uploaded artifacts。
+- React frontend 只消费 API 返回的数据模型，不直接读本地文件，不重新计算 IC、RankIC、positions 或 turnover。
+- Factor/Pipeline Studio 只发起受控 pipeline 请求，不连接外部数据源或交易接口。
+- Factor Factory 前端浏览只展示 API / artifact 结果，不在前端重新计算 IC、PnL、positions 或 turnover。
+- 已完成 artifact ZIP packaging 下沉到 `artifacts/`。
+- 后续仍需单独处理的架构债包括 frontend feature split、eligibility / tradability 诊断可视化、risk/regime/cost/capacity 扩展和 ML prediction handoff。
+
+## Comparison
+
+Comparison table 只提供独立指标排名，不生成综合评分：
+
+- `rank_mean_ic`、`rank_mean_rankic`、`rank_mean_final_return`：数值越高排名越靠前。
+- `rank_mean_turnover`、`rank_total_cost`：数值越低排名越靠前。
+- 不提供 `overall_score`，避免把不同研究目标混成单一主观评价口径。
+
+上游调用方接入契约见 [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md)。

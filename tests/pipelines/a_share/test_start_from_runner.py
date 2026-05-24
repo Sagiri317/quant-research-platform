@@ -413,12 +413,14 @@ def test_pipeline_runner_starts_from_panel_and_runs_to_evaluation(
 
     assert [checkpoint.key for checkpoint in result.checkpoints] == [
         "snapshot",
+        "build_interim",
         "build_panel",
         "build_factors",
         "evaluate",
     ]
     assert [checkpoint.status for checkpoint in result.checkpoints] == [
         "ready",
+        "skipped",
         "ready",
         "ready",
         "ready",
@@ -540,5 +542,72 @@ def test_pipeline_runner_records_failed_step_without_private_error_text(
     assert summary["status"] == "failed"
     assert summary["failed_step"] == "build_panel"
     assert checkpoints[2]["status"] == "failed"
+    assert [checkpoint["key"] for checkpoint in checkpoints] == [
+        "snapshot",
+        "build_interim",
+        "build_panel",
+        "build_factors",
+        "evaluate",
+    ]
+    assert [checkpoint["status"] for checkpoint in checkpoints] == [
+        "ready",
+        "ready",
+        "failed",
+        "skipped",
+        "skipped",
+    ]
     assert "E:/private" not in json.dumps(summary)
     assert "vendor/path" not in json.dumps(checkpoints)
+
+
+def test_pipeline_runner_starts_from_existing_factors_with_full_checkpoint_chain(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = _full_config(tmp_path)
+    config.start_from = "existing_factors"
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "quant_research_platform.pipelines.a_share.runner."
+        "_run_build_interim_step",
+        lambda config: calls.append("build_interim"),
+    )
+    monkeypatch.setattr(
+        "quant_research_platform.pipelines.a_share.runner."
+        "_run_build_panel_step",
+        lambda config: calls.append("build_panel"),
+    )
+    monkeypatch.setattr(
+        "quant_research_platform.pipelines.a_share.runner."
+        "_run_build_factors_step",
+        lambda config: calls.append("build_factors"),
+    )
+    monkeypatch.setattr(
+        "quant_research_platform.pipelines.a_share.runner."
+        "_run_evaluate_step",
+        lambda config, run_dir: {
+            "row_count": 4,
+            "artifact": "evaluation/evaluation_manifest.json",
+            "evaluation_manifest_path": run_dir
+            / "evaluation/evaluation_manifest.json",
+        },
+    )
+
+    result = run_a_share_pipeline(config)
+
+    assert calls == []
+    assert [checkpoint.key for checkpoint in result.checkpoints] == [
+        "snapshot",
+        "build_interim",
+        "build_panel",
+        "build_factors",
+        "evaluate",
+    ]
+    assert [checkpoint.status for checkpoint in result.checkpoints] == [
+        "ready",
+        "skipped",
+        "skipped",
+        "skipped",
+        "ready",
+    ]

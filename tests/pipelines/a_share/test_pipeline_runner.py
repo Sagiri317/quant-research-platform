@@ -119,12 +119,25 @@ def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summar
     assert summary["status"] == "ready"
     assert summary["start_from"] == "existing_factors"
     assert summary["failed_step"] is None
-    assert summary["checkpoints"][1]["key"] == "evaluate"
-    assert summary["checkpoints"][1]["row_count"] == 10
+    assert [checkpoint["key"] for checkpoint in summary["checkpoints"]] == [
+        "snapshot",
+        "build_interim",
+        "build_panel",
+        "build_factors",
+        "evaluate",
+    ]
+    assert summary["checkpoints"][-1]["key"] == "evaluate"
+    assert summary["checkpoints"][-1]["row_count"] == 10
     checkpoints = json.loads(
         (result.run_dir / "checkpoints.json").read_text(encoding="utf-8")
     )
-    assert [checkpoint["status"] for checkpoint in checkpoints] == ["ready", "ready"]
+    assert [checkpoint["status"] for checkpoint in checkpoints] == [
+        "ready",
+        "skipped",
+        "skipped",
+        "skipped",
+        "ready",
+    ]
 
 
 def test_existing_factors_runner_does_not_overwrite_existing_run_dir(
@@ -183,11 +196,17 @@ def test_existing_factors_runner_records_failed_step(tmp_path, monkeypatch) -> N
     )
     assert summary["status"] == "failed"
     assert summary["failed_step"] == "evaluate"
-    assert summary["checkpoints"][1]["status"] == "failed"
+    assert [checkpoint["status"] for checkpoint in summary["checkpoints"]] == [
+        "ready",
+        "skipped",
+        "skipped",
+        "skipped",
+        "failed",
+    ]
     checkpoints = json.loads(
         (tmp_path / "sample_run" / "checkpoints.json").read_text(encoding="utf-8")
     )
-    assert checkpoints[1]["message"] == "pipeline evaluation failed"
+    assert checkpoints[-1]["message"] == "pipeline evaluation failed"
     assert "missing processed factor table" not in json.dumps(checkpoints)
 
 
@@ -220,7 +239,7 @@ def test_existing_factors_runner_records_sanitized_failure_code(
         (tmp_path / "sample_run" / "checkpoints.json").read_text(encoding="utf-8")
     )
     assert summary["failure_code"] == "missing_processed_field"
-    assert checkpoints[1]["failure_code"] == "missing_processed_field"
+    assert checkpoints[-1]["failure_code"] == "missing_processed_field"
     assert "private table" not in json.dumps(summary)
     assert "private table" not in json.dumps(checkpoints)
 
@@ -254,7 +273,10 @@ def test_existing_factors_runner_smoke_writes_schema_artifacts_and_index(
     )
 
     assert result.status == "ready"
-    assert result.checkpoints[1].row_count == 36
+    evaluate_checkpoint = next(
+        checkpoint for checkpoint in result.checkpoints if checkpoint.key == "evaluate"
+    )
+    assert evaluate_checkpoint.row_count == 36
     manifest = json.loads(result.evaluation_manifest_path.read_text(encoding="utf-8"))
     assert manifest["artifact_type"] == "a_share_pipeline_evaluation_manifest"
     assert manifest["schema_version"] == "0.1"
