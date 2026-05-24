@@ -8,7 +8,7 @@ import pytest
 from quant_research_platform.pipelines.a_share.config import PipelineConfig
 from quant_research_platform.pipelines.a_share.runner import PipelineRunnerError
 from quant_research_platform.research.factor_factory.batch_runner import (
-    evaluate_processed_existing_candidates,
+    evaluate_existing_factor_candidates,
 )
 from quant_research_platform.research.factor_factory.candidate import FactorCandidate
 
@@ -46,7 +46,7 @@ def _candidate(
         label_columns=("forward_return_1d", "forward_return_20d"),
         inputs=("close",),
         outputs=(output_column,) if output_column else (),
-        capabilities=("processed_existing", "evaluate"),
+        capabilities=("existing_factors", "evaluate"),
     )
 
 
@@ -58,7 +58,7 @@ def test_batch_runner_records_success_and_unmappable_candidate(
 
     calls: list[PipelineConfig] = []
 
-    def fake_run_processed_existing_pipeline(config):
+    def fake_run_a_share_pipeline(config):
         calls.append(config)
         run_dir = tmp_path / "runs" / config.run_id
         run_dir.mkdir(parents=True)
@@ -66,15 +66,15 @@ def test_batch_runner_records_success_and_unmappable_candidate(
 
     monkeypatch.setattr(
         runner_module,
-        "run_processed_existing_pipeline",
-        fake_run_processed_existing_pipeline,
+        "run_a_share_pipeline",
+        fake_run_a_share_pipeline,
     )
     candidates = (
         _candidate("reversal_20d@1", output_column="rev_20d"),
         _candidate("unmapped@1", output_column=None),
     )
 
-    records = evaluate_processed_existing_candidates(
+    records = evaluate_existing_factor_candidates(
         candidates,
         base_config=_base_config(tmp_path),
         output_dir=tmp_path,
@@ -92,6 +92,7 @@ def test_batch_runner_records_success_and_unmappable_candidate(
     assert calls[0].factor_expression == "neg(return(close, 20))"
     assert calls[0].factor_template_id == "reversal_20d"
     assert calls[0].processed_factor_column == "rev_20d"
+    assert calls[0].start_from == "existing_factors"
     assert calls[0].label_columns == ("forward_return_1d", "forward_return_20d")
 
     factory_run_dir = tmp_path / "factor_factory" / "factory_run_factory"
@@ -117,7 +118,7 @@ def test_batch_runner_records_success_and_unmappable_candidate(
     )
 
     with pytest.raises(FileExistsError):
-        evaluate_processed_existing_candidates(
+        evaluate_existing_factor_candidates(
             candidates,
             base_config=_base_config(tmp_path),
             output_dir=tmp_path,
@@ -132,7 +133,7 @@ def test_batch_runner_records_pipeline_failure_and_continues(
 
     calls: list[str] = []
 
-    def fake_run_processed_existing_pipeline(config):
+    def fake_run_a_share_pipeline(config):
         calls.append(config.run_id)
         if config.run_id.endswith("bad_1"):
             raise PipelineRunnerError("missing processed factor table")
@@ -144,8 +145,8 @@ def test_batch_runner_records_pipeline_failure_and_continues(
 
     monkeypatch.setattr(
         runner_module,
-        "run_processed_existing_pipeline",
-        fake_run_processed_existing_pipeline,
+        "run_a_share_pipeline",
+        fake_run_a_share_pipeline,
     )
     candidates = (
         _candidate("bad@1", output_column="bad_factor"),
@@ -153,7 +154,7 @@ def test_batch_runner_records_pipeline_failure_and_continues(
         _candidate("good@1", output_column="rev_20d"),
     )
 
-    records = evaluate_processed_existing_candidates(
+    records = evaluate_existing_factor_candidates(
         candidates,
         base_config=_base_config(tmp_path),
         output_dir=tmp_path,
@@ -173,19 +174,19 @@ def test_batch_runner_records_pipeline_failure_and_continues(
 def test_batch_runner_sanitizes_private_failure_reason(tmp_path, monkeypatch) -> None:
     import quant_research_platform.research.factor_factory.batch_runner as runner_module
 
-    def fake_run_processed_existing_pipeline(config):
+    def fake_run_a_share_pipeline(config):
         raise PipelineRunnerError(
             f"missing data/processed_private/csmar/{config.run_id}.parquet"
         )
 
     monkeypatch.setattr(
         runner_module,
-        "run_processed_existing_pipeline",
-        fake_run_processed_existing_pipeline,
+        "run_a_share_pipeline",
+        fake_run_a_share_pipeline,
     )
     candidates = (_candidate("bad@1", output_column="bad_factor"),)
 
-    evaluate_processed_existing_candidates(
+    evaluate_existing_factor_candidates(
         candidates,
         base_config=_base_config(tmp_path),
         output_dir=tmp_path,

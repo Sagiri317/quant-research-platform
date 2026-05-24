@@ -150,7 +150,7 @@ Platform evaluation contract:
 - Evaluation artifacts use schema `0.5`.
 - A-share full/private evaluation runs should use `python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`, not the generic `evaluate-parquet` CLI. Use `--start-year/--end-year` to locate the processed factor file and `--start-date/--end-date` for `trade_date` filtering.
 - Use generic `evaluate-parquet` only for external/local Parquet adapter checks or non-A-share inputs. Do not treat a temporary sliced Parquet plus `evaluate-parquet` as proof that the A-share adapter pipeline works.
-- The current frontend Pipeline Builder defaults to a configuration snapshot flow through `POST /api/pipeline-runs`; the backend also supports `execution_mode=processed_existing` as a lightweight runner over existing processed A-share factor data.
+- The current frontend Pipeline Builder defaults to a configuration snapshot flow through `POST /api/pipeline-snapshots`. Executable A-share pipeline requests use `POST /api/pipeline-runs` with `start_from` set to `existing_factors`, `rebuild_factors`, `rebuild_panel`, or `rebuild_interim`; every executable run continues through evaluation.
 - API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` in run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend routing.
 - `manifest.display` is the source of truth for API evidence, CSV preview, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
 - Do not create frontend-only or backend-only artifact shortcuts that bypass `manifest.display`.

@@ -1,36 +1,35 @@
 # Next Stage Roadmap / 下一阶段路线图
 
-本文把 Phase 1 之后的近期任务提上日程。它不是最终能力畅想；最终目标见 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)。本路线图只覆盖当前本地研究平台合理的下一阶段，不引入部署、外部 API、券商连接、paper trading、live trading 或实盘能力。
+本文记录 Phase 1 之后的近期任务。它不引入部署、外部 API、券商连接、paper trading、live trading 或实盘能力。最终能力边界见 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)。
 
 ## 优先级
 
-| ID | 任务 | 优先级 | 目标 |
-|---|---|---|---|
-| N1 | 完整 A 股 build runner | P0 | 把 raw/interim/panel/factors/evaluate 串成可恢复 pipeline |
-| N2 | Eligibility / tradability 诊断可见化 | P0 | 让过滤覆盖、不可交易原因和影响进入 artifact/API/frontend |
-| N3 | Artifact ZIP packaging 下沉 | P1 | 把下载打包规则从 API service 下沉到 `artifacts/` |
-| N4 | 前端 feature split | P1 | 拆分当前平铺 workbench，降低后续功能耦合 |
-| N5 | 风险、regime、成本和容量扩展 | P1 | 补研究诊断，形成正式研究扩展路径 |
-| N6 | ML prediction handoff | P2 | 建立 prediction output 到 evaluation 的可复现接口 |
+| ID | 任务 | 优先级 | 状态 | 目标 |
+|---|---|---:|---|---|
+| N1 | A 股 start-from pipeline runner | P0 | implemented in `codex/a-share-build-runner` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
+| N2 | Eligibility / tradability 诊断可视化 | P0 | next | 让覆盖、过滤原因和影响进入 artifact/API/frontend |
+| N3 | Artifact ZIP packaging 下沉 | P1 | planned | 把下载打包规则从 API service 下沉到 `artifacts/` |
+| N4 | 前端 feature split | P1 | planned | 拆分当前平铺 workbench，降低后续功能耦合 |
+| N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
+| N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 
-## N1 完整 A 股 Build Runner
+## N1 A 股 Start-From Pipeline Runner
 
-目标：
+当前实现：
 
-- 在 `pipelines/a_share/` 中新增完整 build/evaluate 编排。
-- 支持从已有 raw/interim 或已有 processed 中断点继续。
-- 保留当前 `processed_existing` 轻量 runner，不破坏 Phase 1 API。
+- Snapshot-only 入口：`POST /api/pipeline-snapshots`。
+- Executable run 入口：`POST /api/pipeline-runs`。
+- 公开执行参数：`start_from`。
+- 结束层固定为 evaluation，不提供 build-only 或 end-layer contract。
+- 统一 runner：`src/quant_research_platform/pipelines/a_share/runner.py::run_a_share_pipeline`。
 
-建议链路：
+执行链路：
 
 ```text
-PipelineConfig
--> build_interim optional
--> build_panel
--> build_factors
--> run_processed_factor_evaluation
--> write checkpoints
--> expose pipeline/evaluation manifests
+existing_factors -> evaluation
+rebuild_factors  -> build_factors -> evaluation
+rebuild_panel    -> build_panel -> build_factors -> evaluation
+rebuild_interim  -> build_interim -> build_panel -> build_factors -> evaluation
 ```
 
 非目标：
@@ -39,22 +38,25 @@ PipelineConfig
 - 不下载外部数据。
 - 不覆盖已有正式 private runs。
 - 不接交易、模拟盘或部署服务。
+- 不做多 factor payload；该能力后续单独设计。
 
-验收：
+验收边界：
 
-- 每一步有 checkpoint、status、duration、row count、warnings、blocking issues。
-- 失败后能读取最后状态并明确失败 step。
+- 每一步有 checkpoint、status、duration；row count、warnings、blocking issues 在可取得时写入。
+- 失败后能读取最后状态并明确 failed step。
 - 默认不覆盖已有 run dir。
-- 小样本 smoke 能从 fixture 或受控小样本走完整链路。
+- API 拒绝退休字段。
+- Factor Factory 通过 `existing_factors` start layer 调用统一 runner。
 
 建议测试：
 
 ```powershell
 $env:PYTHONPATH="src"
 conda run -n analysis python -m pytest -q tests/pipelines/a_share tests/markets/implementations/a_share
+conda run -n analysis python -m pytest -q tests/interfaces/api tests/research/factor_factory tests/scripts
 ```
 
-## N2 Eligibility / Tradability 诊断可见化
+## N2 Eligibility / Tradability 诊断可视化
 
 目标：
 
@@ -95,7 +97,7 @@ src/quant_research_platform/artifacts/artifact_package.py
 
 验收：
 
-- unknown item、unsafe path、missing display item 仍 fail fast。
+- unknown item、unsafe path、missing display item fail fast。
 - ZIP cache identity 继续包含 `source_alias` 和 `run_id`。
 - `comparison.csv` 动态生成逻辑保持清晰边界。
 - API tests 不降覆盖。
@@ -128,42 +130,18 @@ web/src/shared/
 - download picker 和 ZIP preset 仍来自 `manifest.display`。
 - Factor Factory browser 仍不暴露 private filesystem paths。
 
-建议测试：
-
-```powershell
-Push-Location web
-npm test -- --run --maxWorkers=1
-npm run lint
-npm run build
-Pop-Location
-```
-
 ## N5 风险、Regime、成本和容量扩展
 
 目标：
 
-- 在正式研究层补充风险暴露、regime 切片、成本敏感性和流动性/容量诊断。
+- 补充风险暴露、regime 切片、成本敏感性和流动性/容量诊断。
 - 形成后续研究报告所需的稳定诊断表。
-
-建议能力：
-
-- exposure summary by industry / market cap / liquidity。
-- cost grid。
-- turnover / participation / liquidity capacity summary。
-- regime slices。
-- benchmark / baseline comparison。
 
 非目标：
 
 - 不写成真实收益承诺。
 - 不进入交易风控或实盘控制。
 - 不把 regime 用未来收益定义。
-
-验收：
-
-- 所有新增表进入 artifact schema/display 设计。
-- 研究报告区分事实、诊断、候选结论和限制。
-- 诊断可由 API/frontend 展示，不绕过 artifact。
 
 ## N6 ML Prediction Handoff
 
@@ -172,42 +150,20 @@ Pop-Location
 - 建立模型输出到 evaluation 的稳定接口。
 - 让 prediction 像 factor 一样成为可评价输入，而不是在 evaluation layer 中训练模型。
 
-建议产物：
-
-```text
-prediction_<model_id>_<start>_<end>.parquet
-model_manifest.json
-prediction_evaluation/
-```
-
 最低字段：
 
-- model id / version。
-- feature set。
-- label definition。
-- train / validation / test split。
-- embargo / leakage controls。
-- data version。
-- code version。
-- random seed。
-- prediction column。
-
-非目标：
-
-- 不把完整 ML training pipeline 塞进 evaluations。
-- 不做线上推理服务。
-- 不做自动调参平台。
+- model id / version
+- feature set
+- label definition
+- train / validation / test split
+- embargo / leakage controls
+- data version
+- code version
+- random seed
+- prediction column
 
 验收：
 
 - prediction Parquet 可通过 `EvaluationSpec` 或 A 股 adapter-like handoff 进入 evaluation。
 - model manifest 可追踪训练数据、特征、label、split 和失败实验。
 - walk-forward 和 OOS 结果明确区分。
-
-## 近期建议顺序
-
-1. N1 + N2：先让 A 股完整 build runner 和 tradability 诊断闭环。
-2. N3：在下载功能继续扩展前先清理 artifact packaging 边界。
-3. N4：前端继续加功能前先拆 feature。
-4. N5：补正式研究诊断。
-5. N6：等研究诊断稳定后接 ML prediction handoff。

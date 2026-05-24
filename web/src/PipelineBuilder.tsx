@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
-  createPipelineRun,
-  getPipelineCheckpoints,
+  createPipelineSnapshot,
+  getPipelineSnapshotCheckpoints,
   type PipelineCheckpointSummary,
   type PipelineRunSummary,
 } from './api'
@@ -27,7 +27,7 @@ export function PipelineBuilder({
     setSubmitting(true)
     setError('')
     try {
-      const created = await createPipelineRun({
+      const created = await createPipelineSnapshot({
         cost_bps: Number(costBps),
         date_end: dateEnd,
         date_start: dateStart,
@@ -40,7 +40,9 @@ export function PipelineBuilder({
         run_id: runId,
       })
       setStatus(created)
-      setCheckpoints(await getPipelineCheckpoints(created.run_ref ?? created.run_id))
+      setCheckpoints(
+        await getPipelineSnapshotCheckpoints(created.run_ref ?? created.run_id),
+      )
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '流程快照生成失败')
     } finally {
@@ -78,49 +80,52 @@ export function PipelineBuilder({
       </div>
 
       <div className="studio-panel pipeline-form">
-        <label className="field-label" htmlFor="pipeline-run-id">
-          运行编号
+        <label className="pipeline-field" htmlFor="pipeline-run-id">
+          <span className="field-label">运行编号</span>
+          <input
+            id="pipeline-run-id"
+            onChange={(event) => setRunId(event.target.value)}
+            value={runId}
+          />
         </label>
-        <input
-          id="pipeline-run-id"
-          onChange={(event) => setRunId(event.target.value)}
-          value={runId}
-        />
-        <label className="field-label" htmlFor="date-start">
-          开始日期
+        <label className="pipeline-field" htmlFor="date-start">
+          <span className="field-label">开始日期</span>
+          <input
+            id="date-start"
+            onChange={(event) => setDateStart(event.target.value)}
+            value={dateStart}
+          />
         </label>
-        <input
-          id="date-start"
-          onChange={(event) => setDateStart(event.target.value)}
-          value={dateStart}
-        />
-        <label className="field-label" htmlFor="date-end">
-          结束日期
+        <label className="pipeline-field" htmlFor="date-end">
+          <span className="field-label">结束日期</span>
+          <input
+            id="date-end"
+            onChange={(event) => setDateEnd(event.target.value)}
+            value={dateEnd}
+          />
         </label>
-        <input
-          id="date-end"
-          onChange={(event) => setDateEnd(event.target.value)}
-          value={dateEnd}
-        />
-        <label className="field-label" htmlFor="cost-bps">
-          成本 bps
+        <label className="pipeline-field" htmlFor="cost-bps">
+          <span className="field-label">成本 bps</span>
+          <input
+            id="cost-bps"
+            onChange={(event) => setCostBps(event.target.value)}
+            value={costBps}
+          />
         </label>
-        <input
-          id="cost-bps"
-          onChange={(event) => setCostBps(event.target.value)}
-          value={costBps}
-        />
-        <label className="field-label" htmlFor="pipeline-factor-expression">
-          因子表达式
+        <label
+          className="pipeline-field pipeline-expression-field"
+          htmlFor="pipeline-factor-expression"
+        >
+          <span className="field-label">因子表达式</span>
+          <textarea
+            className="expression-editor compact"
+            id="pipeline-factor-expression"
+            onChange={(event) =>
+              onFactorDraftChange({ ...factorDraft, expression: event.target.value })
+            }
+            value={factorDraft.expression}
+          />
         </label>
-        <textarea
-          className="expression-editor compact"
-          id="pipeline-factor-expression"
-          onChange={(event) =>
-            onFactorDraftChange({ ...factorDraft, expression: event.target.value })
-          }
-          value={factorDraft.expression}
-        />
         <button disabled={submitting} onClick={handleSubmit} type="button">
           {submitting ? '正在生成快照...' : '生成快照'}
         </button>

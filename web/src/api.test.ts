@@ -6,8 +6,11 @@ import {
   fetchFactorFactoryTable,
   factorFactoryArtifactDownloadUrl,
   createPipelineRun,
-  getPipelineCheckpoints,
+  createPipelineSnapshot,
+  getPipelineRunCheckpoints,
   getPipelineRunStatus,
+  getPipelineSnapshotCheckpoints,
+  getPipelineSnapshotStatus,
   listFactorFactoryRuns,
   listFactorTemplates,
   listMarkets,
@@ -49,27 +52,29 @@ describe('api client', () => {
           ],
         } as Response)
       }
-      if (url.endsWith('/api/pipeline-runs') && init?.method === 'POST') {
+      if (url.endsWith('/api/pipeline-snapshots') && init?.method === 'POST') {
         return Promise.resolve({
           ok: true,
           json: async () => ({
+            kind: 'snapshot',
             run_id: 'a_share_reversal_smoke',
             run_ref: 'a_share_reversal_smoke_20260523',
             status: 'queued',
           }),
         } as Response)
       }
-      if (url.endsWith('/api/pipeline-runs/a_share_reversal_smoke')) {
+      if (url.endsWith('/api/pipeline-snapshots/a_share_reversal_smoke')) {
         return Promise.resolve({
           ok: true,
           json: async () => ({
+            kind: 'snapshot',
             run_id: 'a_share_reversal_smoke',
             run_ref: 'a_share_reversal_smoke_20260523',
             status: 'ready',
           }),
         } as Response)
       }
-      if (url.endsWith('/api/pipeline-runs/a_share_reversal_smoke/checkpoints')) {
+      if (url.endsWith('/api/pipeline-snapshots/a_share_reversal_smoke/checkpoints')) {
         return Promise.resolve({
           ok: true,
           json: async () => [
@@ -88,7 +93,7 @@ describe('api client', () => {
     await expect(listMarkets()).resolves.toHaveLength(2)
     await expect(listFactorTemplates('a_share')).resolves.toHaveLength(1)
     await expect(
-      createPipelineRun({
+      createPipelineSnapshot({
         cost_bps: 10,
         date_end: '2025-12-31',
         date_start: '2024-01-01',
@@ -100,15 +105,90 @@ describe('api client', () => {
         run_id: 'a_share_reversal_smoke',
       }),
     ).resolves.toMatchObject({
+      kind: 'snapshot',
       run_ref: 'a_share_reversal_smoke_20260523',
       status: 'queued',
     })
-    await expect(getPipelineRunStatus('a_share_reversal_smoke')).resolves.toMatchObject({
+    await expect(
+      getPipelineSnapshotStatus('a_share_reversal_smoke'),
+    ).resolves.toMatchObject({
+      kind: 'snapshot',
       status: 'ready',
     })
-    await expect(getPipelineCheckpoints('a_share_reversal_smoke')).resolves.toMatchObject([
+    await expect(
+      getPipelineSnapshotCheckpoints('a_share_reversal_smoke'),
+    ).resolves.toMatchObject([
       { artifact: 'run_config.yaml' },
     ])
+  })
+
+  test('pipeline run helpers use executable-run endpoints', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/pipeline-runs') && init?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            kind: 'run',
+            run_id: 'a_share_runner',
+            run_ref: 'a_share_runner',
+            status: 'ready',
+          }),
+        } as Response)
+      }
+      if (url.endsWith('/api/pipeline-runs/a_share_runner')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            kind: 'run',
+            run_id: 'a_share_runner',
+            status: 'ready',
+          }),
+        } as Response)
+      }
+      if (url.endsWith('/api/pipeline-runs/a_share_runner/checkpoints')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              key: 'evaluate',
+              label: 'A-share evaluation',
+              status: 'ready',
+              artifact: 'evaluation_manifest',
+            },
+          ],
+        } as Response)
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response)
+    }) as typeof fetch
+
+    await expect(
+      createPipelineRun({
+        cost_bps: 10,
+        date_end: '2025-12-31',
+        date_start: '2024-01-01',
+        factor_expression: 'rev_20d',
+        label_columns: ['forward_return_20d'],
+        market: 'a_share',
+        pnl_return_column: 'forward_return_1d',
+        portfolio_mode: 'long_only',
+        run_id: 'a_share_runner',
+        start_from: 'existing_factors',
+      }),
+    ).resolves.toMatchObject({
+      kind: 'run',
+      status: 'ready',
+    })
+    await expect(getPipelineRunStatus('a_share_runner')).resolves.toMatchObject({
+      kind: 'run',
+      status: 'ready',
+    })
+    await expect(getPipelineRunCheckpoints('a_share_runner')).resolves.toMatchObject([
+      { artifact: 'evaluation_manifest' },
+    ])
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/pipeline-runs/a_share_runner/checkpoints',
+    )
   })
 
   test('fetchRuns reads the run index from the backend', async () => {
@@ -388,7 +468,7 @@ describe('api client', () => {
       }),
     } as Response)
 
-    await expect(getPipelineRunStatus('bad')).rejects.toThrow(
+    await expect(getPipelineSnapshotStatus('bad')).rejects.toThrow(
       'invalid_factor_expression: unsupported expression',
     )
   })
@@ -408,7 +488,7 @@ describe('api client', () => {
       }),
     } as Response)
 
-    await expect(getPipelineRunStatus('bad')).rejects.toThrow(
+    await expect(getPipelineSnapshotStatus('bad')).rejects.toThrow(
       'body.run_id: Field required',
     )
   })

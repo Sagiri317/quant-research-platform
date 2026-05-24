@@ -16,7 +16,7 @@ from quant_research_platform.pipelines.a_share.pipeline_step_registry import (
 from quant_research_platform.pipelines.a_share.runner import (
     PipelineRunnerError,
     resolve_processed_factor_columns,
-    run_processed_existing_pipeline,
+    run_a_share_pipeline,
 )
 
 
@@ -38,10 +38,10 @@ def _valid_config(tmp_path) -> PipelineConfig:
     )
 
 
-def test_pipeline_step_registry_declares_processed_evaluation_step() -> None:
-    contract = get_pipeline_step_contract("processed_evaluation")
+def test_pipeline_step_registry_declares_evaluation_step() -> None:
+    contract = get_pipeline_step_contract("evaluate")
 
-    assert contract.name == "processed_evaluation"
+    assert contract.name == "evaluate"
     assert contract.version == "1"
     assert "PipelineConfig" in contract.inputs
     assert "processed_factor_table" in contract.inputs
@@ -49,7 +49,12 @@ def test_pipeline_step_registry_declares_processed_evaluation_step() -> None:
     assert "checkpoint" in contract.capabilities
 
 
-def test_processed_existing_runner_calls_a_share_adapter_and_writes_runtime_summary(
+def test_pipeline_step_registry_rejects_retired_processed_evaluation_step() -> None:
+    with pytest.raises(ValueError, match="unsupported pipeline step"):
+        get_pipeline_step_contract("processed_evaluation")
+
+
+def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summary(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -82,10 +87,11 @@ def test_processed_existing_runner_calls_a_share_adapter_and_writes_runtime_summ
     )
     processed_root = tmp_path / "processed"
     config = _valid_config(tmp_path)
+    config.start_from = "existing_factors"
+    config.processed_root = processed_root
 
-    result = run_processed_existing_pipeline(
+    result = run_a_share_pipeline(
         config,
-        processed_root=processed_root,
         n_groups=3,
     )
 
@@ -111,9 +117,9 @@ def test_processed_existing_runner_calls_a_share_adapter_and_writes_runtime_summ
     assert calls[0]["source_alias"] == "pipeline"
     summary = json.loads(result.runtime_summary_path.read_text(encoding="utf-8"))
     assert summary["status"] == "ready"
-    assert summary["execution_mode"] == "processed_existing"
+    assert summary["start_from"] == "existing_factors"
     assert summary["failed_step"] is None
-    assert summary["checkpoints"][1]["key"] == "processed_evaluation"
+    assert summary["checkpoints"][1]["key"] == "evaluate"
     assert summary["checkpoints"][1]["row_count"] == 10
     checkpoints = json.loads(
         (result.run_dir / "checkpoints.json").read_text(encoding="utf-8")
@@ -121,7 +127,7 @@ def test_processed_existing_runner_calls_a_share_adapter_and_writes_runtime_summ
     assert [checkpoint["status"] for checkpoint in checkpoints] == ["ready", "ready"]
 
 
-def test_processed_existing_runner_does_not_overwrite_existing_run_dir(
+def test_existing_factors_runner_does_not_overwrite_existing_run_dir(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -140,18 +146,20 @@ def test_processed_existing_runner_does_not_overwrite_existing_run_dir(
         fake_run_processed_factor_evaluation,
     )
     config = _valid_config(tmp_path)
+    config.start_from = "existing_factors"
+    config.processed_root = tmp_path
     existing = tmp_path / "sample_run"
     existing.mkdir()
     (existing / "keep.txt").write_text("keep", encoding="utf-8")
 
-    result = run_processed_existing_pipeline(config, processed_root=tmp_path)
+    result = run_a_share_pipeline(config)
 
     assert result.run_dir != existing
     assert result.run_dir.name.startswith("sample_run_")
     assert (existing / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
-def test_processed_existing_runner_records_failed_step(tmp_path, monkeypatch) -> None:
+def test_existing_factors_runner_records_failed_step(tmp_path, monkeypatch) -> None:
     import quant_research_platform.pipelines.a_share.runner as runner_module
 
     def fail_run_processed_factor_evaluation(**_kwargs):
@@ -163,26 +171,27 @@ def test_processed_existing_runner_records_failed_step(tmp_path, monkeypatch) ->
         fail_run_processed_factor_evaluation,
     )
 
-    with pytest.raises(PipelineRunnerError, match="processed evaluation failed"):
-        run_processed_existing_pipeline(
-            _valid_config(tmp_path),
-            processed_root=tmp_path,
-        )
+    config = _valid_config(tmp_path)
+    config.start_from = "existing_factors"
+    config.processed_root = tmp_path
+
+    with pytest.raises(PipelineRunnerError, match="pipeline evaluation failed"):
+        run_a_share_pipeline(config)
 
     summary = json.loads(
         (tmp_path / "sample_run" / "runtime_summary.json").read_text(encoding="utf-8")
     )
     assert summary["status"] == "failed"
-    assert summary["failed_step"] == "processed_evaluation"
+    assert summary["failed_step"] == "evaluate"
     assert summary["checkpoints"][1]["status"] == "failed"
     checkpoints = json.loads(
         (tmp_path / "sample_run" / "checkpoints.json").read_text(encoding="utf-8")
     )
-    assert checkpoints[1]["message"] == "processed evaluation failed"
+    assert checkpoints[1]["message"] == "pipeline evaluation failed"
     assert "missing processed factor table" not in json.dumps(checkpoints)
 
 
-def test_processed_existing_runner_records_sanitized_failure_code(
+def test_existing_factors_runner_records_sanitized_failure_code(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -197,11 +206,12 @@ def test_processed_existing_runner_records_sanitized_failure_code(
         fail_run_processed_factor_evaluation,
     )
 
+    config = _valid_config(tmp_path)
+    config.start_from = "existing_factors"
+    config.processed_root = tmp_path
+
     with pytest.raises(PipelineRunnerError, match="missing_processed_field"):
-        run_processed_existing_pipeline(
-            _valid_config(tmp_path),
-            processed_root=tmp_path,
-        )
+        run_a_share_pipeline(config)
 
     summary = json.loads(
         (tmp_path / "sample_run" / "runtime_summary.json").read_text(encoding="utf-8")
@@ -215,7 +225,7 @@ def test_processed_existing_runner_records_sanitized_failure_code(
     assert "private table" not in json.dumps(checkpoints)
 
 
-def test_processed_existing_runner_smoke_writes_schema_artifacts_and_index(
+def test_existing_factors_runner_smoke_writes_schema_artifacts_and_index(
     tmp_path,
 ) -> None:
     processed_root = tmp_path / "processed"
@@ -234,11 +244,12 @@ def test_processed_existing_runner_smoke_writes_schema_artifacts_and_index(
         label_columns=("forward_return_1d",),
         engine="dataframe",
         output_root=output_root,
+        processed_root=processed_root,
+        start_from="existing_factors",
     )
 
-    result = run_processed_existing_pipeline(
+    result = run_a_share_pipeline(
         config,
-        processed_root=processed_root,
         n_groups=2,
     )
 
@@ -256,7 +267,7 @@ def test_processed_existing_runner_smoke_writes_schema_artifacts_and_index(
     ]
 
 
-def test_processed_existing_factor_resolution_requires_known_template_or_column(
+def test_existing_factor_resolution_requires_known_template_or_column(
     tmp_path,
 ) -> None:
     config = _valid_config(tmp_path)
@@ -267,15 +278,17 @@ def test_processed_existing_factor_resolution_requires_known_template_or_column(
     assert resolve_processed_factor_columns(config) == ("custom_factor_1",)
 
     config.factor_expression = "neg(return(close, 20))"
-    with pytest.raises(PipelineRunnerError, match="processed_existing mode"):
+    with pytest.raises(PipelineRunnerError, match="existing factor"):
         resolve_processed_factor_columns(config)
 
 
-def test_processed_existing_runner_allows_existing_column_expression(
+def test_existing_factors_runner_allows_existing_column_expression(
     tmp_path,
     monkeypatch,
 ) -> None:
     config = _valid_config(tmp_path)
+    config.start_from = "existing_factors"
+    config.processed_root = tmp_path
     config.factor_template_id = "custom"
     config.factor_template_source = None
     config.factor_expression = "custom_factor_1"
@@ -294,7 +307,7 @@ def test_processed_existing_runner_allows_existing_column_expression(
         fake_run_processed_factor_evaluation,
     )
 
-    result = run_processed_existing_pipeline(config, processed_root=tmp_path)
+    result = run_a_share_pipeline(config)
 
     run_config = (result.run_dir / "run_config.yaml").read_text(encoding="utf-8")
     assert result.status == "ready"

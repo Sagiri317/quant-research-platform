@@ -47,8 +47,9 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 - A-share private evaluation should use `python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`.
 - Use `--start-year/--end-year` to locate processed factor files and `--start-date/--end-date` for `trade_date` row filtering.
 - Generic `evaluate-parquet` is only for evaluation-layer, adapter, or non-A-share local Parquet checks. It is not proof that the A-share adapter selected the right coverage file, date-filtered correctly, wrote label availability summaries, or preserved private run metadata.
-- `POST /api/pipeline-runs` defaults to `execution_mode="snapshot"` and writes `run_config.yaml`, `warnings.json`, and `summary.md`.
-- Backend `execution_mode="processed_existing"` calls the lightweight runner in `src/quant_research_platform/pipelines/a_share/runner.py` over existing processed factor tables. It may produce runner checkpoints, runtime summary, and evaluation manifest, but it is not full raw/interim/processed rebuild orchestration.
+- `POST /api/pipeline-snapshots` writes configuration snapshots only: `run_config.yaml`, `warnings.json`, and `summary.md`.
+- `POST /api/pipeline-runs` executes the A-share pipeline with `start_from`. Supported start layers are `existing_factors`, `rebuild_factors`, `rebuild_panel`, and `rebuild_interim`; every executable run continues through evaluation.
+- The canonical executable runner is `src/quant_research_platform/pipelines/a_share/runner.py::run_a_share_pipeline`.
 
 ## Local Scripts
 
@@ -86,7 +87,7 @@ Useful surfaces:
 - API and downloads: run list, run evidence, table preview, direct CSV download, selected ZIP download, all-items ZIP download, comparison download, unknown items, unsafe paths, and cache behavior;
 - uploaded-run deletion: positive uploaded-panel cleanup plus negative generated/private/missing-manifest/unknown-root/unsafe-run/out-of-root cases;
 - frontend state: run identity matching, first valid combination, combination filtering, disabled tab correction, display-driven table specs, chart range readouts, chart empty states, and selected artifact URLs;
-- create-run and pipeline flow: required columns, `pnl_return_column`, engine selection, `execution_mode`, time breakdowns, and user-facing validation messages;
+- create-run and pipeline flow: required columns, `pnl_return_column`, engine selection, `start_from`, retired-field rejection, time breakdowns, and user-facing validation messages;
 - Factor Factory: schema `0.1`, `factor_factory_run` API validation, distinct run directories, sanitized reports, and frontend listing/detail behavior.
 
 ## Browser Acceptance

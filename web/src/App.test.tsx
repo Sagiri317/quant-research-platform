@@ -228,7 +228,9 @@ describe('App', () => {
     render(<FactorFactoryRuns />)
 
     expect(await screen.findByRole('heading', { name: 'factory_preview_error' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Candidate summary CSV' })).toHaveAttribute(
+    expect(
+      await screen.findByRole('link', { name: 'Candidate summary CSV' }),
+    ).toHaveAttribute(
       'href',
       'http://127.0.0.1:8000/api/factor-factory-runs/factory_preview_error/artifacts/candidate_summary.csv',
     )
@@ -515,9 +517,10 @@ describe('App', () => {
       if (url.endsWith('/api/factor-templates?market=a_share')) {
         return jsonResponse([])
       }
-      if (url.endsWith('/api/pipeline-runs') && init?.method === 'POST') {
+      if (url.endsWith('/api/pipeline-snapshots') && init?.method === 'POST') {
         pipelineRequest = JSON.parse(String(init.body))
         return jsonResponse({
+          kind: 'snapshot',
           run_id: pipelineRequest?.run_id,
           run_ref: 'a_share_reversal_smoke_20260523',
           status: 'ready',
@@ -525,7 +528,7 @@ describe('App', () => {
       }
       if (
         url.endsWith(
-          '/api/pipeline-runs/a_share_reversal_smoke_20260523/checkpoints',
+          '/api/pipeline-snapshots/a_share_reversal_smoke_20260523/checkpoints',
         )
       ) {
         return jsonResponse([])

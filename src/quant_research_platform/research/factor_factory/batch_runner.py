@@ -1,4 +1,4 @@
-"""批量评估 Phase 1 A 股 processed-existing factor candidates。"""
+"""Batch-evaluate A-share factor candidates from existing factor tables."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from quant_research_platform.pipelines.a_share.config import PipelineConfig
 from quant_research_platform.pipelines.a_share.runner import (
     PipelineRunnerError,
-    run_processed_existing_pipeline,
+    run_a_share_pipeline,
 )
 from quant_research_platform.research.factor_factory.candidate import (
     CandidateEvaluationRecord,
@@ -19,13 +19,13 @@ from quant_research_platform.research.factor_factory.reports import (
 )
 
 
-def evaluate_processed_existing_candidates(
+def evaluate_existing_factor_candidates(
     candidates: tuple[FactorCandidate, ...],
     *,
     base_config: PipelineConfig,
     output_dir: str | Path,
 ) -> tuple[CandidateEvaluationRecord, ...]:
-    """逐个评估 candidates，一个失败不影响其他 candidate。"""
+    """Evaluate candidates independently; one failure does not stop the batch."""
 
     records: list[CandidateEvaluationRecord] = []
     for candidate in candidates:
@@ -38,6 +38,7 @@ def evaluate_processed_existing_candidates(
             factor_template_id=candidate.candidate_id.split("@", 1)[0],
             processed_factor_column=candidate.output_column,
             label_columns=candidate.label_columns,
+            start_from="existing_factors",
             output_root=Path(output_dir),
         )
         if candidate.output_column is None:
@@ -53,7 +54,7 @@ def evaluate_processed_existing_candidates(
             )
             continue
         try:
-            result = run_processed_existing_pipeline(config)
+            result = run_a_share_pipeline(config)
         except PipelineRunnerError as exc:
             records.append(
                 _failed_record(
@@ -146,4 +147,4 @@ def _pipeline_failure_code(exc: PipelineRunnerError) -> str:
     return "cannot_compute"
 
 
-__all__ = ["evaluate_processed_existing_candidates"]
+__all__ = ["evaluate_existing_factor_candidates"]

@@ -140,7 +140,7 @@ def test_factory_smoke_output_root_is_private_reports(monkeypatch, tmp_path):
         type(
             "FakeBatchRunnerModule",
             (),
-            {"evaluate_processed_existing_candidates": fake_evaluate},
+            {"evaluate_existing_factor_candidates": fake_evaluate},
         ),
     )
 

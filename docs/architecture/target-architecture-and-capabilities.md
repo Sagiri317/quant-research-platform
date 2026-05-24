@@ -430,7 +430,7 @@ compliance                                           # 许可、发布、免责�
 
 ## Capability Priority / 能力优先级
 
-本节使用 `C0-C8` 表示长期能力池优先级。当前 Phase 1 已完成 C0 大部分和 C1 第一版，C2 已完成 processed-existing 轻量模式但还没有完整 raw/interim/panel/factors build runner。
+本节使用 `C0-C8` 表示长期能力池优先级。当前 Phase 1 已完成 C0 大部分和 C1 第一版；C2 的 `start_from` runner 属于 Phase 1 后 N1 工作，在 `codex/a-share-build-runner` 中实现从已有 factors 或 raw/interim/panel/factors 任一构建层开始，并固定运行到 evaluation。
 
 ### C0: 合同和模块边界
 

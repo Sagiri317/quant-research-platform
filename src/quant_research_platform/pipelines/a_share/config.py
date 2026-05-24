@@ -14,10 +14,19 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 )
 
 IssueSeverity = Literal["blocking", "warning"]
+PipelineStartFrom = Literal[
+    "existing_factors",
+    "rebuild_factors",
+    "rebuild_panel",
+    "rebuild_interim",
+]
 
 SUPPORTED_MARKETS = frozenset({"a_share"})
 SUPPORTED_PORTFOLIO_MODES = frozenset({"long_only", "long_short"})
 SUPPORTED_ENGINES = frozenset(supported_engine_names())
+SUPPORTED_START_FROM = frozenset(
+    {"existing_factors", "rebuild_factors", "rebuild_panel", "rebuild_interim"}
+)
 DEFAULT_OUTPUT_ROOT = Path("reports/private_real/pipeline_runs")
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 COLUMN_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -56,6 +65,13 @@ class PipelineConfig:
     label_columns: tuple[str, ...]
     engine: str = "dataframe"
     output_root: Path = DEFAULT_OUTPUT_ROOT
+    raw_root: Path = Path("data/raw_private/csmar")
+    interim_root: Path = Path("data/interim_private/csmar")
+    processed_root: Path = Path("data/processed_private/csmar")
+    start_from: PipelineStartFrom = "existing_factors"
+    min_listing_trading_days: int = 120
+    factor_windows: tuple[int, ...] = (20, 60, 120)
+    label_horizons: tuple[int, ...] = (1, 5, 10, 20, 60, 120)
     factor_template_source: str | None = None
     processed_factor_column: str | None = None
     diagnostics: tuple[str, ...] = ()
@@ -66,7 +82,18 @@ class PipelineConfig:
         payload["output_root"] = Path(
             payload.get("output_root", DEFAULT_OUTPUT_ROOT)
         )
+        payload["raw_root"] = Path(payload.get("raw_root", "data/raw_private/csmar"))
+        payload["interim_root"] = Path(
+            payload.get("interim_root", "data/interim_private/csmar")
+        )
+        payload["processed_root"] = Path(
+            payload.get("processed_root", "data/processed_private/csmar")
+        )
         payload["label_columns"] = tuple(payload.get("label_columns", ()))
+        payload["factor_windows"] = tuple(payload.get("factor_windows", (20, 60, 120)))
+        payload["label_horizons"] = tuple(
+            payload.get("label_horizons", (1, 5, 10, 20, 60, 120))
+        )
         payload["diagnostics"] = tuple(payload.get("diagnostics", ()))
         return cls(**payload)
 
@@ -80,8 +107,13 @@ class PipelineConfig:
             self.factor_expression,
             allow_processed_column=allow_processed_factor_expression,
         )
-        payload["output_root"] = self.output_root.as_posix()
+        payload.pop("output_root", None)
+        payload.pop("raw_root", None)
+        payload.pop("interim_root", None)
+        payload.pop("processed_root", None)
         payload["label_columns"] = list(self.label_columns)
+        payload["factor_windows"] = list(self.factor_windows)
+        payload["label_horizons"] = list(self.label_horizons)
         payload["diagnostics"] = list(self.diagnostics)
         payload["expression_dependencies"] = sorted(expression.dependencies)
         payload["parsed_expression"] = expression.parsed
@@ -170,6 +202,16 @@ def validate_pipeline_config(
                     )
                 )
 
+    if config.start_from not in SUPPORTED_START_FROM:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="unsupported_start_from",
+                message=f"unsupported start_from: {config.start_from}",
+                field="start_from",
+            )
+        )
+
     if config.processed_factor_column is not None and not COLUMN_NAME_PATTERN.fullmatch(
         config.processed_factor_column
     ):
@@ -212,6 +254,36 @@ def validate_pipeline_config(
                 code="negative_cost_bps",
                 message="cost_bps must be nonnegative",
                 field="cost_bps",
+            )
+        )
+    if (
+        not _is_plain_int(config.min_listing_trading_days)
+        or config.min_listing_trading_days < 0
+    ):
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="negative_min_listing_trading_days",
+                message="min_listing_trading_days must be nonnegative",
+                field="min_listing_trading_days",
+            )
+        )
+    if not _is_positive_int_tuple(config.factor_windows):
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="invalid_factor_windows",
+                message="factor_windows must contain positive integers",
+                field="factor_windows",
+            )
+        )
+    if not _is_positive_int_tuple(config.label_horizons):
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="invalid_label_horizons",
+                message="label_horizons must contain positive integers",
+                field="label_horizons",
             )
         )
 
@@ -284,6 +356,16 @@ def validate_pipeline_config(
         )
 
     return result
+
+
+def _is_plain_int(value: Any) -> bool:
+    return type(value) is int
+
+
+def _is_positive_int_tuple(values: Any) -> bool:
+    if not values:
+        return False
+    return all(_is_plain_int(value) and value > 0 for value in values)
 
 
 def _parse_factor_expression_or_column(

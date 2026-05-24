@@ -36,7 +36,7 @@ def test_factor_template_registry_loads_controlled_a_share_templates() -> None:
     assert reversal.sample_start == "2024-01-01"
     assert reversal.sample_end == "2024-12-31"
     assert reversal.label_columns == ("forward_return_1d",)
-    assert "processed_existing" in reversal.capabilities
+    assert "existing_factors" in reversal.capabilities
     assert "evaluate" in reversal.capabilities
     assert "parameter_grid" in reversal.capabilities
     templates = registry.templates()

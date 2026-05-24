@@ -13,9 +13,9 @@
 
 | 文档 | 用途 |
 |---|---|
-| [platform-flow.md](platform-flow.md) | 当前平台全局地图；包含 Phase 1 已实现链路、节点说明、边说明、API/CLI/前端入口和 Phase 1 后续架构债 |
-| [platform-flow-interactive.html](platform-flow-interactive.html) | 与 `platform-flow.md` 同步的可浏览交互图；支持按分组筛选节点、查看节点和边说明 |
-| [a-share-data-and-pipeline.md](a-share-data-and-pipeline.md) | A 股 CSMAR raw/interim/panel/factor/processed-existing pipeline、Factor Factory 和 validation/runtime 的代码地图 |
+| [platform-flow.md](platform-flow.md) | 当前平台全局概览；用少量节点描述主链路、入口和边界 |
+| [platform-flow-interactive.html](platform-flow-interactive.html) | 当前平台详细交互图；用细粒度节点和边定位具体模块、入口和文件 |
+| [a-share-data-and-pipeline.md](a-share-data-and-pipeline.md) | A 股 CSMAR raw/interim/panel/factor/start_from pipeline、Factor Factory 和 validation/runtime 的代码地图 |
 | [evaluation-artifacts-api.md](evaluation-artifacts-api.md) | Evaluation contract、schema `0.5` artifacts、`manifest.display`、API/download/frontend 合同地图 |
 
 ## 推荐阅读顺序
@@ -23,9 +23,9 @@
 按新人接手顺序：
 
 1. [platform-flow.md](platform-flow.md)：先建立全局链路、入口和边界。
-2. [a-share-data-and-pipeline.md](a-share-data-and-pipeline.md)：看懂 A 股私有数据如何进入 processed factor table，以及 Phase 1 runner 的真实范围。
+2. [a-share-data-and-pipeline.md](a-share-data-and-pipeline.md)：看懂 A 股私有数据如何进入 processed factor table，以及 start_from runner 的真实范围。
 3. [evaluation-artifacts-api.md](evaluation-artifacts-api.md)：看懂 `EvaluationSpec -> artifacts -> API -> workbench` 的合同。
-4. [platform-flow-interactive.html](platform-flow-interactive.html)：需要查节点、边或入口时用浏览器浏览。
+4. [platform-flow-interactive.html](platform-flow-interactive.html)：需要查细粒度节点、边或入口时用浏览器浏览。
 
 ## 按问题定位
 
@@ -42,7 +42,7 @@
 
 ## 维护规则
 
-- `platform-flow.md` 和 `platform-flow-interactive.html` 必须同步维护。
+- `platform-flow.md` 和 `platform-flow-interactive.html` 保持语义一致，但粒度不同；Markdown 版是 overview，HTML 版是 detailed map。
 - 新增用户可见 artifact、API、download、frontend table/chart 时，同步 `evaluation-artifacts-api.md`。
 - 修改 A 股 raw/interim/panel/factor/runner/Factor Factory 时，同步 `a-share-data-and-pipeline.md`。
 - 不在 code-map 中记录一次性 run id、临时文件、完整私有路径或不可公开的 CSMAR 明细。

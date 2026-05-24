@@ -31,7 +31,7 @@ def _candidate_record(
         label_columns=("forward_return_1d",),
         inputs=("close",),
         outputs=(output_column,),
-        capabilities=("processed_existing", "evaluate"),
+        capabilities=("existing_factors", "evaluate"),
         parameters={"window": 20},
         availability_rule="trade_date_close",
         time_semantics={"label_rule": "forward_return_1d"},

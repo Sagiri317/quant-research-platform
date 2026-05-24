@@ -521,11 +521,19 @@
 .pipeline-form {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
-.pipeline-form .field-label {
-  grid-row: 1;
+.pipeline-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pipeline-expression-field,
+.pipeline-form button,
+.pipeline-form .inline-error {
+  grid-column: 1 / -1;
 }
 
 .pipeline-form input {
@@ -536,12 +544,7 @@
   font: inherit;
   min-width: 0;
   padding: 9px 10px;
-}
-
-.pipeline-form .expression-editor,
-.pipeline-form button,
-.pipeline-form .inline-error {
-  grid-column: 1 / -1;
+  width: 100%;
 }
 
 .expression-editor.compact {

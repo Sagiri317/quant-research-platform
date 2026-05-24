@@ -24,10 +24,35 @@ PIPELINE_STEP_CONTRACTS = {
         outputs=("run_config.yaml", "warnings.json", "summary.md"),
         capabilities=("validate", "write_snapshot"),
     ),
-    "processed_evaluation": PipelineStepContract(
-        name="processed_evaluation",
+    "build_interim": PipelineStepContract(
+        name="build_interim",
         version="1",
-        inputs=("PipelineConfig", "processed_factor_table"),
+        inputs=("raw_dataset",),
+        outputs=("interim_dataset",),
+        capabilities=("build", "checkpoint", "private_data_boundary"),
+    ),
+    "build_panel": PipelineStepContract(
+        name="build_panel",
+        version="1",
+        inputs=("interim_dataset",),
+        outputs=("research_panel",),
+        capabilities=("build", "checkpoint"),
+    ),
+    "build_factors": PipelineStepContract(
+        name="build_factors",
+        version="1",
+        inputs=("research_panel",),
+        outputs=("factor_table",),
+        capabilities=("build", "checkpoint"),
+    ),
+    "evaluate": PipelineStepContract(
+        name="evaluate",
+        version="1",
+        inputs=(
+            "processed_factor_table",
+            "factor_table",
+            "PipelineConfig",
+        ),
         outputs=(
             "evaluation/evaluation_manifest.json",
             "evaluation/label_availability.csv",

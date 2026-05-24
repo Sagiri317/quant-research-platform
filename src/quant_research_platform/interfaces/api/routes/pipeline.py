@@ -1,4 +1,4 @@
-"""因子 template 和 pipeline snapshot 路由。"""
+"""Factor template, pipeline snapshot, and pipeline run routes."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ from fastapi import APIRouter, Request, status
 from quant_research_platform.interfaces.api.services.context import api_context
 from quant_research_platform.interfaces.api.services.pipeline_service import (
     PipelineRunRequestPayload,
+    PipelineSnapshotRequestPayload,
+    create_pipeline_run_payload,
     create_pipeline_snapshot_payload,
     list_factor_template_payloads,
     pipeline_checkpoint_payloads,
@@ -18,17 +20,17 @@ router = APIRouter()
 
 @router.get("/api/factor-templates")
 def factor_templates(market: str = "a_share") -> list[dict[str, object]]:
-    """返回可编辑的 factor expression templates。"""
+    """Return editable factor expression templates."""
 
     return list_factor_template_payloads(market)
 
 
-@router.post("/api/pipeline-runs", status_code=status.HTTP_201_CREATED)
-def create_pipeline_run(
-    payload: PipelineRunRequestPayload,
+@router.post("/api/pipeline-snapshots", status_code=status.HTTP_201_CREATED)
+def create_pipeline_snapshot(
+    payload: PipelineSnapshotRequestPayload,
     request: Request,
 ) -> dict[str, object]:
-    """校验 factor 设置并写入本地 pipeline snapshot。"""
+    """Validate factor settings and write a configuration-only snapshot."""
 
     context = api_context(request)
     return create_pipeline_snapshot_payload(
@@ -38,21 +40,68 @@ def create_pipeline_run(
     )
 
 
-@router.get("/api/pipeline-runs/{run_id}")
-def pipeline_run_status(run_id: str, request: Request) -> dict[str, object]:
-    """返回内存中的 pipeline snapshot 状态。"""
+@router.post("/api/pipeline-runs", status_code=status.HTTP_201_CREATED)
+def create_pipeline_run(
+    payload: PipelineRunRequestPayload,
+    request: Request,
+) -> dict[str, object]:
+    """Execute the A-share pipeline from the requested start layer."""
 
-    return pipeline_run_status_payload(run_id, api_context(request).pipeline_runs)
+    context = api_context(request)
+    return create_pipeline_run_payload(
+        payload,
+        context.pipeline_runs,
+        output_root=context.pipeline_output_root,
+    )
 
 
-@router.get("/api/pipeline-runs/{run_id}/checkpoints")
-def pipeline_checkpoints(run_id: str, request: Request) -> list[dict[str, object]]:
-    """返回 pipeline run 的 snapshot 阶段 checkpoints。"""
+@router.get("/api/pipeline-snapshots/{run_id}")
+def pipeline_snapshot_status(run_id: str, request: Request) -> dict[str, object]:
+    """Return in-memory pipeline snapshot status."""
+
+    return pipeline_run_status_payload(
+        run_id,
+        api_context(request).pipeline_runs,
+        kind="snapshot",
+    )
+
+
+@router.get("/api/pipeline-snapshots/{run_id}/checkpoints")
+def pipeline_snapshot_checkpoints(
+    run_id: str,
+    request: Request,
+) -> list[dict[str, object]]:
+    """Return pipeline snapshot checkpoints."""
 
     context = api_context(request)
     return pipeline_checkpoint_payloads(
         run_id,
         context.pipeline_runs,
+        kind="snapshot",
+        output_root=context.pipeline_output_root,
+    )
+
+
+@router.get("/api/pipeline-runs/{run_id}")
+def pipeline_run_status(run_id: str, request: Request) -> dict[str, object]:
+    """Return in-memory pipeline run status."""
+
+    return pipeline_run_status_payload(
+        run_id,
+        api_context(request).pipeline_runs,
+        kind="run",
+    )
+
+
+@router.get("/api/pipeline-runs/{run_id}/checkpoints")
+def pipeline_checkpoints(run_id: str, request: Request) -> list[dict[str, object]]:
+    """Return pipeline run checkpoints."""
+
+    context = api_context(request)
+    return pipeline_checkpoint_payloads(
+        run_id,
+        context.pipeline_runs,
+        kind="run",
         output_root=context.pipeline_output_root,
     )
 

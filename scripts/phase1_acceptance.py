@@ -207,7 +207,7 @@ def run_factory_smoke(stamp: str) -> Path:
     """跑两个固定候选因子的轻量 smoke，验证 Factor Factory 到 evaluation 的主路径。"""
     from quant_research_platform.pipelines.a_share.config import PipelineConfig
     from quant_research_platform.research.factor_factory.batch_runner import (
-        evaluate_processed_existing_candidates,
+        evaluate_existing_factor_candidates,
     )
     from quant_research_platform.research.factor_factory.factor_registry import (
         FactorTemplateRegistry,
@@ -249,7 +249,7 @@ def run_factory_smoke(stamp: str) -> Path:
         engine="dataframe",
         output_root=output_dir,
     )
-    records = evaluate_processed_existing_candidates(
+    records = evaluate_existing_factor_candidates(
         candidates,
         base_config=base_config,
         output_dir=output_dir,

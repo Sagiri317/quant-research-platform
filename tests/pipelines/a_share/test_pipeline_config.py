@@ -31,16 +31,22 @@ def _valid_config(tmp_path):
 
 def test_valid_config_writes_snapshot(tmp_path):
     config = _valid_config(tmp_path)
+    config.raw_root = tmp_path / "raw_private" / "csmar"
+    config.interim_root = tmp_path / "interim_private" / "csmar"
+    config.processed_root = tmp_path / "processed_private" / "csmar"
 
     snapshot = write_run_snapshot(config)
+    run_config = (snapshot.run_dir / "run_config.yaml").read_text(encoding="utf-8")
 
     assert snapshot.run_dir == tmp_path / "sample_run"
     assert (snapshot.run_dir / "run_config.yaml").is_file()
     assert (snapshot.run_dir / "warnings.json").is_file()
     assert (snapshot.run_dir / "summary.md").is_file()
-    assert "factor_template_id: reversal_20d" in (
-        snapshot.run_dir / "run_config.yaml"
-    ).read_text(encoding="utf-8")
+    assert "factor_template_id: reversal_20d" in run_config
+    assert "raw_private" not in run_config
+    assert "interim_private" not in run_config
+    assert "processed_private" not in run_config
+    assert str(tmp_path) not in run_config
 
 
 def test_snapshot_records_expression_metadata_and_template_source(tmp_path):
@@ -167,6 +173,40 @@ def test_validation_rejects_invalid_dates_cost_and_labels(tmp_path):
             write_run_snapshot(config)
 
 
+def test_validation_rejects_invalid_build_numeric_fields(tmp_path):
+    negative_listing_days = _valid_config(tmp_path)
+    negative_listing_days.min_listing_trading_days = -1
+    string_factor_window = _valid_config(tmp_path)
+    string_factor_window.factor_windows = ("20",)
+    zero_factor_window = _valid_config(tmp_path)
+    zero_factor_window.factor_windows = (0,)
+    string_label_horizon = _valid_config(tmp_path)
+    string_label_horizon.label_horizons = ("1",)
+    empty_label_horizons = _valid_config(tmp_path)
+    empty_label_horizons.label_horizons = ()
+
+    cases = [
+        (negative_listing_days, "negative_min_listing_trading_days"),
+        (string_factor_window, "invalid_factor_windows"),
+        (zero_factor_window, "invalid_factor_windows"),
+        (string_label_horizon, "invalid_label_horizons"),
+        (empty_label_horizons, "invalid_label_horizons"),
+    ]
+    for config, code in cases:
+        validation = validate_pipeline_config(config)
+
+        assert any(issue.code == code for issue in validation.blocking)
+
+
+def test_validation_rejects_unknown_start_layer(tmp_path):
+    config = _valid_config(tmp_path)
+    config.start_from = "middle_layer"
+
+    validation = validate_pipeline_config(config)
+
+    assert any(issue.code == "unsupported_start_from" for issue in validation.blocking)
+
+
 def test_validation_allows_separate_label_and_pnl_return_columns(tmp_path):
     config = _valid_config(tmp_path)
     config.label_columns = ("forward_return_20d",)
@@ -199,3 +239,25 @@ def test_warning_issue_is_recorded(tmp_path):
 
     assert not validation.has_blocking
     assert any(issue["code"] == "missing_optional_industry" for issue in warnings)
+
+
+def test_start_from_and_build_config_fields_are_serialized(tmp_path):
+    config = _valid_config(tmp_path)
+    config.start_from = "rebuild_panel"
+    config.raw_root = tmp_path / "raw"
+    config.interim_root = tmp_path / "interim"
+    config.processed_root = tmp_path / "processed"
+    config.min_listing_trading_days = 90
+    config.factor_windows = (20, 60)
+    config.label_horizons = (1, 20)
+
+    payload = config.to_snapshot_dict()
+
+    assert payload["start_from"] == "rebuild_panel"
+    assert "raw_root" not in payload
+    assert "interim_root" not in payload
+    assert "processed_root" not in payload
+    assert "output_root" not in payload
+    assert payload["min_listing_trading_days"] == 90
+    assert payload["factor_windows"] == [20, 60]
+    assert payload["label_horizons"] == [1, 20]

@@ -218,7 +218,7 @@ def _template_from_yaml(
         output_column=output_column,
         inputs=tuple(sorted(parsed.dependencies)),
         outputs=outputs,
-        capabilities=("processed_existing", "evaluate"),
+        capabilities=("existing_factors", "evaluate"),
         grid_parameter=grid_parameter,
         grid_values=grid_values,
         expression_template=expression_template,

@@ -158,7 +158,7 @@ API 和 frontend 不允许绕过它访问隐式文件。
 | `run_repository.py` | `interfaces/api/services/run_repository.py` | run roots、run discovery、run index、loader wrapper、uploaded-run delete。 |
 | `download_service.py` | `interfaces/api/services/download_service.py` | direct download、report download、selected ZIP、cache path、download item validation。 |
 | `comparison_service.py` | `interfaces/api/services/comparison_service.py` | API-visible comparison JSON/CSV。 |
-| `pipeline_service.py` | `interfaces/api/services/pipeline_service.py` | factor templates、pipeline snapshot、processed-existing runner dispatch。 |
+| `pipeline_service.py` | `interfaces/api/services/pipeline_service.py` | factor templates、pipeline snapshots、`start_from` pipeline run dispatch。 |
 | `upload_service.py` | `interfaces/api/services/upload_service.py` | CSV upload -> `EvaluationSpec` -> evaluation run。 |
 
 `run_repository` 身份规则：
@@ -175,7 +175,7 @@ RunRef = (source_alias, run_id, path)
 |---|---|---|
 | `routes/health.py` | `/health` | 健康检查和安全 root 摘要。 |
 | `routes/markets.py` | `/markets`, `/api/markets` | 市场能力；A 股 enabled，其他 planned/disabled。 |
-| `routes/pipeline.py` | `/api/factor-templates`, `/api/pipeline-runs` | templates、snapshot、processed-existing runner 状态。 |
+| `routes/pipeline.py` | `/api/factor-templates`, `/api/pipeline-snapshots`, `/api/pipeline-runs` | templates、snapshot 状态、`start_from` runner 状态。 |
 | `routes/runs.py` | `/api/runs`, evidence, table previews | run list、删除 uploaded run、evidence、metrics/portfolio/diagnostics/breakdowns preview。 |
 | `routes/artifacts.py` | `/api/runs/{source_alias}/{run_id}/artifacts/{artifact_item:path}` | display-exposed artifact direct download。 |
 | `routes/downloads.py` | `/report.md`, `/download` | report 和 selected ZIP download。 |

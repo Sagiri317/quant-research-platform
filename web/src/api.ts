@@ -122,7 +122,7 @@ export type FactorTemplate = {
   grid_values?: string[]
 }
 
-export type PipelineRunRequest = {
+export type PipelineSnapshotRequest = {
   cost_bps: number
   date_end: string
   date_start: string
@@ -136,7 +136,16 @@ export type PipelineRunRequest = {
   run_id: string
 }
 
+export type PipelineRunRequest = PipelineSnapshotRequest & {
+  start_from:
+    | 'existing_factors'
+    | 'rebuild_factors'
+    | 'rebuild_panel'
+    | 'rebuild_interim'
+}
+
 export type PipelineRunSummary = {
+  kind: 'snapshot' | 'run'
   run_id: string
   status: 'queued' | 'running' | 'ready' | 'failed' | string
   message?: string
@@ -298,6 +307,16 @@ export async function listFactorTemplates(market: string): Promise<FactorTemplat
   return fetchJson<FactorTemplate[]>(`/api/factor-templates?${params.toString()}`)
 }
 
+export async function createPipelineSnapshot(
+  payload: PipelineSnapshotRequest,
+): Promise<PipelineRunSummary> {
+  return fetchJson<PipelineRunSummary>('/api/pipeline-snapshots', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
 export async function createPipelineRun(
   payload: PipelineRunRequest,
 ): Promise<PipelineRunSummary> {
@@ -308,6 +327,14 @@ export async function createPipelineRun(
   })
 }
 
+export async function getPipelineSnapshotStatus(
+  runId: string,
+): Promise<PipelineRunSummary> {
+  return fetchJson<PipelineRunSummary>(
+    `/api/pipeline-snapshots/${encodeURIComponent(runId)}`,
+  )
+}
+
 export async function getPipelineRunStatus(
   runId: string,
 ): Promise<PipelineRunSummary> {
@@ -316,12 +343,26 @@ export async function getPipelineRunStatus(
   )
 }
 
-export async function getPipelineCheckpoints(
+async function getPipelineCheckpoints(
+  runId: string,
+  kind: 'run' | 'snapshot',
+): Promise<PipelineCheckpointSummary[]> {
+  const root = kind === 'run' ? 'pipeline-runs' : 'pipeline-snapshots'
+  return fetchJson<PipelineCheckpointSummary[]>(
+    `/api/${root}/${encodeURIComponent(runId)}/checkpoints`,
+  )
+}
+
+export async function getPipelineSnapshotCheckpoints(
   runId: string,
 ): Promise<PipelineCheckpointSummary[]> {
-  return fetchJson<PipelineCheckpointSummary[]>(
-    `/api/pipeline-runs/${encodeURIComponent(runId)}/checkpoints`,
-  )
+  return getPipelineCheckpoints(runId, 'snapshot')
+}
+
+export async function getPipelineRunCheckpoints(
+  runId: string,
+): Promise<PipelineCheckpointSummary[]> {
+  return getPipelineCheckpoints(runId, 'run')
 }
 
 export async function listFactorFactoryRuns(): Promise<FactorFactoryRunSummary[]> {

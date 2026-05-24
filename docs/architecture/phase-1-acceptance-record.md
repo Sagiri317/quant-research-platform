@@ -25,7 +25,7 @@ src/quant_research_platform/
     implementations/
       a_share/                         CSMAR-backed A-share implementation
   pipelines/
-    a_share/                           snapshots、step registry、processed-existing runner
+    a_share/                           snapshots、step registry、A 股 workflow helpers
   research/
     factor_factory/                    template registry、candidate batch runner、reports
   runtime/                             paths、profiling、metadata、exceptions
@@ -46,7 +46,7 @@ Phase 1 验收时保留以下合同：
 | API run identity | API-visible run identity 是 `(source_alias, run_id)` |
 | Download contract | direct download 和 ZIP download 只暴露 `manifest.display.downloads.items` |
 | A 股 adapter | 私有 A 股 evaluation 使用 `markets.implementations.a_share.evaluation.run_factor_evaluation` |
-| Pipeline runner | `processed_existing` 是 Phase 1 轻量 runner，不重建 raw/interim/panel/factors |
+| Pipeline workflow | Phase 1 保留配置 snapshot 和 step registry 边界；`start_from` executable runner 是 Phase 1 后 N1 工作 |
 | Factor Factory | 第一版使用受控 YAML template registry 和已有 processed factor columns |
 
 明确不恢复：
@@ -64,7 +64,7 @@ Phase 1 验收时保留以下合同：
 | P1 Evaluation payload boundary | 拆出 `EvaluationRunPayload`，保留 public `run_evaluation` | 已完成 |
 | P2 Artifact module split | schema、display validation、writer、loader、registry 拆分 | 已完成 |
 | P3 API router/service split | `interfaces/api` route/service 分层，保留 route path | 已完成 |
-| P4 A 股 pipeline runner | 先实现 processed-existing 轻量模式、checkpoint、runtime summary | 已完成轻量模式 |
+| P4 A 股 pipeline boundary | 配置 snapshot、step registry 和 A 股 workflow 边界 | 已完成；`start_from` runner 和 snapshot/run API split 归入 N1 |
 | P5 Factor Factory 第一版 | registry、参数网格、批量评价、failed log、workbench 浏览 | 已完成第一版 |
 
 ## 验收证据
@@ -91,19 +91,18 @@ Phase 1 验收中已覆盖：
 
 - `docs/code-map/` 旧文件名和旧模块名扫描。
 - code-map Markdown 链接检查。
-- `platform-flow.md` 节点/边计数：40 nodes, 49 edges。
-- `platform-flow-interactive.html` 脚本解析：40 nodes, 49 edges。
+- `platform-flow.md` 更新为 15-node overview。
+- `platform-flow-interactive.html` 更新为 41-node detailed map。
 - API/contract 轻量导入和路由检查。
 
 ## 已知剩余架构债
 
 这些不是 Phase 1 未完成项，而是 Phase 1 后续工作：
 
-1. 完整 A 股 build runner：把 raw/interim/panel/factors/evaluate 编排进可恢复 pipeline。
-2. Eligibility / tradability 可见诊断：把覆盖数、过滤影响和不可交易原因写入 artifact。
-3. Artifact ZIP packaging 下沉：把 API service 中的 ZIP 选择和打包规则抽到 `artifacts/`。
-4. 前端 feature split：把当前平铺 `web/src` 拆成 Evidence、Pipeline、Factor Factory、Uploads、shared。
-5. 风险、regime、成本、容量扩展：补正式研究诊断，不写成投资结论。
-6. ML prediction handoff：prediction Parquet、model manifest、walk-forward 和 evaluation 接口。
+1. Eligibility / tradability 可见诊断：把覆盖数、过滤影响和不可交易原因写入 artifact。
+2. Artifact ZIP packaging 下沉：把 API service 中的 ZIP 选择和打包规则抽到 `artifacts/`。
+3. 前端 feature split：把当前平铺 `web/src` 拆成 Evidence、Pipeline、Factor Factory、Uploads、shared。
+4. 风险、regime、成本、容量扩展：补正式研究诊断，不写成投资结论。
+5. ML prediction handoff：prediction Parquet、model manifest、walk-forward 和 evaluation 接口。
 
 后续任务见 [next-stage-roadmap.md](next-stage-roadmap.md)。

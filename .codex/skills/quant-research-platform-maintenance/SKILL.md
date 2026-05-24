@@ -43,7 +43,7 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 - Do not conflate the two schema versions; tests, API validation, docs, and frontend types must name the artifact type they are checking.
 - `manifest.display` remains the only UI/download exposure contract for run artifacts.
 - Preserve API-visible evaluation run identity as `(source_alias, run_id)` across run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend route state.
-- Pipeline Builder defaults to snapshot creation. The backend also supports `execution_mode=processed_existing` as a lightweight runner over existing processed A-share factor data; do not describe it as full raw-to-evaluation orchestration.
+- Pipeline Builder defaults to snapshot creation through `POST /api/pipeline-snapshots`. Executable A-share pipeline requests use `POST /api/pipeline-runs` with `start_from`; every executable run continues through evaluation.
 - Factor Studio and Pipeline Builder must keep A-share enabled and crypto/other markets disabled or planned until real modules exist.
 - Generated runs under `reports/private_real/`, `reports/runs/`, and `reports/profiles/` are evidence, not authority docs. Regenerate stale runs instead of weakening loaders.
 

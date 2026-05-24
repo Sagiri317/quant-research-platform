@@ -1,7 +1,7 @@
 """第一版 Factor Factory 入口。"""
 
 from quant_research_platform.research.factor_factory.batch_runner import (
-    evaluate_processed_existing_candidates,
+    evaluate_existing_factor_candidates,
 )
 from quant_research_platform.research.factor_factory.candidate import (
     CandidateEvaluationRecord,
@@ -17,5 +17,5 @@ __all__ = [
     "FactorCandidate",
     "FactorTemplateRegistry",
     "RegisteredFactorTemplate",
-    "evaluate_processed_existing_candidates",
+    "evaluate_existing_factor_candidates",
 ]
