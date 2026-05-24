@@ -5,7 +5,7 @@
 | 项目 | 当前事实 |
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
-| 当前分支 | `codex/a-share-build-runner` |
+| 当前分支 | `main` |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 raw/interim/processed 历史产物仍遵守私有边界 |
@@ -45,7 +45,7 @@ Phase 1 验收口径下已补齐：
 Phase 1 之后下一阶段进展：
 
 1. N3 Artifact ZIP packaging 已合入 `main`：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`。
-2. `codex/a-share-build-runner` 分支已把 A 股 pipeline 外部接口重构为 snapshot/run split 和 `start_from` 模型：`POST /api/pipeline-snapshots` 只保存配置，`POST /api/pipeline-runs` 执行统一 runner 并固定运行到 evaluation。
+2. N1 A 股 pipeline start-from runner 已合入 `main`：外部接口为 snapshot/run split 和 `start_from` 模型，`POST /api/pipeline-snapshots` 只保存配置，`POST /api/pipeline-runs` 执行统一 runner 并固定运行到 evaluation。
 3. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
 4. 后续继续做前端 feature split、eligibility / tradability 诊断可视化、ML prediction pipeline、风险/中性化扩展等独立任务。
 
@@ -76,10 +76,10 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 完成 `codex/a-share-build-runner` 分支的全量验证和 review。
-2. 继续做 N2：eligibility / tradability 诊断可视化。
-3. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
-4. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
+1. 继续做 N2：eligibility / tradability 诊断可视化。
+2. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
+3. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
+4. 已合并的 N1/N3 工作树和分支可在用户批准 exact paths 后清理。
 
 ## Root Handoff / 根目录回传信号
 
@@ -90,4 +90,4 @@ Phase 1 之后下一阶段进展：
 | 2026-05-23 | phase1 | Phase 1 目标结构已执行并完成复验；后续架构债另列。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
 | 2026-05-24 | docs sync | 已重构 `docs/code-map/`，同步根文档、architecture 文档和状态文件的当前架构表述。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
 | 2026-05-24 | architecture debt | N3 Artifact ZIP packaging 下沉已合入 main：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`，API download service 保留 HTTP response adapter 职责；未触碰 web。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
-| 2026-05-24 | next-stage implementation | `codex/a-share-build-runner` 分支重构 A 股 pipeline 外部接口：新增 `POST /api/pipeline-snapshots`，`POST /api/pipeline-runs` 统一为 `start_from`，统一 runner 编排 build/evaluate 到 evaluation，Factor Factory 改为 existing-factors start layer。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-24 | next-stage implementation | N1 A 股 start-from pipeline runner 已合入 main：新增 `POST /api/pipeline-snapshots`，`POST /api/pipeline-runs` 统一为 `start_from`，统一 runner 编排 build/evaluate 到 evaluation，Factor Factory 改为 existing-factors start layer。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |

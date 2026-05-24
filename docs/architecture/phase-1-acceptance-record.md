@@ -46,7 +46,7 @@ Phase 1 验收时保留以下合同：
 | API run identity | API-visible run identity 是 `(source_alias, run_id)` |
 | Download contract | direct download 和 ZIP download 只暴露 `manifest.display.downloads.items` |
 | A 股 adapter | 私有 A 股 evaluation 使用 `markets.implementations.a_share.evaluation.run_factor_evaluation` |
-| Pipeline workflow | Phase 1 保留配置 snapshot 和 step registry 边界；N1 分支已在此边界上实现 `start_from` executable runner 和 snapshot/run split |
+| Pipeline workflow | Phase 1 保留配置 snapshot 和 step registry 边界；N1 已在此边界上实现 `start_from` executable runner 和 snapshot/run split，并已合入 `main` |
 | Factor Factory | 第一版使用受控 YAML template registry 和已有 processed factor columns |
 
 明确不恢复：
@@ -64,7 +64,7 @@ Phase 1 验收时保留以下合同：
 | P1 Evaluation payload boundary | 拆出 `EvaluationRunPayload`，保留 public `run_evaluation` | 已完成 |
 | P2 Artifact module split | schema、display validation、writer、loader、registry 拆分 | 已完成 |
 | P3 API router/service split | `interfaces/api` route/service 分层，保留 route path | 已完成 |
-| P4 A 股 pipeline boundary | 配置 snapshot、step registry 和 A 股 workflow 边界 | 已完成；Phase 1 后 N1 分支已实现 `start_from` runner 和 snapshot/run API split |
+| P4 A 股 pipeline boundary | 配置 snapshot、step registry 和 A 股 workflow 边界 | 已完成；Phase 1 后 N1 已实现 `start_from` runner 和 snapshot/run API split，并已合入 `main` |
 | P5 Factor Factory 第一版 | registry、参数网格、批量评价、failed log、workbench 浏览 | 已完成第一版 |
 
 ## 验收证据

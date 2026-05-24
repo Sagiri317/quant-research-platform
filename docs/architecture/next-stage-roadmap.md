@@ -6,7 +6,7 @@
 
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
-| N1 | A 股 start-from pipeline runner | P0 | implemented in `codex/a-share-build-runner` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
+| N1 | A 股 start-from pipeline runner | P0 | merged to `main` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
 | N2 | Eligibility / tradability 诊断可视化 | P0 | next | 让覆盖、过滤原因和影响进入 artifact/API/frontend |
 | N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
 | N4 | 前端 feature split | P1 | planned | 拆分当前平铺 workbench，降低后续功能耦合 |
