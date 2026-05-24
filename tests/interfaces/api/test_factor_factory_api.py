@@ -268,6 +268,19 @@ def test_factor_factory_record_sanitizes_private_failure_reason_case_insensitive
     assert "RAW_PRIVATE" not in row["failure_reason"]
 
 
+def test_factor_factory_record_sanitizes_local_absolute_failure_reason():
+    record = _candidate_record(
+        "broken@1",
+        status="failed",
+        failure_reason="Failed(path=C:\\Users\\DELL\\vendor\\input.csv)",
+    )
+
+    row = record.to_row()
+
+    assert "[local-path]" in row["failure_reason"]
+    assert "C:/Users" not in row["failure_reason"]
+
+
 def test_factor_factory_api_rejects_private_markers_in_preview_and_download(tmp_path):
     factory_root = tmp_path / "factor_factory_runs"
     run_dir = factory_root / "factory_demo"

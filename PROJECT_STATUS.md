@@ -46,7 +46,7 @@ Phase 1 之后下一阶段进展：
 
 1. N3 Artifact ZIP packaging 已合入 `main`：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`。
 2. `codex/a-share-build-runner` 分支已把 A 股 pipeline 外部接口重构为 snapshot/run split 和 `start_from` 模型：`POST /api/pipeline-snapshots` 只保存配置，`POST /api/pipeline-runs` 执行统一 runner 并固定运行到 evaluation。
-3. 旧外部执行模式、双 runner 命名和独立 `rebuild_*` 参数已从源码入口移除；旧字段只在负向测试中作为拒绝用例保留。
+3. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
 4. 后续继续做前端 feature split、eligibility / tradability 诊断可视化、ML prediction pipeline、风险/中性化扩展等独立任务。
 
 ## 当前研究资产

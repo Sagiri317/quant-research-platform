@@ -201,3 +201,37 @@ def test_batch_runner_sanitizes_private_failure_reason(tmp_path, monkeypatch) ->
     assert "processed_private" not in summary
     assert "processed_private" not in failed
     assert "[private-path]" in summary
+
+
+def test_batch_runner_sanitizes_local_absolute_failure_reason(
+    tmp_path, monkeypatch
+) -> None:
+    import quant_research_platform.research.factor_factory.batch_runner as runner_module
+
+    def fake_run_a_share_pipeline(config):
+        raise PipelineRunnerError(
+            f"missing path=C:/Users/DELL/vendor/{config.run_id}.parquet"
+        )
+
+    monkeypatch.setattr(
+        runner_module,
+        "run_a_share_pipeline",
+        fake_run_a_share_pipeline,
+    )
+    candidates = (_candidate("bad@1", output_column="bad_factor"),)
+
+    evaluate_existing_factor_candidates(
+        candidates,
+        base_config=_base_config(tmp_path),
+        output_dir=tmp_path,
+    )
+
+    summary = (
+        tmp_path / "factor_factory" / "factory_run_factory" / "candidate_summary.csv"
+    ).read_text(encoding="utf-8")
+    failed = (
+        tmp_path / "factor_factory" / "factory_run_factory" / "failed_candidates.json"
+    ).read_text(encoding="utf-8")
+    assert "C:/Users" not in summary
+    assert "C:/Users" not in failed
+    assert "[local-path]" in summary

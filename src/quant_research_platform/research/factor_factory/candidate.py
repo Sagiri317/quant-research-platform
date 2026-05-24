@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Literal
 
 CandidateStatus = Literal["pending", "success", "failed"]
+PRIVATE_PATH_PATTERN = re.compile(
+    r"([A-Za-z]:)?/?(?:[^,\s:;]+/)*(?:raw_private|interim_private|processed_private|private_real)(?:/[^,\s:;]*)*",
+    flags=re.IGNORECASE,
+)
+LOCAL_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Za-z]:/|//)[^,\s;)\]]+"
+)
 
 
 @dataclass(frozen=True)
@@ -95,12 +102,8 @@ def _safe_failure_reason(reason: str | None) -> str:
     if not reason:
         return ""
     sanitized = reason.replace("\\", "/")
-    sanitized = re.sub(
-        r"([A-Za-z]:)?/?(?:[^,\s:;]+/)*(?:raw_private|interim_private|processed_private|private_real)(?:/[^,\s:;]*)*",
-        "[private-path]",
-        sanitized,
-        flags=re.IGNORECASE,
-    )
+    sanitized = PRIVATE_PATH_PATTERN.sub("[private-path]", sanitized)
+    sanitized = LOCAL_ABSOLUTE_PATH_PATTERN.sub("[local-path]", sanitized)
     return sanitized
 
 

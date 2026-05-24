@@ -324,9 +324,9 @@ def _checkpoint_payloads_from_json(path: Path) -> list[dict[str, Any]]:
                 else _safe_checkpoint_artifact(Path(path_value).name)
             )
         payload = {
-            "key": item.get("key"),
-            "label": item.get("label"),
-            "status": item.get("status"),
+            "key": _sanitize_checkpoint_string(item.get("key")),
+            "label": _sanitize_checkpoint_string(item.get("label")),
+            "status": _sanitize_checkpoint_string(item.get("status")),
             "artifact": artifact,
             "message": _sanitize_checkpoint_string(item.get("message")),
             "duration_seconds": item.get("duration_seconds"),
@@ -350,16 +350,20 @@ def _checkpoint_payloads_from_json(path: Path) -> list[dict[str, Any]]:
 def _safe_checkpoint_artifact(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
-    if _has_private_path_marker(value):
+    if _has_private_path_marker(value) or _has_unsafe_path_text(value):
         return None
     path = Path(value)
-    if path.is_absolute() or path.drive:
+    if path.is_absolute() or path.drive or ".." in path.parts:
         return None
     return value
 
 
 def _sanitize_checkpoint_string(value: object) -> str | None:
-    if not isinstance(value, str) or _has_private_path_marker(value):
+    if (
+        not isinstance(value, str)
+        or _has_private_path_marker(value)
+        or _has_unsafe_path_text(value)
+    ):
         return None
     return value
 
@@ -385,7 +389,11 @@ def _sanitize_checkpoint_record(value: dict[str, Any]) -> dict[str, Any]:
 
 def _sanitize_checkpoint_value(value: object) -> object | None:
     if isinstance(value, str):
-        return None if _has_private_path_marker(value) else value
+        return (
+            None
+            if _has_private_path_marker(value) or _has_unsafe_path_text(value)
+            else value
+        )
     if isinstance(value, dict):
         return _sanitize_checkpoint_record(value)
     if isinstance(value, list):
@@ -400,6 +408,17 @@ def _sanitize_checkpoint_value(value: object) -> object | None:
 def _has_private_path_marker(value: str) -> bool:
     lowered = value.replace("\\", "/").lower()
     return any(marker in lowered for marker in PRIVATE_PATH_MARKERS)
+
+
+def _has_unsafe_path_text(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    if re.search(r"(?<![A-Za-z0-9])[A-Za-z]:/", normalized):
+        return True
+    if normalized.startswith(("/", "//")):
+        return True
+    if re.search(r"(?<![A-Za-z0-9_.])\.\.(?:/|$)", normalized):
+        return True
+    return any(".." in Path(token).parts for token in normalized.split())
 
 
 def _pipeline_config_from_payload(

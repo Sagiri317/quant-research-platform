@@ -421,6 +421,93 @@ def test_pipeline_checkpoints_sanitize_private_artifacts_after_restart(
     assert str(tmp_path) not in checkpoints.text
 
 
+def test_pipeline_checkpoints_sanitize_traversal_and_absolute_path_text_after_restart(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "unsafe_path_text_run"
+    run_dir.mkdir()
+    (run_dir / "checkpoints.json").write_text(
+        json.dumps(
+            [
+                {
+                    "key": "evaluate",
+                    "label": "A-share evaluation",
+                    "status": "failed",
+                    "artifact": "../outside.csv",
+                    "message": "failed(path=C:/Users/DELL/vendor/file.csv)",
+                    "failure_code": "see(E:/vendor/secret.csv)",
+                    "warnings": [
+                        {
+                            "code": "local_path",
+                            "message": "loaded(path:..\\outside.csv)",
+                        }
+                    ],
+                    "blocking_issues": [
+                        {
+                            "code": "absolute_path",
+                            "path": "C:\\Users\\DELL\\vendor\\panel.parquet",
+                        }
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
+
+    checkpoints = client.get("/api/pipeline-runs/unsafe_path_text_run/checkpoints")
+
+    assert checkpoints.status_code == 200
+    checkpoint = checkpoints.json()[0]
+    assert checkpoint["artifact"] is None
+    assert checkpoint["message"] is None
+    assert checkpoint["failure_code"] is None
+    assert checkpoint["warnings"] == [{"code": "local_path"}]
+    assert checkpoint["blocking_issues"] == [{"code": "absolute_path"}]
+    assert "../outside.csv" not in checkpoints.text
+    assert "C:/Users" not in checkpoints.text
+    assert "E:/vendor" not in checkpoints.text
+    assert "C:\\Users" not in checkpoints.text
+
+
+def test_pipeline_checkpoints_reject_unsafe_required_fields_after_restart(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "unsafe_required_checkpoint_run"
+    run_dir.mkdir()
+    (run_dir / "checkpoints.json").write_text(
+        json.dumps(
+            [
+                {
+                    "key": "path=C:/Users/DELL/vendor/file.csv",
+                    "label": "A-share evaluation",
+                    "status": "failed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
+
+    checkpoints = client.get(
+        "/api/pipeline-runs/unsafe_required_checkpoint_run/checkpoints"
+    )
+
+    assert checkpoints.status_code == 422
+    assert checkpoints.json()["detail"] == "pipeline checkpoints invalid"
+    assert "C:/Users" not in checkpoints.text
+
+
 def test_pipeline_checkpoints_reject_unsafe_disk_run_ref(tmp_path) -> None:
     client = TestClient(
         create_app(
@@ -707,7 +794,7 @@ def test_pipeline_run_rejects_invalid_expression(tmp_path) -> None:
     )
 
     response = client.post(
-        "/api/pipeline-snapshots",
+        "/api/pipeline-runs",
         json={
             "market": "a_share",
             "run_id": "bad_expression",
@@ -719,6 +806,7 @@ def test_pipeline_run_rejects_invalid_expression(tmp_path) -> None:
             "cost_bps": 0,
             "pnl_return_column": "forward_return_1d",
             "label_columns": ["forward_return_1d"],
+            "start_from": "existing_factors",
         },
     )
 
@@ -738,7 +826,7 @@ def test_pipeline_run_rejects_unsafe_run_id(tmp_path) -> None:
     )
 
     response = client.post(
-        "/api/pipeline-snapshots",
+        "/api/pipeline-runs",
         json={
             "market": "a_share",
             "run_id": "../outside",
@@ -750,6 +838,7 @@ def test_pipeline_run_rejects_unsafe_run_id(tmp_path) -> None:
             "cost_bps": 0,
             "pnl_return_column": "forward_return_1d",
             "label_columns": ["forward_return_1d"],
+            "start_from": "existing_factors",
         },
     )
 
@@ -767,7 +856,7 @@ def test_pipeline_run_forbids_client_output_root(tmp_path) -> None:
     )
 
     response = client.post(
-        "/api/pipeline-snapshots",
+        "/api/pipeline-runs",
         json={
             "market": "a_share",
             "run_id": "server_controlled",
@@ -779,6 +868,7 @@ def test_pipeline_run_forbids_client_output_root(tmp_path) -> None:
             "cost_bps": 0,
             "pnl_return_column": "forward_return_1d",
             "label_columns": ["forward_return_1d"],
+            "start_from": "existing_factors",
             "output_root": (tmp_path / "client").as_posix(),
         },
     )
