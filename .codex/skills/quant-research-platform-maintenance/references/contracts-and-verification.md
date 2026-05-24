@@ -50,6 +50,8 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 - `POST /api/pipeline-snapshots` writes configuration snapshots only: `run_config.yaml`, `warnings.json`, and `summary.md`.
 - `POST /api/pipeline-runs` executes the A-share pipeline with `start_from`. Supported start layers are `existing_factors`, `rebuild_factors`, `rebuild_panel`, and `rebuild_interim`; every executable run continues through evaluation.
 - The canonical executable runner is `src/quant_research_platform/pipelines/a_share/runner.py::run_a_share_pipeline`.
+- Pipeline checkpoint API payloads must not expose private or local filesystem paths when replaying persisted `checkpoints.json`. Sanitize or reject unsafe text in `artifact`, `message`, `failure_code`, `key`, `label`, `status`, `warnings`, and `blocking_issues`, including private layer markers, drive paths, absolute paths, `path=C:/...` / `see(E:/...)` forms, and `..` traversal.
+- Factor Factory failure reports must sanitize `failure_reason` in both `candidate_summary.csv` and `failed_candidates.json`. Do not rely only on private layer markers; also strip local absolute paths such as `C:/Users/...` or `path=C:/...`.
 
 ## Local Scripts
 
