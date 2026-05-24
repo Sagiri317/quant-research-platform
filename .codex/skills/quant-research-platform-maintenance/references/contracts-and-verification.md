@@ -11,6 +11,7 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 - Loader rejects unsupported artifact schema versions and unsupported artifact types.
 - `manifest.display.schema_version` must match the current evaluation artifact schema and must be validated at API/UI entry points.
 - All display tables must map to real artifact CSV paths; all download items must be backed by `manifest.display` or an explicitly allowed metadata item.
+- Required table additions intentionally invalidate stale generated runs; reject and regenerate them instead of adding optional loader fallbacks.
 - Never reintroduce `artifacts.xlsx`, old `total_*_portfolio_return` summary fields, direct frontend assumptions about undeclared files, or fallback loaders that silently accept retired schemas.
 
 ### `factor_factory_run` schema `0.1`
