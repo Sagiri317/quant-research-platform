@@ -124,6 +124,7 @@ def evaluate_to_payload(spec: EvaluationSpec) -> EvaluationRunPayload:
         "cost_breakdown": [],
         "weight_diagnostics": [],
         "neutralization_diagnostics": [],
+        "tradability_diagnostics": [],
     }
     combination_records: list[dict[str, object]] = []
     for label in spec.label_columns:
@@ -289,6 +290,7 @@ def _run_dataframe_feature_set(
             segment_columns=spec.segment_columns,
         ),
     )
+    tradability_diagnostics = _build_tradability_diagnostics(diagnostics)
     metrics = {
         "ic": ic,
         "ic_summary": ic_summary,
@@ -303,6 +305,7 @@ def _run_dataframe_feature_set(
         "cost_breakdown": cost_breakdown,
         "weight_diagnostics": diagnostics,
         "neutralization_diagnostics": neutralization_diagnostics,
+        "tradability_diagnostics": tradability_diagnostics,
     }
     if spec.time_breakdowns:
         metrics.update(
@@ -406,6 +409,9 @@ def _run_tensor_feature_set(
             segment_columns=spec.segment_columns,
         ),
     )
+    tradability_diagnostics = _build_tradability_diagnostics(
+        portfolio_artifacts.diagnostics
+    )
     metrics = {
         "ic": ic,
         "ic_summary": ic_summary,
@@ -420,6 +426,7 @@ def _run_tensor_feature_set(
         "cost_breakdown": portfolio_artifacts.cost_breakdown,
         "weight_diagnostics": portfolio_artifacts.diagnostics,
         "neutralization_diagnostics": neutralization_diagnostics,
+        "tradability_diagnostics": tradability_diagnostics,
     }
     if spec.time_breakdowns:
         metrics.update(
@@ -444,6 +451,47 @@ def _metrics_for_feature(
         )
         for name, frame in metrics.items()
     }
+
+
+def _build_tradability_diagnostics(weight_diagnostics: pd.DataFrame) -> pd.DataFrame:
+    result = weight_diagnostics.copy()
+    if result.empty:
+        for column in (
+            "eligible_rate",
+            "can_enter_rate",
+            "can_exit_rate",
+            "entry_blocked_rate",
+            "exit_blocked_rate",
+        ):
+            result[column] = pd.Series(dtype="float64")
+        return result
+    result["eligible_rate"] = _safe_rate(
+        result["eligible_count"],
+        result["universe_count"],
+    )
+    result["can_enter_rate"] = _safe_rate(
+        result["can_enter_count"],
+        result["eligible_count"],
+    )
+    result["can_exit_rate"] = _safe_rate(
+        result["can_exit_count"],
+        result["universe_count"],
+    )
+    result["entry_blocked_rate"] = _safe_rate(
+        result["entry_blocked_count"],
+        result["eligible_count"],
+    )
+    result["exit_blocked_rate"] = _safe_rate(
+        result["exit_blocked_count"],
+        result["universe_count"],
+    )
+    return result
+
+
+def _safe_rate(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    values = pd.to_numeric(numerator, errors="coerce").fillna(0.0)
+    bases = pd.to_numeric(denominator, errors="coerce").fillna(0.0)
+    return values.divide(bases.where(bases.ne(0.0))).fillna(0.0)
 
 
 def _evaluation_set_profile_metadata(spec: EvaluationSpec) -> dict[str, object]:

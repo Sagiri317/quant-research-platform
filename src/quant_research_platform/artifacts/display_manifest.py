@@ -19,6 +19,7 @@ TABLE_LABELS = {
     "cost_breakdown": ("成本拆分", "portfolio"),
     "weight_diagnostics": ("权重诊断", "diagnostics"),
     "neutralization_diagnostics": ("中性化诊断", "diagnostics"),
+    "tradability_diagnostics": ("可交易性诊断", "diagnostics"),
 }
 
 TABLE_ORDER = tuple(TABLE_LABELS)

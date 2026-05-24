@@ -97,6 +97,7 @@ portfolio/cost_breakdown.csv
 portfolio/exposure_summary.csv
 diagnostics/weight_diagnostics.csv
 diagnostics/neutralization_diagnostics.csv
+diagnostics/tradability_diagnostics.csv
 ```
 
 启用 `time_breakdowns` 后会按配置出现可选目录：
@@ -141,6 +142,11 @@ metrics_by_month/
 - download presets。
 
 API 和 frontend 不允许绕过它访问隐式文件。
+N2 tradability diagnostics 作为 `diagnostics/tradability_diagnostics.csv`
+通过 `manifest.display` 暴露；前端应通过常规 diagnostics preview/download API
+消费该表，不重新计算 eligibility、can_enter 或 can_exit 计数。
+新生成的 schema `0.5` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
+需要重新生成后才能由当前 loader/API 加载。
 
 校验要求：
 
