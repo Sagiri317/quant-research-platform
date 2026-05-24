@@ -12,7 +12,7 @@
 | 平台合同 | evaluation contract、artifact schema `0.5`、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间 |
 | 前端状态 | 本地 workbench 已中文化；Factor Studio 可把表达式/模板传给 Pipeline Builder；Pipeline Builder 默认只调用 `POST /api/pipeline-snapshots` 写配置快照 |
 | A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation |
-| Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner |
+| Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner；N7 后应适配 evaluation run 合同，而不是约束 N7 核心设计 |
 | 市场范围 | A 股 enabled；crypto / other markets planned / disabled，不代表真实支持，也不保留空实现包 |
 | 私有边界 | CSMAR raw/interim/processed 和 `reports/private_real/` 不提交、不公开 |
 | 交易边界 | 不做投资建议、paper trading、live trading、券商/交易所/API 连接或部署服务 |
@@ -31,7 +31,7 @@
 - 项目级 `AGENTS.md` 增加 `src/quant_research_platform/` 结构、Conda `analysis`、私有数据、无外部 API/凭据、无交易、exact-path deletion、frontend/API/artifact contract、旧 evaluation reference 仅作参考、`source_alias + run_id` 运行身份边界。
 - `.codex/skills/quant-research-platform-maintenance/` 记录后续维护 artifact/API/download/frontend 合同时必须执行的 gates。
 - React workbench 已改为中文界面，并补上“因子表达式/模板 -> 流程配置”的前端状态传递。
-- React workbench 已补上 Factor Factory run browser；前端只展示 API / artifact 结果，不重新计算 IC、PnL、positions 或 turnover。
+- React workbench 已补上 Factor Factory run browser；前端只展示 API / artifact 结果，不重新计算 IC、returns、weights 或 turnover。
 - 本地 API 与前端服务已用小范围 smoke 验证；2023-2025 私有 smoke 已覆盖 tensor / dataframe 与 long-only / long-short；2026-05-23 又复跑 2024 acceptance 小样本并生成 old/new 比较，提交前仍以完整 Python 和 frontend 检查作为准入。
 - A 股真实私有 runs 必须走 A 股专用 adapter：`python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`。通用 `evaluate-parquet` 只作为平台 evaluation / 外部 Parquet adapter 验收，不替代 A 股 adapter 验收。
 - P4/P5 本地示例入口为 `scripts/phase1_acceptance.py`：`run` 复跑 2024 A 股 adapter acceptance runs，`compare` 低内存比较 old/new，`factory-smoke` 生成 Factor Factory candidate summary。
@@ -46,8 +46,10 @@ Phase 1 之后下一阶段进展：
 
 1. N3 Artifact ZIP packaging 已合入 `main`：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`。
 2. N1 A 股 pipeline start-from runner 已合入 `main`：外部接口为 snapshot/run split 和 `start_from` 模型，`POST /api/pipeline-snapshots` 只保存配置，`POST /api/pipeline-runs` 执行统一 runner 并固定运行到 evaluation。
-3. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
-4. 后续继续做前端 feature split、eligibility / tradability 诊断可视化、ML prediction pipeline、风险/中性化扩展等独立任务。
+3. N2 后端 tradability artifact/API 已合入 `main`：新增 `diagnostics/tradability_diagnostics.csv`，并通过 schema `0.5`、`manifest.display`、API preview、direct download 和 ZIP download 暴露；N2 frontend 仍是后续任务。
+4. N4 前端 feature split 已合入 `main`：`web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract。
+5. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
+6. 当前推荐先做 N7 A 股 `EvaluationMatrixRun` 与 2023-2025 canonical 样例生成：一个 API-visible run 对应一个 evaluation run；计算层支持多个 feature / label / portfolio mode / kernel 一起批量或并行计算，结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；tensor 是长期主路径，dataframe 是 reference / fallback。之后再做 N2 frontend、N5 和 N6。
 
 ## 当前研究资产
 
@@ -76,10 +78,11 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 继续做 N2 前端：消费 `tradability_diagnostics` 后端 artifact/API，完成 eligibility / tradability 诊断可视化。
-2. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
-3. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
-4. 已合并的 N1/N3 工作树和分支可在用户批准 exact paths 后清理。
+1. 先做 N7：稳定 A 股 `EvaluationMatrixRun`、`combination_id` 和 tensor-native 多维评价合同，并生成 2023-2025 canonical evaluation / Factor Factory 样例；默认评价集合为 1 个 run，内部至少覆盖 `2 kernels x 2 portfolio modes x 2 labels x 3 features = 24` 个 result combinations；artifact schema `0.6` 使用 star schema，`weights` 第一阶段直接写 Parquet，frontend/API 对所有 display tables 提供 20 行 preview，`compare_evaluation_sets` 改成网页/API 可展示和可画图的低内存 summary comparison，另增只输出表格/JSON/Markdown 的 Evaluation Comparison Report，dataframe/tensor parity 使用分层 `rtol/atol` 容差。第一晚真实数据验收先跑 `reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1`，不要求和旧样例做结果一致性比较；完整 canonical root 固定为 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`，三年样例生成后再在实现验收阶段比较新实现输出是否一致。
+2. N7 后继续做 N2 前端：消费 `tradability_diagnostics` 后端 artifact/API，完成 eligibility / tradability 诊断可视化。
+3. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
+4. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
+5. 已合并的 N1/N2/N3/N4 工作树和分支可在用户批准 exact paths 后清理。
 
 ## Root Handoff / 根目录回传信号
 
@@ -91,5 +94,6 @@ Phase 1 之后下一阶段进展：
 | 2026-05-24 | docs sync | 已重构 `docs/code-map/`，同步根文档、architecture 文档和状态文件的当前架构表述。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
 | 2026-05-24 | architecture debt | N3 Artifact ZIP packaging 下沉已合入 main：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`，API download service 保留 HTTP response adapter 职责；未触碰 web。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
 | 2026-05-24 | next-stage implementation | N1 A 股 start-from pipeline runner 已合入 main：新增 `POST /api/pipeline-snapshots`，`POST /api/pipeline-runs` 统一为 `start_from`，统一 runner 编排 build/evaluate 到 evaluation，Factor Factory 改为 existing-factors start layer。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
-| 2026-05-24 | next-stage implementation | N4 前端 feature split 已在 `codex/frontend-feature-split` 工作树完成：`web/src` 拆为 `shell/`、`features/` 和 `shared/`，仅同步前端 imports、tests 和 code-map，不新增 diagnostics UI，不改变 API contract。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
-| 2026-05-24 | next-stage implementation | N2 后端第一层 tradability artifact/API 已加入 schema `0.5`：新增 `diagnostics/tradability_diagnostics.csv`，通过 `manifest.display`、diagnostics preview、direct download 和 ZIP download 暴露；前端可视化仍是独立后续任务。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-24 | next-stage implementation | N2 后端第一层 tradability artifact/API 已合入 main：新增 `diagnostics/tradability_diagnostics.csv`，通过 `manifest.display`、diagnostics preview、direct download 和 ZIP download 暴露；前端可视化等待 N7 canonical 样例。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-24 | next-stage implementation | N4 前端 feature split 已合入 main：`web/src` 拆为 `shell/`、`features/` 和 `shared/`，仅同步前端 imports、tests 和 code-map，不新增 diagnostics UI，不改变 API contract。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-25 | planning | N7 A 股 evaluation run identity 与 2023-2025 canonical 样例生成成为当前前置任务：一个 API-visible run 对应一个 `EvaluationMatrixRun`；计算层可一起跑 feature / label / portfolio mode / kernel，结果层用 `combination_id` 管理单独评价切片；schema `0.6` 按 star schema 重构，`weights` 直接 Parquet，前端/API 做 20 行 preview；Factor Factory 适配 N7；N2 frontend、N5 和 N6 后续复用该 evaluation run identity 与样例。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
