@@ -26,6 +26,7 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 | --- | --- |
 | Evaluation artifact schema `0.5` | `src/quant_research_platform/artifacts/artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py` |
 | `manifest.display` | `src/quant_research_platform/artifacts/display_manifest.py`, `manifest_validation.py` |
+| Artifact ZIP packaging | `src/quant_research_platform/artifacts/artifact_package.py`, `tests/artifacts/test_artifact_package.py` |
 | Evidence API and downloads | `src/quant_research_platform/interfaces/api/routes/`, `interfaces/api/services/`, `interfaces/api/app.py`, `interfaces/api/run_index.py` |
 | A-share runtime paths | `src/quant_research_platform/markets/implementations/a_share/runtime/storage.py`, `runtime/check_processed_space.py` |
 | A-share private evaluation | `src/quant_research_platform/markets/implementations/a_share/evaluation/run_factor_evaluation.py`, `evaluation/evaluation_adapter.py` |
@@ -42,6 +43,7 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 - Factor Factory runs are `artifact_type="factor_factory_run"` with `artifact_schema_version="0.1"`.
 - Do not conflate the two schema versions; tests, API validation, docs, and frontend types must name the artifact type they are checking.
 - `manifest.display` remains the only UI/download exposure contract for run artifacts.
+- Artifact ZIP assembly belongs in `artifacts/artifact_package.py`; API download services should orchestrate responses instead of owning artifact packaging rules.
 - Preserve API-visible evaluation run identity as `(source_alias, run_id)` across run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend route state.
 - Pipeline Builder defaults to snapshot creation through `POST /api/pipeline-snapshots`. Executable A-share pipeline requests use `POST /api/pipeline-runs` with `start_from`; every executable run continues through evaluation.
 - Factor Studio and Pipeline Builder must keep A-share enabled and crypto/other markets disabled or planned until real modules exist.
