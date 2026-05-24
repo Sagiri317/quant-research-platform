@@ -11,7 +11,7 @@ N7 的目标不是把一个评价请求拆成一堆用户需要手动面对的�
 - 一个 API-visible run 表示一个 `EvaluationMatrixRun`；
 - 一个 `EvaluationMatrixRun` 内部包含多个 `combination_id`；
 - 每个 `combination_id` 表示一个完整参数组合的结果切片；
-- 前端在同一个 run 页面里按 feature、label、portfolio mode、kernel、factor set 等维度切换展示结果；
+- 前端在同一个 run 页面里按 feature、label、portfolio mode、kernel 等结果维度切换展示结果；
 - 计算层可以把多个 feature、label、portfolio mode 和 kernel 一起批量或并行计算；
 - 评价和展示层仍按 `combination_id` 单独查看每个结果切片；
 - tensor 是长期主计算路径，应该支持 matrix-native 输入和批量输出；
@@ -51,24 +51,23 @@ EvaluationMatrixRun = 一个可审计、可展示、可下载、可对比的矩�
 
 `combination_id` 是矩阵内部最重要的连接键。它把每个表格、图表、诊断、下载项和前端选择状态连接起来。
 
-N7 第一阶段应保持现有 evaluation 的核心语义：每个 factor column 是一个可单独评价的结果轴。也就是说，`feature` 是 result axis，`factor_set` 是输入批次或研究集合，不是第一阶段唯一的评价对象。
+N7 第一阶段应保持现有 evaluation 的核心语义：每个 factor column 是一个可单独评价的结果轴。也就是说，`feature` 是 result axis；第一阶段用户入口直接传入 feature columns。
 
 一个 result combination 至少由这些字段定义：
 
 ```text
 combination_id
-factor_set_id
 feature
 label
 kernel
 portfolio_mode
-weight_profile_id
-cost_profile_id
-benchmark_profile_set_id
-universe_policy_id
-eligibility_policy_id
-tradability_policy_id
 ```
+
+`dimensions/combinations.csv` 是动态维度表。只有在同一个 evaluation run 内同时存在多个取值、且这些取值会改变结果语义时，字段才进入 `combinations.csv`。第一阶段只有 `feature`、`label`、`kernel`、`portfolio_mode` 在 run 内展开多取值。
+
+第一阶段的成本、权重、benchmark、universe、eligibility、tradability 配置都是 run-level constants，写入 `config.json` / `lineage.json`。它们的实际结果数值仍然写在对应 fact tables 中，例如 `cost`、`turnover`、`target_weight`、diagnostic `method`。
+
+如果未来同一个 run 内同时比较多个成本、权重、benchmark、universe、eligibility 或 tradability 配置，再把对应 `cost_profile_id`、`weight_profile_id`、`benchmark_profile_id` 或 `*_policy_id` 提升进 `combinations.csv`。
 
 如果未来实现多因子模型、组合 signal 或 prediction score，可以把 `signal_id`、`model_id`、`prediction_id`、`risk_model_id`、`neutralization_policy_id` 等作为 future optional axes；不要把这些占位列放进 schema `0.6` 第一阶段的 required columns，也不要用它们替代第一阶段的单 feature 评价。
 
@@ -83,15 +82,15 @@ computation strategy = 如何计算
 result identity      = 如何命名、展示、比较和下载结果
 ```
 
-计算层可以把一个 factor set 里的多个 features、多个 labels、多个 portfolio modes 和多个 kernels 一起提交给 evaluation runner。tensor 路径应尽量使用 matrix-native 输入，一次性或批量产生所有结果；dataframe 路径可以用循环或并行模拟矩阵执行。
+计算层可以把显式传入的多个 features、多个 labels、多个 portfolio modes 和多个 kernels 一起提交给 evaluation runner。tensor 路径应尽量使用 matrix-native 输入，一次性或批量产生所有结果；dataframe 路径可以用循环或并行模拟矩阵执行。
 
 结果层必须仍然能够单独评价：
 
 ```text
-feature x label x portfolio_mode x kernel x weight_profile x cost_profile x policy_set -> combination_id
+feature x label x portfolio_mode x kernel -> combination_id
 ```
 
-因此，`factor_set` 的职责是组织一批一起输入计算的 feature columns；`feature` 的职责是形成可展示、可比较的单因子结果切片。未来如果要评价一个多因子整体 signal，应作为新的 signal/model 结果轴加入，而不是让第一阶段的单 feature 切片消失。
+因此，第一阶段输入选择直接使用 `features` 列表；`feature` 的职责是形成可展示、可比较的单因子结果切片。未来如果常用 feature 组合稳定下来，可以单独设计输入快捷方式，但它不应进入 `combination_id` 的必需身份字段，因为同一个 feature 未来可能同时用于多个研究问题。未来如果要评价一个多因子整体 signal，应作为新的 signal/model 结果轴加入，而不是让第一阶段的单 feature 切片消失。
 
 ### 2.4 Tensor 是长期主路径
 
@@ -225,7 +224,6 @@ Matrix identity 至少包含：
 ```text
 market
 requested date range
-factor_set_id
 factor_definition_version
 factor columns
 label set
@@ -233,14 +231,14 @@ portfolio mode set
 kernel set
 weight profile/config
 cost profile/config
-benchmark profile set config
+benchmark profile config
 universe policy
 eligibility policy
 tradability policy
 neutralization/risk controls when implemented
 ```
 
-`benchmark_profile_set_id` 表示一组基准配置，而不是单个基准指数。第一阶段可以使用 `none`；未来应支持默认指数集合和用户自定义基准集合，例如 `cn_default_equity_indices_v1` 或 `custom_user_benchmarks_v1`。同一个 `combination_id` 内可以按 `benchmark_id` 展开多个基准比较结果，不因为多个基准指数生成更多 `combination_id`。
+第一阶段 `benchmark_profiles=[]`，只写入 run config，不进入 `combinations.csv`。未来实现 benchmark 比较时，统一使用 `benchmark_profile_id` 表示一组基准配置；一个 profile 可以包含多个 benchmark，例如沪深 300、中证 500、中证 1000 或用户自定义指数。同一个 `combination_id` 内可以按 `benchmark_id` 展开多个基准比较结果，不因为多个基准指数生成更多 `combination_id`。
 
 Lineage 至少记录：
 
@@ -298,9 +296,6 @@ labels:
   - forward_return_5d
   - forward_return_20d
 
-factor_set_id:
-  - price_volume_core_v1
-
 factor columns:
   - mom_20d
   - vol_20d
@@ -316,7 +311,7 @@ cost_bps:
 2 kernels x 2 portfolio modes x 2 labels x 3 features = 24 result combinations
 ```
 
-这里的 `factor_set_id = price_volume_core_v1` 表示这 3 个 feature columns 作为同一批输入一起计算；它不表示只输出一个 factor-set-level 评价结果。
+这里的 3 个 factor columns 是显式输入的 evaluation features。第一阶段不定义额外的输入快捷名，也不输出 group-level 评价结果。
 
 `long_short` 在 N7 中是 factor spread / grouped portfolio 诊断口径，不等于真实可融券做空策略。除非未来单独建模 borrow availability、short-sale constraints、margin、execution、slippage 和 capacity，否则不得描述为真实可交易 long-short。
 
@@ -418,7 +413,7 @@ breakdowns/year/performance_summary.csv
 
 - `dimensions/combinations.csv` 是所有结果维度的 source of truth；
 - fact tables 默认只强制包含 `combination_id` 和本表自然主键，例如 `timestamp`、`asset`、`group`、`year`；
-- 大表不要重复写入 `feature`、`label`、`kernel`、`portfolio_mode`、`factor_set_id` 等字符串维度，避免体积膨胀；
+- 大表不要重复写入 `feature`、`label`、`kernel`、`portfolio_mode` 等字符串维度，避免体积膨胀；
 - 前端、API、下载、对比通过 `combination_id` join `dimensions/combinations.csv` 获得维度信息；
 - 用户可见表、可下载项和图表必须仍通过 `manifest.display` 暴露；前端不得绕过 display contract 猜测文件名；
 - `weights` 第一阶段就直接写 Parquet，不再把完整 weights CSV 作为主产物；
@@ -428,20 +423,13 @@ breakdowns/year/performance_summary.csv
 
 ```text
 combination_id
-factor_set_id
 feature
 label
 kernel
 portfolio_mode
-weight_profile_id
-cost_profile_id
-benchmark_profile_set_id
-universe_policy_id
-eligibility_policy_id
-tradability_policy_id
 ```
 
-其中 `weight_profile_id`、`cost_profile_id`、`benchmark_profile_set_id` 表示参数配置口径，`universe_policy_id`、`eligibility_policy_id`、`tradability_policy_id` 表示样本和交易可行性规则口径。`benchmark_profile_set_id` 是一组基准，不是单个指数；一个 combination 内未来可以按 `benchmark_id` 展开多个基准比较结果。`signal_id`、`model_id` 等只作为 future optional axes，不进入第一阶段 required columns。
+这些是第一阶段 run 内实际展开的结果维度。`combinations.csv` 不是固定全量 schema；未来只有当某个 profile/policy 在同一个 run 内出现多个取值并改变结果语义时，才把对应 ID 列加入 `combinations.csv`。`signal_id`、`model_id` 等只作为 future optional axes，不进入第一阶段 required columns。
 
 第一阶段 fact table 最低列约束：
 
@@ -488,7 +476,7 @@ diagnostics/tradability_diagnostics.csv:
 未来实现基准比较时，建议补充：
 ```text
 dimensions/benchmark_profiles.csv:
-  benchmark_profile_set_id, benchmark_id, benchmark_name, benchmark_type,
+  benchmark_profile_id, benchmark_id, benchmark_name, benchmark_type,
   return_column, alignment_policy
 
 metrics/benchmark_returns.csv:
@@ -524,8 +512,6 @@ Controls:
   label: forward_return_5d / forward_return_20d
   portfolio_mode: long_only / long_short
   kernel: tensor / dataframe
-  factor_set: price_volume_core_v1
-
 Current selection:
   combination_id = ...
 
@@ -668,7 +654,9 @@ Factor Factory 是 N7 的上游调用方和下游汇总视图，不是 N7 核心
 - API payload 使用 `kernel`，不接受旧 `engine`；
 - frontend shared API types 使用 `kernel`；
 - upload / pipeline / Factor Factory creation surface 使用 `kernel`；
-- A 股 CLI 使用 `--kernel`；
+- A 股 CLI 使用 `--kernels`，并支持一行多值参数：`--features mom_20d vol_20d`、`--labels forward_return_5d forward_return_20d`、`--kernels tensor dataframe`、`--portfolio-modes long_only long_short`；不要要求重复写多个 `--features`；
+- A 股 CLI 可以提供后端/本地私有的 `--input-file` 来显式指定 Parquet 输入文件，但这个入口不暴露到前端；
+- A 股 CLI 保留 `--dry-run` / plan-printing，用于校验输入文件、日期覆盖、列存在性、组合展开和输出位置，不写 artifact；
 - summary / config / manifest 使用 `kernel`；
 - docs 和 tests 全面改名。
 
@@ -680,7 +668,7 @@ Factor Factory 是 N7 的上游调用方和下游汇总视图，不是 N7 核心
 
 1. 定义 schema `0.6` evaluation artifact contract：`combination_id`、核心表、`manifest.display`。
 2. 把 QRP 自有 evaluation compute backend 从 `engine` 改为 `kernel`。
-3. 引入 A 股 `AShareEvaluationMatrixSpec`、matrix identity、combination objects，并明确 `factor_set` 是计算输入批次、`feature` 是结果轴。
+3. 引入 A 股 `AShareEvaluationMatrixSpec`、matrix identity、combination objects，并明确显式 `features` 是输入选择、`feature` 是结果轴。
 4. 先让 dataframe reference path 能生成 schema `0.6` matrix artifact，作为合同和对照基线。
 5. 重构 tensor path，使其接收 matrix-native 输入并输出 combination-keyed 结果。
 6. 用 dataframe/tensor 对照测试验证共同覆盖结果，采用分层容差策略；如因浮点归约顺序需要放宽，必须在测试和文档中写明。
@@ -766,29 +754,15 @@ canonical private sample regeneration 不是普通 unit test。它应作为合�
 2. 再跑 2023H1 A 股真实数据 smoke，覆盖 24 个 result combinations；只验证 schema、生成完整性、schema `0.6` 内部 compare/report、dataframe/tensor parity 和前端/API preview，不要求和旧样例做结果一致性比较。
 3. 2023H1 smoke 通过后，才跑完整 2023-2025 canonical regeneration；三年样例生成后，再在实现验收阶段比较新实现输出是否一致。
 
-## 14. 当前 Git 工作区处理
+## 14. Git 工作流
 
-当前 dirty docs 仍属于文档同步 checkpoint，不是 N7 代码实现：
-
-```text
-PROJECT_STATUS.md
-docs/architecture/README.md
-docs/architecture/next-stage-roadmap.md
-docs/architecture/next-stage-worktree-plan.md
-docs/superpowers/specs/2026-05-25-n7-a-share-run-identity-design.md
-```
-
-建议先做 docs-only commit：
+本文件和对应 implementation plan 是 N7 编码前的设计与执行合同。建议先提交 docs-only checkpoint，再从 `main` 创建实现分支：
 
 ```text
-docs: sync next-stage N7 evaluation run design
+codex/n7-evaluation-run-implementation
 ```
 
-之后再创建 N7 实现分支：
-
-```text
-codex/n7-a-share-run-identity
-```
+实现分支不应混入私有生成物、临时浏览器输出、依赖目录或 unrelated docs cleanup。
 
 ## 15. 非目标
 
@@ -810,8 +784,8 @@ N7 不做：
 - 一个 API-visible run 是 `EvaluationMatrixRun`；
 - 一个 evaluation run 内部包含多个 `combination_id`；
 - 计算层支持多个 features / labels / portfolio modes / kernels 一起批量或并行计算；
-- 评价层按 `feature x label x portfolio_mode x kernel x cost_profile` 单独形成结果切片；
-- `factor_set` 是计算输入批次，`feature` 是第一阶段的结果轴；
+- 评价层第一阶段按 `feature x label x portfolio_mode x kernel` 单独形成结果切片；
+- 显式 `features` 是第一阶段输入选择方式，`feature` 是第一阶段的结果轴；
 - 前端在一个页面切换 feature / label / portfolio mode / kernel；
 - 前端不需要视觉重设计，但必须完整展示 schema `0.6` 暴露的用户可见结果；
 - 所有 display tables，包括 Parquet `weights`，都必须支持 20 行 preview；
@@ -832,7 +806,7 @@ N7 不做：
 - 需要新增更详细的低内存 Evaluation Comparison Report，只输出表格/JSON/Markdown，不进主网页展示，用于比较 schema `0.6` combinations 和 kernel parity，不能用会读完整大 artifact 的 comparison 路径验收大样本；
 - dataframe/tensor 对照是 N7 验收门槛，使用分层 `rtol/atol` 容差策略。
 
-仍需在实现计划里细化，但不改变上述方向：
+实现时需要重点复核，但不改变上述方向：
 
 - schema `0.6` 每张表的完整列约束和 parquet/csv 写入策略；
 - tensor matrix layout 的最小输入/输出合同；
