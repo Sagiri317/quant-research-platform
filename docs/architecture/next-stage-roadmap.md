@@ -7,7 +7,7 @@
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
 | N1 | A 股 start-from pipeline runner | P0 | merged to `main` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
-| N2 | Eligibility / tradability 诊断可视化 | P0 | next | 让覆盖、过滤原因和影响进入 artifact/API/frontend |
+| N2 | Eligibility / tradability 诊断可视化 | P0 | backend artifact/API ready; frontend next | 让覆盖、过滤原因和影响先进入 artifact/API，下一步由 frontend 消费 |
 | N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
 | N4 | 前端 feature split | P1 | planned | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
@@ -64,13 +64,13 @@ conda run -n analysis python -m pytest -q tests/interfaces/api tests/research/fa
 - 把 `eligible`、`can_enter`、`can_exit` 的覆盖数、过滤影响和异常分布写成 artifact。
 - 前端可以看到每个 run 的可交易性诊断。
 
-建议输出：
+当前后端输出：
 
 ```text
-diagnostics/tradability_summary.csv
-diagnostics/tradability_by_year.csv
-diagnostics/tradability_by_segment.csv
+diagnostics/tradability_diagnostics.csv
 ```
+
+后续扩展可以单独设计按年、按 segment 的派生表；当前 N2 前端任务应先消费 `tradability_diagnostics.csv`，不要依赖尚未落地的 summary/by-year/by-segment 文件名。
 
 非目标：
 

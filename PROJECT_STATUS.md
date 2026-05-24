@@ -76,7 +76,7 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 继续做 N2：eligibility / tradability 诊断可视化。
+1. 继续做 N2 前端：消费 `tradability_diagnostics` 后端 artifact/API，完成 eligibility / tradability 诊断可视化。
 2. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
 3. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
 4. 已合并的 N1/N3 工作树和分支可在用户批准 exact paths 后清理。
@@ -91,3 +91,4 @@ Phase 1 之后下一阶段进展：
 | 2026-05-24 | docs sync | 已重构 `docs/code-map/`，同步根文档、architecture 文档和状态文件的当前架构表述。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | closed 2026-05-24 |
 | 2026-05-24 | architecture debt | N3 Artifact ZIP packaging 下沉已合入 main：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`，API download service 保留 HTTP response adapter 职责；未触碰 web。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
 | 2026-05-24 | next-stage implementation | N1 A 股 start-from pipeline runner 已合入 main：新增 `POST /api/pipeline-snapshots`，`POST /api/pipeline-runs` 统一为 `start_from`，统一 runner 编排 build/evaluate 到 evaluation，Factor Factory 改为 existing-factors start layer。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |
+| 2026-05-24 | next-stage implementation | N2 后端第一层 tradability artifact/API 已加入 schema `0.5`：新增 `diagnostics/tradability_diagnostics.csv`，通过 `manifest.display`、diagnostics preview、direct download 和 ZIP download 暴露；前端可视化仍是独立后续任务。 | `WORKSPACE_STATUS.md`、`PLAN_INDEX.md`、`control/PROJECT_REGISTRY.md` | open |

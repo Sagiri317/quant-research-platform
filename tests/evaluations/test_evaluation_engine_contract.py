@@ -138,6 +138,7 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
         "cost_breakdown",
         "weight_diagnostics",
         "neutralization_diagnostics",
+        "tradability_diagnostics",
     }
     weight_diagnostics = result.metrics["weight_diagnostics"]
     assert {
@@ -148,6 +149,54 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
         "entry_blocked_count",
         "exit_blocked_count",
     }.issubset(weight_diagnostics.columns)
+    tradability_diagnostics = result.metrics["tradability_diagnostics"]
+    assert {
+        "eligible_rate",
+        "can_enter_rate",
+        "can_exit_rate",
+        "entry_blocked_rate",
+        "exit_blocked_rate",
+    }.issubset(tradability_diagnostics.columns)
+    assert (
+        tradability_diagnostics[
+            [
+                "eligible_rate",
+                "can_enter_rate",
+                "can_exit_rate",
+                "entry_blocked_rate",
+                "exit_blocked_rate",
+            ]
+        ]
+        .apply(pd.to_numeric, errors="coerce")
+        .ge(0.0)
+        .all()
+        .all()
+    )
+    assert (
+        tradability_diagnostics[
+            [
+                "eligible_rate",
+                "can_enter_rate",
+                "can_exit_rate",
+                "entry_blocked_rate",
+                "exit_blocked_rate",
+            ]
+        ]
+        .apply(pd.to_numeric, errors="coerce")
+        .le(1.0)
+        .all()
+        .all()
+    )
+    sample = tradability_diagnostics.iloc[0]
+    assert sample["eligible_rate"] == pytest.approx(
+        sample["eligible_count"] / sample["universe_count"]
+    )
+    assert sample["can_enter_rate"] == pytest.approx(
+        sample["can_enter_count"] / sample["eligible_count"]
+    )
+    assert sample["can_exit_rate"] == pytest.approx(
+        sample["can_exit_count"] / sample["universe_count"]
+    )
     assert set(pd.read_csv(expected_paths["positions"])["feature"]) == {
         "factor",
         "alt_factor",
@@ -335,6 +384,14 @@ def test_tensor_engine_uses_tensor_metric_path(tmp_path, monkeypatch):
     assert result.summary["engine"] == "tensor"
     assert not result.metrics["returns"].empty
     assert not result.metrics["pnl"].empty
+    assert not result.metrics["tradability_diagnostics"].empty
+    assert {
+        "eligible_rate",
+        "can_enter_rate",
+        "can_exit_rate",
+        "entry_blocked_rate",
+        "exit_blocked_rate",
+    }.issubset(result.metrics["tradability_diagnostics"].columns)
 
 
 def test_tensor_engine_passes_configured_value_dtype_to_tensor_conversion(

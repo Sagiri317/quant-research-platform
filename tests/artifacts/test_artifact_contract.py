@@ -66,7 +66,20 @@ def test_load_evaluation_set_reads_manifest_summary_tables_and_report(tmp_path):
         "cost_breakdown",
         "weight_diagnostics",
         "neutralization_diagnostics",
+        "tradability_diagnostics",
     }
+    display_tables = {
+        table["key"]: table
+        for table in loaded.manifest["display"]["tables"]
+    }
+    assert display_tables["tradability_diagnostics"]["path"] == (
+        "diagnostics/tradability_diagnostics.csv"
+    )
+    download_items = {
+        item["item"]
+        for item in loaded.manifest["display"]["downloads"]["items"]
+    }
+    assert "diagnostics/tradability_diagnostics.csv" in download_items
     assert loaded.tables["ic"]["ic"].tolist() == [0.4]
     assert loaded.report == "# Report\n"
 
@@ -126,6 +139,17 @@ def test_load_evaluation_set_reports_missing_manifest_section(tmp_path):
         load_evaluation_set(tmp_path)
 
 
+def test_load_evaluation_set_rejects_legacy_run_without_tradability_table(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["artifacts"]["diagnostics"]["tradability_diagnostics"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="diagnostics.tradability_diagnostics"):
+        load_evaluation_set(tmp_path)
+
+
 def test_load_evaluation_set_reports_missing_required_csv_column(tmp_path):
     write_evaluation_set(tmp_path)
     pd.DataFrame(
@@ -139,6 +163,16 @@ def test_load_evaluation_set_reports_missing_required_csv_column(tmp_path):
     ).to_csv(tmp_path / "metrics" / "ic.csv", index=False)
 
     with pytest.raises(ValueError, match="ic is missing columns"):
+        load_evaluation_set(tmp_path)
+
+
+def test_load_evaluation_set_reports_missing_tradability_diagnostic_column(tmp_path):
+    write_evaluation_set(tmp_path)
+    path = tmp_path / "diagnostics" / "tradability_diagnostics.csv"
+    diagnostics = pd.read_csv(path).drop(columns=["eligible_rate"])
+    diagnostics.to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="tradability_diagnostics is missing columns"):
         load_evaluation_set(tmp_path)
 
 

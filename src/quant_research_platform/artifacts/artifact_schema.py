@@ -22,6 +22,7 @@ EVALUATION_SET_REQUIRED_TABLES = (
     "exposure_summary",
     "weight_diagnostics",
     "neutralization_diagnostics",
+    "tradability_diagnostics",
 )
 
 EVALUATION_SET_METRIC_TABLES = (
@@ -42,6 +43,7 @@ EVALUATION_SET_PORTFOLIO_TABLES = (
 EVALUATION_SET_DIAGNOSTIC_TABLES = (
     "weight_diagnostics",
     "neutralization_diagnostics",
+    "tradability_diagnostics",
 )
 OPTIONAL_ARTIFACT_GROUPS = (
     "metrics_by_year",
@@ -110,6 +112,10 @@ def build_evaluation_set_artifact_paths(
             "neutralization_diagnostics": _relative(
                 base,
                 base / "diagnostics" / "neutralization_diagnostics.csv",
+            ),
+            "tradability_diagnostics": _relative(
+                base,
+                base / "diagnostics" / "tradability_diagnostics.csv",
             ),
         },
         "report": "report.md",

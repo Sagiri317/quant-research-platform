@@ -16,6 +16,26 @@ from quant_research_platform.artifacts.artifact_schema import (
 )
 from quant_research_platform.runtime.run_metadata import validate_run_metadata
 
+TRADABILITY_DIAGNOSTIC_COLUMNS = frozenset(
+    {
+        "timestamp",
+        "method",
+        "direction",
+        "universe_count",
+        "eligible_count",
+        "can_enter_count",
+        "can_exit_count",
+        "entry_blocked_count",
+        "exit_blocked_count",
+        "eligible_rate",
+        "can_enter_rate",
+        "can_exit_rate",
+        "entry_blocked_rate",
+        "exit_blocked_rate",
+        "fallback_reason",
+    }
+)
+
 
 def evaluation_set_csv_paths(artifacts: dict[object, object]) -> dict[str, str]:
     """返回 evaluation-set manifest 声明并通过校验的 CSV table paths。"""
@@ -92,6 +112,8 @@ def validate_evaluation_set_table_columns(tables: dict[str, pd.DataFrame]) -> No
                 "final_cumulative_gross_return",
                 "final_cumulative_net_return",
             }
+        elif name == "tradability_diagnostics":
+            required = {*dimension_columns, *TRADABILITY_DIAGNOSTIC_COLUMNS}
         elif name in {
             "ic",
             "ic_summary",

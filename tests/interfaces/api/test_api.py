@@ -1070,6 +1070,40 @@ def test_api_downloads_neutralization_diagnostics_artifact_csv(tmp_path):
     assert "method" in response.text
 
 
+def test_api_previews_tradability_diagnostics_table(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get(
+        "/api/runs/platform/demo/diagnostics/tradability_diagnostics"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "eligible_rate" in payload["columns"]
+    assert "entry_blocked_rate" in payload["columns"]
+
+
+def test_api_downloads_tradability_diagnostics_artifact_csv(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get(
+        "/api/runs/platform/demo/artifacts/"
+        "diagnostics/tradability_diagnostics.csv"
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert 'filename="tradability_diagnostics.csv"' in response.headers[
+        "content-disposition"
+    ]
+    assert "eligible_rate" in response.text
+    assert "entry_blocked_rate" in response.text
+
+
 def test_api_downloads_report_markdown_and_rejects_removed_excel_workbook(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
@@ -1154,6 +1188,7 @@ def test_api_downloads_selected_artifacts_as_zip(tmp_path):
                 "summary.json",
                 "metrics/performance_summary.csv",
                 "portfolio/cost_breakdown.csv",
+                "diagnostics/tradability_diagnostics.csv",
             ]
         },
     )
@@ -1170,6 +1205,7 @@ def test_api_downloads_selected_artifacts_as_zip(tmp_path):
             "summary.json",
             "metrics/performance_summary.csv",
             "portfolio/cost_breakdown.csv",
+            "diagnostics/tradability_diagnostics.csv",
         }
         assert b"public_run_id" in archive.read("comparison.csv")
         assert b"platform/demo" in archive.read("comparison.csv")
@@ -1181,6 +1217,9 @@ def test_api_downloads_selected_artifacts_as_zip(tmp_path):
             "metrics/performance_summary.csv"
         )
         assert b"buy_turnover" in archive.read("portfolio/cost_breakdown.csv")
+        assert b"eligible_rate" in archive.read(
+            "diagnostics/tradability_diagnostics.csv"
+        )
 
 
 def test_api_downloads_selected_artifacts_from_query_items(tmp_path):

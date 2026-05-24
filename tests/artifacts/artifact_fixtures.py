@@ -137,6 +137,10 @@ def write_evaluation_set(
         output_dir / "diagnostics" / "neutralization_diagnostics.csv",
         index=False,
     )
+    _with_dims(_tradability_diagnostics_frame()).to_csv(
+        output_dir / "diagnostics" / "tradability_diagnostics.csv",
+        index=False,
+    )
     (output_dir / "report.md").write_text("# Report\n", encoding="utf-8")
 
 
@@ -165,6 +169,9 @@ def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
             "weight_diagnostics": "diagnostics/weight_diagnostics.csv",
             "neutralization_diagnostics": (
                 "diagnostics/neutralization_diagnostics.csv"
+            ),
+            "tradability_diagnostics": (
+                "diagnostics/tradability_diagnostics.csv"
             ),
         },
         "report": "report.md",
@@ -493,6 +500,12 @@ def _diagnostics_frame() -> pd.DataFrame:
             "feature": ["factor"],
             "method": ["equal_weight_quantile"],
             "direction": ["long_high"],
+            "universe_count": [100],
+            "eligible_count": [90],
+            "can_enter_count": [85],
+            "can_exit_count": [95],
+            "entry_blocked_count": [5],
+            "exit_blocked_count": [5],
             "long_count": [1],
             "short_count": [1],
             "fallback_reason": [""],
@@ -509,6 +522,31 @@ def _neutralization_diagnostics_frame() -> pd.DataFrame:
             "n_obs": [5],
             "group_columns": [""],
             "exposure_columns": [""],
+        }
+    )
+
+
+def _tradability_diagnostics_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01"],
+            "feature": ["factor"],
+            "method": ["equal_weight_quantile"],
+            "direction": ["long_high"],
+            "universe_count": [100],
+            "eligible_count": [90],
+            "can_enter_count": [85],
+            "can_exit_count": [95],
+            "entry_blocked_count": [5],
+            "exit_blocked_count": [5],
+            "long_count": [1],
+            "short_count": [1],
+            "eligible_rate": [0.9],
+            "can_enter_rate": [85 / 90],
+            "can_exit_rate": [0.95],
+            "entry_blocked_rate": [5 / 90],
+            "exit_blocked_rate": [0.05],
+            "fallback_reason": [""],
         }
     )
 
