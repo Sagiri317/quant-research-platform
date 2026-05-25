@@ -12,11 +12,11 @@
 | N4 | 前端 feature split | P1 | merged to `main` | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
-| N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | design needed | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片，并生成可供前端展示和后续诊断复用的三年 A 股样例 |
+| N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | implementation branch under pre-merge review: `codex/n7-evaluation-run-implementation` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片，并生成可供前端展示和后续诊断复用的三年 A 股样例 |
 
 ## 当前推荐顺序
 
-N7 应先于 N2 frontend、N5 和 N6 的落地实现。
+当前应先完成并合并 N7 实现分支；N2 frontend、N5 和 N6 的落地实现应基于合并后的 N7 合同继续。
 
 ```text
 1. N7 A 股 evaluation run identity 与 2023-2025 样例生成

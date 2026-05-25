@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from quant_research_platform.artifacts.artifact_loader import LoadedEvaluationSet
 from quant_research_platform.artifacts.artifact_schema import ARTIFACT_SCHEMA_VERSION
+from quant_research_platform.artifacts.public_metadata import sanitize_public_metadata
 
 
 class ArtifactPackageError(ValueError):
@@ -158,6 +159,12 @@ def _selected_zip_cache_path(
     fingerprint: list[str] = []
     for item in items:
         _validate_download_item_name(item)
+        if item in {"config.json", "lineage.json"}:
+            digest = hashlib.sha256(
+                _public_metadata_bytes(run.output_dir, item)
+            ).hexdigest()
+            fingerprint.append(f"{item}\0dynamic\0{digest}")
+            continue
         source_path = _download_item_path(run, item)
         if source_path is not None:
             stat = source_path.stat()
@@ -221,7 +228,7 @@ def _resolve_download_item(
         return _ResolvedDownloadItem(
             name=item,
             media_type="application/json",
-            content=_json_bytes(run.config),
+            content=_public_metadata_bytes(run.output_dir, item, fallback=run.config),
         )
     if item == "lineage.json":
         return _ResolvedDownloadItem(
@@ -260,7 +267,7 @@ def _download_item_path(run: LoadedEvaluationSet, item: str) -> Path | None:
     """Return an existing artifact file path; dynamic content returns None."""
 
     _validate_download_item_name(item)
-    if item == "lineage.json":
+    if item in {"config.json", "lineage.json"}:
         return None
     artifacts = run.manifest.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -380,16 +387,43 @@ def _json_bytes(payload: dict[str, object]) -> bytes:
 def public_lineage_bytes(output_dir: Path) -> bytes:
     """Return API-safe lineage metadata without private/local input file fields."""
 
-    return _json_bytes(_public_lineage_payload(output_dir))
+    return _public_metadata_bytes(output_dir, "lineage.json")
 
 
-def _public_lineage_payload(output_dir: Path) -> dict[str, object]:
-    path = output_dir / "lineage.json"
-    value = json.loads(path.read_text(encoding="utf-8"))
+def public_config_bytes(output_dir: Path) -> bytes:
+    """Return API-safe config metadata without private/local path fields."""
+
+    return _public_metadata_bytes(output_dir, "config.json")
+
+
+def _public_metadata_bytes(
+    output_dir: Path,
+    file_name: str,
+    *,
+    fallback: dict[str, object] | None = None,
+) -> bytes:
+    return _json_bytes(
+        _public_metadata_payload(output_dir, file_name, fallback=fallback)
+    )
+
+
+def _public_metadata_payload(
+    output_dir: Path,
+    file_name: str,
+    *,
+    fallback: dict[str, object] | None = None,
+) -> dict[str, object]:
+    path = output_dir / file_name
+    if not path.is_file() and fallback is not None:
+        value = fallback
+    else:
+        value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise ArtifactPackageError("lineage.json must contain an object")
-    value.pop("input_file", None)
-    return value
+        raise ArtifactPackageError(f"{file_name} must contain an object")
+    sanitized = sanitize_public_metadata(value)
+    if not isinstance(sanitized, dict):
+        raise ArtifactPackageError(f"{file_name} must contain an object")
+    return sanitized
 
 
 def _write_selected_zip(

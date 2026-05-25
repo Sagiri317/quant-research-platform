@@ -56,6 +56,14 @@ def direct_manifest_download_response(
         raise HTTPException(status_code=422, detail=f"未知下载项：{artifact_item}")
     if not path.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
+    if artifact_item == "config.json":
+        return Response(
+            content=package.public_config_bytes(output_dir),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": 'attachment; filename="config.json"'
+            },
+        )
     if artifact_item == "lineage.json":
         return Response(
             content=package.public_lineage_bytes(output_dir),

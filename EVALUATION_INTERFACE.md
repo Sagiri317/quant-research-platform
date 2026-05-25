@@ -225,8 +225,8 @@ conda run -n analysis python -m quant_research_platform.markets.implementations.
   --end-year 2025 `
   --start-date 2024-01-01 `
   --end-date 2024-12-31 `
-  --features mom_20d,vol_20d,amihud_20d `
-  --labels forward_return_5d,forward_return_20d `
+  --features mom_20d vol_20d amihud_20d `
+  --labels forward_return_5d forward_return_20d `
   --return-source-column forward_return_1d `
   --portfolio-modes long_only `
   --kernels dataframe

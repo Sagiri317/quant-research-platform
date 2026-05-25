@@ -28,6 +28,7 @@ from quant_research_platform.artifacts.manifest_validation import (
     validate_display_manifest,
     validate_evaluation_set_table_columns,
 )
+from quant_research_platform.artifacts.public_metadata import sanitize_public_metadata
 from quant_research_platform.runtime.profiling import measure_stage
 
 
@@ -107,11 +108,12 @@ def write_evaluation_set_artifacts(
     summary_path = destination / "summary.json"
     report_path = destination / "report.md"
 
+    persisted_config = _public_metadata(config)
     persisted_lineage = _public_lineage(lineage)
     persisted_lineage.setdefault("artifact_schema_version", ARTIFACT_SCHEMA_VERSION)
     for path, payload in (
         (manifest_path, manifest),
-        (config_path, config),
+        (config_path, persisted_config),
         (lineage_path, persisted_lineage),
         (summary_path, persisted_summary),
     ):
@@ -265,9 +267,14 @@ def _summary_with_artifact_contract(summary: dict[str, object]) -> dict[str, obj
 
 
 def _public_lineage(lineage: dict[str, object] | None) -> dict[str, object]:
-    result = dict(lineage or {})
-    result.pop("input_file", None)
-    return result
+    return _public_metadata(lineage or {})
+
+
+def _public_metadata(value: dict[str, object]) -> dict[str, object]:
+    sanitized = sanitize_public_metadata(value)
+    if not isinstance(sanitized, dict):
+        return {}
+    return sanitized
 
 
 def _write_table(frame: pd.DataFrame, path: Path) -> None:

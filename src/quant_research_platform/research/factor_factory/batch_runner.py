@@ -74,7 +74,13 @@ def evaluate_existing_factor_candidates(
             )
             continue
         try:
-            records.extend(_success_records(candidate, result.run_dir))
+            records.extend(
+                _success_records(
+                    candidate,
+                    result.run_dir,
+                    artifact_dir=_evaluation_artifact_dir(result),
+                )
+            )
         except ValueError as exc:
             records.append(
                 _failed_record(
@@ -121,8 +127,10 @@ def _failed_record(
 def _success_records(
     candidate: FactorCandidate,
     run_dir: Path,
+    *,
+    artifact_dir: Path | None = None,
 ) -> list[CandidateEvaluationRecord]:
-    summary = _candidate_combination_summary(run_dir)
+    summary = _candidate_combination_summary(artifact_dir or run_dir)
     return [
         CandidateEvaluationRecord(
             candidate_id=candidate.candidate_id,
@@ -155,6 +163,13 @@ def _success_records(
         )
         for row in summary.to_dict(orient="records")
     ]
+
+
+def _evaluation_artifact_dir(result: object) -> Path | None:
+    manifest_path = getattr(result, "evaluation_artifact_path", None)
+    if manifest_path is None:
+        return None
+    return Path(manifest_path).parent
 
 
 def _candidate_combination_summary(run_dir: Path) -> pd.DataFrame:

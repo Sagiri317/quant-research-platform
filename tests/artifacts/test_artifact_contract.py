@@ -348,6 +348,17 @@ def test_load_evaluation_set_rejects_unknown_artifact_entries(tmp_path):
         load_evaluation_set(tmp_path)
 
 
+def test_load_evaluation_set_rejects_missing_metadata_artifact_key(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["artifacts"]["lineage"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing required artifact groups"):
+        load_evaluation_set(tmp_path)
+
+
 def test_load_evaluation_set_rejects_unknown_artifact_table_entries(tmp_path):
     write_evaluation_set(tmp_path)
     manifest_path = tmp_path / "manifest.json"

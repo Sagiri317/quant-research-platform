@@ -178,6 +178,37 @@ def test_build_selected_artifact_zip_reuses_dynamic_item_for_fingerprint_and_wri
         assert archive.namelist() == ["comparison.csv"]
 
 
+def test_build_selected_artifact_zip_cache_changes_when_lineage_changes(
+    tmp_path,
+) -> None:
+    write_evaluation_set(tmp_path / "run", run_id="demo")
+    run = load_evaluation_set(tmp_path / "run")
+
+    first_zip_path = build_selected_artifact_zip(
+        run,
+        source_alias="platform",
+        run_id="demo",
+        items=["lineage.json"],
+        cache_root=tmp_path / "download_cache",
+    )
+    lineage_path = tmp_path / "run" / "lineage.json"
+    lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+    lineage["public_note"] = "updated"
+    lineage_path.write_text(json.dumps(lineage), encoding="utf-8")
+
+    second_zip_path = build_selected_artifact_zip(
+        run,
+        source_alias="platform",
+        run_id="demo",
+        items=["lineage.json"],
+        cache_root=tmp_path / "download_cache",
+    )
+
+    assert second_zip_path != first_zip_path
+    with zipfile.ZipFile(second_zip_path) as archive:
+        assert json.loads(archive.read("lineage.json"))["public_note"] == "updated"
+
+
 def test_build_selected_artifact_zip_rejects_unknown_item_before_cache(
     tmp_path,
 ) -> None:

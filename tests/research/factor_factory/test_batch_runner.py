@@ -62,8 +62,12 @@ def test_batch_runner_records_success_and_unmappable_candidate(
     def fake_run_a_share_pipeline(config):
         calls.append(config)
         run_dir = tmp_path / "runs" / config.run_id
-        _write_n7_evaluation_summary(run_dir)
-        return SimpleNamespace(run_dir=run_dir)
+        evaluation_dir = run_dir / "evaluation"
+        _write_n7_evaluation_summary(evaluation_dir)
+        return SimpleNamespace(
+            run_dir=run_dir,
+            evaluation_artifact_path=evaluation_dir / "manifest.json",
+        )
 
     monkeypatch.setattr(
         runner_module,

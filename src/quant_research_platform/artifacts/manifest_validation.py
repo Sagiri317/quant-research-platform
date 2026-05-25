@@ -117,12 +117,23 @@ def _validate_known_artifact_entries(artifacts: dict[object, object]) -> None:
     }
     allowed_top_level = {*required_top_level, *OPTIONAL_ARTIFACT_GROUPS}
     top_level_keys = {key for key in artifacts if isinstance(key, str)}
+    missing_groups = sorted(required_top_level.difference(top_level_keys))
+    if missing_groups:
+        raise ValueError(
+            "manifest artifacts missing required artifact groups: "
+            f"{missing_groups}."
+        )
     unknown_groups = sorted(top_level_keys.difference(allowed_top_level))
     if unknown_groups:
         raise ValueError(
             "manifest artifacts contain unknown artifact groups: "
             f"{unknown_groups}."
         )
+    for key in ("manifest", "config", "lineage", "summary", "report"):
+        relative_path = artifacts.get(key)
+        if not isinstance(relative_path, str) or not relative_path:
+            raise ValueError(f"manifest artifacts must include {key}.")
+        validate_artifact_relative_path(relative_path, source=f"artifacts.{key}")
 
     _require_no_unknown_section_keys(artifacts, "dimensions", {"combinations"})
     _require_no_unknown_section_keys(

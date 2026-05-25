@@ -1722,6 +1722,8 @@ def test_api_downloads_lineage_metadata_directly_and_in_selected_zip(tmp_path):
     lineage_path = run_dir / "lineage.json"
     lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
     lineage["input_file"] = "data/processed_private/csmar/factors.parquet"
+    lineage["source_file"] = "C:/Users/DELL/private/factors.parquet"
+    lineage["nested"] = {"path": "data/processed_private/csmar/factors.parquet"}
     lineage_path.write_text(json.dumps(lineage), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
@@ -1733,10 +1735,49 @@ def test_api_downloads_lineage_metadata_directly_and_in_selected_zip(tmp_path):
 
     assert direct.status_code == 200
     assert "input_file" not in direct.text
+    assert "processed_private" not in direct.text
+    assert "C:/Users" not in direct.text
+    assert direct.json()["source_file"] == "[redacted-path]"
+    assert direct.json()["nested"]["path"] == "[redacted-path]"
     assert zipped.status_code == 200
     with zipfile.ZipFile(BytesIO(zipped.content)) as archive:
         assert archive.namelist() == ["lineage.json"]
-        assert b"input_file" not in archive.read("lineage.json")
+        zipped_lineage = archive.read("lineage.json")
+        assert b"input_file" not in zipped_lineage
+        assert b"processed_private" not in zipped_lineage
+        assert b"C:/Users" not in zipped_lineage
+
+
+def test_api_downloads_config_metadata_without_private_paths(tmp_path):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    config_path = run_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["metadata"]["source_file"] = (
+        "data/processed_private/csmar/factors.parquet"
+    )
+    config["debug"] = {"path": "C:/Users/DELL/private/factors.parquet"}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    direct = client.get("/api/runs/platform/demo/artifacts/config.json")
+    zipped = client.post(
+        "/api/runs/platform/demo/download",
+        json={"items": ["config.json"]},
+    )
+
+    assert direct.status_code == 200
+    assert "processed_private" not in direct.text
+    assert "C:/Users" not in direct.text
+    assert direct.json()["metadata"]["source_file"] == "[redacted-path]"
+    assert direct.json()["debug"]["path"] == "[redacted-path]"
+    assert zipped.status_code == 200
+    with zipfile.ZipFile(BytesIO(zipped.content)) as archive:
+        assert archive.namelist() == ["config.json"]
+        zipped_config = archive.read("config.json")
+        assert b"processed_private" not in zipped_config
+        assert b"C:/Users" not in zipped_config
 
 
 def test_api_rejects_unknown_selected_artifact_before_writing_cache(tmp_path):

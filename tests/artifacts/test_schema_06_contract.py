@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -43,6 +44,15 @@ def test_writer_persists_schema_06_star_artifact_with_parquet_weights(tmp_path) 
         output_dir,
         config={
             "metadata": _metadata(),
+            "source_file": (
+                "E:/quant-workspace/projects/quant-research-platform/"
+                "data/processed_private/csmar/factors.parquet"
+            ),
+            "nested": {
+                "path": "C:/Users/DELL/private/factors.parquet",
+                "input_path": Path("data/processed_private/csmar/factors.parquet"),
+                "public_label": "safe",
+            },
             "cost_config": {"cost_bps": 0.0},
             "weight_config": {"method": "equal_weight_quantile"},
             "benchmark_profiles": [],
@@ -54,6 +64,12 @@ def test_writer_persists_schema_06_star_artifact_with_parquet_weights(tmp_path) 
             "input_file": "fixture.parquet",
             "input_reference": "fixture",
             "input_fingerprint": "sha256:fixture",
+            "source_file": "data/processed_private/csmar/factors.parquet",
+            "nested": {
+                "path": "C:/Users/DELL/private/factors.parquet",
+                "input_path": Path("data/processed_private/csmar/factors.parquet"),
+                "public_label": "safe",
+            },
             "actual_date_coverage": {
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-02",
@@ -103,8 +119,16 @@ def test_writer_persists_schema_06_star_artifact_with_parquet_weights(tmp_path) 
     assert "engine" not in summary
     assert config["cost_config"] == {"cost_bps": 0.0}
     assert config["benchmark_profiles"] == []
+    assert config["source_file"] == "[redacted-path]"
+    assert config["nested"]["path"] == "[redacted-path]"
+    assert config["nested"]["input_path"] == "[redacted-path]"
+    assert config["nested"]["public_label"] == "safe"
     assert "input_file" not in lineage
     assert lineage["input_reference"] == "fixture"
+    assert lineage["source_file"] == "[redacted-path]"
+    assert lineage["nested"]["path"] == "[redacted-path]"
+    assert lineage["nested"]["input_path"] == "[redacted-path]"
+    assert lineage["nested"]["public_label"] == "safe"
     assert list(combinations.columns) == [
         "combination_id",
         "feature",
