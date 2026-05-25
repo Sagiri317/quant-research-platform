@@ -127,11 +127,9 @@ def test_discover_runs_uses_schema_evaluation_id(tmp_path):
     assert [record.ref.public_run_id for record in records] == ["platform/schema_run"]
 
 
-def test_discover_runs_exposes_pipeline_evaluation_runs(tmp_path):
+def test_discover_runs_exposes_pipeline_evaluation_run(tmp_path):
     pipeline_root = tmp_path / "pipeline_runs"
-    nested_run = (
-        pipeline_root / "pipeline_run" / "evaluation" / "evaluation_runs" / "demo"
-    )
+    nested_run = pipeline_root / "pipeline_run" / "evaluation"
     write_evaluation_set(nested_run, run_id="demo")
 
     records = discover_runs([RunRoot("pipeline", pipeline_root)])
@@ -150,8 +148,6 @@ def test_default_api_run_list_exposes_default_pipeline_root(tmp_path, monkeypatc
         / "pipeline_runs"
         / "pipeline_run"
         / "evaluation"
-        / "evaluation_runs"
-        / "demo"
     )
     write_evaluation_set(pipeline_run, run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", platform_root)]))
@@ -220,6 +216,64 @@ def test_api_run_list_skips_unsupported_legacy_schema_runs(tmp_path):
     assert [run["public_run_id"] for run in response.json()] == ["platform/demo"]
 
 
+def test_api_run_list_skips_schema_06_run_missing_required_artifact_file(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
+    broken = runs_root / "broken"
+    write_evaluation_set(broken, run_id="broken")
+    (broken / "portfolio" / "weights.parquet").unlink()
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs")
+    target = client.get("/api/runs/platform/broken/evidence")
+
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
+    assert target.status_code == 422
+    assert target.json()["detail"] == "artifact run index is incomplete or invalid"
+
+
+def test_api_run_list_skips_schema_06_run_missing_performance_columns(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
+    broken = runs_root / "broken"
+    write_evaluation_set(broken, run_id="broken")
+    performance_path = broken / "metrics" / "performance_summary.csv"
+    performance = pd.read_csv(performance_path).drop(
+        columns=["mean_net_portfolio_return"]
+    )
+    performance.to_csv(performance_path, index=False)
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs")
+    target = client.get("/api/runs/platform/broken/evidence")
+
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
+    assert target.status_code == 422
+    assert "performance_summary is missing columns" in target.json()["detail"]
+
+
+def test_api_run_list_skips_unknown_manifest_artifact_entries(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "good", run_id="good")
+    broken = runs_root / "broken"
+    write_evaluation_set(broken, run_id="broken")
+    manifest_path = broken / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["private_debug"] = "private/debug.csv"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs")
+    target = client.get("/api/runs/platform/broken/evidence")
+
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
+    assert target.status_code == 422
+    assert "unknown artifact groups" in target.json()["detail"]
+
+
 def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(
@@ -233,7 +287,7 @@ def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
 
     evidence = client.get("/api/runs/platform/demo/evidence")
     ic = client.get("/api/runs/platform/demo/metrics/ic")
-    pnl = client.get("/api/runs/platform/demo/portfolio/pnl")
+    cumulative = client.get("/api/runs/platform/demo/portfolio/cumulative_returns")
     performance = client.get("/api/runs/platform/demo/metrics/performance_summary")
     retired_performance = client.get(
         "/api/runs/platform/demo/metrics/performance-summary"
@@ -251,8 +305,8 @@ def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
         ic.json()["columns"]
     )
     assert len(ic.json()["rows"]) == 2
-    assert pnl.status_code == 200
-    assert "cumulative_pnl" in pnl.json()["columns"]
+    assert cumulative.status_code == 200
+    assert "cumulative_net_return" in cumulative.json()["columns"]
     assert performance.status_code == 200
     assert "max_drawdown" in performance.json()["columns"]
     assert retired_performance.status_code == 404
@@ -266,39 +320,61 @@ def test_api_metric_preview_filters_combination_before_limit(tmp_path):
     write_evaluation_set(run_dir, run_id="demo")
     pd.DataFrame(
         [
-            {"combination_id": "combo_a", "timestamp": "2024-01-01", "ic": 0.1},
-            {"combination_id": "combo_b", "timestamp": "2024-01-02", "ic": 0.2},
-            {"combination_id": "combo_b", "timestamp": "2024-01-03", "ic": 0.3},
+            {
+                "combination_id": "factor__forward_return__dataframe__long_short",
+                "timestamp": "2024-01-01",
+                "ic": 0.1,
+                "rankic": 0.1,
+                "n_obs": 4,
+            },
+            {
+                "combination_id": "factor__forward_return__dataframe__long_short",
+                "timestamp": "2024-01-02",
+                "ic": 0.2,
+                "rankic": 0.2,
+                "n_obs": 4,
+            },
+            {
+                "combination_id": "factor__forward_return__dataframe__long_short",
+                "timestamp": "2024-01-03",
+                "ic": 0.3,
+                "rankic": 0.3,
+                "n_obs": 4,
+            },
         ]
     ).assign(
         feature="factor",
         label="forward_return",
-        weight_id="w0",
-        cost_id="c0",
+        kernel="dataframe",
+        portfolio_mode="long_short",
     ).to_csv(run_dir / "metrics" / "ic.csv", index=False)
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/metrics/ic?combination_id=combo_b&limit=1"
+        "/api/runs/platform/demo/metrics/ic?"
+        "combination_id=factor__forward_return__dataframe__long_short&limit=1"
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["total_rows"] == 2
+    assert payload["total_rows"] == 3
+    assert payload["has_more"] is True
     assert payload["rows"] == [
         {
-            "combination_id": "combo_b",
-            "timestamp": "2024-01-02",
-            "ic": 0.2,
+            "combination_id": "factor__forward_return__dataframe__long_short",
+            "timestamp": "2024-01-01",
+            "ic": 0.1,
+            "rankic": 0.1,
+            "n_obs": 4,
             "feature": "factor",
             "label": "forward_return",
-            "weight_id": "w0",
-            "cost_id": "c0",
+            "kernel": "dataframe",
+            "portfolio_mode": "long_short",
         }
     ]
 
 
-def test_api_metric_endpoint_loads_only_selected_run_artifacts(tmp_path, monkeypatch):
+def test_api_metric_endpoint_uses_lightweight_table_preview(tmp_path, monkeypatch):
     from quant_research_platform.interfaces.api.services import run_repository
 
     runs_root = tmp_path / "runs"
@@ -317,7 +393,34 @@ def test_api_metric_endpoint_loads_only_selected_run_artifacts(tmp_path, monkeyp
     response = client.get("/api/runs/platform/run_b/metrics/ic")
 
     assert response.status_code == 200
-    assert loaded_run_dirs == ["run_b"]
+    assert loaded_run_dirs == []
+    assert response.json()["rows"][0]["combination_id"] == (
+        "factor__forward_return__dataframe__long_short"
+    )
+
+
+def test_api_metric_endpoint_streams_csv_preview(tmp_path, monkeypatch):
+    import quant_research_platform.interfaces.api.routes.runs as runs_route
+
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    read_csv = runs_route.pd.read_csv
+    chunked_paths: list[str] = []
+
+    def spy_read_csv(path, *args, **kwargs):
+        if kwargs.get("chunksize") is not None:
+            chunked_paths.append(str(path))
+        return read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(runs_route.pd, "read_csv", spy_read_csv)
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/metrics/ic?limit=1")
+
+    assert response.status_code == 200
+    assert response.json()["limit"] == 1
+    assert chunked_paths
+    assert chunked_paths[-1].replace("\\", "/").endswith("metrics/ic.csv")
 
 
 def test_api_metric_endpoint_ignores_unrelated_broken_run_index(tmp_path):
@@ -337,6 +440,17 @@ def test_api_metric_endpoint_ignores_unrelated_broken_run_index(tmp_path):
     assert response.json()["rows"]
 
 
+def test_api_discovers_exact_run_root(tmp_path):
+    run_dir = tmp_path / "single_run"
+    write_evaluation_set(run_dir, run_id="single_run")
+    client = TestClient(create_app(run_roots=[("single", run_dir)]))
+
+    response = client.get("/api/runs")
+
+    assert response.status_code == 200
+    assert [run["public_run_id"] for run in response.json()] == ["single/single_run"]
+
+
 def test_api_target_broken_run_index_still_returns_422(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "good", run_id="good")
@@ -352,6 +466,18 @@ def test_api_target_broken_run_index_still_returns_422(tmp_path):
 
     assert response.status_code == 422
     assert response.json()["detail"] == "artifact run index is incomplete or invalid"
+
+
+def test_api_target_duplicate_run_id_within_source_returns_422(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "first", run_id="demo")
+    write_evaluation_set(runs_root / "second", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/metrics/ic")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "duplicate run id for source platform: demo"
 
 
 def test_api_metric_endpoint_returns_limited_preview_rows(tmp_path):
@@ -371,6 +497,99 @@ def test_api_metric_endpoint_returns_limited_preview_rows(tmp_path):
     assert len(payload["rows"]) == 2
     assert payload["total_rows"] == 3
     assert payload["limit"] == 2
+    assert payload["has_more"] is True
+    assert payload["total_rows_exact"] is False
+
+
+def test_api_metric_preview_rejects_oversized_limit(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=1001")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "limit must be between 1 and 1000"
+
+
+def test_api_metric_preview_allows_maximum_limit(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=1000")
+
+    assert response.status_code == 200
+    assert response.json()["limit"] == 1000
+
+
+def test_api_csv_preview_stops_after_page_is_collected(tmp_path, monkeypatch):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+    original_read_csv = pd.read_csv
+    first_chunk = pd.DataFrame(
+        [
+            {
+                "combination_id": "factor__forward_return__dataframe__long_short",
+                "timestamp": "2024-01-01",
+                "ic": 0.1,
+                "rankic": 0.1,
+                "n_obs": 4,
+            },
+            {
+                "combination_id": "factor__forward_return__dataframe__long_short",
+                "timestamp": "2024-01-02",
+                "ic": 0.2,
+                "rankic": 0.2,
+                "n_obs": 4,
+            },
+        ]
+    )
+
+    def bounded_read_csv(path, *args, **kwargs):
+        if str(path).replace("\\", "/").endswith("metrics/ic.csv") and kwargs.get(
+            "chunksize"
+        ):
+            def chunks():
+                yield first_chunk
+                raise AssertionError(
+                    "preview should stop after collecting requested rows"
+                )
+
+            return chunks()
+        return original_read_csv(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", bounded_read_csv)
+
+    response = client.get(
+        "/api/runs/platform/demo/metrics/ic?"
+        "combination_id=factor__forward_return__dataframe__long_short&limit=1"
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["rows"]) == 1
+
+
+def test_api_csv_preview_reports_exact_eof_page(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(
+        runs_root / "demo",
+        run_id="demo",
+        ic_values=[0.1],
+        rankic_values=[0.2],
+    )
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/metrics/ic?limit=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["rows"]) == 1
+    assert payload["total_rows"] == 1
+    assert payload["has_more"] is False
+    assert payload["total_rows_exact"] is True
 
 
 def test_api_removed_summary_endpoint_returns_404_without_loading_artifacts(
@@ -448,7 +667,7 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
         payload["tables"]["ic"]["columns"]
     )
     assert len(payload["tables"]["ic"]["rows"]) == 2
-    assert "pnl" in payload["tables"]
+    assert "cumulative_returns" in payload["tables"]
     assert "returns" in payload["tables"]
     assert "performance_summary" not in payload["tables"]
     combination_summary = payload["combination_summaries"]["rows"][0]
@@ -472,30 +691,23 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
             "combination_id",
             "feature",
             "label",
-            "weight_id",
-            "cost_id",
-            "weight_method",
-            "direction",
+            "kernel",
             "portfolio_mode",
         )
     } == {
-        "combination_id": "factor__forward_return__w0__c0",
+        "combination_id": "factor__forward_return__dataframe__long_short",
         "feature": "factor",
         "label": "forward_return",
-        "weight_id": "w0",
-        "cost_id": "c0",
-        "weight_method": "equal_weight_quantile",
-        "direction": "long_high",
+        "kernel": "dataframe",
         "portfolio_mode": "long_short",
     }
-    assert combination_summary["cost_bps"] == pytest.approx(0.0)
     display = payload["display"]
-    assert display["schema_version"] == "0.5"
-    assert {"combinations", "ic", "returns", "pnl"}.issubset(
+    assert display["schema_version"] == "0.6"
+    assert {"combinations", "ic", "returns", "cumulative_returns"}.issubset(
         {table["key"] for table in display["tables"]}
     )
     assert [chart["id"] for chart in display["charts"]] == [
-        "pnl",
+        "cumulative_returns",
         "ic_rankic",
         "net_portfolio_return",
         "turnover",
@@ -506,7 +718,7 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
         for preset in display["downloads"]["presets"]
         if preset["key"] == "all"
     )
-    assert "portfolio/pnl.csv" in all_download["items"]
+    assert "portfolio/cumulative_returns.csv" in all_download["items"]
     assert [row["public_run_id"] for row in payload["comparison"]["rows"]] == [
         "platform/demo",
         "platform/other",
@@ -571,13 +783,13 @@ def test_api_evidence_eager_tables_follow_display_charts(tmp_path):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["display"]["charts"].append(
         {
-            "id": "cost_breakdown",
+            "id": "returns_cost",
             "title": "Cost breakdown",
             "description": "Cost diagnostics",
             "kind": "line",
-            "table": "cost_breakdown",
+            "table": "returns",
             "x": "timestamp",
-            "series": [{"key": "total_cost", "color": "#b42318"}],
+            "series": [{"key": "cost", "color": "#b42318"}],
         }
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -587,8 +799,39 @@ def test_api_evidence_eager_tables_follow_display_charts(tmp_path):
 
     assert response.status_code == 200
     payload = response.json()
-    assert "cost_breakdown" in payload["tables"]
-    assert "total_cost" in payload["tables"]["cost_breakdown"]["columns"]
+    assert "returns" in payload["tables"]
+    assert "cost" in payload["tables"]["returns"]["columns"]
+
+
+def test_api_evidence_uses_preview_loader_for_chart_tables(tmp_path, monkeypatch):
+    from quant_research_platform.artifacts import artifact_loader
+
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    read_table = artifact_loader._read_table
+    full_load_attempts: list[str] = []
+
+    def fail_if_chart_table_is_full_loaded(path):
+        if str(path).replace("\\", "/").endswith(
+            "portfolio/cumulative_returns.csv"
+        ):
+            full_load_attempts.append(str(path))
+            raise AssertionError("chart table should use preview loading")
+        return read_table(path)
+
+    monkeypatch.setattr(
+        artifact_loader,
+        "_read_table",
+        fail_if_chart_table_is_full_loaded,
+    )
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/evidence")
+
+    assert response.status_code == 200
+    assert "cumulative_returns" in response.json()["tables"]
+    assert full_load_attempts == []
 
 
 def test_api_serves_factor_csv_template() -> None:
@@ -616,7 +859,7 @@ def test_api_creates_run_from_uploaded_csv_payload(tmp_path):
         "asset_column": "asset",
         "feature_columns": ["factor"],
         "label_columns": ["forward_return"],
-        "pnl_return_column": "forward_return_1d",
+        "return_source_column": "forward_return_1d",
         "n_groups": 2,
         "weight_method": "equal_weight_quantile",
         "portfolio_mode": "long_only",
@@ -640,7 +883,9 @@ def test_api_creates_run_from_uploaded_csv_payload(tmp_path):
     body = response.json()
     assert body["public_run_id"] == "platform/uploaded_demo"
     assert body["domain"] == "user_upload"
-    assert (runs_root / "uploaded_demo" / "portfolio" / "pnl.csv").is_file()
+    assert (
+        runs_root / "uploaded_demo" / "portfolio" / "cumulative_returns.csv"
+    ).is_file()
     returns = (runs_root / "uploaded_demo" / "portfolio" / "returns.csv").read_text(
         encoding="utf-8"
     )
@@ -662,7 +907,7 @@ def test_api_uploaded_csv_rejects_non_uploaded_panel_stage(tmp_path):
         "asset_column": "asset",
         "feature_columns": ["factor"],
         "label_columns": ["forward_return"],
-        "pnl_return_column": "forward_return_1d",
+        "return_source_column": "forward_return_1d",
         "n_groups": 2,
         "weight_method": "equal_weight_quantile",
         "portfolio_mode": "long_only",
@@ -704,7 +949,7 @@ def test_api_uploaded_csv_rejects_existing_non_manifest_directory(tmp_path):
         "asset_column": "asset",
         "feature_columns": ["factor"],
         "label_columns": ["forward_return"],
-        "pnl_return_column": "forward_return_1d",
+        "return_source_column": "forward_return_1d",
         "n_groups": 2,
         "weight_method": "equal_weight_quantile",
         "portfolio_mode": "long_only",
@@ -1013,7 +1258,7 @@ def test_api_breakdown_preview_rejects_wrong_group(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/breakdowns/metrics_by_month/"
+        "/api/runs/platform/demo/breakdowns/not_a_period/"
         "performance_summary_by_year"
     )
 
@@ -1021,39 +1266,60 @@ def test_api_breakdown_preview_rejects_wrong_group(tmp_path):
     assert response.json()["detail"] == "breakdown table not found"
 
 
+def test_api_breakdown_preview_reads_period_breakdown_table(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(
+        runs_root / "demo",
+        run_id="demo",
+        time_breakdowns=("year",),
+    )
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get(
+        "/api/runs/platform/demo/breakdowns/year/performance_summary?limit=1"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "year" in payload["columns"]
+    assert payload["rows"][0]["year"] == 2026
+
+
 def test_api_preview_routes_reject_wrong_display_group(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    metrics_for_portfolio = client.get("/api/runs/platform/demo/metrics/pnl")
+    metrics_for_portfolio = client.get(
+        "/api/runs/platform/demo/metrics/cumulative_returns"
+    )
     portfolio_for_metric = client.get("/api/runs/platform/demo/portfolio/ic")
-    diagnostics_for_portfolio = client.get("/api/runs/platform/demo/diagnostics/pnl")
+    diagnostics_for_portfolio = client.get(
+        "/api/runs/platform/demo/diagnostics/cumulative_returns"
+    )
 
     assert metrics_for_portfolio.status_code == 404
     assert portfolio_for_metric.status_code == 404
     assert diagnostics_for_portfolio.status_code == 404
 
 
-def test_api_downloads_cost_breakdown_artifact_csv(tmp_path):
+def test_api_downloads_weights_artifact_parquet(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/artifacts/portfolio/cost_breakdown.csv"
+        "/api/runs/platform/demo/artifacts/portfolio/weights.parquet"
     )
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/csv")
-    assert 'filename="cost_breakdown.csv"' in response.headers[
+    assert response.headers["content-type"] == "application/vnd.apache.parquet"
+    assert 'filename="weights.parquet"' in response.headers[
         "content-disposition"
     ]
-    assert "buy_turnover" in response.text
-    assert "total_cost" in response.text
 
 
-def test_api_downloads_neutralization_diagnostics_artifact_csv(tmp_path):
+def test_api_rejects_retired_neutralization_diagnostics_artifact(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
@@ -1062,12 +1328,7 @@ def test_api_downloads_neutralization_diagnostics_artifact_csv(tmp_path):
         "/api/runs/platform/demo/artifacts/diagnostics/neutralization_diagnostics.csv"
     )
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/csv")
-    assert 'filename="neutralization_diagnostics.csv"' in response.headers[
-        "content-disposition"
-    ]
-    assert "method" in response.text
+    assert response.status_code == 422
 
 
 def test_api_previews_tradability_diagnostics_table(tmp_path):
@@ -1083,6 +1344,137 @@ def test_api_previews_tradability_diagnostics_table(tmp_path):
     payload = response.json()
     assert "eligible_rate" in payload["columns"]
     assert "entry_blocked_rate" in payload["columns"]
+
+
+def test_api_previews_parquet_weights_table(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=20")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limit"] == 20
+    assert "target_weight" in payload["columns"]
+    assert payload["rows"][0]["combination_id"] == (
+        "factor__forward_return__dataframe__long_short"
+    )
+
+
+def test_api_previews_parquet_weights_defaults_to_display_preview_rows(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/portfolio/weights")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limit"] == 20
+    assert len(payload["rows"]) <= 20
+    assert payload["total_rows"] >= len(payload["rows"])
+    assert payload["total_rows_exact"] is True
+
+
+def test_api_previews_parquet_weights_without_full_artifact_load(
+    tmp_path,
+    monkeypatch,
+):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    def fail_read_parquet(*_args, **_kwargs):
+        raise AssertionError("weights preview should not full-read parquet")
+
+    monkeypatch.setattr(pd, "read_parquet", fail_read_parquet)
+
+    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=20")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limit"] == 20
+    assert "target_weight" in payload["columns"]
+
+
+def test_api_parquet_preview_stops_after_filtered_page_is_collected(
+    tmp_path,
+    monkeypatch,
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+    original_parquet_file = pq.ParquetFile
+    frame = pd.DataFrame(
+        [
+            {
+                "combination_id": "factor__forward_return__dataframe__long_short",
+                "timestamp": "2026-01-01",
+                "asset": "asset_001",
+                "target_weight": 1.0,
+            },
+            {
+                "combination_id": "factor__forward_return__dataframe__long_short",
+                "timestamp": "2026-01-02",
+                "asset": "asset_001",
+                "target_weight": 1.0,
+            },
+        ]
+    )
+
+    class FakeParquetFile:
+        schema_arrow = pa.schema(
+            [
+                ("combination_id", pa.string()),
+                ("timestamp", pa.string()),
+                ("asset", pa.string()),
+                ("target_weight", pa.float64()),
+            ]
+        )
+
+        def iter_batches(self, *, batch_size):
+            del batch_size
+            yield pa.RecordBatch.from_pandas(frame)
+            raise AssertionError(
+                "preview should stop after collecting requested rows"
+            )
+
+    def bounded_parquet_file(path, *args, **kwargs):
+        if str(path).replace("\\", "/").endswith("portfolio/weights.parquet"):
+            return FakeParquetFile()
+        return original_parquet_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", bounded_parquet_file)
+
+    response = client.get(
+        "/api/runs/platform/demo/portfolio/weights?"
+        "combination_id=factor__forward_return__dataframe__long_short&limit=1"
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["rows"]) == 1
+
+
+def test_api_parquet_filtered_preview_reports_exact_eof_page(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get(
+        "/api/runs/platform/demo/portfolio/weights?"
+        "combination_id=factor__forward_return__dataframe__long_short&limit=1"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["rows"]) == 1
+    assert payload["total_rows"] == 1
+    assert payload["has_more"] is False
+    assert payload["total_rows_exact"] is True
 
 
 def test_api_downloads_tradability_diagnostics_artifact_csv(tmp_path):
@@ -1119,6 +1511,25 @@ def test_api_downloads_report_markdown_and_rejects_removed_excel_workbook(tmp_pa
     assert workbook.status_code == 404
 
 
+def test_api_downloads_report_markdown_without_full_artifact_load(
+    tmp_path,
+    monkeypatch,
+):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    def fail_read_parquet(*_args, **_kwargs):
+        raise AssertionError("report.md download should not full-load run tables")
+
+    monkeypatch.setattr(pd, "read_parquet", fail_read_parquet)
+
+    response = client.get("/api/runs/platform/demo/report.md")
+
+    assert response.status_code == 200
+    assert response.text == "# Report\n"
+
+
 def test_api_report_markdown_must_be_exposed_by_display_downloads(tmp_path):
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "demo"
@@ -1128,7 +1539,8 @@ def test_api_report_markdown_must_be_exposed_by_display_downloads(tmp_path):
 
     response = client.get("/api/runs/platform/demo/report.md")
 
-    assert response.status_code == 404
+    assert response.status_code == 422
+    assert "report.md is not exposed" in response.json()["detail"]
 
 
 def test_api_report_markdown_requires_canonical_report_artifact(tmp_path):
@@ -1187,7 +1599,7 @@ def test_api_downloads_selected_artifacts_as_zip(tmp_path):
                 "report.md",
                 "summary.json",
                 "metrics/performance_summary.csv",
-                "portfolio/cost_breakdown.csv",
+                "portfolio/weights.parquet",
                 "diagnostics/tradability_diagnostics.csv",
             ]
         },
@@ -1204,7 +1616,7 @@ def test_api_downloads_selected_artifacts_as_zip(tmp_path):
             "report.md",
             "summary.json",
             "metrics/performance_summary.csv",
-            "portfolio/cost_breakdown.csv",
+            "portfolio/weights.parquet",
             "diagnostics/tradability_diagnostics.csv",
         }
         assert b"public_run_id" in archive.read("comparison.csv")
@@ -1216,7 +1628,7 @@ def test_api_downloads_selected_artifacts_as_zip(tmp_path):
         assert b"final_cumulative_net_return" in archive.read(
             "metrics/performance_summary.csv"
         )
-        assert b"buy_turnover" in archive.read("portfolio/cost_breakdown.csv")
+        assert archive.read("portfolio/weights.parquet")
         assert b"eligible_rate" in archive.read(
             "diagnostics/tradability_diagnostics.csv"
         )
@@ -1301,6 +1713,30 @@ def test_api_selected_artifact_zip_reuses_files_and_writes_cache(
     )
     assert len(cache_files) == 1
     assert cache_files[0].read_bytes() == response.content
+
+
+def test_api_downloads_lineage_metadata_directly_and_in_selected_zip(tmp_path):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    lineage_path = run_dir / "lineage.json"
+    lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+    lineage["input_file"] = "data/processed_private/csmar/factors.parquet"
+    lineage_path.write_text(json.dumps(lineage), encoding="utf-8")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    direct = client.get("/api/runs/platform/demo/artifacts/lineage.json")
+    zipped = client.post(
+        "/api/runs/platform/demo/download",
+        json={"items": ["lineage.json"]},
+    )
+
+    assert direct.status_code == 200
+    assert "input_file" not in direct.text
+    assert zipped.status_code == 200
+    with zipfile.ZipFile(BytesIO(zipped.content)) as archive:
+        assert archive.namelist() == ["lineage.json"]
+        assert b"input_file" not in archive.read("lineage.json")
 
 
 def test_api_rejects_unknown_selected_artifact_before_writing_cache(tmp_path):
@@ -1412,6 +1848,29 @@ def test_api_downloads_single_selected_artifact_as_zip(tmp_path):
         ).read_bytes()
 
 
+def test_api_downloads_selected_zip_without_full_artifact_load(
+    tmp_path,
+    monkeypatch,
+):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    def fail_read_parquet(*_args, **_kwargs):
+        raise AssertionError("selected ZIP should not full-load run tables")
+
+    monkeypatch.setattr(pd, "read_parquet", fail_read_parquet)
+
+    response = client.post(
+        "/api/runs/platform/demo/download",
+        json={"items": ["report.md"]},
+    )
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["report.md"]
+
+
 def test_api_selected_artifact_zip_cache_hashes_long_identity_segments(tmp_path):
     runs_root = tmp_path / "runs"
     run_id = "run_" + ("20240101_" * 12)
@@ -1466,7 +1925,7 @@ def test_api_returns_chinese_error_for_bad_uploaded_csv(tmp_path):
     assert "CSV 缺少必需列" in response.json()["detail"]
 
 
-def test_api_returns_chinese_error_for_missing_uploaded_pnl_column(tmp_path):
+def test_api_returns_chinese_error_for_missing_uploaded_return_source_column(tmp_path):
     runs_root = tmp_path / "runs"
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
     payload = {
@@ -1497,7 +1956,7 @@ def test_api_returns_chinese_error_for_missing_uploaded_pnl_column(tmp_path):
     response = client.post("/api/runs", json=payload)
 
     assert response.status_code == 422
-    assert "CSV 缺少 PnL 收益列" in response.json()["detail"]
+    assert "CSV 缺少收益来源列" in response.json()["detail"]
 
 
 def test_api_returns_comparison_for_discovered_runs(tmp_path):
@@ -1523,10 +1982,10 @@ def test_api_run_list_skips_run_with_missing_weight_method(tmp_path):
     write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
-    summary_path = run_dir / "summary.json"
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    summary["weight_configs"] = [{}]
-    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    config_path = run_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["weight_configs"] = [{}]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get("/api/runs")
@@ -1540,10 +1999,10 @@ def test_api_comparison_skips_run_with_missing_weight_method(tmp_path):
     write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
-    summary_path = run_dir / "summary.json"
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    summary["weight_configs"] = [{}]
-    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    config_path = run_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["weight_configs"] = [{}]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get("/api/comparison")

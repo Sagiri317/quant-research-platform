@@ -39,6 +39,7 @@ def _discover_run_dirs(runs_root: Path) -> list[Path]:
 
 def _run_index_record(run: LoadedEvaluationSet) -> dict[str, object]:
     summary = run.summary
+    config = run.config
     performance = run.tables["performance_summary"]
     return {
         "evaluation_id": str(summary["evaluation_id"]),
@@ -49,8 +50,8 @@ def _run_index_record(run: LoadedEvaluationSet) -> dict[str, object]:
         "uses_external_data": bool(summary["uses_external_data"]),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "n_combinations": int(summary["n_combinations"]),
-        "weight_method": _weight_method(summary),
-        "portfolio_mode": _portfolio_mode(summary),
+        "weight_method": _weight_method(config),
+        "portfolio_mode": _portfolio_mode(config),
         "mean_final_return": _mean_numeric(
             performance,
             "final_cumulative_net_return",
@@ -60,8 +61,8 @@ def _run_index_record(run: LoadedEvaluationSet) -> dict[str, object]:
     }
 
 
-def _weight_method(summary: dict[str, object]) -> str:
-    configs = summary.get("weight_configs")
+def _weight_method(config: dict[str, object]) -> str:
+    configs = config.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and first.get("method") is not None:
@@ -69,8 +70,15 @@ def _weight_method(summary: dict[str, object]) -> str:
     return "unknown"
 
 
-def _portfolio_mode(summary: dict[str, object]) -> str:
-    configs = summary.get("weight_configs")
+def _portfolio_mode(config: dict[str, object]) -> str:
+    modes = config.get("portfolio_modes")
+    if isinstance(modes, list) and modes:
+        normalized = [str(mode) for mode in modes if mode]
+        if len(set(normalized)) > 1:
+            return "multiple"
+        if normalized:
+            return normalized[0]
+    configs = config.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and first.get("portfolio_mode") is not None:

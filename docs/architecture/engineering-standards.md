@@ -20,7 +20,7 @@ runtime/                                             # 本地运行上下文，�
 硬规则：
 
 - `apps/*` 不承载核心研究、评价、市场、交易或风控算法；这些逻辑必须下沉到 `src/quant_research_platform/` 的领域模块。
-- `web` 不重新计算 IC、PnL、turnover、cost、weights 或 risk metrics。
+- `web` 不重新计算 IC、cumulative returns、turnover、cost、weights 或 risk metrics。
 - API 层不绕过 `artifacts/display_manifest.py` 暴露下载和预览文件。
 - `research` 不能直接触发 `trading` 或真实外部连接。
 - `markets` 不能读取凭据、连接 vendor API 或承担用户权限逻辑。

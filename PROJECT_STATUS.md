@@ -1,5 +1,22 @@
 # Quant Research Platform 项目状态
 
+## 2026-05-25 N7 implementation signal
+
+N7 A 股 evaluation run identity 已完成本轮实现闭环：新 evaluation artifacts 使用
+schema `0.6`，一个 API-visible run 内含多个 `combination_id`；第一阶段
+`dimensions/combinations.csv` required columns 为
+`combination_id, feature, label, kernel, portfolio_mode`。A 股 CLI 支持显式
+`--features` 和一行多值 `--labels / --kernels / --portfolio-modes`，保留
+CLI/backend-only `--input-file` 与不写 artifact 的 `--dry-run`。
+
+已生成并验证 private smoke：
+`reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1`，覆盖
+24 个 combinations。验证包括 schema 0.6 artifact load、低内存 comparison、
+CSV/JSON/Markdown Evaluation Comparison Report、dataframe/tensor parity、API
+evidence 和 Parquet weights 20 行 preview。完整
+`reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` canonical regeneration
+本轮未提前执行。
+
 ## 当前状态
 
 | 项目 | 当前事实 |
@@ -9,10 +26,10 @@
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 raw/interim/processed 历史产物仍遵守私有边界 |
-| 平台合同 | evaluation contract、artifact schema `0.5`、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间 |
-| 前端状态 | 本地 workbench 已中文化；Factor Studio 可把表达式/模板传给 Pipeline Builder；Pipeline Builder 默认只调用 `POST /api/pipeline-snapshots` 写配置快照 |
+| 平台合同 | evaluation contract、artifact schema `0.6`、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间 |
+| 前端状态 | 本地 workbench 已中文化；Factor Studio 可把表达式/模板传给 Pipeline Builder；Pipeline Builder 默认写配置快照，也可切换执行模式调用 `POST /api/pipeline-runs` |
 | A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation |
-| Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner；N7 后应适配 evaluation run 合同，而不是约束 N7 核心设计 |
+| Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner，并用 `candidate_id + combination_id` 汇总 N7 evaluation results |
 | 市场范围 | A 股 enabled；crypto / other markets planned / disabled，不代表真实支持，也不保留空实现包 |
 | 私有边界 | CSMAR raw/interim/processed 和 `reports/private_real/` 不提交、不公开 |
 | 交易边界 | 不做投资建议、paper trading、live trading、券商/交易所/API 连接或部署服务 |
@@ -24,7 +41,7 @@
 当前阶段已完成可提交的迁移、核心合同闭环、Factor Factory 前端浏览入口和 P4/P5 小样本示例。2026-05-23 已完成 Phase 1 代码功能复核；2026-05-24 已同步 `docs/code-map/`、`docs/architecture/` 和项目根目录文档的当前架构表述。验收结论见 `docs/architecture/phase-1-acceptance-record.md`；下一阶段任务见 `docs/architecture/next-stage-roadmap.md`。Phase 1 功能已实现并通过测试：
 
 - 用户入口文档改为 Chinese-first 的平台说明。
-- `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、artifact schema `0.5`、`manifest.display`、API/download/frontend 边界。
+- `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、artifact schema `0.6`、`manifest.display`、API/download/frontend 边界。
 - `docs/architecture/target-architecture-and-capabilities.md` 合并最终目录结构与未来能力池，保留 A 股、ML prediction、风险、regime、workbench、未来模拟盘和商业化平台边界，但不把未来能力写成当前已实现范围。
 - `docs/architecture/phase-1-acceptance-record.md` 记录 Phase 1 已实现范围、冻结合同、测试证据和后续架构债。
 - `docs/architecture/next-stage-roadmap.md` 把 Phase 1 后的架构债提上日程，按任务列出目标、非目标、验收口径和测试边界。
@@ -49,7 +66,7 @@ Phase 1 之后下一阶段进展：
 3. N2 后端 tradability artifact/API 已合入 `main`：新增 `diagnostics/tradability_diagnostics.csv`，并通过 schema `0.5`、`manifest.display`、API preview、direct download 和 ZIP download 暴露；N2 frontend 仍是后续任务。
 4. N4 前端 feature split 已合入 `main`：`web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract。
 5. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
-6. 当前推荐先做 N7 A 股 `EvaluationMatrixRun` 与 2023-2025 canonical 样例生成：一个 API-visible run 对应一个 evaluation run；计算层支持多个 feature / label / portfolio mode / kernel 一起批量或并行计算，结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；tensor 是长期主路径，dataframe 是 reference / fallback。之后再做 N2 frontend、N5 和 N6。
+6. N7 A 股 evaluation run identity 已在本分支完成实现闭环：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现；tensor 是长期主路径，dataframe 是 reference / fallback。后续优先做 N2 frontend、N5 和 N6。
 
 ## 当前研究资产
 
@@ -78,8 +95,8 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 先做 N7：稳定 A 股 `EvaluationMatrixRun`、`combination_id` 和 tensor-native 多维评价合同，并生成 2023-2025 canonical evaluation / Factor Factory 样例；默认评价集合为 1 个 run，内部至少覆盖 `2 kernels x 2 portfolio modes x 2 labels x 3 features = 24` 个 result combinations；artifact schema `0.6` 使用 star schema，`weights` 第一阶段直接写 Parquet，frontend/API 对所有 display tables 提供 20 行 preview，`compare_evaluation_sets` 改成网页/API 可展示和可画图的低内存 summary comparison，另增只输出表格/JSON/Markdown 的 Evaluation Comparison Report，dataframe/tensor parity 使用分层 `rtol/atol` 容差。第一晚真实数据验收先跑 `reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1`，不要求和旧样例做结果一致性比较；完整 canonical root 固定为 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`，三年样例生成后再在实现验收阶段比较新实现输出是否一致。
-2. N7 后继续做 N2 前端：消费 `tradability_diagnostics` 后端 artifact/API，完成 eligibility / tradability 诊断可视化。
+1. 继续做 N2 前端：消费 `tradability_diagnostics` 后端 artifact/API，完成 eligibility / tradability 诊断可视化。
+2. 在 N7 私有样例稳定后，按需重新生成 2023-2025 canonical evaluation / Factor Factory 样例，并保留低内存 comparison、Evaluation Comparison Report、dataframe/tensor parity 和 API/frontend preview 作为验收门槛。
 3. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
 4. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
 5. 已合并的 N1/N2/N3/N4 工作树和分支可在用户批准 exact paths 后清理。

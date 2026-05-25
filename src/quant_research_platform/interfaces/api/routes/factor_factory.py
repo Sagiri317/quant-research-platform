@@ -31,6 +31,9 @@ PRIVATE_TEXT_MARKERS = (
     "interim_private",
     "processed_private",
 )
+LOCAL_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Za-z]:/|//)[^,\s;)\]]+",
+)
 
 
 @router.get("/api/factor-factory-runs")
@@ -261,6 +264,11 @@ def _validate_private_display_text(value: object) -> None:
             raise HTTPException(
                 status_code=422,
                 detail="factor factory display contains private path text",
+            )
+        if LOCAL_ABSOLUTE_PATH_PATTERN.search(normalized):
+            raise HTTPException(
+                status_code=422,
+                detail="factor factory display contains local path text",
             )
         return
     if isinstance(value, dict):

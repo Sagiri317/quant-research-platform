@@ -59,6 +59,15 @@ class CandidateEvaluationRecord:
     time_semantics: dict[str, object]
     status: CandidateStatus
     run_dir: str | None = None
+    combination_id: str | None = None
+    feature: str | None = None
+    label: str | None = None
+    kernel: str | None = None
+    portfolio_mode: str | None = None
+    mean_ic: float | None = None
+    final_cumulative_net_return: float | None = None
+    mean_turnover: float | None = None
+    total_cost: float | None = None
     failure_reason: str | None = None
     failure_code: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
@@ -83,6 +92,21 @@ class CandidateEvaluationRecord:
             "time_semantics": _json_cell(self.time_semantics),
             "status": self.status,
             "run_ref": _run_ref(self.run_dir),
+            "combination_id": self.combination_id or "",
+            "feature": self.feature or "",
+            "label": self.label or "",
+            "kernel": self.kernel or "",
+            "portfolio_mode": self.portfolio_mode or "",
+            "mean_ic": self.mean_ic if self.mean_ic is not None else "",
+            "final_cumulative_net_return": (
+                self.final_cumulative_net_return
+                if self.final_cumulative_net_return is not None
+                else ""
+            ),
+            "mean_turnover": (
+                self.mean_turnover if self.mean_turnover is not None else ""
+            ),
+            "total_cost": self.total_cost if self.total_cost is not None else "",
             "failure_code": self.failure_code or "",
             "failure_reason": _safe_failure_reason(self.failure_reason),
         }

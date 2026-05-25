@@ -15,7 +15,7 @@ from quant_research_platform.kernels.dataframe.portfolio import (
     build_long_short_positions,
     build_weighted_positions,
     calculate_cost_breakdown,
-    calculate_cumulative_pnl,
+    calculate_cumulative_returns,
     calculate_turnover,
     simulate_long_short_returns,
     simulate_weighted_long_short_returns,
@@ -655,7 +655,7 @@ def test_simulation_calculates_long_short_legs_without_dataframe_dropna(
     assert returns["gross_portfolio_return"].round(6).tolist() == [0.02, 0.02]
 
 
-def test_calculate_cumulative_pnl_accumulates_by_feature() -> None:
+def test_calculate_cumulative_returns_accumulates_by_feature() -> None:
     returns = pd.DataFrame(
         {
             "timestamp": [
@@ -671,11 +671,18 @@ def test_calculate_cumulative_pnl_accumulates_by_feature() -> None:
         }
     )
 
-    pnl = calculate_cumulative_pnl(returns)
+    cumulative_returns = calculate_cumulative_returns(returns)
 
-    ordered = pnl.sort_values(["feature", "timestamp"]).reset_index(drop=True)
-    assert ordered["cumulative_pnl"].round(6).tolist() == [-0.01, 0.03, 0.02, 0.05]
-    assert ordered["cumulative_gross_pnl"].round(6).tolist() == [
+    ordered = cumulative_returns.sort_values(
+        ["feature", "timestamp"]
+    ).reset_index(drop=True)
+    assert ordered["cumulative_net_return"].round(6).tolist() == [
+        -0.01,
+        0.03,
+        0.02,
+        0.05,
+    ]
+    assert ordered["cumulative_gross_return"].round(6).tolist() == [
         -0.01,
         0.03,
         0.02,
@@ -696,9 +703,9 @@ def test_summarize_performance_reports_common_portfolio_diagnostics() -> None:
             "net_portfolio_return": [0.029, -0.022, 0.0385],
         }
     )
-    pnl = calculate_cumulative_pnl(returns)
+    cumulative_returns = calculate_cumulative_returns(returns)
 
-    summary = summarize_performance(returns, pnl)
+    summary = summarize_performance(returns, cumulative_returns)
 
     row = summary.iloc[0]
     assert row["periods"] == 3

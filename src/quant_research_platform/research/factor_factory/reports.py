@@ -52,12 +52,19 @@ def _factor_factory_manifest(
     *,
     records: tuple[CandidateEvaluationRecord, ...],
 ) -> dict[str, object]:
+    candidate_ids = {record.candidate_id for record in records}
+    successful_candidate_ids = {
+        record.candidate_id for record in records if record.status == "success"
+    }
+    failed_candidate_ids = {
+        record.candidate_id for record in records if record.status == "failed"
+    }
     return {
         "artifact_schema_version": FACTOR_FACTORY_ARTIFACT_SCHEMA_VERSION,
         "artifact_type": "factor_factory_run",
-        "candidate_count": len(records),
-        "success_count": sum(record.status == "success" for record in records),
-        "failed_count": sum(record.status == "failed" for record in records),
+        "candidate_count": len(candidate_ids),
+        "success_count": len(successful_candidate_ids),
+        "failed_count": len(failed_candidate_ids),
         "artifacts": {
             "candidate_summary": "candidate_summary.csv",
             "failed_candidates": "failed_candidates.json",
@@ -68,7 +75,9 @@ def _factor_factory_manifest(
                 {
                     "key": "candidate_summary",
                     "label": "候选因子汇总",
+                    "group": "candidate",
                     "path": "candidate_summary.csv",
+                    "download_item": "candidate_summary.csv",
                 }
             ],
             "downloads": {

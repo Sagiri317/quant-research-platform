@@ -138,17 +138,17 @@ def discover_run_indexes(run_roots: list[RunRoot]) -> list[RunIndexRecord]:
 def _iter_evaluation_run_dirs(root: Path):
     """发现直接 run 目录和 pipeline run 内嵌 evaluation run 目录。"""
 
+    if (root / "manifest.json").is_file():
+        yield root
+        return
     for child in sorted(root.iterdir()):
         if not child.is_dir():
             continue
         if (child / "manifest.json").is_file():
             yield child
-        nested_root = child / "evaluation" / "evaluation_runs"
-        if not nested_root.is_dir():
-            continue
-        for nested_child in sorted(nested_root.iterdir()):
-            if nested_child.is_dir() and (nested_child / "manifest.json").is_file():
-                yield nested_child
+        pipeline_evaluation = child / "evaluation"
+        if (pipeline_evaluation / "manifest.json").is_file():
+            yield pipeline_evaluation
 
 
 def discover_run_refs(run_roots: list[RunRoot]) -> list[RunRef]:
@@ -192,6 +192,7 @@ def resolve_run_index_record(
     if not root.path.is_dir():
         raise HTTPException(status_code=404, detail="run not found")
 
+    matches: list[RunIndexRecord] = []
     for run_dir in _iter_evaluation_run_dirs(root.path):
         try:
             record = load_run_index_or_422(root.source_alias, run_dir)
@@ -200,7 +201,14 @@ def resolve_run_index_record(
                 raise
             continue
         if record.ref.run_id == run_id:
-            return record
+            matches.append(record)
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=f"duplicate run id for source {source_alias}: {run_id}",
+        )
+    if matches:
+        return matches[0]
     raise HTTPException(status_code=404, detail="run not found")
 
 

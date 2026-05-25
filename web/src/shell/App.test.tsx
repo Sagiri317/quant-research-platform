@@ -95,11 +95,17 @@ describe('App', () => {
                 {
                   item: 'candidate_summary.csv',
                   kind: 'table',
-                  label: 'Candidate summary',
+                  label: 'Candidate summary CSV',
                   table: 'candidate_summary',
                 },
               ],
-              presets: [],
+              presets: [
+                {
+                  items: ['candidate_summary.csv'],
+                  key: 'all',
+                  label: 'All artifacts',
+                },
+              ],
             },
             tables: [
               {
@@ -157,6 +163,8 @@ describe('App', () => {
     expect(await screen.findByText('reversal_20d@1')).toBeInTheDocument()
     expect(screen.getByText('momentum_60d@1')).toBeInTheDocument()
     expect(screen.getByText('pipeline/reversal_20d')).toBeInTheDocument()
+    expect(screen.getAllByText('Candidate summary CSV')).toHaveLength(2)
+    expect(screen.queryByText('candidate_summary.csv')).not.toBeInTheDocument()
     expect(screen.queryByText(/reports\/private_real/)).not.toBeInTheDocument()
     expect(screen.queryByText(/E:\\/)).not.toBeInTheDocument()
   })
@@ -327,14 +335,20 @@ describe('App', () => {
     expect(screen.getByText('0.4')).toBeInTheDocument()
     expect(screen.getByText('Analysis summary')).toBeInTheDocument()
     expect(screen.getByText('Review bundle')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Analysis summary CSV' })).toHaveAttribute(
-      'href',
-      'http://127.0.0.1:8000/api/factor-factory-runs/factory_display_driven/artifacts/analysis_summary.csv',
-    )
-    expect(screen.getByRole('link', { name: 'manifest.json' })).toHaveAttribute(
-      'href',
-      'http://127.0.0.1:8000/api/factor-factory-runs/factory_display_driven/artifacts/manifest.json',
-    )
+    for (const link of screen.getAllByRole('link', {
+      name: 'Analysis summary CSV',
+    })) {
+      expect(link).toHaveAttribute(
+        'href',
+        'http://127.0.0.1:8000/api/factor-factory-runs/factory_display_driven/artifacts/analysis_summary.csv',
+      )
+    }
+    for (const link of screen.getAllByRole('link', { name: 'Manifest JSON' })) {
+      expect(link).toHaveAttribute(
+        'href',
+        'http://127.0.0.1:8000/api/factor-factory-runs/factory_display_driven/artifacts/manifest.json',
+      )
+    }
     expect(globalThis.fetch).not.toHaveBeenCalledWith(
       expect.stringContaining('/tables/candidate_summary'),
     )
@@ -552,9 +566,72 @@ describe('App', () => {
       expect(pipelineRequest).toMatchObject({
         factor_expression: 'return(close, 60)',
         factor_template_id: 'reversal_20d',
+        kernel: 'dataframe',
       })
     })
+    expect(pipelineRequest).not.toHaveProperty('input_file')
     expect(screen.getByText('pipeline/a_share_reversal_smoke_20260523')).toBeInTheDocument()
+  })
+
+  test('can execute an A-share pipeline run with selected kernel and start layer', async () => {
+    let pipelineRequest: Record<string, unknown> | undefined
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/runs')) {
+        return jsonResponse([])
+      }
+      if (url.endsWith('/api/factor-templates?market=a_share')) {
+        return jsonResponse([])
+      }
+      if (url.endsWith('/api/pipeline-runs') && init?.method === 'POST') {
+        pipelineRequest = JSON.parse(String(init.body))
+        return jsonResponse({
+          kind: 'run',
+          run_id: pipelineRequest?.run_id,
+          run_ref: 'a_share_reversal_smoke',
+          status: 'ready',
+          message: 'pipeline run ready',
+        })
+      }
+      if (
+        url.endsWith('/api/pipeline-runs/a_share_reversal_smoke/checkpoints')
+      ) {
+        return jsonResponse([
+          {
+            key: 'evaluate',
+            label: 'A-share evaluation',
+            status: 'ready',
+            artifact: 'evaluation/manifest.json',
+          },
+        ])
+      }
+      return tableResponse([])
+    }) as typeof fetch
+
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '进入流程配置' }))
+    fireEvent.change(screen.getByLabelText('提交方式'), {
+      target: { value: 'run' },
+    })
+    fireEvent.change(screen.getByLabelText('计算内核'), {
+      target: { value: 'tensor' },
+    })
+    fireEvent.change(screen.getByLabelText('起始步骤'), {
+      target: { value: 'existing_factors' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '执行流程' }))
+
+    await waitFor(() => {
+      expect(pipelineRequest).toMatchObject({
+        kernel: 'tensor',
+        start_from: 'existing_factors',
+        return_source_column: 'forward_return_1d',
+      })
+    })
+    expect(pipelineRequest).not.toHaveProperty('input_file')
+    expect(screen.getByText('evaluation/manifest.json')).toBeInTheDocument()
+    expect(screen.getByText('pipeline run ready')).toBeInTheDocument()
   })
 
   test('defaults to an interview workbench with compact diagnostic charts and delivery tabs', async () => {
@@ -573,7 +650,7 @@ describe('App', () => {
             uses_external_data: true,
             n_rows_evaluated: 3984077,
             label_columns: ['forward_return_20d'],
-            pnl_return_column: 'forward_return_1d',
+            return_source_column: 'forward_return_1d',
             n_combinations: 4,
             weight_method: 'equal_weight_quantile',
             mean_final_return: 0.54,
@@ -605,7 +682,7 @@ describe('App', () => {
       'aria-pressed',
       'false',
     )
-    expect(await screen.findByTestId('pnl-chart')).toBeInTheDocument()
+    expect(await screen.findByTestId('cumulative-returns-chart')).toBeInTheDocument()
     expect(screen.getByTestId('ic-rankic-chart')).toBeInTheDocument()
     expect(await screen.findByTestId('net-portfolio-return-chart')).toBeInTheDocument()
     expect(screen.queryByTestId('turnover-chart')).not.toBeInTheDocument()
@@ -631,7 +708,7 @@ describe('App', () => {
     expect(await screen.findByTestId('net-portfolio-return-chart')).toBeInTheDocument()
     expect(await screen.findByTestId('turnover-chart')).toBeInTheDocument()
     expect(await screen.findByTestId('cost-chart')).toBeInTheDocument()
-    expect(screen.getByText('CSV 明细浏览')).toBeInTheDocument()
+    expect(screen.getByText('明细表预览')).toBeInTheDocument()
     expect(screen.getByText('结果文件下载')).toBeInTheDocument()
   })
 
@@ -651,7 +728,7 @@ describe('App', () => {
             uses_external_data: false,
             n_rows_evaluated: 600,
             label_columns: ['forward_return_20d'],
-            pnl_return_column: 'forward_return_1d',
+            return_source_column: 'forward_return_1d',
             weight_method: 'equal_weight_quantile',
             mean_final_return: 1.6099,
             mean_turnover: 1.54,
@@ -733,12 +810,12 @@ describe('App', () => {
           },
         ])
       }
-      if (url.includes('/portfolio/pnl')) {
+      if (url.includes('/portfolio/cumulative_returns')) {
         return tableResponse([
           {
             timestamp: '2026-01-01',
             net_portfolio_return: 0.02,
-            cumulative_pnl: 0.02,
+            cumulative_net_return: 0.02,
             drawdown: 0,
           },
         ])
@@ -774,7 +851,7 @@ describe('App', () => {
       screen.getByText((_, element) => element?.textContent === '标签列：forward_return_20d'),
     ).toBeInTheDocument()
     expect(
-      screen.getByText((_, element) => element?.textContent === 'PnL: forward_return_1d'),
+      screen.getByText((_, element) => element?.textContent === '收益来源: forward_return_1d'),
     ).toBeInTheDocument()
     expect(screen.getByText('收益风险')).toBeInTheDocument()
     expect(screen.getAllByText('IC / RankIC').length).toBeGreaterThan(0)
@@ -806,8 +883,8 @@ describe('App', () => {
     expect(screen.getByRole('checkbox', { name: '研究报告 report.md' })).toBeChecked()
     expect(screen.queryByRole('checkbox', { name: 'Excel 汇总 artifacts.xlsx' })).not.toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: '运行对比 comparison.csv' })).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: '成本拆分 CSV' })).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: '中性化诊断 CSV' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '目标权重 CSV' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '可交易诊断 CSV' })).toBeInTheDocument()
     expect(screen.getByText('常用组合')).toBeInTheDocument()
     expect(screen.getByText('选择内容')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '下载所选' })).toBeInTheDocument()
@@ -824,9 +901,9 @@ describe('App', () => {
     expect(screen.getByText('收益风险')).toBeInTheDocument()
     expect(screen.getByText('收益风险').closest('details')).toHaveAttribute('open')
     expect(screen.getByText('成本换手')).toBeInTheDocument()
-    const pnlChartTitle = await screen.findByText('累计组合 PnL')
+    const cumulativeReturnsChartTitle = await screen.findByText('累计组合收益')
     expect(
-      pnlChartTitle.compareDocumentPosition(
+      cumulativeReturnsChartTitle.compareDocumentPosition(
         screen.getByText('指标详情'),
       ) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy()
@@ -838,15 +915,15 @@ describe('App', () => {
     expect(screen.getByRole('combobox', { name: '选择明细表' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '展开预览' })).toBeInTheDocument()
     expect(screen.queryByRole('table', { name: 'IC / RankIC 表格' })).not.toBeInTheDocument()
-    expect(pnlChartTitle).toBeInTheDocument()
-    expect(screen.getByTestId('pnl-chart')).toHaveAttribute(
+    expect(cumulativeReturnsChartTitle).toBeInTheDocument()
+    expect(screen.getByTestId('cumulative-returns-chart')).toHaveAttribute(
       'data-row-count',
       '1',
     )
-    expect(Number(screen.getByTestId('pnl-chart').dataset.yAxisWidth)).toBeGreaterThan(
+    expect(Number(screen.getByTestId('cumulative-returns-chart').dataset.yAxisWidth)).toBeGreaterThan(
       46,
     )
-    expect(screen.getByTestId('pnl-chart')).toHaveAttribute(
+    expect(screen.getByTestId('cumulative-returns-chart')).toHaveAttribute(
       'data-chart-margin-left',
       '0',
     )
@@ -893,7 +970,7 @@ describe('App', () => {
     })
     expect(within(performance).getByText('sharpe_like')).toBeInTheDocument()
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/demo/metrics/performance_summary?limit=20&combination_id=factor__forward_return__w0__c0',
+      'http://127.0.0.1:8000/api/runs/core/demo/metrics/performance_summary?limit=20&combination_id=factor__forward_return__dataframe__long_only',
     )
     expect(screen.getByRole('link', { name: '下载当前 CSV' })).toHaveAttribute(
       'href',
@@ -928,16 +1005,16 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(await screen.findByTestId('pnl-chart')).toBeInTheDocument()
-    expect(within(screen.getByTestId('pnl-chart')).getAllByText('cumulative_pnl').length).toBeGreaterThan(1)
-    expect(within(screen.getByTestId('pnl-chart')).getAllByText('drawdown').length).toBeGreaterThan(1)
+    expect(await screen.findByTestId('cumulative-returns-chart')).toBeInTheDocument()
+    expect(within(screen.getByTestId('cumulative-returns-chart')).getAllByText('cumulative_net_return').length).toBeGreaterThan(1)
+    expect(within(screen.getByTestId('cumulative-returns-chart')).getAllByText('drawdown').length).toBeGreaterThan(1)
     expect(within(screen.getByTestId('ic-rankic-chart')).getAllByText('rankic').length).toBeGreaterThan(1)
     expect(
       within(screen.getByTestId('net-portfolio-return-chart')).getAllByText(
         'net_portfolio_return',
       ).length,
     ).toBeGreaterThan(1)
-    expect(within(screen.getByTestId('pnl-chart')).getByText('净值曲线和回撤')).toBeInTheDocument()
+    expect(within(screen.getByTestId('cumulative-returns-chart')).getByText('净值曲线和回撤')).toBeInTheDocument()
   })
 
   test('renders chart range readouts as structured tokens and splits return diagnostics', async () => {
@@ -967,15 +1044,15 @@ describe('App', () => {
             comparisonRows: [],
             tables: {
               combinations: tablePayload([]),
-              pnl: tablePayload([
+              cumulative_returns: tablePayload([
                 {
                   timestamp: '2026-01-01',
-                  cumulative_pnl: -0.1,
+                  cumulative_net_return: -0.1,
                   drawdown: -0.12,
                 },
                 {
                   timestamp: '2026-01-02',
-                  cumulative_pnl: 0.2,
+                  cumulative_net_return: 0.2,
                   drawdown: 0,
                 },
               ]),
@@ -1006,13 +1083,13 @@ describe('App', () => {
 
     render(<App />)
 
-    const pnlChart = await screen.findByTestId('pnl-chart')
-    expect(within(pnlChart).getByText('2026-01-01 至 2026-01-02')).toBeInTheDocument()
-    expect(within(pnlChart).queryByText('数值范围')).not.toBeInTheDocument()
-    expect(within(pnlChart).getAllByText('cumulative_pnl').length).toBeGreaterThan(1)
-    expect(within(pnlChart).getByText('-10.00% ~ 20.00%')).toBeInTheDocument()
-    expect(within(pnlChart).getAllByText('drawdown').length).toBeGreaterThan(1)
-    expect(within(pnlChart).getByText('-12.00% ~ 0.00%')).toBeInTheDocument()
+    const cumulativeReturnsChart = await screen.findByTestId('cumulative-returns-chart')
+    expect(within(cumulativeReturnsChart).getByText('2026-01-01 至 2026-01-02')).toBeInTheDocument()
+    expect(within(cumulativeReturnsChart).queryByText('数值范围')).not.toBeInTheDocument()
+    expect(within(cumulativeReturnsChart).getAllByText('cumulative_net_return').length).toBeGreaterThan(1)
+    expect(within(cumulativeReturnsChart).getByText('-10.00% ~ 20.00%')).toBeInTheDocument()
+    expect(within(cumulativeReturnsChart).getAllByText('drawdown').length).toBeGreaterThan(1)
+    expect(within(cumulativeReturnsChart).getByText('-12.00% ~ 0.00%')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '完整报告' }))
     await waitFor(() => {
       expect(screen.getByTestId('net-portfolio-return-chart')).toBeInTheDocument()
@@ -1046,7 +1123,7 @@ describe('App', () => {
           evidencePayload({
             comparisonRows: [],
             tables: {
-              pnl: tablePayload([]),
+              cumulative_returns: tablePayload([]),
               ic: tablePayload([]),
               returns: tablePayload(
                 Array.from({ length: 180 }, (_, index) => ({
@@ -1100,7 +1177,7 @@ describe('App', () => {
             ...evidencePayload().tables,
             ic: tablePayload([]),
             returns: tablePayload([]),
-            pnl: tablePayload([]),
+            cumulative_returns: tablePayload([]),
           },
         })
       }
@@ -1109,7 +1186,7 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(await screen.findByTestId('pnl-chart')).toBeInTheDocument()
+    expect(await screen.findByTestId('cumulative-returns-chart')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '完整报告' }))
     await waitFor(() => {
       expect(screen.getAllByText('暂无可绘制数据').length).toBeGreaterThanOrEqual(5)
@@ -1202,8 +1279,8 @@ describe('App', () => {
       if (url.includes('/metrics/ic_summary')) {
           return tableResponse([{ feature: 'factor', mean_ic: 0.4, icir: 0 }])
         }
-        if (url.includes('/portfolio/pnl')) {
-          return tableResponse([{ timestamp: '2026-01-01', cumulative_pnl: 0.04 }])
+        if (url.includes('/portfolio/cumulative_returns')) {
+          return tableResponse([{ timestamp: '2026-01-01', cumulative_net_return: 0.04 }])
         }
         if (url.includes('/portfolio/returns')) {
           return tableResponse([
@@ -1297,7 +1374,7 @@ describe('App', () => {
     expect(screen.getByRole('combobox', { name: '时间列 timestamp_column' })).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '资产列 asset_column' })).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: '标签列 label_columns' })).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: 'PnL收益列 pnl_return_column' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '收益来源列 return_source_column' })).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '风险列 risk_column' })).toBeInTheDocument()
     expect(screen.getAllByText('timestamp').length).toBeGreaterThan(0)
     expect(screen.getAllByText('forward_return').length).toBeGreaterThan(0)
@@ -1557,10 +1634,10 @@ describe('App', () => {
       performance_summary: tablePayload([
         { timestamp: '2026-01-01', alpha_score: 0.7 },
       ]),
-      pnl: tablePayload([
+      cumulative_returns: tablePayload([
         {
           timestamp: '2026-01-01',
-          cumulative_pnl: 0.12,
+          cumulative_net_return: 0.12,
           drawdown: -0.02,
         },
       ]),
@@ -1569,7 +1646,7 @@ describe('App', () => {
     display.charts = [
       {
         description: 'manifest configured chart',
-        id: 'custom_pnl',
+        id: 'custom_cumulative_returns',
         include_zero: true,
         kind: 'line',
         section: 'primary',
@@ -1577,12 +1654,12 @@ describe('App', () => {
           {
             color: '#2563eb',
             format: 'percent',
-            key: 'cumulative_pnl',
-            label: 'cumulative_pnl',
+            key: 'cumulative_net_return',
+            label: 'cumulative_net_return',
           },
         ],
-        table: 'pnl',
-        title: 'Manifest PnL',
+        table: 'cumulative_returns',
+        title: 'Manifest Returns',
         x: 'timestamp',
       },
     ]
@@ -1618,7 +1695,7 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(await screen.findByText('Manifest PnL')).toBeInTheDocument()
+    expect(await screen.findByText('Manifest Returns')).toBeInTheDocument()
     expect(screen.queryByTestId('ic-rankic-chart')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: '结果文件下载' }))
     expect(screen.getByRole('checkbox', { name: '绩效汇总 CSV' })).toBeInTheDocument()
@@ -1647,7 +1724,7 @@ describe('App', () => {
             data_stage: 'approved_offline_real_data',
             uses_external_data: true,
             label_columns: ['forward_return_20d'],
-            pnl_return_column: 'forward_return_1d',
+            return_source_column: 'forward_return_1d',
             n_combinations: 2,
             n_rows_evaluated: 12231140,
             weight_method: 'equal_weight_quantile',
@@ -1667,28 +1744,28 @@ describe('App', () => {
                   combination_id: 'combo_1',
                   feature: 'rev_20d',
                   label: 'forward_return_20d',
-                  weight_id: 'w0',
-                  cost_id: 'c0',
+                  kernel: 'dataframe',
+                  portfolio_mode: 'long_only',
                 },
                 {
                   combination_id: 'combo_2',
                   feature: 'rev_60d',
                   label: 'forward_return_20d',
-                  weight_id: 'w0',
-                  cost_id: 'c1',
+                  kernel: 'dataframe',
+                  portfolio_mode: 'market_neutral',
                 },
               ]),
-              pnl: tablePayload([
+              cumulative_returns: tablePayload([
                 {
                   combination_id: 'combo_1',
                   timestamp: '2026-01-01',
-                  cumulative_pnl: 0.02,
+                  cumulative_net_return: 0.02,
                   drawdown: 0,
                 },
                 {
                   combination_id: 'combo_2',
                   timestamp: '2026-01-01',
-                  cumulative_pnl: 0.04,
+                  cumulative_net_return: 0.04,
                   drawdown: 0,
                 },
               ]),
@@ -1707,18 +1784,226 @@ describe('App', () => {
     render(<App />)
 
     expect(await screen.findByLabelText('选择 feature')).toBeInTheDocument()
-    expect(screen.getByLabelText('选择 cost_id')).toBeInTheDocument()
+    expect(screen.getByLabelText('选择 portfolio_mode')).toBeInTheDocument()
     expect(screen.queryByLabelText('展示组合 combination_id')).not.toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('选择 feature'), {
       target: { value: 'rev_20d' },
     })
-    fireEvent.change(screen.getByLabelText('选择 cost_id'), {
-      target: { value: 'c1' },
+    fireEvent.change(screen.getByLabelText('选择 portfolio_mode'), {
+      target: { value: 'market_neutral' },
     })
 
     expect(screen.getByText('没有匹配的组合配置')).toBeInTheDocument()
-    expect(screen.getByTestId('pnl-chart')).toHaveAttribute('data-row-count', '0')
+    expect(screen.getByTestId('cumulative-returns-chart')).toHaveAttribute('data-row-count', '0')
+  })
+
+  test('loads selected-combination chart tables instead of filtering truncated evidence', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/runs')) {
+        return jsonResponse([
+          {
+            source_alias: 'core',
+            run_id: 'combo_chart_demo',
+            public_run_id: 'core/combo_chart_demo',
+            project: 'quant-research-platform',
+            kind: 'factor',
+            domain: 'a_share',
+            data_stage: 'approved_offline_real_data',
+            uses_external_data: true,
+            n_combinations: 2,
+            n_rows_evaluated: 100,
+            weight_method: 'equal_weight_quantile',
+            mean_final_return: 0.12,
+            mean_turnover: 0.4,
+            total_cost: 0,
+          },
+        ])
+      }
+      if (url.endsWith('/api/runs/core/combo_chart_demo/evidence')) {
+        return jsonResponse(
+          evidencePayload({
+            comparisonRows: [],
+            tables: {
+              combinations: tablePayload([
+                {
+                  combination_id: 'combo_1',
+                  feature: 'rev_20d',
+                  label: 'forward_return_20d',
+                  kernel: 'dataframe',
+                  portfolio_mode: 'long_only',
+                },
+                {
+                  combination_id: 'combo_2',
+                  feature: 'rev_60d',
+                  label: 'forward_return_20d',
+                  kernel: 'dataframe',
+                  portfolio_mode: 'long_only',
+                },
+              ]),
+              cumulative_returns: tablePayload([
+                {
+                  combination_id: 'combo_1',
+                  timestamp: '2026-01-01',
+                  cumulative_net_return: 0.02,
+                  drawdown: 0,
+                },
+              ]),
+              returns: tablePayload([]),
+              ic: tablePayload([]),
+            },
+          }),
+        )
+      }
+      if (
+        url ===
+        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/portfolio/cumulative_returns?limit=1000&combination_id=combo_2'
+      ) {
+        return tableResponse([
+          {
+            combination_id: 'combo_2',
+            timestamp: '2026-01-01',
+            cumulative_net_return: 0.04,
+            drawdown: 0,
+          },
+          {
+            combination_id: 'combo_2',
+            timestamp: '2026-01-02',
+            cumulative_net_return: 0.05,
+            drawdown: -0.01,
+          },
+        ])
+      }
+      if (
+        url ===
+        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/portfolio/cumulative_returns?limit=1000&combination_id=combo_1'
+      ) {
+        return tableResponse([
+          {
+            combination_id: 'combo_1',
+            timestamp: '2026-01-01',
+            cumulative_net_return: 0.02,
+            drawdown: 0,
+          },
+        ])
+      }
+      if (url.includes('combo_chart_demo') && url.includes('combination_id=')) {
+        return tableResponse([])
+      }
+      return tableResponse([])
+    }) as typeof fetch
+
+    render(<App />)
+
+    expect(await screen.findByTestId('cumulative-returns-chart')).toHaveAttribute(
+      'data-row-count',
+      '1',
+    )
+    fireEvent.change(screen.getByLabelText('选择 feature'), {
+      target: { value: 'rev_60d' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('cumulative-returns-chart')).toHaveAttribute(
+        'data-row-count',
+        '2',
+      )
+    })
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/portfolio/cumulative_returns?limit=1000&combination_id=combo_2',
+    )
+  })
+
+  test('does not reuse stale chart evidence when selected-combination preview fails', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/runs')) {
+        return jsonResponse([
+          {
+            source_alias: 'core',
+            run_id: 'combo_chart_error',
+            public_run_id: 'core/combo_chart_error',
+            project: 'quant-research-platform',
+            kind: 'factor',
+            domain: 'a_share',
+            data_stage: 'approved_offline_real_data',
+            uses_external_data: true,
+            n_combinations: 2,
+            n_rows_evaluated: 100,
+            weight_method: 'equal_weight_quantile',
+            mean_final_return: 0.12,
+            mean_turnover: 0.4,
+            total_cost: 0,
+          },
+        ])
+      }
+      if (url.endsWith('/api/runs/core/combo_chart_error/evidence')) {
+        return jsonResponse(
+          evidencePayload({
+            comparisonRows: [],
+            tables: {
+              combinations: tablePayload([
+                {
+                  combination_id: 'combo_1',
+                  feature: 'rev_20d',
+                  label: 'forward_return_20d',
+                  kernel: 'dataframe',
+                  portfolio_mode: 'long_only',
+                },
+                {
+                  combination_id: 'combo_2',
+                  feature: 'rev_60d',
+                  label: 'forward_return_20d',
+                  kernel: 'dataframe',
+                  portfolio_mode: 'long_only',
+                },
+              ]),
+              cumulative_returns: tablePayload([
+                {
+                  combination_id: 'combo_1',
+                  timestamp: '2026-01-01',
+                  cumulative_net_return: 0.02,
+                  drawdown: 0,
+                },
+              ]),
+              returns: tablePayload([]),
+              ic: tablePayload([]),
+            },
+          }),
+        )
+      }
+      if (
+        url ===
+        'http://127.0.0.1:8000/api/runs/core/combo_chart_error/portfolio/cumulative_returns?limit=1000&combination_id=combo_2'
+      ) {
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          json: async () => ({ detail: 'chart preview unavailable' }),
+        } as Response)
+      }
+      if (url.includes('combo_chart_error') && url.includes('combination_id=')) {
+        return tableResponse([])
+      }
+      return tableResponse([])
+    }) as typeof fetch
+
+    render(<App />)
+
+    expect(await screen.findByTestId('cumulative-returns-chart')).toHaveAttribute(
+      'data-row-count',
+      '1',
+    )
+    fireEvent.change(screen.getByLabelText('选择 feature'), {
+      target: { value: 'rev_60d' },
+    })
+
+    expect(await screen.findByText('chart preview unavailable')).toBeInTheDocument()
+    expect(screen.getByTestId('cumulative-returns-chart')).toHaveAttribute(
+      'data-row-count',
+      '0',
+    )
   })
 
   test('caches loaded run evidence when switching runs', async () => {
@@ -1782,7 +2067,7 @@ describe('App', () => {
                   label: 'forward_return',
                 },
               ]),
-              pnl: tablePayload([]),
+              cumulative_returns: tablePayload([]),
               returns: tablePayload([]),
               ic: tablePayload([]),
             },
@@ -1815,7 +2100,7 @@ describe('App', () => {
                   label: 'forward_return',
                 },
               ]),
-              pnl: tablePayload([]),
+              cumulative_returns: tablePayload([]),
               returns: tablePayload([]),
               ic: tablePayload([]),
             },
@@ -1942,15 +2227,15 @@ describe('App', () => {
             comparisonRows: [],
             tables: {
               combinations: tablePayload([]),
-              pnl: tablePayload([
+              cumulative_returns: tablePayload([
                 {
                   timestamp: '2026-01-01',
-                  cumulative_pnl: 1.1219,
+                  cumulative_net_return: 1.1219,
                   drawdown: -0.3156,
                 },
                 {
                   timestamp: '2026-01-02',
-                  cumulative_pnl: 0.8844,
+                  cumulative_net_return: 0.8844,
                   drawdown: -0.4856,
                 },
               ]),
@@ -1968,7 +2253,7 @@ describe('App', () => {
 
     render(<App />)
 
-    const chart = await screen.findByTestId('pnl-chart')
+    const chart = await screen.findByTestId('cumulative-returns-chart')
     expect(within(chart).getByText(/112\.19%/)).toBeInTheDocument()
     const drawdownToggle = within(chart).getByRole('button', { name: '隐藏 drawdown' })
     fireEvent.click(drawdownToggle)
@@ -2009,36 +2294,28 @@ describe('App', () => {
                   combination_id: 'combo_a',
                   feature: 'rev_20d',
                   label: 'forward_return_20d',
-                  weight_id: 'w0',
-                  cost_id: 'c0',
-                  weight_method: 'equal_weight_quantile',
-                  direction: 'long_high',
+                  kernel: 'dataframe',
                   portfolio_mode: 'long_only',
-                  cost_bps: 5,
                 },
                 {
                   combination_id: 'combo_b',
                   feature: 'rev_60d',
                   label: 'forward_return_20d',
-                  weight_id: 'w0',
-                  cost_id: 'c0',
-                  weight_method: 'equal_weight_quantile',
-                  direction: 'long_high',
+                  kernel: 'dataframe',
                   portfolio_mode: 'long_only',
-                  cost_bps: 5,
                 },
               ]),
-              pnl: tablePayload([
+              cumulative_returns: tablePayload([
                 {
                   combination_id: 'combo_a',
                   timestamp: '2026-01-01',
-                  cumulative_pnl: 0.11,
+                  cumulative_net_return: 0.11,
                   drawdown: -0.01,
                 },
                 {
                   combination_id: 'combo_b',
                   timestamp: '2026-01-01',
-                  cumulative_pnl: 0.33,
+                  cumulative_net_return: 0.33,
                   drawdown: -0.03,
                 },
               ]),
@@ -2098,15 +2375,15 @@ describe('App', () => {
     expect(screen.getAllByText('0.33').length).toBeGreaterThan(0)
     expect(screen.getAllByText('2.2').length).toBeGreaterThan(0)
     expect(screen.getAllByText('0.09').length).toBeGreaterThan(0)
-    expect(screen.getByTestId('pnl-chart')).toHaveAttribute('data-row-count', '1')
+    expect(screen.getByTestId('cumulative-returns-chart')).toHaveAttribute('data-row-count', '1')
 
     fireEvent.click(screen.getByRole('tab', { name: 'CSV 明细' }))
     fireEvent.change(screen.getByRole('combobox', { name: '选择明细表' }), {
-      target: { value: 'pnl' },
+      target: { value: 'cumulative_returns' },
     })
     fireEvent.click(screen.getByRole('button', { name: '展开预览' }))
-    const pnlTable = screen.getByRole('table', { name: 'PnL 曲线 表格' })
-    expect(within(pnlTable).queryByText('combo_a')).not.toBeInTheDocument()
-    expect(within(pnlTable).getByText('combo_b')).toBeInTheDocument()
+    const cumulativeReturnsTable = screen.getByRole('table', { name: '累计收益曲线 表格' })
+    expect(within(cumulativeReturnsTable).queryByText('combo_a')).not.toBeInTheDocument()
+    expect(within(cumulativeReturnsTable).getByText('combo_b')).toBeInTheDocument()
   })
 })

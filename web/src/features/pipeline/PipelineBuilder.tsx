@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import {
+  createPipelineRun,
   createPipelineSnapshot,
+  getPipelineRunCheckpoints,
   getPipelineSnapshotCheckpoints,
   type PipelineCheckpointSummary,
   type PipelineRunSummary,
@@ -18,6 +20,9 @@ export function PipelineBuilder({
   const [dateStart, setDateStart] = useState('2024-01-01')
   const [dateEnd, setDateEnd] = useState('2024-12-31')
   const [costBps, setCostBps] = useState('10')
+  const [kernel, setKernel] = useState('dataframe')
+  const [submissionMode, setSubmissionMode] = useState('snapshot')
+  const [startFrom, setStartFrom] = useState('existing_factors')
   const [status, setStatus] = useState<PipelineRunSummary | null>(null)
   const [checkpoints, setCheckpoints] = useState<PipelineCheckpointSummary[]>([])
   const [error, setError] = useState('')
@@ -27,21 +32,36 @@ export function PipelineBuilder({
     setSubmitting(true)
     setError('')
     try {
-      const created = await createPipelineSnapshot({
+      const payload = {
         cost_bps: Number(costBps),
         date_end: dateEnd,
         date_start: dateStart,
         factor_expression: factorDraft.expression,
         factor_template_id: factorDraft.templateId || 'custom',
+        kernel,
         label_columns: ['forward_return_1d', 'forward_return_20d'],
         market: 'a_share',
-        pnl_return_column: 'forward_return_1d',
+        return_source_column: 'forward_return_1d',
         portfolio_mode: 'long_only',
         run_id: runId,
-      })
+      }
+      const created =
+        submissionMode === 'run'
+          ? await createPipelineRun({
+              ...payload,
+              start_from: startFrom as
+                | 'existing_factors'
+                | 'rebuild_factors'
+                | 'rebuild_panel'
+                | 'rebuild_interim',
+            })
+          : await createPipelineSnapshot(payload)
       setStatus(created)
+      const checkpointRef = created.run_ref ?? created.run_id
       setCheckpoints(
-        await getPipelineSnapshotCheckpoints(created.run_ref ?? created.run_id),
+        submissionMode === 'run'
+          ? await getPipelineRunCheckpoints(checkpointRef)
+          : await getPipelineSnapshotCheckpoints(checkpointRef),
       )
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '流程快照生成失败')
@@ -112,6 +132,43 @@ export function PipelineBuilder({
             value={costBps}
           />
         </label>
+        <label className="pipeline-field" htmlFor="submission-mode">
+          <span className="field-label">提交方式</span>
+          <select
+            id="submission-mode"
+            onChange={(event) => setSubmissionMode(event.target.value)}
+            value={submissionMode}
+          >
+            <option value="snapshot">配置快照</option>
+            <option value="run">执行流程</option>
+          </select>
+        </label>
+        <label className="pipeline-field" htmlFor="pipeline-kernel">
+          <span className="field-label">计算内核</span>
+          <select
+            id="pipeline-kernel"
+            onChange={(event) => setKernel(event.target.value)}
+            value={kernel}
+          >
+            <option value="dataframe">dataframe</option>
+            <option value="tensor">tensor</option>
+          </select>
+        </label>
+        {submissionMode === 'run' ? (
+          <label className="pipeline-field" htmlFor="pipeline-start-from">
+            <span className="field-label">起始步骤</span>
+            <select
+              id="pipeline-start-from"
+              onChange={(event) => setStartFrom(event.target.value)}
+              value={startFrom}
+            >
+              <option value="existing_factors">existing_factors</option>
+              <option value="rebuild_factors">rebuild_factors</option>
+              <option value="rebuild_panel">rebuild_panel</option>
+              <option value="rebuild_interim">rebuild_interim</option>
+            </select>
+          </label>
+        ) : null}
         <label
           className="pipeline-field pipeline-expression-field"
           htmlFor="pipeline-factor-expression"
@@ -127,7 +184,13 @@ export function PipelineBuilder({
           />
         </label>
         <button disabled={submitting} onClick={handleSubmit} type="button">
-          {submitting ? '正在生成快照...' : '生成快照'}
+          {submitting
+            ? submissionMode === 'run'
+              ? '正在执行流程...'
+              : '正在生成快照...'
+            : submissionMode === 'run'
+              ? '执行流程'
+              : '生成快照'}
         </button>
         {error ? <p className="inline-error">{error}</p> : null}
       </div>

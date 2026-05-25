@@ -13,7 +13,7 @@ class ArtifactValidationError(QuantResearchPlatformError):
     """在 run artifacts 违反 artifact contract 时抛出。"""
 
 
-class UnsupportedEngineError(QuantResearchPlatformError):
+class UnsupportedKernelError(QuantResearchPlatformError):
     """在 evaluation kernel 不受支持时抛出。"""
 
 

@@ -16,7 +16,7 @@
 | [platform-flow.md](platform-flow.md) | 当前平台全局概览；用少量节点描述主链路、入口和边界 |
 | [platform-flow-interactive.html](platform-flow-interactive.html) | 当前平台详细交互图；用细粒度节点和边定位具体模块、入口和文件 |
 | [a-share-data-and-pipeline.md](a-share-data-and-pipeline.md) | A 股 CSMAR raw/interim/panel/factor/start_from pipeline、Factor Factory 和 validation/runtime 的代码地图 |
-| [evaluation-artifacts-api.md](evaluation-artifacts-api.md) | Evaluation contract、schema `0.5` artifacts、`manifest.display`、API/download/frontend 合同地图 |
+| [evaluation-artifacts-api.md](evaluation-artifacts-api.md) | Evaluation contract、schema `0.6` artifacts、`manifest.display`、API/download/frontend 合同地图 |
 
 ## 推荐阅读顺序
 
@@ -35,8 +35,8 @@
 | 原始 CSV、interim、panel 或 factor table 口径不清楚 | `a-share-data-and-pipeline.md` |
 | Pipeline Builder 到底是 snapshot 还是 runner | `platform-flow.md` -> `a-share-data-and-pipeline.md` |
 | Factor Factory 候选、失败日志或本地浏览入口不清楚 | `a-share-data-and-pipeline.md` |
-| evaluation run 没有 schema `0.5` 或 `manifest.display` | `evaluation-artifacts-api.md` |
-| PnL、turnover、download、ZIP 或 workbench 展示不一致 | `evaluation-artifacts-api.md` |
+| evaluation run 没有 schema `0.6` 或 `manifest.display` | `evaluation-artifacts-api.md` |
+| cumulative returns、turnover、download、ZIP 或 workbench 展示不一致 | `evaluation-artifacts-api.md` |
 | API 里 `source_alias + run_id` 身份丢失 | `evaluation-artifacts-api.md` -> `platform-flow.md` |
 | 后续架构债和 Phase 2/Future 边界不清楚 | `platform-flow.md` |
 

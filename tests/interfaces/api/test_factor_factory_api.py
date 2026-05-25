@@ -37,6 +37,15 @@ def _candidate_record(
         time_semantics={"label_rule": "forward_return_1d"},
         status=status,
         run_dir="reports/private_real/pipeline_runs/factory_run",
+        combination_id=f"{candidate_id}__forward_return_1d__dataframe__long_only",
+        feature=output_column,
+        label="forward_return_1d",
+        kernel="dataframe",
+        portfolio_mode="long_only",
+        mean_ic=0.12,
+        final_cumulative_net_return=0.04,
+        mean_turnover=0.3,
+        total_cost=0.01,
         failure_reason=failure_reason,
         failure_code="factory_failed" if status == "failed" else None,
     )
@@ -79,6 +88,9 @@ def test_factor_factory_runs_are_browsable_from_api(tmp_path):
     assert detail.json()["display"]["tables"][0]["key"] == "candidate_summary"
     assert table.status_code == 200
     assert table.json()["rows"][0]["candidate_id"] == "reversal_20d@1"
+    assert "combination_id" in table.json()["columns"]
+    assert table.json()["rows"][0]["kernel"] == "dataframe"
+    assert table.json()["rows"][0]["mean_ic"] == 0.12
     assert "run_dir" not in table.json()["columns"]
     assert table.json()["rows"][0]["run_ref"] == "factory_run"
     assert artifact.status_code == 200
@@ -307,3 +319,33 @@ def test_factor_factory_api_rejects_private_markers_in_preview_and_download(tmp_
     assert artifact.status_code == 422
     assert "RAW_PRIVATE" not in table.text
     assert "RAW_PRIVATE" not in artifact.text
+
+
+def test_factor_factory_api_rejects_local_absolute_paths_in_preview_and_download(
+    tmp_path,
+):
+    factory_root = tmp_path / "factor_factory_runs"
+    run_dir = factory_root / "factory_demo"
+    _write_factor_factory_run(run_dir)
+    summary_path = run_dir / "candidate_summary.csv"
+    summary_text = summary_path.read_text(encoding="utf-8")
+    summary_path.write_text(
+        summary_text.replace("factory_run", "C:\\Users\\DELL\\vendor\\input.csv"),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_factory_root=factory_root,
+        )
+    )
+
+    table = client.get("/api/factor-factory-runs/factory_demo/tables/candidate_summary")
+    artifact = client.get(
+        "/api/factor-factory-runs/factory_demo/artifacts/candidate_summary.csv"
+    )
+
+    assert table.status_code == 422
+    assert artifact.status_code == 422
+    assert "Users" not in table.text
+    assert "Users" not in artifact.text

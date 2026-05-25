@@ -27,6 +27,7 @@ afterEach(() => {
 
 describe('api client', () => {
   test('reads market, factor template, and pipeline studio endpoints', async () => {
+    let snapshotRequest: Record<string, unknown> | undefined
     globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/api/markets')) {
@@ -53,6 +54,7 @@ describe('api client', () => {
         } as Response)
       }
       if (url.endsWith('/api/pipeline-snapshots') && init?.method === 'POST') {
+        snapshotRequest = JSON.parse(String(init.body))
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -98,9 +100,10 @@ describe('api client', () => {
         date_end: '2025-12-31',
         date_start: '2024-01-01',
         factor_expression: 'neg(return(close, 20))',
+        kernel: 'dataframe',
         label_columns: ['forward_return_20d'],
         market: 'a_share',
-        pnl_return_column: 'forward_return_1d',
+        return_source_column: 'forward_return_1d',
         portfolio_mode: 'long_only',
         run_id: 'a_share_reversal_smoke',
       }),
@@ -109,6 +112,13 @@ describe('api client', () => {
       run_ref: 'a_share_reversal_smoke_20260523',
       status: 'queued',
     })
+    expect(snapshotRequest).toMatchObject({
+      kernel: 'dataframe',
+      return_source_column: 'forward_return_1d',
+    })
+    expect(snapshotRequest).not.toHaveProperty('engine')
+    expect(snapshotRequest).not.toHaveProperty('input_file')
+    expect(snapshotRequest).not.toHaveProperty('pnl_return_column')
     await expect(
       getPipelineSnapshotStatus('a_share_reversal_smoke'),
     ).resolves.toMatchObject({
@@ -123,9 +133,11 @@ describe('api client', () => {
   })
 
   test('pipeline run helpers use executable-run endpoints', async () => {
+    let runRequest: Record<string, unknown> | undefined
     globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/api/pipeline-runs') && init?.method === 'POST') {
+        runRequest = JSON.parse(String(init.body))
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -154,7 +166,7 @@ describe('api client', () => {
               key: 'evaluate',
               label: 'A-share evaluation',
               status: 'ready',
-              artifact: 'evaluation_manifest',
+              artifact: 'evaluation/manifest.json',
             },
           ],
         } as Response)
@@ -168,9 +180,10 @@ describe('api client', () => {
         date_end: '2025-12-31',
         date_start: '2024-01-01',
         factor_expression: 'rev_20d',
+        kernel: 'tensor',
         label_columns: ['forward_return_20d'],
         market: 'a_share',
-        pnl_return_column: 'forward_return_1d',
+        return_source_column: 'forward_return_1d',
         portfolio_mode: 'long_only',
         run_id: 'a_share_runner',
         start_from: 'existing_factors',
@@ -179,12 +192,18 @@ describe('api client', () => {
       kind: 'run',
       status: 'ready',
     })
+    expect(runRequest).toMatchObject({
+      kernel: 'tensor',
+      return_source_column: 'forward_return_1d',
+      start_from: 'existing_factors',
+    })
+    expect(runRequest).not.toHaveProperty('input_file')
     await expect(getPipelineRunStatus('a_share_runner')).resolves.toMatchObject({
       kind: 'run',
       status: 'ready',
     })
     await expect(getPipelineRunCheckpoints('a_share_runner')).resolves.toMatchObject([
-      { artifact: 'evaluation_manifest' },
+      { artifact: 'evaluation/manifest.json' },
     ])
     expect(globalThis.fetch).toHaveBeenCalledWith(
       'http://127.0.0.1:8000/api/pipeline-runs/a_share_runner/checkpoints',
@@ -358,16 +377,16 @@ describe('api client', () => {
         total_cost: 0,
       },
       {
-        schema_version: '0.5',
+        schema_version: '0.6',
         charts: [],
         downloads: { items: [], presets: [] },
         tables: [
           {
-            download_item: 'combinations.csv',
+            download_item: 'dimensions/combinations.csv',
             group: 'setup',
             key: 'combinations',
             label: '组合配置',
-            path: 'combinations.csv',
+            path: 'dimensions/combinations.csv',
             supports_combination_filter: false,
           },
         ],
@@ -395,16 +414,16 @@ describe('api client', () => {
         total_cost: 0,
       },
       {
-        schema_version: '0.5',
+        schema_version: '0.6',
         charts: [],
         downloads: { items: [], presets: [] },
         tables: [
           {
-            download_item: 'metrics_by_year/performance_summary_by_year.csv',
+            download_item: 'breakdowns/year/performance_summary.csv',
             group: 'breakdown',
             key: 'performance_by_year',
             label: '按年绩效',
-            path: 'metrics_by_year/performance_summary_by_year.csv',
+            path: 'breakdowns/year/performance_summary.csv',
             supports_combination_filter: true,
           },
         ],
@@ -412,7 +431,7 @@ describe('api client', () => {
     )
 
     expect(specs[0].path).toBe(
-      '/api/runs/core/demo/breakdowns/metrics_by_year/performance_summary_by_year',
+      '/api/runs/core/demo/breakdowns/year/performance_summary',
     )
   })
 
@@ -434,7 +453,7 @@ describe('api client', () => {
           total_cost: 0,
         },
         {
-          schema_version: '0.5',
+          schema_version: '0.6',
           charts: [],
           downloads: { items: [], presets: [] },
           tables: [

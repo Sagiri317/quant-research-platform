@@ -55,16 +55,16 @@ export function evidencePayload({
   const evidenceTables = tables ?? {
     combinations: tablePayload([
       {
-        combination_id: 'factor__forward_return__w0__c0',
+        combination_id: 'factor__forward_return__dataframe__long_only',
         feature: 'factor',
         label: 'forward_return',
-        weight_id: 'w0',
-        cost_id: 'c0',
+        kernel: 'dataframe',
+        portfolio_mode: 'long_only',
       },
     ]),
     ic: tablePayload(
       Array.from({ length: 30 }, (_, index) => ({
-        combination_id: 'factor__forward_return__w0__c0',
+        combination_id: 'factor__forward_return__dataframe__long_only',
         timestamp: `2026-01-${String(index + 1).padStart(2, '0')}`,
         ic: 0.4,
         rankic: 0.5,
@@ -72,19 +72,19 @@ export function evidencePayload({
     ),
     returns: tablePayload([
       {
-        combination_id: 'factor__forward_return__w0__c0',
+        combination_id: 'factor__forward_return__dataframe__long_only',
         timestamp: '2026-01-01',
         net_portfolio_return: 0.02,
         turnover: 1.1,
         cost: 0.001,
       },
     ]),
-    pnl: tablePayload([
+    cumulative_returns: tablePayload([
       {
-        combination_id: 'factor__forward_return__w0__c0',
+        combination_id: 'factor__forward_return__dataframe__long_only',
         timestamp: '2026-01-01',
         net_portfolio_return: 0.02,
-        cumulative_pnl: 0.02,
+        cumulative_net_return: 0.02,
         drawdown: 0,
       },
     ]),
@@ -112,16 +112,17 @@ export function displayPayload(
     key,
     label: tableLabel(key),
     path: tableDownloadItem(key),
-    supports_combination_filter: key !== 'combinations',
+    format: key === 'weights' ? 'parquet' : 'csv',
+    supports_combination_filter: tableSupportsCombinationFilter(key),
   }))
   const tableItems = tableEntries.map((table) => table.download_item)
   return {
-    schema_version: '0.5',
+    schema_version: '0.6',
     tables: tableEntries,
     charts: [
       {
         description: '净值曲线和回撤',
-        id: 'pnl',
+        id: 'cumulative_returns',
         include_zero: true,
         kind: 'line',
         section: 'primary',
@@ -129,8 +130,8 @@ export function displayPayload(
           {
             color: '#2563eb',
             format: 'percent',
-            key: 'cumulative_pnl',
-            label: 'cumulative_pnl',
+            key: 'cumulative_net_return',
+            label: 'cumulative_net_return',
           },
           {
             color: '#dc2626',
@@ -139,8 +140,8 @@ export function displayPayload(
             label: 'drawdown',
           },
         ],
-        table: 'pnl',
-        title: '累计组合 PnL',
+        table: 'cumulative_returns',
+        title: '累计组合收益',
         x: 'timestamp',
       },
       {
@@ -257,53 +258,54 @@ const DEFAULT_TABLE_KEYS = [
   'grouped_returns',
   'group_spread_summary',
   'performance_summary',
-  'exposure_summary',
-  'positions',
-  'turnover',
   'returns',
-  'pnl',
-  'cost_breakdown',
-  'weight_diagnostics',
-  'neutralization_diagnostics',
+  'cumulative_returns',
+  'weights',
+  'tradability_diagnostics',
+  'label_availability',
+  'factor_coverage',
+  'tradability_coverage',
+  'evaluation_summary',
 ]
 
 function tableDownloadItem(key: string) {
-  if (
-    [
-      'cost_breakdown',
-      'exposure_summary',
-      'pnl',
-      'positions',
-      'returns',
-      'turnover',
-    ].includes(key)
-  ) {
+  if (key === 'weights') {
+    return 'portfolio/weights.parquet'
+  }
+  if (['cumulative_returns', 'returns'].includes(key)) {
     return `portfolio/${key}.csv`
   }
-  if (key === 'weight_diagnostics' || key === 'neutralization_diagnostics') {
+  if (key === 'tradability_diagnostics') {
     return `diagnostics/${key}.csv`
   }
+  if (
+    ['label_availability', 'factor_coverage', 'tradability_coverage'].includes(key)
+  ) {
+    return `input_quality/${key}.csv`
+  }
+  if (key === 'evaluation_summary') {
+    return 'summaries/evaluation_summary.csv'
+  }
   if (key === 'combinations') {
-    return 'combinations.csv'
+    return 'dimensions/combinations.csv'
   }
   return `metrics/${key}.csv`
 }
 
 function tableGroup(key: string) {
-  if (
-    [
-      'cost_breakdown',
-      'exposure_summary',
-      'pnl',
-      'positions',
-      'returns',
-      'turnover',
-    ].includes(key)
-  ) {
+  if (['cumulative_returns', 'returns', 'weights'].includes(key)) {
     return 'portfolio'
   }
-  if (key === 'weight_diagnostics' || key === 'neutralization_diagnostics') {
+  if (key === 'tradability_diagnostics') {
     return 'diagnostics'
+  }
+  if (
+    ['label_availability', 'factor_coverage', 'tradability_coverage'].includes(key)
+  ) {
+    return 'input_quality'
+  }
+  if (key === 'evaluation_summary') {
+    return 'summaries'
   }
   if (key === 'combinations') {
     return 'setup'
@@ -316,19 +318,28 @@ function tableLabel(key: string) {
     {
       combinations: '组合配置',
       custom_alpha: '自定义 Alpha',
-      cost_breakdown: '成本拆分',
-      exposure_summary: '敞口汇总',
+      evaluation_summary: '评价组合汇总',
+      factor_coverage: '因子覆盖',
       group_spread_summary: '分组价差汇总',
       grouped_returns: '分组收益',
       ic: 'IC / RankIC',
       ic_summary: 'IC / RankIC 汇总',
-      neutralization_diagnostics: '中性化诊断',
+      label_availability: '标签可用性',
       performance_summary: '绩效汇总',
-      pnl: 'PnL 曲线',
-      positions: '持仓明细',
+      cumulative_returns: '累计收益曲线',
       returns: '组合收益明细',
-      turnover: '换手明细',
-      weight_diagnostics: '权重诊断',
+      tradability_coverage: '可交易覆盖',
+      tradability_diagnostics: '可交易诊断',
+      weights: '目标权重',
     }[key] ?? key
   )
+}
+
+function tableSupportsCombinationFilter(key: string) {
+  return ![
+    'combinations',
+    'label_availability',
+    'factor_coverage',
+    'tradability_coverage',
+  ].includes(key)
 }

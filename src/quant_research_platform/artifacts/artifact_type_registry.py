@@ -10,9 +10,11 @@ from quant_research_platform.artifacts.artifact_schema import (
     DISPLAY_METADATA_DOWNLOAD_ITEMS,
     EVALUATION_SET_ARTIFACT_TYPE,
     EVALUATION_SET_DIAGNOSTIC_TABLES,
+    EVALUATION_SET_INPUT_QUALITY_TABLES,
     EVALUATION_SET_METRIC_TABLES,
     EVALUATION_SET_PORTFOLIO_TABLES,
     EVALUATION_SET_REQUIRED_TABLES,
+    EVALUATION_SET_SUMMARY_TABLES,
 )
 
 
@@ -30,7 +32,7 @@ class ArtifactTypeContract:
 
 
 BREAKDOWN_DOWNLOAD_ITEMS = tuple(
-    f"metrics_by_{period}/{table}_by_{period}.csv"
+    f"breakdowns/{period}/{table}.csv"
     for period in BREAKDOWN_PERIODS
     for table in (
         "ic_summary",
@@ -44,15 +46,31 @@ EVALUATION_SET_CONTRACT = ArtifactTypeContract(
     name=EVALUATION_SET_ARTIFACT_TYPE,
     version=ARTIFACT_SCHEMA_VERSION,
     inputs=("EvaluationRunPayload",),
-    outputs=("manifest.json", "config.json", "summary.json", "report.md"),
+    outputs=(
+        "manifest.json",
+        "config.json",
+        "lineage.json",
+        "summary.json",
+        "report.md",
+    ),
     tables=EVALUATION_SET_REQUIRED_TABLES,
     downloads=(
         *tuple(sorted(DISPLAY_METADATA_DOWNLOAD_ITEMS)),
-        "combinations.csv",
+        "dimensions/combinations.csv",
         *(f"metrics/{table}.csv" for table in EVALUATION_SET_METRIC_TABLES),
         *BREAKDOWN_DOWNLOAD_ITEMS,
-        *(f"portfolio/{table}.csv" for table in EVALUATION_SET_PORTFOLIO_TABLES),
+        *(
+            f"portfolio/{table}.parquet"
+            if table == "weights"
+            else f"portfolio/{table}.csv"
+            for table in EVALUATION_SET_PORTFOLIO_TABLES
+        ),
         *(f"diagnostics/{table}.csv" for table in EVALUATION_SET_DIAGNOSTIC_TABLES),
+        *(
+            f"input_quality/{table}.csv"
+            for table in EVALUATION_SET_INPUT_QUALITY_TABLES
+        ),
+        *(f"summaries/{table}.csv" for table in EVALUATION_SET_SUMMARY_TABLES),
     ),
     capabilities=("load", "display", "download", "compare"),
 )

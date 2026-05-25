@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -100,7 +101,7 @@ def test_date_filtered_evaluation_frame_keeps_only_requested_trade_dates(
     filtered = evaluation.read_evaluation_frame(
         path,
         feature_columns=("rev_20d",),
-        label_column="forward_return_20d",
+        label_columns=("forward_return_20d",),
         start_date="2024-09-24",
         end_date="2024-09-25",
     )
@@ -112,6 +113,39 @@ def test_date_filtered_evaluation_frame_keeps_only_requested_trade_dates(
     assert "rev_20d" in filtered.columns
     assert "forward_return_20d" in filtered.columns
     assert "forward_return_1d" in filtered.columns
+
+
+def test_read_factor_frame_pushes_trade_date_filters_to_parquet(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_read_parquet(path, *, columns=None, engine=None, filters=None):
+        captured["path"] = path
+        captured["columns"] = columns
+        captured["engine"] = engine
+        captured["filters"] = filters
+        return pd.DataFrame(
+            {
+                "trade_date": pd.to_datetime(["2024-01-02"]),
+                "rev_20d": [0.1],
+            }
+        )
+
+    monkeypatch.setattr(evaluation.pd, "read_parquet", fake_read_parquet)
+
+    frame = evaluation.read_factor_frame(
+        Path("factors.parquet"),
+        columns=("rev_20d",),
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+    )
+
+    assert len(frame) == 1
+    assert captured["columns"] == ["rev_20d", "trade_date"]
+    assert captured["engine"] == "pyarrow"
+    assert captured["filters"] == [
+        ("trade_date", ">=", pd.Timestamp("2024-01-01").to_pydatetime()),
+        ("trade_date", "<=", pd.Timestamp("2024-12-31").to_pydatetime()),
+    ]
 
 
 def test_evaluation_spec_uses_filtered_panel_without_input_parquet(tmp_path) -> None:
@@ -132,9 +166,9 @@ def test_evaluation_spec_uses_filtered_panel_without_input_parquet(tmp_path) -> 
         panel=panel,
         start_year=2024,
         end_year=2024,
-        label_column="forward_return_20d",
+        label_columns=("forward_return_20d",),
         feature_columns=("rev_20d",),
-        output_dir=tmp_path / "reports" / "evaluation_runs" / "run",
+        output_dir=tmp_path / "reports" / "run",
         run_id="run",
         n_groups=5,
         source_file="data/processed_private/csmar/example.parquet",
@@ -149,7 +183,7 @@ def test_evaluation_spec_uses_filtered_panel_without_input_parquet(tmp_path) -> 
     )
     assert spec.feature_columns == ("rev_20d",)
     assert spec.label_columns == ("forward_return_20d",)
-    assert spec.pnl_return_column == "forward_return_1d"
+    assert spec.return_source_column == "forward_return_1d"
     assert spec.time_breakdowns == ("year",)
     assert spec.time_semantics_config.decision_time_column == "trade_date"
     assert spec.metadata["time_semantics"]["decision_time_column"] == "trade_date"
@@ -175,9 +209,9 @@ def test_evaluation_spec_rejects_non_forward_return_label_name(tmp_path) -> None
             panel=panel,
             start_year=2024,
             end_year=2024,
-            label_column="future_return_20d",
+            label_columns=("future_return_20d",),
             feature_columns=("rev_20d",),
-            output_dir=tmp_path / "reports" / "evaluation_runs" / "run",
+            output_dir=tmp_path / "reports" / "run",
             run_id="run",
             n_groups=5,
             source_file="data/processed_private/csmar/example.parquet",
@@ -206,16 +240,16 @@ def test_evaluation_spec_exposes_evaluation_runtime_options(tmp_path) -> None:
         panel=panel,
         start_year=2024,
         end_year=2024,
-        label_column="forward_return_20d",
+        label_columns=("forward_return_20d",),
         feature_columns=("rev_20d",),
-        output_dir=tmp_path / "reports" / "evaluation_runs" / "run",
+        output_dir=tmp_path / "reports" / "run",
         run_id="run",
         n_groups=5,
         source_file="data/processed_private/csmar/example.parquet",
-        pnl_return_column="forward_return_5d",
+        return_source_column="forward_return_5d",
         cost_bps=3.5,
         portfolio_mode="long_only",
-        engine="tensor",
+        kernel="tensor",
         segment_columns=("industry",),
         risk_column="risk_20d",
         neutralization_method="cross_sectional_ols",
@@ -223,12 +257,12 @@ def test_evaluation_spec_exposes_evaluation_runtime_options(tmp_path) -> None:
         neutralization_exposure_columns=("size_exposure",),
     )
 
-    assert spec.pnl_return_column == "forward_return_5d"
+    assert spec.return_source_column == "forward_return_5d"
     assert spec.weight_configs[0].cost_bps == 3.5
     assert spec.weight_configs[0].portfolio_mode == "long_only"
     assert spec.weight_configs[0].risk_column == "risk_20d"
     assert spec.metadata["portfolio_mode"] == "long_only"
-    assert spec.engine == "tensor"
+    assert spec.kernel == "tensor"
     assert spec.segment_columns == ("industry",)
     assert spec.neutralization_config.method == "cross_sectional_ols"
     assert spec.neutralization_config.exposure_columns == ("size_exposure",)
@@ -259,7 +293,6 @@ def test_label_availability_frame_applies_date_filter(tmp_path) -> None:
 
 def test_processed_factor_evaluation_reads_full_factor_file_once(
     tmp_path,
-    monkeypatch,
 ) -> None:
     processed_root = tmp_path / "processed"
     factor_dir = processed_root / "price_volume_factors_full"
@@ -267,67 +300,65 @@ def test_processed_factor_evaluation_reads_full_factor_file_once(
     factor_path = factor_dir / "price_volume_factors_2014_2025.parquet"
     pd.DataFrame(
         {
-            "stock_code": ["000001", "000001", "000001"],
+            "stock_code": ["000001", "000002", "000001", "000002"],
             "trade_date": pd.to_datetime(
-                ["2024-01-02", "2025-01-02", "2025-01-03"]
+                ["2024-01-02", "2024-01-02", "2025-01-02", "2025-01-02"]
             ),
-            "eligible": [True, True, False],
-            "can_enter": [True, True, False],
-            "can_exit": [True, True, False],
-            "rev_20d": [0.1, 0.2, 0.3],
-            "forward_return_1d": [0.001, 0.002, 0.003],
-            "forward_return_20d": [0.01, 0.02, 0.03],
+            "eligible": [True, True, True, True],
+            "can_enter": [True, True, True, True],
+            "can_exit": [True, True, True, True],
+            "rev_20d": [0.1, 0.2, 0.3, 0.4],
+            "forward_return_1d": [0.001, 0.002, 0.003, 0.004],
+            "forward_return_20d": [0.01, 0.02, 0.03, 0.04],
         }
     ).to_parquet(factor_path, engine="pyarrow", compression="zstd", index=False)
-    captured_specs = []
-
-    def fake_run_evaluation(spec):
-        captured_specs.append(spec)
-
-    monkeypatch.setattr(evaluation, "run_evaluation", fake_run_evaluation)
+    report_root = tmp_path / "factor_evaluation" / "full_2024_2025"
 
     result = evaluation.run_processed_factor_evaluation(
         processed_root=processed_root,
-        report_root=tmp_path / "reports",
+        report_root=report_root,
         start_year=2024,
         end_year=2025,
         requested_labels=("forward_return_20d",),
         requested_factors=("rev_20d",),
         all_factors=False,
-        n_groups=5,
+        n_groups=2,
     )
-    label_summary, manifest_path, evaluation_runs = result
+    label_summary, manifest_path, run_records = result
 
-    assert len(captured_specs) == 1
-    assert captured_specs[0].metadata["start_year"] == 2024
-    assert captured_specs[0].metadata["end_year"] == 2025
-    assert captured_specs[0].metadata["source_file"] == factor_path.as_posix()
-    assert captured_specs[0].metadata["portfolio_mode"] == "long_short"
-    assert captured_specs[0].weight_configs[0].portfolio_mode == "long_short"
-    assert captured_specs[0].panel["trade_date"].dt.year.tolist() == [
-        2024,
-        2025,
-        2025,
-    ]
     assert sorted(label_summary["year"].unique().tolist()) == [2024, 2025]
-    assert evaluation_runs[0]["run_id"] == "csmar_2024_2025_forward_return_20d"
-    assert evaluation_runs[0]["portfolio_mode"] == "long_short"
-    assert evaluation_runs[0]["output_dir"] == (
-        "evaluation_runs/csmar_2024_2025_forward_return_20d"
-    )
-    assert "input_file" not in evaluation_runs[0]
-    assert evaluation_runs[0]["input_source"] == "processed_factor_table"
-    assert evaluation_runs[0]["input_year_range"] == "2014_2025"
-    assert manifest_path.name == "evaluation_manifest.json"
+    assert run_records[0]["run_id"] == "full_2024_2025"
+    assert run_records[0]["labels"] == ["forward_return_20d"]
+    assert run_records[0]["features"] == ["rev_20d"]
+    assert run_records[0]["portfolio_modes"] == ["long_short"]
+    assert run_records[0]["kernels"] == ["dataframe"]
+    assert run_records[0]["output_dir"] == "."
+    assert "input_file" not in run_records[0]
+    assert run_records[0]["input_source"] == "processed_factor_table"
+    assert run_records[0]["input_year_range"] == "2014_2025"
+    assert manifest_path.name == "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    combinations = pd.read_csv(report_root / "dimensions" / "combinations.csv")
+    assert combinations.columns.tolist() == [
+        "combination_id",
+        "feature",
+        "label",
+        "kernel",
+        "portfolio_mode",
+    ]
     manifest_text = json.dumps(manifest)
+    config_text = (report_root / "config.json").read_text(encoding="utf-8")
+    lineage = json.loads((report_root / "lineage.json").read_text(encoding="utf-8"))
     assert "data/processed_private" not in manifest_text
     assert factor_path.as_posix() not in manifest_text
+    assert factor_path.as_posix() not in config_text
+    assert lineage["source_file"] == factor_path.name
+    assert not (report_root / "label_availability.csv").exists()
+    assert (report_root / "input_quality" / "label_availability.csv").is_file()
 
 
-def test_processed_factor_evaluation_manifest_uses_full_report_identity(
+def test_processed_factor_evaluation_combined_summary_counts_all_payload_tables(
     tmp_path,
-    monkeypatch,
 ) -> None:
     processed_root = tmp_path / "processed"
     factor_dir = processed_root / "price_volume_factors_full"
@@ -348,8 +379,57 @@ def test_processed_factor_evaluation_manifest_uses_full_report_identity(
         compression="zstd",
         index=False,
     )
-    monkeypatch.setattr(evaluation, "run_evaluation", lambda _spec: None)
+    report_root = tmp_path / "factor_evaluation" / "multi_mode_2024"
 
+    _, manifest_path, _ = evaluation.run_processed_factor_evaluation(
+        processed_root=processed_root,
+        report_root=report_root,
+        start_year=2024,
+        end_year=2024,
+        requested_labels=("forward_return_1d",),
+        requested_factors=("rev_20d",),
+        all_factors=False,
+        n_groups=2,
+        portfolio_modes=("long_short", "long_only"),
+    )
+
+    summary = json.loads((manifest_path.parent / "summary.json").read_text())
+    config = json.loads((manifest_path.parent / "config.json").read_text())
+    assert summary["n_combinations"] == 2
+    assert summary["tables"]["combinations"] == 2
+    assert summary["tables"]["weights"] == len(
+        pd.read_parquet(report_root / "portfolio" / "weights.parquet")
+    )
+    assert summary["tables"]["returns"] == len(
+        pd.read_csv(report_root / "portfolio" / "returns.csv")
+    )
+    assert config["portfolio_modes"] == ["long_short", "long_only"]
+    assert "portfolio_mode" not in config["metadata"]
+    assert "portfolio_mode" not in config["weight_configs"][0]
+
+
+def test_processed_factor_evaluation_artifact_uses_full_report_identity(
+    tmp_path,
+) -> None:
+    processed_root = tmp_path / "processed"
+    factor_dir = processed_root / "price_volume_factors_full"
+    factor_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "stock_code": ["000001", "000002"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "eligible": [True, True],
+            "can_enter": [True, True],
+            "can_exit": [True, True],
+            "rev_20d": [0.1, 0.2],
+            "forward_return_1d": [0.001, 0.002],
+        }
+    ).to_parquet(
+        factor_dir / "price_volume_factors_2024_2024.parquet",
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
     _, manifest_path, _ = evaluation.run_processed_factor_evaluation(
         processed_root=processed_root,
         report_root=tmp_path / "factor_evaluation" / "full_2024_2024",
@@ -362,13 +442,14 @@ def test_processed_factor_evaluation_manifest_uses_full_report_identity(
     )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["source_alias"] == "a_share"
-    assert manifest["run_id"] == "full_2024_2024"
+    assert manifest["evaluation_id"] == "full_2024_2024"
+    lineage = json.loads((manifest_path.parent / "lineage.json").read_text())
+    assert lineage["source_alias"] == "a_share"
+    assert lineage["evaluation_id"] == "full_2024_2024"
 
 
-def test_processed_factor_evaluation_manifest_preserves_pipeline_identity(
+def test_processed_factor_evaluation_artifact_preserves_pipeline_identity(
     tmp_path,
-    monkeypatch,
 ) -> None:
     processed_root = tmp_path / "processed"
     factor_dir = processed_root / "price_volume_factors_full"
@@ -389,8 +470,6 @@ def test_processed_factor_evaluation_manifest_preserves_pipeline_identity(
         compression="zstd",
         index=False,
     )
-    monkeypatch.setattr(evaluation, "run_evaluation", lambda _spec: None)
-
     _, manifest_path, _ = evaluation.run_processed_factor_evaluation(
         processed_root=processed_root,
         report_root=tmp_path / "pipeline_run" / "evaluation",
@@ -404,35 +483,12 @@ def test_processed_factor_evaluation_manifest_preserves_pipeline_identity(
     )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["source_alias"] == "pipeline"
-    assert manifest["run_id"] == "pipeline_run"
+    assert manifest["evaluation_id"] == "pipeline_run"
+    lineage = json.loads((manifest_path.parent / "lineage.json").read_text())
+    assert lineage["source_alias"] == "pipeline"
+    assert lineage["evaluation_id"] == "pipeline_run"
 
 
-def test_run_label_evaluation_rejects_unsafe_label_in_run_id(tmp_path):
-    panel = pd.DataFrame(
-        {
-            "stock_code": ["000001", "000002"],
-            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "eligible": [True, True],
-            "can_enter": [True, True],
-            "can_exit": [True, True],
-            "rev_20d": [0.1, 0.2],
-            "forward_return_1d": [0.001, 0.002],
-            "forward_return_20d/evil": [0.01, 0.02],
-        }
-    )
-
-    with pytest.raises(ValueError, match="unsafe evaluation run_id"):
-        evaluation.run_label_evaluation(
-            panel=panel,
-            source_file="factor.parquet",
-            start_year=2024,
-            end_year=2024,
-            label_column="forward_return_20d/evil",
-            feature_columns=("rev_20d",),
-            output_root=tmp_path / "reports",
-            n_groups=2,
-        )
 
 
 def test_run_factor_evaluation_cli_passes_evaluation_runtime_options(
@@ -443,7 +499,7 @@ def test_run_factor_evaluation_cli_passes_evaluation_runtime_options(
 
     def fake_run_processed_factor_evaluation(**kwargs):
         captured.update(kwargs)
-        return pd.DataFrame(), tmp_path / "evaluation_manifest.json", []
+        return pd.DataFrame(), tmp_path / "manifest.json", []
 
     monkeypatch.setattr(
         run_factor_evaluation,
@@ -463,15 +519,15 @@ def test_run_factor_evaluation_cli_passes_evaluation_runtime_options(
             "2025",
             "--labels",
             "forward_return_20d",
-            "--factors",
+            "--features",
             "rev_20d",
-            "--pnl-return-column",
+            "--return-source-column",
             "forward_return_5d",
             "--cost-bps",
             "2.5",
-            "--portfolio-mode",
+            "--portfolio-modes",
             "long_only",
-            "--engine",
+            "--kernels",
             "tensor",
             "--segment-columns",
             "industry,market",
@@ -487,10 +543,10 @@ def test_run_factor_evaluation_cli_passes_evaluation_runtime_options(
     )
 
     assert exit_code == 0
-    assert captured["pnl_return_column"] == "forward_return_5d"
+    assert captured["return_source_column"] == "forward_return_5d"
     assert captured["cost_bps"] == 2.5
-    assert captured["portfolio_mode"] == "long_only"
-    assert captured["engine"] == "tensor"
+    assert captured["portfolio_modes"] == ("long_only",)
+    assert captured["kernels"] == ("tensor",)
     assert captured["segment_columns"] == ("industry", "market")
     assert captured["risk_column"] == "risk_20d"
     assert captured["neutralization_method"] == "cross_sectional_ols"
@@ -498,11 +554,106 @@ def test_run_factor_evaluation_cli_passes_evaluation_runtime_options(
     assert captured["neutralization_exposure_columns"] == ("ln_mktcap", "beta")
 
 
-def test_run_factor_evaluation_cli_rejects_invalid_engine_before_io() -> None:
+def test_run_factor_evaluation_cli_rejects_invalid_kernel_before_io() -> None:
     with pytest.raises(SystemExit) as exc_info:
-        run_factor_evaluation.main(["--engine", "bad"])
+        run_factor_evaluation.main(["--features", "rev_20d", "--kernels", "bad"])
 
     assert exc_info.value.code == 2
+
+
+def test_run_factor_evaluation_dry_run_checks_date_coverage_without_artifact(
+    tmp_path,
+    capsys,
+) -> None:
+    input_file = tmp_path / "factors.parquet"
+    report_root = tmp_path / "reports"
+    pd.DataFrame(
+        {
+            "stock_code": ["000001", "000002"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "eligible": [True, True],
+            "can_enter": [True, True],
+            "can_exit": [True, True],
+            "rev_20d": [0.1, 0.2],
+            "forward_return_1d": [0.001, 0.002],
+            "forward_return_20d": [0.01, 0.02],
+        }
+    ).to_parquet(input_file, engine="pyarrow", compression="zstd", index=False)
+
+    exit_code = run_factor_evaluation.main(
+        [
+            "--input-file",
+            str(input_file),
+            "--report-root",
+            str(report_root),
+            "--start-year",
+            "2024",
+            "--end-year",
+            "2024",
+            "--start-date",
+            "2024-01-01",
+            "--end-date",
+            "2024-01-31",
+            "--features",
+            "rev_20d",
+            "--labels",
+            "forward_return_20d",
+            "--kernels",
+            "dataframe",
+            "tensor",
+            "--portfolio-modes",
+            "long_short",
+            "long_only",
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "date_coverage=2024-01-01..2024-01-31" in output
+    assert "rows_in_range=2" in output
+    assert "combinations=4" in output
+    assert not (report_root / "manifest.json").exists()
+
+
+def test_run_factor_evaluation_dry_run_rejects_missing_date_coverage(
+    tmp_path,
+    capsys,
+) -> None:
+    input_file = tmp_path / "factors.parquet"
+    pd.DataFrame(
+        {
+            "stock_code": ["000001"],
+            "trade_date": pd.to_datetime(["2024-01-02"]),
+            "eligible": [True],
+            "can_enter": [True],
+            "can_exit": [True],
+            "rev_20d": [0.1],
+            "forward_return_1d": [0.001],
+            "forward_return_20d": [0.01],
+        }
+    ).to_parquet(input_file, engine="pyarrow", compression="zstd", index=False)
+
+    exit_code = run_factor_evaluation.main(
+        [
+            "--input-file",
+            str(input_file),
+            "--start-year",
+            "2024",
+            "--end-year",
+            "2024",
+            "--start-date",
+            "2024-02-01",
+            "--end-date",
+            "2024-02-29",
+            "--features",
+            "rev_20d",
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "no rows in requested date coverage" in capsys.readouterr().out
 
 
 def test_processed_factor_evaluation_rejects_invalid_options_before_parquet_io(
@@ -518,7 +669,7 @@ def test_processed_factor_evaluation_rejects_invalid_options_before_parquet_io(
         fail_if_parquet_path_is_resolved,
     )
 
-    with pytest.raises(ValueError, match="engine"):
+    with pytest.raises(ValueError, match="kernel"):
         evaluation.run_processed_factor_evaluation(
             processed_root=tmp_path / "processed",
             report_root=tmp_path / "reports",
@@ -528,7 +679,7 @@ def test_processed_factor_evaluation_rejects_invalid_options_before_parquet_io(
             requested_factors=("rev_20d",),
             all_factors=False,
             n_groups=5,
-            engine="bad",
+            kernels=("bad",),
         )
 
     with pytest.raises(ValueError, match="portfolio_mode"):
@@ -541,7 +692,7 @@ def test_processed_factor_evaluation_rejects_invalid_options_before_parquet_io(
             requested_factors=("rev_20d",),
             all_factors=False,
             n_groups=5,
-            portfolio_mode="bad",
+            portfolio_modes=("bad",),
         )
 
     with pytest.raises(ValueError, match="unsafe label"):
@@ -607,6 +758,20 @@ def test_processed_factor_evaluation_rejects_invalid_options_before_parquet_io(
             end_date="2024-12-31",
         )
 
+    with pytest.raises(ValueError, match="within start_year/end_year"):
+        evaluation.run_processed_factor_evaluation(
+            processed_root=tmp_path / "processed",
+            report_root=tmp_path / "reports",
+            start_year=2024,
+            end_year=2024,
+            requested_labels=("forward_return_20d",),
+            requested_factors=("rev_20d",),
+            all_factors=False,
+            n_groups=5,
+            start_date="2023-12-29",
+            end_date="2024-12-31",
+        )
+
 
 def test_run_factor_evaluation_cli_defaults_to_full_report_root(
     monkeypatch,
@@ -623,13 +788,14 @@ def test_run_factor_evaluation_cli_defaults_to_full_report_root(
         fake_run_processed_factor_evaluation,
     )
 
-    exit_code = run_factor_evaluation.main([])
+    exit_code = run_factor_evaluation.main(["--features", "rev_20d"])
 
     assert exit_code == 0
     assert captured["report_root"].as_posix() == (
         "reports/private_real/factor_evaluation/full_2024_2025"
     )
-    assert captured["portfolio_mode"] == "long_short"
+    assert captured["portfolio_modes"] == ("long_short",)
+    assert captured["kernels"] == ("dataframe",)
 
 
 def test_run_factor_evaluation_cli_derives_default_report_root_from_years(
@@ -648,7 +814,7 @@ def test_run_factor_evaluation_cli_derives_default_report_root_from_years(
     )
 
     exit_code = run_factor_evaluation.main(
-        ["--start-year", "2023", "--end-year", "2025"]
+        ["--start-year", "2023", "--end-year", "2025", "--features", "rev_20d"]
     )
 
     assert exit_code == 0

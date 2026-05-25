@@ -22,7 +22,7 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
         asset_column="asset",
         feature_columns=("factor_a", "factor_b"),
         label_columns=("ret_5d", "ret_20d"),
-        pnl_return_column="forward_return_1d",
+        return_source_column="forward_return_1d",
         metadata={
             "evaluation_id": "evaluation_demo",
             "project": "quant-research-platform",
@@ -47,19 +47,34 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
     output_dir = tmp_path / "evaluation_demo"
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
-    combinations = pd.read_csv(output_dir / "combinations.csv")
+    combinations = pd.read_csv(output_dir / "dimensions" / "combinations.csv")
     returns = pd.read_csv(output_dir / "portfolio" / "returns.csv")
-    pnl = pd.read_csv(output_dir / "portfolio" / "pnl.csv")
+    cumulative_returns = pd.read_csv(
+        output_dir / "portfolio" / "cumulative_returns.csv"
+    )
+    weights = pd.read_parquet(output_dir / "portfolio" / "weights.parquet")
     ic = pd.read_csv(output_dir / "metrics" / "ic.csv")
 
     assert manifest["artifact_schema_version"] == ARTIFACT_SCHEMA_VERSION
     assert manifest["artifact_type"] == "evaluation_set"
     assert summary["artifact_type"] == "evaluation_set"
     assert summary["n_combinations"] == 4
-    assert result.combinations_path == output_dir / "combinations.csv"
+    assert manifest["kernel"] == "dataframe"
+    assert "engine" not in manifest
+    assert result.combinations_path == output_dir / "dimensions" / "combinations.csv"
     assert not (output_dir / "portfolio" / "long_short.csv").exists()
+    assert not (output_dir / "portfolio" / "pnl.csv").exists()
+    assert not (output_dir / "portfolio" / "positions.csv").exists()
     assert len(combinations) == 4
+    assert list(combinations.columns) == [
+        "combination_id",
+        "feature",
+        "label",
+        "kernel",
+        "portfolio_mode",
+    ]
     assert set(combinations["portfolio_mode"]) == {"long_only"}
+    assert set(combinations["kernel"]) == {"dataframe"}
     assert set(combinations["feature"]) == {"factor_a", "factor_b"}
     assert set(combinations["label"]) == {"ret_5d", "ret_20d"}
     assert {
@@ -68,17 +83,21 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
         "short_count",
     }.issubset(returns.columns)
     assert returns["short_count"].eq(0).all()
-    for frame in (combinations, returns, pnl, ic):
-        assert {
-            "combination_id",
-            "feature",
-            "label",
-            "weight_id",
-            "cost_id",
-        }.issubset(frame.columns)
+    assert "return_source_column" in returns.columns
+    assert "target_weight" in weights.columns
+    for frame in (returns, cumulative_returns, weights, ic):
+        assert "combination_id" in frame.columns
+        assert "weight_id" not in frame.columns
+        assert "cost_id" not in frame.columns
     loaded = load_evaluation_set(output_dir)
     assert loaded.summary["evaluation_id"] == "evaluation_demo"
-    assert set(loaded.tables) >= {"combinations", "returns", "pnl", "ic"}
+    assert set(loaded.tables) >= {
+        "combinations",
+        "returns",
+        "cumulative_returns",
+        "weights",
+        "ic",
+    }
     assert "long_short" not in loaded.tables
 
 

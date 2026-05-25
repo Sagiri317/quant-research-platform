@@ -71,10 +71,10 @@ class PipelineSnapshotRequestPayload(BaseModel):
     factor_template_id: str | None = None
     portfolio_mode: str = "long_only"
     cost_bps: float = 0.0
-    pnl_return_column: str = "forward_return_1d"
+    return_source_column: str = "forward_return_1d"
     label_columns: list[str] = Field(default_factory=lambda: ["forward_return_1d"])
     processed_factor_column: str | None = None
-    engine: str = "dataframe"
+    kernel: str = "dataframe"
 
 
 class PipelineRunRequestPayload(PipelineSnapshotRequestPayload):
@@ -440,11 +440,11 @@ def _pipeline_config_from_payload(
         factor_template_source=factor_template_source,
         portfolio_mode=payload.portfolio_mode,
         cost_bps=payload.cost_bps,
-        pnl_return_column=payload.pnl_return_column,
+        return_source_column=payload.return_source_column,
         label_columns=tuple(payload.label_columns),
         processed_factor_column=payload.processed_factor_column,
         start_from=getattr(payload, "start_from", "existing_factors"),
-        engine=payload.engine,
+        kernel=payload.kernel,
         output_root=output_root,
     )
 

@@ -26,7 +26,7 @@ CSMAR raw exports
   -> price_volume_factors_2014_2025.parquet
   -> EvaluationSpec
   -> quant_research_platform.run_evaluation
-  -> schema 0.5 artifacts
+  -> schema 0.6 artifacts
   -> API / downloads / evidence workbench
 ```
 
@@ -42,7 +42,7 @@ data/processed_private/csmar/
 reports/private_real/factor_evaluation/
   full_2024_2025/
     label_availability.csv
-    evaluation_manifest.json
+    manifest.json
     factor_summary.csv
     factor_summary.md
   smoke_2023_2025_tensor_long_only/
@@ -56,17 +56,17 @@ reports/private_real/factor_evaluation/
   comparisons/
 ```
 
-当前标准 evaluation run 应输出 schema `0.5` artifacts，并通过 `manifest.display` 暴露可浏览表格、下载项、下载 preset 和图表配置。没有进入 `manifest.display` 的文件不应成为前端或下载接口的隐式展示项。
+当前标准 evaluation run 应输出 schema `0.6` artifacts，并通过 `manifest.display` 暴露可浏览表格、下载项、下载 preset 和图表配置。没有进入 `manifest.display` 的文件不应成为前端或下载接口的隐式展示项。
 
 ## Evaluation 口径
 
-正式研究口径继续区分 diagnostics label 与 PnL return：
+正式研究口径继续区分 diagnostics label 与 return source：
 
 - `label_columns` 用于 IC、RankIC、grouped returns 和 spread diagnostics。
-- `pnl_return_column` 用于 portfolio returns、PnL、performance summary 和 time breakdown。
+- `return_source_column` 用于 portfolio returns、cumulative returns、performance summary 和 time breakdown。
 - A 股主报告在 long-only 场景下必须显式选择 `portfolio_mode=long_only`。
 
-历史 `full_2024_2025` 是一次性把 2024-2025 输入传给 evaluation layer，用 `forward_return_20d` 做预测标签、`forward_return_1d` 做 PnL 日收益列，并启用年度 breakdown。年度 breakdown 是连续回测路径上的自然年切片，不是每年空仓重启。
+历史 `full_2024_2025` 是一次性把 2024-2025 输入传给 evaluation layer，用 `forward_return_20d` 做预测标签、`forward_return_1d` 做 return source 日收益列，并启用年度 breakdown。年度 breakdown 是连续回测路径上的自然年切片，不是每年空仓重启。
 
 ## 当前观察
 

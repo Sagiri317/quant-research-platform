@@ -1,18 +1,18 @@
-"""提供 portfolio returns 的 PnL 和 performance diagnostics。"""
+"""提供 portfolio returns 的 cumulative return 和 performance diagnostics。"""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-PNL_COLUMNS = [
+CUMULATIVE_RETURN_COLUMNS = [
     "timestamp",
     "feature",
     "gross_portfolio_return",
     "net_portfolio_return",
     "cost",
-    "cumulative_gross_pnl",
-    "cumulative_pnl",
+    "cumulative_gross_return",
+    "cumulative_net_return",
     "cumulative_cost",
     "high_water_mark",
     "drawdown",
@@ -59,19 +59,19 @@ PERFORMANCE_SUMMARY_COLUMNS = [
 ]
 
 
-def calculate_cumulative_pnl(
+def calculate_cumulative_returns(
     returns: pd.DataFrame,
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """基于 portfolio returns 构造 cumulative net PnL 和 drawdown series。"""
+    """基于 portfolio returns 构造 cumulative return 和 drawdown series。"""
 
     _validate_returns_frame(
         returns,
         segment_columns=segment_columns,
         include_performance_columns=False,
     )
-    output_columns = [*segment_columns, *PNL_COLUMNS]
+    output_columns = [*segment_columns, *CUMULATIVE_RETURN_COLUMNS]
     if returns.empty:
         return pd.DataFrame(columns=output_columns)
 
@@ -93,25 +93,25 @@ def calculate_cumulative_pnl(
     result["cost"] = pd.to_numeric(result["cost"], errors="coerce")
     result = result.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
     group_columns = [*segment_columns, "feature"]
-    result["cumulative_gross_pnl"] = result.groupby(group_columns, sort=False)[
+    result["cumulative_gross_return"] = result.groupby(group_columns, sort=False)[
         "gross_portfolio_return"
     ].cumsum()
-    result["cumulative_pnl"] = result.groupby(group_columns, sort=False)[
+    result["cumulative_net_return"] = result.groupby(group_columns, sort=False)[
         "net_portfolio_return"
     ].cumsum()
     result["cumulative_cost"] = result.groupby(group_columns, sort=False)[
         "cost"
     ].cumsum()
     result["high_water_mark"] = result.groupby(group_columns, sort=False)[
-        "cumulative_pnl"
+        "cumulative_net_return"
     ].cummax()
-    result["drawdown"] = result["cumulative_pnl"] - result["high_water_mark"]
+    result["drawdown"] = result["cumulative_net_return"] - result["high_water_mark"]
     return result[output_columns]
 
 
 def summarize_performance(
     returns: pd.DataFrame,
-    pnl: pd.DataFrame,
+    cumulative_returns: pd.DataFrame,
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
@@ -130,14 +130,14 @@ def summarize_performance(
     frame = returns.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"])
     frame = frame.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
-    pnl_frame = pnl.copy()
+    cumulative_frame = cumulative_returns.copy()
     records: list[dict[str, object]] = []
     group_columns = [*segment_columns, "feature"]
     for group_key, group in frame.groupby(group_columns, sort=True, dropna=False):
         group_values = _normalize_group_key(group_key, group_columns)
-        filters = pnl_frame["feature"] == group_values["feature"]
+        filters = cumulative_frame["feature"] == group_values["feature"]
         for segment in segment_columns:
-            filters &= pnl_frame[segment] == group_values[segment]
+            filters &= cumulative_frame[segment] == group_values[segment]
 
         net_returns = pd.to_numeric(group["net_portfolio_return"], errors="coerce")
         gross_returns = pd.to_numeric(
@@ -154,7 +154,7 @@ def summarize_performance(
         total_gross = float(gross_returns.sum())
         total_net = float(net_returns.sum())
         total_cost = float(costs.sum())
-        drawdown_stats = _max_drawdown_stats(pnl_frame.loc[filters])
+        drawdown_stats = _max_drawdown_stats(cumulative_frame.loc[filters])
         var_95 = float(net_returns.quantile(0.05))
         q95 = float(net_returns.quantile(0.95))
         cvar_values = net_returns[net_returns <= var_95]
@@ -212,8 +212,8 @@ def summarize_performance(
     return pd.DataFrame.from_records(records, columns=output_columns)
 
 
-def _max_drawdown_stats(pnl: pd.DataFrame) -> dict[str, object]:
-    if pnl.empty:
+def _max_drawdown_stats(cumulative_returns: pd.DataFrame) -> dict[str, object]:
+    if cumulative_returns.empty:
         return {
             "max_drawdown": 0.0,
             "drawdown_duration": 0,
@@ -222,9 +222,12 @@ def _max_drawdown_stats(pnl: pd.DataFrame) -> dict[str, object]:
             "max_drawdown_recovery": "",
         }
 
-    frame = pnl.copy()
+    frame = cumulative_returns.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"])
-    frame["cumulative_pnl"] = pd.to_numeric(frame["cumulative_pnl"], errors="coerce")
+    frame["cumulative_net_return"] = pd.to_numeric(
+        frame["cumulative_net_return"],
+        errors="coerce",
+    )
     frame["high_water_mark"] = pd.to_numeric(frame["high_water_mark"], errors="coerce")
     frame["drawdown"] = pd.to_numeric(frame["drawdown"], errors="coerce")
     frame = frame.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
@@ -242,10 +245,10 @@ def _max_drawdown_stats(pnl: pd.DataFrame) -> dict[str, object]:
     valley = frame.loc[valley_idx]
     peak_value = float(valley["high_water_mark"])
     before_valley = frame.loc[:valley_idx]
-    peak_rows = before_valley[before_valley["cumulative_pnl"] == peak_value]
+    peak_rows = before_valley[before_valley["cumulative_net_return"] == peak_value]
     start_idx = int(peak_rows.index[-1]) if not peak_rows.empty else 0
     after_valley = frame.loc[valley_idx + 1 :]
-    recovery_rows = after_valley[after_valley["cumulative_pnl"] >= peak_value]
+    recovery_rows = after_valley[after_valley["cumulative_net_return"] >= peak_value]
     recovery_idx = int(recovery_rows.index[0]) if not recovery_rows.empty else None
     end_idx = recovery_idx if recovery_idx is not None else int(frame.index[-1])
     return {

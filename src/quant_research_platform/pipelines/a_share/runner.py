@@ -87,7 +87,7 @@ class PipelineRunResult:
     run_dir: Path
     checkpoints: list[PipelineCheckpoint]
     runtime_summary_path: Path
-    evaluation_manifest_path: Path | None = None
+    evaluation_artifact_path: Path | None = None
     warnings: list[dict[str, object]] = field(default_factory=list)
     failed_step: str | None = None
 
@@ -142,7 +142,7 @@ def run_a_share_pipeline(
             warnings=warnings,
         )
     ]
-    evaluation_manifest_path: Path | None = None
+    evaluation_artifact_path: Path | None = None
 
     all_steps = _all_steps()
     start_index = _start_step_index(config.start_from)
@@ -216,7 +216,7 @@ def run_a_share_pipeline(
         artifact = payload.get("artifact")
         row_count = payload.get("row_count")
         if step.key == "evaluate":
-            evaluation_manifest_path = payload.get("evaluation_manifest_path")
+            evaluation_artifact_path = payload.get("evaluation_artifact_path")
         checkpoints.append(
             PipelineCheckpoint(
                 key=step.key,
@@ -245,7 +245,7 @@ def run_a_share_pipeline(
         run_dir=snapshot.run_dir,
         checkpoints=checkpoints,
         runtime_summary_path=summary_path,
-        evaluation_manifest_path=evaluation_manifest_path,
+        evaluation_artifact_path=evaluation_artifact_path,
         warnings=warnings,
     )
 
@@ -292,7 +292,7 @@ def _all_steps() -> tuple[_StepSpec, ...]:
             key="evaluate",
             label="A-share evaluation",
             function=_run_evaluate_step,
-            artifact="evaluation/evaluation_manifest.json",
+            artifact="evaluation/manifest.json",
         ),
     )
 
@@ -346,7 +346,7 @@ def _validate_rebuild_outputs(
         f"forward_return_{horizon}d" for horizon in config.label_horizons
     }
     requested_labels = set(config.label_columns)
-    requested_labels.add(config.pnl_return_column)
+    requested_labels.add(config.return_source_column)
     missing_labels = sorted(
         label for label in requested_labels if label not in expected_labels
     )
@@ -419,7 +419,7 @@ def _run_evaluate_step(
     *,
     n_groups: int = 5,
 ) -> dict[str, Any]:
-    label_summary, manifest_path, _evaluation_runs = run_processed_factor_evaluation(
+    label_summary, manifest_path, _run_records = run_processed_factor_evaluation(
         processed_root=config.processed_root,
         report_root=run_dir / "evaluation",
         start_year=_start_year(config),
@@ -430,18 +430,18 @@ def _run_evaluate_step(
         n_groups=n_groups,
         start_date=config.date_start,
         end_date=config.date_end,
-        pnl_return_column=config.pnl_return_column,
+        return_source_column=config.return_source_column,
         cost_bps=config.cost_bps,
-        portfolio_mode=config.portfolio_mode,
-        engine=config.engine,
+        portfolio_modes=(config.portfolio_mode,),
+        kernels=(config.kernel,),
         source_alias="pipeline",
         manifest_run_id=run_dir.name,
     )
-    row_count = int(label_summary["rows"].sum()) if "rows" in label_summary else None
+    row_count = int(label_summary["rows"].max()) if "rows" in label_summary else None
     return {
-        "artifact": "evaluation_manifest",
+        "artifact": "evaluation/manifest.json",
         "row_count": row_count,
-        "evaluation_manifest_path": manifest_path,
+        "evaluation_artifact_path": manifest_path,
     }
 
 
@@ -476,7 +476,7 @@ def _write_runtime_summary(
         "start_from": config.start_from,
         "date_start": config.date_start,
         "date_end": config.date_end,
-        "engine": config.engine,
+        "kernel": config.kernel,
         "duration_seconds": _elapsed(started),
         "warnings": warnings,
         "failed_step": failed_step,

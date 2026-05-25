@@ -11,10 +11,15 @@ from quant_research_platform.artifacts.artifact_schema import (
     BREAKDOWN_PERIODS,
     DISPLAY_METADATA_DOWNLOAD_ITEMS,
     EVALUATION_SET_DIAGNOSTIC_TABLES,
+    EVALUATION_SET_INPUT_QUALITY_TABLES,
     EVALUATION_SET_METRIC_TABLES,
     EVALUATION_SET_PORTFOLIO_TABLES,
+    EVALUATION_SET_SUMMARY_TABLES,
+    OPTIONAL_ARTIFACT_GROUPS,
 )
 from quant_research_platform.runtime.run_metadata import validate_run_metadata
+
+DISPLAY_PREVIEW_ROWS_MAX = 1000
 
 TRADABILITY_DIAGNOSTIC_COLUMNS = frozenset(
     {
@@ -38,19 +43,28 @@ TRADABILITY_DIAGNOSTIC_COLUMNS = frozenset(
 
 
 def evaluation_set_csv_paths(artifacts: dict[object, object]) -> dict[str, str]:
-    """返回 evaluation-set manifest 声明并通过校验的 CSV table paths。"""
+    """返回 evaluation-set manifest 声明并通过校验的 table paths."""
 
+    _validate_known_artifact_entries(artifacts)
     paths: dict[str, str] = {}
-    combinations = artifacts.get("combinations")
+    dimensions = artifacts.get("dimensions")
+    combinations = (
+        dimensions.get("combinations") if isinstance(dimensions, dict) else None
+    )
     if not isinstance(combinations, str) or not combinations:
-        raise ValueError("manifest artifacts must include combinations.")
-    validate_artifact_relative_path(combinations, source="artifacts.combinations")
+        raise ValueError("manifest artifacts must include dimensions.combinations.")
+    validate_artifact_relative_path(
+        combinations,
+        source="artifacts.dimensions.combinations",
+    )
     paths["combinations"] = combinations
 
     for group, names in {
         "metrics": EVALUATION_SET_METRIC_TABLES,
         "portfolio": EVALUATION_SET_PORTFOLIO_TABLES,
         "diagnostics": EVALUATION_SET_DIAGNOSTIC_TABLES,
+        "input_quality": EVALUATION_SET_INPUT_QUALITY_TABLES,
+        "summaries": EVALUATION_SET_SUMMARY_TABLES,
     }.items():
         section = artifacts.get(group)
         if not isinstance(section, dict):
@@ -65,7 +79,7 @@ def evaluation_set_csv_paths(artifacts: dict[object, object]) -> dict[str, str]:
             )
             paths[name] = relative_path
     for period in BREAKDOWN_PERIODS:
-        group = f"metrics_by_{period}"
+        group = f"breakdowns/{period}"
         section = artifacts.get(group)
         if section is None:
             continue
@@ -87,48 +101,216 @@ def evaluation_set_csv_paths(artifacts: dict[object, object]) -> dict[str, str]:
     return paths
 
 
+def _validate_known_artifact_entries(artifacts: dict[object, object]) -> None:
+    required_top_level = {
+        "manifest",
+        "config",
+        "lineage",
+        "summary",
+        "dimensions",
+        "metrics",
+        "portfolio",
+        "diagnostics",
+        "input_quality",
+        "summaries",
+        "report",
+    }
+    allowed_top_level = {*required_top_level, *OPTIONAL_ARTIFACT_GROUPS}
+    top_level_keys = {key for key in artifacts if isinstance(key, str)}
+    unknown_groups = sorted(top_level_keys.difference(allowed_top_level))
+    if unknown_groups:
+        raise ValueError(
+            "manifest artifacts contain unknown artifact groups: "
+            f"{unknown_groups}."
+        )
+
+    _require_no_unknown_section_keys(artifacts, "dimensions", {"combinations"})
+    _require_no_unknown_section_keys(
+        artifacts,
+        "metrics",
+        set(EVALUATION_SET_METRIC_TABLES),
+    )
+    _require_no_unknown_section_keys(
+        artifacts,
+        "portfolio",
+        set(EVALUATION_SET_PORTFOLIO_TABLES),
+    )
+    _require_no_unknown_section_keys(
+        artifacts,
+        "diagnostics",
+        set(EVALUATION_SET_DIAGNOSTIC_TABLES),
+    )
+    _require_no_unknown_section_keys(
+        artifacts,
+        "input_quality",
+        set(EVALUATION_SET_INPUT_QUALITY_TABLES),
+    )
+    _require_no_unknown_section_keys(
+        artifacts,
+        "summaries",
+        set(EVALUATION_SET_SUMMARY_TABLES),
+    )
+    for period in BREAKDOWN_PERIODS:
+        group = f"breakdowns/{period}"
+        if group not in artifacts:
+            continue
+        _require_no_unknown_section_keys(
+            artifacts,
+            group,
+            {
+                f"ic_summary_by_{period}",
+                f"group_spread_summary_by_{period}",
+                f"performance_summary_by_{period}",
+            },
+        )
+
+
+def _require_no_unknown_section_keys(
+    artifacts: dict[object, object],
+    group: str,
+    allowed_keys: set[str],
+) -> None:
+    section = artifacts.get(group)
+    if not isinstance(section, dict):
+        return
+    keys = {key for key in section if isinstance(key, str)}
+    unknown = sorted(keys.difference(allowed_keys))
+    if unknown:
+        raise ValueError(f"manifest contains unknown artifacts.{group}: {unknown}.")
+
+
 def validate_evaluation_set_table_columns(tables: dict[str, pd.DataFrame]) -> None:
     """校验当前 evaluation-set table columns，并拒绝 retired fields。"""
 
-    dimension_columns = {"combination_id", "feature", "label", "weight_id", "cost_id"}
+    combination_columns = {
+        "combination_id",
+        "feature",
+        "label",
+        "kernel",
+        "portfolio_mode",
+    }
+    fact_key = {"combination_id"}
     retired_columns = {
         "total_gross_portfolio_return",
         "total_net_portfolio_return",
+        "weight_id",
+        "cost_id",
+        "position",
+        "pnl_return_column",
     }
     for name, frame in tables.items():
         stale = sorted(retired_columns.intersection(frame.columns))
         if stale:
             raise ValueError(f"{name} contains retired columns: {stale}.")
         if name == "combinations":
-            required = {
-                *dimension_columns,
-                "weight_method",
-                "direction",
-                "cost_bps",
+            required = combination_columns
+            extra_profiles = {
+                column
+                for column in frame.columns
+                if column.endswith("_profile_id") or column.endswith("_policy_id")
             }
+            if extra_profiles:
+                raise ValueError(
+                    "combinations contains first-stage run-level profile/policy "
+                    f"columns: {sorted(extra_profiles)}."
+                )
+            if set(frame.columns) != combination_columns:
+                extras = sorted(set(frame.columns).difference(combination_columns))
+                raise ValueError(
+                    "combinations must contain only first-stage dynamic dimensions; "
+                    f"extra={extras}."
+                )
         elif name == "performance_summary":
             required = {
-                *dimension_columns,
+                *fact_key,
+                "periods",
                 "final_cumulative_gross_return",
                 "final_cumulative_net_return",
+                "mean_net_portfolio_return",
+                "mean_turnover",
+                "max_drawdown",
+                "sharpe_like",
+                "sortino_like",
+                "total_cost",
+                "win_rate",
             }
         elif name == "tradability_diagnostics":
-            required = {*dimension_columns, *TRADABILITY_DIAGNOSTIC_COLUMNS}
-        elif name in {
-            "ic",
-            "ic_summary",
-            "grouped_returns",
-            "group_spread_summary",
-            "positions",
-            "turnover",
-            "returns",
-            "pnl",
-            "cost_breakdown",
-            "exposure_summary",
-            "weight_diagnostics",
-            "neutralization_diagnostics",
-        }:
-            required = dimension_columns
+            required = {*fact_key, *TRADABILITY_DIAGNOSTIC_COLUMNS}
+        elif name == "ic":
+            required = {*fact_key, "timestamp", "ic", "rankic", "n_obs"}
+        elif name == "ic_summary":
+            required = {
+                *fact_key,
+                "mean_ic",
+                "std_ic",
+                "icir",
+                "positive_ic_rate",
+                "mean_rankic",
+                "std_rankic",
+                "rankicir",
+                "positive_rankic_rate",
+            }
+        elif name == "grouped_returns":
+            required = {
+                *fact_key,
+                "timestamp",
+                "group",
+                "mean_forward_return",
+                "n_obs",
+            }
+        elif name == "group_spread_summary":
+            required = {
+                *fact_key,
+                "top_group_mean_return",
+                "bottom_group_mean_return",
+                "top_bottom_spread_mean",
+                "top_bottom_spread_hit_rate",
+                "group_monotonicity_score",
+            }
+        elif name == "returns":
+            required = {
+                *fact_key,
+                "timestamp",
+                "portfolio_mode",
+                "long_return",
+                "short_return",
+                "gross_portfolio_return",
+                "turnover",
+                "cost",
+                "net_portfolio_return",
+                "long_count",
+                "short_count",
+                "return_source_column",
+            }
+        elif name == "cumulative_returns":
+            required = {
+                *fact_key,
+                "timestamp",
+                "gross_return",
+                "net_return",
+                "cost",
+                "cumulative_gross_return",
+                "cumulative_net_return",
+                "cumulative_cost",
+                "high_water_mark",
+                "drawdown",
+            }
+        elif name == "weights":
+            required = {*fact_key, "timestamp", "asset", "target_weight"}
+        elif name == "label_availability":
+            required = {"label", "available_rows", "missing_rows", "coverage_rate"}
+        elif name == "factor_coverage":
+            required = {"feature", "available_rows", "missing_rows", "coverage_rate"}
+        elif name == "tradability_coverage":
+            required = {"field", "available_rows", "missing_rows", "coverage_rate"}
+        elif name == "evaluation_summary":
+            required = {
+                *combination_columns,
+                "mean_ic",
+                "final_cumulative_net_return",
+                "mean_turnover",
+                "total_cost",
+            }
         else:
             required = set()
         missing = sorted(required.difference(frame.columns))
@@ -191,6 +373,8 @@ def validate_display_manifest(manifest: dict[str, object]) -> None:
         key = table.get("key")
         path = table.get("path")
         download_item = table.get("download_item")
+        table_format = table.get("format")
+        role = table.get("role")
         if not isinstance(key, str) or not key:
             raise ValueError("manifest display table key must be a non-empty string.")
         if key not in artifact_paths:
@@ -201,6 +385,38 @@ def validate_display_manifest(manifest: dict[str, object]) -> None:
             raise ValueError(
                 f"manifest display table {key!r} download_item is inconsistent."
             )
+        if table_format not in {"csv", "parquet", "json", "markdown"}:
+            raise ValueError(f"manifest display table {key!r} format is unsupported.")
+        if key == "weights" and table_format != "parquet":
+            raise ValueError("manifest display weights table must be parquet.")
+        if not isinstance(role, str) or not role:
+            raise ValueError(f"manifest display table {key!r} role is required.")
+        if key == "combinations" or key in EVALUATION_SET_INPUT_QUALITY_TABLES:
+            if table.get("join_key") is not None:
+                raise ValueError(
+                    f"manifest display table {key!r} join_key must be absent."
+                )
+            if table.get("supports_combination_filter") is not False:
+                raise ValueError(
+                    f"manifest display table {key!r} must not support "
+                    "combination filter."
+                )
+        else:
+            if table.get("join_key") != "combination_id":
+                raise ValueError(
+                    f"manifest display table {key!r} join_key must be combination_id."
+                )
+            if table.get("supports_combination_filter") is not True:
+                raise ValueError(
+                    f"manifest display table {key!r} must support combination filter."
+                )
+        preview_rows = table.get("preview_rows")
+        if (
+            not isinstance(preview_rows, int)
+            or preview_rows <= 0
+            or preview_rows > DISPLAY_PREVIEW_ROWS_MAX
+        ):
+            raise ValueError(f"manifest display table {key!r} preview_rows invalid.")
         validate_display_path(path, source=f"display table {key}")
         table_paths[key] = path
         table_downloads[key] = download_item

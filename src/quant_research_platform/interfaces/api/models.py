@@ -25,10 +25,10 @@ class CreateRunPayload(BaseModel):
     asset_column: str = "asset"
     feature_columns: list[str] = Field(default_factory=lambda: ["factor"])
     label_columns: list[str] = Field(default_factory=lambda: ["forward_return"])
-    pnl_return_column: str | None = None
+    return_source_column: str | None = None
     segment_columns: list[str] = Field(default_factory=list)
     time_breakdowns: list[str] = Field(default_factory=list)
-    engine: str = "dataframe"
+    kernel: str = "dataframe"
     n_groups: int = 5
     weight_method: str = "equal_weight_quantile"
     direction: str = "long_high"
@@ -86,6 +86,7 @@ class RunIndexRecord:
 
     ref: RunRef
     manifest: dict[str, object]
+    config: dict[str, object]
     summary: dict[str, object]
     ic_summary: pd.DataFrame
     performance_summary: pd.DataFrame

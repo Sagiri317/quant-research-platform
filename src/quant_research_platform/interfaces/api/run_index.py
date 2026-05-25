@@ -5,11 +5,15 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from quant_research_platform.artifacts.manifest_validation import (
+    evaluation_set_csv_paths,
     validate_artifact_schema_version,
+    validate_display_chart_columns,
     validate_display_manifest,
     validate_evaluation_set_payload,
+    validate_evaluation_set_table_columns,
 )
 
 from .models import RunIndexRecord, RunRef
@@ -19,6 +23,7 @@ def load_run_index(source_alias: str, path: Path) -> RunIndexRecord:
     """读取一个 artifact run 的轻量 index，不加载全部 metrics。"""
 
     manifest = read_json(path / "manifest.json")
+    config = read_json(path / "config.json")
     summary = read_json(path / "summary.json")
     validate_artifact_schema_version(manifest, source="manifest.json")
     validate_artifact_schema_version(summary, source="summary.json")
@@ -29,6 +34,18 @@ def load_run_index(source_alias: str, path: Path) -> RunIndexRecord:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ValueError("manifest.json must contain an artifacts object.")
+    table_paths = evaluation_set_csv_paths(artifacts)
+    table_headers = {
+        name: read_manifest_table_header(require_index_file(path, relative_path))
+        for name, relative_path in table_paths.items()
+    }
+    validate_evaluation_set_table_columns(table_headers)
+    validate_display_chart_columns(manifest, table_headers)
+    report_path = artifacts.get("report")
+    if not isinstance(report_path, str) or not report_path:
+        raise ValueError("manifest artifacts must include report.")
+    require_index_file(path, report_path)
+    require_index_file(path, "lineage.json")
     metrics = artifacts.get("metrics")
     if not isinstance(metrics, dict):
         raise ValueError("manifest artifacts must contain a metrics object.")
@@ -39,9 +56,13 @@ def load_run_index(source_alias: str, path: Path) -> RunIndexRecord:
         "ic_summary",
         required_columns={
             "mean_ic",
+            "std_ic",
             "mean_rankic",
+            "std_rankic",
             "icir",
             "rankicir",
+            "positive_ic_rate",
+            "positive_rankic_rate",
         },
     )
     performance_summary = read_manifest_metric(
@@ -49,6 +70,10 @@ def load_run_index(source_alias: str, path: Path) -> RunIndexRecord:
         metrics,
         "performance_summary",
         required_columns={
+            "periods",
+            "final_cumulative_gross_return",
+            "final_cumulative_net_return",
+            "mean_net_portfolio_return",
             "mean_turnover",
             "total_cost",
             "sharpe_like",
@@ -57,15 +82,11 @@ def load_run_index(source_alias: str, path: Path) -> RunIndexRecord:
             "win_rate",
         },
     )
-    require_column(
-        performance_summary,
-        "performance_summary",
-        "final_cumulative_net_return",
-    )
     run_id = str(summary["evaluation_id"])
     return RunIndexRecord(
         ref=RunRef(source_alias, run_id, path),
         manifest=manifest,
+        config=config,
         summary=summary,
         ic_summary=ic_summary,
         performance_summary=performance_summary,
@@ -89,6 +110,14 @@ def read_manifest_metric(
     if missing:
         raise ValueError(f"{name} is missing columns: {missing}.")
     return frame
+
+
+def read_manifest_table_header(path: Path) -> pd.DataFrame:
+    """Read only table column names for lightweight schema validation."""
+
+    if path.suffix == ".parquet":
+        return pd.DataFrame(columns=pq.ParquetFile(path).schema_arrow.names)
+    return pd.read_csv(path, nrows=0)
 
 
 def read_json(path: Path) -> dict[str, object]:

@@ -1,4 +1,4 @@
-"""提供 evaluation panel schema 和 column validation helper。"""
+"""Evaluation panel schema and column validation helpers."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 def validate_evaluation_spec_columns(spec: EvaluationSpec) -> None:
-    """校验 evaluation spec 引用的所有必需和可选 columns。"""
+    """Validate all columns referenced by an evaluation spec."""
 
     panel = spec.panel
     requested_columns = [
@@ -22,7 +22,7 @@ def validate_evaluation_spec_columns(spec: EvaluationSpec) -> None:
         *spec.feature_columns,
         *spec.label_columns,
         *spec.segment_columns,
-        spec.pnl_return_column,
+        spec.return_source_column,
         spec.tradability_config.eligibility_column,
         spec.tradability_config.can_enter_column,
         spec.tradability_config.can_exit_column,
@@ -42,23 +42,25 @@ def validate_evaluation_spec_columns(spec: EvaluationSpec) -> None:
         raise ValueError(f"evaluation panel is missing columns: {missing}.")
 
 
-def validate_evaluation_set_pnl_return_column(spec: EvaluationSpec) -> str:
-    """解析并校验 portfolio PnL 使用的 realized-return column。"""
+def validate_evaluation_set_return_source_column(spec: EvaluationSpec) -> str:
+    """Resolve the realized-return column for portfolio cumulative returns."""
 
-    pnl_return_column = spec.resolve_pnl_return_column(spec.panel)
-    if pnl_return_column not in spec.panel.columns:
+    return_source_column = spec.resolve_return_source_column(spec.panel)
+    if return_source_column not in spec.panel.columns:
         raise ValueError(
-            "PnL curve requires pnl_return_column, but column "
-            f"{pnl_return_column!r} was not found."
+            "Portfolio cumulative returns require return_source_column, but column "
+            f"{return_source_column!r} was not found."
         )
-    if not pd.api.types.is_numeric_dtype(spec.panel[pnl_return_column]):
-        raise TypeError(f"pnl_return_column {pnl_return_column!r} must be numeric.")
-    return pnl_return_column
+    if not pd.api.types.is_numeric_dtype(spec.panel[return_source_column]):
+        raise TypeError(
+            f"return_source_column {return_source_column!r} must be numeric."
+        )
+    return return_source_column
 
 
 __all__ = [
     "PanelSpec",
-    "validate_evaluation_set_pnl_return_column",
+    "validate_evaluation_set_return_source_column",
     "validate_evaluation_spec_columns",
     "validate_panel",
 ]

@@ -9,7 +9,7 @@ from quant_research_platform.kernels.dataframe.cross_section import (
     summarize_ic,
 )
 from quant_research_platform.kernels.dataframe.performance import (
-    calculate_cumulative_pnl,
+    calculate_cumulative_returns,
     summarize_performance,
 )
 
@@ -37,11 +37,14 @@ def build_time_breakdown_metrics(
         ic = _with_period_column(metrics["ic"], period=period)
         grouped_returns = _with_period_column(metrics["grouped_returns"], period=period)
         returns = _with_period_column(metrics["returns"], period=period)
-        pnl = calculate_cumulative_pnl(
+        cumulative_returns = calculate_cumulative_returns(
             returns,
             segment_columns=period_segments,
         )
-        pnl = _rebase_period_drawdown_to_zero(pnl, segment_columns=period_segments)
+        cumulative_returns = _rebase_period_drawdown_to_zero(
+            cumulative_returns,
+            segment_columns=period_segments,
+        )
         breakdowns[f"ic_summary_by_{period}"] = summarize_ic(
             ic,
             segment_columns=period_segments,
@@ -52,27 +55,27 @@ def build_time_breakdown_metrics(
         )
         breakdowns[f"performance_summary_by_{period}"] = summarize_performance(
             returns,
-            pnl,
+            cumulative_returns,
             segment_columns=period_segments,
         )
     return breakdowns
 
 
 def _rebase_period_drawdown_to_zero(
-    pnl: pd.DataFrame,
+    cumulative_returns: pd.DataFrame,
     *,
     segment_columns: tuple[str, ...],
 ) -> pd.DataFrame:
     """使用零起点 high-water mark 计算 period-local drawdown stats。"""
 
-    if pnl.empty:
-        return pnl
-    result = pnl.copy()
+    if cumulative_returns.empty:
+        return cumulative_returns
+    result = cumulative_returns.copy()
     group_columns = [*segment_columns, "feature"]
     result["high_water_mark"] = result.groupby(group_columns, sort=False)[
-        "cumulative_pnl"
+        "cumulative_net_return"
     ].transform(lambda values: values.cummax().clip(lower=0.0))
-    result["drawdown"] = result["cumulative_pnl"] - result["high_water_mark"]
+    result["drawdown"] = result["cumulative_net_return"] - result["high_water_mark"]
     return result
 
 

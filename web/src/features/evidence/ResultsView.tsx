@@ -405,12 +405,13 @@ function selectedCombinationMetrics({
   const summaryRow = combinationSummaries?.rows.find(
     (row) => String(row.combination_id ?? '') === selectedCombinationId,
   )
-  const pnlRows = chartTables.pnl?.rows ?? []
-  const finalPnlRow = pnlRows[pnlRows.length - 1]
+  const cumulativeReturnRows = chartTables.cumulative_returns?.rows ?? []
+  const finalCumulativeReturnRow =
+    cumulativeReturnRows[cumulativeReturnRows.length - 1]
   return {
     finalReturn:
       numericValue(summaryRow?.final_cumulative_net_return) ??
-      numericValue(finalPnlRow?.cumulative_pnl),
+      numericValue(finalCumulativeReturnRow?.cumulative_net_return),
     icir: numericValue(summaryRow?.icir),
     maxDrawdown: numericValue(summaryRow?.max_drawdown),
     meanIc: numericValue(summaryRow?.mean_ic),

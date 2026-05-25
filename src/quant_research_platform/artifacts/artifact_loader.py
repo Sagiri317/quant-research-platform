@@ -44,8 +44,9 @@ def load_evaluation_set(
     destination = Path(output_dir)
     manifest_path = destination / "manifest.json"
     config_path = destination / "config.json"
+    lineage_path = destination / "lineage.json"
     summary_path = destination / "summary.json"
-    for path in (manifest_path, config_path, summary_path):
+    for path in (manifest_path, config_path, lineage_path, summary_path):
         _require_file(path, base=destination)
 
     manifest = _read_json(manifest_path)
@@ -75,7 +76,9 @@ def load_evaluation_set(
             if name in table_names
         }
     tables = {
-        name: pd.read_csv(_require_file(destination / relative_path, base=destination))
+        name: _read_table(
+            _require_file(destination / relative_path, base=destination)
+        )
         for name, relative_path in table_paths.items()
     }
     validate_evaluation_set_table_columns(tables)
@@ -102,6 +105,12 @@ def _read_json(path: Path) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"{path.name} must contain a JSON object.")
     return value
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
 
 
 def _require_file(path: Path, *, base: Path) -> Path:

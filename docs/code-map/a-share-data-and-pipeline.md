@@ -65,10 +65,10 @@ factor_expression
 factor_template_id
 processed_factor_column
 label_columns
-pnl_return_column
+return_source_column
 portfolio_mode
 cost_bps
-engine
+kernel
 start_from
 raw_root
 interim_root
@@ -103,7 +103,7 @@ Factor Factory 从 `config/a_share/factor_templates/` 展开 candidates。批量
 quant_research_platform.research.factor_factory.batch_runner.evaluate_existing_factor_candidates
 ```
 
-它为每个 candidate 构造 `PipelineConfig(start_from="existing_factors")`，通过统一 A 股 runner 评估已经存在的 factor table 列，并写出 Factor Factory artifact `0.1`。
+它为每个 candidate 构造 `PipelineConfig(start_from="existing_factors")`，通过统一 A 股 runner 评估已经存在的 factor table 列，并写出 Factor Factory artifact `0.1`。成功候选会读取 N7 `dimensions/combinations.csv` 和 `summaries/evaluation_summary.csv`，在 `candidate_summary.csv` 中按 `candidate_id + combination_id` 展开表现；失败候选继续写入 sanitized failure record。
 
 ## 验证入口
 

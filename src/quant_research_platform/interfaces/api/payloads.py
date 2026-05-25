@@ -14,6 +14,7 @@ def run_payload(run: LoadedEvaluationSet, ref: RunRef) -> dict[str, object]:
     """把已加载 run artifacts 压缩成前端 run detail/list 可用摘要。"""
 
     summary = run.summary
+    config = run.config
     performance = run.tables["performance_summary"]
     ic_summary = run.tables["ic_summary"]
     combinations = run.tables["combinations"]
@@ -30,9 +31,9 @@ def run_payload(run: LoadedEvaluationSet, ref: RunRef) -> dict[str, object]:
         "uses_external_data": bool(summary["uses_external_data"]),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "label_columns": label_columns(summary),
-        "pnl_return_column": pnl_return_column(summary),
-        "weight_method": weight_method(summary),
-        "portfolio_mode": portfolio_mode(summary),
+        "return_source_column": return_source_column(summary),
+        "weight_method": weight_method(config),
+        "portfolio_mode": portfolio_mode(config),
         "n_combinations": int(summary["n_combinations"]),
         "breakdown_columns": breakdown_columns(summary),
         "combinations": table_payload(combinations),
@@ -57,6 +58,7 @@ def run_index_payload(record: RunIndexRecord) -> dict[str, object]:
     """把轻量 run index record 压缩成前端 run list 摘要。"""
 
     summary = record.summary
+    config = record.config
     run_id = str(summary["evaluation_id"])
     return {
         "source_alias": record.ref.source_alias,
@@ -70,9 +72,9 @@ def run_index_payload(record: RunIndexRecord) -> dict[str, object]:
         "uses_external_data": bool(summary["uses_external_data"]),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "label_columns": label_columns(summary),
-        "pnl_return_column": pnl_return_column(summary),
-        "weight_method": weight_method(summary),
-        "portfolio_mode": portfolio_mode(summary),
+        "return_source_column": return_source_column(summary),
+        "weight_method": weight_method(config),
+        "portfolio_mode": portfolio_mode(config),
         "n_combinations": int(summary["n_combinations"]),
         "breakdown_columns": breakdown_columns(summary),
         "mean_final_return": mean_numeric(
@@ -134,18 +136,13 @@ def evidence_summary_payload(
 def evidence_load_table_names(manifest: dict[str, object]) -> set[str]:
     """返回构造 evidence payload 所需的 artifact tables。"""
 
-    return {
-        "combinations",
-        "ic_summary",
-        "performance_summary",
-        *display_chart_table_names(manifest),
-    }
+    return {"combinations", "ic_summary", "performance_summary"}
 
 
 def evidence_payload_table_names(manifest: dict[str, object]) -> set[str]:
     """返回首屏需要随 payload 下发的 table payloads。"""
 
-    return {"combinations", *display_chart_table_names(manifest)}
+    return {"combinations"}
 
 
 def display_chart_table_names(manifest: dict[str, object]) -> set[str]:
@@ -217,8 +214,7 @@ COMBINATION_SUMMARY_DIMENSION_COLUMNS = [
     "combination_id",
     "feature",
     "label",
-    "weight_id",
-    "cost_id",
+    "kernel",
     "weight_method",
     "direction",
     "portfolio_mode",
@@ -316,30 +312,37 @@ def table_payload(
     }
 
 
-def weight_method(summary: dict[str, object]) -> str:
+def weight_method(config: dict[str, object]) -> str:
     """从 summary 的 weight_config 中读取 weighting method。"""
 
-    configs = summary.get("weight_configs")
+    configs = config.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and isinstance(first.get("method"), str):
             method = first["method"]
             if method:
                 return method
-    raise HTTPException(status_code=422, detail="summary weight_configs invalid")
+    raise HTTPException(status_code=422, detail="config weight_configs invalid")
 
 
-def portfolio_mode(summary: dict[str, object]) -> str:
+def portfolio_mode(config: dict[str, object]) -> str:
     """从 summary 的 weight_config 中读取 portfolio mode。"""
 
-    configs = summary.get("weight_configs")
+    modes = config.get("portfolio_modes")
+    if isinstance(modes, list) and modes:
+        normalized = [str(mode) for mode in modes if mode]
+        if len(set(normalized)) > 1:
+            return "multiple"
+        if normalized:
+            return normalized[0]
+    configs = config.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and isinstance(first.get("portfolio_mode"), str):
             mode = first["portfolio_mode"]
             if mode:
                 return mode
-    raise HTTPException(status_code=422, detail="summary weight_configs invalid")
+    raise HTTPException(status_code=422, detail="config weight_configs invalid")
 
 
 def label_columns(summary: dict[str, object]) -> list[str]:
@@ -351,12 +354,12 @@ def label_columns(summary: dict[str, object]) -> list[str]:
     return []
 
 
-def pnl_return_column(summary: dict[str, object]) -> str | None:
-    """从 summary schema 中读取 PnL return column。"""
+def return_source_column(summary: dict[str, object]) -> str | None:
+    """从 summary schema 中读取收益来源 column。"""
 
     schema = summary.get("schema")
-    if isinstance(schema, dict) and schema.get("pnl_return_column") is not None:
-        return str(schema["pnl_return_column"])
+    if isinstance(schema, dict) and schema.get("return_source_column") is not None:
+        return str(schema["return_source_column"])
     return None
 
 

@@ -39,16 +39,16 @@ SUMMARY_FILES = (
     "metrics/ic_summary.csv",
     "metrics/group_spread_summary.csv",
     "metrics/performance_summary.csv",
-    "metrics_by_year/ic_summary_by_year.csv",
-    "metrics_by_year/group_spread_summary_by_year.csv",
-    "metrics_by_year/performance_summary_by_year.csv",
+    "breakdowns/year/ic_summary.csv",
+    "breakdowns/year/group_spread_summary.csv",
+    "breakdowns/year/performance_summary.csv",
 )
 HEAVY_FILES = (
     "metrics/ic.csv",
     "metrics/grouped_returns.csv",
-    "portfolio/positions.csv",
-    "portfolio/pnl.csv",
+    "portfolio/weights.parquet",
     "portfolio/returns.csv",
+    "portfolio/cumulative_returns.csv",
     "portfolio/turnover.csv",
     "diagnostics/weight_diagnostics.csv",
     "diagnostics/neutralization_diagnostics.csv",
@@ -57,8 +57,8 @@ KEY_COLUMNS = (
     "combination_id",
     "feature",
     "label",
-    "weight_id",
-    "cost_id",
+    "kernel",
+    "portfolio_mode",
     "year",
 )
 NUMERIC_TOLERANCE = 1e-9
@@ -70,7 +70,7 @@ if str(SRC_ROOT) not in sys.path:
 @dataclass(frozen=True)
 class AcceptanceRun:
     name: str
-    engine: str
+    kernel: str
     portfolio_mode: str
 
     @property
@@ -244,9 +244,9 @@ def run_factory_smoke(stamp: str) -> Path:
         factor_template_id="reversal_20d",
         portfolio_mode="long_only",
         cost_bps=0.0,
-        pnl_return_column="forward_return_1d",
+        return_source_column="forward_return_1d",
         label_columns=("forward_return_20d",),
-        engine="dataframe",
+        kernel="dataframe",
         output_root=output_dir,
     )
     records = evaluate_existing_factor_candidates(
@@ -331,19 +331,19 @@ def _run_command(run: AcceptanceRun) -> list[str]:
         "--end-date",
         "2024-12-31",
         "--labels",
-        ",".join(LABELS),
-        "--factors",
-        ",".join(FEATURES),
+        *LABELS,
+        "--features",
+        *FEATURES,
         "--n-groups",
         "5",
-        "--pnl-return-column",
+        "--return-source-column",
         "forward_return_1d",
         "--cost-bps",
         "0",
-        "--portfolio-mode",
+        "--portfolio-modes",
         run.portfolio_mode,
-        "--engine",
-        run.engine,
+        "--kernels",
+        run.kernel,
     ]
 
 
@@ -364,6 +364,8 @@ def _baseline_path(run: AcceptanceRun, stamp: str) -> Path:
 
 def _run_dirs(root: Path) -> list[Path]:
     candidates: list[Path] = []
+    if (root / "summary.json").exists():
+        candidates.append(root)
     for child in ("evaluation_runs", "core_runs"):
         run_root = root / child
         if run_root.exists():
@@ -450,7 +452,7 @@ def _compare_metadata(
             )
     old_schema = old_summary.get("schema", {})
     new_schema = new_summary.get("schema", {})
-    for field in ("feature_columns", "label_columns", "pnl_return_column"):
+    for field in ("feature_columns", "label_columns", "return_source_column"):
         if old_schema.get(field) != new_schema.get(field):
             differences.append(
                 {

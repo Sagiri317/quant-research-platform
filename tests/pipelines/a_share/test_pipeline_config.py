@@ -23,7 +23,7 @@ def _valid_config(tmp_path):
         factor_template_source="config/a_share/factor_templates/reversal_20d.yaml",
         portfolio_mode="long_only",
         cost_bps=10.0,
-        pnl_return_column="forward_return_20d",
+        return_source_column="forward_return_20d",
         label_columns=("forward_return_5d", "forward_return_20d"),
         output_root=tmp_path,
     )
@@ -149,10 +149,10 @@ def test_validation_rejects_invalid_dates_cost_and_labels(tmp_path):
     missing_labels.label_columns = ()
     unsafe_label = _valid_config(tmp_path)
     unsafe_label.label_columns = ("forward-return-1d",)
-    missing_pnl = _valid_config(tmp_path)
-    missing_pnl.pnl_return_column = ""
-    unsafe_pnl = _valid_config(tmp_path)
-    unsafe_pnl.pnl_return_column = "forward-return-1d"
+    missing_return_source = _valid_config(tmp_path)
+    missing_return_source.return_source_column = ""
+    unsafe_return_source = _valid_config(tmp_path)
+    unsafe_return_source.return_source_column = "forward-return-1d"
 
     cases = [
         (reverse_dates, "invalid_date_range"),
@@ -162,8 +162,8 @@ def test_validation_rejects_invalid_dates_cost_and_labels(tmp_path):
         (negative_cost, "negative_cost_bps"),
         (missing_labels, "missing_label_columns"),
         (unsafe_label, "unsafe_label_column"),
-        (missing_pnl, "missing_pnl_return_column"),
-        (unsafe_pnl, "unsafe_pnl_return_column"),
+        (missing_return_source, "missing_return_source_column"),
+        (unsafe_return_source, "unsafe_return_source_column"),
     ]
     for config, code in cases:
         validation = validate_pipeline_config(config)
@@ -207,10 +207,10 @@ def test_validation_rejects_unknown_start_layer(tmp_path):
     assert any(issue.code == "unsupported_start_from" for issue in validation.blocking)
 
 
-def test_validation_allows_separate_label_and_pnl_return_columns(tmp_path):
+def test_validation_allows_separate_label_and_return_source_columns(tmp_path):
     config = _valid_config(tmp_path)
     config.label_columns = ("forward_return_20d",)
-    config.pnl_return_column = "forward_return_1d"
+    config.return_source_column = "forward_return_1d"
 
     validation = validate_pipeline_config(config)
 

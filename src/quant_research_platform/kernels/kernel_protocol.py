@@ -8,9 +8,9 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
-DATAFRAME_ENGINE = "dataframe"
-TENSOR_ENGINE = "tensor"
-SUPPORTED_ENGINES = {DATAFRAME_ENGINE, TENSOR_ENGINE}
+DATAFRAME_KERNEL = "dataframe"
+TENSOR_KERNEL = "tensor"
+SUPPORTED_KERNELS = {DATAFRAME_KERNEL, TENSOR_KERNEL}
 
 WEIGHT_METHODS = {
     "equal_weight_quantile",

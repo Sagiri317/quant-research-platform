@@ -1,4 +1,4 @@
-"""提供 DataFrame kernel 的公开 helper。"""
+"""Public helpers for the DataFrame evaluation kernel."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from quant_research_platform.kernels.dataframe.cross_section import (
     summarize_ic,
 )
 from quant_research_platform.kernels.dataframe.performance import (
-    calculate_cumulative_pnl,
+    calculate_cumulative_returns,
     summarize_performance,
 )
 from quant_research_platform.kernels.dataframe.portfolio import (
@@ -24,7 +24,7 @@ __all__ = [
     "analyze_grouped_returns",
     "build_weighted_positions",
     "calculate_cost_breakdown",
-    "calculate_cumulative_pnl",
+    "calculate_cumulative_returns",
     "calculate_turnover",
     "evaluate_ic_by_timestamp",
     "simulate_weighted_long_short_returns",

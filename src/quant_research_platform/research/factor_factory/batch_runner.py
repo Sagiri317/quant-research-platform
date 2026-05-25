@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.pipelines.a_share.config import PipelineConfig
 from quant_research_platform.pipelines.a_share.runner import (
     PipelineRunnerError,
@@ -26,6 +28,13 @@ def evaluate_existing_factor_candidates(
     output_dir: str | Path,
 ) -> tuple[CandidateEvaluationRecord, ...]:
     """Evaluate candidates independently; one failure does not stop the batch."""
+
+    output_path = Path(output_dir)
+    factory_run_dir = output_path / "factor_factory" / _factory_run_id(
+        base_config.run_id
+    )
+    if factory_run_dir.exists():
+        raise FileExistsError(factory_run_dir)
 
     records: list[CandidateEvaluationRecord] = []
     for candidate in candidates:
@@ -64,29 +73,18 @@ def evaluate_existing_factor_candidates(
                 )
             )
             continue
-        records.append(
-            CandidateEvaluationRecord(
-                candidate_id=candidate.candidate_id,
-                version=candidate.version,
-                expression=candidate.expression,
-                dependencies=candidate.dependencies,
-                output_column=candidate.output_column,
-                sample_start=candidate.sample_start,
-                sample_end=candidate.sample_end,
-                label_columns=candidate.label_columns,
-                inputs=candidate.inputs,
-                outputs=candidate.outputs,
-                capabilities=candidate.capabilities,
-                parameters=candidate.parameters,
-                availability_rule=candidate.availability_rule,
-                time_semantics=candidate.time_semantics,
-                status="success",
-                run_dir=result.run_dir.as_posix(),
+        try:
+            records.extend(_success_records(candidate, result.run_dir))
+        except ValueError as exc:
+            records.append(
+                _failed_record(
+                    candidate,
+                    failure_code="invalid_evaluation_artifact",
+                    failure_reason=str(exc),
+                )
             )
-        )
-    output_path = Path(output_dir)
     write_candidate_reports(
-        output_path / "factor_factory" / _factory_run_id(base_config.run_id),
+        factory_run_dir,
         tuple(records),
         overwrite=False,
     )
@@ -118,6 +116,112 @@ def _failed_record(
         failure_code=failure_code,
         failure_reason=failure_reason,
     )
+
+
+def _success_records(
+    candidate: FactorCandidate,
+    run_dir: Path,
+) -> list[CandidateEvaluationRecord]:
+    summary = _candidate_combination_summary(run_dir)
+    return [
+        CandidateEvaluationRecord(
+            candidate_id=candidate.candidate_id,
+            version=candidate.version,
+            expression=candidate.expression,
+            dependencies=candidate.dependencies,
+            output_column=candidate.output_column,
+            sample_start=candidate.sample_start,
+            sample_end=candidate.sample_end,
+            label_columns=candidate.label_columns,
+            inputs=candidate.inputs,
+            outputs=candidate.outputs,
+            capabilities=candidate.capabilities,
+            parameters=candidate.parameters,
+            availability_rule=candidate.availability_rule,
+            time_semantics=candidate.time_semantics,
+            status="success",
+            run_dir=run_dir.as_posix(),
+            combination_id=str(row["combination_id"]),
+            feature=str(row["feature"]),
+            label=str(row["label"]),
+            kernel=str(row["kernel"]),
+            portfolio_mode=str(row["portfolio_mode"]),
+            mean_ic=_optional_float(row.get("mean_ic")),
+            final_cumulative_net_return=_optional_float(
+                row.get("final_cumulative_net_return")
+            ),
+            mean_turnover=_optional_float(row.get("mean_turnover")),
+            total_cost=_optional_float(row.get("total_cost")),
+        )
+        for row in summary.to_dict(orient="records")
+    ]
+
+
+def _candidate_combination_summary(run_dir: Path) -> pd.DataFrame:
+    combinations_path = run_dir / "dimensions" / "combinations.csv"
+    evaluation_summary_path = run_dir / "summaries" / "evaluation_summary.csv"
+    if not combinations_path.is_file():
+        raise ValueError("missing dimensions/combinations.csv")
+    if not evaluation_summary_path.is_file():
+        raise ValueError("missing summaries/evaluation_summary.csv")
+    combinations = pd.read_csv(combinations_path)
+    evaluation_summary = pd.read_csv(evaluation_summary_path)
+    _require_columns(
+        combinations,
+        "dimensions/combinations.csv",
+        {"combination_id", "feature", "label", "kernel", "portfolio_mode"},
+    )
+    _require_columns(
+        evaluation_summary,
+        "summaries/evaluation_summary.csv",
+        {
+            "combination_id",
+            "mean_ic",
+            "final_cumulative_net_return",
+            "mean_turnover",
+            "total_cost",
+        },
+    )
+    if combinations.empty:
+        raise ValueError("evaluation artifact has no combinations")
+    if evaluation_summary.empty:
+        raise ValueError("evaluation artifact has no evaluation_summary rows")
+    missing_summary = sorted(
+        set(combinations["combination_id"].astype(str)).difference(
+            evaluation_summary["combination_id"].astype(str)
+        )
+    )
+    if missing_summary:
+        raise ValueError(
+            "summaries/evaluation_summary.csv missing combinations: "
+            f"{missing_summary}"
+        )
+    metric_columns = [
+        "combination_id",
+        "mean_ic",
+        "final_cumulative_net_return",
+        "mean_turnover",
+        "total_cost",
+    ]
+    merged = combinations.merge(
+        evaluation_summary[metric_columns],
+        on="combination_id",
+        how="left",
+        validate="one_to_one",
+    )
+    return merged
+
+
+def _require_columns(frame: pd.DataFrame, source: str, columns: set[str]) -> None:
+    missing = sorted(columns.difference(frame.columns))
+    if missing:
+        raise ValueError(f"{source} missing columns: {missing}")
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
 
 
 def _candidate_run_id(prefix: str, candidate_id: str) -> str:

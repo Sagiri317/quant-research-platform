@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
-from quant_research_platform.kernels.kernel_registry import supported_engine_names
+from quant_research_platform.kernels.kernel_registry import supported_kernel_names
 from quant_research_platform.markets.implementations.a_share.factors import (
     expressions,
 )
@@ -23,7 +23,7 @@ PipelineStartFrom = Literal[
 
 SUPPORTED_MARKETS = frozenset({"a_share"})
 SUPPORTED_PORTFOLIO_MODES = frozenset({"long_only", "long_short"})
-SUPPORTED_ENGINES = frozenset(supported_engine_names())
+SUPPORTED_KERNELS = frozenset(supported_kernel_names())
 SUPPORTED_START_FROM = frozenset(
     {"existing_factors", "rebuild_factors", "rebuild_panel", "rebuild_interim"}
 )
@@ -61,9 +61,9 @@ class PipelineConfig:
     factor_template_id: str
     portfolio_mode: str
     cost_bps: float
-    pnl_return_column: str
+    return_source_column: str
     label_columns: tuple[str, ...]
-    engine: str = "dataframe"
+    kernel: str = "dataframe"
     output_root: Path = DEFAULT_OUTPUT_ROOT
     raw_root: Path = Path("data/raw_private/csmar")
     interim_root: Path = Path("data/interim_private/csmar")
@@ -237,13 +237,13 @@ def validate_pipeline_config(
             )
         )
 
-    if config.engine not in SUPPORTED_ENGINES:
+    if config.kernel not in SUPPORTED_KERNELS:
         result.blocking.append(
             ValidationIssue(
                 severity="blocking",
-                code="unsupported_engine",
-                message=f"unsupported engine: {config.engine}",
-                field="engine",
+                code="unsupported_kernel",
+                message=f"unsupported kernel: {config.kernel}",
+                field="kernel",
             )
         )
 
@@ -312,25 +312,25 @@ def validate_pipeline_config(
                 )
                 break
 
-    if not config.pnl_return_column:
+    if not config.return_source_column:
         result.blocking.append(
             ValidationIssue(
                 severity="blocking",
-                code="missing_pnl_return_column",
-                message="pnl_return_column is required",
-                field="pnl_return_column",
+                code="missing_return_source_column",
+                message="return_source_column is required",
+                field="return_source_column",
             )
         )
-    elif not COLUMN_NAME_PATTERN.fullmatch(config.pnl_return_column):
+    elif not COLUMN_NAME_PATTERN.fullmatch(config.return_source_column):
         result.blocking.append(
             ValidationIssue(
                 severity="blocking",
-                code="unsafe_pnl_return_column",
+                code="unsafe_return_source_column",
                 message=(
-                    "pnl_return_column may only contain ASCII letters, numbers, "
+                    "return_source_column may only contain ASCII letters, numbers, "
                     "and underscores, and may not start with a number"
                 ),
-                field="pnl_return_column",
+                field="return_source_column",
             )
         )
     if not config.run_id:

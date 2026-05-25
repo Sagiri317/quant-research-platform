@@ -1,4 +1,4 @@
-"""定义跨资产 alpha research evaluation 的公开合同。"""
+"""Evaluation input contracts for alpha research."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from quant_research_platform.kernels.kernel_protocol import (
     WeightConfig,
 )
 from quant_research_platform.kernels.kernel_protocol import (
-    SUPPORTED_ENGINES as EVALUATION_ENGINES,
+    SUPPORTED_KERNELS as EVALUATION_KERNELS,
 )
-from quant_research_platform.kernels.kernel_registry import normalize_engine_name
+from quant_research_platform.kernels.kernel_registry import normalize_kernel_name
 from quant_research_platform.runtime.profiling import ProfileConfig
 from quant_research_platform.runtime.run_metadata import (
     MINIMUM_RUN_METADATA_FIELDS,
@@ -30,15 +30,15 @@ from quant_research_platform.runtime.run_metadata import (
 NEUTRALIZATION_METHODS = {"none", "demean_by_group", "cross_sectional_ols"}
 NEUTRALIZATION_FIT_SCOPES = {"per_timestamp"}
 TIME_BREAKDOWNS = {"year", "quarter", "month"}
-DEFAULT_PNL_RETURN_COLUMN = "forward_return_1d"
+DEFAULT_RETURN_SOURCE_COLUMN = "forward_return_1d"
 TENSOR_BACKENDS = {"numpy"}
 TENSOR_DEVICES = {"cpu"}
 TENSOR_VALUE_DTYPES = {"float32", "float64"}
 TENSOR_AGGREGATION_DTYPES = {"float64"}
 __all__ = [
     "CostConfig",
-    "DEFAULT_PNL_RETURN_COLUMN",
-    "EVALUATION_ENGINES",
+    "DEFAULT_RETURN_SOURCE_COLUMN",
+    "EVALUATION_KERNELS",
     "EvaluationSpec",
     "ExecutionConfig",
     "MINIMUM_RUN_METADATA_FIELDS",
@@ -57,7 +57,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class EvaluationSpec:
-    """定义 batch-native evaluation set 输入合同。"""
+    """Batch-native evaluation set input contract."""
 
     panel: pd.DataFrame
     feature_columns: tuple[str, ...]
@@ -89,14 +89,14 @@ class EvaluationSpec:
     )
     segment_columns: tuple[str, ...] = ()
     time_breakdowns: tuple[str, ...] = ()
-    engine: str = "dataframe"
-    pnl_return_column: str | None = None
+    kernel: str = "dataframe"
+    return_source_column: str | None = None
     output_dir: str | Path = Path("reports/runs/demo")
     profile_config: ProfileConfig = field(default_factory=ProfileConfig)
     domain_notes: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """校验 evaluation set、metadata 和共享配置。"""
+        """Validate evaluation set metadata and core options."""
 
         if not isinstance(self.panel, pd.DataFrame):
             raise TypeError("panel must be a pandas DataFrame.")
@@ -125,10 +125,21 @@ class EvaluationSpec:
             raise ValueError("weight_configs must contain at least one config.")
         if any(not isinstance(config, WeightConfig) for config in self.weight_configs):
             raise TypeError("weight_configs must contain WeightConfig objects.")
+        if len(self.weight_configs) != 1:
+            raise ValueError(
+                "schema 0.6 evaluation sets support exactly one run-level "
+                "weight_config; vary portfolio_mode, kernel, feature, or label "
+                "as combination dimensions."
+            )
         if not self.cost_configs:
             raise ValueError("cost_configs must contain at least one config.")
         if any(not isinstance(config, CostConfig) for config in self.cost_configs):
             raise TypeError("cost_configs must contain CostConfig objects.")
+        if len(self.cost_configs) != 1:
+            raise ValueError(
+                "schema 0.6 evaluation sets support exactly one run-level "
+                "cost_config; cost is persisted in config.json/lineage.json."
+            )
         if not isinstance(self.execution_config, ExecutionConfig):
             raise TypeError("execution_config must be an ExecutionConfig.")
         if not isinstance(self.tradability_config, TradabilityConfig):
@@ -155,21 +166,22 @@ class EvaluationSpec:
         if len(set(self.time_breakdowns)) != len(self.time_breakdowns):
             raise ValueError("time_breakdowns must not contain duplicates.")
         try:
-            normalized_engine = normalize_engine_name(self.engine)
+            normalized_kernel = normalize_kernel_name(self.kernel)
         except Exception as exc:
             raise ValueError(
-                f"engine must be one of {sorted(EVALUATION_ENGINES)}."
+                f"kernel must be one of {sorted(EVALUATION_KERNELS)}."
             ) from exc
-        object.__setattr__(self, "engine", normalized_engine)
-        if self.pnl_return_column is not None and (
-            not isinstance(self.pnl_return_column, str) or not self.pnl_return_column
+        object.__setattr__(self, "kernel", normalized_kernel)
+        if self.return_source_column is not None and (
+            not isinstance(self.return_source_column, str)
+            or not self.return_source_column
         ):
-            raise ValueError("pnl_return_column must be a non-empty string.")
+            raise ValueError("return_source_column must be a non-empty string.")
         if not isinstance(self.profile_config, ProfileConfig):
             raise TypeError("profile_config must be a ProfileConfig.")
 
     def panel_spec_for_label(self, label_column: str) -> PanelSpec:
-        """构造单个 label 的 PanelSpec，供 metric kernels 使用。"""
+        """Build the metric kernel panel spec for one label."""
 
         if label_column not in self.label_columns:
             raise ValueError(f"unknown label_column {label_column!r}.")
@@ -180,28 +192,29 @@ class EvaluationSpec:
             asset_column=self.asset_column,
         )
 
-    def resolve_pnl_return_column(self, panel: pd.DataFrame) -> str:
-        """解析 portfolio PnL 使用的 realized-return column。"""
+    def resolve_return_source_column(self, panel: pd.DataFrame) -> str:
+        """Resolve the realized-return column for portfolio cumulative returns."""
 
-        if self.pnl_return_column is not None:
-            return self.pnl_return_column
-        if DEFAULT_PNL_RETURN_COLUMN in panel.columns:
-            return DEFAULT_PNL_RETURN_COLUMN
+        if self.return_source_column is not None:
+            return self.return_source_column
+        if DEFAULT_RETURN_SOURCE_COLUMN in panel.columns:
+            return DEFAULT_RETURN_SOURCE_COLUMN
         raise ValueError(
-            "PnL curve requires pnl_return_column, but none was provided and "
-            f"default column {DEFAULT_PNL_RETURN_COLUMN!r} was not found."
+            "Portfolio cumulative returns require return_source_column, but none "
+            f"was provided and default column {DEFAULT_RETURN_SOURCE_COLUMN!r} "
+            "was not found."
         )
 
 
 @dataclass(frozen=True)
 class ExecutionConfig:
-    """市场无关的 execution timing 和 price selection metadata。"""
+    """Execution timing and price selection metadata."""
 
     execution_lag: int = 0
     execution_price_column: str | None = None
 
     def __post_init__(self) -> None:
-        """校验 execution lag 和可选 execution price column。"""
+        """Validate execution lag and optional execution price column."""
 
         if not isinstance(self.execution_lag, int) or isinstance(
             self.execution_lag,
@@ -218,7 +231,7 @@ class ExecutionConfig:
 
 @dataclass(frozen=True)
 class NeutralizationConfig:
-    """市场无关的 cross-sectional feature neutralization metadata。"""
+    """Cross-sectional feature neutralization metadata."""
 
     method: str = "none"
     group_columns: tuple[str, ...] = ()
@@ -226,7 +239,7 @@ class NeutralizationConfig:
     fit_scope: str = "per_timestamp"
 
     def __post_init__(self) -> None:
-        """校验 neutralization method 和 group/exposure columns。"""
+        """Validate neutralization method and group or exposure columns."""
 
         if self.method not in NEUTRALIZATION_METHODS:
             raise ValueError(
@@ -248,7 +261,7 @@ class NeutralizationConfig:
 
 @dataclass(frozen=True)
 class TimeSemanticsConfig:
-    """声明 factor evaluation 的 decision、label 和 as-of 时间语义。"""
+    """Factor evaluation time semantics metadata."""
 
     decision_time_column: str | None = None
     label_time_columns: dict[str, str] = field(default_factory=dict)
@@ -257,7 +270,7 @@ class TimeSemanticsConfig:
     timezone: str = "Asia/Shanghai"
 
     def __post_init__(self) -> None:
-        """校验时间语义配置字段。"""
+        """Validate time semantics column configuration."""
 
         _validate_optional_column_name(
             self.decision_time_column,
@@ -290,7 +303,7 @@ class TimeSemanticsConfig:
         label_columns: tuple[str, ...],
         feature_columns: tuple[str, ...],
     ) -> None:
-        """校验 panel 满足已声明的时间可知性合同。"""
+        """Validate panel time semantics columns."""
 
         if self.decision_time_column is None:
             if self.label_time_columns or self.as_of_time_columns:
@@ -332,7 +345,7 @@ class TimeSemanticsConfig:
 
 @dataclass(frozen=True)
 class TensorBatchConfig:
-    """内部 tensor kernel execution 和 memory-budget metadata。"""
+    """Tensor kernel memory-budget metadata."""
 
     backend: str = "numpy"
     device: str = "cpu"
@@ -343,7 +356,7 @@ class TensorBatchConfig:
     max_memory_mb: float | None = None
 
     def __post_init__(self) -> None:
-        """校验 tensor backend、dtypes、chunk sizes 和 memory budget。"""
+        """Validate tensor backend, dtypes, chunk sizes, and memory budget."""
 
         if self.backend not in TENSOR_BACKENDS:
             raise ValueError(f"backend must be one of {sorted(TENSOR_BACKENDS)}.")

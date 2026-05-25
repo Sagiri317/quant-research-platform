@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.pipelines.a_share.config import PipelineConfig
@@ -23,7 +24,7 @@ def _base_config(tmp_path) -> PipelineConfig:
         factor_template_id="reversal_20d",
         portfolio_mode="long_only",
         cost_bps=5.0,
-        pnl_return_column="forward_return_1d",
+        return_source_column="forward_return_1d",
         label_columns=("forward_return_1d",),
         output_root=tmp_path,
     )
@@ -61,7 +62,7 @@ def test_batch_runner_records_success_and_unmappable_candidate(
     def fake_run_a_share_pipeline(config):
         calls.append(config)
         run_dir = tmp_path / "runs" / config.run_id
-        run_dir.mkdir(parents=True)
+        _write_n7_evaluation_summary(run_dir)
         return SimpleNamespace(run_dir=run_dir)
 
     monkeypatch.setattr(
@@ -80,11 +81,13 @@ def test_batch_runner_records_success_and_unmappable_candidate(
         output_dir=tmp_path,
     )
 
-    assert [record.status for record in records] == ["success", "failed"]
+    assert [record.status for record in records] == ["success", "success", "failed"]
     assert records[0].run_dir == (
         tmp_path / "runs" / "factory_run_reversal_20d_1"
     ).as_posix()
-    assert records[1].failure_code == "missing_processed_factor"
+    assert records[0].combination_id == "combo_1"
+    assert records[1].combination_id == "combo_2"
+    assert records[2].failure_code == "missing_processed_factor"
     assert len(calls) == 1
     assert calls[0].run_id == "factory_run_reversal_20d_1"
     assert calls[0].date_start == "2024-02-01"
@@ -100,19 +103,39 @@ def test_batch_runner_records_success_and_unmappable_candidate(
     failed_path = factory_run_dir / "failed_candidates.json"
     manifest_path = factory_run_dir / "manifest.json"
     assert summary_path.is_file()
-    summary = summary_path.read_text(encoding="utf-8")
-    assert "inputs" in summary
-    assert "capabilities" in summary
-    assert "availability_rule" in summary
-    assert "run_ref" in summary
-    assert "run_dir" not in summary
-    assert str(tmp_path) not in summary
+    summary = pd.read_csv(summary_path)
+    assert summary["candidate_id"].tolist() == [
+        "reversal_20d@1",
+        "reversal_20d@1",
+        "unmapped@1",
+    ]
+    assert summary["combination_id"].fillna("").tolist() == [
+        "combo_1",
+        "combo_2",
+        "",
+    ]
+    assert summary["kernel"].fillna("").tolist()[:2] == ["dataframe", "tensor"]
+    assert summary["mean_ic"].dropna().round(4).tolist() == [0.11, 0.22]
+    summary_text = summary_path.read_text(encoding="utf-8")
+    assert "inputs" in summary_text
+    assert "capabilities" in summary_text
+    assert "availability_rule" in summary_text
+    assert "run_ref" in summary_text
+    assert "run_dir" not in summary_text
+    assert str(tmp_path) not in summary_text
     failed = json.loads(failed_path.read_text(encoding="utf-8"))
     assert [row["candidate_id"] for row in failed] == ["unmapped@1"]
     assert "run_dir" not in failed[0]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["artifact_type"] == "factor_factory_run"
+    assert manifest["candidate_count"] == 2
+    assert manifest["success_count"] == 1
+    assert manifest["failed_count"] == 1
     assert manifest["display"]["tables"][0]["path"] == "candidate_summary.csv"
+    assert manifest["display"]["tables"][0]["group"] == "candidate"
+    assert manifest["display"]["tables"][0]["download_item"] == (
+        "candidate_summary.csv"
+    )
     assert manifest["display"]["downloads"]["items"][1]["item"] == (
         "failed_candidates.json"
     )
@@ -123,6 +146,7 @@ def test_batch_runner_records_success_and_unmappable_candidate(
             base_config=_base_config(tmp_path),
             output_dir=tmp_path,
         )
+    assert len(calls) == 1
 
 
 def test_batch_runner_records_pipeline_failure_and_continues(
@@ -140,7 +164,7 @@ def test_batch_runner_records_pipeline_failure_and_continues(
         if config.run_id.endswith("empty_1"):
             raise PipelineRunnerError("empty sample after filtering")
         run_dir = tmp_path / "runs" / config.run_id
-        run_dir.mkdir(parents=True)
+        _write_n7_evaluation_summary(run_dir)
         return SimpleNamespace(run_dir=run_dir)
 
     monkeypatch.setattr(
@@ -160,7 +184,12 @@ def test_batch_runner_records_pipeline_failure_and_continues(
         output_dir=tmp_path,
     )
 
-    assert [record.status for record in records] == ["failed", "failed", "success"]
+    assert [record.status for record in records] == [
+        "failed",
+        "failed",
+        "success",
+        "success",
+    ]
     assert records[0].failure_code == "missing_processed_field"
     assert records[1].failure_code == "insufficient_sample"
     assert "missing processed factor table" in (records[0].failure_reason or "")
@@ -169,6 +198,33 @@ def test_batch_runner_records_pipeline_failure_and_continues(
         "factory_run_empty_1",
         "factory_run_good_1",
     ]
+
+
+def test_batch_runner_records_invalid_evaluation_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import quant_research_platform.research.factor_factory.batch_runner as runner_module
+
+    def fake_run_a_share_pipeline(config):
+        run_dir = tmp_path / "runs" / config.run_id
+        run_dir.mkdir(parents=True)
+        return SimpleNamespace(run_dir=run_dir)
+
+    monkeypatch.setattr(
+        runner_module,
+        "run_a_share_pipeline",
+        fake_run_a_share_pipeline,
+    )
+
+    records = evaluate_existing_factor_candidates(
+        (_candidate("broken@1", output_column="broken_factor"),),
+        base_config=_base_config(tmp_path),
+        output_dir=tmp_path,
+    )
+
+    assert [record.status for record in records] == ["failed"]
+    assert records[0].failure_code == "invalid_evaluation_artifact"
 
 
 def test_batch_runner_sanitizes_private_failure_reason(tmp_path, monkeypatch) -> None:
@@ -235,3 +291,52 @@ def test_batch_runner_sanitizes_local_absolute_failure_reason(
     assert "C:/Users" not in summary
     assert "C:/Users" not in failed
     assert "[local-path]" in summary
+
+
+def _write_n7_evaluation_summary(run_dir) -> None:
+    (run_dir / "dimensions").mkdir(parents=True)
+    (run_dir / "summaries").mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "combination_id": "combo_1",
+                "feature": "rev_20d",
+                "label": "forward_return_1d",
+                "kernel": "dataframe",
+                "portfolio_mode": "long_only",
+            },
+            {
+                "combination_id": "combo_2",
+                "feature": "rev_20d",
+                "label": "forward_return_20d",
+                "kernel": "tensor",
+                "portfolio_mode": "long_only",
+            },
+        ]
+    ).to_csv(run_dir / "dimensions" / "combinations.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "combination_id": "combo_1",
+                "feature": "rev_20d",
+                "label": "forward_return_1d",
+                "kernel": "dataframe",
+                "portfolio_mode": "long_only",
+                "mean_ic": 0.11,
+                "final_cumulative_net_return": 0.03,
+                "mean_turnover": 0.4,
+                "total_cost": 0.01,
+            },
+            {
+                "combination_id": "combo_2",
+                "feature": "rev_20d",
+                "label": "forward_return_20d",
+                "kernel": "tensor",
+                "portfolio_mode": "long_only",
+                "mean_ic": 0.22,
+                "final_cumulative_net_return": 0.06,
+                "mean_turnover": 0.5,
+                "total_cost": 0.02,
+            },
+        ]
+    ).to_csv(run_dir / "summaries" / "evaluation_summary.csv", index=False)

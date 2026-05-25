@@ -13,6 +13,7 @@ class EvaluationSetResult:
     """保存一个 evaluation set 的内存指标和 artifact paths。"""
 
     summary: dict[str, Any]
+    config: dict[str, Any]
     metrics: dict[str, pd.DataFrame]
     artifacts: Any
     combinations: pd.DataFrame

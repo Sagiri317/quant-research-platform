@@ -14,7 +14,7 @@ flowchart LR
   adapter["A-share evaluation adapter"]
   spec["EvaluationSpec"]
   eval["run_evaluation"]
-  artifacts["schema 0.5 artifacts"]
+  artifacts["schema 0.6 artifacts"]
   display["manifest.display"]
   package["artifact_package"]
   api["FastAPI evidence API"]
@@ -46,7 +46,7 @@ CSMAR raw CSV
 -> A 股 evaluation adapter
 -> EvaluationSpec
 -> run_evaluation
--> schema 0.5 artifacts
+-> schema 0.6 artifacts
 -> manifest.display
 -> API / downloads / React workbench
 ```
@@ -99,14 +99,14 @@ Canonical implementation:
 | N05 | run_a_share_pipeline | 已实现 | `src/quant_research_platform/pipelines/a_share/runner.py` | 按 `start_from` 执行到 evaluation，并写完整 checkpoint 链 |
 | N06 | A 股 evaluation adapter | 已实现 | `src/quant_research_platform/markets/implementations/a_share/evaluation/evaluation_adapter.py` | factor table -> `EvaluationSpec` |
 | N07 | Evaluation layer | 已实现 | `src/quant_research_platform/evaluations/` | 统一评估逻辑 |
-| N08 | Artifact writer/loader | 已实现 | `src/quant_research_platform/artifacts/` | schema `0.5` 和 `manifest.display` |
+| N08 | Artifact writer/loader | 已实现 | `src/quant_research_platform/artifacts/` | schema `0.6` 和 `manifest.display` |
 | N09 | Artifact ZIP package | 已实现 | `src/quant_research_platform/artifacts/artifact_package.py` | display download items 的文件收集、校验和 ZIP item 打包规则 |
 | N10 | Run repository | 已实现 | `src/quant_research_platform/interfaces/api/services/run_repository.py` | API-visible run index，身份为 `(source_alias, run_id)` |
 | N11 | Evidence API | 已实现 | `src/quant_research_platform/interfaces/api/routes/` | runs, evidence, previews, downloads, comparison |
-| N12 | Pipeline Builder | 已实现 | `web/src/features/pipeline/PipelineBuilder.tsx` | 当前提交 configuration snapshot |
+| N12 | Pipeline Builder | 已实现 | `web/src/features/pipeline/PipelineBuilder.tsx` | 默认提交 configuration snapshot，也可用 `kernel + start_from` 执行 pipeline run |
 | N13 | Pipeline snapshots | 已实现 | `src/quant_research_platform/pipelines/a_share/snapshots.py` | 写 `run_config.yaml`、`warnings.json`、`summary.md` |
 | N14 | Factor template registry | 已实现 | `src/quant_research_platform/research/factor_factory/factor_registry.py` | 受控 factor templates |
-| N15 | Factor Factory batch runner | 已实现 | `src/quant_research_platform/research/factor_factory/batch_runner.py` | 通过 `run_a_share_pipeline(start_from="existing_factors")` 批量评估候选 |
+| N15 | Factor Factory batch runner | 已实现 | `src/quant_research_platform/research/factor_factory/batch_runner.py` | 通过 `run_a_share_pipeline(start_from="existing_factors")` 批量评估候选，并按 `candidate_id + combination_id` 汇总 N7 results |
 | N16 | Factor Factory API | 已实现 | `src/quant_research_platform/interfaces/api/routes/factor_factory.py` | 浏览 factory runs、tables 和 downloads |
 | N17 | React workbench | 已实现 | `web/src/shell/App.tsx` | 本地 evidence workbench，消费 API 和 display contract |
 | N18 | `qrp` CLI | 已实现 | `src/quant_research_platform/interfaces/cli/commands.py` | Typer 总入口，含 evaluation、comparison 和 A 股帮助入口 |
@@ -182,7 +182,7 @@ Canonical implementation:
 
 ## 自查结论
 
-- A 股主链路、evaluation schema `0.5`、`manifest.display`、API/download/frontend、start-from runner 和 Factor Factory 已在代码中落地。
+- A 股主链路、evaluation schema `0.6`、`manifest.display`、API/download/frontend、start-from runner 和 Factor Factory 已在代码中落地。
 - 通用 `evaluate-parquet` 不是 A 股 adapter 验收替代品。
 - `source_alias + run_id` 是 API-visible run identity。
 - 用户可见 artifact 必须进入 `manifest.display`，不能走后端或前端私有 shortcut。

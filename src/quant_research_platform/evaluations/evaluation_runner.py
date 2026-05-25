@@ -16,7 +16,7 @@ from quant_research_platform.evaluations.evaluation_spec import EvaluationSpec
 from quant_research_platform.evaluations.neutralization import apply_neutralization
 from quant_research_platform.evaluations.panel_validation import (
     PanelSpec,
-    validate_evaluation_set_pnl_return_column,
+    validate_evaluation_set_return_source_column,
     validate_evaluation_spec_columns,
     validate_panel,
 )
@@ -31,7 +31,7 @@ from quant_research_platform.kernels.dataframe.cross_section import (
 )
 from quant_research_platform.kernels.dataframe.portfolio import (
     _simulate_weighted_long_short_returns_and_cost_from_validated_panel,
-    calculate_cumulative_pnl,
+    calculate_cumulative_returns,
     summarize_exposure,
     summarize_performance,
 )
@@ -78,12 +78,14 @@ def run_evaluation(spec: EvaluationSpec) -> EvaluationSetResult:
     artifacts = write_evaluation_set_artifacts(
         spec.output_dir,
         config=payload.config,
+        lineage=payload.config.get("lineage", {}),
         summary=payload.summary,
         tables=payload.tables,
         report=payload.report,
     )
     return EvaluationSetResult(
         summary=payload.summary,
+        config=payload.config,
         metrics={
             name: frame
             for name, frame in payload.tables.items()
@@ -101,11 +103,11 @@ def evaluate_to_payload(spec: EvaluationSpec) -> EvaluationRunPayload:
     if not isinstance(spec, EvaluationSpec):
         raise TypeError("spec must be an EvaluationSpec.")
     validate_evaluation_spec_columns(spec)
-    pnl_return_column = validate_evaluation_set_pnl_return_column(spec)
-    kernel = get_kernel_descriptor(spec.engine)
+    return_source_column = validate_evaluation_set_return_source_column(spec)
+    kernel = get_kernel_descriptor(spec.kernel)
     if kernel.uses_tensor_layout:
         measure_stage(
-            "engine",
+            "kernel",
             "tensor_conversion",
             lambda: _prepare_tensor_batch(spec),
         )
@@ -120,80 +122,79 @@ def evaluate_to_payload(spec: EvaluationSpec) -> EvaluationRunPayload:
         "positions": [],
         "turnover": [],
         "returns": [],
-        "pnl": [],
+        "cumulative_returns": [],
         "cost_breakdown": [],
         "weight_diagnostics": [],
         "neutralization_diagnostics": [],
         "tradability_diagnostics": [],
     }
     combination_records: list[dict[str, object]] = []
+    weight_config = spec.weight_configs[0]
+    cost_config = spec.cost_configs[0]
+    portfolio_mode = weight_config.portfolio_mode
     for label in spec.label_columns:
-        for weight_index, weight_config in enumerate(spec.weight_configs):
-            for cost_index, cost_config in enumerate(spec.cost_configs):
-                weight_id = f"w{weight_index}"
-                cost_id = f"c{cost_index}"
-                runner = (
-                    _run_tensor_feature_set
-                    if kernel.uses_tensor_layout
-                    else _run_dataframe_feature_set
-                )
-                raw_metrics = runner(
-                    spec=spec,
-                    validated_panel=validated_panels[label],
+        runner = (
+            _run_tensor_feature_set
+            if kernel.uses_tensor_layout
+            else _run_dataframe_feature_set
+        )
+        raw_metrics = runner(
+            spec=spec,
+            validated_panel=validated_panels[label],
+            label=label,
+            weight_config=weight_config,
+            cost_config=cost_config,
+            return_source_column=return_source_column,
+        )
+        dimensioned_metrics = {
+            name: _add_feature_set_combination_columns(
+                frame,
+                label=label,
+                kernel=spec.kernel,
+                portfolio_mode=portfolio_mode,
+            )
+            for name, frame in raw_metrics.items()
+        }
+        for name, frame in dimensioned_metrics.items():
+            all_tables.setdefault(name, []).append(frame)
+        for feature in spec.feature_columns:
+            combination_id = _combination_id(
+                feature=feature,
+                label=label,
+                kernel=spec.kernel,
+                portfolio_mode=portfolio_mode,
+            )
+            combination_records.append(
+                _combination_record(
+                    combination_id=combination_id,
+                    feature=feature,
                     label=label,
-                    weight_id=weight_id,
-                    cost_id=cost_id,
-                    weight_config=weight_config,
-                    cost_config=cost_config,
-                    pnl_return_column=pnl_return_column,
+                    kernel=spec.kernel,
+                    portfolio_mode=portfolio_mode,
                 )
-                dimensioned_metrics = {
-                    name: _add_feature_set_combination_columns(
-                        frame,
-                        label=label,
-                        weight_id=weight_id,
-                        cost_id=cost_id,
-                    )
-                    for name, frame in raw_metrics.items()
-                }
-                for name, frame in dimensioned_metrics.items():
-                    all_tables.setdefault(name, []).append(frame)
-                for feature in spec.feature_columns:
-                    combination_id = _combination_id(
-                        feature=feature,
-                        label=label,
-                        weight_id=weight_id,
-                        cost_id=cost_id,
-                    )
-                    feature_metrics = _metrics_for_feature(raw_metrics, feature)
-                    combination_records.append(
-                        _combination_record(
-                            combination_id=combination_id,
-                            feature=feature,
-                            label=label,
-                            weight_id=weight_id,
-                            cost_id=cost_id,
-                            weight_config=weight_config,
-                            cost_config=cost_config,
-                            metrics=feature_metrics,
-                        )
-                    )
+            )
 
-    tables = {
+    raw_tables = {
         name: pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         for name, frames in all_tables.items()
     }
     combinations = pd.DataFrame.from_records(combination_records)
-    tables["combinations"] = combinations
+    raw_tables["combinations"] = combinations
+    tables = _to_schema_06_tables(
+        raw_tables,
+        spec=spec,
+        return_source_column=return_source_column,
+    )
+    combinations = tables["combinations"]
     summary = _build_evaluation_set_summary(
         spec=spec,
-        pnl_return_column=pnl_return_column,
+        return_source_column=return_source_column,
         tables=tables,
         combinations=combinations,
     )
     config = _build_evaluation_set_config(
         spec=spec,
-        pnl_return_column=pnl_return_column,
+        return_source_column=return_source_column,
     )
     return EvaluationRunPayload(
         summary=summary,
@@ -208,11 +209,9 @@ def _run_dataframe_feature_set(
     spec: EvaluationSpec,
     validated_panel: pd.DataFrame,
     label: str,
-    weight_id: str,
-    cost_id: str,
     weight_config,
     cost_config,
-    pnl_return_column: str,
+    return_source_column: str,
 ) -> dict[str, pd.DataFrame]:
     panel_spec = PanelSpec(
         feature_columns=spec.feature_columns,
@@ -244,17 +243,17 @@ def _run_dataframe_feature_set(
             portfolio_features=spec.feature_columns,
             tradability_config=spec.tradability_config,
             cost_config=cost_config,
-            pnl_return_column=pnl_return_column,
+            return_source_column=return_source_column,
         )
     )
     returns = returns.copy()
     if "label" in returns.columns:
-        returns["pnl_return_column"] = returns["label"]
+        returns["return_source_column"] = returns["label"]
         returns["label"] = label
-    pnl = measure_stage(
+    cumulative_returns = measure_stage(
         "metric",
-        "pnl",
-        lambda: calculate_cumulative_pnl(
+        "cumulative_returns",
+        lambda: calculate_cumulative_returns(
             returns,
             segment_columns=spec.segment_columns,
         ),
@@ -264,7 +263,7 @@ def _run_dataframe_feature_set(
         "performance_summary",
         lambda: summarize_performance(
             returns,
-            pnl,
+            cumulative_returns,
             segment_columns=spec.segment_columns,
         ),
     )
@@ -301,7 +300,7 @@ def _run_dataframe_feature_set(
         "positions": positions,
         "turnover": turnover,
         "returns": returns,
-        "pnl": pnl,
+        "cumulative_returns": cumulative_returns,
         "cost_breakdown": cost_breakdown,
         "weight_diagnostics": diagnostics,
         "neutralization_diagnostics": neutralization_diagnostics,
@@ -323,11 +322,9 @@ def _run_tensor_feature_set(
     spec: EvaluationSpec,
     validated_panel: pd.DataFrame,
     label: str,
-    weight_id: str,
-    cost_id: str,
     weight_config,
     cost_config,
-    pnl_return_column: str,
+    return_source_column: str,
 ) -> dict[str, pd.DataFrame]:
     panel_spec = PanelSpec(
         feature_columns=spec.feature_columns,
@@ -362,18 +359,18 @@ def _run_tensor_feature_set(
             segment_columns=spec.segment_columns,
             portfolio_features=spec.feature_columns,
             tradability_config=spec.tradability_config,
-            pnl_return_column=pnl_return_column,
+            return_source_column=return_source_column,
             value_dtype=spec.tensor_config.value_dtype,
         ),
     )
     returns = portfolio_artifacts.returns.copy()
     if "label" in returns.columns:
-        returns["pnl_return_column"] = returns["label"]
+        returns["return_source_column"] = returns["label"]
         returns["label"] = label
-    pnl = measure_stage(
+    cumulative_returns = measure_stage(
         "metric",
-        "pnl",
-        lambda: calculate_cumulative_pnl(
+        "cumulative_returns",
+        lambda: calculate_cumulative_returns(
             returns,
             segment_columns=spec.segment_columns,
         ),
@@ -383,7 +380,7 @@ def _run_tensor_feature_set(
         "performance_summary",
         lambda: summarize_performance(
             returns,
-            pnl,
+            cumulative_returns,
             segment_columns=spec.segment_columns,
         ),
     )
@@ -422,7 +419,7 @@ def _run_tensor_feature_set(
         "positions": portfolio_artifacts.positions,
         "turnover": portfolio_artifacts.turnover,
         "returns": returns,
-        "pnl": pnl,
+        "cumulative_returns": cumulative_returns,
         "cost_breakdown": portfolio_artifacts.cost_breakdown,
         "weight_diagnostics": portfolio_artifacts.diagnostics,
         "neutralization_diagnostics": neutralization_diagnostics,
@@ -496,7 +493,7 @@ def _safe_rate(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
 
 def _evaluation_set_profile_metadata(spec: EvaluationSpec) -> dict[str, object]:
     return {
-        "engine": spec.engine,
+        "kernel": spec.kernel,
         "rows": int(len(spec.panel)),
         "features": len(spec.feature_columns),
         "labels": len(spec.label_columns),
@@ -603,8 +600,8 @@ def _add_feature_set_combination_columns(
     frame: pd.DataFrame,
     *,
     label: str,
-    weight_id: str,
-    cost_id: str,
+    kernel: str,
+    portfolio_mode: str,
 ) -> pd.DataFrame:
     result = frame.copy()
     if "feature" not in result.columns:
@@ -614,16 +611,22 @@ def _add_feature_set_combination_columns(
         feature: _combination_id(
             feature=feature,
             label=label,
-            weight_id=weight_id,
-            cost_id=cost_id,
+            kernel=kernel,
+            portfolio_mode=portfolio_mode,
         )
         for feature in result["feature"].drop_duplicates()
     }
     result["combination_id"] = result["feature"].map(feature_to_combination_id)
     result["label"] = label
-    result["weight_id"] = weight_id
-    result["cost_id"] = cost_id
-    dimension_columns = ["combination_id", "feature", "label", "weight_id", "cost_id"]
+    result["kernel"] = kernel
+    result["portfolio_mode"] = portfolio_mode
+    dimension_columns = [
+        "combination_id",
+        "feature",
+        "label",
+        "kernel",
+        "portfolio_mode",
+    ]
     remaining_columns = [
         column for column in result.columns if column not in dimension_columns
     ]
@@ -634,11 +637,11 @@ def _combination_id(
     *,
     feature: str,
     label: str,
-    weight_id: str,
-    cost_id: str,
+    kernel: str,
+    portfolio_mode: str,
 ) -> str:
     return "__".join(
-        _slug(value) for value in (feature, label, weight_id, cost_id)
+        _slug(value) for value in (feature, label, kernel, portfolio_mode)
     )
 
 
@@ -651,98 +654,253 @@ def _combination_record(
     combination_id: str,
     feature: str,
     label: str,
-    weight_id: str,
-    cost_id: str,
-    weight_config,
-    cost_config,
-    metrics: dict[str, pd.DataFrame],
+    kernel: str,
+    portfolio_mode: str,
 ) -> dict[str, object]:
-    performance = _aggregate_combination_metrics(
-        metrics["performance_summary"],
-        {
-            "final_cumulative_net_return": "mean",
-            "sharpe_like": "mean",
-            "sortino_like": "mean",
-            "max_drawdown": "min",
-            "win_rate": "mean",
-            "mean_turnover": "mean",
-            "total_cost": "sum",
-        },
-    )
-    ic_summary = _aggregate_combination_metrics(
-        metrics["ic_summary"],
-        {
-            "mean_ic": "mean",
-            "mean_rankic": "mean",
-            "icir": "mean",
-            "rankicir": "mean",
-        },
-    )
     return {
         "combination_id": combination_id,
         "feature": feature,
         "label": label,
-        "weight_id": weight_id,
-        "cost_id": cost_id,
-        "weight_method": weight_config.method,
-        "direction": weight_config.direction,
-        "portfolio_mode": weight_config.portfolio_mode,
-        "cost_bps": _effective_cost_bps(weight_config, cost_config),
-        "mean_ic": ic_summary.get("mean_ic", 0.0),
-        "mean_rankic": ic_summary.get("mean_rankic", 0.0),
-        "icir": ic_summary.get("icir", 0.0),
-        "rankicir": ic_summary.get("rankicir", 0.0),
-        "final_cumulative_net_return": performance.get(
-            "final_cumulative_net_return",
-            0.0,
-        ),
-        "sharpe_like": performance.get("sharpe_like", 0.0),
-        "sortino_like": performance.get("sortino_like", 0.0),
-        "max_drawdown": performance.get("max_drawdown", 0.0),
-        "win_rate": performance.get("win_rate", 0.0),
-        "mean_turnover": performance.get("mean_turnover", 0.0),
-        "total_cost": performance.get("total_cost", 0.0),
+        "kernel": kernel,
+        "portfolio_mode": portfolio_mode,
     }
 
 
-def _aggregate_combination_metrics(
+def _to_schema_06_tables(
+    tables: dict[str, pd.DataFrame],
+    *,
+    spec: EvaluationSpec,
+    return_source_column: str,
+) -> dict[str, pd.DataFrame]:
+    combinations = tables["combinations"].copy()
+    combinations["kernel"] = spec.kernel
+    if "portfolio_mode" not in combinations.columns and spec.weight_configs:
+        combinations["portfolio_mode"] = spec.weight_configs[0].portfolio_mode
+    id_remap = {
+        str(row["combination_id"]): _combination_id_06(
+            feature=str(row["feature"]),
+            label=str(row["label"]),
+            kernel=str(row["kernel"]),
+            portfolio_mode=str(row["portfolio_mode"]),
+        )
+        for _, row in combinations.iterrows()
+    }
+    combinations["combination_id"] = combinations["combination_id"].map(id_remap)
+    schema_06: dict[str, pd.DataFrame] = {
+        "combinations": combinations[
+            ["combination_id", "feature", "label", "kernel", "portfolio_mode"]
+        ].copy()
+    }
+    for name in (
+        "ic",
+        "ic_summary",
+        "grouped_returns",
+        "group_spread_summary",
+        "performance_summary",
+        "tradability_diagnostics",
+    ):
+        schema_06[name] = _remap_fact_table(tables[name], id_remap)
+    schema_06["returns"] = _remap_fact_table(
+        tables["returns"],
+        id_remap,
+        keep_columns=("portfolio_mode",),
+    )
+    if "return_source_column" not in schema_06["returns"].columns:
+        schema_06["returns"]["return_source_column"] = return_source_column
+    schema_06["cumulative_returns"] = _schema_06_cumulative_returns(
+        tables["cumulative_returns"],
+        id_remap,
+    )
+    schema_06["weights"] = _schema_06_weights(tables["positions"], id_remap)
+    schema_06["label_availability"] = _label_availability_table(spec)
+    schema_06["factor_coverage"] = _factor_coverage_table(spec)
+    schema_06["tradability_coverage"] = _tradability_coverage_table(spec)
+    schema_06["evaluation_summary"] = _evaluation_summary_table(
+        combinations=schema_06["combinations"],
+        ic_summary=schema_06["ic_summary"],
+        performance_summary=schema_06["performance_summary"],
+    )
+    for name, frame in tables.items():
+        if any(
+            name.endswith(f"_by_{period}")
+            for period in ("year", "quarter", "month")
+        ):
+            schema_06[name] = _remap_fact_table(frame, id_remap)
+    return schema_06
+
+
+def _remap_fact_table(
     frame: pd.DataFrame,
-    aggregations: dict[str, str],
-) -> dict[str, object]:
-    if frame.empty:
-        return {}
-    output: dict[str, object] = {}
-    for column, aggregation in aggregations.items():
-        if column not in frame.columns:
-            continue
-        values = pd.to_numeric(frame[column], errors="coerce").dropna()
-        if values.empty:
-            output[column] = 0.0
-        elif aggregation == "mean":
-            output[column] = float(values.mean())
-        elif aggregation == "sum":
-            output[column] = float(values.sum())
-        elif aggregation == "min":
-            output[column] = float(values.min())
+    id_remap: dict[str, str],
+    keep_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    result = frame.copy()
+    if "combination_id" in result.columns:
+        result["combination_id"] = result["combination_id"].map(id_remap)
+    retired = ["feature", "label", "kernel", "portfolio_mode"]
+    keep = set(keep_columns)
+    retired_columns = [column for column in retired if column in result.columns]
+    retired_columns = [column for column in retired_columns if column not in keep]
+    return result.drop(columns=retired_columns)
+
+
+def _schema_06_weights(
+    positions: pd.DataFrame,
+    id_remap: dict[str, str],
+) -> pd.DataFrame:
+    weights = _remap_fact_table(positions, id_remap)
+    weights = weights.rename(columns={"position": "target_weight"})
+    required = ["combination_id", "timestamp", "asset", "target_weight"]
+    return weights[[column for column in required if column in weights.columns]]
+
+
+def _schema_06_cumulative_returns(
+    cumulative_returns: pd.DataFrame,
+    id_remap: dict[str, str],
+) -> pd.DataFrame:
+    cumulative = _remap_fact_table(cumulative_returns, id_remap)
+    cumulative = cumulative.rename(
+        columns={
+            "gross_portfolio_return": "gross_return",
+            "net_portfolio_return": "net_return",
+        }
+    )
+    required = [
+        "combination_id",
+        "timestamp",
+        "gross_return",
+        "net_return",
+        "cost",
+        "cumulative_gross_return",
+        "cumulative_net_return",
+        "cumulative_cost",
+        "high_water_mark",
+        "drawdown",
+    ]
+    return cumulative[[column for column in required if column in cumulative.columns]]
+
+
+def _label_availability_table(spec: EvaluationSpec) -> pd.DataFrame:
+    records = []
+    for label in spec.label_columns:
+        available = int(spec.panel[label].notna().sum())
+        total = int(len(spec.panel))
+        records.append(
+            {
+                "label": label,
+                "available_rows": available,
+                "missing_rows": total - available,
+                "coverage_rate": available / total if total else 0.0,
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def _factor_coverage_table(spec: EvaluationSpec) -> pd.DataFrame:
+    records = []
+    for feature in spec.feature_columns:
+        available = int(spec.panel[feature].notna().sum())
+        total = int(len(spec.panel))
+        records.append(
+            {
+                "feature": feature,
+                "available_rows": available,
+                "missing_rows": total - available,
+                "coverage_rate": available / total if total else 0.0,
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def _tradability_coverage_table(spec: EvaluationSpec) -> pd.DataFrame:
+    records = []
+    for field in ("eligible", "can_enter", "can_exit"):
+        if field in spec.panel.columns:
+            available = int(spec.panel[field].notna().sum())
+            missing = int(len(spec.panel) - available)
+            coverage = available / len(spec.panel) if len(spec.panel) else 0.0
         else:
-            raise ValueError(f"unsupported aggregation: {aggregation}")
-    return output
+            available = int(len(spec.panel))
+            missing = 0
+            coverage = 1.0
+        records.append(
+            {
+                "field": field,
+                "available_rows": available,
+                "missing_rows": missing,
+                "coverage_rate": coverage,
+            }
+        )
+    return pd.DataFrame.from_records(records)
 
 
-def _effective_cost_bps(weight_config, cost_config) -> float:
-    return float(
-        weight_config.cost_bps
-        + cost_config.buy_cost_bps
-        + cost_config.sell_cost_bps
-        + cost_config.slippage_bps
-        + (cost_config.spread_bps or 0.0)
+def _evaluation_summary_table(
+    *,
+    combinations: pd.DataFrame,
+    ic_summary: pd.DataFrame,
+    performance_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    ic_compact = (
+        ic_summary.groupby("combination_id", as_index=False)["mean_ic"].mean()
+        if not ic_summary.empty
+        else pd.DataFrame(columns=["combination_id", "mean_ic"])
+    )
+    performance_compact = (
+        performance_summary.groupby("combination_id", as_index=False).agg(
+            final_cumulative_net_return=("final_cumulative_net_return", "mean"),
+            mean_turnover=("mean_turnover", "mean"),
+            total_cost=("total_cost", "sum"),
+        )
+        if not performance_summary.empty
+        else pd.DataFrame(
+            columns=[
+                "combination_id",
+                "final_cumulative_net_return",
+                "mean_turnover",
+                "total_cost",
+            ]
+        )
+    )
+    metrics = combinations.merge(
+        ic_compact,
+        on="combination_id",
+        how="left",
+    )
+    return metrics.merge(
+        performance_compact,
+        on="combination_id",
+        how="left",
+    )
+
+
+def _actual_date_coverage(spec: EvaluationSpec) -> dict[str, object]:
+    timestamps = pd.to_datetime(spec.panel[spec.timestamp_column], errors="coerce")
+    timestamps = timestamps.dropna()
+    if timestamps.empty:
+        return {"start_date": None, "end_date": None, "n_timestamps": 0}
+    return {
+        "start_date": str(timestamps.min().date()),
+        "end_date": str(timestamps.max().date()),
+        "n_timestamps": int(timestamps.nunique()),
+    }
+
+
+def _combination_id_06(
+    *,
+    feature: str,
+    label: str,
+    kernel: str,
+    portfolio_mode: str,
+) -> str:
+    return "__".join(
+        _slug(value) for value in (feature, label, kernel, portfolio_mode)
     )
 
 
 def _build_evaluation_set_summary(
     *,
     spec: EvaluationSpec,
-    pnl_return_column: str,
+    return_source_column: str,
     tables: dict[str, pd.DataFrame],
     combinations: pd.DataFrame,
 ) -> dict[str, object]:
@@ -759,7 +917,7 @@ def _build_evaluation_set_summary(
             "asset_column": spec.asset_column,
             "feature_columns": list(spec.feature_columns),
             "label_columns": list(spec.label_columns),
-            "pnl_return_column": pnl_return_column,
+            "return_source_column": return_source_column,
         },
         "n_rows_evaluated": int(len(spec.panel)),
         "n_combinations": int(len(combinations)),
@@ -768,16 +926,8 @@ def _build_evaluation_set_summary(
         "breakdown_enabled": bool(spec.time_breakdowns),
         "breakdown_columns": list(spec.time_breakdowns),
         "period_breakdown_policy": PERIOD_BREAKDOWN_POLICY,
-        "engine": spec.engine,
-        "weight_configs": [asdict(config) for config in spec.weight_configs],
-        "execution_config": asdict(spec.execution_config),
-        "tradability_config": asdict(spec.tradability_config),
-        "cost_configs": [asdict(config) for config in spec.cost_configs],
-        "neutralization_config": asdict(spec.neutralization_config),
-        "time_semantics_config": asdict(spec.time_semantics_config),
-        "tensor_config": asdict(spec.tensor_config),
+        "kernel": spec.kernel,
         "tables": {name: int(len(frame)) for name, frame in tables.items()},
-        "position_artifact_policy": POSITION_ARTIFACT_POLICY,
         "boundary": spec.domain_notes.get(
             "boundary",
             "No real data, API connection, credentials, paper trading, live trading, "
@@ -789,7 +939,7 @@ def _build_evaluation_set_summary(
 def _build_evaluation_set_config(
     *,
     spec: EvaluationSpec,
-    pnl_return_column: str,
+    return_source_column: str,
 ) -> dict[str, object]:
     return {
         "metadata": spec.metadata,
@@ -799,12 +949,12 @@ def _build_evaluation_set_config(
             "asset_column": spec.asset_column,
             "feature_columns": list(spec.feature_columns),
             "label_columns": list(spec.label_columns),
-            "pnl_return_column": pnl_return_column,
+            "return_source_column": return_source_column,
         },
         "n_groups": spec.n_groups,
         "segment_columns": list(spec.segment_columns),
         "time_breakdowns": list(spec.time_breakdowns),
-        "engine": spec.engine,
+        "kernel": spec.kernel,
         "weight_configs": [asdict(config) for config in spec.weight_configs],
         "execution_config": asdict(spec.execution_config),
         "tradability_config": asdict(spec.tradability_config),
@@ -812,6 +962,19 @@ def _build_evaluation_set_config(
         "neutralization_config": asdict(spec.neutralization_config),
         "time_semantics_config": asdict(spec.time_semantics_config),
         "tensor_config": asdict(spec.tensor_config),
+        "cost_config": asdict(spec.cost_configs[0]) if spec.cost_configs else {},
+        "weight_config": (
+            asdict(spec.weight_configs[0]) if spec.weight_configs else {}
+        ),
+        "benchmark_profiles": [],
+        "universe_policy": "not_configured",
+        "eligibility_policy": "not_configured",
+        "tradability_policy": asdict(spec.tradability_config),
+        "lineage": {
+            "artifact_schema_version": "0.6",
+            "input_fingerprint": None,
+            "actual_date_coverage": _actual_date_coverage(spec),
+        },
     }
 
 
@@ -828,7 +991,7 @@ def _render_evaluation_set_report(
         "",
         f"- evaluation_id: {summary['evaluation_id']}",
         f"- n_combinations: {summary['n_combinations']}",
-        f"- engine: {summary['engine']}",
+        f"- kernel: {summary['kernel']}",
         "",
         "## Tables",
         "",

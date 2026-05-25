@@ -10,7 +10,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from quant_research_platform.evaluations.evaluation_spec import (
-    DEFAULT_PNL_RETURN_COLUMN,
+    DEFAULT_RETURN_SOURCE_COLUMN,
     CostConfig,
     EvaluationSpec,
     ExecutionConfig,
@@ -94,19 +94,19 @@ def validate_parquet_evaluation_columns(
     asset_column: str,
     feature_columns: tuple[str, ...],
     label_columns: tuple[str, ...],
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
     extra_columns: tuple[str, ...] = (),
 ) -> ParquetSchemaInspection:
     """校验 evaluation set 所需的全部 Parquet columns。"""
 
-    pnl_return_column = pnl_return_column or DEFAULT_PNL_RETURN_COLUMN
+    return_source_column = return_source_column or DEFAULT_RETURN_SOURCE_COLUMN
     required = _unique_columns(
         (
             timestamp_column,
             asset_column,
             *feature_columns,
             *label_columns,
-            pnl_return_column,
+            return_source_column,
             *extra_columns,
         )
     )
@@ -155,8 +155,8 @@ def make_parquet_evaluation_spec(
     neutralization_config: NeutralizationConfig | None = None,
     segment_columns: tuple[str, ...] = (),
     time_breakdowns: tuple[str, ...] = (),
-    engine: str = "dataframe",
-    pnl_return_column: str | None = None,
+    kernel: str = "dataframe",
+    return_source_column: str | None = None,
     domain_notes: dict[str, Any] | None = None,
     extra_columns: tuple[str, ...] = (),
 ) -> EvaluationSpec:
@@ -167,7 +167,7 @@ def make_parquet_evaluation_spec(
     execution_config = execution_config or ExecutionConfig()
     tradability_config = tradability_config or TradabilityConfig()
     neutralization_config = neutralization_config or NeutralizationConfig()
-    resolved_pnl_return_column = pnl_return_column or DEFAULT_PNL_RETURN_COLUMN
+    resolved_return_source_column = return_source_column or DEFAULT_RETURN_SOURCE_COLUMN
     panel = read_factor_panel_parquet(
         parquet_path,
         timestamp_column=timestamp_column,
@@ -182,7 +182,7 @@ def make_parquet_evaluation_spec(
             segment_columns=segment_columns,
             extra_columns=(
                 *label_columns[1:],
-                resolved_pnl_return_column,
+                resolved_return_source_column,
                 *_risk_columns(weight_configs),
                 *extra_columns,
             ),
@@ -202,8 +202,8 @@ def make_parquet_evaluation_spec(
         execution_config=execution_config,
         tradability_config=tradability_config,
         neutralization_config=neutralization_config,
-        engine=engine,
-        pnl_return_column=pnl_return_column,
+        kernel=kernel,
+        return_source_column=return_source_column,
         segment_columns=segment_columns,
         time_breakdowns=time_breakdowns,
         domain_notes={} if domain_notes is None else domain_notes,

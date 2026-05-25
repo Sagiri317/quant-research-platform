@@ -7,7 +7,7 @@ factor_template_id: reversal_20d
 factor_template_source: config/a_share/factor_templates/reversal_20d.yaml
 portfolio_mode: long_only
 cost_bps: 10.0
-pnl_return_column: forward_return_20d
+return_source_column: forward_return_20d
 label_columns:
   - forward_return_5d
   - forward_return_20d

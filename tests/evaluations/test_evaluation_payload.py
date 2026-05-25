@@ -9,7 +9,7 @@ from quant_research_platform.evaluations import (
 )
 from quant_research_platform.evaluations.evaluation_runner import evaluate_to_payload
 from quant_research_platform.evaluations.panel_validation import (
-    validate_evaluation_set_pnl_return_column,
+    validate_evaluation_set_return_source_column,
     validate_evaluation_spec_columns,
 )
 
@@ -34,11 +34,17 @@ def test_evaluate_to_payload_builds_contract_without_writing_artifacts(tmp_path)
     assert payload.summary["evaluation_id"] == "payload_only"
     assert payload.config["metadata"]["run_id"] == "payload_only"
     assert not hasattr(payload, "artifact_paths")
-    assert set(payload.tables) >= {"combinations", "ic", "returns", "pnl"}
+    assert set(payload.tables) >= {
+        "combinations",
+        "ic",
+        "returns",
+        "cumulative_returns",
+        "weights",
+    }
     assert "Evaluation Set Report" in payload.report
     assert not (output_dir / "manifest.json").exists()
     assert not (output_dir / "summary.json").exists()
-    assert not (output_dir / "combinations.csv").exists()
+    assert not (output_dir / "dimensions" / "combinations.csv").exists()
 
 
 def test_panel_validation_helpers_are_independent_from_artifact_writing(tmp_path):
@@ -51,9 +57,9 @@ def test_panel_validation_helpers_are_independent_from_artifact_writing(tmp_path
     )
 
     validate_evaluation_spec_columns(spec)
-    pnl_column = validate_evaluation_set_pnl_return_column(spec)
+    return_source_column = validate_evaluation_set_return_source_column(spec)
 
-    assert pnl_column == "forward_return_1d"
+    assert return_source_column == "forward_return_1d"
     assert not (tmp_path / "manifest.json").exists()
 
 

@@ -15,7 +15,7 @@ from quant_research_platform.datasets.parquet_panel import (
 )
 from quant_research_platform.evaluations.evaluation_runner import run_evaluation
 from quant_research_platform.evaluations.evaluation_spec import (
-    DEFAULT_PNL_RETURN_COLUMN,
+    DEFAULT_RETURN_SOURCE_COLUMN,
     PORTFOLIO_MODES,
     WEIGHT_DIRECTIONS,
     WEIGHT_METHODS,
@@ -107,12 +107,12 @@ LABEL_OPTION = typer.Option(
     "--label",
     help="Forward return or label column. Repeat for multiple labels.",
 )
-PNL_RETURN_COLUMN_OPTION = typer.Option(
+RETURN_SOURCE_COLUMN_OPTION = typer.Option(
     None,
-    "--pnl-return-column",
+    "--return-source-column",
     help=(
-        "Realized return column used for PnL/equity curve. Defaults to "
-        f"{DEFAULT_PNL_RETURN_COLUMN}."
+        "Realized return source column used for cumulative returns. Defaults to "
+        f"{DEFAULT_RETURN_SOURCE_COLUMN}."
     ),
 )
 SEGMENT_COLUMN_OPTION = typer.Option(
@@ -150,7 +150,7 @@ USES_EXTERNAL_DATA_OPTION = typer.Option(
 BATCH_COST_BPS_OPTION = typer.Option(
     None,
     "--cost-bps",
-    help="Scalar cost in basis points. Repeat for multiple cost variants.",
+    help="Run-level scalar cost in basis points.",
 )
 ELIGIBILITY_COLUMN_OPTION = typer.Option(
     None,
@@ -172,10 +172,10 @@ DRY_RUN_OPTION = typer.Option(
     "--dry-run",
     help="Check Parquet schema and CLI config without running evaluation.",
 )
-ENGINE_OPTION = typer.Option(
+KERNEL_OPTION = typer.Option(
     "dataframe",
-    "--engine",
-    help="Evaluation engine: dataframe or tensor. Default uses dataframe reference.",
+    "--kernel",
+    help="Evaluation kernel: dataframe or tensor. Default uses dataframe reference.",
 )
 
 
@@ -240,7 +240,7 @@ def run_parquet_evaluation(
     asset_column: str = ASSET_COLUMN_OPTION,
     feature: list[str] | None = FEATURE_OPTION,
     label: list[str] | None = LABEL_OPTION,
-    pnl_return_column: str | None = PNL_RETURN_COLUMN_OPTION,
+    return_source_column: str | None = RETURN_SOURCE_COLUMN_OPTION,
     segment_column: list[str] | None = SEGMENT_COLUMN_OPTION,
     time_breakdown: list[str] | None = TIME_BREAKDOWN_OPTION,
     output: Path = EVALUATION_OUTPUT_OPTION,
@@ -261,7 +261,7 @@ def run_parquet_evaluation(
     eligibility_column: str | None = ELIGIBILITY_COLUMN_OPTION,
     can_enter_column: str | None = CAN_ENTER_COLUMN_OPTION,
     can_exit_column: str | None = CAN_EXIT_COLUMN_OPTION,
-    engine: str = ENGINE_OPTION,
+    kernel: str = KERNEL_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
 ) -> None:
     """从 long-format Parquet panel 运行 evaluation set。"""
@@ -282,13 +282,20 @@ def run_parquet_evaluation(
         name="portfolio_mode",
     )
     _validate_cli_choice(
-        engine,
+        kernel,
         valid_values={"dataframe", "tensor"},
-        name="engine",
+        name="kernel",
     )
     features = _required_cli_values(feature, "--feature")
     labels = _required_cli_values(label, "--label")
     cost_values = tuple(cost_bps) if cost_bps else (0.0,)
+    if len(cost_values) != 1:
+        _raise_parquet_input_error(
+            ValueError(
+                "schema 0.6 evaluate-parquet supports exactly one run-level "
+                "--cost-bps value."
+            )
+        )
     try:
         cost_configs = tuple(CostConfig(slippage_bps=cost) for cost in cost_values)
         weight_config = WeightConfig(
@@ -317,7 +324,7 @@ def run_parquet_evaluation(
                 asset_column=asset_column,
                 feature_columns=features,
                 label_columns=labels,
-                pnl_return_column=pnl_return_column,
+                return_source_column=return_source_column,
                 extra_columns=extra_columns,
             )
         except (RuntimeError, TypeError, ValueError) as exc:
@@ -328,7 +335,7 @@ def run_parquet_evaluation(
                 asset_column,
                 *features,
                 *labels,
-                pnl_return_column or DEFAULT_PNL_RETURN_COLUMN,
+                return_source_column or DEFAULT_RETURN_SOURCE_COLUMN,
                 *extra_columns,
             }
         )
@@ -340,7 +347,7 @@ def run_parquet_evaluation(
             f"columns={len(inspection.columns)} "
             f"required_columns={required_count} "
             f"features={len(features)} labels={len(labels)} "
-            f"cost_variants={len(cost_configs)} "
+            f"cost_bps={cost_values[0]} "
             f"portfolio_mode={portfolio_mode}"
         )
         return
@@ -351,7 +358,7 @@ def run_parquet_evaluation(
             asset_column=asset_column,
             feature_columns=features,
             label_columns=labels,
-            pnl_return_column=pnl_return_column,
+            return_source_column=return_source_column,
             metadata={
                 "run_id": evaluation_id or output.name,
                 "project": project,
@@ -371,7 +378,7 @@ def run_parquet_evaluation(
             ),
             segment_columns=tuple(segment_column or ()),
             time_breakdowns=_time_breakdown_values(time_breakdown),
-            engine=engine,
+            kernel=kernel,
         )
         result = run_evaluation(spec)
     except (RuntimeError, TypeError, ValueError) as exc:

@@ -271,7 +271,9 @@ export function FactorFactoryRuns() {
                     </thead>
                     <tbody>
                       {candidateTable.rows.map((row, index) => (
-                        <tr key={`${row.candidate_id ?? index}`}>
+                        <tr
+                          key={`${row.candidate_id ?? index}::${row.combination_id ?? index}`}
+                        >
                           {visibleColumns.map((column) => (
                             <td key={column}>{formatCell(row[column])}</td>
                           ))}
@@ -333,7 +335,7 @@ function presetItemLabel(
   item: string,
   downloadItems: FactorFactoryDownloadItem[],
 ): string {
-  return downloadItems.find((downloadItem) => downloadItem.item === item)?.item ?? item
+  return downloadItems.find((downloadItem) => downloadItem.item === item)?.label ?? item
 }
 
 function hasMoreRows(table: TablePayload, fallbackOffset: number): boolean {

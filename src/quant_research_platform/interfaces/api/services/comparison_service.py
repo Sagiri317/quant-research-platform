@@ -80,7 +80,7 @@ def comparison_record(
         "project": str(summary["project"]),
         "kind": str(summary["kind"]),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
-        "weight_method": weight_method(summary),
+        "weight_method": weight_method(run.config),
         "mean_ic": mean_numeric(ic_summary, "mean_ic"),
         "mean_rankic": mean_numeric(ic_summary, "mean_rankic"),
         "mean_final_return": mean_numeric(
@@ -107,7 +107,7 @@ def comparison_index_record(record: RunIndexRecord) -> dict[str, object]:
         "project": str(summary["project"]),
         "kind": str(summary["kind"]),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
-        "weight_method": weight_method(summary),
+        "weight_method": weight_method(record.config),
         "mean_ic": mean_numeric(record.ic_summary, "mean_ic"),
         "mean_rankic": mean_numeric(record.ic_summary, "mean_rankic"),
         "mean_final_return": mean_numeric(

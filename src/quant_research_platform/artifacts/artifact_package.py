@@ -223,6 +223,12 @@ def _resolve_download_item(
             media_type="application/json",
             content=_json_bytes(run.config),
         )
+    if item == "lineage.json":
+        return _ResolvedDownloadItem(
+            name=item,
+            media_type="application/json",
+            content=public_lineage_bytes(run.output_dir),
+        )
     if item == "summary.json":
         return _ResolvedDownloadItem(
             name=item,
@@ -254,6 +260,8 @@ def _download_item_path(run: LoadedEvaluationSet, item: str) -> Path | None:
     """Return an existing artifact file path; dynamic content returns None."""
 
     _validate_download_item_name(item)
+    if item == "lineage.json":
+        return None
     artifacts = run.manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         return None
@@ -275,7 +283,7 @@ def _artifact_relative_path(
     if item == "report.md":
         value = artifacts.get("report")
         return value if value == item else None
-    if item in {"manifest.json", "config.json", "summary.json"}:
+    if item in {"manifest.json", "config.json", "lineage.json", "summary.json"}:
         return item
     display = run.manifest.get("display")
     if isinstance(display, dict):
@@ -302,7 +310,7 @@ def _artifact_relative_path_from_manifest(
     if item == "report.md":
         value = artifacts.get("report")
         return value if value == item else None
-    if item in {"manifest.json", "config.json", "summary.json"}:
+    if item in {"manifest.json", "config.json", "lineage.json", "summary.json"}:
         return item
     display = manifest.get("display")
     if isinstance(display, dict):
@@ -323,16 +331,17 @@ def _table_relative_path(
     table_name: str,
 ) -> str | None:
     if table_name == "combinations":
-        value = artifacts.get("combinations")
+        dimensions = artifacts.get("dimensions")
+        value = dimensions.get("combinations") if isinstance(dimensions, dict) else None
         return value if isinstance(value, str) else None
-    for group in ("metrics", "portfolio", "diagnostics"):
+    for group in ("metrics", "portfolio", "diagnostics", "input_quality", "summaries"):
         section = artifacts.get(group)
         if isinstance(section, dict):
             value = section.get(table_name)
             if isinstance(value, str):
                 return value
     for period in ("year", "quarter", "month"):
-        section = artifacts.get(f"metrics_by_{period}")
+        section = artifacts.get(f"breakdowns/{period}")
         if isinstance(section, dict):
             value = section.get(table_name)
             if isinstance(value, str):
@@ -366,6 +375,21 @@ def _json_bytes(payload: dict[str, object]) -> bytes:
     """Encode a JSON-like payload as UTF-8 JSON bytes."""
 
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def public_lineage_bytes(output_dir: Path) -> bytes:
+    """Return API-safe lineage metadata without private/local input file fields."""
+
+    return _json_bytes(_public_lineage_payload(output_dir))
+
+
+def _public_lineage_payload(output_dir: Path) -> dict[str, object]:
+    path = output_dir / "lineage.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ArtifactPackageError("lineage.json must contain an object")
+    value.pop("input_file", None)
+    return value
 
 
 def _write_selected_zip(
@@ -427,6 +451,8 @@ def _cache_identity_segment(value: str) -> str:
 def _media_type_for_item(item: str) -> str:
     if item.endswith(".csv"):
         return "text/csv; charset=utf-8"
+    if item.endswith(".parquet"):
+        return "application/vnd.apache.parquet"
     if item.endswith(".md"):
         return "text/markdown; charset=utf-8"
     if item.endswith(".json"):

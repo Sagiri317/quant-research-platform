@@ -3,24 +3,16 @@ import type { TablePayload } from '../../shared/api/api'
 
 const MISSING_COMBINATION_ID = '__missing_combination__'
 const COMBINATION_LABELS: Record<string, string> = {
-  cost_bps: '成本',
-  cost_id: '成本配置',
-  direction: '方向',
   feature: '因子',
+  kernel: '计算内核',
   label: '标签',
   portfolio_mode: '组合模式',
-  weight_id: '权重配置',
-  weight_method: '权重方法',
 }
 const COMBINATION_DIMENSION_COLUMNS = [
   'feature',
   'label',
-  'weight_id',
-  'cost_id',
-  'weight_method',
-  'direction',
+  'kernel',
   'portfolio_mode',
-  'cost_bps',
 ]
 
 type LocalSelection = {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -9,17 +10,21 @@ import pandas as pd
 
 from quant_research_platform.artifacts.artifact_loader import (
     LoadedEvaluationSet,
-    load_evaluation_set,
+)
+from quant_research_platform.artifacts.manifest_validation import (
+    evaluation_set_csv_paths,
+    validate_artifact_schema_version,
+    validate_display_manifest,
+    validate_evaluation_set_payload,
 )
 
 
 def compare_evaluation_sets(output_dirs: list[str | Path]) -> pd.DataFrame:
-    """把已完成的 evaluation sets 汇总成一张 comparison table。"""
+    """把已完成的 evaluation sets 汇总成一张 low-memory comparison table。"""
 
     if not output_dirs:
         raise ValueError("output_dirs must contain at least one run directory.")
-    runs = [load_evaluation_set(output_dir) for output_dir in output_dirs]
-    records = [_summarize_run(run) for run in runs]
+    records = [_summarize_run_path(Path(output_dir)) for output_dir in output_dirs]
     comparison = pd.DataFrame.from_records(records).sort_values(
         "evaluation_id"
     ).reset_index(drop=True)
@@ -54,8 +59,46 @@ def write_run_comparison(
 def _summarize_run(run: LoadedEvaluationSet) -> dict[str, object]:
     return _comparison_record(
         summary=run.summary,
+        config=run.config,
         metrics=run.tables,
     )
+
+
+def _summarize_run_path(output_dir: Path) -> dict[str, object]:
+    summary_path = output_dir / "summary.json"
+    if not summary_path.is_file():
+        raise FileNotFoundError(summary_path)
+    manifest_path = output_dir / "manifest.json"
+    config_path = output_dir / "config.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+    if not config_path.is_file():
+        raise FileNotFoundError(config_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest.json must contain a JSON object.")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("config.json must contain a JSON object.")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(summary, dict):
+        raise ValueError("summary.json must contain a JSON object.")
+    validate_artifact_schema_version(manifest, source="manifest.json")
+    validate_artifact_schema_version(summary, source="summary.json")
+    validate_evaluation_set_payload(manifest, source="manifest.json")
+    validate_evaluation_set_payload(summary, source="summary.json")
+    validate_display_manifest(manifest)
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError("manifest.json must contain an artifacts object.")
+    table_paths = evaluation_set_csv_paths(artifacts)
+    metrics = {
+        "performance_summary": pd.read_csv(
+            output_dir / table_paths["performance_summary"]
+        ),
+        "ic_summary": pd.read_csv(output_dir / table_paths["ic_summary"]),
+    }
+    return _comparison_record(summary=summary, config=config, metrics=metrics)
 
 
 def _summarize_result(result: Any) -> dict[str, object]:
@@ -63,6 +106,7 @@ def _summarize_result(result: Any) -> dict[str, object]:
         raise TypeError("result must expose summary and metrics attributes.")
     return _comparison_record(
         summary=result.summary,
+        config=getattr(result, "config", result.summary),
         metrics=result.metrics,
     )
 
@@ -70,6 +114,7 @@ def _summarize_result(result: Any) -> dict[str, object]:
 def _comparison_record(
     *,
     summary: dict[str, object],
+    config: dict[str, object],
     metrics: dict[str, pd.DataFrame],
 ) -> dict[str, object]:
     evaluation_id = summary.get("evaluation_id")
@@ -83,8 +128,8 @@ def _comparison_record(
         "kind": _required_string(summary, "kind"),
         "n_rows_evaluated": _required_int(summary, "n_rows_evaluated"),
         "n_combinations": _required_int(summary, "n_combinations"),
-        "weight_method": _weight_method(summary),
-        "cost_bps": _weight_cost_bps(summary),
+        "weight_method": _weight_method(config),
+        "cost_bps": _weight_cost_bps(config),
         "mean_ic": _mean_numeric(ic_summary, "mean_ic"),
         "mean_rankic": _mean_numeric(ic_summary, "mean_rankic"),
         "mean_final_return": _mean_numeric(
@@ -110,17 +155,17 @@ def _required_int(summary: dict[str, object], field: str) -> int:
     return value
 
 
-def _weight_method(summary: dict[str, object]) -> str:
-    configs = summary.get("weight_configs")
+def _weight_method(config: dict[str, object]) -> str:
+    configs = config.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and isinstance(first.get("method"), str):
             return str(first["method"])
-    raise ValueError("summary weight_configs must include a non-empty method.")
+    raise ValueError("config weight_configs must include a non-empty method.")
 
 
-def _weight_cost_bps(summary: dict[str, object]) -> float:
-    cost_configs = summary.get("cost_configs")
+def _weight_cost_bps(config: dict[str, object]) -> float:
+    cost_configs = config.get("cost_configs")
     cost_config = (
         cost_configs[0]
         if isinstance(cost_configs, list) and cost_configs
@@ -135,6 +180,20 @@ def _weight_cost_bps(summary: dict[str, object]) -> float:
         )
         if detailed_cost:
             return detailed_cost
+    cost_config = config.get("cost_config")
+    if isinstance(cost_config, dict) and cost_config.get("cost_bps") is not None:
+        return float(cost_config.get("cost_bps") or 0.0)
+    weight_config = config.get("weight_config")
+    if isinstance(weight_config, dict) and weight_config.get("cost_bps") is not None:
+        return float(weight_config.get("cost_bps") or 0.0)
+    weight_configs = config.get("weight_configs")
+    weight_config = (
+        weight_configs[0]
+        if isinstance(weight_configs, list) and weight_configs
+        else None
+    )
+    if isinstance(weight_config, dict) and weight_config.get("cost_bps") is not None:
+        return float(weight_config.get("cost_bps") or 0.0)
     return 0.0
 
 

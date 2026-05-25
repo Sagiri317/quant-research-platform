@@ -1,19 +1,16 @@
-"""把私有 A 股 factor table 接入平台 evaluation layer。
-
-本模块只负责 A 股适配：定位 processed Parquet、读取 CLI 请求的 columns、
-补充 A 股 metadata，并调用平台 evaluation layer。指标定义、持仓路径和
-period breakdown 语义保留在 evaluations 与 kernels 模块内。
-"""
+"""Adapt private A-share factor tables into evaluation artifacts."""
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 
+from quant_research_platform.artifacts.artifact_writer import (
+    write_evaluation_set_artifacts,
+)
 from quant_research_platform.evaluations import (
     EvaluationSpec,
     NeutralizationConfig,
@@ -21,11 +18,12 @@ from quant_research_platform.evaluations import (
     TradabilityConfig,
     WeightConfig,
 )
-from quant_research_platform.evaluations.evaluation_runner import run_evaluation
+from quant_research_platform.evaluations.evaluation_payload import EvaluationRunPayload
+from quant_research_platform.evaluations.evaluation_runner import evaluate_to_payload
 from quant_research_platform.evaluations.evaluation_spec import PORTFOLIO_MODES
 from quant_research_platform.kernels.kernel_registry import (
-    normalize_engine_name,
-    supported_engine_names,
+    normalize_kernel_name,
+    supported_kernel_names,
 )
 from quant_research_platform.runtime.paths import factor_full_path_covering_range
 
@@ -39,7 +37,7 @@ FACTOR_PREFIXES = (
     "amplitude_",
 )
 LABEL_PREFIX = "forward_return_"
-PNL_RETURN_COLUMN = "forward_return_1d"
+DEFAULT_RETURN_SOURCE_COLUMN = "forward_return_1d"
 DATE_COLUMN = "trade_date"
 DEFAULT_REPRESENTATIVE_FACTORS = ("mom_20d", "vol_20d", "amihud_20d")
 LABEL_AVAILABILITY_COLUMNS = (
@@ -49,19 +47,17 @@ LABEL_AVAILABILITY_COLUMNS = (
 )
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 FORWARD_RETURN_LABEL_PATTERN = re.compile(r"^forward_return_\d+d$")
-PIPELINE_EVALUATION_MANIFEST_SCHEMA_VERSION = "0.1"
-PIPELINE_EVALUATION_MANIFEST_TYPE = "a_share_pipeline_evaluation_manifest"
 DEFAULT_A_SHARE_SOURCE_ALIAS = "a_share"
 
 
 def schema_columns(path: Path) -> tuple[str, ...]:
-    """返回 Parquet schema column names。"""
+    """Return Parquet schema column names."""
 
     return tuple(pq.ParquetFile(path).schema.names)
 
 
 def discover_factor_columns(path: Path) -> tuple[str, ...]:
-    """发现 slim factor file 中的价量 factor columns。"""
+    """Discover value factor columns in a slim factor file."""
 
     return tuple(
         sorted(
@@ -73,7 +69,7 @@ def discover_factor_columns(path: Path) -> tuple[str, ...]:
 
 
 def discover_label_columns(path: Path) -> tuple[str, ...]:
-    """发现 slim factor file 中的 forward-return label columns。"""
+    """Discover forward-return label columns in a slim factor file."""
 
     return tuple(
         sorted(
@@ -85,7 +81,7 @@ def discover_label_columns(path: Path) -> tuple[str, ...]:
 
 
 def choose_default_factor_columns(factor_columns: tuple[str, ...]) -> tuple[str, ...]:
-    """在调用方未指定 columns 时选择代表性 factors。"""
+    """Choose representative factors when columns are not specified."""
 
     selected = [
         column for column in DEFAULT_REPRESENTATIVE_FACTORS if column in factor_columns
@@ -96,7 +92,7 @@ def choose_default_factor_columns(factor_columns: tuple[str, ...]) -> tuple[str,
 
 
 def parse_columns(value: str) -> tuple[str, ...]:
-    """解析逗号分隔的 CLI column list。"""
+    """Parse a comma-separated CLI column list."""
 
     return tuple(column.strip() for column in value.split(",") if column.strip())
 
@@ -107,7 +103,7 @@ def summarize_label_availability(
     label_columns: tuple[str, ...],
     year: int,
 ) -> pd.DataFrame:
-    """汇总 label 非空率和 filter-column 计数。"""
+    """Summarize label coverage and filter-column counts."""
 
     records: list[dict[str, object]] = []
     rows = len(frame)
@@ -129,7 +125,7 @@ def summarize_label_availability(
 
 
 def true_count(frame: pd.DataFrame, column: str) -> int:
-    """返回 filter column 中 truthy values 的数量。"""
+    """Return the count of truthy values in a filter column."""
 
     if column not in frame:
         return 0
@@ -137,7 +133,7 @@ def true_count(frame: pd.DataFrame, column: str) -> int:
 
 
 def normalize_date_arg(value: str | None) -> pd.Timestamp | None:
-    """把 CLI date 参数规范化为 pandas timestamp。"""
+    """Normalize a CLI date parameter to a pandas timestamp."""
 
     if not value:
         return None
@@ -145,7 +141,7 @@ def normalize_date_arg(value: str | None) -> pd.Timestamp | None:
 
 
 def date_range_id(start_date: str | None, end_date: str | None) -> str:
-    """为过滤后的 evaluation artifacts 返回紧凑 date-range id。"""
+    """Return a compact date-range id for filtered artifacts."""
 
     start = normalize_date_arg(start_date)
     end = normalize_date_arg(end_date)
@@ -160,7 +156,7 @@ def filter_by_trade_date(
     start_date: str | None,
     end_date: str | None,
 ) -> pd.DataFrame:
-    """按闭区间 trade_date 边界过滤 frame。"""
+    """Filter a frame by inclusive trade-date bounds."""
 
     start = normalize_date_arg(start_date)
     end = normalize_date_arg(end_date)
@@ -182,17 +178,35 @@ def read_factor_frame(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
-    """读取 factor table，并可按 trade_date 过滤。"""
+    """Read the factor table with an optional trade-date filter."""
 
     read_columns = list(columns) if columns is not None else None
     if (start_date or end_date) and read_columns is not None:
         read_columns = list(dict.fromkeys((*read_columns, DATE_COLUMN)))
-    frame = pd.read_parquet(path, columns=read_columns, engine="pyarrow")
+    frame = pd.read_parquet(
+        path,
+        columns=read_columns,
+        engine="pyarrow",
+        filters=_trade_date_filters(start_date=start_date, end_date=end_date),
+    )
     return filter_by_trade_date(frame, start_date=start_date, end_date=end_date)
 
 
+def _trade_date_filters(
+    *,
+    start_date: str | None,
+    end_date: str | None,
+) -> list[tuple[str, str, object]] | None:
+    filters: list[tuple[str, str, object]] = []
+    if start_date is not None:
+        filters.append((DATE_COLUMN, ">=", pd.Timestamp(start_date).to_pydatetime()))
+    if end_date is not None:
+        filters.append((DATE_COLUMN, "<=", pd.Timestamp(end_date).to_pydatetime()))
+    return filters or None
+
+
 def write_csv_utf8_sig(path: Path, frame: pd.DataFrame) -> Path:
-    """写出带 BOM 的 CSV，便于 Windows Excel 直接打开。"""
+    """Write a UTF-8 BOM CSV for direct Windows Excel opening."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False, encoding="utf-8-sig")
@@ -206,7 +220,7 @@ def read_label_availability_frame(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
-    """只读取 availability summary 所需的 filter 与 label columns。"""
+    """Read only columns needed for availability summaries."""
 
     columns = tuple(dict.fromkeys((*LABEL_AVAILABILITY_COLUMNS, *label_columns)))
     return read_factor_frame(
@@ -221,8 +235,8 @@ def read_evaluation_frame(
     path: Path,
     *,
     feature_columns: tuple[str, ...],
-    label_column: str,
-    pnl_return_column: str = PNL_RETURN_COLUMN,
+    label_columns: tuple[str, ...],
+    return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     segment_columns: tuple[str, ...] = (),
     risk_column: str | None = None,
     neutralization_group_columns: tuple[str, ...] = (),
@@ -230,12 +244,7 @@ def read_evaluation_frame(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
-    """读取一次 evaluation layer 请求所需的过滤后 DataFrame。
-
-    只加载 EvaluationSpec 引用的 columns，避免把 panel-only fields 带入
-    evaluation handoff，同时在 CLI 请求时保留 segment、risk 和
-    neutralization columns。
-    """
+    """Read the filtered DataFrame needed for one evaluation request."""
 
     columns = tuple(
         dict.fromkeys(
@@ -243,8 +252,8 @@ def read_evaluation_frame(
                 "trade_date",
                 "stock_code",
                 *feature_columns,
-                label_column,
-                pnl_return_column,
+                *label_columns,
+                return_source_column,
                 *segment_columns,
                 *(column for column in (risk_column,) if column),
                 *neutralization_group_columns,
@@ -273,7 +282,7 @@ def make_a_share_evaluation_spec(
     panel: pd.DataFrame,
     start_year: int,
     end_year: int,
-    label_column: str,
+    label_columns: tuple[str, ...],
     feature_columns: tuple[str, ...],
     output_dir: Path,
     run_id: str,
@@ -281,23 +290,20 @@ def make_a_share_evaluation_spec(
     source_file: str,
     start_date: str | None = None,
     end_date: str | None = None,
-    pnl_return_column: str = PNL_RETURN_COLUMN,
+    return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     cost_bps: float = 0.0,
     portfolio_mode: str = "long_short",
-    engine: str = "dataframe",
+    kernel: str = "dataframe",
     segment_columns: tuple[str, ...] = (),
     risk_column: str | None = None,
     neutralization_method: str = "none",
     neutralization_group_columns: tuple[str, ...] = (),
     neutralization_exposure_columns: tuple[str, ...] = (),
 ) -> EvaluationSpec:
-    """从已过滤的 DataFrame 构造 A 股 evaluation-set spec。
+    """Build an A-share evaluation-set spec from a filtered DataFrame."""
 
-    年份范围描述请求的 research window；evaluation layer 接收连续 panel，
-    并通过切分完整路径生成 metrics_by_year，而不是在自然年边界重启持仓。
-    """
-
-    validate_forward_return_label(label_column)
+    for label_column in label_columns:
+        validate_forward_return_label(label_column)
     metadata = {
         "run_id": run_id,
         "project": "quant-research-platform",
@@ -311,13 +317,13 @@ def make_a_share_evaluation_spec(
         "end_year": end_year,
         "source_file": source_file,
         "factor_count": len(feature_columns),
-        "label_columns": [label_column],
+        "label_columns": list(label_columns),
         "start_date": start_date,
         "end_date": end_date,
-        "pnl_return_column": pnl_return_column,
+        "return_source_column": return_source_column,
         "cost_bps": cost_bps,
         "portfolio_mode": portfolio_mode,
-        "engine": normalize_engine_name(engine),
+        "kernel": normalize_kernel_name(kernel),
         "segment_columns": list(segment_columns),
         "risk_column": risk_column,
         "neutralization_method": neutralization_method,
@@ -337,7 +343,7 @@ def make_a_share_evaluation_spec(
         timestamp_column="trade_date",
         asset_column="stock_code",
         feature_columns=feature_columns,
-        label_columns=(label_column,),
+        label_columns=label_columns,
         metadata=metadata,
         n_groups=n_groups,
         weight_configs=(
@@ -363,8 +369,8 @@ def make_a_share_evaluation_spec(
             timezone="Asia/Shanghai",
         ),
         segment_columns=segment_columns,
-        engine=normalize_engine_name(engine),
-        pnl_return_column=pnl_return_column,
+        kernel=normalize_kernel_name(kernel),
+        return_source_column=return_source_column,
         time_breakdowns=("year",),
         output_dir=output_dir,
         domain_notes={
@@ -378,43 +384,35 @@ def make_a_share_evaluation_spec(
     )
 
 
-def run_label_evaluation(
+def evaluate_a_share_matrix_payload(
     *,
     panel: pd.DataFrame,
     source_file: str,
     start_year: int,
     end_year: int,
-    label_column: str,
+    label_columns: tuple[str, ...],
     feature_columns: tuple[str, ...],
-    output_root: Path,
+    output_dir: Path,
+    run_id: str,
     n_groups: int,
-    date_id: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
-    pnl_return_column: str = PNL_RETURN_COLUMN,
+    return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     cost_bps: float = 0.0,
     portfolio_mode: str = "long_short",
-    engine: str = "dataframe",
+    kernel: str = "dataframe",
     segment_columns: tuple[str, ...] = (),
     risk_column: str | None = None,
     neutralization_method: str = "none",
     neutralization_group_columns: tuple[str, ...] = (),
     neutralization_exposure_columns: tuple[str, ...] = (),
-) -> Path:
-    """在过滤后的全样本 frame 上运行一个 label 的 evaluation。
+) -> EvaluationRunPayload:
+    """Compute one kernel and portfolio-mode payload from a filtered frame."""
 
-    每个 label 使用独立 evaluation run directory，因为 combinations
-    以一个 label set、一个 weight config 和一个 cost config 为单位构造。
-    """
-
-    run_id = f"csmar_{start_year}_{end_year}_{label_column}"
-    if date_id:
-        run_id = f"{run_id}_{date_id}"
-    output_dir = _evaluation_run_output_dir(output_root, run_id)
     spec = make_a_share_evaluation_spec(
         panel=panel,
         feature_columns=feature_columns,
-        label_column=label_column,
+        label_columns=label_columns,
         output_dir=output_dir,
         run_id=run_id,
         n_groups=n_groups,
@@ -423,36 +421,21 @@ def run_label_evaluation(
         source_file=source_file,
         start_date=start_date,
         end_date=end_date,
-        pnl_return_column=pnl_return_column,
+        return_source_column=return_source_column,
         cost_bps=cost_bps,
         portfolio_mode=portfolio_mode,
-        engine=engine,
+        kernel=kernel,
         segment_columns=segment_columns,
         risk_column=risk_column,
         neutralization_method=neutralization_method,
         neutralization_group_columns=neutralization_group_columns,
         neutralization_exposure_columns=neutralization_exposure_columns,
     )
-    run_evaluation(spec)
-    return output_dir
-
-
-def _evaluation_run_output_dir(output_root: Path, run_id: str) -> Path:
-    """返回 output_root/evaluation_runs 下的安全 evaluation run 输出路径。"""
-
-    if not RUN_ID_PATTERN.fullmatch(run_id):
-        raise ValueError(f"unsafe evaluation run_id: {run_id!r}")
-    root = (output_root / "evaluation_runs").resolve()
-    output_dir = (root / run_id).resolve()
-    if output_dir.parent != root:
-        raise ValueError(
-            f"evaluation run output path escaped output root: {output_dir}"
-        )
-    return output_dir
+    return evaluate_to_payload(spec)
 
 
 def validate_forward_return_label(label: str) -> None:
-    """要求 A 股 adapter 只接收已知 forward-return label 命名。"""
+    """Require supported A-share forward-return label names."""
 
     if not FORWARD_RETURN_LABEL_PATTERN.fullmatch(label):
         raise ValueError(
@@ -471,12 +454,13 @@ def run_processed_factor_evaluation(
     requested_factors: tuple[str, ...],
     all_factors: bool,
     n_groups: int,
+    input_file: Path | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
-    pnl_return_column: str = PNL_RETURN_COLUMN,
+    return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     cost_bps: float = 0.0,
-    portfolio_mode: str = "long_short",
-    engine: str = "dataframe",
+    portfolio_modes: tuple[str, ...] = ("long_short",),
+    kernels: tuple[str, ...] = ("dataframe",),
     segment_columns: tuple[str, ...] = (),
     risk_column: str | None = None,
     neutralization_method: str = "none",
@@ -485,17 +469,13 @@ def run_processed_factor_evaluation(
     source_alias: str = DEFAULT_A_SHARE_SOURCE_ALIAS,
     manifest_run_id: str | None = None,
 ) -> tuple[pd.DataFrame, Path, list[dict[str, object]]]:
-    """在一个全样本 slim factor Parquet file 上运行 evaluation layer。
-
-    label availability 按自然年汇总供诊断使用；evaluation 本身读取连续日期区间，
-    因此 tradability 允许时路径指标可以跨年持仓。
-    """
+    """Write one schema 0.6 evaluation_set from a slim factor Parquet file."""
 
     _validate_run_processed_options(
         start_year=start_year,
         end_year=end_year,
-        engine=engine,
-        portfolio_mode=portfolio_mode,
+        kernels=kernels,
+        portfolio_modes=portfolio_modes,
         requested_labels=requested_labels,
         n_groups=n_groups,
         start_date=start_date,
@@ -503,11 +483,14 @@ def run_processed_factor_evaluation(
         cost_bps=cost_bps,
     )
     label_summaries = []
-    evaluation_runs: list[dict[str, object]] = []
-    parquet_path = factor_full_path_covering_range(
-        processed_root,
-        start_year,
-        end_year,
+    parquet_path = (
+        input_file
+        if input_file is not None
+        else factor_full_path_covering_range(
+            processed_root,
+            start_year,
+            end_year,
+        )
     )
     if not parquet_path.exists():
         raise FileNotFoundError(parquet_path)
@@ -551,106 +534,115 @@ def run_processed_factor_evaluation(
         label_summaries.append(availability)
 
     date_id = date_range_id(start_date, end_date) if start_date or end_date else None
-    for label in labels:
-        evaluation_frame = read_evaluation_frame(
-            parquet_path,
-            feature_columns=feature_columns,
-            label_column=label,
-            pnl_return_column=pnl_return_column,
-            segment_columns=segment_columns,
-            risk_column=risk_column,
-            neutralization_group_columns=neutralization_group_columns,
-            neutralization_exposure_columns=neutralization_exposure_columns,
-            start_date=range_start,
-            end_date=range_end,
-        )
-        output_dir = run_label_evaluation(
-            panel=evaluation_frame,
-            source_file=parquet_path.as_posix(),
-            start_year=start_year,
-            end_year=end_year,
-            label_column=label,
-            feature_columns=feature_columns,
-            output_root=report_root,
-            n_groups=n_groups,
-            date_id=date_id,
-            start_date=start_date,
-            end_date=end_date,
-            pnl_return_column=pnl_return_column,
-            cost_bps=cost_bps,
-            portfolio_mode=portfolio_mode,
-            engine=engine,
-            segment_columns=segment_columns,
-            risk_column=risk_column,
-            neutralization_method=neutralization_method,
-            neutralization_group_columns=neutralization_group_columns,
-            neutralization_exposure_columns=neutralization_exposure_columns,
-        )
-        run_id = output_dir.name
-        evaluation_runs.append(
-            {
-                "run_id": run_id,
-                "start_year": start_year,
-                "end_year": end_year,
-                "label": label,
-                "features": list(feature_columns),
-                "start_date": start_date,
-                "end_date": end_date,
-                "pnl_return_column": pnl_return_column,
-                "cost_bps": cost_bps,
-                "portfolio_mode": portfolio_mode,
-                "engine": engine,
-                "segment_columns": list(segment_columns),
-                "risk_column": risk_column,
-                "neutralization_method": neutralization_method,
-                "neutralization_group_columns": list(neutralization_group_columns),
-                "neutralization_exposure_columns": list(
-                    neutralization_exposure_columns
-                ),
-                **input_reference,
-                "input_materialized": False,
-                "output_dir": f"evaluation_runs/{run_id}",
-            }
-        )
-
-    label_summary = pd.concat(label_summaries, ignore_index=True)
-    write_csv_utf8_sig(report_root / "label_availability.csv", label_summary)
-    manifest_path = report_root / "evaluation_manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_identity = manifest_run_id or _default_manifest_run_id(
+    evaluation_frame = read_evaluation_frame(
+        parquet_path,
+        feature_columns=feature_columns,
+        label_columns=labels,
+        return_source_column=return_source_column,
+        segment_columns=segment_columns,
+        risk_column=risk_column,
+        neutralization_group_columns=neutralization_group_columns,
+        neutralization_exposure_columns=neutralization_exposure_columns,
+        start_date=range_start,
+        end_date=range_end,
+    )
+    run_id = manifest_run_id or _default_manifest_run_id(
         report_root,
         source_alias=source_alias,
     )
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "schema_version": PIPELINE_EVALUATION_MANIFEST_SCHEMA_VERSION,
-                "artifact_type": PIPELINE_EVALUATION_MANIFEST_TYPE,
-                "source_alias": source_alias,
-                "run_id": manifest_identity,
-                "evaluation_runs": evaluation_runs,
-                "artifacts": {
-                    "label_availability": "label_availability.csv",
-                    "evaluation_runs_root": "evaluation_runs",
-                },
-                "display": {
-                    "schema_version": PIPELINE_EVALUATION_MANIFEST_SCHEMA_VERSION,
-                    "tables": [
-                        {
-                            "key": "label_availability",
-                            "label": "Label availability",
-                            "path": "label_availability.csv",
-                        }
-                    ],
-                },
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    payloads: list[EvaluationRunPayload] = []
+    for kernel in kernels:
+        for portfolio_mode in portfolio_modes:
+            payloads.append(
+                evaluate_a_share_matrix_payload(
+                    panel=evaluation_frame,
+                    source_file=parquet_path.name,
+                    start_year=start_year,
+                    end_year=end_year,
+                    label_columns=labels,
+                    feature_columns=feature_columns,
+                    output_dir=report_root,
+                    run_id=run_id,
+                    n_groups=n_groups,
+                    start_date=start_date,
+                    end_date=end_date,
+                    return_source_column=return_source_column,
+                    cost_bps=cost_bps,
+                    portfolio_mode=portfolio_mode,
+                    kernel=kernel,
+                    segment_columns=segment_columns,
+                    risk_column=risk_column,
+                    neutralization_method=neutralization_method,
+                    neutralization_group_columns=neutralization_group_columns,
+                    neutralization_exposure_columns=neutralization_exposure_columns,
+                )
+            )
+    combined_tables = _combine_payload_tables(payloads)
+    combined_summary = _combined_summary(
+        payloads,
+        tables=combined_tables,
+        run_id=run_id,
+        labels=labels,
+        kernels=kernels,
+        portfolio_modes=portfolio_modes,
     )
-    return label_summary, manifest_path, evaluation_runs
+    combined_config = _combined_config(
+        payloads,
+        run_id=run_id,
+        labels=labels,
+        kernels=kernels,
+        portfolio_modes=portfolio_modes,
+        input_reference=input_reference,
+        source_alias=source_alias,
+        start_year=start_year,
+        end_year=end_year,
+        start_date=start_date,
+        end_date=end_date,
+        return_source_column=return_source_column,
+        feature_columns=feature_columns,
+        cost_bps=cost_bps,
+        segment_columns=segment_columns,
+        risk_column=risk_column,
+        neutralization_method=neutralization_method,
+        neutralization_group_columns=neutralization_group_columns,
+        neutralization_exposure_columns=neutralization_exposure_columns,
+        source_file=parquet_path.name,
+        date_id=date_id,
+    )
+    artifacts = write_evaluation_set_artifacts(
+        report_root,
+        config=combined_config,
+        lineage=combined_config["lineage"],
+        summary=combined_summary,
+        tables=combined_tables,
+        report=_combined_report(combined_summary, combined_tables),
+    )
+    run_records = [
+        {
+            "run_id": run_id,
+            "start_year": start_year,
+            "end_year": end_year,
+            "labels": list(labels),
+            "features": list(feature_columns),
+            "start_date": start_date,
+            "end_date": end_date,
+            "return_source_column": return_source_column,
+            "cost_bps": cost_bps,
+            "portfolio_modes": list(portfolio_modes),
+            "kernels": list(kernels),
+            "segment_columns": list(segment_columns),
+            "risk_column": risk_column,
+            "neutralization_method": neutralization_method,
+            "neutralization_group_columns": list(neutralization_group_columns),
+            "neutralization_exposure_columns": list(neutralization_exposure_columns),
+            **input_reference,
+            "input_materialized": False,
+            "output_dir": ".",
+        }
+    ]
+
+    label_summary = pd.concat(label_summaries, ignore_index=True)
+    return label_summary, artifacts.manifest_path, run_records
 
 
 def _processed_factor_input_reference(parquet_path: Path) -> dict[str, object]:
@@ -661,6 +653,159 @@ def _processed_factor_input_reference(parquet_path: Path) -> dict[str, object]:
     if match:
         reference["input_year_range"] = f"{match.group(1)}_{match.group(2)}"
     return reference
+
+
+def _combine_payload_tables(
+    payloads: list[EvaluationRunPayload],
+) -> dict[str, pd.DataFrame]:
+    if not payloads:
+        raise ValueError("at least one evaluation payload is required.")
+    table_names = sorted({name for payload in payloads for name in payload.tables})
+    combined: dict[str, pd.DataFrame] = {}
+    for name in table_names:
+        frames = [
+            payload.tables[name]
+            for payload in payloads
+            if name in payload.tables and not payload.tables[name].empty
+        ]
+        frame = (
+            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        )
+        if name in {"label_availability", "factor_coverage", "tradability_coverage"}:
+            frame = frame.drop_duplicates(ignore_index=True)
+        combined[name] = frame
+    return combined
+
+
+def _combined_summary(
+    payloads: list[EvaluationRunPayload],
+    *,
+    tables: dict[str, pd.DataFrame],
+    run_id: str,
+    labels: tuple[str, ...],
+    kernels: tuple[str, ...],
+    portfolio_modes: tuple[str, ...],
+) -> dict[str, object]:
+    summary = dict(payloads[0].summary)
+    summary["evaluation_id"] = run_id
+    summary["n_combinations"] = int(len(tables["combinations"]))
+    summary["kernel"] = kernels[0] if len(kernels) == 1 else "multiple"
+    summary["kernels"] = list(kernels)
+    summary["portfolio_modes"] = list(portfolio_modes)
+    schema = dict(summary.get("schema", {}))
+    schema["label_columns"] = list(labels)
+    schema["return_source_column"] = schema.get("return_source_column")
+    summary["schema"] = schema
+    summary["tables"] = {name: int(len(frame)) for name, frame in tables.items()}
+    return summary
+
+
+def _combined_config(
+    payloads: list[EvaluationRunPayload],
+    *,
+    run_id: str,
+    labels: tuple[str, ...],
+    kernels: tuple[str, ...],
+    portfolio_modes: tuple[str, ...],
+    input_reference: dict[str, object],
+    source_alias: str,
+    start_year: int,
+    end_year: int,
+    start_date: str | None,
+    end_date: str | None,
+    return_source_column: str,
+    feature_columns: tuple[str, ...],
+    cost_bps: float,
+    segment_columns: tuple[str, ...],
+    risk_column: str | None,
+    neutralization_method: str,
+    neutralization_group_columns: tuple[str, ...],
+    neutralization_exposure_columns: tuple[str, ...],
+    source_file: str,
+    date_id: str | None,
+) -> dict[str, object]:
+    config = dict(payloads[0].config)
+    kernel_value = kernels[0] if len(kernels) == 1 else "multiple"
+    config["metadata"] = dict(config.get("metadata", {}))
+    config["metadata"].update(
+        {
+            "run_id": run_id,
+            "label_columns": list(labels),
+            "kernel": kernel_value,
+            "kernels": list(kernels),
+            "portfolio_modes": list(portfolio_modes),
+        }
+    )
+    config["metadata"].pop("portfolio_mode", None)
+    config["kernel"] = kernel_value
+    config["kernels"] = list(kernels)
+    config["portfolio_modes"] = list(portfolio_modes)
+    _remove_dynamic_portfolio_mode_config(config)
+    config["matrix"] = {
+        "features": list(feature_columns),
+        "labels": list(labels),
+        "kernels": list(kernels),
+        "portfolio_modes": list(portfolio_modes),
+    }
+    config["lineage"] = {
+        "source_alias": source_alias,
+        "evaluation_id": run_id,
+        "start_year": start_year,
+        "end_year": end_year,
+        "start_date": start_date,
+        "end_date": end_date,
+        "date_id": date_id,
+        "source_file": source_file,
+        "return_source_column": return_source_column,
+        "cost_config": {"cost_bps": cost_bps},
+        "segment_columns": list(segment_columns),
+        "risk_column": risk_column,
+        "neutralization": {
+            "method": neutralization_method,
+            "group_columns": list(neutralization_group_columns),
+            "exposure_columns": list(neutralization_exposure_columns),
+        },
+        **input_reference,
+    }
+    return config
+
+
+def _remove_dynamic_portfolio_mode_config(config: dict[str, object]) -> None:
+    weight_config = config.get("weight_config")
+    if isinstance(weight_config, dict):
+        normalized = dict(weight_config)
+        normalized.pop("portfolio_mode", None)
+        config["weight_config"] = normalized
+
+    weight_configs = config.get("weight_configs")
+    if isinstance(weight_configs, list):
+        normalized_configs: list[dict[str, object] | object] = []
+        for item in weight_configs:
+            if isinstance(item, dict):
+                normalized_item = dict(item)
+                normalized_item.pop("portfolio_mode", None)
+                normalized_configs.append(normalized_item)
+            else:
+                normalized_configs.append(item)
+        config["weight_configs"] = normalized_configs
+
+
+def _combined_report(
+    summary: dict[str, object],
+    tables: dict[str, pd.DataFrame],
+) -> str:
+    combinations = tables.get("combinations", pd.DataFrame())
+    return "\n".join(
+        [
+            "# Evaluation Set Report",
+            "",
+            f"- Evaluation ID: {summary['evaluation_id']}",
+            f"- Combinations: {len(combinations)}",
+            f"- Kernels: {', '.join(summary.get('kernels', []))}",
+            f"- Portfolio modes: {', '.join(summary.get('portfolio_modes', []))}",
+            "",
+        ]
+    )
 
 
 def _default_manifest_run_id(report_root: Path, *, source_alias: str) -> str:
@@ -675,8 +820,8 @@ def _validate_run_processed_options(
     *,
     start_year: int,
     end_year: int,
-    engine: str,
-    portfolio_mode: str,
+    kernels: tuple[str, ...],
+    portfolio_modes: tuple[str, ...],
     requested_labels: tuple[str, ...],
     n_groups: int,
     start_date: str | None,
@@ -689,14 +834,22 @@ def _validate_run_processed_options(
         raise ValueError("n_groups must be at least 2.")
     if cost_bps < 0:
         raise ValueError("cost_bps must be nonnegative.")
-    try:
-        normalize_engine_name(engine)
-    except Exception as exc:
-        raise ValueError(
-            f"engine must be one of {list(supported_engine_names())}."
-        ) from exc
-    if portfolio_mode not in PORTFOLIO_MODES:
-        raise ValueError(f"portfolio_mode must be one of {sorted(PORTFOLIO_MODES)}.")
+    if not kernels:
+        raise ValueError("kernels must contain at least one kernel.")
+    for kernel in kernels:
+        try:
+            normalize_kernel_name(kernel)
+        except Exception as exc:
+            raise ValueError(
+                f"kernel must be one of {list(supported_kernel_names())}."
+            ) from exc
+    if not portfolio_modes:
+        raise ValueError("portfolio_modes must contain at least one mode.")
+    for portfolio_mode in portfolio_modes:
+        if portfolio_mode not in PORTFOLIO_MODES:
+            raise ValueError(
+                f"portfolio_mode must be one of {sorted(PORTFOLIO_MODES)}."
+            )
     for label in requested_labels:
         if not RUN_ID_PATTERN.fullmatch(f"csmar_2000_2000_{label}"):
             raise ValueError(f"unsafe label for evaluation run_id: {label!r}")
@@ -705,3 +858,7 @@ def _validate_run_processed_options(
     end = normalize_date_arg(end_date) if end_date else None
     if start is not None and end is not None and start > end:
         raise ValueError("start_date must be less than or equal to end_date.")
+    if start is not None and start.year < start_year:
+        raise ValueError("start_date/end_date must be within start_year/end_year.")
+    if end is not None and end.year > end_year:
+        raise ValueError("start_date/end_date must be within start_year/end_year.")

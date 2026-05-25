@@ -35,9 +35,12 @@ def write_evaluation_set(
     turnover = [2.0] if turnover is None else turnover
     cost = [0.001] if cost is None else cost
 
+    (output_dir / "dimensions").mkdir(parents=True)
     (output_dir / "metrics").mkdir(parents=True)
     (output_dir / "portfolio").mkdir(parents=True)
     (output_dir / "diagnostics").mkdir(parents=True)
+    (output_dir / "input_quality").mkdir(parents=True)
+    (output_dir / "summaries").mkdir(parents=True)
     metadata = {
         "run_id": evaluation_id,
         "project": project,
@@ -47,7 +50,29 @@ def write_evaluation_set(
         "uses_external_data": uses_external_data,
     }
     _write_json(output_dir / "manifest.json", _manifest(metadata=metadata))
-    _write_json(output_dir / "config.json", {"metadata": metadata, "n_groups": 2})
+    _write_json(
+        output_dir / "config.json",
+        {
+            "metadata": metadata,
+            "n_groups": 2,
+            "kernel": "dataframe",
+            "weight_configs": [
+                {
+                    "method": "equal_weight_quantile",
+                    "portfolio_mode": "long_short",
+                }
+            ],
+            "cost_configs": [{"slippage_bps": 0.0}],
+        },
+    )
+    _write_json(
+        output_dir / "lineage.json",
+        {
+            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+            "input_reference": "fixture",
+            "input_fingerprint": "sha256:fixture",
+        },
+    )
     _write_json(
         output_dir / "summary.json",
         {
@@ -66,15 +91,15 @@ def write_evaluation_set(
                 "asset_column": "asset",
                 "feature_columns": ["factor"],
                 "label_columns": ["forward_return"],
-                "pnl_return_column": "forward_return_1d",
+                "return_source_column": "forward_return_1d",
             },
-    "weight_configs": [
-        {"method": "equal_weight_quantile", "portfolio_mode": "long_short"}
-    ],
-            "cost_configs": [{"slippage_bps": 0.0}],
+            "kernel": "dataframe",
         },
     )
-    _combinations_frame().to_csv(output_dir / "combinations.csv", index=False)
+    _combinations_frame().to_csv(
+        output_dir / "dimensions" / "combinations.csv",
+        index=False,
+    )
     _with_dims(_ic_frame(ic_values=ic_values, rankic_values=rankic_values)).to_csv(
         output_dir / "metrics" / "ic.csv",
         index=False,
@@ -94,14 +119,6 @@ def write_evaluation_set(
         output_dir / "metrics" / "group_spread_summary.csv",
         index=False,
     )
-    _with_dims(_positions_frame()).to_csv(
-        output_dir / "portfolio" / "positions.csv",
-        index=False,
-    )
-    _with_dims(_turnover_frame(turnover)).to_csv(
-        output_dir / "portfolio" / "turnover.csv",
-        index=False,
-    )
     returns = _with_dims(
         _returns_frame(net_returns=net_returns, turnover=turnover, cost=cost)
     )
@@ -109,16 +126,12 @@ def write_evaluation_set(
         output_dir / "portfolio" / "returns.csv",
         index=False,
     )
-    _with_dims(_pnl_frame(net_returns=net_returns, cost=cost)).to_csv(
-        output_dir / "portfolio" / "pnl.csv",
+    _with_dims(_cumulative_returns_frame(net_returns=net_returns, cost=cost)).to_csv(
+        output_dir / "portfolio" / "cumulative_returns.csv",
         index=False,
     )
-    _with_dims(_cost_breakdown_frame(turnover=turnover, cost=cost)).to_csv(
-        output_dir / "portfolio" / "cost_breakdown.csv",
-        index=False,
-    )
-    _with_dims(_exposure_summary_frame()).to_csv(
-        output_dir / "portfolio" / "exposure_summary.csv",
+    _with_dims(_weights_frame()).to_parquet(
+        output_dir / "portfolio" / "weights.parquet",
         index=False,
     )
     _with_dims(_performance_summary_frame(
@@ -129,16 +142,28 @@ def write_evaluation_set(
         output_dir / "metrics" / "performance_summary.csv",
         index=False,
     )
-    _with_dims(_diagnostics_frame()).to_csv(
-        output_dir / "diagnostics" / "weight_diagnostics.csv",
-        index=False,
-    )
-    _with_dims(_neutralization_diagnostics_frame()).to_csv(
-        output_dir / "diagnostics" / "neutralization_diagnostics.csv",
-        index=False,
-    )
     _with_dims(_tradability_diagnostics_frame()).to_csv(
         output_dir / "diagnostics" / "tradability_diagnostics.csv",
+        index=False,
+    )
+    _label_availability_frame().to_csv(
+        output_dir / "input_quality" / "label_availability.csv",
+        index=False,
+    )
+    _factor_coverage_frame().to_csv(
+        output_dir / "input_quality" / "factor_coverage.csv",
+        index=False,
+    )
+    _tradability_coverage_frame().to_csv(
+        output_dir / "input_quality" / "tradability_coverage.csv",
+        index=False,
+    )
+    _evaluation_summary_frame(
+        net_returns=net_returns,
+        turnover=turnover,
+        cost=cost,
+    ).to_csv(
+        output_dir / "summaries" / "evaluation_summary.csv",
         index=False,
     )
     (output_dir / "report.md").write_text("# Report\n", encoding="utf-8")
@@ -148,8 +173,11 @@ def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
     artifacts = {
         "manifest": "manifest.json",
         "config": "config.json",
+        "lineage": "lineage.json",
         "summary": "summary.json",
-        "combinations": "combinations.csv",
+        "dimensions": {
+            "combinations": "dimensions/combinations.csv",
+        },
         "metrics": {
             "ic": "metrics/ic.csv",
             "ic_summary": "metrics/ic_summary.csv",
@@ -158,21 +186,22 @@ def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
             "performance_summary": "metrics/performance_summary.csv",
         },
         "portfolio": {
-            "positions": "portfolio/positions.csv",
-            "turnover": "portfolio/turnover.csv",
             "returns": "portfolio/returns.csv",
-            "pnl": "portfolio/pnl.csv",
-            "cost_breakdown": "portfolio/cost_breakdown.csv",
-            "exposure_summary": "portfolio/exposure_summary.csv",
+            "cumulative_returns": "portfolio/cumulative_returns.csv",
+            "weights": "portfolio/weights.parquet",
         },
         "diagnostics": {
-            "weight_diagnostics": "diagnostics/weight_diagnostics.csv",
-            "neutralization_diagnostics": (
-                "diagnostics/neutralization_diagnostics.csv"
-            ),
             "tradability_diagnostics": (
                 "diagnostics/tradability_diagnostics.csv"
             ),
+        },
+        "input_quality": {
+            "label_availability": "input_quality/label_availability.csv",
+            "factor_coverage": "input_quality/factor_coverage.csv",
+            "tradability_coverage": "input_quality/tradability_coverage.csv",
+        },
+        "summaries": {
+            "evaluation_summary": "summaries/evaluation_summary.csv",
         },
         "report": "report.md",
     }
@@ -190,17 +219,21 @@ def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
             "asset_column": "asset",
             "feature_columns": ["factor"],
             "label_columns": ["forward_return"],
-            "pnl_return_column": "forward_return_1d",
+            "return_source_column": "forward_return_1d",
         },
+        "kernel": "dataframe",
         "n_combinations": 1,
         "segment_columns": [],
-        "weight_configs": [
-            {"method": "equal_weight_quantile", "portfolio_mode": "long_short"}
-        ],
         "artifacts": artifacts,
         "display": build_display_manifest(
             artifacts,
             schema_version=ARTIFACT_SCHEMA_VERSION,
+            default_selection={
+                "feature": "factor",
+                "label": "forward_return",
+                "kernel": "dataframe",
+                "portfolio_mode": "long_short",
+            },
         ),
     }
 
@@ -208,27 +241,19 @@ def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
 def _combinations_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "combination_id": ["factor__forward_return__w0__c0"],
+            "combination_id": ["factor__forward_return__dataframe__long_short"],
             "feature": ["factor"],
             "label": ["forward_return"],
-            "weight_id": ["w0"],
-            "cost_id": ["c0"],
-            "weight_method": ["equal_weight_quantile"],
-            "direction": ["long_high"],
+            "kernel": ["dataframe"],
             "portfolio_mode": ["long_short"],
-            "cost_bps": [0.0],
         }
     )
 
 
 def _with_dims(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
-    result["combination_id"] = "factor__forward_return__w0__c0"
-    result["feature"] = "factor"
-    result["label"] = "forward_return"
-    result["weight_id"] = "w0"
-    result["cost_id"] = "c0"
-    dimension_columns = ["combination_id", "feature", "label", "weight_id", "cost_id"]
+    result["combination_id"] = "factor__forward_return__dataframe__long_short"
+    dimension_columns = ["combination_id"]
     remaining_columns = [
         column for column in result.columns if column not in dimension_columns
     ]
@@ -300,13 +325,12 @@ def _group_spread_summary_frame() -> pd.DataFrame:
     )
 
 
-def _positions_frame() -> pd.DataFrame:
+def _weights_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": ["2026-01-01"],
             "asset": ["asset_001"],
-            "feature": ["factor"],
-            "position": [1.0],
+            "target_weight": [1.0],
         }
     )
 
@@ -341,11 +365,12 @@ def _returns_frame(
             "net_portfolio_return": net_returns,
             "long_count": [1] * len(net_returns),
             "short_count": [1] * len(net_returns),
+            "return_source_column": ["forward_return_1d"] * len(net_returns),
         }
     )
 
 
-def _pnl_frame(
+def _cumulative_returns_frame(
     *,
     net_returns: list[float],
     cost: list[float] | None = None,
@@ -359,16 +384,29 @@ def _pnl_frame(
                 net_return + cost_value
                 for net_return, cost_value in zip(net_returns, cost, strict=True)
             ],
-            "net_portfolio_return": net_returns,
+            "net_return": net_returns,
             "cost": cost,
         }
     )
-    frame["cumulative_gross_pnl"] = frame["gross_portfolio_return"].cumsum()
-    frame["cumulative_pnl"] = frame["net_portfolio_return"].cumsum()
+    frame["gross_return"] = frame["gross_portfolio_return"]
+    frame["cumulative_gross_return"] = frame["gross_return"].cumsum()
+    frame["cumulative_net_return"] = frame["net_return"].cumsum()
     frame["cumulative_cost"] = frame["cost"].cumsum()
-    frame["high_water_mark"] = frame["cumulative_pnl"].cummax()
-    frame["drawdown"] = frame["cumulative_pnl"] - frame["high_water_mark"]
-    return frame
+    frame["high_water_mark"] = frame["cumulative_net_return"].cummax()
+    frame["drawdown"] = frame["cumulative_net_return"] - frame["high_water_mark"]
+    return frame[
+        [
+            "timestamp",
+            "gross_return",
+            "net_return",
+            "cost",
+            "cumulative_gross_return",
+            "cumulative_net_return",
+            "cumulative_cost",
+            "high_water_mark",
+            "drawdown",
+        ]
+    ]
 
 
 def _cost_breakdown_frame(
@@ -412,8 +450,8 @@ def _performance_summary_frame(
         if downside_volatility > 0
         else 0.0
     )
-    pnl = _pnl_frame(net_returns=net_returns, cost=cost)
-    max_drawdown = float(pnl["drawdown"].min())
+    cumulative = _cumulative_returns_frame(net_returns=net_returns, cost=cost)
+    max_drawdown = float(cumulative["drawdown"].min())
     wins = returns[returns > 0]
     losses = returns[returns < 0]
     var_95 = float(returns.quantile(0.05))
@@ -547,6 +585,67 @@ def _tradability_diagnostics_frame() -> pd.DataFrame:
             "entry_blocked_rate": [5 / 90],
             "exit_blocked_rate": [0.05],
             "fallback_reason": [""],
+        }
+    )
+
+
+def _label_availability_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "label": ["forward_return"],
+            "available_rows": [12],
+            "missing_rows": [0],
+            "coverage_rate": [1.0],
+        }
+    )
+
+
+def _factor_coverage_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "feature": ["factor"],
+            "available_rows": [12],
+            "missing_rows": [0],
+            "coverage_rate": [1.0],
+        }
+    )
+
+
+def _tradability_coverage_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "field": ["can_enter"],
+            "available_rows": [12],
+            "missing_rows": [0],
+            "coverage_rate": [1.0],
+        }
+    )
+
+
+def _evaluation_summary_frame(
+    *,
+    net_returns: list[float],
+    turnover: list[float],
+    cost: list[float],
+) -> pd.DataFrame:
+    performance = _performance_summary_frame(
+        net_returns=net_returns,
+        turnover=turnover,
+        cost=cost,
+    )
+    return pd.DataFrame(
+        {
+            "combination_id": ["factor__forward_return__dataframe__long_short"],
+            "feature": ["factor"],
+            "label": ["forward_return"],
+            "kernel": ["dataframe"],
+            "portfolio_mode": ["long_short"],
+            "mean_ic": [0.4],
+            "final_cumulative_net_return": performance[
+                "final_cumulative_net_return"
+            ].tolist(),
+            "mean_turnover": performance["mean_turnover"].tolist(),
+            "total_cost": performance["total_cost"].tolist(),
         }
     )
 

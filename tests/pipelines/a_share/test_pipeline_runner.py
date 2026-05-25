@@ -31,9 +31,9 @@ def _valid_config(tmp_path) -> PipelineConfig:
         factor_template_source="config/a_share/factor_templates/reversal_20d.yaml",
         portfolio_mode="long_only",
         cost_bps=5.0,
-        pnl_return_column="forward_return_1d",
+        return_source_column="forward_return_1d",
         label_columns=("forward_return_1d", "forward_return_20d"),
-        engine="tensor",
+        kernel="tensor",
         output_root=tmp_path,
     )
 
@@ -45,7 +45,7 @@ def test_pipeline_step_registry_declares_evaluation_step() -> None:
     assert contract.version == "1"
     assert "PipelineConfig" in contract.inputs
     assert "processed_factor_table" in contract.inputs
-    assert "evaluation/evaluation_manifest.json" in contract.outputs
+    assert "evaluation/manifest.json" in contract.outputs
     assert "checkpoint" in contract.capabilities
 
 
@@ -73,9 +73,14 @@ def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summar
             ]
         )
         label_summary.to_csv(report_root / "label_availability.csv", index=False)
-        manifest_path = report_root / "evaluation_manifest.json"
+        manifest_path = report_root / "manifest.json"
         manifest_path.write_text(
-            json.dumps({"evaluation_runs": [{"run_id": "evaluation_run"}]}),
+            json.dumps(
+                {
+                    "artifact_type": "evaluation_set",
+                    "evaluation_id": "evaluation_run",
+                }
+            ),
             encoding="utf-8",
         )
         return label_summary, manifest_path, [{"run_id": "evaluation_run"}]
@@ -97,8 +102,8 @@ def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summar
 
     assert result.status == "ready"
     assert result.run_dir == tmp_path / "sample_run"
-    assert result.evaluation_manifest_path == (
-        tmp_path / "sample_run" / "evaluation" / "evaluation_manifest.json"
+    assert result.evaluation_artifact_path == (
+        tmp_path / "sample_run" / "evaluation" / "manifest.json"
     )
     assert len(calls) == 1
     assert calls[0]["processed_root"] == processed_root
@@ -113,7 +118,7 @@ def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summar
     assert calls[0]["start_date"] == "2024-01-01"
     assert calls[0]["end_date"] == "2024-12-31"
     assert calls[0]["n_groups"] == 3
-    assert calls[0]["engine"] == "tensor"
+    assert calls[0]["kernels"] == ("tensor",)
     assert calls[0]["source_alias"] == "pipeline"
     summary = json.loads(result.runtime_summary_path.read_text(encoding="utf-8"))
     assert summary["status"] == "ready"
@@ -127,7 +132,7 @@ def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summar
         "evaluate",
     ]
     assert summary["checkpoints"][-1]["key"] == "evaluate"
-    assert summary["checkpoints"][-1]["row_count"] == 10
+    assert summary["checkpoints"][-1]["row_count"] == 6
     checkpoints = json.loads(
         (result.run_dir / "checkpoints.json").read_text(encoding="utf-8")
     )
@@ -149,8 +154,11 @@ def test_existing_factors_runner_does_not_overwrite_existing_run_dir(
     def fake_run_processed_factor_evaluation(**kwargs):
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
-        manifest_path = report_root / "evaluation_manifest.json"
-        manifest_path.write_text('{"evaluation_runs": []}', encoding="utf-8")
+        manifest_path = report_root / "manifest.json"
+        manifest_path.write_text(
+            '{"artifact_type": "evaluation_set"}',
+            encoding="utf-8",
+        )
         return pd.DataFrame([{"rows": 1}]), manifest_path, []
 
     monkeypatch.setattr(
@@ -259,9 +267,9 @@ def test_existing_factors_runner_smoke_writes_schema_artifacts_and_index(
         factor_template_id="custom",
         portfolio_mode="long_short",
         cost_bps=0.0,
-        pnl_return_column="forward_return_1d",
+        return_source_column="forward_return_1d",
         label_columns=("forward_return_1d",),
-        engine="dataframe",
+        kernel="dataframe",
         output_root=output_root,
         processed_root=processed_root,
         start_from="existing_factors",
@@ -277,16 +285,13 @@ def test_existing_factors_runner_smoke_writes_schema_artifacts_and_index(
         checkpoint for checkpoint in result.checkpoints if checkpoint.key == "evaluate"
     )
     assert evaluate_checkpoint.row_count == 36
-    manifest = json.loads(result.evaluation_manifest_path.read_text(encoding="utf-8"))
-    assert manifest["artifact_type"] == "a_share_pipeline_evaluation_manifest"
-    assert manifest["schema_version"] == "0.1"
-    assert manifest["source_alias"] == "pipeline"
-    assert manifest["run_id"] == "e2e_run"
-    assert manifest["display"]["tables"][0]["key"] == "label_availability"
+    manifest = json.loads(result.evaluation_artifact_path.read_text(encoding="utf-8"))
+    assert manifest["artifact_type"] == "evaluation_set"
+    assert manifest["artifact_schema_version"] == "0.6"
+    assert manifest["evaluation_id"] == "e2e_run"
+    assert manifest["display"]["tables"][0]["key"] == "combinations"
     records = discover_run_indexes([RunRoot("pipeline", output_root)])
-    assert [record.ref.public_run_id for record in records] == [
-        "pipeline/csmar_2024_2024_forward_return_1d_20240102_20240109"
-    ]
+    assert [record.ref.public_run_id for record in records] == ["pipeline/e2e_run"]
 
 
 def test_existing_factor_resolution_requires_known_template_or_column(
@@ -319,7 +324,7 @@ def test_existing_factors_runner_allows_existing_column_expression(
         label_summary = pd.DataFrame({"label": ["forward_return_1d"], "rows": [8]})
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
-        manifest_path = report_root / "evaluation_manifest.json"
+        manifest_path = report_root / "manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
         return label_summary, manifest_path, []
 

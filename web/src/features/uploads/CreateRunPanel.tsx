@@ -7,7 +7,7 @@ import { CsvUploadField } from './CsvUploadField'
 import {
   DATA_STAGE_OPTIONS,
   DIRECTION_OPTIONS,
-  ENGINE_OPTIONS,
+  KERNEL_OPTIONS,
   KIND_OPTIONS,
   PORTFOLIO_MODE_OPTIONS,
   WEIGHT_METHOD_OPTIONS,
@@ -191,13 +191,13 @@ export function CreateRunPanel({
           value={form.label_columns}
         />
         <SelectField
-          fieldName="pnl_return_column"
-          helperText="用于真实回测收益曲线的可交易收益列，默认 forward_return_1d。"
-          label="PnL收益列"
-          onChange={(value) => update('pnl_return_column', value)}
+          fieldName="return_source_column"
+          helperText="用于组合累计收益的可交易收益列，默认 forward_return_1d。"
+          label="收益来源列"
+          onChange={(value) => update('return_source_column', value)}
           options={columnOptions}
           required
-          value={form.pnl_return_column}
+          value={form.return_source_column}
         />
         <TextField
           fieldName="segment_columns"
@@ -247,13 +247,13 @@ export function CreateRunPanel({
           value={form.n_groups}
         />
         <SelectField
-          fieldName="engine"
-          helperText="默认 DataFrame；Tensor 为实验性 opt-in 引擎，输出 artifact 契约保持一致。"
-          label="计算引擎"
-          onChange={(value) => update('engine', value)}
-          options={ENGINE_OPTIONS}
+          fieldName="kernel"
+          helperText="默认 DataFrame；Tensor 为实验性 opt-in 内核，输出 artifact 契约保持一致。"
+          label="计算内核"
+          onChange={(value) => update('kernel', value)}
+          options={KERNEL_OPTIONS}
           required
-          value={form.engine}
+          value={form.kernel}
         />
         <SelectField
           fieldName="weight_method"

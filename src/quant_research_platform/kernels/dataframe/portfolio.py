@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.kernels.dataframe.performance import (
+    CUMULATIVE_RETURN_COLUMNS,
     PERFORMANCE_SUMMARY_COLUMNS,
-    PNL_COLUMNS,
-    calculate_cumulative_pnl,
+    calculate_cumulative_returns,
     summarize_performance,
 )
 from quant_research_platform.kernels.dataframe.portfolio_helpers import (
@@ -37,8 +37,8 @@ from quant_research_platform.runtime.profiling import measure_stage
 
 __all__ = [
     "EXPOSURE_SUMMARY_COLUMNS",
+    "CUMULATIVE_RETURN_COLUMNS",
     "PERFORMANCE_SUMMARY_COLUMNS",
-    "PNL_COLUMNS",
     "POSITION_COLUMNS",
     "RETURNS_COLUMNS",
     "TURNOVER_COLUMNS",
@@ -46,7 +46,7 @@ __all__ = [
     "build_long_short_positions",
     "build_weighted_positions",
     "calculate_cost_breakdown",
-    "calculate_cumulative_pnl",
+    "calculate_cumulative_returns",
     "calculate_turnover",
     "simulate_long_short_returns",
     "simulate_weighted_long_short_returns",
@@ -317,7 +317,7 @@ def simulate_weighted_long_short_returns(
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     cost_config: CostConfig | None = None,
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """基于 weighted positions 评估 portfolio returns。"""
 
@@ -330,7 +330,7 @@ def simulate_weighted_long_short_returns(
         portfolio_features=portfolio_features,
         tradability_config=tradability_config,
         cost_config=cost_config,
-        pnl_return_column=pnl_return_column,
+        return_source_column=return_source_column,
     )
 
 
@@ -343,7 +343,7 @@ def _simulate_weighted_long_short_returns_from_validated_panel(
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     cost_config: CostConfig | None = None,
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """基于调用方已校验且按 timestamp/asset 排序的 panel 评估 returns。"""
 
@@ -356,7 +356,7 @@ def _simulate_weighted_long_short_returns_from_validated_panel(
             portfolio_features=portfolio_features,
             tradability_config=tradability_config,
             cost_config=cost_config,
-            pnl_return_column=pnl_return_column,
+            return_source_column=return_source_column,
         )
     )
     return positions, turnover, returns, diagnostics
@@ -371,7 +371,7 @@ def _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     cost_config: CostConfig | None = None,
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """评估 returns，并暴露 cost breakdown 供内部 artifact 复用。"""
 
@@ -386,7 +386,7 @@ def _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
             portfolio_features=portfolio_features,
             tradability_config=tradability_config,
             cost_config=cost_config,
-            pnl_return_column=pnl_return_column,
+            return_source_column=return_source_column,
         ),
     )
 
@@ -400,7 +400,7 @@ def _stream_weighted_portfolio_from_validated_panel(
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     cost_config: CostConfig | None = None,
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """在一次扫描中构造 positions、turnover、costs 和 portfolio returns。"""
 
@@ -411,7 +411,7 @@ def _stream_weighted_portfolio_from_validated_panel(
     if cost_config is None:
         cost_config = CostConfig()
     _validate_tradability_columns(panel, tradability_config)
-    pnl_return_column = pnl_return_column or spec.label_column
+    return_source_column = return_source_column or spec.label_column
     features = _select_features(spec, portfolio_features)
     group_columns = [*segment_columns, spec.timestamp_column]
 
@@ -429,7 +429,7 @@ def _stream_weighted_portfolio_from_validated_panel(
         label_lookup = _timestamp_label_lookup(
             timestamp_frame,
             spec,
-            pnl_return_column,
+            return_source_column,
         )
         tradability_context = _build_tradability_context(
             timestamp_frame=timestamp_frame,
@@ -489,7 +489,7 @@ def _stream_weighted_portfolio_from_validated_panel(
                 portfolio_mode=weight_config.portfolio_mode,
                 positions=current,
                 label_lookup=label_lookup,
-                label_column=pnl_return_column,
+                label_column=return_source_column,
                 turnover=turnover,
                 cost=float(costs["total_cost"]),
                 segment_columns=segment_columns,
@@ -600,14 +600,14 @@ def _calculate_long_short_from_positions(
     cost_breakdown: pd.DataFrame,
     weight_config: WeightConfig,
     segment_columns: tuple[str, ...],
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
-    pnl_return_column = pnl_return_column or spec.label_column
+    return_source_column = return_source_column or spec.label_column
     lookup_columns = [*segment_columns, spec.timestamp_column, spec.asset_column]
     lookup_index = [*segment_columns, "timestamp", "asset"]
     label_lookup = (
-        panel[[*lookup_columns, pnl_return_column]]
+        panel[[*lookup_columns, return_source_column]]
         .rename(
             columns={
                 spec.timestamp_column: "timestamp",
@@ -634,7 +634,7 @@ def _calculate_long_short_from_positions(
             dtype="float64",
             copy=False,
         )
-        labels_array = timestamp_positions[pnl_return_column].to_numpy(
+        labels_array = timestamp_positions[return_source_column].to_numpy(
             dtype="float64",
             copy=False,
         )
@@ -664,7 +664,7 @@ def _calculate_long_short_from_positions(
                 **{column: group_values[column] for column in segment_columns},
                 "timestamp": group_values["timestamp"],
                 "feature": group_values["feature"],
-                "label": pnl_return_column,
+                "label": return_source_column,
                 "portfolio_mode": weight_config.portfolio_mode,
                 "long_return": long_return,
                 "short_return": short_return,

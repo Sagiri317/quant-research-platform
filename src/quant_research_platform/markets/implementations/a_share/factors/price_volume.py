@@ -113,7 +113,7 @@ def add_forward_return_labels(
     """按 asset 和 trading-date 顺序添加 forward execution-price labels。
 
     The entry price is the next execution open. A horizon-N label exits at the
-    open after N holding days, matching the evaluation PnL convention where today's
+    open after N holding days, matching the evaluation convention where today's
     signal can only trade on the next available execution price.
     """
 

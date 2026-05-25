@@ -1,6 +1,35 @@
 # Evaluation / Artifacts / API 地图
 
-本文记录当前 evaluation layer、artifact schema `0.5`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
+## N7 当前合同快照（schema 0.6）
+
+当前新生成的 evaluation-set artifact 使用 schema `0.6`：
+
+```text
+market adapter / upload / parquet helper
+-> EvaluationSpec(kernel=..., return_source_column=...)
+-> evaluate_to_payload / run_evaluation
+-> write_evaluation_set_artifacts
+-> schema 0.6 evaluation_set artifact
+-> manifest.display
+-> API evidence/download/preview/comparison
+-> React evidence workbench
+```
+
+核心路径：
+
+- `dimensions/combinations.csv` 是动态维度表；第一阶段 required columns 仅为
+  `combination_id, feature, label, kernel, portfolio_mode`。
+- fact tables 通过 `combination_id` join 维度表；run-level constant 配置写入
+  `config.json` / `lineage.json`。
+- required portfolio outputs 包括 `portfolio/weights.parquet` 和
+  `portfolio/cumulative_returns.csv`；不再写 schema `0.6` 的 `pnl.csv`。
+- API/frontend 合同使用 `kernel` 和 `return_source_column`。
+- `compare_evaluation_sets` 是低内存 summary comparison；更详细的
+  `write_evaluation_comparison_report()` 只输出 CSV/JSON/Markdown，不进入主网页。
+- Parquet table preview 由 evidence API 提供 20 行预览能力，frontend 通过
+  `manifest.display.tables` 消费，不绕过 display contract。
+
+本文记录当前 evaluation layer、artifact schema `0.6`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
 
 ## 总链路
 
@@ -11,7 +40,7 @@ market module or local adapter
 -> evaluate_to_payload
 -> DataFrame/Tensor kernels
 -> write_evaluation_set_artifacts
--> schema 0.5 evaluation-set run
+-> schema 0.6 evaluation-set run
 -> load_evaluation_set / run_repository
 -> FastAPI evidence/download/comparison APIs
 -> React evidence workbench
@@ -28,7 +57,7 @@ market module or local adapter
 | `TradabilityConfig` | `evaluation_spec.py` | eligibility / can_enter / can_exit column 配置。 |
 | `NeutralizationConfig` | `evaluation_spec.py` | group demean 或 OLS neutralization 输入。 |
 | `TimeSemanticsConfig` | `evaluation_spec.py` | decision、label、as-of 时间语义。 |
-| `TensorBatchConfig` | `evaluation_spec.py` | tensor engine batch layout、backend、dtype 和 device 配置。 |
+| `TensorBatchConfig` | `evaluation_spec.py` | tensor kernel batch layout、backend、dtype 和 device 配置。 |
 | `ProfileConfig` | `runtime/profiling.py` | evaluation profiling 开关和输出配置。 |
 | `EvaluationRunPayload` | `evaluation_payload.py` | artifact 写盘前的内部 payload 边界。 |
 | `EvaluationSetResult` | `evaluation_result.py` | `run_evaluation` 返回对象。 |
@@ -51,7 +80,7 @@ long-format panel 必须有：
 | asset | `asset`, `symbol`, `stock_code` | 非空字符串，股票代码不能丢前导零。 |
 | feature | `mom_20d`, `prediction` | numeric。 |
 | label | `forward_return_5d`, `target_return` | numeric。 |
-| PnL return | `forward_return_1d` | 用于 portfolio return path。 |
+| return source | `forward_return_1d` | 用于 portfolio return path。 |
 
 可选列：
 
@@ -62,10 +91,10 @@ long-format panel 必须有：
 - `can_exit_column`
 - neutralization groups / exposures
 
-`label_columns` 与 `pnl_return_column` 不同：
+`label_columns` 与 `return_source_column` 不同：
 
 - labels 用于 IC、RankIC、grouped returns、spread diagnostics。
-- PnL return 用于 portfolio returns、PnL、performance summary、time breakdowns。
+- return source 用于 portfolio returns、cumulative returns、performance summary、time breakdowns。
 
 ## Artifact Contract
 
@@ -73,7 +102,7 @@ Evaluation runs 必须是：
 
 ```text
 artifact_type = "evaluation_set"
-artifact_schema_version = "0.5"
+artifact_schema_version = "0.6"
 ```
 
 核心文件：
@@ -82,30 +111,30 @@ artifact_schema_version = "0.5"
 manifest.json
 config.json
 summary.json
-combinations.csv
+lineage.json
+dimensions/combinations.csv
 report.md
 metrics/ic.csv
 metrics/ic_summary.csv
 metrics/grouped_returns.csv
 metrics/group_spread_summary.csv
 metrics/performance_summary.csv
-portfolio/positions.csv
-portfolio/turnover.csv
+portfolio/weights.parquet
 portfolio/returns.csv
-portfolio/pnl.csv
-portfolio/cost_breakdown.csv
-portfolio/exposure_summary.csv
-diagnostics/weight_diagnostics.csv
-diagnostics/neutralization_diagnostics.csv
+portfolio/cumulative_returns.csv
 diagnostics/tradability_diagnostics.csv
+input_quality/label_availability.csv
+input_quality/factor_coverage.csv
+input_quality/tradability_coverage.csv
+summaries/evaluation_summary.csv
 ```
 
 启用 `time_breakdowns` 后会按配置出现可选目录：
 
 ```text
-metrics_by_year/
-metrics_by_quarter/
-metrics_by_month/
+breakdowns/year/
+breakdowns/quarter/
+breakdowns/month/
 ```
 
 `comparison.csv` 不是单个 evaluation run 的物理必备文件。它是 `manifest.display.downloads` 暴露的动态 index item，由 API comparison 或 `write_run_comparison` 按多个 completed runs 生成。
@@ -145,12 +174,12 @@ API 和 frontend 不允许绕过它访问隐式文件。
 N2 tradability diagnostics 作为 `diagnostics/tradability_diagnostics.csv`
 通过 `manifest.display` 暴露；前端应通过常规 diagnostics preview/download API
 消费该表，不重新计算 eligibility、can_enter 或 can_exit 计数。
-新生成的 schema `0.5` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
+新生成的 schema `0.6` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
 需要重新生成后才能由当前 loader/API 加载。
 
 校验要求：
 
-- `display.schema_version == "0.5"`。
+- `display.schema_version == "0.6"`。
 - `display.tables` 必须覆盖 artifact CSV tables。
 - 每个 display table 必须有 matching download item。
 - download preset 只能引用已暴露 items。
@@ -249,7 +278,7 @@ Frontend rules:
 
 - 消费 API 和 `manifest.display`。
 - 不直接读本地文件。
-- 不重新计算 IC、RankIC、positions、turnover、PnL 或 cost。
+- 不重新计算 IC、RankIC、weights、turnover、cumulative returns 或 cost。
 - run switching / combination switching 不能显示 stale evidence。
 - download picker 和 ZIP preset 必须来自 display contract。
 

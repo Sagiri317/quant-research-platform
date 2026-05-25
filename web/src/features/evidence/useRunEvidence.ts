@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   type RunSummary,
+  type TablePayload,
+  fetchTablePreview,
   fetchRunEvidence,
   runTableSpecsFromDisplay,
 } from '../../shared/api/api'
@@ -15,11 +17,16 @@ import {
 } from './runEvidenceState'
 import { useTablePreview } from './useTablePreview'
 
+const CHART_TABLE_ROW_LIMIT = 1000
+
 export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0) {
   const [runState, setRunState] = useState<RunState>(EMPTY_RUN_STATE)
   const [activeTable, setActiveTable] = useState('IC')
   const [selectedCombinationId, setSelectedCombinationId] = useState('')
   const [tablePreviewExpanded, setTablePreviewExpanded] = useState(false)
+  const [chartPreviewPayloads, setChartPreviewPayloads] = useState<
+    Record<string, TablePayload>
+  >({})
   const [loadingEvidence, setLoadingEvidence] = useState(false)
   const [evidenceError, setEvidenceError] = useState('')
   const [runStateRunId, setRunStateRunId] = useState('')
@@ -107,7 +114,93 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     [exposedRunState.display, selectedRun],
   )
   const selectedTableSpecs = allTableSpecs
-  const chartTables = useMemo(
+  const displayCharts = useMemo(
+    () => exposedRunState.display?.charts ?? [],
+    [exposedRunState.display],
+  )
+  const selectedCombinationExists = useMemo(
+    () =>
+      (exposedRunState.tables.combinations?.rows ?? []).some(
+        (row) => String(row.combination_id ?? '') === selectedCombinationId,
+      ),
+    [exposedRunState.tables.combinations, selectedCombinationId],
+  )
+  const chartTableSpecs = useMemo(() => {
+    const tableKeys = new Set(displayCharts.map((chart) => chart.table))
+    return selectedTableSpecs.filter((spec) => tableKeys.has(spec.key))
+  }, [displayCharts, selectedTableSpecs])
+  const chartPreviewPrefix =
+    selectedRun && selectedCombinationId
+      ? [
+          selectedRun.public_run_id,
+          cacheVersion,
+          selectedCombinationId,
+        ].join('::')
+      : ''
+
+  useEffect(() => {
+    if (
+      !selectedRun ||
+      !selectedCombinationId ||
+      !selectedCombinationExists ||
+      chartTableSpecs.length === 0
+    ) {
+      return
+    }
+    const filterableChartSpecs = chartTableSpecs.filter(
+      (spec) => spec.supportsCombinationFilter !== false,
+    )
+    const missingSpecs = filterableChartSpecs.filter(
+      (spec) => chartPreviewPayloads[`${chartPreviewPrefix}::${spec.key}`] === undefined,
+    )
+    if (missingSpecs.length === 0) {
+      return
+    }
+    let cancelled = false
+    async function loadSelectedChartTables() {
+      try {
+        const payloads = await Promise.all(
+          missingSpecs.map(async (spec) => {
+            const payload = await fetchTablePreview(
+              spec.path,
+              Math.max(spec.previewRows ?? 20, CHART_TABLE_ROW_LIMIT),
+              selectedCombinationId,
+            )
+            return [spec.key, payload] as const
+          }),
+        )
+        if (cancelled) {
+          return
+        }
+        setChartPreviewPayloads((current) => {
+          const next = { ...current }
+          for (const [key, payload] of payloads) {
+            next[`${chartPreviewPrefix}::${key}`] = payload
+          }
+          return next
+        })
+        setEvidenceError('')
+      } catch (caught) {
+        if (!cancelled) {
+          setEvidenceError(messageFrom(caught))
+        }
+      }
+    }
+    void loadSelectedChartTables()
+    return () => {
+      cancelled = true
+    }
+  }, [
+    chartPreviewPayloads,
+    chartPreviewPrefix,
+    chartTableSpecs,
+    selectedCombinationExists,
+    selectedCombinationId,
+    selectedRun,
+    setEvidenceError,
+  ])
+
+  const filteredTables = useMemo(
     () =>
       filterTablesByCombination(
         exposedRunState.tables,
@@ -116,6 +209,27 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
       ),
     [exposedRunState.tables, selectedCombinationId, selectedTableSpecs],
   )
+  const chartTables = useMemo(() => {
+    const next = { ...filteredTables }
+    if (!chartPreviewPrefix) {
+      return next
+    }
+    for (const spec of chartTableSpecs) {
+      const payload = chartPreviewPayloads[`${chartPreviewPrefix}::${spec.key}`]
+      if (payload !== undefined) {
+        const existingRows = next[spec.key]?.rows.length ?? 0
+        if (payload.rows.length > 0 || existingRows === 0) {
+          next[spec.key] = payload
+        }
+      }
+    }
+    return next
+  }, [
+    chartPreviewPayloads,
+    chartPreviewPrefix,
+    chartTableSpecs,
+    filteredTables,
+  ])
   const activeTableSpec = selectedTableSpecs.find(
     (spec) => spec.key === activeTable,
   )

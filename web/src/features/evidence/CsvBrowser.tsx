@@ -6,7 +6,7 @@ import {
 } from '../../shared/api/api'
 import { DataTable } from '../../shared/ui/components'
 
-const CSV_PREVIEW_ROW_LIMIT = 20
+const DEFAULT_TABLE_PREVIEW_ROW_LIMIT = 20
 
 export function CsvBrowser({
   activePayload,
@@ -29,17 +29,21 @@ export function CsvBrowser({
   run: RunSummary
   tableSpecs: RunTableSpec[]
 }) {
+  const activeFormat =
+    activeTableSpec?.format?.toLowerCase() === 'parquet' ? 'Parquet' : 'CSV'
+  const activePreviewRows =
+    activeTableSpec?.previewRows ?? DEFAULT_TABLE_PREVIEW_ROW_LIMIT
   return (
     <section className="data-section">
       <div className="section-title">
-        <h3>CSV 明细浏览</h3>
+        <h3>明细表预览</h3>
         <div className="section-actions">
           {activeTableSpec ? (
             <a
               className="template-link"
               href={artifactDownloadUrl(run, activeTableSpec.downloadItem)}
             >
-              下载当前 CSV
+              下载当前 {activeFormat}
             </a>
           ) : null}
           <span>{activeTableSpec?.label ?? activeTable}</span>
@@ -73,13 +77,13 @@ export function CsvBrowser({
       ) : activePayload && expanded ? (
         <DataTable
           label={`${activeTableSpec?.label ?? activeTable} 表格`}
-          maxRows={CSV_PREVIEW_ROW_LIMIT}
+          maxRows={activePreviewRows}
           payload={activePayload}
         />
       ) : (
         <div className="csv-preview-placeholder">
           默认不展开明细行。选择表格后点击“展开预览”，最多显示前{' '}
-          {CSV_PREVIEW_ROW_LIMIT} 行；完整数据请下载 CSV。
+          {activePreviewRows} 行；完整数据请下载 {activeFormat}。
         </div>
       )}
     </section>

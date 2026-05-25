@@ -48,9 +48,9 @@ def _full_config(tmp_path: Path) -> PipelineConfig:
         factor_template_id="custom",
         portfolio_mode="long_only",
         cost_bps=0.0,
-        pnl_return_column="forward_return_1d",
+        return_source_column="forward_return_1d",
         label_columns=("forward_return_1d",),
-        engine="dataframe",
+        kernel="dataframe",
         output_root=tmp_path / "runs",
         raw_root=tmp_path / "raw",
         interim_root=tmp_path / "interim",
@@ -87,9 +87,9 @@ def test_pipeline_runner_returns_result_type_for_full_start_layer(
         "_run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
-            "artifact": "evaluation/evaluation_manifest.json",
-            "evaluation_manifest_path": run_dir
-            / "evaluation/evaluation_manifest.json",
+            "artifact": "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir
+            / "evaluation/manifest.json",
         },
     )
 
@@ -212,7 +212,7 @@ def test_rebuild_checkpoints_do_not_expose_private_layer_names(
     def fake_run_processed_factor_evaluation(**kwargs):
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
-        manifest_path = report_root / "evaluation_manifest.json"
+        manifest_path = report_root / "manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
         return (
             __import__("pandas").DataFrame([{"rows": 5}]),
@@ -251,7 +251,7 @@ def test_evaluate_step_calls_processed_adapter(
         calls.append(kwargs)
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
-        manifest_path = report_root / "evaluation_manifest.json"
+        manifest_path = report_root / "manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
         return (
             __import__("pandas").DataFrame(
@@ -270,9 +270,9 @@ def test_evaluate_step_calls_processed_adapter(
     payload = _run_evaluate_step(config, run_dir)
 
     assert payload["row_count"] == 7
-    assert payload["artifact"] == "evaluation_manifest"
-    assert payload["evaluation_manifest_path"] == (
-        run_dir / "evaluation/evaluation_manifest.json"
+    assert payload["artifact"] == "evaluation/manifest.json"
+    assert payload["evaluation_artifact_path"] == (
+        run_dir / "evaluation/manifest.json"
     )
     assert calls[0]["processed_root"] == config.processed_root
     assert calls[0]["report_root"] == run_dir / "evaluation"
@@ -308,9 +308,9 @@ def test_pipeline_runner_writes_runtime_summary_and_checkpoints(
         "_run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
-            "artifact": "evaluation/evaluation_manifest.json",
-            "evaluation_manifest_path": run_dir
-            / "evaluation/evaluation_manifest.json",
+            "artifact": "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir
+            / "evaluation/manifest.json",
         },
     )
 
@@ -360,9 +360,9 @@ def test_pipeline_runner_does_not_overwrite_existing_run_dir_by_default(
         "_run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
-            "artifact": "evaluation/evaluation_manifest.json",
-            "evaluation_manifest_path": run_dir
-            / "evaluation/evaluation_manifest.json",
+            "artifact": "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir
+            / "evaluation/manifest.json",
         },
     )
 
@@ -403,9 +403,9 @@ def test_pipeline_runner_starts_from_panel_and_runs_to_evaluation(
         "_run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
-            "artifact": "evaluation/evaluation_manifest.json",
-            "evaluation_manifest_path": run_dir
-            / "evaluation/evaluation_manifest.json",
+            "artifact": "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir
+            / "evaluation/manifest.json",
         },
     )
 
@@ -588,9 +588,9 @@ def test_pipeline_runner_starts_from_existing_factors_with_full_checkpoint_chain
         "_run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
-            "artifact": "evaluation/evaluation_manifest.json",
-            "evaluation_manifest_path": run_dir
-            / "evaluation/evaluation_manifest.json",
+            "artifact": "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir
+            / "evaluation/manifest.json",
         },
     )
 

@@ -80,8 +80,8 @@ def create_uploaded_run(
                 ),
                 segment_columns=tuple(payload.segment_columns),
                 time_breakdowns=tuple(payload.time_breakdowns),
-                engine=payload.engine,
-                pnl_return_column=payload.pnl_return_column,
+                kernel=payload.kernel,
+                return_source_column=payload.return_source_column,
                 tensor_config=TensorBatchConfig(
                     max_memory_mb=payload.tensor_max_memory_mb
                 ),
@@ -114,13 +114,13 @@ def user_facing_error(exc: Exception) -> str:
     if "panel is missing columns" in message or "missing columns" in message:
         missing = message.split(":", 1)[-1].strip().rstrip(".")
         return f"CSV 缺少必需列：{missing}"
-    if "PnL curve requires pnl_return_column" in message:
+    if "Portfolio cumulative returns require return_source_column" in message:
         return (
-            "CSV 缺少 PnL 收益列；请选择 pnl_return_column "
+            "CSV 缺少收益来源列；请选择 return_source_column "
             "或提供 forward_return_1d。"
         )
     if "must be numeric" in message or "could not convert" in message:
-        return "因子列、标签列和 PnL 收益列必须是数值。"
+        return "因子列、标签列和收益来源列必须是数值。"
     if "csv_text must contain at least one data row" in message:
         return "CSV 至少需要一行数据。"
     return f"回测创建失败：{message}"

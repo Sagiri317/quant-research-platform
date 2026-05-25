@@ -34,7 +34,7 @@ export function CreateRunGuide() {
           <h4>数据约束</h4>
           <p>
             timestamp 需可解析为日期时间；asset 按字符串处理；feature 和
-            label 必须是数值；PnL 收益列用于生成真实回测曲线。本地平台只评估上传的 CSV。
+            label 必须是数值；收益来源列用于生成真实回测曲线。本地平台只评估上传的 CSV。
           </p>
         </article>
       </div>

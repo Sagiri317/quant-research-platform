@@ -54,7 +54,7 @@ export function RunHeader({
             <span>标签列：{run.label_columns.join(', ')}</span>
           ) : null}
           {run.n_combinations ? <span>{run.n_combinations} 个组合</span> : null}
-          {run.pnl_return_column ? <span>PnL: {run.pnl_return_column}</span> : null}
+          {run.return_source_column ? <span>收益来源: {run.return_source_column}</span> : null}
           <span>{run.uses_external_data ? '外部数据' : '合成数据'}</span>
         </div>
         {canDelete ? (

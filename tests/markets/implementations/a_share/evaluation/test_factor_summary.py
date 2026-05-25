@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 import pytest
 
@@ -15,272 +13,60 @@ from quant_research_platform.markets.implementations.a_share.evaluation.build_fa
     write_factor_summary_csv,
     write_factor_summary_markdown,
 )
+from tests.interfaces.api.artifact_run_fixtures import write_evaluation_set
 
 
-def test_build_factor_summary_merges_evaluation_metrics_and_labels(tmp_path) -> None:
-    report_root = tmp_path / "factor_evaluation"
-    run_dir = report_root / "evaluation_runs" / "csmar_2024_forward_return_20d"
-    metrics_dir = run_dir / "metrics"
-    metrics_dir.mkdir(parents=True)
-
-    (report_root / "evaluation_manifest.json").write_text(
-        json.dumps(
-            {
-                "evaluation_runs": [
-                    {
-                        "year": 2024,
-                        "label": "forward_return_20d",
-                        "features": ["mom_20d"],
-                        "output_dir": str(run_dir),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
+def test_build_factor_summary_reads_schema_06_direct_run_root(tmp_path) -> None:
+    report_root = tmp_path / "n7_eval"
+    write_evaluation_set(
+        report_root,
+        run_id="n7_eval",
+        time_breakdowns=("year",),
+        n_rows_evaluated=1234,
     )
-    (run_dir / "summary.json").write_text(
-        json.dumps(
-            {
-                "run_id": "csmar_2024_forward_return_20d",
-                "n_rows_evaluated": 1234,
-            }
-        ),
-        encoding="utf-8",
-    )
-    pd.DataFrame(
-        {
-            "year": [2024],
-            "label": ["forward_return_20d"],
-            "rows": [2000],
-            "non_null_rows": [1800],
-            "non_null_rate": [0.9],
-            "eligible_rows": [1700],
-            "can_enter_rows": [1600],
-            "can_exit_rows": [1500],
-        }
-    ).to_csv(report_root / "label_availability.csv", index=False)
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "mean_ic": [0.01],
-            "std_ic": [0.02],
-            "icir": [0.5],
-            "positive_ic_rate": [0.6],
-            "mean_rankic": [0.03],
-            "std_rankic": [0.04],
-            "rankicir": [0.75],
-            "positive_rankic_rate": [0.65],
-        }
-    ).to_csv(metrics_dir / "ic_summary.csv", index=False)
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "top_group_mean_return": [0.02],
-            "bottom_group_mean_return": [-0.01],
-            "top_bottom_spread_mean": [0.03],
-            "top_bottom_spread_hit_rate": [0.55],
-            "group_monotonicity_score": [0.8],
-        }
-    ).to_csv(metrics_dir / "group_spread_summary.csv", index=False)
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d"],
-            "periods": [250],
-            "mean_net_portfolio_return": [0.004],
-            "sharpe_like": [1.2],
-            "max_drawdown": [-0.08],
-            "mean_turnover": [0.3],
-        }
-    ).to_csv(metrics_dir / "performance_summary.csv", index=False)
 
     summary = build_factor_summary_frame(report_root)
 
     assert len(summary) == 1
     row = summary.iloc[0]
-    assert row["year"] == 2024
-    assert row["feature"] == "mom_20d"
-    assert row["mean_rankic"] == 0.03
-    assert row["top_bottom_spread_mean"] == 0.03
-    assert row["mean_net_portfolio_return"] == 0.004
+    assert row["run_id"] == "n7_eval"
+    assert row["year"] == 2026
+    assert row["feature"] == "factor"
+    assert row["label"] == "forward_return"
+    assert row["kernel"] == "dataframe"
     assert row["portfolio_mode"] == "long_short"
-    assert row["label_non_null_rate"] == 0.9
     assert row["n_rows_evaluated"] == 1234
 
 
-def test_build_factor_summary_handles_full_sample_manifest(tmp_path) -> None:
+def test_build_factor_summary_discovers_schema_06_child_runs(tmp_path) -> None:
     report_root = tmp_path / "factor_evaluation"
-    run_dir = report_root / "evaluation_runs" / "csmar_2024_2025_forward_return_20d"
-    metrics_dir = run_dir / "metrics"
-    metrics_dir.mkdir(parents=True)
-    (report_root / "evaluation_manifest.json").write_text(
-        json.dumps(
-            {
-                "evaluation_runs": [
-                    {
-                        "run_id": "csmar_2024_2025_forward_return_20d",
-                        "start_year": 2024,
-                        "end_year": 2025,
-                        "label": "forward_return_20d",
-                        "portfolio_mode": "long_only",
-                        "features": ["mom_20d"],
-                        "output_dir": str(run_dir),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    (run_dir / "summary.json").write_text(
-        json.dumps({"evaluation_id": "csmar_2024_2025_forward_return_20d"}),
-        encoding="utf-8",
-    )
-    pd.DataFrame(
-        {
-            "year": [2024, 2025],
-            "label": ["forward_return_20d", "forward_return_20d"],
-            "non_null_rate": [0.9, 0.8],
-            "eligible_rows": [1700, 1800],
-            "can_enter_rows": [1600, 1700],
-            "can_exit_rows": [1500, 1600],
-        }
-    ).to_csv(report_root / "label_availability.csv", index=False)
-    breakdown_dir = run_dir / "metrics_by_year"
-    breakdown_dir.mkdir()
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d", "mom_20d"],
-            "label": ["forward_return_20d", "forward_return_20d"],
-            "year": [2024, 2025],
-            "mean_ic": [0.01, 0.02],
-            "icir": [0.5, 0.6],
-            "positive_ic_rate": [0.6, 0.7],
-            "mean_rankic": [0.03, 0.04],
-            "rankicir": [0.75, 0.85],
-            "positive_rankic_rate": [0.65, 0.75],
-        }
-    ).to_csv(breakdown_dir / "ic_summary_by_year.csv", index=False)
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d", "mom_20d"],
-            "label": ["forward_return_20d", "forward_return_20d"],
-            "year": [2024, 2025],
-            "top_bottom_spread_mean": [0.03, 0.04],
-            "top_bottom_spread_hit_rate": [0.55, 0.65],
-            "group_monotonicity_score": [0.8, 0.9],
-        }
-    ).to_csv(breakdown_dir / "group_spread_summary_by_year.csv", index=False)
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d", "mom_20d"],
-            "year": [2024, 2025],
-            "portfolio_mode": ["long_only", "long_only"],
-            "mean_net_portfolio_return": [0.004, 0.005],
-            "sharpe_like": [1.2, 1.3],
-            "max_drawdown": [-0.08, -0.09],
-            "mean_turnover": [0.3, 0.4],
-        }
-    ).to_csv(breakdown_dir / "performance_summary_by_year.csv", index=False)
+    write_evaluation_set(report_root / "run_a", run_id="run_a")
+    write_evaluation_set(report_root / "run_b", run_id="run_b")
 
     summary = build_factor_summary_frame(report_root)
 
-    assert len(summary) == 2
-    assert summary["year"].tolist() == [2024, 2025]
-    assert summary["run_id"].tolist() == [
-        "csmar_2024_2025_forward_return_20d",
-        "csmar_2024_2025_forward_return_20d",
-    ]
-    assert summary["portfolio_mode"].tolist() == ["long_only", "long_only"]
-    assert summary["mean_net_portfolio_return"].tolist() == [0.004, 0.005]
-
-
-def test_build_factor_summary_rejects_run_dir_outside_report_root(tmp_path) -> None:
-    report_root = tmp_path / "factor_evaluation"
-    outside_run = tmp_path / "outside" / "run"
-    outside_run.mkdir(parents=True)
-    report_root.mkdir(parents=True)
-    (report_root / "evaluation_manifest.json").write_text(
-        json.dumps(
-            {
-                "evaluation_runs": [
-                    {
-                        "run_id": "run",
-                        "start_year": 2024,
-                        "end_year": 2024,
-                        "label": "forward_return_20d",
-                        "features": ["mom_20d"],
-                        "output_dir": str(outside_run),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="report_root/evaluation_runs"):
-        build_factor_summary_frame(report_root)
+    assert summary["run_id"].tolist() == ["run_a", "run_b"]
+    assert summary["feature"].tolist() == ["factor", "factor"]
 
 
 def test_build_factor_summary_cli_defaults_to_full_report_root(
     tmp_path,
     monkeypatch,
 ) -> None:
-    report_root = tmp_path / "reports" / "private_real" / "factor_evaluation"
-    run_dir = report_root / "full_2024_2025" / "evaluation_runs" / "run"
-    metrics_dir = run_dir / "metrics"
-    metrics_dir.mkdir(parents=True)
-    (report_root / "full_2024_2025" / "evaluation_manifest.json").write_text(
-        json.dumps(
-            {
-                "evaluation_runs": [
-                    {
-                        "year": 2024,
-                        "label": "forward_return_20d",
-                        "features": ["mom_20d"],
-                        "output_dir": str(run_dir),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
+    report_root = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "factor_evaluation"
+        / "full_2024_2025"
     )
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "mean_ic": [0.01],
-            "icir": [0.5],
-            "positive_ic_rate": [0.6],
-            "mean_rankic": [0.03],
-            "rankicir": [0.75],
-            "positive_rankic_rate": [0.65],
-        }
-    ).to_csv(metrics_dir / "ic_summary.csv", index=False)
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "top_bottom_spread_mean": [0.03],
-            "top_bottom_spread_hit_rate": [0.55],
-            "group_monotonicity_score": [0.8],
-        }
-    ).to_csv(metrics_dir / "group_spread_summary.csv", index=False)
-    pd.DataFrame(
-        {
-            "feature": ["mom_20d"],
-            "mean_net_portfolio_return": [0.004],
-            "sharpe_like": [1.2],
-            "max_drawdown": [-0.08],
-            "mean_turnover": [0.3],
-        }
-    ).to_csv(metrics_dir / "performance_summary.csv", index=False)
+    write_evaluation_set(report_root, run_id="full_2024_2025")
     monkeypatch.chdir(tmp_path)
 
     exit_code = main([])
 
     assert exit_code == 0
-    assert (report_root / "full_2024_2025" / "factor_summary.csv").exists()
+    assert (report_root / "factor_summary.csv").exists()
 
 
 def test_factor_summary_writers_use_stable_outputs_and_excel_safe_csv(tmp_path) -> None:
@@ -289,6 +75,7 @@ def test_factor_summary_writers_use_stable_outputs_and_excel_safe_csv(tmp_path) 
             "year": [2025],
             "label": ["forward_return_20d"],
             "feature": ["amihud_20d"],
+            "kernel": ["dataframe"],
             "mean_ic": [0.01],
             "icir": [0.5],
             "positive_ic_rate": [0.6],
@@ -319,7 +106,6 @@ def test_factor_summary_writers_use_stable_outputs_and_excel_safe_csv(tmp_path) 
 
     assert csv_path.read_bytes().startswith(b"\xef\xbb\xbf")
     markdown = md_path.read_text(encoding="utf-8")
-    assert "# 因子评估汇总" in markdown
     assert "amihud_20d" in markdown
 
 
@@ -328,6 +114,8 @@ def test_factor_summary_contract_excludes_retired_performance_columns() -> None:
         "total_gross_portfolio_return",
         "total_net_portfolio_return",
         "mean_net_long_short_return",
+        "weight_id",
+        "cost_id",
     }
 
     assert retired.isdisjoint(PERFORMANCE_COLUMNS)

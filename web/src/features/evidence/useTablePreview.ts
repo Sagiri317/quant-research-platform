@@ -7,7 +7,7 @@ import {
 } from '../../shared/api/api'
 import { messageFrom } from '../../shared/format'
 
-const TABLE_PREVIEW_ROW_LIMIT = 20
+const DEFAULT_TABLE_PREVIEW_ROW_LIMIT = 20
 
 export function useTablePreview({
   activePayload,
@@ -60,7 +60,7 @@ export function useTablePreview({
         setLoadingPreviewKey(cacheKey)
         const payload = await fetchTablePreview(
           tableSpec.path,
-          TABLE_PREVIEW_ROW_LIMIT,
+          tableSpec.previewRows ?? DEFAULT_TABLE_PREVIEW_ROW_LIMIT,
           combinationFilter,
         )
         if (cancelled) {

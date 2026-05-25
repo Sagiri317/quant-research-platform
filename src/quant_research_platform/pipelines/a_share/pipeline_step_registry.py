@@ -54,9 +54,9 @@ PIPELINE_STEP_CONTRACTS = {
             "PipelineConfig",
         ),
         outputs=(
-            "evaluation/evaluation_manifest.json",
-            "evaluation/label_availability.csv",
-            "evaluation/evaluation_runs/",
+            "evaluation/manifest.json",
+            "evaluation/config.json",
+            "evaluation/summary.json",
         ),
         capabilities=("evaluate", "checkpoint"),
     ),

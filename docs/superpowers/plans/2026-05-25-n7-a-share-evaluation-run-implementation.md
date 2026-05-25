@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Implementation status (2026-05-25):** This plan has been executed on branch `codex/n7-evaluation-run-implementation`. Treat the detailed checkbox list below as the historical implementation plan, not as a fresh pending task list. Current code/docs/tests are the source of truth for follow-up review.
+
 **Goal:** Implement the finalized N7 A-share evaluation run contract: one user-visible evaluation run contains a matrix of factor/label/kernel/portfolio-mode combinations, writes artifact schema `0.6`, supports low-memory comparison/reporting, and lets the frontend fully inspect the resulting tables and summaries.
 
 **Architecture:** Keep the public language as "evaluation run/results"; use `EvaluationMatrixRun` only as an internal implementation concept. The A-share adapter owns private-data construction and matrix expansion. The generic evaluation/artifact/API/frontend layers consume explicit schema `0.6` artifacts through `manifest.display`; they must not rely on A-share-only shortcuts.
@@ -10,13 +12,13 @@
 
 ---
 
-## Current Starting Point
+## Original Pre-Implementation Starting Point
 
 - Final design spec: `docs/superpowers/specs/2026-05-25-n7-a-share-run-identity-design.md`.
-- Current artifact schema is `0.5` and still uses `positions.csv`, `pnl.csv`, root-level `combinations.csv`, and `engine` language.
-- Current runner supports `spec.engine` and combination axes `feature`, `label`, `weight_id`, `cost_id`.
-- Current loader and comparison read whole CSV artifacts; they do not support Parquet table metadata or low-memory large-run comparison.
-- Current frontend depends on `manifest.display`, but display metadata does not yet expose table format, dimension source, join key, or preview row intent.
+- At plan creation, artifact schema was `0.5` and still used `positions.csv`, `pnl.csv`, root-level `combinations.csv`, and `engine` language.
+- At plan creation, the runner supported `spec.engine` and combination axes `feature`, `label`, `weight_id`, `cost_id`.
+- At plan creation, loader and comparison paths read whole CSV artifacts; they did not support Parquet table metadata or low-memory large-run comparison.
+- At plan creation, the frontend depended on `manifest.display`, but display metadata did not yet expose table format, dimension source, join key, or preview row intent.
 - Target first private smoke run is 2023H1 only. The full 2023-2025 canonical run is a later acceptance run after implementation is verified.
 
 ## Target First-Stage Run

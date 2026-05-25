@@ -16,7 +16,7 @@ from quant_research_platform.evaluations.evaluation_spec import (
 )
 from quant_research_platform.evaluations.panel_validation import (
     PanelSpec,
-    validate_evaluation_set_pnl_return_column,
+    validate_evaluation_set_return_source_column,
     validate_evaluation_spec_columns,
     validate_panel,
 )
@@ -43,7 +43,7 @@ __all__ = [
     "TradabilityConfig",
     "WeightConfig",
     "run_evaluation",
-    "validate_evaluation_set_pnl_return_column",
+    "validate_evaluation_set_return_source_column",
     "validate_evaluation_spec_columns",
     "validate_panel",
 ]

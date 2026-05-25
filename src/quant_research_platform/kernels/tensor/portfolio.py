@@ -72,7 +72,7 @@ def build_tensor_weighted_positions(
     segment_columns: tuple[str, ...] = (),
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
     value_dtype: str = "float64",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """从 tensor signal arrays 构建 timestamp-level positions。
@@ -88,7 +88,7 @@ def build_tensor_weighted_positions(
         segment_columns=segment_columns,
         portfolio_features=portfolio_features,
         tradability_config=tradability_config,
-        pnl_return_column=pnl_return_column,
+        return_source_column=return_source_column,
         value_dtype=value_dtype,
     )
     return artifacts.positions, artifacts.diagnostics
@@ -103,7 +103,7 @@ def build_tensor_portfolio_artifacts(
     segment_columns: tuple[str, ...] = (),
     portfolio_features: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
     value_dtype: str = "float64",
 ) -> TensorPortfolioArtifacts:
     """构造 tensor portfolio artifacts，同时不保留 dense path matrices。"""
@@ -116,7 +116,7 @@ def build_tensor_portfolio_artifacts(
     if tradability_config is None:
         tradability_config = TradabilityConfig()
     _validate_tradability_columns(panel, tradability_config)
-    pnl_return_column = pnl_return_column or spec.label_column
+    return_source_column = return_source_column or spec.label_column
     features = _select_features(spec, portfolio_features)
     panel = panel.sort_values(
         [*segment_columns, spec.timestamp_column, spec.asset_column],
@@ -150,7 +150,7 @@ def build_tensor_portfolio_artifacts(
                     features=features,
                     weight_config=weight_config,
                     tradability_config=tradability_config,
-                    pnl_return_column=pnl_return_column,
+                    return_source_column=return_source_column,
                     value_dtype=dtype,
                 )
             ),
@@ -223,7 +223,7 @@ def build_tensor_portfolio_artifacts(
                         context=segment_context,
                         timestamp=timestamp,
                         feature=feature,
-                        label=pnl_return_column,
+                        label=return_source_column,
                         assets=timestamp_input.assets,
                         position_values=position_values,
                         label_values=timestamp_input.label_values,
@@ -1069,10 +1069,10 @@ def _prepare_timestamp_position_input(
     features: tuple[str, ...],
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,
-    pnl_return_column: str | None = None,
+    return_source_column: str | None = None,
     value_dtype: np.dtype | str = "float64",
 ) -> _TimestampPositionInput:
-    pnl_return_column = pnl_return_column or spec.label_column
+    return_source_column = return_source_column or spec.label_column
     dtype = _validate_value_dtype(str(value_dtype))
     asset_values = timestamp_frame[spec.asset_column].to_numpy(
         dtype=str,
@@ -1090,7 +1090,7 @@ def _prepare_timestamp_position_input(
             feature: feature_matrix[:, offset]
             for offset, feature in enumerate(features)
         },
-        label_values=timestamp_frame[pnl_return_column].to_numpy(
+        label_values=timestamp_frame[return_source_column].to_numpy(
             dtype=dtype,
             copy=False,
         ),

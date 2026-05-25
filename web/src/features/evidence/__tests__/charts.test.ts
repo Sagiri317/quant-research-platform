@@ -9,11 +9,11 @@ describe('chart range readouts', () => {
   test('reports value ranges per series instead of merging unrelated curves', () => {
     const readout = rangeReadout(
       [
-        { timestamp: '2026-01-01', cumulative_pnl: 0.1, drawdown: -0.03 },
-        { timestamp: '2026-01-02', cumulative_pnl: 0.5, drawdown: -0.2 },
+        { timestamp: '2026-01-01', cumulative_net_return: 0.1, drawdown: -0.03 },
+        { timestamp: '2026-01-02', cumulative_net_return: 0.5, drawdown: -0.2 },
       ],
       [
-        { key: 'cumulative_pnl', label: 'cumulative_pnl' },
+        { key: 'cumulative_net_return', label: 'cumulative_net_return' },
         { key: 'drawdown', label: 'drawdown' },
       ],
       (value) => `${value}`,
@@ -21,7 +21,7 @@ describe('chart range readouts', () => {
 
     expect(readout.datePart).toBe('2026-01-01 至 2026-01-02')
     expect(readout.seriesRanges).toEqual([
-      { label: 'cumulative_pnl', minValue: '0.1', maxValue: '0.5' },
+      { label: 'cumulative_net_return', minValue: '0.1', maxValue: '0.5' },
       { label: 'drawdown', minValue: '-0.2', maxValue: '-0.03' },
     ])
   })

@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from quant_research_platform.kernels.kernel_protocol import (
-    DATAFRAME_ENGINE,
-    SUPPORTED_ENGINES,
-    TENSOR_ENGINE,
+    DATAFRAME_KERNEL,
+    SUPPORTED_KERNELS,
+    TENSOR_KERNEL,
 )
-from quant_research_platform.runtime.exceptions import UnsupportedEngineError
+from quant_research_platform.runtime.exceptions import UnsupportedKernelError
 
 
 @dataclass(frozen=True)
@@ -22,38 +22,38 @@ class KernelDescriptor:
 
 
 KERNEL_REGISTRY: dict[str, KernelDescriptor] = {
-    DATAFRAME_ENGINE: KernelDescriptor(
-        name=DATAFRAME_ENGINE,
+    DATAFRAME_KERNEL: KernelDescriptor(
+        name=DATAFRAME_KERNEL,
         label="pandas DataFrame kernel",
     ),
-    TENSOR_ENGINE: KernelDescriptor(
-        name=TENSOR_ENGINE,
+    TENSOR_KERNEL: KernelDescriptor(
+        name=TENSOR_KERNEL,
         label="numpy tensor kernel",
         uses_tensor_layout=True,
     ),
 }
 
 
-def supported_engine_names() -> tuple[str, ...]:
-    """返回注册表声明的 engine 名称。"""
+def supported_kernel_names() -> tuple[str, ...]:
+    """返回注册表声明的 kernel 名称。"""
 
     return tuple(sorted(KERNEL_REGISTRY))
 
 
-def get_kernel_descriptor(engine: str | None) -> KernelDescriptor:
+def get_kernel_descriptor(kernel: str | None) -> KernelDescriptor:
     """返回规范化后的 kernel descriptor。"""
 
-    return KERNEL_REGISTRY[normalize_engine_name(engine)]
+    return KERNEL_REGISTRY[normalize_kernel_name(kernel)]
 
 
-def normalize_engine_name(engine: str | None) -> str:
+def normalize_kernel_name(kernel: str | None) -> str:
     """返回规范化后的 kernel 名称。"""
 
-    if engine is None:
-        return DATAFRAME_ENGINE
-    if not isinstance(engine, str) or not engine:
-        raise UnsupportedEngineError("engine must be a non-empty string.")
-    normalized = engine.lower()
-    if normalized not in SUPPORTED_ENGINES:
-        raise UnsupportedEngineError(f"unsupported evaluation engine: {engine}")
+    if kernel is None:
+        return DATAFRAME_KERNEL
+    if not isinstance(kernel, str) or not kernel:
+        raise UnsupportedKernelError("kernel must be a non-empty string.")
+    normalized = kernel.lower()
+    if normalized not in SUPPORTED_KERNELS:
+        raise UnsupportedKernelError(f"unsupported evaluation kernel: {kernel}")
     return normalized

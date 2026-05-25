@@ -11,10 +11,10 @@ export type CreateFormState = {
   asset_column: string
   feature_columns: string
   label_columns: string
-  pnl_return_column: string
+  return_source_column: string
   segment_columns: string
   time_breakdowns: string
-  engine: string
+  kernel: string
   n_groups: string
   weight_method: string
   portfolio_mode: string
@@ -55,9 +55,9 @@ export const KIND_OPTIONS = [{ value: 'factor', label: '因子研究' }]
 export const DATA_STAGE_OPTIONS = [
   { value: 'uploaded_panel', label: '用户上传面板' },
 ]
-export const ENGINE_OPTIONS = [
-  { value: 'dataframe', label: 'DataFrame 引擎' },
-  { value: 'tensor', label: 'Tensor 引擎' },
+export const KERNEL_OPTIONS = [
+  { value: 'dataframe', label: 'DataFrame 内核' },
+  { value: 'tensor', label: 'Tensor 内核' },
 ]
 
 export const INITIAL_CREATE_FORM: CreateFormState = {
@@ -71,10 +71,10 @@ export const INITIAL_CREATE_FORM: CreateFormState = {
   asset_column: 'asset',
   feature_columns: 'factor',
   label_columns: 'forward_return',
-  pnl_return_column: 'forward_return_1d',
+  return_source_column: 'forward_return_1d',
   segment_columns: '',
   time_breakdowns: '',
-  engine: 'dataframe',
+  kernel: 'dataframe',
   n_groups: '5',
   weight_method: 'equal_weight_quantile',
   portfolio_mode: 'long_short',
@@ -102,12 +102,12 @@ export function validateCreateForm(
     ['asset_column', '资产列'],
     ['feature_columns', '因子列'],
     ['label_columns', '标签列'],
-    ['pnl_return_column', 'PnL收益列'],
+    ['return_source_column', '收益来源列'],
     ['n_groups', '分组数'],
     ['weight_method', '权重方法'],
     ['portfolio_mode', '组合模式'],
     ['direction', '信号方向'],
-    ['engine', '计算引擎'],
+    ['kernel', '计算内核'],
     ['top_quantile', '多头分位'],
     ['bottom_quantile', '空头分位'],
   ]
@@ -129,7 +129,7 @@ export function validateCreateForm(
     form.asset_column,
     ...splitColumns(form.feature_columns),
     ...splitColumns(form.label_columns),
-    form.pnl_return_column,
+    form.return_source_column,
   ].map((column) => column.trim())
   const missingColumns = requiredColumns.filter(
     (column) => !csvPreview.columns.includes(column),
@@ -147,8 +147,8 @@ export function validateCreateForm(
   if (unsupportedBreakdowns.length > 0) {
     return `时间分解只支持 year、quarter、month：${unsupportedBreakdowns.join(', ')}`
   }
-  if (!['dataframe', 'tensor'].includes(form.engine)) {
-    return '计算引擎只支持 dataframe 或 tensor。'
+  if (!['dataframe', 'tensor'].includes(form.kernel)) {
+    return '计算内核只支持 dataframe 或 tensor。'
   }
   if (!['long_short', 'long_only'].includes(form.portfolio_mode)) {
     return '组合模式只支持 long_short 或 long_only。'
@@ -204,10 +204,10 @@ export function buildCreatePayload(
     asset_column: form.asset_column.trim(),
     feature_columns: splitColumns(form.feature_columns),
     label_columns: splitColumns(form.label_columns),
-    pnl_return_column: form.pnl_return_column.trim(),
+    return_source_column: form.return_source_column.trim(),
     segment_columns: splitColumns(form.segment_columns),
     time_breakdowns: splitColumns(form.time_breakdowns),
-    engine: form.engine,
+    kernel: form.kernel,
     n_groups: Number.parseInt(form.n_groups, 10),
     weight_method: form.weight_method.trim(),
     portfolio_mode: form.portfolio_mode.trim(),
@@ -259,13 +259,12 @@ export function inferCreateFormFromColumns(
     'stock_code',
     'instrument',
   ])
-  const pnlReturn = firstExisting(columns, [
-    form.pnl_return_column,
+  const inferredReturnSource = firstExisting(columns, [
+    form.return_source_column,
     'forward_return_1d',
-    'pnl_return',
     'return_1d',
   ])
-  const reserved = new Set([timestamp, asset, pnlReturn].filter(Boolean))
+  const reserved = new Set([timestamp, asset, inferredReturnSource].filter(Boolean))
   const labelCandidates = columns.filter(
     (column) =>
       !reserved.has(column) &&
@@ -283,7 +282,7 @@ export function inferCreateFormFromColumns(
     asset_column: asset || form.asset_column,
     feature_columns: featureCandidates.join(',') || form.feature_columns,
     label_columns: labelCandidates.join(',') || form.label_columns,
-    pnl_return_column: pnlReturn || form.pnl_return_column,
+    return_source_column: inferredReturnSource || form.return_source_column,
   }
 }
 

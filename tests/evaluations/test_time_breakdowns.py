@@ -50,18 +50,19 @@ def test_time_breakdowns_write_year_quarter_month_summary_artifacts(tmp_path):
     )
 
     for period in ("year", "quarter", "month"):
-        directory = tmp_path / f"metrics_by_{period}"
+        directory = tmp_path / "breakdowns" / period
         for name in (
             f"ic_summary_by_{period}",
             f"group_spread_summary_by_{period}",
             f"performance_summary_by_{period}",
         ):
-            assert (directory / f"{name}.csv").exists()
+            file_name = name.removesuffix(f"_by_{period}")
+            assert (directory / f"{file_name}.csv").exists()
             assert name in result.metrics
             assert period in result.metrics[name].columns
             assert (
-                manifest["artifacts"][f"metrics_by_{period}"][name]
-                == f"metrics_by_{period}/{name}.csv"
+                manifest["artifacts"][f"breakdowns/{period}"][name]
+                == f"breakdowns/{period}/{file_name}.csv"
             )
             display_tables = {
                 table["key"]: table for table in manifest["display"]["tables"]
@@ -70,17 +71,19 @@ def test_time_breakdowns_write_year_quarter_month_summary_artifacts(tmp_path):
             download_items = {
                 item["item"] for item in display_downloads["items"]
             }
-            assert display_tables[name]["path"] == f"metrics_by_{period}/{name}.csv"
-            assert f"metrics_by_{period}/{name}.csv" in download_items
+            assert display_tables[name]["path"] == (
+                f"breakdowns/{period}/{file_name}.csv"
+            )
+            assert f"breakdowns/{period}/{file_name}.csv" in download_items
             all_preset = next(
                 preset
                 for preset in display_downloads["presets"]
                 if preset["key"] == "all"
             )
-            assert f"metrics_by_{period}/{name}.csv" in all_preset["items"]
+            assert f"breakdowns/{period}/{file_name}.csv" in all_preset["items"]
 
     performance_by_year = pd.read_csv(
-        tmp_path / "metrics_by_year" / "performance_summary_by_year.csv"
+        tmp_path / "breakdowns" / "year" / "performance_summary.csv"
     )
     assert set(performance_by_year["year"]) == {2025, 2026}
     assert dict(

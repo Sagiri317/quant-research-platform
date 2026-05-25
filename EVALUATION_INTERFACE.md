@@ -1,5 +1,47 @@
 # Evaluation 接口说明
 
+## N7 当前合同（schema 0.6）
+
+从 N7 起，新写出的 evaluation-set artifact schema 为 `0.6`。一个
+API-visible evaluation run 可以包含多个 result combinations；用户可见维度只通过
+`dimensions/combinations.csv` 表达，第一阶段 required columns 为：
+
+```text
+combination_id, feature, label, kernel, portfolio_mode
+```
+
+run-level constant 配置，包括成本、权重方法、benchmark、universe、
+eligibility 和 tradability 配置，写入 `config.json` / `lineage.json`，不进入
+`dimensions/combinations.csv`。实际结果值仍写入 fact tables，例如
+`metrics/performance_summary.csv`、`portfolio/returns.csv`、
+`portfolio/weights.parquet` 和 `diagnostics/tradability_diagnostics.csv`。
+
+公开命名使用 `kernel` 和 `return_source_column`。旧的 external `engine`
+compatibility、`pnl_return_column`、`portfolio/pnl.csv` 和 `portfolio/positions.csv` 不属于 schema `0.6` 合同；累计收益表为
+`portfolio/cumulative_returns.csv`，权重表为 required Parquet：
+`portfolio/weights.parquet`。
+
+A 股本地 CLI 第一阶段只使用显式 features，且多值参数写在同一行：
+
+```powershell
+conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation `
+  --processed-root data/processed_private/csmar `
+  --report-root reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1 `
+  --start-year 2023 `
+  --end-year 2025 `
+  --start-date 2023-01-01 `
+  --end-date 2023-06-30 `
+  --features mom_20d vol_20d amihud_20d `
+  --labels forward_return_5d forward_return_20d `
+  --kernels dataframe tensor `
+  --portfolio-modes long_short long_only `
+  --dry-run
+```
+
+`--input-file` 是后端/本地 CLI-only override，不暴露到 API request models、
+frontend forms、Pipeline Builder payloads 或 saved snapshots。`--dry-run`
+只检查输入文件、日期覆盖、required columns、组合展开和输出目录，不写 artifact。
+
 本文是 `quant-research-platform` 内部 market module 和外部本地研究脚本接入 evaluation layer 的接口文档。它只定义 evaluation layer 需要什么输入、如何调用、会写出什么结果；不绑定具体市场，也不处理真实数据许可、下载、凭据或交易。
 
 Evaluation layer 的职责是评价已经构造好的 factor / prediction panel，并写出标准 evaluation-set artifacts。它不下载数据、不清洗 vendor/raw data、不读取 credentials、不训练 ML model，也不判断真实市场 alpha。
@@ -10,7 +52,7 @@ Evaluation layer 的职责是评价已经构造好的 factor / prediction panel�
 
 | 层级 | 名称 | 作用 |
 |---|---|---|
-| 输入 contract | `EvaluationSpec` | 一次 evaluation set 的完整请求，可以包含多个 feature、多个 label、多个 weight config 和多个 cost config |
+| 输入 contract | `EvaluationSpec` | 一次 evaluation set 的完整请求，可以包含多个 feature 和多个 label，以及一个 run-level weight config 和一个 run-level cost config |
 | 执行入口 | `run_evaluation(spec)` | 运行整个 evaluation set，并写出 artifacts |
 | 输出结果 | `EvaluationSetResult` | 返回内存表、`combinations` 表和 artifact paths |
 
@@ -26,7 +68,7 @@ Evaluation layer 的职责是评价已经构造好的 factor / prediction panel�
 ```text
 input transport -> input adapter -> EvaluationSpec
                 -> run_evaluation
-                -> schema 0.5 evaluation-set artifacts
+                -> schema 0.6 evaluation-set artifacts
 ```
 
 ## 2. Long Panel Schema
@@ -39,12 +81,12 @@ Panel 必须是 `timestamp x asset` long format。每行代表一个资产在一
 | asset | `asset`、`symbol`、`stock_code` | 非空，会转为字符串 |
 | feature / signal | `factor_a`、`mom_20d`、`prediction` | 至少一个，必须是 numeric |
 | label | `forward_return_5d`、`target_return` | 至少一个，必须是 numeric |
-| PnL return | `forward_return_1d` | 用于真实回测收益曲线；可用 `pnl_return_column` 指定 |
+| return source | `forward_return_1d` | 用于累计收益曲线；可用 `return_source_column` 指定 |
 
 硬约束：
 
 - `timestamp + asset` 必须唯一。
-- feature、label、PnL return 必须是数值列。
+- feature、label、return source 必须是数值列。
 - feature columns 和 label columns 不能重叠。
 - asset code 不应因保存为数字而丢失前导零。
 - 缺列、重复 key、非数值列都会 fail fast。
@@ -61,9 +103,9 @@ Panel 必须是 `timestamp x asset` long format。每行代表一个资产在一
 | neutralization group | `industry`、`sector` | group de-mean neutralization |
 | exposure | `size`、`beta`、`volatility` | cross-sectional OLS neutralization |
 
-## 3. Label 与 PnL Return
+## 3. Label 与 Return Source
 
-`label_columns` 和 `pnl_return_column` 是两个不同角色。
+`label_columns` 和 `return_source_column` 是两个不同角色。
 
 `label_columns` 用于 label-based diagnostics：
 
@@ -72,19 +114,19 @@ Panel 必须是 `timestamp x asset` long format。每行代表一个资产在一
 - grouped returns；
 - group spread diagnostics。
 
-`pnl_return_column` 用于真实回测收益路径：
+`return_source_column` 用于真实回测收益路径：
 
 - `portfolio/returns.csv`；
-- `portfolio/pnl.csv`；
+- `portfolio/cumulative_returns.csv`；
 - `metrics/performance_summary.csv`；
 - year / quarter / month breakdown 中的 performance metrics。
 
 默认规则：
 
-- 如果显式传入 `pnl_return_column`，evaluation layer 使用该列计算 PnL。
+- 如果显式传入 `return_source_column`，evaluation layer 使用该列计算 portfolio returns 和 cumulative returns。
 - 如果未显式传入，evaluation layer 默认查找 `forward_return_1d`。
 - 如果两者都没有，evaluation layer 拒绝运行。
-- 5d / 20d / 60d 等 longer-horizon label 只作为 diagnostics，不自动当作真实日频 PnL 曲线。
+- 5d / 20d / 60d 等 longer-horizon label 只作为 diagnostics，不自动当作真实日频累计收益曲线。
 
 ## 4. Python API
 
@@ -99,7 +141,7 @@ spec = EvaluationSpec(
     asset_column="asset",
     feature_columns=("factor_a", "factor_b"),
     label_columns=("forward_return_5d", "forward_return_20d"),
-    pnl_return_column="forward_return_1d",
+    return_source_column="forward_return_1d",
     metadata={
         "run_id": "factor_eval_set",
         "project": "quant-research-platform",
@@ -112,7 +154,7 @@ spec = EvaluationSpec(
     output_dir="reports/private_real/factor_evaluation/factor_eval_set",
     n_groups=5,
     time_breakdowns=("year", "quarter", "month"),
-    engine="dataframe",
+    kernel="dataframe",
 )
 
 result = run_evaluation(spec)
@@ -146,7 +188,7 @@ spec = make_parquet_evaluation_spec(
     asset_column="stock_code",
     feature_columns=("rev_20d", "rev_60d"),
     label_columns=("forward_return_20d",),
-    pnl_return_column="forward_return_1d",
+    return_source_column="forward_return_1d",
     metadata={
         "run_id": "a_share_reversal_smoke",
         "project": "quant-research-platform",
@@ -157,7 +199,7 @@ spec = make_parquet_evaluation_spec(
     },
     output_dir="reports/private_real/factor_evaluation/a_share_reversal_smoke",
     segment_columns=("market_type",),
-    engine="dataframe",
+    kernel="dataframe",
 )
 
 result = run_evaluation(spec)
@@ -183,19 +225,19 @@ conda run -n analysis python -m quant_research_platform.markets.implementations.
   --end-year 2025 `
   --start-date 2024-01-01 `
   --end-date 2024-12-31 `
-  --factors mom_20d,vol_20d,amihud_20d `
+  --features mom_20d,vol_20d,amihud_20d `
   --labels forward_return_5d,forward_return_20d `
-  --pnl-return-column forward_return_1d `
-  --portfolio-mode long_only `
-  --engine dataframe
+  --return-source-column forward_return_1d `
+  --portfolio-modes long_only `
+  --kernels dataframe
 ```
 
 这个入口的语义是：
 
 - `--start-year/--end-year` 用来定位 `price_volume_factors_<start>_<end>.parquet`；若精确文件不存在，会选择覆盖该年份范围的更宽 full factor 文件。
 - `--start-date/--end-date` 用来对 `trade_date` 做评估阶段行过滤。
-- 每个 label 生成一个 evaluation run，输出在 `--report-root/evaluation_runs/` 下。
-- 这里会保留 A 股 adapter metadata、label availability summary、portfolio mode、engine、date filter 和 source file 信息。
+- 一个 API-visible evaluation run 内包含所有展开后的 `combination_id`；输出直接写入 `--report-root`。
+- 这里会保留 A 股 adapter metadata、label availability summary、portfolio mode、kernel、date filter 和 source file basename 信息。
 
 `evaluate-parquet` 是通用 generic evaluation adapter，适合外部本地 Parquet、临时输入验收或非 A 股市场模块；验证 A 股全流程时不要用它替代 A 股专用入口。
 
@@ -216,7 +258,7 @@ conda run -n analysis python -m quant_research_platform.interfaces.cli evaluate-
   --feature rev_20d `
   --feature rev_60d `
   --label forward_return_20d `
-  --pnl-return-column forward_return_1d `
+  --return-source-column forward_return_1d `
   --segment-column market_type `
   --eligibility-column eligible `
   --can-enter-column can_enter `
@@ -241,26 +283,27 @@ conda run -n analysis python -m quant_research_platform.interfaces.cli evaluate-
 manifest.json
 config.json
 summary.json
-combinations.csv
+lineage.json
+dimensions/combinations.csv
 report.md
 metrics/ic.csv
 metrics/ic_summary.csv
 metrics/grouped_returns.csv
 metrics/group_spread_summary.csv
 metrics/performance_summary.csv
-portfolio/positions.csv
-portfolio/turnover.csv
+portfolio/weights.parquet
 portfolio/returns.csv
-portfolio/pnl.csv
-portfolio/cost_breakdown.csv
-portfolio/exposure_summary.csv
-diagnostics/weight_diagnostics.csv
-diagnostics/neutralization_diagnostics.csv
+portfolio/cumulative_returns.csv
+diagnostics/tradability_diagnostics.csv
+input_quality/label_availability.csv
+input_quality/factor_coverage.csv
+input_quality/tradability_coverage.csv
+summaries/evaluation_summary.csv
 ```
 
-启用 `time_breakdowns` 后，会按实际配置出现 `metrics_by_year/`、`metrics_by_quarter/` 或 `metrics_by_month/`。这些 time breakdown 是从完整 overall run path 中按 period 切片统计，不重新运行年度 / 季度 / 月度回测，不清仓，也不重新生成 weights、positions 或 portfolio returns path。
+启用 `time_breakdowns` 后，会按实际配置出现 `breakdowns/year/`、`breakdowns/quarter/` 或 `breakdowns/month/`。这些 time breakdown 是从完整 overall run path 中按 period 切片统计，不重新运行年度 / 季度 / 月度回测，不清仓，也不重新生成 weights 或 portfolio returns path。
 
-`manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.5"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。
+`manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.6"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。
 
 ## 9. Evaluation Layer 不负责的边界
 

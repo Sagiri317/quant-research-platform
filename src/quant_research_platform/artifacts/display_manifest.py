@@ -5,39 +5,38 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 TABLE_LABELS = {
-    "combinations": ("组合配置", "setup"),
+    "combinations": ("组合配置", "dimensions"),
     "ic": ("IC / RankIC", "metrics"),
     "ic_summary": ("IC / RankIC 汇总", "metrics"),
     "grouped_returns": ("分组收益", "metrics"),
     "group_spread_summary": ("分组 Spread 汇总", "metrics"),
     "performance_summary": ("Performance 汇总", "metrics"),
-    "exposure_summary": ("敞口汇总", "portfolio"),
-    "positions": ("持仓明细", "portfolio"),
-    "turnover": ("Turnover 明细", "portfolio"),
     "returns": ("组合收益明细", "portfolio"),
-    "pnl": ("PnL 曲线", "portfolio"),
-    "cost_breakdown": ("成本拆分", "portfolio"),
-    "weight_diagnostics": ("权重诊断", "diagnostics"),
-    "neutralization_diagnostics": ("中性化诊断", "diagnostics"),
+    "cumulative_returns": ("累计收益曲线", "portfolio"),
+    "weights": ("目标权重", "portfolio"),
     "tradability_diagnostics": ("可交易性诊断", "diagnostics"),
+    "label_availability": ("Label 可用性", "input_quality"),
+    "factor_coverage": ("Factor 覆盖", "input_quality"),
+    "tradability_coverage": ("可交易字段覆盖", "input_quality"),
+    "evaluation_summary": ("评价摘要", "summary"),
 }
 
 TABLE_ORDER = tuple(TABLE_LABELS)
 
 CHARTS = [
     {
-        "id": "pnl",
-        "title": "累计组合 PnL",
+        "id": "cumulative_returns",
+        "title": "累计组合收益",
         "description": "净值曲线和回撤",
         "section": "primary",
         "kind": "line",
-        "table": "pnl",
+        "table": "cumulative_returns",
         "x": "timestamp",
         "include_zero": True,
         "series": [
             {
-                "key": "cumulative_pnl",
-                "label": "cumulative_pnl",
+                "key": "cumulative_net_return",
+                "label": "cumulative_net_return",
                 "color": "#2563eb",
                 "format": "percent",
             },
@@ -112,6 +111,7 @@ def build_display_manifest(
     artifacts: Mapping[str, object],
     *,
     schema_version: str,
+    default_selection: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """从 artifact path contract 构造前端 display contract。"""
 
@@ -122,10 +122,13 @@ def build_display_manifest(
         {"item": "comparison.csv", "label": "Run 对比 comparison.csv", "kind": "index"},
         {"item": "manifest.json", "label": "Manifest manifest.json", "kind": "json"},
         {"item": "config.json", "label": "Config config.json", "kind": "json"},
+        {"item": "lineage.json", "label": "Lineage lineage.json", "kind": "json"},
         {"item": "summary.json", "label": "Summary summary.json", "kind": "json"},
     ]
     return {
         "schema_version": schema_version,
+        "dimension_source": "dimensions/combinations.csv",
+        "default_selection": dict(default_selection or {}),
         "tables": tables,
         "charts": [
             chart
@@ -138,7 +141,10 @@ def build_display_manifest(
                 *[
                     {
                         "item": str(table["download_item"]),
-                        "label": f"{table['label']} CSV",
+                        "label": (
+                            f"{table['label']} "
+                            f"{_table_format_label(table)}"
+                        ),
                         "kind": "table",
                         "table": table["key"],
                     }
@@ -182,28 +188,46 @@ def _table_entries(artifacts: Mapping[str, object]) -> list[dict[str, object]]:
 
 
 def _table_entry(key: str, path: str) -> dict[str, object]:
-    label, group = TABLE_LABELS.get(key, (_humanize_key(key), _group_for_path(path)))
+    label, role = TABLE_LABELS.get(key, (_humanize_key(key), _role_for_path(path)))
+    table_format = "parquet" if path.endswith(".parquet") else "csv"
+    supports_combination_filter = key not in {
+        "combinations",
+        "label_availability",
+        "factor_coverage",
+        "tradability_coverage",
+    }
     return {
         "key": key,
         "label": label,
-        "group": group,
+        "group": role,
+        "role": role,
         "path": path,
+        "format": table_format,
         "download_item": path,
-        "supports_combination_filter": key != "combinations",
+        "dimension_source": "dimensions/combinations.csv",
+        "join_key": "combination_id" if supports_combination_filter else None,
+        "preview_rows": 20,
+        "supports_combination_filter": supports_combination_filter,
     }
 
 
 def _table_paths(artifacts: Mapping[str, object]) -> dict[str, str]:
     paths: dict[str, str] = {}
-    combinations = artifacts.get("combinations")
-    if isinstance(combinations, str):
-        paths["combinations"] = combinations
-    for group in ("metrics", "portfolio", "diagnostics"):
+    dimensions = artifacts.get("dimensions")
+    if isinstance(dimensions, Mapping):
+        combinations = dimensions.get("combinations")
+        if isinstance(combinations, str):
+            paths["combinations"] = combinations
+    for group in ("metrics", "portfolio", "diagnostics", "input_quality", "summaries"):
         _extend_section_paths(paths, artifacts.get(group))
     for group, section in artifacts.items():
-        if isinstance(group, str) and group.startswith("metrics_by_"):
+        if isinstance(group, str) and group.startswith("breakdowns/"):
             _extend_section_paths(paths, section)
     return paths
+
+
+def _table_format_label(table: Mapping[str, object]) -> str:
+    return "Parquet" if table.get("format") == "parquet" else "CSV"
 
 
 def _extend_section_paths(paths: dict[str, str], section: object) -> None:
@@ -214,12 +238,18 @@ def _extend_section_paths(paths: dict[str, str], section: object) -> None:
             paths[key] = path
 
 
-def _group_for_path(path: str) -> str:
+def _role_for_path(path: str) -> str:
+    if path.startswith("dimensions/"):
+        return "dimensions"
     if path.startswith("portfolio/"):
         return "portfolio"
     if path.startswith("diagnostics/"):
         return "diagnostics"
-    if path.startswith("metrics_by_"):
+    if path.startswith("input_quality/"):
+        return "input_quality"
+    if path.startswith("summaries/"):
+        return "summary"
+    if path.startswith("breakdowns/"):
         return "breakdown"
     return "metrics"
 

@@ -28,15 +28,19 @@ def test_compare_run_tree_matches_combined_old_run_to_split_new_runs(tmp_path):
         labels=["forward_return_5d", "forward_return_20d"],
         rows=[
             [
-                "mom_20d__forward_return_5d__w0__c0",
+                "mom_20d__forward_return_5d__dataframe__long_only",
                 "mom_20d",
                 "forward_return_5d",
+                "dataframe",
+                "long_only",
                 "0.1",
             ],
             [
-                "mom_20d__forward_return_20d__w0__c0",
+                "mom_20d__forward_return_20d__dataframe__long_only",
                 "mom_20d",
                 "forward_return_20d",
+                "dataframe",
+                "long_only",
                 "0.2",
             ],
         ],
@@ -46,9 +50,11 @@ def test_compare_run_tree_matches_combined_old_run_to_split_new_runs(tmp_path):
         labels=["forward_return_5d"],
         rows=[
             [
-                "mom_20d__forward_return_5d__w0__c0",
+                "mom_20d__forward_return_5d__dataframe__long_only",
                 "mom_20d",
                 "forward_return_5d",
+                "dataframe",
+                "long_only",
                 "0.1",
             ],
         ],
@@ -58,9 +64,11 @@ def test_compare_run_tree_matches_combined_old_run_to_split_new_runs(tmp_path):
         labels=["forward_return_20d"],
         rows=[
             [
-                "mom_20d__forward_return_20d__w0__c0",
+                "mom_20d__forward_return_20d__dataframe__long_only",
                 "mom_20d",
                 "forward_return_20d",
+                "dataframe",
+                "long_only",
                 "0.2",
             ],
         ],
@@ -92,6 +100,14 @@ def test_run_acceptance_passes_src_pythonpath_to_child_process(monkeypatch):
     assert str(Path("C:/repo") / "src") in pythonpath
     assert calls[0]["cwd"] == Path("C:/repo")
     assert calls[0]["check"] is True
+    assert "--features" in calls[0]["command"]
+    assert "--kernels" in calls[0]["command"]
+    assert "--return-source-column" in calls[0]["command"]
+    assert "--portfolio-modes" in calls[0]["command"]
+    assert "--factors" not in calls[0]["command"]
+    assert "--engine" not in calls[0]["command"]
+    assert "--pnl-return-column" not in calls[0]["command"]
+    assert "--portfolio-mode" not in calls[0]["command"]
 
 
 def test_module_import_adds_project_src_to_sys_path():
@@ -161,7 +177,7 @@ def _write_run(
 ) -> None:
     run_dir.mkdir(parents=True)
     summary = {
-        "artifact_schema_version": "0.5",
+        "artifact_schema_version": "0.6",
         "artifact_type": "evaluation_set",
         "data_stage": "approved_offline_real_data",
         "uses_external_data": True,
@@ -169,7 +185,7 @@ def _write_run(
         "schema": {
             "feature_columns": ["mom_20d"],
             "label_columns": labels,
-            "pnl_return_column": "forward_return_1d",
+            "return_source_column": "forward_return_1d",
         },
     }
     (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
@@ -181,7 +197,9 @@ def _write_run(
         newline="",
     ) as handle:
         writer = csv.writer(handle)
-        writer.writerow(["combination_id", "feature", "label", "value"])
+        writer.writerow(
+            ["combination_id", "feature", "label", "kernel", "portfolio_mode", "value"]
+        )
         writer.writerows(rows)
 
 

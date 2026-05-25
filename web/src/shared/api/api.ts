@@ -17,7 +17,7 @@ export type RunSummary = {
   uses_external_data: boolean
   n_rows_evaluated: number
   label_columns?: string[]
-  pnl_return_column?: string | null
+  return_source_column?: string | null
   n_combinations?: number
   breakdown_columns?: string[]
   weight_method: string
@@ -53,7 +53,7 @@ export type RunDetail = {
   uses_external_data: boolean
   n_rows_evaluated: number
   label_columns?: string[]
-  pnl_return_column?: string | null
+  return_source_column?: string | null
   n_combinations?: number
   breakdown_columns?: string[]
   weight_config?: Record<string, unknown>
@@ -82,10 +82,10 @@ export type CreateRunPayload = {
   asset_column: string
   feature_columns: string[]
   label_columns: string[]
-  pnl_return_column?: string
+  return_source_column?: string
   segment_columns: string[]
   time_breakdowns: string[]
-  engine: string
+  kernel: string
   n_groups: number
   weight_method: string
   portfolio_mode: string
@@ -128,9 +128,10 @@ export type PipelineSnapshotRequest = {
   date_start: string
   factor_expression: string
   factor_template_id?: string
+  kernel: string
   label_columns: string[]
   market: string
-  pnl_return_column: string
+  return_source_column: string
   portfolio_mode: string
   processed_factor_column?: string
   run_id: string
@@ -211,6 +212,8 @@ export type RunTableSpec = {
   path: string
   downloadItem: string
   evidenceKey: string
+  format?: string
+  previewRows: number
   supportsCombinationFilter: boolean
 }
 
@@ -220,6 +223,10 @@ export type RunDisplayTable = {
   group: string
   path: string
   download_item: string
+  format?: 'csv' | 'parquet' | string
+  role?: string
+  join_key?: string | null
+  preview_rows?: number
   supports_combination_filter?: boolean
 }
 
@@ -422,14 +429,16 @@ export function runTableSpecsFromDisplay(
     path: tableApiPath(run, table),
     downloadItem: table.download_item,
     evidenceKey: table.key,
+    format: table.format,
+    previewRows: table.preview_rows ?? 20,
     supportsCombinationFilter: table.supports_combination_filter !== false,
   }))
 }
 
 function tableApiPath(run: RunSummary, table: RunDisplayTable): string {
-  const metricName = table.path.split('/').pop()?.replace(/\.csv$/, '') ?? table.key
+  const metricName = table.path.split('/').pop()?.replace(/\.(csv|parquet)$/, '') ?? table.key
   const prefix = runApiPath(run)
-  if (table.path === 'combinations.csv') {
+  if (table.path === 'dimensions/combinations.csv') {
     return `${prefix}/metrics/combinations`
   }
   if (table.path.startsWith('portfolio/')) {
@@ -439,12 +448,19 @@ function tableApiPath(run: RunSummary, table: RunDisplayTable): string {
     return `${prefix}/diagnostics/${encodeURIComponent(metricName)}`
   }
   if (
-    table.path.startsWith('metrics_by_year/') ||
-    table.path.startsWith('metrics_by_quarter/') ||
-    table.path.startsWith('metrics_by_month/')
+    table.path.startsWith('breakdowns/year/') ||
+    table.path.startsWith('breakdowns/quarter/') ||
+    table.path.startsWith('breakdowns/month/')
   ) {
-    const [group] = table.path.split('/')
+    const parts = table.path.split('/')
+    const group = parts[1]
     return `${prefix}/breakdowns/${encodeURIComponent(group)}/${encodeURIComponent(metricName)}`
+  }
+  if (table.path.startsWith('input_quality/')) {
+    return `${prefix}/metrics/${encodeURIComponent(metricName)}`
+  }
+  if (table.path.startsWith('summaries/')) {
+    return `${prefix}/metrics/${encodeURIComponent(metricName)}`
   }
   if (table.path.startsWith('metrics/')) {
     return `${prefix}/metrics/${encodeURIComponent(metricName)}`
