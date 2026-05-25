@@ -107,6 +107,7 @@ Evaluation set 输出：
 ```text
 manifest.json
 config.json
+lineage.json
 summary.json
 dimensions/combinations.csv
 report.md
@@ -118,7 +119,7 @@ breakdowns/quarter/
 breakdowns/month/
 ```
 
-`manifest.json` 和 `summary.json` 均包含 `artifact_schema_version: "0.6"` 与 `artifact_type: "evaluation_set"`。Manifest 中的 artifact 路径必须是 portable relative paths，不写入 Windows drive letter、用户目录或绝对路径。
+`manifest.json` 和 `summary.json` 均包含 `artifact_schema_version: "0.6"` 与 `artifact_type: "evaluation_set"`。Manifest 中的 artifact 路径必须是 portable relative paths，不写入 Windows drive letter、用户目录或绝对路径。Public-downloadable `config.json` 和 `lineage.json` 必须在 writer、direct download 和 selected ZIP 路径上统一脱敏，不暴露 private data path 或本机绝对路径。
 
 `manifest.display` 是 API、下载和 React workbench 的展示合同。新增 artifact 时，writer / loader、API payload/download、frontend display consumers、tests 和 docs 必须同步。
 

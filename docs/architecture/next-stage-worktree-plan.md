@@ -36,7 +36,7 @@
 
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
-| `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023-2025 样例生成 | A 股 `EvaluationMatrixRun`、`combination_id`、`engine` -> `kernel` 合同重命名、schema `0.6` evaluation artifact、feature / label / mode / kernel 批量计算与结果切片、tensor-native 计算路径、dataframe reference/fallback、2023-2025 canonical sample generation、implementation acceptance comparison、docs/code-map | 当前 pre-merge review 分支；消费 N1 runner、N2 backend diagnostics artifact 和 N3 packaging 边界 | 高。会碰 A 股 evaluation adapter、kernels、Factor Factory downstream evaluation、artifact/API/frontend 合同和私有样例生成流程 |
+| `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023-2025 样例生成 | A 股 `EvaluationMatrixRun`、`combination_id`、`engine` -> `kernel` 合同重命名、schema `0.6` evaluation artifact、feature / label / mode / kernel 批量计算与结果切片、tensor-native 计算路径、dataframe reference/fallback、2023-2025 canonical sample generation、implementation acceptance comparison、docs/code-map | 当前 pre-merge closeout 分支；review fixes 已提交，消费 N1 runner、N2 backend diagnostics artifact 和 N3 packaging 边界 | 高。会碰 A 股 evaluation adapter、kernels、Factor Factory downstream evaluation、artifact/API/frontend 合同和私有样例生成流程 |
 | `codex/tradability-workbench` | N2 frontend 展示 | frontend evidence/workbench 展示新增 diagnostics | 依赖 N7 生成带 `tradability_diagnostics.csv` 的 canonical 2023-2025 样例；最好基于 N4 后结构 | 中。会碰 frontend evidence state |
 | `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N7 evaluation run identity 和样例稳定；复用 N2 诊断 artifact/display 模式 | 中到高。需要先写详细计划 |
 | `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 N7 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
@@ -85,7 +85,7 @@
 
 ## 工作树创建策略
 
-N7 当前实现分支是 `codex/n7-evaluation-run-implementation`；不要再创建旧的 `codex/a-share-run-identity` 工作树。后续新任务从干净 `main` 创建新工作树：
+N7 当前实现分支是 `codex/n7-evaluation-run-implementation`，pre-merge review fixes 已提交；不要再创建旧的 `codex/a-share-run-identity` 工作树。后续新任务从干净 `main` 创建新工作树：
 
 ```powershell
 git status --short

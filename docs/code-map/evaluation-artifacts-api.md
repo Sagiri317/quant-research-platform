@@ -28,6 +28,10 @@ market adapter / upload / parquet helper
   `write_evaluation_comparison_report()` 只输出 CSV/JSON/Markdown，不进入主网页。
 - Parquet table preview 由 evidence API 提供 20 行预览能力，frontend 通过
   `manifest.display.tables` 消费，不绕过 display contract。
+- Public-downloadable metadata files, currently `config.json` and `lineage.json`,
+  are sanitized consistently when written, directly downloaded, and packaged in
+  selected ZIPs; selected ZIP cache fingerprints hash the sanitized dynamic
+  metadata bytes.
 
 本文记录当前 evaluation layer、artifact schema `0.6`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
 
@@ -147,11 +151,12 @@ breakdowns/month/
 | `artifact_type_registry.py` | `ArtifactTypeContract`, `EVALUATION_SET_CONTRACT` | 轻量 artifact type registry。 |
 | `display_manifest.py` | `build_display_manifest` | 构造 `manifest.display`。 |
 | `manifest_validation.py` | `validate_artifact_schema_version`, `validate_display_manifest`, `validate_evaluation_set_table_columns` | schema/display/path/table/chart validation。 |
+| `public_metadata.py` | `sanitize_public_metadata` | public-downloadable metadata 脱敏；移除 backend-only input fields，并隐藏私有或本机路径。 |
 | `artifact_writer.py` | `ArtifactOutputs`, `write_evaluation_set_artifacts`, `build_evaluation_set_manifest` | 写 evaluation-set artifacts。 |
 | `artifact_loader.py` | `LoadedEvaluationSet`, `load_evaluation_set` | 严格读取 completed run。 |
 | `artifact_inventory.py` | `index_evaluation_sets` | 离线 run inventory。 |
 | `artifact_comparison.py` | `compare_evaluation_sets`, `write_run_comparison` | 离线 run comparison。 |
-| `artifact_package.py` | `build_selected_artifact_zip`, `require_manifest_display_download_item`, `resolve_manifest_display_artifact_path` | manifest.display download gate、direct artifact path resolution、selected ZIP file collection、dynamic item handling、cache fingerprint、ZIP writing。 |
+| `artifact_package.py` | `build_selected_artifact_zip`, `public_config_bytes`, `public_lineage_bytes`, `require_manifest_display_download_item`, `resolve_manifest_display_artifact_path` | manifest.display download gate、direct artifact path resolution、selected ZIP file collection、dynamic metadata handling、cache fingerprint、ZIP writing。 |
 
 明确不支持：
 
@@ -227,6 +232,10 @@ Direct download 和 ZIP download 必须满足：
 - path resolves inside run directory。
 - item path is safe relative path。
 - ZIP cache identity includes `source_alias` and `run_id`。
+- `config.json` and `lineage.json` direct downloads and selected ZIP entries use
+  sanitized public metadata bytes, not raw private/local path payloads。
+- selected ZIP cache identity for dynamic metadata includes the sanitized content
+  digest, so metadata changes do not reuse stale ZIP files。
 - `comparison.csv` is generated dynamically from API-visible runs when requested。
 - unknown item is rejected before writing cache。
 - removed workbook `artifacts.xlsx` returns 404 / not exposed。

@@ -305,6 +305,9 @@ summaries/evaluation_summary.csv
 
 `manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.6"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。
 
+`config.json` 和 `lineage.json` 属于 public-downloadable metadata：writer、direct download
+和 selected ZIP packaging 都必须使用统一脱敏后的内容，不暴露 private data path 或本机绝对路径；selected ZIP cache fingerprint 也使用脱敏后的动态 metadata bytes。
+
 ## 9. Evaluation Layer 不负责的边界
 
 Evaluation layer 不负责：

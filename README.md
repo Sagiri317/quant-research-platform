@@ -1,6 +1,6 @@
 # Quant Research Platform
 
-## N7 当前 Evaluation 合同（2026-05-25）
+## N7 当前 Evaluation 合同（2026-05-26）
 
 当前新生成的 evaluation artifacts 使用 schema `0.6`。一个 API-visible
 evaluation run 可以包含多个 `combination_id`，组合维度由
@@ -8,6 +8,8 @@ evaluation run 可以包含多个 `combination_id`，组合维度由
 `combination_id, feature, label, kernel, portfolio_mode`。成本、权重方法、
 benchmark、universe、eligibility 和 tradability 等 run-level constant 配置写入
 `config.json` / `lineage.json`，不写入 combinations 维度表。
+这两个 public-downloadable metadata 文件在写入、direct download 和 selected ZIP
+打包路径上统一脱敏，不暴露 private data path 或本机绝对路径。
 
 Schema `0.6` 的核心输出包括 `portfolio/weights.parquet`、
 `portfolio/cumulative_returns.csv`、`metrics/performance_summary.csv`、

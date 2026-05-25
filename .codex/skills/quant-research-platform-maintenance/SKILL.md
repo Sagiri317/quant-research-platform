@@ -77,6 +77,7 @@ For artifact/API/frontend contract work, explicitly review these invariants befo
 - `manifest.display` remains the only exposure source for evidence payloads, table previews, direct downloads, ZIP downloads, frontend tables, charts, and download presets.
 - Preview endpoints have bounded defaults, hard maximum limits, and clear low-memory metadata such as `has_more` and whether row counts are exact.
 - Download services package files from manifest-resolved artifact paths and do not full-load Parquet tables for metadata-only or selected-file downloads.
+- Public-downloadable metadata such as `config.json` and `lineage.json` is sanitized consistently at writer, direct-download, and ZIP-packaging paths, including selected ZIP cache fingerprints.
 - Frontend selected-run and selected-combination state drives fresh table/chart previews when the initial evidence payload is intentionally truncated.
 - Factor Factory consumes the current artifact/API contract without forcing N7 evaluation artifacts to preserve retired fields.
 - Retired public fields and table names are absent from current `src/` and `web/` contracts; allowed historical references and negative tests must be intentional.
