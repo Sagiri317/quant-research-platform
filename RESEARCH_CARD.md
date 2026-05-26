@@ -7,8 +7,8 @@
 | 字段 | 内容 |
 |---|---|
 | 记录名称 | `quant_research_platform_a_share_module` |
-| 当前状态 | Phase 1 required code functionality implemented and verified; code-map, architecture docs, and root docs synchronized |
-| 日期 | 2026-05-24 |
+| 当前状态 | Phase 1 completed; N1/N2 backend/N3/N4/N7 merged to `main`; code-map, architecture docs, skills, and root docs synchronized |
+| 日期 | 2026-05-26 |
 | 项目定位 | 本地多市场量化研究平台；A 股为第一版完整 market module |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
 | 主要产物 | `panel_full/research_panel_2014_2025.parquet`；`price_volume_factors_full/price_volume_factors_2014_2025.parquet` |
@@ -34,6 +34,7 @@
 
 ## 下一阶段事项
 
-- 前端 feature split、artifact ZIP packaging 下沉到 artifacts、eligibility / tradability 诊断可见化属于 Phase 1 之后的架构债。
+- N2 frontend diagnostics display 是下一项前端任务；后端 `tradability_diagnostics` artifact/API 已合入 `main`。
+- 2023-2025 canonical evaluation / Factor Factory 样例可按需重新生成，用于展示和回归验收。
 - long-only 成本敏感性、regime、行业/市值中性化、风险暴露和正式组合约束分析仍需单独研究。
 - ML prediction pipeline 的 time split、防泄漏、model manifest 和失败实验记录仍需单独设计。

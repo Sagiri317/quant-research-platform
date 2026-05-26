@@ -7,20 +7,20 @@
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
 | N1 | A 股 start-from pipeline runner | P0 | merged to `main` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
-| N2 | Eligibility / tradability 诊断可视化 | P0 | backend artifact/API merged to `main`; frontend waits for N7 | 让覆盖、过滤原因和影响先进入 artifact/API，下一步由 frontend 消费 |
+| N2 | Eligibility / tradability 诊断可视化 | P0 | backend artifact/API merged to `main`; frontend pending | 让覆盖、过滤原因和影响先进入 artifact/API，下一步由 frontend 消费 |
 | N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
 | N4 | 前端 feature split | P1 | merged to `main` | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
-| N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | pre-merge review fixes committed on `codex/n7-evaluation-run-implementation` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片，并生成可供前端展示和后续诊断复用的三年 A 股样例 |
+| N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 已验证，完整 2023-2025 canonical regeneration 按需执行 |
 
 ## 当前推荐顺序
 
-当前应先合并或发 PR 处理 N7 实现分支；N2 frontend、N5 和 N6 的落地实现应基于合并后的 N7 合同继续。
+N7 evaluation run identity 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id` 和 artifact/API/frontend 合同继续。
 
 ```text
-1. N7 A 股 evaluation run identity 与 2023-2025 样例生成
-2. N2 frontend diagnostics display
+1. N2 frontend diagnostics display
+2. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
 3. N5 风险、regime、成本和容量扩展
 4. N6 ML prediction handoff
 5. Pipeline history UI
@@ -28,9 +28,10 @@
 
 原因：
 
-- N2 后端已支持 `diagnostics/tradability_diagnostics.csv`，但现有 2023-2025 私有样例是旧生成物，尚不能证明前端能展示真实 N2 diagnostics。
-- N5 会继续新增 diagnostics artifacts；如果 evaluation run identity、`combination_id` 和样例未稳定，会继续叠加在不清晰的展示结构上。
-- N6 的 prediction handoff 也需要稳定表达 date range、feature / signal、label、kernel、portfolio mode、factor set 和输入身份，并能在同一个 evaluation run 页面里切换结果。
+- N2 后端已支持 `diagnostics/tradability_diagnostics.csv`，N7 已稳定 `combination_id` 和 schema `0.6`，前端可以在当前合同上消费诊断结果。
+- 完整 2023-2025 canonical regeneration 仍可作为公开安全展示或回归样例的后续验收步骤，但不再阻塞 N7 集成。
+- N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
+- N6 的 prediction handoff 需要稳定表达 date range、feature / signal、label、kernel、portfolio mode、factor set 和输入身份，并能在同一个 evaluation run 页面里切换结果。
 
 ## N1 A 股 Start-From Pipeline Runner
 
@@ -86,8 +87,8 @@ conda run -n analysis python -m pytest -q tests/interfaces/api tests/research/fa
 当前后端状态：
 
 - Backend artifact/API 已合并到 `main`。
-- 新增 diagnostics 通过 schema `0.5`、`manifest.display`、API preview、direct download 和 ZIP download 暴露。
-- Frontend 展示仍是后续任务，应等 N7 生成带 diagnostics 的 2023-2025 canonical 样例后再验收。
+- 该 diagnostics 后端能力最初在 schema `0.5` 期间落地；当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它。
+- Frontend 展示仍是后续任务；它应基于 `main` 的 N7 schema `0.6` / `combination_id` 合同消费 diagnostics。完整 2023-2025 canonical 样例可作为最终验收或公开安全展示的后续输入，但不再是启动前置条件。
 
 当前后端输出：
 
@@ -110,7 +111,7 @@ diagnostics/tradability_diagnostics.csv
 
 实现顺序说明：
 
-- 前端展示应等 N7 重新生成 2023-2025 样例后再做，避免用缺少 `tradability_diagnostics.csv` 的旧样例证明 UI 路径。
+- 前端展示应基于当前 `main` 的 N7 contract 和包含 `tradability_diagnostics.csv` 的 artifact/API 路径验收；不要用缺少 diagnostics 的旧样例证明 UI 路径。
 
 ## N3 Artifact ZIP Packaging 下沉
 

@@ -13,7 +13,7 @@
 | 第一市场模块 | A 股 |
 | 数据源 | CSMAR，用户手工导出 |
 | 数据范围 | 2014-2025 interim / panel / factor 已有历史产物 |
-| 评估范围 | 历史 2024-2025 long-only full-sample evaluation；迁移后新增 2023-2025 tensor / dataframe、long-only / long-short 四组小样本 smoke；Phase 1 代码功能已按验收记录复核 |
+| 评估范围 | 历史 2024-2025 long-only full-sample evaluation；迁移后新增 2023-2025 tensor / dataframe、long-only / long-short 四组小样本 smoke；N7 已完成 2023H1 private smoke 并合入 `main`；Phase 1 代码功能已按验收记录复核 |
 | universe | 第一版 A 股范围，排除 B 股和北交所 |
 | 私有边界 | raw/interim/processed 和 private reports 不公开、不提交 |
 
@@ -72,7 +72,7 @@ reports/private_real/factor_evaluation/
 
 迁移前历史 long-only 年度结果里，`rev_20d`、`rev_60d`、`rev_120d` 是第一版最主要的候选信号。2024 年 `rev_120d` 的 `mean_rankic` 约 0.114，`mean_net_portfolio_return` 约 0.003086；2025 年 `rev_60d` 的 `mean_rankic` 约 0.095，`mean_net_portfolio_return` 约 0.001717。
 
-这些数字只作为历史统计诊断，不是最终投资结论。迁移后的 2023-2025 小样本 smoke 已覆盖 tensor / dataframe 与 long-only / long-short；Phase 1 验收记录中的 A 股 pipeline runner、Factor Factory 本地入口和 artifact/API/frontend 合同已通过代码验收。后续仍需要继续补充正式成本敏感性、regime、中性化和风险暴露分析。
+这些数字只作为历史统计诊断，不是最终投资结论。迁移后的 2023-2025 小样本 smoke 已覆盖 tensor / dataframe 与 long-only / long-short；N7 2023H1 private smoke 已覆盖 24 个 `combination_id`，完整 2023-2025 canonical regeneration 仍按需执行。Phase 1 验收记录中的 A 股 pipeline runner、Factor Factory 本地入口和 artifact/API/frontend 合同已通过代码验收。后续仍需要继续补充 N2 frontend diagnostics display、正式成本敏感性、regime、中性化和风险暴露分析。
 
 ## 限制
 

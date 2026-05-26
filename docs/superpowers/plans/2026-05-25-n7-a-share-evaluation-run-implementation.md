@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Implementation status (2026-05-26):** This plan has been executed on branch `codex/n7-evaluation-run-implementation`. Pre-merge review fixes for public metadata sanitization, schema `0.6` metadata key validation, Factor Factory N7 artifact directory handling, and docs drift have been committed. Treat the detailed checkbox list below as the historical implementation plan, not as a fresh pending task list. Current code/docs/tests are the source of truth for follow-up review.
+> **Implementation status (2026-05-26):** This plan has been executed and merged to `main`. Public metadata sanitization, schema `0.6` metadata key validation, Factor Factory N7 artifact directory handling, and docs drift fixes are part of the current baseline. Treat the detailed checkbox list below as the historical implementation plan, not as a fresh pending task list. Current code/docs/tests are the source of truth for follow-up review.
 
 **Goal:** Implement the finalized N7 A-share evaluation run contract: one user-visible evaluation run contains a matrix of factor/label/kernel/portfolio-mode combinations, writes artifact schema `0.6`, supports low-memory comparison/reporting, and lets the frontend fully inspect the resulting tables and summaries.
 

@@ -45,4 +45,5 @@
 - `platform-flow.md` 和 `platform-flow-interactive.html` 保持语义一致，但粒度不同；Markdown 版是 overview，HTML 版是 detailed map。
 - 新增用户可见 artifact、API、download、frontend table/chart 时，同步 `evaluation-artifacts-api.md`。
 - 修改 A 股 raw/interim/panel/factor/runner/Factor Factory 时，同步 `a-share-data-and-pipeline.md`。
+- 修改 platform flow 图时，运行 `scripts/verify_code_map_flow.ps1` 做 UTF-8、节点/边、环、重叠和 Bezier edge 静态检查。
 - 不在 code-map 中记录一次性 run id、临时文件、完整私有路径或不可公开的 CSMAR 明细。

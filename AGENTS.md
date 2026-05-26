@@ -12,7 +12,7 @@ Project purpose:
 - A-share is the first complete market module, backed by local private CSMAR data.
 - Evaluation layer, artifact schema `0.6`, local API, downloads, and React evidence workbench live inside this project.
 - Crypto and other markets are planned/disabled only until separately designed and tested; do not keep empty implementation packages for them.
-- Sibling project `../alpha-research-core` is historical reference only. Do not make it a runtime dependency or active source after migration unless the user explicitly asks.
+- Do not add sibling workspace projects as runtime dependencies or active sources unless the user explicitly asks.
 - Code and public-safe aggregate summaries may later be published after review.
 - CSMAR raw/interim/processed data and private real reports remain private.
 
@@ -203,7 +203,15 @@ Do not run slow, network-heavy, destructive, or environment-changing commands wi
 - [docs/code-map/](docs/code-map/): current source reading map, including platform flow, A-share data/pipeline, and evaluation/artifact/API/frontend contracts.
 - `.codex/skills/quant-research-platform-maintenance/SKILL.md`: project-local maintenance workflow, review stop rules, and verification sequencing for artifact/API/frontend contract changes.
 
+If GPT Pro or other external tools are used, they must receive an explicit context packet or public link. Context packets are managed by the root workflow; do not create a project-local packet cache unless approved.
+
 Root handoff rule: if this project changes its current topic, phase, milestone, blocker, next step, public readiness, or data/API/Git/Conda/privacy boundary, record an `open` signal in [PROJECT_STATUS.md](PROJECT_STATUS.md). Do not edit workspace-root planning or status files from this project unless explicitly asked.
+
+Use the workspace learning-day convention for project status, task summaries, research evidence, and planning handoffs:
+
+- Late-night work after midnight but before the user sleeps still belongs to the previous calendar day.
+- Morning updates after 08:00 belong to the current calendar day.
+- If date ownership is ambiguous, ask before creating or updating dated project records.
 
 ## 8. Forbidden Operations
 

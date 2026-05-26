@@ -1,6 +1,6 @@
 # N7 A 股 Evaluation Run Identity 与样例设计
 
-状态：待实现设计草案，已按 `docs/architecture/` 复核并按最新方向重写
+状态：历史设计草案；N7 implementation 已于 2026-05-26 合入 `main`，当前合同以源码、`README.md`、`EVALUATION_INTERFACE.md` 和 `docs/code-map/` 为准
 日期：2026-05-25
 范围：N7 A 股 `EvaluationMatrixRun`、`combination_id`、`kernel` 命名、tensor-native 计算路径、Factor Factory 下游 evaluation run 引用，以及 2023-2025 canonical 样例。
 

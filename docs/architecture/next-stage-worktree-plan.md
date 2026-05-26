@@ -8,12 +8,13 @@
 - `main` 已包含 N2 backend artifact/API tradability diagnostics。
 - `main` 已包含 N3 Artifact ZIP packaging 下沉。
 - `main` 已包含 N4 frontend feature split。
+- `main` 已包含 N7 A 股 evaluation run identity、schema `0.6`、`combination_id`、kernel 维度、Factor Factory N7 artifact 读取和 public-downloadable metadata 脱敏。
 - 2023-2025 smoke evaluation 与 Factor Factory 旧样例已保留为 `*_baseline_before_2023_2025_regen` 历史参考目录，不进入 N7 正式 compare contract。
 - Pipeline 对外语言固定为 snapshot vs run：
   - `POST /api/pipeline-snapshots` 只保存配置。
   - `POST /api/pipeline-runs` 执行到 evaluation。
   - executable run 只用 `start_from` 控制开始层。
-- 当前没有保留已完成 N1/N3 的本地工作树；新任务应从干净 `main` 创建新工作树。
+- 当前没有保留已完成 N1/N3 的本地工作树；N7 已合入 `main`，新任务应从干净 `main` 创建新工作树。
 
 ## 原则
 
@@ -28,22 +29,22 @@
 | 分支 | 路线图任务 | 状态 | 结果 |
 |---|---|---|---|
 | `codex/a-share-build-runner` | N1 A 股 start-from runner | merged to `main` | snapshot/run split、`start_from` runner、完整 checkpoint 链和 Factor Factory existing-factors start layer 已落地 |
-| `codex/tradability-artifacts` | N2 后端 artifact/API 诊断 | merged to `main` | `diagnostics/tradability_diagnostics.csv` 已进入 schema `0.5`、`manifest.display`、API preview、direct download 和 ZIP download |
+| `codex/tradability-artifacts` | N2 后端 artifact/API 诊断 | merged to `main` | `diagnostics/tradability_diagnostics.csv` 最初在 schema `0.5` 期间落地，当前 schema `0.6` 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露 |
 | `codex/artifact-zip-packaging` | N3 ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py` |
 | `codex/frontend-feature-split` | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
+| `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 已落地；完整 2023-2025 canonical regeneration 按需执行 |
 
 ## 建议后续分支
 
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
-| `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023-2025 样例生成 | A 股 `EvaluationMatrixRun`、`combination_id`、`engine` -> `kernel` 合同重命名、schema `0.6` evaluation artifact、feature / label / mode / kernel 批量计算与结果切片、tensor-native 计算路径、dataframe reference/fallback、2023-2025 canonical sample generation、implementation acceptance comparison、docs/code-map | 当前 pre-merge closeout 分支；review fixes 已提交，消费 N1 runner、N2 backend diagnostics artifact 和 N3 packaging 边界 | 高。会碰 A 股 evaluation adapter、kernels、Factor Factory downstream evaluation、artifact/API/frontend 合同和私有样例生成流程 |
-| `codex/tradability-workbench` | N2 frontend 展示 | frontend evidence/workbench 展示新增 diagnostics | 依赖 N7 生成带 `tradability_diagnostics.csv` 的 canonical 2023-2025 样例；最好基于 N4 后结构 | 中。会碰 frontend evidence state |
+| `codex/tradability-workbench` | N2 frontend 展示 | frontend evidence/workbench 展示新增 diagnostics | 基于 `main` 的 N7 schema `0.6` / `combination_id` 合同和 N2 backend diagnostics artifact；如需最终展示样例，可先按审批重生成 2023-2025 canonical sample | 中。会碰 frontend evidence state |
 | `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N7 evaluation run identity 和样例稳定；复用 N2 诊断 artifact/display 模式 | 中到高。需要先写详细计划 |
 | `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 N7 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
 
 ## 推荐顺序
 
-1. `codex/n7-evaluation-run-implementation`
+1. N7 已完成并合入 `main`
    - 先稳定“一个 API-visible run 是一个 `EvaluationMatrixRun`”的长期语义。
    - Evaluation run 内部用 `combination_id` 管理 feature / label / portfolio mode / kernel / factor set 等结果切片。
    - `factor_set` 是一起输入计算的 feature 批次；第一阶段保持每个 feature column 单独评价。
@@ -68,7 +69,7 @@
    - 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致，不打印或公开原始 CSMAR 数据。
 
 2. `codex/tradability-workbench`
-   - 消费 N7 重新生成后的 N2 diagnostics artifact/API。
+   - 消费 N2 diagnostics artifact/API，并基于 `main` 的 N7 schema `0.6` 和 `combination_id` 合同展示。
    - 前端只展示，不重新计算 eligibility、tradability、IC、returns、weights 或 turnover。
 
 3. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
@@ -85,7 +86,7 @@
 
 ## 工作树创建策略
 
-N7 当前实现分支是 `codex/n7-evaluation-run-implementation`，pre-merge review fixes 已提交；不要再创建旧的 `codex/a-share-run-identity` 工作树。后续新任务从干净 `main` 创建新工作树：
+N7 已合入 `main`；不要再创建旧的 A-share run identity 或 N7 implementation 工作树。后续新任务从干净 `main` 创建新工作树：
 
 ```powershell
 git status --short
