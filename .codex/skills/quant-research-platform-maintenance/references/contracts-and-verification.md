@@ -32,6 +32,17 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 - Uploaded-run deletion is limited to `summary.data_stage == "uploaded_panel"`, configured run roots, immediate child run directories, and directories containing `manifest.json`.
 - Bad or stale runs are rejected or excluded at the earliest reasonable entry point.
 
+## N8 Contract Consumer Convergence
+
+Use this section when the work is explicitly about simplifying or converging contract consumers rather than adding a new research diagnostic.
+
+- Shared `manifest.display` preview/download helpers may serve both evaluation runs and Factor Factory, but they must keep artifact type and schema validation explicit: evaluation-set schema `0.6` is not Factor Factory schema `0.1`.
+- Factor-template discovery should be separable from pipeline snapshot/run submission. If `GET /api/factor-templates` moves out of pipeline routes, keep Factor Studio behavior stable and keep Pipeline API focused on snapshot/run.
+- Frontend table preview should consume backend-provided endpoint metadata when available. Avoid duplicating backend route rules in frontend path inference.
+- A-share build/evaluate service extraction should make CLI, pipeline runner, and Factor Factory thinner callers of the same service layer; it must not change `start_from` semantics or imply build-only pipeline runs.
+- CSV upload is legacy/dev compatibility and not the A-share private main chain. Any renaming or hiding must preserve local debugging boundaries and deletion safety.
+- Do not combine N8 cleanup with N5/N6 research-contract changes unless a written plan states the exact shared files, test boundaries, and rollback path.
+
 ## Frontend Exit Criteria
 
 - Run switching clears stale evidence and updates title, summary cards, interpretation, charts, metric details, CSV preview, report mode, comparison state, and downloads.

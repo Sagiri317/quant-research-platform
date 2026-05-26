@@ -4,6 +4,10 @@
 
 ## 总览
 
+本页 Markdown 版按阅读用途拆成三张小图：先看 A-share 主链路，再看 artifact/display 到 API 和前端的展示链路，最后看 CLI、Factor Factory 和 CSV upload 兼容入口。完整节点、边、参数详情和可拖动布局仍以交互 HTML 为准。
+
+### A-share 主链路
+
 ```mermaid
 flowchart LR
   raw["CSMAR raw CSV\n私有输入"]
@@ -15,54 +19,89 @@ flowchart LR
   spec["EvaluationSpec"]
   payload["evaluate_to_payload"]
   writer["write_evaluation_set_artifacts"]
-  eval["run_evaluation\ngeneric wrapper"]
   artifacts["schema 0.6 evaluation_set"]
   display["manifest.display"]
-  package["Artifact ZIP package\nartifact_package.py"]
-  fastapi["FastAPI app\nApiContext"]
-  run_repo["run_repository\n(source_alias, run_id)"]
-  pipeline_api["Pipeline run/snapshot API"]
-  evidence_api["Evidence API\n(source_alias, run_id)"]
-  download_api["Download API\nroutes/artifacts + downloads"]
-  comparison_api["Comparison API"]
-  web["React workbench"]
-  builder["Pipeline Builder"]
-  template_api["Factor template API"]
-  studio["Factor Studio"]
-  factory["Factor Factory\nschema 0.1"]
-  factory_api["Factor Factory API\n(run_id)"]
-  factory_ui["FactorFactoryRuns UI"]
-  upload["CSV Upload UI/API\nlegacy/dev"]
-  a_share_cli["A-share eval CLI\nrun_factor_evaluation"]
-  offline_compare["Offline comparison writer"]
-  cli["qrp CLI"]
 
   raw --> interim --> panel --> factors
   factors --> adapter --> spec --> payload --> writer --> artifacts --> display
+  raw --> runner
   interim --> runner
   panel --> runner
   factors --> runner
   runner --> adapter
-  fastapi --> pipeline_api
-  fastapi --> run_repo
-  fastapi --> template_api
-  fastapi --> factory_api
-  fastapi --> upload
-  pipeline_api --> runner
-  display --> run_repo
-  run_repo --> evidence_api --> web
+```
+
+### Artifact、API 与前端展示链路
+
+```mermaid
+flowchart LR
+  artifacts["schema 0.6 evaluation_set"]
+  display["manifest.display"]
+  loader["artifact loader"]
+  package["Artifact ZIP package\nartifact_package.py"]
+  fastapi["FastAPI app\nApiContext"]
+  run_repo["run_repository\n(source_alias, run_id)"]
+  evidence_api["Evidence API\n(source_alias, run_id)"]
+  download_api["Download API\nroutes/artifacts + downloads"]
+  comparison_api["Comparison API"]
+  web["React workbench"]
+  evidence_feature["Evidence feature\ncharts/tables/downloads"]
+
+  fastapi -. mounts/context .-> run_repo
+  artifacts --> display
+  artifacts --> loader --> run_repo
+  display --> evidence_api
   display --> package
+  display --> evidence_feature
+  run_repo --> evidence_api --> web
   run_repo --> download_api
-  package --> download_api --> web
-  run_repo --> comparison_api
-  factory --> runner
-  factory --> factory_api --> factory_ui
-  template_api --> studio --> builder --> pipeline_api
+  package --> download_api --> evidence_feature
+  run_repo --> comparison_api --> web
+```
+
+### 旁路入口和兼容路径
+
+```mermaid
+flowchart LR
+  fastapi["FastAPI app\nApiContext"]
+  pipeline_api["Pipeline run/snapshot API"]
+  runner["A-share pipeline runner\nstart_from"]
+  adapter["A-share evaluation adapter"]
+  payload["evaluate_to_payload"]
+  eval["run_evaluation\ngeneric wrapper"]
+  builder["Pipeline Builder"]
+  template_api["Factor template API"]
+  templates["Factor templates\nregistry"]
+  studio["Factor Studio"]
+  factory["Factor Factory\nbatch runner"]
+  factory_artifacts["Factor Factory artifacts\nschema 0.1"]
+  factory_api["Factor Factory API\n(run_id)"]
+  factory_ui["FactorFactoryRuns UI"]
+  upload["CSV Upload UI/API\nlegacy/dev"]
+  evidence_api["Evidence API\n(source_alias, run_id)"]
+  a_share_cli["A-share eval CLI\nrun_factor_evaluation"]
+  offline_compare["Offline comparison writer"]
+  cli["qrp CLI"]
+
+  fastapi -. mounts .-> pipeline_api
+  fastapi -. mounts .-> template_api
+  fastapi -. mounts .-> factory_api
+  fastapi -. mounts .-> upload
+  template_api --> studio --> builder --> pipeline_api --> runner --> adapter
+  templates --> template_api
+  templates --> factory --> runner
+  factory --> factory_artifacts --> factory_api --> factory_ui
   upload --> evidence_api
   cli --> eval --> payload
   cli --> a_share_cli --> adapter
   cli --> offline_compare
 ```
+
+旁路入口说明：
+
+- `run_evaluation` 是 `qrp evaluate-parquet` 等通用入口使用的 wrapper，不是 A-share 私有主链路的必经节点。
+- Factor Studio 通过 `GET /api/factor-templates` 读取模板，不直接绕过 API 访问 registry。
+- CSV Upload UI/API 是本地 legacy/dev 兼容路径，不是 A-share 私有主链路。
 
 ## 主链路
 

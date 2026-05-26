@@ -13,6 +13,7 @@
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 | N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 已验证，完整 2023-2025 canonical regeneration 按需执行 |
+| N8 | 架构简化与合同消费收敛 | P1 | planned | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
 
 ## 当前推荐顺序
 
@@ -20,15 +21,17 @@ N7 evaluation run identity 已合入 `main`。当前后续实现应基于 `main`
 
 ```text
 1. N2 frontend diagnostics display
-2. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
-3. N5 风险、regime、成本和容量扩展
-4. N6 ML prediction handoff
-5. Pipeline history UI
+2. N8 架构简化与合同消费收敛
+3. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
+4. N5 风险、regime、成本和容量扩展
+5. N6 ML prediction handoff
+6. Pipeline history UI
 ```
 
 原因：
 
 - N2 后端已支持 `diagnostics/tradability_diagnostics.csv`，N7 已稳定 `combination_id` 和 schema `0.6`，前端可以在当前合同上消费诊断结果。
+- N8 不应阻塞 N2 frontend，但应在 N5/N6 大范围新增 artifact/API/frontend 合同前推进，避免继续复制 display preview、download allowlist、template API 和 pipeline entry glue。
 - 完整 2023-2025 canonical regeneration 仍可作为公开安全展示或回归样例的后续验收步骤，但不再阻塞 N7 集成。
 - N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
 - N6 的 prediction handoff 需要稳定表达 date range、feature / signal、label、kernel、portfolio mode、factor set 和输入身份，并能在同一个 evaluation run 页面里切换结果。
@@ -108,6 +111,7 @@ diagnostics/tradability_diagnostics.csv
 - `manifest.display.tables` 暴露新增诊断表。
 - API preview 和 direct/ZIP download 只通过 `manifest.display` 访问。
 - 前端不重新计算，只展示 artifact/API 结果。
+- Diagnostics 展示优先落在 `web/src/features/evidence/` 的 feature-local 组件和测试中；不要继续把新增 UI 逻辑堆进 shell-level `App.test.tsx`。
 
 实现顺序说明：
 
@@ -299,3 +303,36 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 - 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致。
 - 对比不读取或打印原始 CSMAR 私有数据。
 - 前端 root 配置后续可以指向新的 2023-2025 evaluation 展示 root。
+
+## N8 架构简化与合同消费收敛
+
+目标：
+
+- 把已经稳定的 artifact/display/API/frontend 合同消费路径收敛成更少的共享 helper 和更薄的入口适配。
+- 在 N5/N6 扩展前降低重复解析、路径推导、入口混淆和 legacy/dev 路径误读。
+
+建议范围：
+
+- 抽共享的 `manifest.display` preview/download resolver，用于 evaluation runs 和 Factor Factory 的 table preview、download allowlist 和 display path resolution；保留 evaluation-set schema `0.6` 与 Factor Factory schema `0.1` 的类型边界。
+- 将 `GET /api/factor-templates` 从 Pipeline route/service 中拆成独立 factor-template route/service；Pipeline API 只保留 snapshot/run 职责，Factor Studio 只依赖 template API。
+- 让 evidence/display payload 提供 table preview endpoint metadata（例如 `preview_url` 或等价字段），减少前端根据 `manifest.display.tables.path` 推导 `metrics/portfolio/diagnostics/breakdowns` 路由的双写规则。
+- 把 A-share build/evaluate 从 CLI-style `main(argv)` 调用沉成可调用 service；CLI 只做薄包装，pipeline runner、Factor Factory 和 API 调用同一层 service。
+- 继续把 Evidence UI 的新增 diagnostics 和大组件拆到 feature-local container / component / tests；shell 只负责导航、运行选择和跨 feature 协调。
+- 将 CSV upload 标得更明确为 legacy/dev 入口；可考虑迁到显式 dev/upload 命名或用本地开关隐藏，避免把 `POST /api/runs` 误读为正式 A-share 创建路径。
+
+非目标：
+
+- 不重做视觉系统。
+- 不改 A-share `start_from` 语义。
+- 不新增外部 API、自动下载、部署、paper trading 或 live trading。
+- 不为了清理提前创建 repo-level `apps/api` 或空 market implementation。
+- 不在没有 schema 变化时强制 bump artifact schema。
+
+验收：
+
+- 所有用户可见 table preview、direct download、ZIP download、frontend tables/charts 仍只通过 `manifest.display` 暴露。
+- `(source_alias, run_id)` 仍贯穿 evaluation run list、evidence、preview、download、ZIP cache、comparison 和 frontend routing。
+- Factor Factory 和 evaluation runs 共享 helper 后仍分别校验自己的 artifact type / schema version。
+- `GET /api/factor-templates` 拆分后，Factor Studio 行为不变，Pipeline snapshot/run API 不承担 template discovery 细节。
+- A-share CLI、pipeline runner 和 Factor Factory 调用 service 后，现有 A-share pipeline/evaluation tests 不降覆盖。
+- 如 API payload、route、frontend contract 或 code-map 节点关系变化，同步 `docs/code-map/`、API tests 和 frontend tests。

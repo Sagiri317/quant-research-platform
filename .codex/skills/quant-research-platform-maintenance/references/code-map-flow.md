@@ -6,7 +6,7 @@ Load this reference when changing or reviewing `docs/code-map/platform-flow.md` 
 
 - `platform-flow.md` is the concise Chinese source-reading map.
 - `platform-flow-interactive.html` is the offline interactive SVG map.
-- Keep both files aligned on nodes, edges, API surfaces, entry points, and terminology.
+- Keep both files aligned on contract relationships, API surfaces, entry points, and terminology. They do not need identical graph granularity: the Markdown map may split or aggregate nodes for readability, while the interactive HTML remains the detailed graph.
 - Do not turn this reference into a generated-run log. Keep commit hashes, temporary screenshots, private paths, and one-time review notes out of it.
 
 ## Graph Semantics
@@ -14,12 +14,14 @@ Load this reference when changing or reviewing `docs/code-map/platform-flow.md` 
 - Edges represent data, contract, or payload availability flow. They do not necessarily represent HTTP request direction.
 - Keep actual request direction in node detail text when it differs from the visual flow.
 - Prefer left-to-right visual flow. Local vertical movement is allowed when it reduces overlap or edge clutter.
+- For Markdown readability, prefer a few small Mermaid diagrams over one dense graph when side paths would compete with the main A-share flow. A useful split is: A-share main chain, artifact/API/frontend display chain, and side or compatibility entries.
 - The graph must remain acyclic unless the code actually has a runtime cycle and the doc explicitly explains it.
 - Do not collapse frontend and API nodes unless there is a single path, no reuse branch, and no independent responsibility boundary. Composite nodes must explicitly say `Frontend + API`.
 
 ## Required Relationships
 
-- A-share main chain: CSMAR raw CSV -> build_interim -> interim CSV -> build_panel -> research panel -> build_factors -> factor table -> A-share adapter -> EvaluationSpec -> run_evaluation -> schema 0.6 artifacts -> `manifest.display` -> API/download/frontend.
+- A-share main chain: CSMAR raw CSV -> build_interim -> interim CSV -> build_panel -> research panel -> build_factors -> factor table -> A-share adapter -> EvaluationSpec -> evaluate_to_payload -> write_evaluation_set_artifacts -> schema 0.6 artifacts -> `manifest.display` -> API/download/frontend.
+- Keep `run_evaluation` visible only as the generic wrapper path used by `qrp evaluate-parquet` and other non-A-share generic entries; do not present it as the required A-share private evaluation path.
 - `start_from` runner entries are `existing_factors`, `rebuild_factors`, `rebuild_panel`, and `rebuild_interim`; every executable run continues through evaluation.
 - `manifest.display` is the only display contract for evidence payloads, table previews, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
 - API-visible evaluation run identity is `(source_alias, run_id)` across run list, evidence, preview, direct download, ZIP cache path, comparison payload, and frontend routing.
@@ -64,7 +66,7 @@ Mark backend-only or local-debug parameters, such as local file inputs, as not b
 
 Before calling a code-map update complete:
 
-- Compare the Markdown and HTML maps for missing nodes, missing edges, naming drift, and relationship direction errors.
+- Compare the Markdown and HTML maps for missing critical relationships, naming drift, and relationship direction errors. Do not require identical node or edge counts when Markdown intentionally uses smaller diagrams and HTML keeps the full detailed graph.
 - Check key code surfaces when the graph mentions them: `interfaces/api/app.py`, API routes/services, `artifacts/artifact_package.py`, `artifacts/display_manifest.py`, A-share pipeline runner, A-share evaluation adapter, Factor Factory routes, and React feature entry points.
 - Verify there are no `routeY`, `lane`, or `泳道` remnants in the interactive HTML.
 - Verify HTML nodes and edges parse, every edge endpoint exists, the graph has no directed cycle, and static node positions do not overlap.

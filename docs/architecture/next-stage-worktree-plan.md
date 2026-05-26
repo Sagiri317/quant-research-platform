@@ -39,6 +39,7 @@
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
 | `codex/tradability-workbench` | N2 frontend 展示 | frontend evidence/workbench 展示新增 diagnostics | 基于 `main` 的 N7 schema `0.6` / `combination_id` 合同和 N2 backend diagnostics artifact；如需最终展示样例，可先按审批重生成 2023-2025 canonical sample | 中。会碰 frontend evidence state |
+| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | `manifest.display` preview/download helper、factor-template route/service 拆分、preview endpoint metadata、A-share service entry、CSV upload legacy/dev 降级 | 基于 N7 schema `0.6` / `combination_id`、N2 backend diagnostics、N3 artifact package 和 N4 frontend feature split | 中到高。横跨 API、artifact、pipeline、Factor Factory 和 frontend，应先写详细计划 |
 | `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N7 evaluation run identity 和样例稳定；复用 N2 诊断 artifact/display 模式 | 中到高。需要先写详细计划 |
 | `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 N7 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
 
@@ -71,10 +72,20 @@
 2. `codex/tradability-workbench`
    - 消费 N2 diagnostics artifact/API，并基于 `main` 的 N7 schema `0.6` 和 `combination_id` 合同展示。
    - 前端只展示，不重新计算 eligibility、tradability、IC、returns、weights 或 turnover。
+   - 新增 diagnostics UI 时优先拆 feature-local components 和 focused tests；不要继续扩大 shell-level `App.test.tsx`。
 
-3. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
+3. `codex/contract-consumer-convergence`
+   - 收敛 `manifest.display` preview/download 解析，减少 evaluation runs 与 Factor Factory 的重复 helper。
+   - 将 factor-template endpoint 从 Pipeline route/service 中拆出，保持 Pipeline API 只负责 snapshot/run。
+   - 让前端通过后端下发的 preview endpoint metadata 消费 table preview，减少基于 path 的 route 推导。
+   - 把 A-share build/evaluate 调用沉成 service，CLI、pipeline runner 和 Factor Factory 都调用同一 service 层。
+   - 将 CSV upload 进一步标记为 legacy/dev，可用显式 dev/upload 命名或本地开关降低主路径误读。
+   - 该分支不应重做视觉、不改 A-share `start_from` 语义、不引入外部 API/部署/交易能力。
+
+4. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
    - 两者都应先写独立计划。
    - 不建议和 N2 frontend 同时抢同一批 artifact/API/frontend 文件。
+   - 若 N8 尚未完成，N5/N6 计划必须明确哪些 display/API/frontend helper 是复用现状，哪些留给 N8，避免隐性重构混入研究合同分支。
 
 ## 不建议并行的组合
 
@@ -83,6 +94,8 @@
 - 不要在 N7 之前推进 N2 frontend 的最终验收；旧私有样例缺少 `tradability_diagnostics.csv`，无法证明真实 diagnostics 展示路径。
 - 不要把 N5 风险/regime 扩展混进 N2 tradability 诊断。两者都属于 diagnostics，但研究语义和验收口径不同。
 - 不要把 N6 ML prediction handoff 混进现有 factor evaluation runner。Prediction 是新的输入合同，应单独设计。
+- 不要把 N8 的 cross-cutting contract cleanup 混进 N5/N6。N8 会触碰 artifact/API/download/frontend/pipeline/Factor Factory 多个面，应该单独计划和验收。
+- 不要在 N8 中同时重做 Evidence 视觉或引入新的研究诊断。N8 的目标是降低耦合和重复，不是新增研究能力。
 
 ## 工作树创建策略
 
