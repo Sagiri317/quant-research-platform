@@ -6,6 +6,7 @@
 
 - `main` 已包含 N1 A 股 `start_from` runner。
 - `main` 已包含 N2 backend artifact/API tradability diagnostics。
+- `codex/tradability-workbench` 已实现 N2 frontend diagnostics display，待合并到 `main`。
 - `main` 已包含 N3 Artifact ZIP packaging 下沉。
 - `main` 已包含 N4 frontend feature split。
 - `main` 已包含 N7 A 股 evaluation run identity、schema `0.6`、`combination_id`、kernel 维度、Factor Factory N7 artifact 读取和 public-downloadable metadata 脱敏。
@@ -33,12 +34,12 @@
 | `codex/artifact-zip-packaging` | N3 ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py` |
 | `codex/frontend-feature-split` | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
 | `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 已落地；完整 2023-2025 canonical regeneration 按需执行 |
+| `codex/tradability-workbench` | N2 frontend diagnostics display | ready for merge | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
 
 ## 建议后续分支
 
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
-| `codex/tradability-workbench` | N2 frontend 展示 | frontend evidence/workbench 展示新增 diagnostics | 基于 `main` 的 N7 schema `0.6` / `combination_id` 合同和 N2 backend diagnostics artifact；如需最终展示样例，可先按审批重生成 2023-2025 canonical sample | 中。会碰 frontend evidence state |
 | `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | `manifest.display` preview/download helper、factor-template route/service 拆分、preview endpoint metadata、A-share service entry、CSV upload legacy/dev 降级 | 基于 N7 schema `0.6` / `combination_id`、N2 backend diagnostics、N3 artifact package 和 N4 frontend feature split | 中到高。横跨 API、artifact、pipeline、Factor Factory 和 frontend，应先写详细计划 |
 | `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N7 evaluation run identity 和样例稳定；复用 N2 诊断 artifact/display 模式 | 中到高。需要先写详细计划 |
 | `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 N7 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
@@ -69,15 +70,16 @@
    - `long_short` 在 N7 中是诊断组合口径，不声明真实可融券做空或可交易策略。
    - 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致，不打印或公开原始 CSMAR 数据。
 
-2. `codex/tradability-workbench`
-   - 消费 N2 diagnostics artifact/API，并基于 `main` 的 N7 schema `0.6` 和 `combination_id` 合同展示。
+2. Merge `codex/tradability-workbench`
+   - N2 frontend diagnostics display 已实现，下一步是合并或发布该分支。
    - 前端只展示，不重新计算 eligibility、tradability、IC、returns、weights 或 turnover。
-   - 新增 diagnostics UI 时优先拆 feature-local components 和 focused tests；不要继续扩大 shell-level `App.test.tsx`。
+   - 诊断卡片只额外读取当前组合最后一行，不拉完整 diagnostics 表；后续 metadata/helper 收敛留给 N8。
 
 3. `codex/contract-consumer-convergence`
    - 收敛 `manifest.display` preview/download 解析，减少 evaluation runs 与 Factor Factory 的重复 helper。
    - 将 factor-template endpoint 从 Pipeline route/service 中拆出，保持 Pipeline API 只负责 snapshot/run。
    - 让前端通过后端下发的 preview endpoint metadata 消费 table preview，减少基于 path 的 route 推导。
+   - 统一组合相关但非 chart 的 display table preview 规则，让 diagnostics、N5 风险/regime 表和 N6 prediction 相关表按 metadata 声明随 `combination_id` 刷新，不继续增加前端 hardcoded table key。
    - 把 A-share build/evaluate 调用沉成 service，CLI、pipeline runner 和 Factor Factory 都调用同一 service 层。
    - 将 CSV upload 进一步标记为 legacy/dev，可用显式 dev/upload 命名或本地开关降低主路径误读。
    - 该分支不应重做视觉、不改 A-share `start_from` 语义、不引入外部 API/部署/交易能力。
@@ -91,7 +93,7 @@
 
 - 不要同时做 `codex/frontend-feature-split` 和 `codex/tradability-workbench`，除非已经约定 disjoint ownership。一个移动文件，一个加 UI，冲突概率高。
 - 不要把 `codex/tradability-artifacts` 和 `codex/tradability-workbench` 混到一个大分支。先把 artifact/API 合同稳定下来，再让前端消费。
-- 不要在 N7 之前推进 N2 frontend 的最终验收；旧私有样例缺少 `tradability_diagnostics.csv`，无法证明真实 diagnostics 展示路径。
+- N2 frontend 的最终验收应使用 N7 之后、包含 `tradability_diagnostics.csv` 的样例；旧私有样例缺少 diagnostics，不能证明真实展示路径。
 - 不要把 N5 风险/regime 扩展混进 N2 tradability 诊断。两者都属于 diagnostics，但研究语义和验收口径不同。
 - 不要把 N6 ML prediction handoff 混进现有 factor evaluation runner。Prediction 是新的输入合同，应单独设计。
 - 不要把 N8 的 cross-cutting contract cleanup 混进 N5/N6。N8 会触碰 artifact/API/download/frontend/pipeline/Factor Factory 多个面，应该单独计划和验收。

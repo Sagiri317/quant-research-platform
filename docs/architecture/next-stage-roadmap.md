@@ -7,7 +7,7 @@
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
 | N1 | A 股 start-from pipeline runner | P0 | merged to `main` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
-| N2 | Eligibility / tradability 诊断可视化 | P0 | backend artifact/API merged to `main`; frontend pending | 让覆盖、过滤原因和影响先进入 artifact/API，下一步由 frontend 消费 |
+| N2 | Eligibility / tradability 诊断可视化 | P0 | backend artifact/API merged to `main`; frontend implemented on `codex/tradability-workbench`, pending merge | 让覆盖、过滤原因和影响先进入 artifact/API，并由 frontend 只读展示 |
 | N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
 | N4 | 前端 feature split | P1 | merged to `main` | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
@@ -20,7 +20,7 @@
 N7 evaluation run identity 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id` 和 artifact/API/frontend 合同继续。
 
 ```text
-1. N2 frontend diagnostics display
+1. Merge N2 frontend diagnostics display
 2. N8 架构简化与合同消费收敛
 3. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
 4. N5 风险、regime、成本和容量扩展
@@ -30,7 +30,7 @@ N7 evaluation run identity 已合入 `main`。当前后续实现应基于 `main`
 
 原因：
 
-- N2 后端已支持 `diagnostics/tradability_diagnostics.csv`，N7 已稳定 `combination_id` 和 schema `0.6`，前端可以在当前合同上消费诊断结果。
+- N2 后端已支持 `diagnostics/tradability_diagnostics.csv`，N7 已稳定 `combination_id` 和 schema `0.6`，`codex/tradability-workbench` 已在当前合同上消费并展示诊断结果。
 - N8 不应阻塞 N2 frontend，但应在 N5/N6 大范围新增 artifact/API/frontend 合同前推进，避免继续复制 display preview、download allowlist、template API 和 pipeline entry glue。
 - 完整 2023-2025 canonical regeneration 仍可作为公开安全展示或回归样例的后续验收步骤，但不再阻塞 N7 集成。
 - N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
@@ -91,7 +91,7 @@ conda run -n analysis python -m pytest -q tests/interfaces/api tests/research/fa
 
 - Backend artifact/API 已合并到 `main`。
 - 该 diagnostics 后端能力最初在 schema `0.5` 期间落地；当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它。
-- Frontend 展示仍是后续任务；它应基于 `main` 的 N7 schema `0.6` / `combination_id` 合同消费 diagnostics。完整 2023-2025 canonical 样例可作为最终验收或公开安全展示的后续输入，但不再是启动前置条件。
+- Frontend 展示已在 `codex/tradability-workbench` 实现：基于 N7 schema `0.6` / `combination_id` 合同消费 diagnostics。完整 2023-2025 canonical 样例可作为公开安全展示或后续回归输入，但不再是 N2 frontend 合并前置条件。
 
 当前后端输出：
 
@@ -111,7 +111,8 @@ diagnostics/tradability_diagnostics.csv
 - `manifest.display.tables` 暴露新增诊断表。
 - API preview 和 direct/ZIP download 只通过 `manifest.display` 访问。
 - 前端不重新计算，只展示 artifact/API 结果。
-- Diagnostics 展示优先落在 `web/src/features/evidence/` 的 feature-local 组件和测试中；不要继续把新增 UI 逻辑堆进 shell-level `App.test.tsx`。
+- Diagnostics 展示落在 `web/src/features/evidence/` 的 feature-local 组件和测试中；不要继续把新增 UI 逻辑堆进 shell-level `App.test.tsx`。
+- CSV 明细预览保持 display preview row limit；诊断卡片若需要当前组合最后一行，应通过 bounded preview metadata 或当前 API 的 `limit=1&offset=total_rows-1` 单行读取，不为卡片拉完整 diagnostics 表。
 
 实现顺序说明：
 
@@ -316,6 +317,7 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 - 抽共享的 `manifest.display` preview/download resolver，用于 evaluation runs 和 Factor Factory 的 table preview、download allowlist 和 display path resolution；保留 evaluation-set schema `0.6` 与 Factor Factory schema `0.1` 的类型边界。
 - 将 `GET /api/factor-templates` 从 Pipeline route/service 中拆成独立 factor-template route/service；Pipeline API 只保留 snapshot/run 职责，Factor Studio 只依赖 template API。
 - 让 evidence/display payload 提供 table preview endpoint metadata（例如 `preview_url` 或等价字段），减少前端根据 `manifest.display.tables.path` 推导 `metrics/portfolio/diagnostics/breakdowns` 路由的双写规则。
+- 收敛组合相关但非 chart 的 display table preview 逻辑：由 `manifest.display.tables` 或后端 preview metadata 明确声明哪些表需要随 `combination_id` 刷新、默认 preview endpoint 和 preview row limit；前端不再为每个 diagnostics 表追加 hardcoded table key。
 - 把 A-share build/evaluate 从 CLI-style `main(argv)` 调用沉成可调用 service；CLI 只做薄包装，pipeline runner、Factor Factory 和 API 调用同一层 service。
 - 继续把 Evidence UI 的新增 diagnostics 和大组件拆到 feature-local container / component / tests；shell 只负责导航、运行选择和跨 feature 协调。
 - 将 CSV upload 标得更明确为 legacy/dev 入口；可考虑迁到显式 dev/upload 命名或用本地开关隐藏，避免把 `POST /api/runs` 误读为正式 A-share 创建路径。
@@ -334,5 +336,6 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 - `(source_alias, run_id)` 仍贯穿 evaluation run list、evidence、preview、download、ZIP cache、comparison 和 frontend routing。
 - Factor Factory 和 evaluation runs 共享 helper 后仍分别校验自己的 artifact type / schema version。
 - `GET /api/factor-templates` 拆分后，Factor Studio 行为不变，Pipeline snapshot/run API 不承担 template discovery 细节。
+- 组合切换时，charts、diagnostics 和未来 N5/N6 组合相关表都通过同一 preview metadata/helper 刷新，不靠前端逐表白名单维持正确性。
 - A-share CLI、pipeline runner 和 Factor Factory 调用 service 后，现有 A-share pipeline/evaluation tests 不降覆盖。
 - 如 API payload、route、frontend contract 或 code-map 节点关系变化，同步 `docs/code-map/`、API tests 和 frontend tests。

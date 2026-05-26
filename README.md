@@ -52,6 +52,7 @@ local approved data
 - Pipeline Builder 前端默认生成配置快照，调用 `POST /api/pipeline-snapshots`；也可切换到执行模式，调用 `POST /api/pipeline-runs`。
 - 可执行 pipeline 调用的公开控制参数是 `kernel` 和 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并且一定运行到 evaluation。
 - Factor Factory 已有后端 registry、批量评估、API 浏览入口和本地 workbench 浏览入口；candidate summary 按 `candidate_id + combination_id` 展开 N7 evaluation results。
+- Evidence workbench 已消费 `diagnostics/tradability_diagnostics.csv`，按当前 `combination_id` 展示 Eligibility / Tradability 诊断；前端只展示 artifact/API 结果，不重新计算 eligibility、tradability 或 performance metrics。
 - Crypto 和其他市场只显示为 planned / disabled，不代表真实数据、交易或空实现包。
 
 ## 当前结构
@@ -181,7 +182,7 @@ Phase 1 验收结论见 [docs/architecture/phase-1-acceptance-record.md](docs/ar
 - A 股 existing-factors start layer 小样本示例和 old/new 比较；
 - Factor Factory 小样本示例。
 
-本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。当前 A 股 pipeline 对外合同是 snapshot vs run：snapshot 只保存配置，run 只用 `start_from` 决定开始层，并固定运行到 evaluation。N1 start-from runner、N2 backend tradability artifact/API、N3 ZIP packaging 下沉、N4 frontend feature split 和 N7 evaluation run identity 已合入 `main`；下一批优先级是 N2 frontend diagnostics display、N8 架构简化与合同消费收敛、按需重生成 2023-2025 canonical evaluation / Factor Factory 样例、risk/regime/cost/capacity 和 ML prediction handoff。
+本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。当前 A 股 pipeline 对外合同是 snapshot vs run：snapshot 只保存配置，run 只用 `start_from` 决定开始层，并固定运行到 evaluation。N1 start-from runner、N2 backend tradability artifact/API、N3 ZIP packaging 下沉、N4 frontend feature split 和 N7 evaluation run identity 已合入 `main`；N2 frontend diagnostics display 已在 `codex/tradability-workbench` 完成并待合并。下一批优先级是 N8 架构简化与合同消费收敛、按需重生成 2023-2025 canonical evaluation / Factor Factory 样例、risk/regime/cost/capacity 和 ML prediction handoff。
 
 新增或修改 artifacts 时必须同时检查：
 

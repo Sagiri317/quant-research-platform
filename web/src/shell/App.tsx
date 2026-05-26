@@ -35,6 +35,7 @@ function App() {
     combinationSummaries,
     display,
     evidenceError,
+    latestTradabilityDiagnostic,
     loadingEvidence,
     loadingTablePreview,
     runState,
@@ -180,6 +181,7 @@ function App() {
             downloading={downloading}
             downloadOptions={downloadOptions}
             downloadPresets={downloadPresets}
+            latestTradabilityDiagnostic={latestTradabilityDiagnostic}
             onActiveTableChange={setActiveTable}
             onDelete={handleDeleteSelectedRun}
             onDownload={handleSelectedDownload}

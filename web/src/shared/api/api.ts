@@ -288,8 +288,12 @@ export async function fetchTablePreview(
   path: string,
   limit: number,
   combinationId?: string,
+  offset?: number,
 ): Promise<TablePayload> {
   const params = new URLSearchParams({ limit: String(limit) })
+  if (offset !== undefined) {
+    params.set('offset', String(offset))
+  }
   if (combinationId) {
     params.set('combination_id', combinationId)
   }

@@ -72,7 +72,7 @@ reports/private_real/factor_evaluation/
 
 迁移前历史 long-only 年度结果里，`rev_20d`、`rev_60d`、`rev_120d` 是第一版最主要的候选信号。2024 年 `rev_120d` 的 `mean_rankic` 约 0.114，`mean_net_portfolio_return` 约 0.003086；2025 年 `rev_60d` 的 `mean_rankic` 约 0.095，`mean_net_portfolio_return` 约 0.001717。
 
-这些数字只作为历史统计诊断，不是最终投资结论。迁移后的 2023-2025 小样本 smoke 已覆盖 tensor / dataframe 与 long-only / long-short；N7 2023H1 private smoke 已覆盖 24 个 `combination_id`，完整 2023-2025 canonical regeneration 仍按需执行。Phase 1 验收记录中的 A 股 pipeline runner、Factor Factory 本地入口和 artifact/API/frontend 合同已通过代码验收。后续仍需要继续补充 N2 frontend diagnostics display、N8 架构简化与合同消费收敛、正式成本敏感性、regime、中性化和风险暴露分析。
+这些数字只作为历史统计诊断，不是最终投资结论。迁移后的 2023-2025 小样本 smoke 已覆盖 tensor / dataframe 与 long-only / long-short；N7 2023H1 private smoke 已覆盖 24 个 `combination_id`，完整 2023-2025 canonical regeneration 仍按需执行。Phase 1 验收记录中的 A 股 pipeline runner、Factor Factory 本地入口和 artifact/API/frontend 合同已通过代码验收。N2 frontend diagnostics display 已在当前分支完成本地验收：前端只消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API，不重新计算 eligibility 或 tradability。后续仍需要继续补充 N8 架构简化与合同消费收敛、正式成本敏感性、regime、中性化和风险暴露分析。
 
 ## 限制
 

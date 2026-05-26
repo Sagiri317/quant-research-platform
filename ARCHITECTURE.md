@@ -121,7 +121,7 @@ breakdowns/month/
 
 `manifest.json` 和 `summary.json` 均包含 `artifact_schema_version: "0.6"` 与 `artifact_type: "evaluation_set"`。Manifest 中的 artifact 路径必须是 portable relative paths，不写入 Windows drive letter、用户目录或绝对路径。Public-downloadable `config.json` 和 `lineage.json` 必须在 writer、direct download 和 selected ZIP 路径上统一脱敏，不暴露 private data path 或本机绝对路径。
 
-`manifest.display` 是 API、下载和 React workbench 的展示合同。新增 artifact 时，writer / loader、API payload/download、frontend display consumers、tests 和 docs 必须同步。
+`manifest.display` 是 API、下载和 React workbench 的展示合同。新增 artifact 时，writer / loader、API payload/download、frontend display consumers、tests 和 docs 必须同步。Evidence workbench 对 diagnostics 只展示 artifact/API 返回结果；例如 tradability 诊断卡片用 preview 分页读取当前组合最后一行，不在前端重新计算 eligibility 或 tradability。
 
 ## Phase 2 边界
 
@@ -136,7 +136,7 @@ Phase 1 中 `interfaces/api` 是本地 FastAPI 适配层。未来 `apps/api` 是
 - Factor/Pipeline Studio 只发起受控 pipeline 请求，不连接外部数据源或交易接口。
 - Factor Factory 前端浏览只展示 API / artifact 结果，不在前端重新计算 IC、cumulative returns、weights 或 turnover。
 - 已完成 artifact ZIP packaging 下沉到 `artifacts/`。
-- 后续仍需单独处理的架构债包括 frontend feature split、eligibility / tradability 诊断可视化、risk/regime/cost/capacity 扩展和 ML prediction handoff。
+- 后续仍需单独处理的架构债包括 N8 合同消费收敛、risk/regime/cost/capacity 扩展和 ML prediction handoff；frontend feature split 已完成，eligibility / tradability 诊断可视化已在 N2 frontend 分支实现并待合并。
 
 ## Comparison
 

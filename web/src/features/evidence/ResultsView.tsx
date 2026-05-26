@@ -20,6 +20,7 @@ import { ReportView } from './reportView'
 import { RunComparison } from './RunComparison'
 import { RunCharts } from './RunCharts'
 import { RunHeader } from './RunHeader'
+import { TradabilityDiagnostics } from './TradabilityDiagnostics'
 
 type EvidenceViewMode = 'workbench' | 'report'
 type DeliveryTab = 'metrics' | 'report' | 'csv' | 'comparison' | 'downloads'
@@ -38,6 +39,7 @@ export function ResultsView({
   downloading,
   downloadOptions,
   downloadPresets,
+  latestTradabilityDiagnostic,
   onActiveTableChange,
   onDelete,
   onDownload,
@@ -69,6 +71,7 @@ export function ResultsView({
   downloading: boolean
   downloadOptions: DownloadOption[]
   downloadPresets: RunDisplayDownloadPreset[]
+  latestTradabilityDiagnostic?: TablePayload
   onActiveTableChange: (table: string) => void
   onDelete: () => void
   onDownload: () => void
@@ -132,6 +135,10 @@ export function ResultsView({
 
             <RunCharts charts={displayCharts} mode="workbench" tables={chartTables} />
 
+            <TradabilityDiagnostics
+              latestDiagnostic={latestTradabilityDiagnostic}
+            />
+
             <DeliveryTabs
               activePayload={activePayload}
               activeTable={activeTable}
@@ -180,6 +187,10 @@ export function ResultsView({
             />
 
             <RunCharts charts={displayCharts} mode="report" tables={chartTables} />
+
+            <TradabilityDiagnostics
+              latestDiagnostic={latestTradabilityDiagnostic}
+            />
 
             <MetricDetails run={run} selectedMetrics={selectedMetrics} />
 

@@ -179,6 +179,10 @@ API 和 frontend 不允许绕过它访问隐式文件。
 N2 tradability diagnostics 作为 `diagnostics/tradability_diagnostics.csv`
 通过 `manifest.display` 暴露；前端应通过常规 diagnostics preview/download API
 消费该表，不重新计算 eligibility、can_enter 或 can_exit 计数。
+Evidence workbench 的诊断卡片展示当前组合最后一行时，应使用低内存 preview
+分页语义读取单行，例如在首个 preview payload 返回 `total_rows` 后请求
+`limit=1&offset=total_rows-1&combination_id=...`；CSV 明细预览仍保持
+display preview row limit，不为了卡片拉完整 diagnostics 表。
 新生成的 schema `0.6` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
 需要重新生成后才能由当前 loader/API 加载。
 

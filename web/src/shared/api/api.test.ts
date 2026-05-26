@@ -360,6 +360,19 @@ describe('api client', () => {
     )
   })
 
+  test('fetchTablePreview can request an offset page', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ columns: [], rows: [] }),
+    } as Response)
+
+    await fetchTablePreview('/api/runs/core/demo/diagnostics/tradability_diagnostics', 1, 'combo_b', 129)
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/runs/core/demo/diagnostics/tradability_diagnostics?limit=1&offset=129&combination_id=combo_b',
+    )
+  })
+
   test('runTableSpecsFromDisplay maps top-level combinations table to preview JSON route', () => {
     const specs = runTableSpecsFromDisplay(
       {

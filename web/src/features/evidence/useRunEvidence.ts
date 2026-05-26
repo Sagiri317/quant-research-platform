@@ -18,6 +18,9 @@ import {
 import { useTablePreview } from './useTablePreview'
 
 const CHART_TABLE_ROW_LIMIT = 1000
+const COMBINATION_PREVIEW_TABLE_KEYS = new Set(['tradability_diagnostics'])
+const TRADABILITY_DIAGNOSTICS_TABLE_KEY = 'tradability_diagnostics'
+const LATEST_PREVIEW_SUFFIX = '__latest'
 
 export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0) {
   const [runState, setRunState] = useState<RunState>(EMPTY_RUN_STATE)
@@ -129,6 +132,15 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     const tableKeys = new Set(displayCharts.map((chart) => chart.table))
     return selectedTableSpecs.filter((spec) => tableKeys.has(spec.key))
   }, [displayCharts, selectedTableSpecs])
+  const selectedCombinationPreviewSpecs = useMemo(() => {
+    const previewKeys = new Set(chartTableSpecs.map((spec) => spec.key))
+    return selectedTableSpecs.filter((spec) => {
+      if (previewKeys.has(spec.key)) {
+        return true
+      }
+      return COMBINATION_PREVIEW_TABLE_KEYS.has(spec.key)
+    })
+  }, [chartTableSpecs, selectedTableSpecs])
   const chartPreviewPrefix =
     selectedRun && selectedCombinationId
       ? [
@@ -143,16 +155,22 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
       !selectedRun ||
       !selectedCombinationId ||
       !selectedCombinationExists ||
-      chartTableSpecs.length === 0
+      selectedCombinationPreviewSpecs.length === 0
     ) {
       return
     }
-    const filterableChartSpecs = chartTableSpecs.filter(
+    const filterableChartSpecs = selectedCombinationPreviewSpecs.filter(
       (spec) => spec.supportsCombinationFilter !== false,
     )
-    const missingSpecs = filterableChartSpecs.filter(
-      (spec) => chartPreviewPayloads[`${chartPreviewPrefix}::${spec.key}`] === undefined,
-    )
+    const missingSpecs = filterableChartSpecs.filter((spec) => {
+      const previewKey = `${chartPreviewPrefix}::${spec.key}`
+      const latestKey = latestPreviewKey(chartPreviewPrefix, spec.key)
+      return (
+        chartPreviewPayloads[previewKey] === undefined ||
+        (spec.key === TRADABILITY_DIAGNOSTICS_TABLE_KEY &&
+          chartPreviewPayloads[latestKey] === undefined)
+      )
+    })
     if (missingSpecs.length === 0) {
       return
     }
@@ -163,10 +181,14 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
           missingSpecs.map(async (spec) => {
             const payload = await fetchTablePreview(
               spec.path,
-              Math.max(spec.previewRows ?? 20, CHART_TABLE_ROW_LIMIT),
+              combinationPreviewLimit(spec, chartTableSpecs),
               selectedCombinationId,
             )
-            return [spec.key, payload] as const
+            const latestPayload =
+              spec.key === TRADABILITY_DIAGNOSTICS_TABLE_KEY
+                ? await latestDiagnosticPreview(spec.path, payload, selectedCombinationId)
+                : undefined
+            return [spec.key, payload, latestPayload] as const
           }),
         )
         if (cancelled) {
@@ -174,8 +196,11 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
         }
         setChartPreviewPayloads((current) => {
           const next = { ...current }
-          for (const [key, payload] of payloads) {
+          for (const [key, payload, latestPayload] of payloads) {
             next[`${chartPreviewPrefix}::${key}`] = payload
+            if (latestPayload) {
+              next[latestPreviewKey(chartPreviewPrefix, key)] = latestPayload
+            }
           }
           return next
         })
@@ -194,6 +219,7 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     chartPreviewPayloads,
     chartPreviewPrefix,
     chartTableSpecs,
+    selectedCombinationPreviewSpecs,
     selectedCombinationExists,
     selectedCombinationId,
     selectedRun,
@@ -214,7 +240,7 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     if (!chartPreviewPrefix) {
       return next
     }
-    for (const spec of chartTableSpecs) {
+    for (const spec of selectedCombinationPreviewSpecs) {
       const payload = chartPreviewPayloads[`${chartPreviewPrefix}::${spec.key}`]
       if (payload !== undefined) {
         const existingRows = next[spec.key]?.rows.length ?? 0
@@ -227,8 +253,8 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
   }, [
     chartPreviewPayloads,
     chartPreviewPrefix,
-    chartTableSpecs,
     filteredTables,
+    selectedCombinationPreviewSpecs,
   ])
   const activeTableSpec = selectedTableSpecs.find(
     (spec) => spec.key === activeTable,
@@ -245,6 +271,11 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     setEvidenceError,
   })
   const activePayload = baseActivePayload ?? previewPayload
+  const latestTradabilityDiagnostic = chartPreviewPrefix
+    ? chartPreviewPayloads[
+        latestPreviewKey(chartPreviewPrefix, TRADABILITY_DIAGNOSTICS_TABLE_KEY)
+      ]
+    : undefined
 
   return {
     activePayload,
@@ -253,6 +284,7 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     evidenceError: selectedRun ? evidenceError : '',
     loadingEvidence: selectedRun ? loadingEvidence || !runStateMatchesSelectedRun : false,
     loadingTablePreview,
+    latestTradabilityDiagnostic,
     runState: exposedRunState,
     chartTables,
     combinationSummaries: exposedRunState.combinationSummaries,
@@ -265,4 +297,50 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     setTablePreviewExpanded,
     tablePreviewExpanded,
   }
+}
+
+async function latestDiagnosticPreview(
+  path: string,
+  previewPayload: TablePayload,
+  selectedCombinationId: string,
+): Promise<TablePayload | undefined> {
+  if (previewPayload.rows.length === 0) {
+    return previewPayload
+  }
+  const totalRows = previewPayload.total_rows
+  if (typeof totalRows === 'number' && totalRows > previewPayload.rows.length) {
+    return fetchTablePreview(path, 1, selectedCombinationId, totalRows - 1)
+  }
+  return singleRowPayload(
+    previewPayload,
+    previewPayload.rows[previewPayload.rows.length - 1],
+  )
+}
+
+function singleRowPayload(
+  payload: TablePayload,
+  row: Record<string, unknown>,
+): TablePayload {
+  return {
+    ...payload,
+    has_more: false,
+    limit: 1,
+    rows: [row],
+    total_rows: 1,
+  }
+}
+
+function latestPreviewKey(prefix: string, tableKey: string): string {
+  return `${prefix}::${tableKey}${LATEST_PREVIEW_SUFFIX}`
+}
+
+function combinationPreviewLimit(
+  spec: { key: string; previewRows?: number },
+  chartTableSpecs: { key: string }[],
+): number {
+  const previewRows = spec.previewRows ?? 20
+  if (chartTableSpecs.some((chartSpec) => chartSpec.key === spec.key)) {
+    return Math.max(previewRows, CHART_TABLE_ROW_LIMIT)
+  }
+  return previewRows
 }

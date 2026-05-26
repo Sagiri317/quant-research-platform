@@ -2250,6 +2250,69 @@ tbody tr:hover {
   font-weight: 800;
 }
 
+.tradability-diagnostics {
+  background: #ffffff;
+  border: 1px solid #dce4ec;
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.035);
+  display: grid;
+  gap: 12px;
+  padding: 15px;
+}
+
+.tradability-diagnostics .section-title {
+  align-items: start;
+}
+
+.tradability-diagnostics .section-title p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 4px 0 0;
+}
+
+.tradability-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.tradability-card,
+.tradability-fallback {
+  background: #f8fafb;
+  border: 1px solid #e7edf3;
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px;
+}
+
+.tradability-card span,
+.tradability-fallback span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tradability-card strong {
+  color: #111827;
+  font-size: 19px;
+  line-height: 1.15;
+}
+
+.tradability-card small {
+  color: #435166;
+  font-size: 12px;
+}
+
+.tradability-fallback strong {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .report-chart-grid {
   grid-template-columns: minmax(0, 1fr);
 }
