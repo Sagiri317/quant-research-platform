@@ -92,7 +92,7 @@ Phase 1 之后下一阶段进展：
 4. N4 前端 feature split 已合入 `main`：`web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract。
 5. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
 6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。后续从 `main` 继续做 N8、N5 和 N6。
-7. N8 架构简化与合同消费收敛已加入后续路线图：在 N5/N6 扩展前，计划收敛 `manifest.display` preview/download helper、拆出 factor-template route/service、减少前端 preview route 推导，统一组合相关但非 chart 的 display table preview metadata，把 A-share build/evaluate 沉成 service，继续拆 Evidence feature-local 组件，并把 CSV upload 进一步标记为 legacy/dev。
+7. N8 架构简化与合同消费收敛已加入后续路线图，详细计划见 `docs/superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md`：在 N5/N6 扩展前，计划收敛 `manifest.display` preview/download helper、拆出 factor-template route/service、减少前端 preview route 推导，统一组合相关但非 chart 的 display table preview metadata，把 A-share build/evaluate 沉成 service，继续拆 Evidence feature-local 组件，并把 CSV upload 进一步标记为 legacy/dev。
 
 ## 当前研究资产
 
@@ -121,7 +121,7 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 推进 N8 架构简化与合同消费收敛，先写详细计划，再单独处理跨 artifact/API/download/frontend/pipeline/Factor Factory 的收敛工作。
+1. 从干净 `main` 创建 `codex/contract-consumer-convergence`，按 N8 详细计划分 4 个 slice 处理跨 artifact/API/download/frontend/pipeline/Factor Factory 的收敛工作。
 2. 按需重新生成 2023-2025 canonical evaluation / Factor Factory 样例，并保留低内存 comparison、Evaluation Comparison Report、dataframe/tensor parity 和 API/frontend preview 作为验收门槛。
 3. 用当前 `main` 作为后续工作基线，旧 N7 implementation branch 不再作为当前基线。
 4. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
@@ -130,4 +130,4 @@ Phase 1 之后下一阶段进展：
 
 ## Root Handoff / 根目录回传信号
 
-Open: N2 frontend diagnostics display 已合入 `main`；`docs/architecture/next-stage-roadmap.md` 和 `docs/architecture/next-stage-worktree-plan.md` 已记录 N8 架构简化与合同消费收敛。后续根目录 planning/status 同步时，应把下一步更新为 “N8、N5、N6”，并保持 N8 不引入外部 API、部署、paper/live trading 或空未来目录。
+Open: N2 frontend diagnostics display 已合入 `main`；N8 架构简化与合同消费收敛已写入 `docs/superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md`，并同步到 `docs/architecture/next-stage-roadmap.md` 和 `docs/architecture/next-stage-worktree-plan.md`。后续根目录 planning/status 同步时，应把下一步更新为 “执行 N8，再推进 N5/N6”，并保持 N8 不引入外部 API、部署、paper/live trading 或空未来目录。

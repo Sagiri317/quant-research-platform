@@ -306,6 +306,8 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 
 ## N8 架构简化与合同消费收敛
 
+实施计划：[`docs/superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md`](../superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md)。
+
 目标：
 
 - 把已经稳定的 artifact/display/API/frontend 合同消费路径收敛成更少的共享 helper 和更薄的入口适配。
@@ -320,6 +322,14 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 - 把 A-share build/evaluate 从 CLI-style `main(argv)` 调用沉成可调用 service；CLI 只做薄包装，pipeline runner、Factor Factory 和 API 调用同一层 service。
 - 继续把 Evidence UI 的新增 diagnostics 和大组件拆到 feature-local container / component / tests；shell 只负责导航、运行选择和跨 feature 协调。
 - 将 CSV upload 标得更明确为 legacy/dev 入口；可考虑迁到显式 dev/upload 命名或用本地开关隐藏，避免把 `POST /api/runs` 误读为正式 A-share 创建路径。
+
+计划决策：
+
+- `manifest.json` 保持可移植；不写入 `source_alias`、`run_id`、host 或运行时 URL。
+- schema `0.6` 的 `manifest.display.tables` 增加 portable preview descriptor；API 在 evidence payload 中运行时补充 `preview_url`。
+- preview 是 artifact inspection / audit support，不扩展成通用 CSV viewer，也不提高默认 preview 行数来规避 latest-row 问题。
+- 旧 generated run 如果缺少当前 display preview metadata，按 stale generated run 处理；需要展示或验收时按审批重新生成，而不是放宽当前合同。
+- CSV upload 后端兼容保留，前端和文档降级为 legacy/dev uploaded-panel smoke 路径，不删除、不扩展。
 
 非目标：
 

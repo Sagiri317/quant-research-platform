@@ -40,7 +40,7 @@
 
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
-| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | `manifest.display` preview/download helper、factor-template route/service 拆分、preview endpoint metadata、A-share service entry、CSV upload legacy/dev 降级 | 基于 N7 schema `0.6` / `combination_id`、N2 backend diagnostics、N3 artifact package 和 N4 frontend feature split | 中到高。横跨 API、artifact、pipeline、Factor Factory 和 frontend，应先写详细计划 |
+| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | `manifest.display` preview/download helper、factor-template route/service 拆分、preview endpoint metadata、A-share service entry、CSV upload legacy/dev 降级；计划见 [`docs/superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md`](../superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md) | 基于 N7 schema `0.6` / `combination_id`、N2 backend diagnostics、N3 artifact package 和 N4 frontend feature split | 中到高。横跨 API、artifact、pipeline、Factor Factory 和 frontend，按计划分 4 个 slice 推进 |
 | `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N7 evaluation run identity 和样例稳定；复用 N2 诊断 artifact/display 模式 | 中到高。需要先写详细计划 |
 | `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 N7 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
 
@@ -78,6 +78,7 @@
    - 把 A-share build/evaluate 调用沉成 service，CLI、pipeline runner 和 Factor Factory 都调用同一 service 层。
    - 将 CSV upload 进一步标记为 legacy/dev，可用显式 dev/upload 命名或本地开关降低主路径误读。
    - 该分支不应重做视觉、不改 A-share `start_from` 语义、不引入外部 API/部署/交易能力。
+   - 计划约束：`manifest.json` 不写运行时 URL；API evidence payload 补充 `preview_url`；缺 preview metadata 的旧 schema `0.6` generated run 按 stale generated run 处理，必要时经审批重新生成。
 
 3. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
    - 两者都应先写独立计划。
