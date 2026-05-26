@@ -20,9 +20,10 @@ Load this reference when changing or reviewing `docs/code-map/platform-flow.md` 
 
 ## Required Relationships
 
-- A-share main chain: CSMAR raw CSV -> build_interim -> interim CSV -> build_panel -> research panel -> build_factors -> factor table -> A-share adapter -> EvaluationSpec -> evaluate_to_payload -> write_evaluation_set_artifacts -> schema 0.6 artifacts -> `manifest.display` -> API/download/frontend.
+- A-share main chain: CSMAR raw CSV -> build_interim -> interim CSV -> build_panel -> research panel -> build_factors -> factor table -> A-share evaluation service -> A-share adapter -> EvaluationSpec -> evaluate_to_payload -> write_evaluation_set_artifacts -> schema 0.6 artifacts -> `manifest.display` -> API/download/frontend.
 - Keep `run_evaluation` visible only as the generic wrapper path used by `qrp evaluate-parquet` and other non-A-share generic entries; do not present it as the required A-share private evaluation path.
 - `start_from` runner entries are `existing_factors`, `rebuild_factors`, `rebuild_panel`, and `rebuild_interim`; every executable run continues through evaluation.
+- Pipeline runner, A-share evaluation CLI, and Factor Factory should reach the A-share adapter through `markets/implementations/a_share/evaluation/service.py`, not by documenting separate direct adapter paths.
 - `manifest.display` is the only display contract for evidence payloads, table previews, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
 - API-visible evaluation run identity is `(source_alias, run_id)` across run list, evidence, preview, direct download, ZIP cache path, comparison payload, and frontend routing.
 - `Artifact ZIP package` / `artifact_package.py` stays visible in the download path and enforces `manifest.display.downloads`; download services orchestrate responses.

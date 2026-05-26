@@ -83,12 +83,11 @@
 
 ## 不建议并行的组合
 
-- `codex/frontend-feature-split`、`codex/tradability-artifacts` 和 `codex/tradability-workbench` 已完成；后续不要在 N8/N5/N6 中重新打开这些历史分支的范围。
+- `codex/frontend-feature-split`、`codex/tradability-artifacts`、`codex/tradability-workbench` 和 `codex/contract-consumer-convergence` 已完成；后续不要在 N5/N6 中重新打开这些历史分支的范围。
 - N2 frontend 的最终验收应使用 N7 之后、包含 `tradability_diagnostics.csv` 的样例；旧私有样例缺少 diagnostics，不能证明真实展示路径。
 - 不要把 N5 风险/regime 扩展混进 N2 tradability 诊断。两者都属于 diagnostics，但研究语义和验收口径不同。
 - 不要把 N6 ML prediction handoff 混进现有 factor evaluation runner。Prediction 是新的输入合同，应单独设计。
-- 不要把 N8 的 cross-cutting contract cleanup 混进 N5/N6。N8 会触碰 artifact/API/download/frontend/pipeline/Factor Factory 多个面，应该单独计划和验收。
-- 不要在 N8 中同时重做 Evidence 视觉或引入新的研究诊断。N8 的目标是降低耦合和重复，不是新增研究能力。
+- N5/N6 应复用 N8 已合入的 display preview、download allowlist、factor-template API、A-share service entry 和 CSV upload legacy/dev 边界；不要在研究合同分支里重新打开这些横切清理。
 
 ## 工作树创建策略
 

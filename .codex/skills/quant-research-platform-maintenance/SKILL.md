@@ -33,7 +33,7 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 | A-share private evaluation | `src/quant_research_platform/markets/implementations/a_share/evaluation/run_factor_evaluation.py`, `evaluation/evaluation_adapter.py` |
 | A-share Pipeline Builder API | `src/quant_research_platform/interfaces/api/routes/pipeline.py`, `interfaces/api/services/pipeline_service.py`, `src/quant_research_platform/pipelines/a_share/` |
 | Factor Factory schema `0.1` | `src/quant_research_platform/research/factor_factory/`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py` |
-| N8 contract consumer convergence | display preview/download helpers, factor-template route/service split, A-share service entry, CSV upload legacy/dev boundary |
+| N8 contract surfaces | display preview/download helpers, factor-template route/service split, A-share service entry, CSV upload legacy/dev boundary |
 | Frontend shell | `web/src/shell/App.tsx`, `web/src/shell/App.test.tsx` |
 | Frontend evidence workbench | `web/src/features/evidence/ResultsView.tsx`, `web/src/features/evidence/RunCharts.tsx`, `web/src/features/evidence/ArtifactDownloads.tsx`, `web/src/features/evidence/CsvBrowser.tsx`, `web/src/features/evidence/runEvidenceState.ts`, `web/src/features/evidence/useRunEvidence.ts` |
 | Frontend creation surfaces | `web/src/features/uploads/`, `web/src/features/factor-studio/`, `web/src/features/factor-factory/`, `web/src/features/pipeline/`, `web/src/features/runs/` |
@@ -52,7 +52,7 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 - Pipeline Builder defaults to snapshot creation through `POST /api/pipeline-snapshots`. Executable A-share pipeline requests use `POST /api/pipeline-runs` with `start_from`; every executable run continues through evaluation.
 - Factor Studio and Pipeline Builder must keep A-share enabled and crypto/other markets disabled or planned until real modules exist.
 - Frontend dependency direction is `shell -> features -> shared`; `web/src/shared/*` must not import from `features/*` or `shell/*`, and cross-feature imports should stay rare.
-- Treat N8 contract consumer convergence as a separate cross-cutting task unless the user explicitly scopes it into another branch. Do not hide display-helper, factor-template, A-share service-entry, or CSV-upload boundary cleanup inside N5/N6 research-contract work.
+- For N5/N6 and later research-contract work, reuse the N8 display-helper, factor-template, A-share service-entry, and CSV-upload boundary cleanup surfaces. Do not re-open or replace them inside a research-contract branch unless a written plan states the exact shared files, tests, and rollback path.
 - Generated runs under `reports/private_real/`, `reports/runs/`, and `reports/profiles/` are evidence, not authority docs. Regenerate stale runs instead of weakening loaders.
 
 ## Contract Work Loop
