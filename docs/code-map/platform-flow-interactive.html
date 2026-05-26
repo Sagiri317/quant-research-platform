@@ -570,11 +570,13 @@
       n("N13", "Pipeline Builder", "frontend", "UI", "web/src/features/pipeline/PipelineBuilder.tsx", "本地 workbench 的 pipeline 配置和可执行 run 控件；接收 Factor Studio 的 factorDraft。", 1310, 265),
 
       n("N14", "EvaluationSpec", "evaluation", "输入契约", "evaluations/evaluation_spec.py", "共享 evaluation 输入契约。", 2310, 360),
-      n("N15", "run_evaluation", "evaluation", "共享执行入口", "evaluations/evaluation_runner.py", "连接 evaluation 计算和 artifact 写入。", 2560, 360),
+      n("N15", "evaluate_to_payload", "evaluation", "共享计算入口", "evaluations/evaluation_runner.py", "计算 evaluation payload tables；A-share 专用路径直接调用它。", 2560, 360),
       n("N16", "Kernels", "evaluation", "计算辅助", "kernels/", "DataFrame 和 tensor helper。", 2560, 500),
-      n("N17", "schema 0.6 artifacts", "evaluation", "evaluation_set", "artifacts/artifact_writer.py", "写 schema 0.6 evaluation-set run directory。", 2810, 360),
+      n("N38", "artifact writer", "evaluation", "payload -> files", "artifacts/artifact_writer.py", "write_evaluation_set_artifacts 写 schema 0.6 evaluation-set run directory。", 2810, 360),
+      n("N17", "schema 0.6 artifacts", "evaluation", "evaluation_set", "artifacts/artifact_writer.py", "写 schema 0.6 evaluation-set run directory。", 3060, 360),
       n("N18", "manifest.display", "evaluation", "展示契约", "artifacts/display_manifest.py", "API evidence、previews、charts、downloads、ZIP 和 frontend 的唯一展示源。", 3310, 360),
-      n("N19", "artifact loader", "evaluation", "严格读取", "artifacts/artifact_loader.py", "严格加载 completed evaluation-set artifacts，拒绝缺表或 stale run。", 3060, 360),
+      n("N19", "artifact loader", "evaluation", "严格读取", "artifacts/artifact_loader.py", "严格加载 completed evaluation-set artifacts，拒绝缺表或 stale run。", 3060, 500),
+      n("N39", "run_evaluation", "evaluation", "generic wrapper", "evaluations/evaluation_runner.py", "通用 wrapper：调用 evaluate_to_payload 后写 artifacts；qrp evaluate-parquet 使用它。", 2310, 500),
 
       n("N20", "run_repository", "api", "run index", "interfaces/api/services/run_repository.py", "维护 API-visible runs，身份是 (source_alias, run_id)。", 3560, 430),
       n("N21", "Evidence API", "api", "runs/evidence", "interfaces/api/routes/runs.py", "run list、evidence payload、table previews 和受控 uploaded-panel 删除。", 3810, 430),
@@ -614,9 +616,10 @@
       e("E14", "N12", "N10", "run", "pipeline-runs 调用 executable runner。"),
       e("E15", "N13", "N12", "submitted config", "Pipeline Builder 提交 snapshot/run payload 到 Pipeline API；此边表达提交 payload。"),
       e("E16", "N09", "N14", "builds", "A-share adapter 构造 EvaluationSpec。"),
-      e("E17", "N14", "N15", "input", "EvaluationSpec 进入 run_evaluation。"),
+      e("E17", "N14", "N15", "input", "A-share adapter 构造 EvaluationSpec 后进入 evaluate_to_payload。"),
       e("E18", "N15", "N16", "uses", "Evaluation computation 使用 kernels。"),
-      e("E19", "N15", "N17", "writes", "run_evaluation 写 schema 0.6 artifacts。"),
+      e("E19", "N15", "N38", "payload", "evaluate_to_payload 返回 tables/config/report payload。"),
+      e("E52", "N38", "N17", "writes", "write_evaluation_set_artifacts 写 schema 0.6 artifacts。"),
       e("E20", "N17", "N18", "declares", "artifact manifest 声明 display。"),
       e("E21", "N17", "N19", "loaded by", "loader 严格读取 artifacts。"),
       e("E22", "N18", "N21", "exposes", "Evidence API 只暴露 display-approved tables。"),
@@ -634,7 +637,7 @@
       e("E34", "N29", "N30", "exposed by", "Factor Factory API 浏览 schema 0.1 artifacts。"),
       e("E35", "N37", "N31", "template payload", "Factor Studio 通过 GET /api/factor-templates?market=a_share 加载 templates。"),
       e("E36", "N32", "N20", "uploaded run visibility", "CSV Upload UI/API 生成本地 uploaded-panel run 后进入 API-visible run roots。"),
-      e("E37", "N33", "N15", "generic evaluation", "evaluate-parquet 只验证通用 Parquet adapter 和 shared evaluation layer。"),
+      e("E37", "N33", "N39", "generic evaluation", "evaluate-parquet 通过 run_evaluation wrapper 验证通用 Parquet adapter 和 shared evaluation layer。"),
       e("E38", "N33", "N08", "A-share helper", "A-share 验收应使用 A-share 专用入口或 pipeline runner。"),
       e("E39", "N27", "N37", "template endpoint", "Factor template API 从受控 registry 输出 payload。"),
       e("E40", "N24", "N12", "mounts", "FastAPI app 挂载 pipeline routes。"),
@@ -648,7 +651,8 @@
       e("E48", "N31", "N13", "draft handoff", "Factor Studio 的 factorDraft 交给 Pipeline Builder 继续生成 snapshot 或 run。"),
       e("E49", "N30", "N36", "factory UI", "Factor Factory API payload 被 FactorFactoryRuns UI 消费；实际 request 由前端发起。"),
       e("E50", "N24", "N37", "mounts", "FastAPI app 通过 pipeline router 挂载 factor-template endpoint。"),
-      e("E51", "N07", "N10", "existing_factors", "从已有 factor table 直接进入 evaluation。")
+      e("E51", "N07", "N10", "existing_factors", "从已有 factor table 直接进入 evaluation。"),
+      e("E53", "N39", "N15", "wraps", "run_evaluation 内部调用 evaluate_to_payload。")
     ];
 
     const entries = {

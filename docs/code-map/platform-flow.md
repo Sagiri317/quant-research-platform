@@ -13,14 +13,18 @@ flowchart LR
   runner["A-share pipeline runner\nstart_from"]
   adapter["A-share evaluation adapter"]
   spec["EvaluationSpec"]
-  eval["run_evaluation"]
+  payload["evaluate_to_payload"]
+  writer["write_evaluation_set_artifacts"]
+  eval["run_evaluation\ngeneric wrapper"]
   artifacts["schema 0.6 evaluation_set"]
   display["manifest.display"]
   package["Artifact ZIP package\nartifact_package.py"]
   fastapi["FastAPI app\nApiContext"]
+  run_repo["run_repository\n(source_alias, run_id)"]
   pipeline_api["Pipeline run/snapshot API"]
   evidence_api["Evidence API\n(source_alias, run_id)"]
   download_api["Download API\nroutes/artifacts + downloads"]
+  comparison_api["Comparison API"]
   web["React workbench"]
   builder["Pipeline Builder"]
   template_api["Factor template API"]
@@ -29,25 +33,34 @@ flowchart LR
   factory_api["Factor Factory API\n(run_id)"]
   factory_ui["FactorFactoryRuns UI"]
   upload["CSV Upload UI/API\nlegacy/dev"]
+  a_share_cli["A-share eval CLI\nrun_factor_evaluation"]
   offline_compare["Offline comparison writer"]
   cli["qrp CLI"]
 
   raw --> interim --> panel --> factors
-  factors --> adapter --> spec --> eval --> artifacts --> display
+  factors --> adapter --> spec --> payload --> writer --> artifacts --> display
   interim --> runner
   panel --> runner
   factors --> runner
   runner --> adapter
-  fastapi --> pipeline_api --> runner
-  display --> evidence_api --> web
-  display --> download_api --> web
-  download_api --> package
+  fastapi --> pipeline_api
+  fastapi --> run_repo
+  fastapi --> template_api
+  fastapi --> factory_api
+  fastapi --> upload
+  pipeline_api --> runner
+  display --> run_repo
+  run_repo --> evidence_api --> web
+  display --> package
+  run_repo --> download_api
+  package --> download_api --> web
+  run_repo --> comparison_api
   factory --> runner
   factory --> factory_api --> factory_ui
   template_api --> studio --> builder --> pipeline_api
   upload --> evidence_api
-  cli --> eval
-  cli --> adapter
+  cli --> eval --> payload
+  cli --> a_share_cli --> adapter
   cli --> offline_compare
 ```
 
@@ -63,7 +76,8 @@ CSMAR raw CSV
 -> price_volume_factors_full/price_volume_factors_<start>_<end>.parquet
 -> A-share evaluation adapter 或 start_from pipeline runner
 -> EvaluationSpec
--> run_evaluation
+-> evaluate_to_payload
+-> write_evaluation_set_artifacts
 -> schema 0.6 evaluation_set artifacts
 -> manifest.display
 -> API / downloads / React workbench
@@ -117,10 +131,11 @@ rebuild_interim  -> build_interim -> build_panel -> build_factors -> evaluation
 ## Evaluation、Artifact 与显示契约
 
 - Evaluation artifact 类型是 `evaluation_set`，schema version 是 `0.6`。
-- `EvaluationSpec` 是 evaluation layer 的输入契约，`run_evaluation(spec)` 是共享执行入口。
+- `EvaluationSpec` 是 evaluation layer 的输入契约；A-share 专用评估路径构造 `EvaluationSpec` 后调用 `evaluate_to_payload(spec)`，合并 payload 后由 `write_evaluation_set_artifacts(...)` 写出 schema `0.6` artifacts。
+- `run_evaluation(spec)` 是通用 wrapper，当前由 `qrp evaluate-parquet` 等通用入口使用，内部同样调用 `evaluate_to_payload(spec)` 并写出 artifacts。
 - `manifest.display` 是 API evidence、CSV preview、direct download、ZIP download、frontend tables、frontend charts 和 download presets 的唯一展示契约。
 - API-visible evaluation run identity 是 `(source_alias, run_id)`；run list、evidence routes、CSV preview、direct download、ZIP cache path、comparison payload 和 frontend routing 都必须保留这个身份。
-- Artifact ZIP package (`artifact_package.py`) 负责按照 manifest-resolved download items 组装 ZIP；API download service 只做响应编排。
+- Artifact ZIP package (`artifact_package.py`) 负责校验 `manifest.display.downloads` 并按照 manifest-resolved download items 组装 ZIP；API download service 只做响应编排。
 
 ## API 与前端
 
