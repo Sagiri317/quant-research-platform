@@ -13,14 +13,14 @@
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 | N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 已验证，完整 2023-2025 canonical regeneration 按需执行 |
-| N8 | 架构简化与合同消费收敛 | P1 | in progress | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
+| N8 | 架构简化与合同消费收敛 | P1 | ready for merge | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
 
 ## 当前推荐顺序
 
 N7 evaluation run identity 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id` 和 artifact/API/frontend 合同继续。
 
 ```text
-1. N8 架构简化与合同消费收敛
+1. 合入 N8 架构简化与合同消费收敛
 2. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
 3. N5 风险、regime、成本和容量扩展
 4. N6 ML prediction handoff
@@ -341,6 +341,7 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 - React evidence workbench 只消费 API 下发的 preview metadata，不再从 display table path 推导 preview route；CSV upload UI 文案降级为 legacy/dev uploaded-panel smoke / compatibility path。
 - `GET /api/factor-templates` 已拆到独立 factor-template route/service；pipeline route/service 只保留 snapshot/run 职责。
 - A-share evaluation 已有 service entry；CLI 和 pipeline runner 通过 service request/result 调用，schema 仍保持 `0.6`。
+- Pipeline Builder 执行 run 后会刷新 `/api/runs`、选择 `pipeline/<run_ref or run_id>` 并切回 evidence workbench；这属于本地 workbench 挂载体验，不改变 pipeline `start_from` 语义。
 
 非目标：
 

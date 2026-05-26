@@ -156,6 +156,7 @@ Use browser acceptance when frontend behavior changes:
 - all-items download starts a ZIP download without `Failed to fetch`;
 - Factor Studio shows A-share enabled and crypto planned/disabled;
 - Pipeline Builder validates required fields, defaults to snapshot, and does not imply deployment or trading;
+- Executed pipeline runs refresh `/api/runs`, select `pipeline/<run_ref or run_id>`, switch to the evidence workbench, and show a non-mojibake success message.
 - at least one narrow viewport is checked for overlap, clipped labels, and unusable controls.
 
 After browser acceptance, stop local services and list validation outputs before cleanup. Remove only exact approved paths or single explicitly named files, and do not remove generated runs, profiles, dependencies, or private outputs as incidental cleanup.

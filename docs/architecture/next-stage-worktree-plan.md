@@ -40,7 +40,7 @@
 
 | 分支 | 路线图任务 | 状态 | 当前结果 |
 |---|---|---|---|
-| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | in progress | `manifest.display.tables[]` portable preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry 和 CSV upload legacy/dev 文案已在本分支实现中 |
+| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | ready for merge | `manifest.display.tables[]` portable preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案已在本分支完成本地提交 |
 
 ## 建议后续分支
 
@@ -83,6 +83,7 @@
    - 统一组合相关但非 chart 的 display table preview 规则，让 diagnostics、N5 风险/regime 表和 N6 prediction 相关表按 metadata 声明随 `combination_id` 刷新，不继续增加前端 hardcoded table key。
    - 把 A-share build/evaluate 调用沉成 service，CLI、pipeline runner 和 Factor Factory 都调用同一 service 层。
    - 将 CSV upload 进一步标记为 legacy/dev，可用显式 dev/upload 命名或本地开关降低主路径误读。
+   - Pipeline Builder 执行 run 后刷新 run list、选中新 `pipeline/<run_ref or run_id>` 并切回 evidence workbench。
    - 该分支不应重做视觉、不改 A-share `start_from` 语义、不引入外部 API/部署/交易能力。
    - 计划约束：`manifest.json` 不写运行时 URL；API evidence payload 补充 `preview_url`；缺 preview metadata 的旧 schema `0.6` generated run 按 stale generated run 处理，必要时经审批重新生成。
 
