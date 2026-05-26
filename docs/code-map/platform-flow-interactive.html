@@ -3,119 +3,332 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Quant Research Platform Code Map</title>
+  <title>Quant Research Platform 交互 Code Map</title>
   <style>
     :root {
-      --bg: #f7f9fb;
+      --bg: #eef2f5;
       --panel: #ffffff;
-      --ink: #17202a;
-      --muted: #5f6b7a;
-      --line: #d9e1ea;
-      --green: #0d6f65;
-      --blue: #2f68b1;
-      --amber: #a8660a;
-      --purple: #7056b8;
-      --red: #b33a3a;
-      --shadow: 0 10px 26px rgba(23, 32, 42, 0.12);
+      --ink: #142033;
+      --muted: #607085;
+      --line: #d8e1ea;
+      --grid: rgba(20, 32, 51, 0.06);
+      --a-share: #0f766e;
+      --pipeline: #b7791f;
+      --evaluation: #1d4ed8;
+      --api: #7c3aed;
+      --frontend: #0e7490;
+      --frontend-api: #2563eb;
+      --factory: #b45309;
+      --cli: #475569;
+      --danger: #b42318;
+      --code-bg: #edf2f7;
     }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      font: 14px/1.5 "Segoe UI", Arial, sans-serif;
       color: var(--ink);
       background: var(--bg);
+      font: 14px/1.55 "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      letter-spacing: 0;
     }
+
     header {
-      padding: 16px 20px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 18px;
+      padding: 14px 18px 12px;
       border-bottom: 1px solid var(--line);
       background: var(--panel);
     }
-    h1 { margin: 0 0 6px; font-size: 22px; }
-    .subtitle { color: var(--muted); margin: 0; }
-    .layout {
-      display: grid;
-      grid-template-columns: minmax(720px, 1fr) 430px;
-      min-height: calc(100vh - 75px);
+
+    h1 {
+      margin: 0 0 5px;
+      font-size: 20px;
+      line-height: 1.2;
+      letter-spacing: 0;
     }
+
+    .subtitle {
+      max-width: 1080px;
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .status-pill {
+      flex: 0 0 auto;
+      min-height: 26px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: #f8fafc;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .layout {
+      --sidebar-width: 380px;
+      display: grid;
+      grid-template-columns: minmax(820px, 1fr) 6px var(--sidebar-width);
+      min-height: calc(100vh - 70px);
+      transition: grid-template-columns 160ms ease;
+    }
+
+    .layout.sidebar-collapsed {
+      grid-template-columns: minmax(820px, 1fr) 0 0;
+    }
+
+    .layout.resizing {
+      transition: none;
+    }
+
     .canvas-wrap {
       position: relative;
+      isolation: isolate;
+      height: calc(100vh - 70px);
+      min-height: calc(100vh - 70px);
       overflow: hidden;
       border-right: 1px solid var(--line);
       background:
-        linear-gradient(rgba(23, 32, 42, 0.05) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(23, 32, 42, 0.05) 1px, transparent 1px);
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+        #f7f9fb;
       background-size: 24px 24px;
     }
+
+    .layout.sidebar-collapsed .canvas-wrap {
+      border-right: 0;
+    }
+
+    .sidebar-resizer {
+      height: calc(100vh - 70px);
+      min-height: calc(100vh - 70px);
+      border-right: 1px solid var(--line);
+      background: #e8eef5;
+      cursor: col-resize;
+      transition: background 120ms ease;
+    }
+
+    .sidebar-resizer:hover,
+    .sidebar-resizer.dragging {
+      background: #c9d6e5;
+    }
+
+    .layout.sidebar-collapsed .sidebar-resizer {
+      display: none;
+    }
+
     .toolbar {
       position: absolute;
-      z-index: 5;
+      z-index: 20;
       left: 14px;
       top: 14px;
       display: flex;
-      gap: 8px;
       flex-wrap: wrap;
+      gap: 8px;
       max-width: calc(100% - 28px);
+      padding: 8px;
+      border: 1px solid rgba(216, 225, 234, 0.95);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.95);
+      box-shadow: 0 8px 22px rgba(20, 32, 51, 0.1);
+      backdrop-filter: blur(6px);
     }
-    button, select, input {
+
+    button,
+    select,
+    input {
+      min-height: 34px;
       border: 1px solid var(--line);
-      background: var(--panel);
-      color: var(--ink);
       border-radius: 6px;
-      padding: 7px 10px;
+      padding: 6px 10px;
+      color: var(--ink);
+      background: var(--panel);
       font: inherit;
-      box-shadow: 0 1px 2px rgba(23, 32, 42, 0.05);
+      letter-spacing: 0;
     }
-    button { cursor: pointer; }
-    input { width: 230px; }
-    svg { width: 100%; height: 100%; display: block; }
+
+    button {
+      cursor: pointer;
+      font-weight: 650;
+    }
+
+    input { width: 300px; }
+
+    svg {
+      position: relative;
+      z-index: 1;
+      display: block;
+      width: 100%;
+      height: 100%;
+      min-height: calc(100vh - 70px);
+      touch-action: none;
+      user-select: none;
+      cursor: grab;
+    }
+
+    svg.panning { cursor: grabbing; }
+
     .edge {
-      stroke: #7b8794;
-      stroke-width: 2;
       fill: none;
+      stroke: #8492a6;
+      stroke-width: 2.1;
+      opacity: 0.82;
       marker-end: url(#arrow);
-      opacity: 0.86;
       cursor: pointer;
     }
-    .edge.active { stroke: var(--red); stroke-width: 4; opacity: 1; }
+
+    .edge-hit {
+      fill: none;
+      stroke: transparent;
+      stroke-width: 16;
+      pointer-events: stroke;
+      cursor: pointer;
+    }
+
+    .edge.dimmed { opacity: 0.13; }
+    .edge.active { stroke: var(--danger); stroke-width: 4; opacity: 1; }
+
+    .edge-handle {
+      fill: #fff;
+      stroke: #8492a6;
+      stroke-width: 2;
+      cursor: grab;
+      opacity: 0.82;
+    }
+
+    .edge-handle:hover,
+    .edge-handle.active {
+      stroke: var(--danger);
+      stroke-width: 3;
+      opacity: 1;
+    }
+
+    .edge-handle.dragging {
+      cursor: grabbing;
+      stroke: var(--danger);
+      opacity: 1;
+    }
+
+    .edge-handle.dimmed { opacity: 0.14; }
+    .edge-handle.hidden { display: none; }
+
+    .edge-handles.hidden { display: none; }
+
+    .edge-handle[data-role="source"],
+    .edge-handle[data-role="target"] {
+      fill: #f8fafc;
+    }
+
+    .edge-handle[data-role="c1"],
+    .edge-handle[data-role="c2"] {
+      fill: #fff7ed;
+      stroke-dasharray: 2 2;
+    }
+
+    .edge-control-line {
+      fill: none;
+      stroke: #b6c2d2;
+      stroke-width: 1.3;
+      stroke-dasharray: 5 5;
+      pointer-events: none;
+    }
+
+    .edge-label {
+      fill: #536177;
+      font-size: 11px;
+      pointer-events: none;
+      paint-order: stroke;
+      stroke: #fff;
+      stroke-width: 4px;
+      stroke-linejoin: round;
+    }
+
+    .node { cursor: grab; }
+    .node.dragging { cursor: grabbing; }
+
     .node rect {
       fill: var(--panel);
       stroke: var(--line);
       stroke-width: 1.5;
-      rx: 8;
-      filter: drop-shadow(0 4px 8px rgba(23, 32, 42, 0.12));
+      rx: 7;
+      filter: drop-shadow(0 5px 10px rgba(20, 32, 51, 0.13));
     }
-    .node text { pointer-events: none; }
-    .node .id { font-size: 11px; fill: var(--muted); }
-    .node .label { font-size: 13px; font-weight: 700; fill: var(--ink); }
-    .node.active rect { stroke: var(--red); stroke-width: 3; }
-    .node[data-group="a_share"] rect { stroke: var(--green); }
-    .node[data-group="evaluation"] rect { stroke: var(--blue); }
-    .node[data-group="api"] rect { stroke: var(--purple); }
-    .node[data-group="frontend"] rect { stroke: #377f9d; }
-    .node[data-group="pipeline"] rect { stroke: var(--amber); }
-    .node[data-group="factory"] rect { stroke: #8f5d24; }
-    .node[data-group="cli"] rect { stroke: #59636f; }
+
+    .node .label {
+      fill: var(--ink);
+      font-size: 13px;
+      font-weight: 750;
+      pointer-events: none;
+    }
+
+    .node .id,
+    .node .path {
+      fill: var(--muted);
+      font-size: 11px;
+      pointer-events: none;
+    }
+
+    .node .entry-dot {
+      fill: #fff;
+      stroke: currentColor;
+      stroke-width: 2;
+    }
+
+    .node.dimmed { opacity: 0.18; }
+    .node.active rect { stroke: var(--danger); stroke-width: 3; }
+    .node[data-group="a-share"] { color: var(--a-share); }
+    .node[data-group="pipeline"] { color: var(--pipeline); }
+    .node[data-group="evaluation"] { color: var(--evaluation); }
+    .node[data-group="api"] { color: var(--api); }
+    .node[data-group="frontend"] { color: var(--frontend); }
+    .node[data-group="frontend-api"] { color: var(--frontend-api); }
+    .node[data-group="factory"] { color: var(--factory); }
+    .node[data-group="cli"] { color: var(--cli); }
+    .node[data-group] rect { stroke: currentColor; }
+
     aside {
+      height: calc(100vh - 70px);
       overflow: auto;
-      padding: 18px;
+      padding: 14px;
       background: var(--panel);
+      transition: padding 160ms ease, opacity 120ms ease;
     }
+
+    .layout.sidebar-collapsed aside {
+      width: 0;
+      padding: 0;
+      opacity: 0;
+      overflow: hidden;
+    }
+
     .card {
+      padding: 13px;
+      margin-bottom: 13px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 14px;
-      margin-bottom: 14px;
-      box-shadow: 0 2px 6px rgba(23, 32, 42, 0.04);
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(20, 32, 51, 0.04);
     }
-    .card h2 { font-size: 18px; margin: 0 0 8px; }
-    .card h3 { font-size: 15px; margin: 14px 0 6px; }
+
+    .card h2 { margin: 0 0 8px; font-size: 17px; }
+    .card h3 { margin: 14px 0 6px; font-size: 14px; }
+    .muted { color: var(--muted); }
+
     .meta {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      margin: 8px 0;
+      margin: 9px 0;
     }
+
     .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 2px 8px;
@@ -123,305 +336,1382 @@
       background: #f8fafc;
       font-size: 12px;
     }
-    code { background: #f1f5f9; padding: 1px 4px; border-radius: 4px; }
-    ul { padding-left: 18px; }
+
+    .tag.a-share { color: var(--a-share); }
+    .tag.pipeline { color: var(--pipeline); }
+    .tag.evaluation { color: var(--evaluation); }
+    .tag.api { color: var(--api); }
+    .tag.frontend { color: var(--frontend); }
+    .tag.frontend-api { color: var(--frontend-api); }
+    .tag.factory { color: var(--factory); }
+    .tag.cli { color: var(--cli); }
+    .tag.entry { color: var(--danger); border-color: rgba(180, 35, 24, 0.28); }
+
+    code {
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: var(--code-bg);
+      color: #223149;
+    }
+
+    pre {
+      overflow: auto;
+      margin: 8px 0 0;
+      padding: 10px;
+      border-radius: 7px;
+      background: #111827;
+      color: #e5edf7;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+
+    th,
+    td {
+      vertical-align: top;
+      padding: 6px 7px;
+      border-bottom: 1px solid #e9eef4;
+      text-align: left;
+    }
+
+    th {
+      color: #405169;
+      background: #f8fafc;
+      font-weight: 700;
+    }
+
+    ul { margin: 8px 0 0; padding-left: 18px; }
+
     .list-item {
+      position: relative;
       padding: 7px 0;
       border-bottom: 1px solid #edf1f5;
       cursor: pointer;
     }
+
     .list-item:last-child { border-bottom: 0; }
-    .list-item strong { display: block; }
-    .muted { color: var(--muted); }
-    @media (max-width: 1100px) {
+    .list-item strong { display: block; font-size: 13px; }
+
+    .list-item.with-action {
+      padding-right: 64px;
+    }
+
+    .list-item .list-action {
+      position: absolute;
+      top: 8px;
+      right: 0;
+      min-height: 24px;
+      padding: 2px 7px;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .ghost-button {
+      min-height: 30px;
+      padding: 4px 9px;
+      color: #405169;
+      background: #f8fafc;
+    }
+
+    .empty-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .hidden { display: none; }
+
+    @media (max-width: 1180px) {
+      header { display: block; }
+      .status-pill { display: inline-flex; margin-top: 10px; }
       .layout { grid-template-columns: 1fr; }
-      .canvas-wrap { height: 760px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .layout.sidebar-collapsed { grid-template-columns: 1fr; }
+      .canvas-wrap { min-height: 760px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .sidebar-resizer { display: none; }
+      svg { min-height: 760px; }
+      aside { height: auto; }
+      .layout.sidebar-collapsed aside { display: none; }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>Quant Research Platform Code Map</h1>
-    <p class="subtitle">当前平台代码事实：A 股数据链路、evaluation artifacts、API/download/frontend、start_from runner 和 Factor Factory。</p>
+    <div>
+      <h1>Quant Research Platform 交互 Code Map</h1>
+      <p class="subtitle">
+        当前工程事实图谱：A-share 私有数据链路、start_from pipeline runner、evaluation schema 0.6、
+        manifest.display、API/download/frontend、Factor Factory 和 CLI。默认布局以左到右主流向为准，局部上下回流用于减少遮挡；画布可平移缩放，节点可拖动。
+        连线表示主要数据/契约可用方向，不逐条等同 HTTP request 方向。
+      </p>
+    </div>
+    <span class="status-pill">入口参数以当前源码定义为准</span>
   </header>
-  <main class="layout">
+
+  <main class="layout" id="layout">
     <section class="canvas-wrap" id="canvasWrap">
       <div class="toolbar">
-        <select id="groupFilter" aria-label="分组筛选">
+        <select id="groupFilter" aria-label="分组过滤">
           <option value="all">全部分组</option>
-          <option value="a_share">A 股数据</option>
+          <option value="a-share">A-share 数据</option>
+          <option value="pipeline">Pipeline</option>
           <option value="evaluation">Evaluation / Artifacts</option>
           <option value="api">API</option>
           <option value="frontend">Frontend</option>
-          <option value="pipeline">Pipeline</option>
+          <option value="frontend-api">Frontend + API</option>
           <option value="factory">Factor Factory</option>
           <option value="cli">CLI</option>
         </select>
-        <input id="searchBox" placeholder="搜索节点、边、文件或入口" />
-        <button id="resetBtn" type="button">重置视图</button>
+        <input id="searchBox" placeholder="搜索节点、边、文件或 API" />
+        <button id="zoomInBtn" type="button">放大</button>
+        <button id="zoomOutBtn" type="button">缩小</button>
+        <button id="fitBtn" type="button">适配</button>
+        <button id="resetBtn" type="button">重置</button>
+        <button id="hideSelectedNodeBtn" type="button" disabled>选中节点后隐藏</button>
+        <button id="toggleSidebarBtn" type="button">隐藏侧栏</button>
       </div>
-      <svg id="map" viewBox="0 0 1600 1120" role="img" aria-label="Quant Research Platform code map">
+      <svg id="map" viewBox="0 0 1500 820" role="img" aria-label="Quant Research Platform interactive code map">
         <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8794"></path>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#8492a6"></path>
           </marker>
         </defs>
-        <g id="viewport"></g>
+        <g id="edgeHits"></g>
+        <g id="edges"></g>
+        <g id="edgeLabels"></g>
+        <g id="nodes"></g>
+        <g id="edgeHandles"></g>
       </svg>
     </section>
+    <div class="sidebar-resizer" id="sidebarResizer" title="拖动调整侧栏宽度"></div>
+
     <aside>
       <div class="card" id="detail">
-        <h2>选择节点或边</h2>
-        <p class="muted">点击图中节点或边查看功能、状态、代码位置和边界说明。也可以用搜索框过滤。</p>
+        <h2>选择节点或连线</h2>
+        <p class="muted">点击节点查看代码位置、工程角色和入口参数。按住画布空白处可平移，滚轮可缩放。</p>
+      </div>
+      <div class="card">
+        <h2>图例</h2>
+        <div class="meta" id="legend"></div>
+        <p class="muted"><span class="tag entry">入口</span> 表示点击后有命令/API 参数详情。边末端的小圆点可拖动，用来滑动箭头落点；连线按数据/契约可用流阅读，布局优先减少交叉和遮挡。</p>
+      </div>
+      <div class="card">
+        <h2>图结构检查</h2>
+        <div id="graphCheck"></div>
+      </div>
+      <div class="card">
+        <h2>已隐藏节点</h2>
+        <div id="hiddenNodeList"></div>
+        <div class="button-row">
+          <button class="ghost-button" id="showAllNodesBtn" type="button">显示全部节点</button>
+        </div>
       </div>
       <div class="card">
         <h2>节点索引</h2>
         <div id="nodeList"></div>
       </div>
       <div class="card">
-        <h2>边索引</h2>
+        <h2>连线索引</h2>
         <div id="edgeList"></div>
       </div>
     </aside>
   </main>
+
   <script>
+    const GROUPS = {
+      "a-share": "A-share 数据",
+      "pipeline": "Pipeline",
+      "evaluation": "Evaluation / Artifacts",
+      "api": "API",
+      "frontend": "Frontend",
+      "frontend-api": "Frontend + API",
+      "factory": "Factor Factory",
+      "cli": "CLI"
+    };
+
+    const WORLD = { w: 4700, h: 1080 };
+    const NODE_W = 205;
+    const NODE_H = 72;
+    const EDGE_PORT_STEP = 18;
+    const EDGE_PORT_LIMIT_X = NODE_W / 2 - 18;
+    const EDGE_PORT_LIMIT_Y = NODE_H / 2;
+    const MIN_VIEW_W = 780;
+    const MAX_VIEW_W = 3300;
+    const initialView = { x: 0, y: 0, w: 1500, h: 820 };
+    let view = { ...initialView };
+
     const nodes = [
-      n("N01","CSMAR raw CSV","a_share","已实现私有输入","data/raw_private/csmar/","用户手工导出的 CSMAR 原始文件；不提交、不公开、不自动下载。",80,80),
-      n("N02","build_interim CLI","a_share","已实现入口","markets/implementations/a_share/csmar/build_interim.py","标准化 raw CSV，写出 interim CSV。",290,80),
-      n("N03","interim CSV","a_share","已实现私有产物","data/interim_private/csmar/","可审计中间层，供 panel builder 读取。",500,80),
-      n("N04","build_panel CLI","a_share","已实现入口","markets/implementations/a_share/datasets/build_panel.py","从 interim yearly CSV 构建 full research panel。",710,80),
-      n("N05","build_panel_full_from_interim","a_share","已实现函数","datasets/build_panel.py","合并行情、基础信息、市值并生成 universe/tradability 列。",930,80),
-      n("N06","research panel Parquet","a_share","已实现私有产物","data/processed_private/csmar/panel_full/","宽表研究面板，供 factor builder 读取。",1190,80),
-      n("N07","build_factors CLI","a_share","已实现入口","markets/implementations/a_share/factors/build_factors.py","从 panel 生成 slim factor and label table。",80,250),
-      n("N08","calculate_price_volume_factor_full","a_share","已实现函数","factors/build_factors.py","计算 price-volume factors 和 forward labels。",320,250),
-      n("N09","factor and label Parquet","a_share","已实现私有产物","data/processed_private/csmar/price_volume_factors_full/","A 股 adapter、runner 和 Factor Factory 的主要输入。",610,250),
-      n("N10","A 股 run_factor_evaluation CLI","a_share","已实现入口","evaluation/run_factor_evaluation.py","按年份定位 factor file，按日期过滤 trade_date。",900,250),
-      n("N11","run_processed_factor_evaluation","a_share","已实现编排","evaluation/evaluation_adapter.py","覆盖文件选择、label availability、逐 label evaluation run。",1190,250),
-      n("N12","read_evaluation_frame / read_factor_frame","a_share","已实现读取","evaluation/evaluation_adapter.py","读取所需列并保留 factor、label、return source、risk、tradability。",80,420),
-      n("N13","EvaluationSpec","evaluation","已实现 public contract","evaluations/evaluation_spec.py","统一 evaluation 输入合同。",380,420),
-      n("N14","evaluate_to_payload","evaluation","已实现内部边界","evaluations/evaluation_runner.py","纯计算 payload，不写 artifacts。",610,420),
-      n("N15","run_evaluation","evaluation","已实现 public entrypoint","evaluations/evaluation_runner.py","对外稳定入口，连接 payload 和 writer。",850,420),
-      n("N16","DataFrame / Tensor kernels","evaluation","已实现计算路径","kernels/dataframe/, kernels/tensor/","数值计算实现，不依赖 API 或 market module。",1070,420),
-      n("N17","write_evaluation_set_artifacts","evaluation","已实现 writer","artifacts/artifact_writer.py","写 schema 0.6 evaluation-set artifacts。",1320,420),
-      n("N18","EvaluationSetResult","evaluation","已实现结果对象","evaluations/evaluation_result.py","run_evaluation 返回对象。",80,590),
-      n("N19","schema 0.6 run directory","evaluation","已实现产物合同","reports/private_real/factor_evaluation/, reports/runs/","completed evaluation-set artifacts。",330,590),
-      n("N20","manifest.display","evaluation","已实现展示合同","artifacts/display_manifest.py, manifest_validation.py","API、downloads、CSV preview、charts、frontend 的唯一展示合同。",600,590),
-      n("N21","load_evaluation_set","evaluation","已实现 loader","artifacts/artifact_loader.py","严格读取 schema 0.6 artifacts。",850,590),
-      n("N22","run_repository","api","已实现 service","interfaces/api/services/run_repository.py","run roots、source_alias + run_id、loader wrapper、受控删除。",1080,590),
-      n("N23","FastAPI create_app","api","已实现本地 app","interfaces/api/app.py","配置 app state 并注册 routers。",1320,590),
-      n("N24","runs/evidence/table APIs","api","已实现 routes","routes/runs.py, routes/artifacts.py","run list、evidence、table preview、artifact route。",80,760),
-      n("N25","direct/ZIP downloads","api","已实现 artifact/API 边界","artifacts/artifact_package.py, routes/downloads.py, services/download_service.py","只下载 manifest.display 暴露项；ZIP packaging 规则在 artifacts 层。",330,760),
-      n("N26","comparison APIs","api","已实现 routes/services","routes/comparison.py, services/comparison_service.py","API-visible runs comparison。",590,760),
-      n("N27","CSV upload API","api","保留入口","routes/uploads.py, services/upload_service.py","factor CSV template 与本地 CSV upload；不是 A 股主流程。",820,760),
-      n("N28","React workbench","frontend","已实现前端入口","web/src/shell/App.tsx","本地 evidence workbench，只消费 API。",1070,760),
-      n("N29","ArtifactDownloads","frontend","已实现下载 UI","web/src/features/evidence/ArtifactDownloads.tsx","display-driven direct/ZIP download。",1320,760),
-      n("N30","Factor Studio","frontend","已实现前端入口","web/src/features/factor-studio/FactorStudio.tsx","受控 factor draft。",80,930),
-      n("N31","Pipeline Builder","frontend","已实现前端入口","web/src/features/pipeline/PipelineBuilder.tsx","当前 UI 调用 snapshot endpoint；执行端点独立使用 start_from。",300,930),
-      n("N32S","POST /api/pipeline-snapshots","pipeline","已实现 API","routes/pipeline.py, services/pipeline_service.py","只写配置快照，不执行。",540,930),
-      n("N32","POST /api/pipeline-runs","pipeline","已实现 API","routes/pipeline.py, services/pipeline_service.py","按 start_from 执行到 evaluation。",540,1010),
-      n("N32SG","GET /api/pipeline-snapshots/{run_id}","pipeline","已实现 API","routes/pipeline.py, services/pipeline_service.py","读取配置快照状态。",780,850),
-      n("N32SC","GET /api/pipeline-snapshots/{run_id}/checkpoints","pipeline","已实现 API","routes/pipeline.py, services/pipeline_service.py","读取配置快照 artifacts 状态。",1020,850),
-      n("N32G","GET /api/pipeline-runs/{run_id}","pipeline","已实现 API","routes/pipeline.py, services/pipeline_service.py","读取执行状态。",780,1010),
-      n("N32C","GET /api/pipeline-runs/{run_id}/checkpoints","pipeline","已实现 API","routes/pipeline.py, services/pipeline_service.py","读取完整 checkpoint 链。",1020,1010),
-      n("N33","pipeline snapshot","pipeline","已实现产物","reports/private_real/pipeline_runs/","run_config.yaml、warnings.json、summary.md。",780,930),
-      n("N34","start_from runner","pipeline","已实现统一执行","pipelines/a_share/runner.py","按 start_from 从指定层开始并固定运行到 evaluation；写完整 checkpoints.json 和 runtime_summary.json，未执行层/失败后续层标为 skipped。",1020,930),
-      n("N35","Factor template registry","factory","已实现 registry","research/factor_factory/factor_registry.py","受控 templates、inputs、outputs、capabilities。",1260,930),
-      n("N36","Factor Factory batch runner","factory","已实现第一版","research/factor_factory/batch_runner.py","批量调用统一 runner，并固定 start_from=existing_factors。",80,1070),
-      n("N37","Factor Factory artifacts","factory","已实现 artifact 0.1","research/factor_factory/reports.py","candidate_summary、failed_candidates、manifest.display。",330,1070),
-      n("N38","Factor Factory APIs","factory","已实现 routes","routes/factor_factory.py","浏览和下载 Factor Factory display artifacts。",590,1070),
-      n("N39","qrp CLI","cli","已实现入口","interfaces/cli/commands.py","evaluate-parquet、compare、a-share help commands。",850,1070),
-      n("N40","write_run_comparison","cli","已实现离线比较","artifacts/artifact_comparison.py","qrp compare 的离线 comparison writer。",1080,1070)
+      n("N01", "CSMAR raw CSV", "a-share", "私有输入", "data/raw_private/csmar/", "用户手动导出的 CSMAR 原始文件；源码不登录、不自动下载、不暴露凭据。", 60, 80),
+      n("N02", "build_interim", "a-share", "raw -> interim", "markets/implementations/a_share/csmar/build_interim.py", "把 raw CSV 标准化为 audit-friendly interim CSV。", 310, 80),
+      n("N03", "interim CSV", "a-share", "私有 interim", "data/interim_private/csmar/", "标准化审计层，供 panel builder 读取。", 560, 80),
+      n("N04", "build_panel", "a-share", "interim -> panel", "markets/implementations/a_share/datasets/build_panel.py", "从 interim 表构建 full-sample research panel。", 810, 80),
+      n("N05", "research panel", "a-share", "私有 processed", "data/processed_private/csmar/panel_full/", "research_panel_<start>_<end>.parquet，供因子构建读取。", 1060, 80),
+      n("N06", "build_factors", "a-share", "panel -> factors", "markets/implementations/a_share/factors/build_factors.py", "构建 slim factor table 和 forward labels。", 1310, 80),
+      n("N07", "factor table", "a-share", "私有 processed", "data/processed_private/csmar/price_volume_factors_full/", "A-share adapter、pipeline runner 和 Factor Factory 的主输入。", 1560, 80),
+
+      n("N08", "A-share eval CLI", "a-share", "专用评估入口", "markets/implementations/a_share/evaluation/run_factor_evaluation.py", "A-share private/full evaluation 入口；用 year 定位文件，用 date 过滤 trade_date。", 1810, 530),
+      n("N09", "A-share adapter", "a-share", "factor -> spec", "markets/implementations/a_share/evaluation/evaluation_adapter.py", "读取 processed factor files，检查 label/factor/tradability 并构造 EvaluationSpec。", 2060, 360),
+      n("N10", "Pipeline runner", "pipeline", "start_from", "pipelines/a_share/runner.py", "从 existing_factors、rebuild_factors、rebuild_panel 或 rebuild_interim 开始，并继续到 evaluation。", 1810, 265),
+      n("N11", "Pipeline snapshots", "pipeline", "仅配置", "pipelines/a_share/snapshots.py", "写 run_config.yaml、warnings.json、summary.md；snapshot endpoint 不执行计算。", 1810, 405),
+      n("N12", "Pipeline run API", "pipeline", "run/snapshot routes", "interfaces/api/routes/pipeline.py; interfaces/api/services/pipeline_service.py", "提供 /api/pipeline-snapshots 与 /api/pipeline-runs；不包含 factor-template discovery。", 1560, 265),
+      n("N13", "Pipeline Builder", "frontend", "UI", "web/src/features/pipeline/PipelineBuilder.tsx", "本地 workbench 的 pipeline 配置和可执行 run 控件；接收 Factor Studio 的 factorDraft。", 1310, 265),
+
+      n("N14", "EvaluationSpec", "evaluation", "输入契约", "evaluations/evaluation_spec.py", "共享 evaluation 输入契约。", 2310, 360),
+      n("N15", "run_evaluation", "evaluation", "共享执行入口", "evaluations/evaluation_runner.py", "连接 evaluation 计算和 artifact 写入。", 2560, 360),
+      n("N16", "Kernels", "evaluation", "计算辅助", "kernels/", "DataFrame 和 tensor helper。", 2560, 500),
+      n("N17", "schema 0.6 artifacts", "evaluation", "evaluation_set", "artifacts/artifact_writer.py", "写 schema 0.6 evaluation-set run directory。", 2810, 360),
+      n("N18", "manifest.display", "evaluation", "展示契约", "artifacts/display_manifest.py", "API evidence、previews、charts、downloads、ZIP 和 frontend 的唯一展示源。", 3310, 360),
+      n("N19", "artifact loader", "evaluation", "严格读取", "artifacts/artifact_loader.py", "严格加载 completed evaluation-set artifacts，拒绝缺表或 stale run。", 3060, 360),
+
+      n("N20", "run_repository", "api", "run index", "interfaces/api/services/run_repository.py", "维护 API-visible runs，身份是 (source_alias, run_id)。", 3560, 430),
+      n("N21", "Evidence API", "api", "runs/evidence", "interfaces/api/routes/runs.py", "run list、evidence payload、table previews 和受控 uploaded-panel 删除。", 3810, 430),
+      n("N22", "Download API", "api", "direct/ZIP", "interfaces/api/routes/artifacts.py; interfaces/api/routes/downloads.py; interfaces/api/services/download_service.py", "Direct artifact、report.md 和 ZIP download；ZIP 规则委托 artifacts 层。", 3810, 570),
+      n("N23", "Comparison API", "api", "comparison", "interfaces/api/routes/comparison.py", "为 API-visible runs 提供 comparison table 和 CSV。", 3810, 710),
+      n("N24", "FastAPI app", "api", "local app", "interfaces/api/app.py", "创建 ApiContext 并挂载 market、runs、downloads、pipeline、factory routers。", 60, 365),
+      n("N25", "React workbench", "frontend", "shell", "web/src/shell/App.tsx", "本地 evidence workbench shell；依赖方向 shell -> features -> shared。", 4060, 430),
+      n("N26", "Evidence feature", "frontend", "tables/charts", "web/src/features/evidence/", "消费 API 和 manifest.display 展示 summary、charts、CSV preview、report、downloads。", 4310, 570),
+
+      n("N27", "Factor templates", "factory", "registry", "research/factor_factory/factor_registry.py", "受控 factor templates、inputs、outputs 和 capabilities。", 560, 265),
+      n("N28", "Factory batch runner", "factory", "batch eval", "research/factor_factory/batch_runner.py", "批量候选因子经 A-share runner 执行，当前通常 start_from=existing_factors。", 1560, 600),
+      n("N29", "Factory artifacts", "factory", "schema 0.1", "research/factor_factory/reports.py", "Factor Factory run schema 0.1，不同于 evaluation-set schema 0.6。", 1810, 740),
+      n("N30", "Factor Factory API", "api", "factory routes", "interfaces/api/routes/factor_factory.py", "浏览 Factor Factory runs、tables 和 display-approved artifacts。", 2060, 740),
+      n("N31", "Factor Studio", "frontend", "draft UI", "web/src/features/factor-studio/FactorStudio.tsx", "通过 listFactorTemplates('a_share') 读取 API templates 后编辑受控因子草稿。", 1060, 265),
+      n("N32", "CSV Upload UI/API", "frontend-api", "legacy/dev", "web/src/features/uploads/CreateRunPanel.tsx; web/src/features/uploads/useCreateRun.ts; web/src/shared/api/api.ts#createRun; interfaces/api/routes/uploads.py", "复合节点：前端 CSV 上传 UI 和 POST /api/runs 兼容 API；早期本地调试路径，不是 A-share 私有主链路。", 3060, 690),
+      n("N33", "qrp CLI", "cli", "Typer", "interfaces/cli/commands.py", "evaluate-parquet、compare 和 A-share helper commands 的 root CLI。", 60, 620),
+      n("N34", "Artifact ZIP package", "evaluation", "selected ZIP", "artifacts/artifact_package.py", "按照 manifest.display.downloads 校验并组装 selected artifact ZIP。", 3560, 570),
+      n("N35", "Offline comparison writer", "cli", "local CSV", "artifacts/artifact_comparison.py", "qrp compare 从 completed evaluation-set artifact 目录写离线 comparison CSV；不是 API comparison endpoint。", 3060, 830),
+      n("N36", "FactorFactoryRuns UI", "frontend", "factory UI", "web/src/features/factor-factory/FactorFactoryRuns.tsx", "前端浏览 Factor Factory run list、detail、table preview 和 artifact downloads。", 2310, 740),
+      n("N37", "Factor template API", "api", "template endpoint", "interfaces/api/routes/pipeline.py; interfaces/api/services/pipeline_service.py", "GET /api/factor-templates?market=a_share，从 registry 输出可编辑模板 payload。", 810, 265)
     ];
 
     const edges = [
-      e("E01","N01","N02","raw CSV 进入 build_interim；代码不自动下载或登录 CSMAR。"),
-      e("E02","N02","N03","build_interim 写出标准化 interim CSV。"),
-      e("E03","N03","N04","panel builder 读取 interim，不直接读 raw。"),
-      e("E04","N04","N05","CLI 调用函数级 panel builder。"),
-      e("E05","N05","N06","写出 full research panel 和 tradability 列。"),
-      e("E06","N06","N07","factor CLI 读取 full panel。"),
-      e("E07","N07","N08","按 windows/horizons 调用 factor builder。"),
-      e("E08","N08","N09","写 slim factor and label Parquet。"),
-      e("E09","N09","N10","A 股评估入口读取 processed factor table。"),
-      e("E10","N10","N11","CLI 参数进入 A 股 adapter 编排。"),
-      e("E11","N11","N12","adapter 定位覆盖文件并读取 evaluation frame。"),
-      e("E12","N12","N13","构造 EvaluationSpec，保留 A 股 metadata。"),
-      e("E13","N13","N15","所有 adapter 最终进入 run_evaluation。"),
-      e("E14","N15","N14","run_evaluation 先生成纯计算 payload。"),
-      e("E15","N14","N16","payload 计算阶段调用 kernels。"),
-      e("E16","N16","N14","kernels 返回表格、summary 和 report 输入。"),
-      e("E17","N14","N17","writer 消费结构化 payload。"),
-      e("E18","N15","N17","public entrypoint 连接计算和写盘。"),
-      e("E19","N17","N19","写 schema 0.6 artifact directory。"),
-      e("E20","N17","N18","返回 EvaluationSetResult。"),
-      e("E21","N19","N20","manifest.json 中的 display 成为展示合同。"),
-      e("E22","N19","N21","loader 严格读取 completed run。"),
-      e("E23","N21","N22","repository 通过 loader 建立 run index。"),
-      e("E24","N22","N23","app state 注入 run roots 和 services。"),
-      e("E25","N20","N24","evidence/table API 只暴露 display tables。"),
-      e("E26","N20","N25","download API 只暴露 display download items。"),
-      e("E27","N23","N24","FastAPI 注册 runs/artifacts routes。"),
-      e("E28","N23","N25","FastAPI 注册 download routes。"),
-      e("E29","N23","N26","FastAPI 注册 comparison routes。"),
-      e("E30","N23","N27","CSV upload 保留入口。","保留入口"),
-      e("E31","N27","N13","upload service 构造 EvaluationSpec。"),
-      e("E32","N24","N28","React workbench 获取 runs/evidence/table payload。"),
-      e("E33","N25","N29","ArtifactDownloads 调用 direct/ZIP endpoints。"),
-      e("E34","N28","N29","download UI 随 run/combination state 更新。"),
-      e("E35","N30","N31","Factor draft 传入 Pipeline Builder。"),
-      e("E36","N35","N30","template registry 供 Factor Studio 展示。"),
-      e("E37","N31","N32S","Pipeline Builder 提交 pipeline snapshot request。"),
-      e("E38","N32S","N33","snapshot endpoint 写配置快照。"),
-      e("E38A","N32S","N32SG","snapshot status endpoint 读取配置快照状态。"),
-      e("E38B","N33","N32SC","snapshot checkpoint endpoint 读取配置 artifacts 状态。"),
-      e("E39","N32","N34","start_from 调用统一 runner。","已实现"),
-      e("E39A","N32","N32G","run status endpoint 读取执行状态。"),
-      e("E39B","N34","N32C","run checkpoint endpoint 读取完整 checkpoint 链。"),
-      e("E40","N34","N11","runner 调用 A 股 adapter，不绕过 market module。","按 start_from 执行到 evaluation"),
-      e("E41","N35","N36","registry 展开 Factor Factory candidates。"),
-      e("E42","N36","N34","batch runner 逐 candidate 调用 runner，并使用 existing_factors 作为 start_from。","已实现"),
-      e("E43","N36","N37","写 candidate summary 和 failed candidate log。"),
-      e("E44","N37","N38","Factor Factory API 读取 display artifacts。"),
-      e("E45","N38","N28","workbench 浏览 Factor Factory results。"),
-      e("E46","N39","N10","qrp a-share evaluate 是帮助/跳转入口。","已实现入口"),
-      e("E47","N39","N13","qrp evaluate-parquet 构造 EvaluationSpec。"),
-      e("E48","N39","N40","qrp compare 调用离线 comparison writer。"),
-      e("E49","N40","N19","comparison writer 读取 completed run directory。")
+      e("E01", "N01", "N02", "manual raw input", "手动 CSMAR CSV 进入 build_interim。"),
+      e("E02", "N02", "N03", "writes", "build_interim 写入 interim CSV。"),
+      e("E03", "N03", "N04", "reads", "build_panel 读取 interim 层。"),
+      e("E04", "N04", "N05", "writes", "build_panel 写入 research panel。"),
+      e("E05", "N05", "N06", "reads", "build_factors 读取 panel。"),
+      e("E06", "N06", "N07", "writes", "build_factors 写入 factor 和 label table。"),
+      e("E07", "N07", "N09", "adapter input", "A-share adapter 读取 processed factor table。"),
+      e("E08", "N08", "N09", "calls", "A-share eval CLI 调用 adapter。"),
+      e("E09", "N10", "N09", "evaluates", "Pipeline runner 最终进入 A-share adapter。"),
+      e("E10", "N01", "N10", "rebuild_interim", "从 raw/private input 进入 build_interim，并继续到 panel、factors 和 evaluation。"),
+      e("E11", "N03", "N10", "rebuild_panel", "从 interim 层进入 build_panel，并继续到 factors 和 evaluation。"),
+      e("E12", "N05", "N10", "rebuild_factors", "从已有 research panel 进入 build_factors，并继续到 evaluation。"),
+      e("E13", "N12", "N11", "snapshot", "Snapshot endpoints 只写配置。"),
+      e("E14", "N12", "N10", "run", "pipeline-runs 调用 executable runner。"),
+      e("E15", "N13", "N12", "submitted config", "Pipeline Builder 提交 snapshot/run payload 到 Pipeline API；此边表达提交 payload。"),
+      e("E16", "N09", "N14", "builds", "A-share adapter 构造 EvaluationSpec。"),
+      e("E17", "N14", "N15", "input", "EvaluationSpec 进入 run_evaluation。"),
+      e("E18", "N15", "N16", "uses", "Evaluation computation 使用 kernels。"),
+      e("E19", "N15", "N17", "writes", "run_evaluation 写 schema 0.6 artifacts。"),
+      e("E20", "N17", "N18", "declares", "artifact manifest 声明 display。"),
+      e("E21", "N17", "N19", "loaded by", "loader 严格读取 artifacts。"),
+      e("E22", "N18", "N21", "exposes", "Evidence API 只暴露 display-approved tables。"),
+      e("E23", "N18", "N22", "direct downloads", "Direct artifact 和 report.md downloads 受 display 控制。"),
+      e("E24", "N19", "N20", "indexes", "run_repository 使用 loader 结果建立 index。"),
+      e("E25", "N20", "N21", "serves", "Runs/evidence routes 通过 repository 访问 run。"),
+      e("E26", "N20", "N23", "compares", "Comparison API 只比较 API-visible runs。"),
+      e("E27", "N24", "N20", "app context", "FastAPI app 创建 ApiContext，repository/services 从 context 读取 run roots。"),
+      e("E28", "N21", "N25", "consumed by", "React shell 消费 evidence API。"),
+      e("E29", "N22", "N26", "downloads", "Download API 提供 direct/ZIP download contract，Evidence download UI 消费；实际 request 由前端发起。"),
+      e("E30", "N18", "N26", "drives UI", "Frontend tables、charts、downloads 必须来自 manifest.display。"),
+      e("E31", "N27", "N28", "templates", "Factory runner 使用受控 factor templates。"),
+      e("E32", "N28", "N10", "batch runs", "Factory batch runner 调用 A-share pipeline runner。"),
+      e("E33", "N28", "N29", "writes", "Factory 写 schema 0.1 artifacts。"),
+      e("E34", "N29", "N30", "exposed by", "Factor Factory API 浏览 schema 0.1 artifacts。"),
+      e("E35", "N37", "N31", "template payload", "Factor Studio 通过 GET /api/factor-templates?market=a_share 加载 templates。"),
+      e("E36", "N32", "N20", "uploaded run visibility", "CSV Upload UI/API 生成本地 uploaded-panel run 后进入 API-visible run roots。"),
+      e("E37", "N33", "N15", "generic evaluation", "evaluate-parquet 只验证通用 Parquet adapter 和 shared evaluation layer。"),
+      e("E38", "N33", "N08", "A-share helper", "A-share 验收应使用 A-share 专用入口或 pipeline runner。"),
+      e("E39", "N27", "N37", "template endpoint", "Factor template API 从受控 registry 输出 payload。"),
+      e("E40", "N24", "N12", "mounts", "FastAPI app 挂载 pipeline routes。"),
+      e("E41", "N24", "N21", "mounts", "FastAPI app 挂载 runs/evidence routes。"),
+      e("E42", "N24", "N22", "mounts", "FastAPI app 挂载 artifact/download routes。"),
+      e("E43", "N24", "N23", "mounts", "FastAPI app 挂载 comparison routes。"),
+      e("E44", "N24", "N30", "mounts", "FastAPI app 挂载 Factor Factory routes。"),
+      e("E45", "N18", "N34", "download contract", "manifest.display.downloads 定义 ZIP 可选 items。"),
+      e("E46", "N34", "N22", "ZIP package", "download_service 委托 artifact_package 组装 selected ZIP。"),
+      e("E47", "N33", "N35", "offline compare", "qrp compare 调用 write_run_comparison 写本地 comparison CSV。"),
+      e("E48", "N31", "N13", "draft handoff", "Factor Studio 的 factorDraft 交给 Pipeline Builder 继续生成 snapshot 或 run。"),
+      e("E49", "N30", "N36", "factory UI", "Factor Factory API payload 被 FactorFactoryRuns UI 消费；实际 request 由前端发起。"),
+      e("E50", "N24", "N37", "mounts", "FastAPI app 通过 pipeline router 挂载 factor-template endpoint。"),
+      e("E51", "N07", "N10", "existing_factors", "从已有 factor table 直接进入 evaluation。")
     ];
 
-    function n(id,label,group,status,path,description,x,y){ return {id,label,group,status,path,description,x,y}; }
-    function e(id,from,to,description,status="已实现"){ return {id,from,to,description,status}; }
+    const entries = {
+      N02: entry("CLI module", "python -m quant_research_platform.markets.implementations.a_share.csmar.build_interim", "构建本地私有 CSMAR interim CSV，不改 raw data。", [
+        p("--raw-root", "data/raw_private/csmar", "CSMAR raw CSV 根目录"),
+        p("--output-root", "data/interim_private/csmar", "interim CSV 输出根目录"),
+        p("--override-path", "config/private_column_overrides.json", "字段覆盖配置"),
+        p("--start-date", "2014-01-01", "起始日期"),
+        p("--end-date", "2025-12-31", "结束日期"),
+        p("--chunksize", "500000", "分块读取行数")
+      ], "conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.csmar.build_interim --start-date 2014-01-01 --end-date 2025-12-31"),
+      N04: entry("CLI module", "python -m quant_research_platform.markets.implementations.a_share.datasets.build_panel", "从 interim 层构建 full-sample private CSMAR research panel。", [
+        p("--interim-root", "data/interim_private/csmar", "interim 输入根目录"),
+        p("--processed-root", "data/processed_private/csmar", "processed 输出根目录"),
+        p("--start-year", "2014", "起始年份"),
+        p("--end-year", "2025", "结束年份"),
+        p("--end-date", "2025-12-31", "结束日期"),
+        p("--min-listing-trading-days", "120", "上市后最少交易日过滤")
+      ], "conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.datasets.build_panel --start-year 2014 --end-year 2025"),
+      N06: entry("CLI module", "python -m quant_research_platform.markets.implementations.a_share.factors.build_factors", "从 research panel 构建 price_volume factor table 和 forward labels。", [
+        p("--processed-root", "data/processed_private/csmar", "processed 根目录"),
+        p("--start-year", "2014", "起始年份"),
+        p("--end-year", "2025", "结束年份"),
+        p("--factor-set", "price_volume", "当前支持 price_volume"),
+        p("--windows", "20,60,120", "因子窗口"),
+        p("--horizons", "1,5,10,20,60,120", "forward label horizon")
+      ], "conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.factors.build_factors --factor-set price_volume"),
+      N08: entry("CLI module", "python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation", "A-share private/full evaluation 专用入口；这是 A-share adapter 验收入口之一。", [
+        p("--processed-root", "data/processed_private/csmar", "processed CSMAR 根目录"),
+        p("--input-file", "\"\"", "本地调试/后端专用 Parquet override；不是 API/UI 验收入口"),
+        p("--report-root", "reports/private_real/factor_evaluation/full_<start-year>_<end-year>", "输出根目录；省略时按年份生成"),
+        p("--start-year", "2024", "用于定位 processed factor file"),
+        p("--end-year", "2025", "用于定位 processed factor file"),
+        p("--start-date", "\"\"", "可选 trade_date 起始过滤"),
+        p("--end-date", "\"\"", "可选 trade_date 结束过滤"),
+        p("--labels", "forward_return_20d", "一个或多个 label"),
+        p("--features", "required", "一个或多个 factor；必填"),
+        p("--n-groups", "5", "分组数量"),
+        p("--return-source-column", "DEFAULT_RETURN_SOURCE_COLUMN", "累计收益来源列"),
+        p("--cost-bps", "0.0", "交易成本 bps"),
+        p("--portfolio-modes", "long_short", "可选 long_short / long_only"),
+        p("--kernels", "dataframe", "可选 dataframe / tensor"),
+        p("--dry-run", "false", "只检查输入列、日期覆盖和组合数量"),
+        p("--segment-columns", "\"\"", "逗号分隔分段列"),
+        p("--risk-column", "\"\"", "风险列"),
+        p("--neutralization-method", "none", "中性化方法"),
+        p("--neutralization-group-columns", "\"\"", "中性化分组列"),
+        p("--neutralization-exposure-columns", "\"\"", "中性化暴露列")
+      ], "conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation --features factor_ret_20 --labels forward_return_20d --start-year 2024 --end-year 2025 --dry-run"),
+      N12: entry("HTTP API", "POST /api/pipeline-snapshots 或 POST /api/pipeline-runs", "Pipeline snapshot 只写配置；pipeline run 使用 start_from 执行，并继续到 evaluation。", [
+        p("market", "a_share", "市场标识"),
+        p("run_id", "required", "ASCII letters / numbers / underscore / hyphen"),
+        p("date_start", "required", "研究起始日期"),
+        p("date_end", "required", "研究结束日期"),
+        p("factor_expression", "required", "因子表达式"),
+        p("factor_template_id", "null", "可选模板 ID"),
+        p("portfolio_mode", "long_only", "portfolio mode"),
+        p("cost_bps", "0.0", "交易成本 bps"),
+        p("return_source_column", "forward_return_1d", "收益来源列"),
+        p("label_columns", "[forward_return_1d]", "label 列列表"),
+        p("processed_factor_column", "null", "可选 processed factor column"),
+        p("kernel", "dataframe", "evaluation kernel"),
+        p("start_from", "required for /api/pipeline-runs", "existing_factors / rebuild_factors / rebuild_panel / rebuild_interim")
+      ], "{\n  \"market\": \"a_share\",\n  \"run_id\": \"demo_run\",\n  \"date_start\": \"2024-01-01\",\n  \"date_end\": \"2025-12-31\",\n  \"factor_expression\": \"rank(close / delay(close, 20))\",\n  \"label_columns\": [\"forward_return_20d\"],\n  \"start_from\": \"existing_factors\"\n}"),
+      N37: entry("HTTP API", "GET /api/factor-templates", "Factor Studio 通过这个 endpoint 读取 A-share controlled templates；它属于 pipeline router，但不是 pipeline run/snapshot 提交入口。", [
+        p("market", "a_share", "query 参数；当前前端调用 listFactorTemplates('a_share')")
+      ], "GET /api/factor-templates?market=a_share"),
+      N21: entry("HTTP API", "GET /api/runs/{source_alias}/{run_id}/evidence 和 table preview endpoints", "读取 API-visible evaluation run；身份必须保留 (source_alias, run_id)。", [
+        p("source_alias", "path", "run root source，例如 pipeline / private / uploaded"),
+        p("run_id", "path", "evaluation run id"),
+        p("metric_name", "path", "metrics / portfolio / diagnostics 表名"),
+        p("group", "path", "breakdowns 分组，例如 year / quarter / month"),
+        p("limit", "null", "table preview 行数；后端有最大限制"),
+        p("offset", "0", "table preview 起始行"),
+        p("combination_id", "null", "可选组合过滤")
+      ], "GET /api/runs/pipeline/demo_run/evidence\nGET /api/runs/pipeline/demo_run/metrics/combinations?limit=100&offset=0"),
+      N22: entry("HTTP API", "GET/POST /api/runs/{source_alias}/{run_id}/download", "按 manifest.display.downloads 直接下载或打包 ZIP。", [
+        p("source_alias", "path", "run root source"),
+        p("run_id", "path", "evaluation run id"),
+        p("artifact_item", "path", "direct download item，必须由 manifest.display 暴露"),
+        p("items", "required", "POST JSON body 或 GET query list；选中的 ZIP items")
+      ], "POST /api/runs/pipeline/demo_run/download\n{\"items\": [\"report.md\", \"comparison.csv\"]}\nGET /api/runs/pipeline/demo_run/artifacts/report.md"),
+      N23: entry("HTTP API", "GET /api/comparison 和 GET /api/comparison.csv", "比较 API-visible runs，CSV endpoint 返回 attachment。", [
+        p("request", "FastAPI Request", "从 app context 读取 comparison_index_records"),
+        p("无显式 query", "n/a", "当前 endpoint 不接收筛选参数")
+      ], "GET /api/comparison\nGET /api/comparison.csv"),
+      N30: entry("HTTP API", "GET /api/factor-factory-runs", "浏览 Factor Factory run、table preview 和 display-approved artifacts。", [
+        p("run_id", "path", "Factor Factory run id；只允许 ASCII letters / numbers / underscore / hyphen"),
+        p("table_key", "path", "manifest.display.tables key"),
+        p("artifact_item", "path", "manifest.display.downloads 允许的 artifact"),
+        p("limit", "100", "table preview 行数"),
+        p("offset", "0", "table preview 起始行")
+      ], "GET /api/factor-factory-runs\nGET /api/factor-factory-runs/demo/tables/candidates?limit=100&offset=0"),
+      N32: entry("Frontend + HTTP API", "CreateRunPanel/useCreateRun/createRun -> POST /api/runs", "复合节点：用户在前端 CSV 上传开发入口提交，后端 uploads route 创建本地 uploaded-panel run；不是 A-share private data main flow。", [
+        p("run_id", "required", "用户上传 run id"),
+        p("project", "required", "项目名"),
+        p("kind", "factor", "artifact kind"),
+        p("domain", "required", "研究 domain"),
+        p("data_stage", "uploaded_panel", "固定 uploaded_panel"),
+        p("timestamp_column", "timestamp", "时间列"),
+        p("asset_column", "asset", "资产列"),
+        p("feature_columns", "[factor]", "factor columns"),
+        p("label_columns", "[forward_return]", "label columns"),
+        p("kernel", "dataframe", "evaluation kernel"),
+        p("n_groups", "5", "分组数量"),
+        p("weight_method", "equal_weight_quantile", "权重方法"),
+        p("direction", "long_high", "信号方向"),
+        p("portfolio_mode", "long_short", "组合模式"),
+        p("top_quantile", "0.2", "long leg quantile"),
+        p("bottom_quantile", "0.2", "short leg quantile"),
+        p("cost_bps", "0.0", "交易成本 bps"),
+        p("csv_text", "required", "上传的 CSV 文本")
+      ], "POST /api/runs\n{\"run_id\":\"upload_demo\",\"project\":\"quant-research-platform\",\"domain\":\"local\",\"csv_text\":\"...\"}"),
+      N33: entry("CLI", "python -m quant_research_platform.interfaces.cli / qrp", "Typer root CLI。A-share helper 命令只提示实际 python -m 模块入口。", [
+        p("qrp evaluate-parquet --parquet-path", "required, repeatable", "输入 long-format Parquet；可多文件"),
+        p("qrp evaluate-parquet --timestamp-column", "timestamp", "时间列"),
+        p("qrp evaluate-parquet --asset-column", "asset", "资产列"),
+        p("qrp evaluate-parquet --feature", "required, repeatable", "factor/prediction columns"),
+        p("qrp evaluate-parquet --label", "required, repeatable", "forward return / label columns"),
+        p("qrp evaluate-parquet --return-source-column", "DEFAULT_RETURN_SOURCE_COLUMN", "累计收益来源列"),
+        p("qrp evaluate-parquet --segment-column", "optional, repeatable", "分段列"),
+        p("qrp evaluate-parquet --time-breakdown", "optional, repeatable", "year / quarter / month"),
+        p("qrp evaluate-parquet --output", "reports/runs/parquet_evaluation", "输出目录"),
+        p("qrp evaluate-parquet --evaluation-id", "output dir name", "evaluation id"),
+        p("qrp evaluate-parquet --project", "quant-research-platform", "项目名"),
+        p("qrp evaluate-parquet --kind", "factor", "artifact kind"),
+        p("qrp evaluate-parquet --domain", "parquet", "研究 domain"),
+        p("qrp evaluate-parquet --data-stage", "approved_offline_real_data", "数据阶段"),
+        p("qrp evaluate-parquet --uses-external-data/--no-uses-external-data", "true", "外部数据标记"),
+        p("qrp evaluate-parquet --n-groups", "5", "分组数量"),
+        p("qrp evaluate-parquet --weight-method", "equal_weight_quantile", "权重方法"),
+        p("qrp evaluate-parquet --direction", "long_high", "信号方向"),
+        p("qrp evaluate-parquet --portfolio-mode", "long_short", "组合模式"),
+        p("qrp evaluate-parquet --top-quantile", "0.2", "long leg quantile"),
+        p("qrp evaluate-parquet --bottom-quantile", "0.2", "short leg quantile"),
+        p("qrp evaluate-parquet --cost-bps", "0.0", "schema 0.6 当前只接受一个 run-level cost"),
+        p("qrp evaluate-parquet --risk-column", "optional", "风险列"),
+        p("qrp evaluate-parquet --eligibility-column", "optional", "eligibility mask"),
+        p("qrp evaluate-parquet --can-enter-column", "optional", "can-enter mask"),
+        p("qrp evaluate-parquet --can-exit-column", "optional", "can-exit mask"),
+        p("qrp evaluate-parquet --kernel", "dataframe", "dataframe / tensor"),
+        p("qrp evaluate-parquet --dry-run", "false", "只做 schema/config 检查"),
+        p("qrp compare RUN_DIR...", "required", "一个或多个 evaluation-set artifact 目录"),
+        p("qrp compare --output", "reports/runs/comparison.csv", "comparison CSV 输出路径"),
+        p("qrp a-share build-interim/build-panel/build-factors/evaluate", "helper", "显示实际 python -m A-share 模块入口")
+      ], "qrp evaluate-parquet --parquet-path data/sample.parquet --feature factor --label forward_return --dry-run\nqrp compare reports/runs/run_a reports/runs/run_b --output reports/runs/comparison.csv")
+    };
 
-    const viewport = document.getElementById("viewport");
+    const svg = document.getElementById("map");
+    const edgeLayer = document.getElementById("edges");
+    const edgeHitLayer = document.getElementById("edgeHits");
+    const edgeLabelLayer = document.getElementById("edgeLabels");
+    const edgeHandleLayer = document.getElementById("edgeHandles");
+    const nodeLayer = document.getElementById("nodes");
+    const layout = document.getElementById("layout");
+    const sidebarResizer = document.getElementById("sidebarResizer");
     const detail = document.getElementById("detail");
     const nodeList = document.getElementById("nodeList");
     const edgeList = document.getElementById("edgeList");
+    const hiddenNodeList = document.getElementById("hiddenNodeList");
     const groupFilter = document.getElementById("groupFilter");
     const searchBox = document.getElementById("searchBox");
     const resetBtn = document.getElementById("resetBtn");
+    const fitBtn = document.getElementById("fitBtn");
+    const zoomInBtn = document.getElementById("zoomInBtn");
+    const zoomOutBtn = document.getElementById("zoomOutBtn");
+    const hideSelectedNodeBtn = document.getElementById("hideSelectedNodeBtn");
+    const toggleSidebarBtn = document.getElementById("toggleSidebarBtn");
+    const legend = document.getElementById("legend");
+    const graphCheck = document.getElementById("graphCheck");
+    const showAllNodesBtn = document.getElementById("showAllNodesBtn");
+
+    const nodeById = new Map(nodes.map(node => [node.id, node]));
+    const edgeById = new Map(edges.map(edge => [edge.id, edge]));
+    const nodeElements = new Map();
+    const edgeHitElements = new Map();
+    const edgeElements = new Map();
+    const edgeLabelElements = new Map();
+    const edgeHandleElements = new Map();
+    const originalPositions = new Map(nodes.map(node => [node.id, { x: node.x, y: node.y }]));
     let activeId = null;
-    let pan = {x: 0, y: 0};
-    let zoom = 1;
-    let drag = null;
+    let activeEdgeId = null;
+    let nodeDrag = null;
+    let panDrag = null;
+    let edgeHandleDrag = null;
+    let sidebarResizeDrag = null;
+    let sidebarWidth = 380;
+    let currentPortOffsets = new Map();
+    const hiddenNodeIds = new Set();
 
-    function render() {
-      viewport.innerHTML = "";
-      viewport.setAttribute("transform", `translate(${pan.x} ${pan.y}) scale(${zoom})`);
-      const visible = visibleNodes();
-      const visibleIds = new Set(visible.map(node => node.id));
+    renderLegend();
+    renderGraph();
+    renderLists();
+    renderHiddenNodes();
+    renderGraphCheck();
+    applyView();
+    updateFilter();
+
+    groupFilter.addEventListener("change", updateFilter);
+    searchBox.addEventListener("input", updateFilter);
+    resetBtn.addEventListener("click", resetLayout);
+    fitBtn.addEventListener("click", fitView);
+    zoomInBtn.addEventListener("click", () => zoomAtCenter(0.82));
+    zoomOutBtn.addEventListener("click", () => zoomAtCenter(1.22));
+    hideSelectedNodeBtn.addEventListener("click", hideSelectedNode);
+    toggleSidebarBtn.addEventListener("click", toggleSidebar);
+    showAllNodesBtn.addEventListener("click", showAllNodes);
+    detail.addEventListener("click", onDetailAction);
+    sidebarResizer.addEventListener("pointerdown", startSidebarResize);
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    svg.addEventListener("pointerdown", startPan);
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("pointerup", endPointerActions);
+
+    function n(id, label, group, status, path, description, x, y) {
+      return { id, label, group, status, path, description, x, y };
+    }
+
+    function e(id, from, to, label, description, options = {}) {
+      return {
+        id,
+        from,
+        to,
+        label,
+        description,
+        sourceSide: options.sourceSide ?? null,
+        targetSide: options.targetSide ?? null,
+        sourceOffset: options.sourceOffset ?? null,
+        targetOffset: options.targetOffset ?? null,
+        curve: options.curve ? cloneCurve(options.curve) : null,
+        defaultCurve: options.curve ? cloneCurve(options.curve) : null
+      };
+    }
+
+    function entry(kind, command, purpose, params, example) {
+      return { kind, command, purpose, params, example };
+    }
+
+    function p(name, defaultValue, purpose) {
+      return { name, defaultValue, purpose };
+    }
+
+    function cloneCurve(curve) {
+      return curve
+        ? { c1: { ...curve.c1 }, c2: { ...curve.c2 } }
+        : null;
+    }
+
+    function renderLegend() {
+      legend.innerHTML = Object.entries(GROUPS)
+        .map(([group, label]) => `<span class="tag ${group}">${escapeHtml(label)}</span>`)
+        .join("");
+    }
+
+    function renderGraph() {
+      edgeHitLayer.innerHTML = "";
+      edgeLayer.innerHTML = "";
+      edgeLabelLayer.innerHTML = "";
+      edgeHandleLayer.innerHTML = "";
+      nodeLayer.innerHTML = "";
+
       for (const edge of edges) {
-        if (!visibleIds.has(edge.from) || !visibleIds.has(edge.to)) continue;
-        const from = nodes.find(node => node.id === edge.from);
-        const to = nodes.find(node => node.id === edge.to);
+        const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        hit.classList.add("edge-hit");
+        hit.dataset.id = edge.id;
+        hit.addEventListener("click", event => {
+          event.stopPropagation();
+          selectEdge(edge.id);
+        });
+        edgeHitLayer.appendChild(hit);
+        edgeHitElements.set(edge.id, hit);
+
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        const x1 = from.x + 170, y1 = from.y + 34, x2 = to.x, y2 = to.y + 34;
-        const mx = (x1 + x2) / 2;
-        path.setAttribute("d", `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
-        path.setAttribute("class", `edge ${activeId === edge.id ? "active" : ""}`);
-        path.addEventListener("click", event => { event.stopPropagation(); selectEdge(edge.id); });
-        viewport.appendChild(path);
+        path.classList.add("edge");
+        path.dataset.id = edge.id;
+        path.addEventListener("click", event => {
+          event.stopPropagation();
+          selectEdge(edge.id);
+        });
+        edgeLayer.appendChild(path);
+        edgeElements.set(edge.id, path);
+
+        const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        label.classList.add("edge-label");
+        label.textContent = edge.label;
+        edgeLabelLayer.appendChild(label);
+        edgeLabelElements.set(edge.id, label);
+
+        const handleGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        handleGroup.classList.add("edge-handles", "hidden");
+        handleGroup.dataset.id = edge.id;
+        const helper = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        helper.classList.add("edge-control-line");
+        handleGroup.appendChild(helper);
+        const handles = {
+          group: handleGroup,
+          helper,
+          source: edgeHandle(edge.id, "source", "拖动起点：沿来源节点边框选择连接位置"),
+          target: edgeHandle(edge.id, "target", "拖动终点：沿目标节点边框选择箭头落点"),
+          c1: edgeHandle(edge.id, "c1", "拖动曲线控制点 1：改变前半段弯曲形状"),
+          c2: edgeHandle(edge.id, "c2", "拖动曲线控制点 2：改变后半段弯曲形状")
+        };
+        handleGroup.append(handles.source, handles.target, handles.c1, handles.c2);
+        edgeHandleLayer.appendChild(handleGroup);
+        edgeHandleElements.set(edge.id, handles);
       }
-      for (const node of visible) {
+
+      for (const node of nodes) {
         const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        g.setAttribute("class", `node ${activeId === node.id ? "active" : ""}`);
-        g.setAttribute("data-group", node.group);
-        g.setAttribute("transform", `translate(${node.x} ${node.y})`);
-        g.addEventListener("click", event => { event.stopPropagation(); selectNode(node.id); });
+        g.classList.add("node");
+        g.dataset.id = node.id;
+        g.dataset.group = node.group;
+
         const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        rect.setAttribute("width", "180");
-        rect.setAttribute("height", "70");
-        const idText = text(12, 19, node.id, "id");
-        const labelText = text(12, 41, node.label.length > 22 ? node.label.slice(0, 21) + "..." : node.label, "label");
-        const statusText = text(12, 60, node.status, "id");
-        g.append(rect, idText, labelText, statusText);
-        viewport.appendChild(g);
+        rect.setAttribute("width", NODE_W);
+        rect.setAttribute("height", NODE_H);
+
+        g.append(
+          rect,
+          text(12, 24, "label", node.label),
+          text(12, 43, "id", `${node.id} · ${GROUPS[node.group]}`),
+          text(12, 60, "path", truncate(node.path, 31))
+        );
+        if (entries[node.id]) {
+          const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          dot.setAttribute("class", "entry-dot");
+          dot.setAttribute("cx", NODE_W - 17);
+          dot.setAttribute("cy", 16);
+          dot.setAttribute("r", 5);
+          g.appendChild(dot);
+        }
+        g.addEventListener("pointerdown", event => startNodeDrag(event, node.id));
+        g.addEventListener("click", event => {
+          event.stopPropagation();
+          if (!nodeDrag || !nodeDrag.moved) selectNode(node.id);
+        });
+        nodeLayer.appendChild(g);
+        nodeElements.set(node.id, g);
       }
-      renderLists();
+
+      svg.addEventListener("click", clearSelection);
+      updateGraph();
     }
 
-    function text(x,y,value,cls){
-      const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      t.setAttribute("x", x);
-      t.setAttribute("y", y);
-      t.setAttribute("class", cls);
-      t.textContent = value;
-      return t;
+    function text(x, y, className, content) {
+      const item = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      item.setAttribute("x", x);
+      item.setAttribute("y", y);
+      item.classList.add(className);
+      item.textContent = content;
+      return item;
     }
 
-    function visibleNodes() {
-      const group = groupFilter.value;
-      const q = searchBox.value.trim().toLowerCase();
-      return nodes.filter(node => {
-        const groupOk = group === "all" || node.group === group;
-        const textOk = !q || [node.id,node.label,node.group,node.status,node.path,node.description].join(" ").toLowerCase().includes(q);
-        return groupOk && textOk;
+    function edgeHandle(edgeId, role, titleText) {
+      const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      handle.classList.add("edge-handle");
+      handle.dataset.id = edgeId;
+      handle.dataset.role = role;
+      handle.setAttribute("r", 5);
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = titleText;
+      handle.appendChild(title);
+      handle.addEventListener("pointerdown", event => startEdgeHandleDrag(event, edgeId, role, handle));
+      handle.addEventListener("click", event => {
+        event.stopPropagation();
+        selectEdge(edgeId);
       });
+      return handle;
     }
 
     function renderLists() {
-      const visible = visibleNodes();
-      const visibleIds = new Set(visible.map(node => node.id));
-      nodeList.innerHTML = visible.map(node => `<div class="list-item" data-node="${node.id}"><strong>${node.id} ${node.label}</strong><span class="muted">${node.path}</span></div>`).join("");
-      edgeList.innerHTML = edges
-        .filter(edge => visibleIds.has(edge.from) && visibleIds.has(edge.to))
-        .map(edge => `<div class="list-item" data-edge="${edge.id}"><strong>${edge.id} ${edge.from} -> ${edge.to}</strong><span class="muted">${edge.status} · ${edge.description}</span></div>`)
-        .join("");
-      nodeList.querySelectorAll("[data-node]").forEach(el => el.addEventListener("click", () => selectNode(el.dataset.node)));
-      edgeList.querySelectorAll("[data-edge]").forEach(el => el.addEventListener("click", () => selectEdge(el.dataset.edge)));
+      nodeList.innerHTML = nodes.map(node => `
+        <div class="list-item with-action" data-node="${node.id}">
+          <strong>${node.id} ${escapeHtml(node.label)}${entries[node.id] ? " · 入口" : ""}</strong>
+          <span class="muted">${escapeHtml(GROUPS[node.group])} · ${escapeHtml(node.status)}</span>
+          <button class="list-action ghost-button" data-hide-node="${node.id}" type="button">隐藏</button>
+        </div>
+      `).join("");
+
+      edgeList.innerHTML = edges.map(edge => `
+        <div class="list-item" data-edge="${edge.id}">
+          <strong>${edge.from} -> ${edge.to}</strong>
+          <span class="muted">${escapeHtml(edge.label)}</span>
+        </div>
+      `).join("");
+
+      nodeList.querySelectorAll("[data-node]").forEach(item => {
+        item.addEventListener("click", () => selectNode(item.dataset.node));
+      });
+      nodeList.querySelectorAll("[data-hide-node]").forEach(button => {
+        button.addEventListener("click", event => {
+          event.stopPropagation();
+          hideNode(button.dataset.hideNode);
+        });
+      });
+      edgeList.querySelectorAll("[data-edge]").forEach(item => {
+        item.addEventListener("click", () => selectEdge(item.dataset.edge));
+      });
     }
 
-    function selectNode(id) {
-      activeId = id;
-      const node = nodes.find(item => item.id === id);
-      detail.innerHTML = `
-        <div class="meta"><span class="tag">${node.id}</span><span class="tag">${node.group}</span><span class="tag">${node.status}</span></div>
-        <h2>${node.label}</h2>
-        <p>${node.description}</p>
-        <h3>代码位置</h3>
-        <p><code>${node.path}</code></p>
-        <h3>相关边</h3>
-        <ul>${edges.filter(edge => edge.from === id || edge.to === id).map(edge => `<li><button type="button" data-edge="${edge.id}">${edge.id}</button> ${edge.from} -> ${edge.to}: ${edge.description}</li>`).join("")}</ul>
+    function renderHiddenNodes() {
+      const hiddenNodes = nodes.filter(node => hiddenNodeIds.has(node.id));
+      showAllNodesBtn.disabled = hiddenNodes.length === 0;
+      hiddenNodeList.innerHTML = hiddenNodes.length
+        ? hiddenNodes.map(node => `
+          <div class="list-item with-action" data-hidden-node="${node.id}">
+            <strong>${node.id} ${escapeHtml(node.label)}</strong>
+            <span class="muted">${escapeHtml(GROUPS[node.group])} · ${escapeHtml(node.status)}</span>
+            <button class="list-action ghost-button" data-show-node="${node.id}" type="button">显示</button>
+          </div>
+        `).join("")
+        : "<p class=\"empty-note\">当前没有隐藏节点。</p>";
+      hiddenNodeList.querySelectorAll("[data-hidden-node]").forEach(item => {
+        item.addEventListener("click", () => {
+          showNode(item.dataset.hiddenNode);
+          selectNode(item.dataset.hiddenNode);
+        });
+      });
+      hiddenNodeList.querySelectorAll("[data-show-node]").forEach(button => {
+        button.addEventListener("click", event => {
+          event.stopPropagation();
+          showNode(button.dataset.showNode);
+        });
+      });
+    }
+
+    function renderGraphCheck() {
+      const cycles = findCycles();
+      const reverseFlows = findReverseFlowWarnings();
+      const nodeOverlaps = findNodeOverlaps();
+      if (!cycles.length) {
+        graphCheck.innerHTML = `
+          <div class="meta">
+            <span class="tag">DAG</span>
+            <span class="tag">左到右主流向</span>
+            <span class="tag">${nodes.length} 节点</span>
+            <span class="tag">${edges.length} 边</span>
+            <span class="tag">反向边 ${reverseFlows.length}</span>
+            <span class="tag">节点重叠 ${nodeOverlaps.length}</span>
+          </div>
+          <p class="muted">当前边集没有检测到有向环。布局检查只把明显从右往左的边和节点重叠列为提示；局部上下回流允许用于减少交叉和遮挡。</p>
+          ${reverseFlows.length ? `<h3>反向边提示</h3><ul>${reverseFlows.map(edge => `<li><code>${edge.id}</code> ${edge.from} -> ${edge.to}</li>`).join("")}</ul>` : ""}
+          ${nodeOverlaps.length ? `<h3>节点重叠提示</h3><ul>${nodeOverlaps.map(pair => `<li><code>${pair[0]}</code> / <code>${pair[1]}</code></li>`).join("")}</ul>` : ""}
+        `;
+        return;
+      }
+      const cycleItems = cycles.map(cycle => `<li><code>${cycle.map(escapeHtml).join(" -> ")}</code></li>`).join("");
+      graphCheck.innerHTML = `
+        <div class="meta">
+          <span class="tag entry">环: ${cycles.length}</span>
+          <span class="tag">反向边 ${reverseFlows.length}</span>
+          <span class="tag">节点重叠 ${nodeOverlaps.length}</span>
+        </div>
+        ${cycles.length ? `<h3>有向环</h3><ul>${cycleItems}</ul>` : ""}
       `;
-      detail.querySelectorAll("[data-edge]").forEach(el => el.addEventListener("click", () => selectEdge(el.dataset.edge)));
-      render();
     }
 
-    function selectEdge(id) {
-      activeId = id;
-      const edge = edges.find(item => item.id === id);
-      const from = nodes.find(node => node.id === edge.from);
-      const to = nodes.find(node => node.id === edge.to);
-      detail.innerHTML = `
-        <div class="meta"><span class="tag">${edge.id}</span><span class="tag">${edge.status}</span></div>
-        <h2>${from.label} -> ${to.label}</h2>
-        <p>${edge.description}</p>
-        <h3>From</h3>
-        <p><button type="button" data-node="${from.id}">${from.id}</button> <code>${from.path}</code></p>
-        <h3>To</h3>
-        <p><button type="button" data-node="${to.id}">${to.id}</button> <code>${to.path}</code></p>
-      `;
-      detail.querySelectorAll("[data-node]").forEach(el => el.addEventListener("click", () => selectNode(el.dataset.node)));
-      render();
+    function findCycles() {
+      const adjacency = new Map(nodes.map(node => [node.id, []]));
+      for (const edge of edges) adjacency.get(edge.from).push(edge.to);
+      const state = new Map(nodes.map(node => [node.id, "new"]));
+      const stack = [];
+      const cycles = [];
+
+      function visit(nodeId) {
+        state.set(nodeId, "visiting");
+        stack.push(nodeId);
+        for (const next of adjacency.get(nodeId)) {
+          if (state.get(next) === "new") {
+            visit(next);
+          } else if (state.get(next) === "visiting") {
+            const start = stack.indexOf(next);
+            cycles.push([...stack.slice(start), next]);
+          }
+        }
+        stack.pop();
+        state.set(nodeId, "done");
+      }
+
+      for (const node of nodes) {
+        if (state.get(node.id) === "new") visit(node.id);
+      }
+      return cycles;
     }
 
-    document.getElementById("map").addEventListener("wheel", event => {
+    function findReverseFlowWarnings() {
+      return edges.filter(edge => {
+        const from = nodeById.get(edge.from);
+        const to = nodeById.get(edge.to);
+        return to.x + NODE_W / 2 < from.x + NODE_W / 2 - 40;
+      });
+    }
+
+    function findNodeOverlaps() {
+      const overlaps = [];
+      const margin = 22;
+      for (let i = 0; i < nodes.length; i += 1) {
+        for (let j = i + 1; j < nodes.length; j += 1) {
+          const a = nodes[i];
+          const b = nodes[j];
+          const separated =
+            a.x + NODE_W + margin < b.x ||
+            b.x + NODE_W + margin < a.x ||
+            a.y + NODE_H + margin < b.y ||
+            b.y + NODE_H + margin < a.y;
+          if (!separated) overlaps.push([a.id, b.id]);
+        }
+      }
+      return overlaps;
+    }
+
+    function updateGraph() {
+      for (const node of nodes) {
+        nodeElements.get(node.id).setAttribute("transform", `translate(${node.x}, ${node.y})`);
+      }
+
+      currentPortOffsets = computePortOffsets();
+      for (const edge of edges) {
+        const pathData = edgePath(edge, currentPortOffsets);
+        edgeHitElements.get(edge.id).setAttribute("d", pathData.d);
+        edgeElements.get(edge.id).setAttribute("d", pathData.d);
+        edgeLabelElements.get(edge.id).setAttribute("x", pathData.mx);
+        edgeLabelElements.get(edge.id).setAttribute("y", pathData.my - 6);
+        updateEdgeHandles(edge, pathData);
+      }
+    }
+
+    function edgePath(edge, portOffsets) {
+      const from = nodeById.get(edge.from);
+      const to = nodeById.get(edge.to);
+      const sides = effectiveEdgeSides(edge, from, to);
+      const x1 = from.x + NODE_W / 2;
+      const y1 = from.y + NODE_H / 2;
+      const x2 = to.x + NODE_W / 2;
+      const y2 = to.y + NODE_H / 2;
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const fromOffset = portOffsets.get(portKey(edge.id, "from")) || 0;
+      const toOffset = portOffsets.get(portKey(edge.id, "to")) || 0;
+      const source = sidePoint(from, sides.from, edge.sourceOffset ?? fromOffset);
+      const target = sidePoint(to, sides.to, edge.targetOffset ?? toOffset);
+      const horizontal = sides.from === "left" || sides.from === "right";
+      const sx = source.x;
+      const sy = source.y;
+      const tx = target.x;
+      const ty = target.y;
+      const fromSign = sideSign(sides.from);
+      const toSign = sideSign(sides.to);
+      const curve = Math.max(90, Math.min(220, Math.abs(horizontal ? dx : dy) * 0.36));
+      const cx1 = edge.curve?.c1?.x ?? (horizontal ? sx + fromSign * curve : sx);
+      const cy1 = edge.curve?.c1?.y ?? (horizontal ? sy : sy + fromSign * curve);
+      const cx2 = edge.curve?.c2?.x ?? (horizontal ? tx + toSign * curve : tx);
+      const cy2 = edge.curve?.c2?.y ?? (horizontal ? ty : ty + toSign * curve);
+      return {
+        d: `M ${sx} ${sy} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${tx} ${ty}`,
+        mx: (sx + tx) / 2,
+        my: (sy + ty) / 2,
+        sx,
+        sy,
+        tx,
+        ty,
+        c1: { x: cx1, y: cy1 },
+        c2: { x: cx2, y: cy2 },
+        targetSide: sides.to
+      };
+    }
+
+    function updateEdgeHandles(edge, pathData) {
+      const handles = edgeHandleElements.get(edge.id);
+      setCirclePoint(handles.source, pathData.sx, pathData.sy);
+      setCirclePoint(handles.target, pathData.tx, pathData.ty);
+      setCirclePoint(handles.c1, pathData.c1.x, pathData.c1.y);
+      setCirclePoint(handles.c2, pathData.c2.x, pathData.c2.y);
+      handles.c1.classList.remove("hidden");
+      handles.c2.classList.remove("hidden");
+      handles.helper.setAttribute("d", `M ${pathData.sx} ${pathData.sy} L ${pathData.c1.x} ${pathData.c1.y} M ${pathData.tx} ${pathData.ty} L ${pathData.c2.x} ${pathData.c2.y}`);
+    }
+
+    function setCirclePoint(circle, x, y) {
+      circle.setAttribute("cx", x);
+      circle.setAttribute("cy", y);
+    }
+
+    function effectiveEdgeSides(edge, from, to) {
+      const automatic = edgeSides(from, to);
+      return {
+        from: edge.sourceSide || automatic.from,
+        to: edge.targetSide || automatic.to
+      };
+    }
+
+    function edgeSides(from, to) {
+      const dx = to.x + NODE_W / 2 - (from.x + NODE_W / 2);
+      const dy = to.y + NODE_H / 2 - (from.y + NODE_H / 2);
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        return dx >= 0 ? { from: "right", to: "left" } : { from: "left", to: "right" };
+      }
+      return dy >= 0 ? { from: "bottom", to: "top" } : { from: "top", to: "bottom" };
+    }
+
+    function sidePoint(node, side, offset) {
+      const cx = node.x + NODE_W / 2;
+      const cy = node.y + NODE_H / 2;
+      if (side === "left") return { x: node.x, y: cy + clamp(offset, -EDGE_PORT_LIMIT_Y, EDGE_PORT_LIMIT_Y) };
+      if (side === "right") return { x: node.x + NODE_W, y: cy + clamp(offset, -EDGE_PORT_LIMIT_Y, EDGE_PORT_LIMIT_Y) };
+      if (side === "top") return { x: cx + clamp(offset, -EDGE_PORT_LIMIT_X, EDGE_PORT_LIMIT_X), y: node.y };
+      return { x: cx + clamp(offset, -EDGE_PORT_LIMIT_X, EDGE_PORT_LIMIT_X), y: node.y + NODE_H };
+    }
+
+    function borderPortFromPoint(node, point) {
+      const cx = node.x + NODE_W / 2;
+      const cy = node.y + NODE_H / 2;
+      const distances = [
+        { side: "left", value: Math.abs(point.x - node.x) },
+        { side: "right", value: Math.abs(point.x - (node.x + NODE_W)) },
+        { side: "top", value: Math.abs(point.y - node.y) },
+        { side: "bottom", value: Math.abs(point.y - (node.y + NODE_H)) }
+      ].sort((a, b) => a.value - b.value);
+      const side = distances[0].side;
+      const offset = side === "left" || side === "right"
+        ? clamp(point.y - cy, -EDGE_PORT_LIMIT_Y, EDGE_PORT_LIMIT_Y)
+        : clamp(point.x - cx, -EDGE_PORT_LIMIT_X, EDGE_PORT_LIMIT_X);
+      return { side, offset };
+    }
+
+    function sideSign(side) {
+      return side === "left" || side === "top" ? -1 : 1;
+    }
+
+    function portKey(edgeId, role) {
+      return `${edgeId}:${role}`;
+    }
+
+    function computePortOffsets() {
+      const buckets = new Map();
+      for (const edge of edges) {
+        const sides = effectiveEdgeSides(edge, nodeById.get(edge.from), nodeById.get(edge.to));
+        addPortBucket(buckets, edge.from, sides.from, edge.id, "from");
+        addPortBucket(buckets, edge.to, sides.to, edge.id, "to");
+      }
+
+      const offsets = new Map();
+      for (const bucket of buckets.values()) {
+        bucket.sort((a, b) => a.edgeId.localeCompare(b.edgeId) || a.role.localeCompare(b.role));
+        for (let index = 0; index < bucket.length; index += 1) {
+          offsets.set(portKey(bucket[index].edgeId, bucket[index].role), (index - (bucket.length - 1) / 2) * EDGE_PORT_STEP);
+        }
+      }
+      return offsets;
+    }
+
+    function addPortBucket(buckets, nodeId, side, edgeId, role) {
+      const key = `${nodeId}:${side}`;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push({ edgeId, role });
+    }
+
+    function startNodeDrag(event, nodeId) {
+      const node = nodeById.get(nodeId);
+      const point = svgPoint(event);
+      nodeDrag = { node, offsetX: point.x - node.x, offsetY: point.y - node.y, moved: false };
+      nodeElements.get(nodeId).classList.add("dragging");
+      event.currentTarget.setPointerCapture?.(event.pointerId);
       event.preventDefault();
-      zoom = Math.max(0.55, Math.min(1.8, zoom + (event.deltaY < 0 ? 0.08 : -0.08)));
-      render();
-    }, {passive:false});
-    document.getElementById("map").addEventListener("pointerdown", event => {
-      drag = {x:event.clientX, y:event.clientY, panX:pan.x, panY:pan.y};
-    });
-    window.addEventListener("pointermove", event => {
-      if (!drag) return;
-      pan = {x: drag.panX + event.clientX - drag.x, y: drag.panY + event.clientY - drag.y};
-      render();
-    });
-    window.addEventListener("pointerup", () => { drag = null; });
-    groupFilter.addEventListener("change", render);
-    searchBox.addEventListener("input", render);
-    resetBtn.addEventListener("click", () => { pan = {x:0,y:0}; zoom = 1; searchBox.value = ""; groupFilter.value = "all"; activeId = null; render(); });
-    render();
+      event.stopPropagation();
+    }
+
+    function startEdgeHandleDrag(event, edgeId, role, handle) {
+      const edge = edgeById.get(edgeId);
+      const pathData = edgePath(edge, currentPortOffsets);
+      if ((role === "c1" || role === "c2") && !edge.curve) {
+        edge.curve = {
+          c1: { ...pathData.c1 },
+          c2: { ...pathData.c2 }
+        };
+      }
+      edgeHandleDrag = { edge, role, handle, moved: false };
+      handle.classList.add("dragging");
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      selectEdge(edgeId);
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    function startPan(event) {
+      if (event.button !== 0 || event.target.closest?.(".node") || event.target.closest?.(".edge-handle")) return;
+      const point = svgPoint(event);
+      panDrag = { startX: point.x, startY: point.y, viewX: view.x, viewY: view.y };
+      svg.classList.add("panning");
+      event.preventDefault();
+    }
+
+    function onPointerMove(event) {
+      if (sidebarResizeDrag) {
+        sidebarWidth = clamp(
+          sidebarResizeDrag.startWidth + sidebarResizeDrag.startX - event.clientX,
+          300,
+          Math.min(680, window.innerWidth - 760)
+        );
+        layout.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
+        return;
+      }
+      if (edgeHandleDrag) {
+        const point = svgPoint(event);
+        const edge = edgeHandleDrag.edge;
+        if (edgeHandleDrag.role === "source" || edgeHandleDrag.role === "target") {
+          const role = edgeHandleDrag.role;
+          const node = nodeById.get(role === "source" ? edge.from : edge.to);
+          const port = borderPortFromPoint(node, point);
+          if (role === "source") {
+            edge.sourceSide = port.side;
+            edge.sourceOffset = port.offset;
+          } else {
+            edge.targetSide = port.side;
+            edge.targetOffset = port.offset;
+          }
+        } else if (edgeHandleDrag.role === "c1" || edgeHandleDrag.role === "c2") {
+          edge.curve ??= { c1: { x: point.x, y: point.y }, c2: { x: point.x, y: point.y } };
+          edge.curve[edgeHandleDrag.role] = {
+            x: clamp(point.x, 0, WORLD.w),
+            y: clamp(point.y, 0, WORLD.h)
+          };
+        }
+        edgeHandleDrag.moved = true;
+        updateGraph();
+        return;
+      }
+      if (nodeDrag) {
+        const point = svgPoint(event);
+        const nextX = point.x - nodeDrag.offsetX;
+        const nextY = point.y - nodeDrag.offsetY;
+        if (Math.abs(nextX - nodeDrag.node.x) > 1 || Math.abs(nextY - nodeDrag.node.y) > 1) nodeDrag.moved = true;
+        nodeDrag.node.x = clamp(nextX, 20, WORLD.w - NODE_W - 20);
+        nodeDrag.node.y = clamp(nextY, 20, WORLD.h - NODE_H - 20);
+        updateGraph();
+        return;
+      }
+      if (panDrag) {
+        const point = svgPoint(event);
+        view.x = clamp(panDrag.viewX + panDrag.startX - point.x, -160, WORLD.w - view.w + 160);
+        view.y = clamp(panDrag.viewY + panDrag.startY - point.y, -140, WORLD.h - view.h + 140);
+        applyView();
+      }
+    }
+
+    function endPointerActions() {
+      if (sidebarResizeDrag) {
+        sidebarResizer.classList.remove("dragging");
+        layout.classList.remove("resizing");
+        sidebarResizeDrag = null;
+      }
+      if (edgeHandleDrag) {
+        edgeHandleDrag.handle.classList.remove("dragging");
+        edgeHandleDrag = null;
+      }
+      if (nodeDrag) {
+        nodeElements.get(nodeDrag.node.id).classList.remove("dragging");
+        setTimeout(() => { nodeDrag = null; }, 0);
+      }
+      if (panDrag) {
+        svg.classList.remove("panning");
+        panDrag = null;
+      }
+    }
+
+    function onWheel(event) {
+      event.preventDefault();
+      const factor = event.deltaY < 0 ? 0.88 : 1.14;
+      const point = svgPoint(event);
+      zoomAround(point.x, point.y, factor);
+    }
+
+    function zoomAtCenter(factor) {
+      zoomAround(view.x + view.w / 2, view.y + view.h / 2, factor);
+    }
+
+    function zoomAround(cx, cy, factor) {
+      const nextW = clamp(view.w * factor, MIN_VIEW_W, MAX_VIEW_W);
+      const nextH = nextW * (view.h / view.w);
+      const ratioX = (cx - view.x) / view.w;
+      const ratioY = (cy - view.y) / view.h;
+      view = {
+        x: clamp(cx - nextW * ratioX, -160, WORLD.w - nextW + 160),
+        y: clamp(cy - nextH * ratioY, -140, WORLD.h - nextH + 140),
+        w: nextW,
+        h: nextH
+      };
+      applyView();
+    }
+
+    function applyView() {
+      svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`);
+    }
+
+    function toggleSidebar() {
+      const collapsed = layout.classList.toggle("sidebar-collapsed");
+      toggleSidebarBtn.textContent = collapsed ? "显示侧栏" : "隐藏侧栏";
+      requestAnimationFrame(applyView);
+    }
+
+    function startSidebarResize(event) {
+      if (layout.classList.contains("sidebar-collapsed")) return;
+      sidebarResizeDrag = { startX: event.clientX, startWidth: sidebarWidth };
+      sidebarResizer.classList.add("dragging");
+      layout.classList.add("resizing");
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    function svgPoint(event) {
+      const point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      return point.matrixTransform(svg.getScreenCTM().inverse());
+    }
+
+    function selectNode(nodeId) {
+      if (hiddenNodeIds.has(nodeId)) showNode(nodeId);
+      activeId = nodeId;
+      activeEdgeId = null;
+      const node = nodeById.get(nodeId);
+      const entryDetail = entries[node.id] ? renderEntry(entries[node.id]) : "<p class=\"muted\">此节点不是可执行入口；它代表数据层、契约层或 UI 消费面。</p>";
+      detail.innerHTML = `
+        <h2>${escapeHtml(node.id)} ${escapeHtml(node.label)}</h2>
+        <div class="meta">
+          <span class="tag ${node.group}">${escapeHtml(GROUPS[node.group])}</span>
+          <span class="tag">${escapeHtml(node.status)}</span>
+          ${entries[node.id] ? "<span class=\"tag entry\">入口参数</span>" : ""}
+        </div>
+        <p>${escapeHtml(node.description)}</p>
+        <div class="button-row">
+          <button class="ghost-button" data-hide-node="${node.id}" type="button">隐藏此节点及相关连线</button>
+        </div>
+        <h3>代码位置</h3>
+        <p><code>${escapeHtml(node.path)}</code></p>
+        <h3>入口详情</h3>
+        ${entryDetail}
+        <h3>相关连线</h3>
+        <ul>${edges
+          .filter(edge => edge.from === node.id || edge.to === node.id)
+          .map(edge => `<li><code>${edge.from} -> ${edge.to}</code> ${escapeHtml(edge.label)}</li>`)
+          .join("")}</ul>
+      `;
+      updateActiveClasses();
+    }
+
+    function onDetailAction(event) {
+      const hideButton = event.target.closest?.("[data-hide-node]");
+      if (!hideButton) return;
+      event.stopPropagation();
+      hideNode(hideButton.dataset.hideNode);
+    }
+
+    function renderEntry(item) {
+      return `
+        <div class="meta">
+          <span class="tag entry">${escapeHtml(item.kind)}</span>
+        </div>
+        <p>${escapeHtml(item.purpose)}</p>
+        <p><code>${escapeHtml(item.command)}</code></p>
+        <table>
+          <thead><tr><th>参数/字段</th><th>默认值</th><th>用途</th></tr></thead>
+          <tbody>
+            ${item.params.map(param => `
+              <tr>
+                <td><code>${escapeHtml(param.name)}</code></td>
+                <td>${escapeHtml(param.defaultValue)}</td>
+                <td>${escapeHtml(param.purpose)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        <h3>示例</h3>
+        <pre>${escapeHtml(item.example)}</pre>
+      `;
+    }
+
+    function selectEdge(edgeId) {
+      activeEdgeId = edgeId;
+      activeId = null;
+      const edge = edges.find(item => item.id === edgeId);
+      detail.innerHTML = `
+        <h2>${escapeHtml(edge.id)} ${edge.from} -> ${edge.to}</h2>
+        <div class="meta"><span class="tag">${escapeHtml(edge.label)}</span></div>
+        <p>${escapeHtml(edge.description)}</p>
+        <h3>来源</h3>
+        <p><code>${edge.from}</code> ${escapeHtml(nodeById.get(edge.from).label)}</p>
+        <h3>目标</h3>
+        <p><code>${edge.to}</code> ${escapeHtml(nodeById.get(edge.to).label)}</p>
+        <h3>显示调整</h3>
+        <p class="muted">选中连线后会显示编辑手柄：起点和终点可沿节点边框拖动，两个曲线控制点可自由改变 Bezier 曲线形状。重置会恢复默认边形状。</p>
+      `;
+      updateActiveClasses();
+    }
+
+    function clearSelection() {
+      activeId = null;
+      activeEdgeId = null;
+      detail.innerHTML = `
+        <h2>选择节点或连线</h2>
+        <p class="muted">点击节点查看代码位置、工程角色和入口参数；点击连线后可拖动起点、终点和两个曲线控制点。按住画布空白处可平移，滚轮可缩放。</p>
+      `;
+      updateActiveClasses();
+    }
+
+    function updateActiveClasses() {
+      for (const node of nodes) {
+        nodeElements.get(node.id).classList.toggle("active", node.id === activeId);
+      }
+      for (const edge of edges) {
+        edgeElements.get(edge.id).classList.toggle("active", edge.id === activeEdgeId);
+        const handles = edgeHandleElements.get(edge.id);
+        handles.group.classList.toggle("hidden", edge.id !== activeEdgeId);
+        for (const handle of [handles.source, handles.target, handles.c1, handles.c2]) {
+          handle.classList.toggle("active", edge.id === activeEdgeId);
+        }
+      }
+      updateSelectedNodeAction();
+    }
+
+    function updateSelectedNodeAction() {
+      const selectedNode = activeId ? nodeById.get(activeId) : null;
+      hideSelectedNodeBtn.disabled = !selectedNode;
+      hideSelectedNodeBtn.textContent = selectedNode ? `隐藏 ${selectedNode.id}` : "选中节点后隐藏";
+    }
+
+    function updateFilter() {
+      const group = groupFilter.value;
+      const query = searchBox.value.trim().toLowerCase();
+      const matches = new Set();
+
+      for (const node of nodes) {
+        const entryText = entries[node.id]
+          ? [entries[node.id].command, entries[node.id].purpose, entries[node.id].example, ...entries[node.id].params.flatMap(param => [param.name, param.defaultValue, param.purpose])].join(" ")
+          : "";
+        const textValue = [node.id, node.label, node.group, node.status, node.path, node.description, entryText]
+          .join(" ")
+          .toLowerCase();
+        const inGroup = group === "all" || node.group === group;
+        if (inGroup && (!query || textValue.includes(query))) matches.add(node.id);
+      }
+
+      for (const node of nodes) {
+        const isHidden = hiddenNodeIds.has(node.id);
+        nodeElements.get(node.id).classList.toggle("hidden", isHidden);
+        nodeElements.get(node.id).classList.toggle("dimmed", !isHidden && !matches.has(node.id));
+      }
+
+      for (const edge of edges) {
+        const edgeText = [edge.id, edge.from, edge.to, edge.label, edge.description].join(" ").toLowerCase();
+        const incidentHidden = hiddenNodeIds.has(edge.from) || hiddenNodeIds.has(edge.to);
+        const visibleByNodes = matches.has(edge.from) && matches.has(edge.to);
+        const visibleByText = query && edgeText.includes(query);
+        const visible = !incidentHidden && (visibleByNodes || visibleByText);
+        edgeHitElements.get(edge.id).classList.toggle("hidden", !visible);
+        edgeElements.get(edge.id).classList.toggle("hidden", incidentHidden);
+        edgeElements.get(edge.id).classList.toggle("dimmed", !visible);
+        edgeLabelElements.get(edge.id).classList.toggle("hidden", !visible);
+        const handles = edgeHandleElements.get(edge.id);
+        handles.group.classList.toggle("hidden", edge.id !== activeEdgeId || !visible);
+        handles.group.classList.toggle("dimmed", !visible);
+      }
+
+      nodeList.querySelectorAll("[data-node]").forEach(item => {
+        item.classList.toggle("hidden", hiddenNodeIds.has(item.dataset.node) || !matches.has(item.dataset.node));
+      });
+
+      edgeList.querySelectorAll("[data-edge]").forEach(item => {
+        const edge = edges.find(candidate => candidate.id === item.dataset.edge);
+        const edgeText = [edge.id, edge.from, edge.to, edge.label, edge.description].join(" ").toLowerCase();
+        const incidentHidden = hiddenNodeIds.has(edge.from) || hiddenNodeIds.has(edge.to);
+        const visibleByNodes = matches.has(edge.from) && matches.has(edge.to);
+        const visibleByText = query && edgeText.includes(query);
+        item.classList.toggle("hidden", incidentHidden || !(visibleByNodes || visibleByText));
+      });
+    }
+
+    function hideNode(nodeId) {
+      if (!nodeById.has(nodeId)) return;
+      hiddenNodeIds.add(nodeId);
+      if (activeId === nodeId || activeEdgeId && isEdgeIncidentToNode(activeEdgeId, nodeId)) clearSelection();
+      renderHiddenNodes();
+      updateFilter();
+    }
+
+    function hideSelectedNode() {
+      if (!activeId) return;
+      hideNode(activeId);
+    }
+
+    function showNode(nodeId) {
+      hiddenNodeIds.delete(nodeId);
+      renderHiddenNodes();
+      updateFilter();
+    }
+
+    function showAllNodes() {
+      hiddenNodeIds.clear();
+      renderHiddenNodes();
+      updateFilter();
+    }
+
+    function isEdgeIncidentToNode(edgeId, nodeId) {
+      const edge = edgeById.get(edgeId);
+      return Boolean(edge && (edge.from === nodeId || edge.to === nodeId));
+    }
+
+    function resetLayout() {
+      for (const node of nodes) {
+        const original = originalPositions.get(node.id);
+        node.x = original.x;
+        node.y = original.y;
+      }
+      for (const edge of edges) {
+        edge.sourceSide = null;
+        edge.targetSide = null;
+        edge.sourceOffset = null;
+        edge.targetOffset = null;
+        edge.curve = cloneCurve(edge.defaultCurve);
+      }
+      view = { ...initialView };
+      applyView();
+      updateGraph();
+      updateFilter();
+    }
+
+    function fitView() {
+      const visible = nodes.filter(node =>
+        !hiddenNodeIds.has(node.id) &&
+        !nodeElements.get(node.id).classList.contains("dimmed")
+      );
+      const target = visible.length ? visible : nodes;
+      const minX = Math.min(...target.map(node => node.x));
+      const minY = Math.min(...target.map(node => node.y));
+      const maxX = Math.max(...target.map(node => node.x + NODE_W));
+      const maxY = Math.max(...target.map(node => node.y + NODE_H));
+      const pad = 110;
+      view = {
+        x: minX - pad,
+        y: minY - pad,
+        w: Math.max(MIN_VIEW_W, maxX - minX + pad * 2),
+        h: Math.max(520, maxY - minY + pad * 2)
+      };
+      applyView();
+    }
+
+    function truncate(value, max) {
+      return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
   </script>
 </body>
 </html>
