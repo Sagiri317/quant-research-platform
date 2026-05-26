@@ -191,6 +191,7 @@ data_quality                                          # 缺失、重复、延迟
 artifacts/                                           # 研究和评价产物合同层，是 API、下载和前端展示的来源
   artifact_schema.py                                 # artifact schema 版本和顶层持久化合同
   display_manifest.py                                # manifest.display 构造，作为前端、图表、表格和下载的唯一展示合同
+  display_tables.py                                  # manifest.display table preview/download descriptor、路径解析和 row-limit helper
   manifest_validation.py                             # manifest、display、table、chart、download 和 path safety 校验
   artifact_writer.py                                 # JSON、CSV、Markdown、报告和 manifest 写出逻辑
   artifact_loader.py                                 # artifact run 读取逻辑，拒绝 unsupported schema 和退休兼容路径
@@ -534,6 +535,6 @@ helpers.py                                           # 过宽泛，容易变成�
 manager.py                                           # 过宽泛，无法区分管理对象类型
 processor.py                                         # 过宽泛，无法表达输入输出合同
 handler.py                                           # 过宽泛，只能在框架回调上下文中有限使用
-service.py                                           # 单独使用过宽泛，应写成 download_service.py 等具体名称
+service.py                                           # 在宽泛 services 目录下单独使用过宽泛；窄领域包内可用，例如 a_share/evaluation/service.py
 common.py                                            # 文件名过宽泛，跨目录公共对象应放入具体模块名
 ```

@@ -136,7 +136,7 @@ Phase 1 中 `interfaces/api` 是本地 FastAPI 适配层。未来 `apps/api` 是
 - Factor/Pipeline Studio 只发起受控 pipeline 请求，不连接外部数据源或交易接口。
 - Factor Factory 前端浏览只展示 API / artifact 结果，不在前端重新计算 IC、cumulative returns、weights 或 turnover。
 - 已完成 artifact ZIP packaging 下沉到 `artifacts/`。
-- 后续仍需单独处理的架构债包括 N8 合同消费收敛、risk/regime/cost/capacity 扩展和 ML prediction handoff；frontend feature split 和 eligibility / tradability 诊断可视化已合入 `main`。
+- N8 合同消费收敛、frontend feature split 和 eligibility / tradability 诊断可视化已合入 `main`；后续仍需单独处理的架构债包括 risk/regime/cost/capacity 扩展和 ML prediction handoff。
 
 ## Comparison
 

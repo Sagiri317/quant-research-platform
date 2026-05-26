@@ -2,8 +2,7 @@
 
 ## 2026-05-26 N8 contract consumer convergence closeout signal
 
-N8 架构简化与合同消费收敛已在 `codex/contract-consumer-convergence`
-分支完成本地实现与提交，等待 merge / PR 决策。本轮保持 artifact schema `0.6`：
+N8 架构简化与合同消费收敛已合入 `main`。本轮保持 artifact schema `0.6`：
 `manifest.json` 继续只保存可移植
 display contract，不写 `source_alias`、`run_id`、host 或运行时 URL；
 `manifest.display.tables[]` 增加 portable preview descriptor，API evidence payload
@@ -71,7 +70,7 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 | 项目 | 当前事实 |
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
-| 当前分支 | `codex/contract-consumer-convergence`；N8 contract consumer convergence 已完成本地提交，后续 N5/N6 仍需单独分支 |
+| 当前分支 | `main`；N8 contract consumer convergence 已合入，后续 N5/N6 仍需单独分支 |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 raw/interim/processed 历史产物仍遵守私有边界 |
@@ -115,8 +114,8 @@ Phase 1 之后下一阶段进展：
 3. N2 tradability diagnostics 已合入 `main`：后端新增 `diagnostics/tradability_diagnostics.csv`，该诊断最初在 schema `0.5` 期间落地，当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它；frontend evidence workbench 已消费 diagnostics preview API 并完成 eligibility / tradability 诊断展示。
 4. N4 前端 feature split 已合入 `main`：`web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract。
 5. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
-6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。后续从 `main` 继续做 N8、N5 和 N6。
-7. N8 架构简化与合同消费收敛已在 `codex/contract-consumer-convergence` 完成本地实现与提交：已收敛 `manifest.display` preview/download helper、拆出 factor-template route/service、减少前端 preview route 推导，统一 display table preview metadata，把 A-share evaluation 沉成 service entry，并把 CSV upload 标记为 legacy/dev uploaded-panel smoke 路径。
+6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。
+7. N8 架构简化与合同消费收敛已合入 `main`：已收敛 `manifest.display` preview/download helper、拆出 factor-template route/service、减少前端 preview route 推导，统一 display table preview metadata，把 A-share evaluation 沉成 service entry，把 Pipeline Builder run 完成后自动挂载到 evidence workbench，并把 CSV upload 标记为 legacy/dev uploaded-panel smoke 路径。
 
 ## 当前研究资产
 
@@ -145,14 +144,13 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 决定 `codex/contract-consumer-convergence` 的合并方式，合入后再从新的 `main` 单独推进 N5 / N6。
-2. 按需重新生成 2023-2025 canonical evaluation / Factor Factory 样例，并保留低内存 comparison、Evaluation Comparison Report、dataframe/tensor parity 和 API/frontend preview 作为验收门槛。
-3. 不要把风险/regime 或 ML prediction handoff 混入当前 N8 分支；N5 / N6 仍需独立设计和验收。
-4. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
-5. 后续补一个窄范围 `tradability_diagnostics_summary` 任务：保留当前 Eligibility / Tradability 诊断卡片作为单切片快速提示，但新增 artifact/API summary 后再展示所有交易日平均 `eligible_rate`、`can_enter_rate`、`can_exit_rate`、`entry_blocked_rate`、`exit_blocked_rate` 等指标；前端不得从 preview 行临时计算全期间均值。
-6. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
-7. 已合并的 N1/N2/N3/N4/N7 工作树和分支可在用户批准 exact paths 后清理。
+1. 按需重新生成 2023-2025 canonical evaluation / Factor Factory 样例，并保留低内存 comparison、Evaluation Comparison Report、dataframe/tensor parity 和 API/frontend preview 作为验收门槛。
+2. 单独推进 N5 风险/regime/成本/容量扩展；不要把 ML prediction handoff 混入该分支。
+3. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor evaluation contract 分离。
+4. 后续补一个窄范围 `tradability_diagnostics_summary` 任务：保留当前 Eligibility / Tradability 诊断卡片作为单切片快速提示，但新增 artifact/API summary 后再展示所有交易日平均 `eligible_rate`、`can_enter_rate`、`can_exit_rate`、`entry_blocked_rate`、`exit_blocked_rate` 等指标；前端不得从 preview 行临时计算全期间均值。
+5. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
+6. 已合并的 N1/N2/N3/N4/N7/N8 工作树和分支可在用户批准 exact paths 后清理。
 
 ## Root Handoff / 根目录回传信号
 
-Open: N8 contract consumer convergence 已在 `codex/contract-consumer-convergence` 完成本地提交；后续根目录 planning/status 同步时，应把下一步更新为“合入 N8，再分别推进 N5/N6”。当前分支仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。
+Closed 2026-05-26: N8 contract consumer convergence 已合入 `main`；根目录 planning/status 已同步为“按需重生成 canonical 样例，再分别推进 N5/N6”。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。

@@ -10,6 +10,7 @@
 - `main` 已包含 N3 Artifact ZIP packaging 下沉。
 - `main` 已包含 N4 frontend feature split。
 - `main` 已包含 N7 A 股 evaluation run identity、schema `0.6`、`combination_id`、kernel 维度、Factor Factory N7 artifact 读取和 public-downloadable metadata 脱敏。
+- `main` 已包含 N8 contract consumer convergence：portable display preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案。
 - 2023-2025 smoke evaluation 与 Factor Factory 旧样例已保留为 `*_baseline_before_2023_2025_regen` 历史参考目录，不进入 N7 正式 compare contract。
 - Pipeline 对外语言固定为 snapshot vs run：
   - `POST /api/pipeline-snapshots` 只保存配置。
@@ -35,12 +36,11 @@
 | `codex/frontend-feature-split` | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
 | `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 已落地；完整 2023-2025 canonical regeneration 按需执行 |
 | `codex/tradability-workbench` | N2 frontend diagnostics display | merged to `main` | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片仅在 preview payload 标记 `total_rows_exact=true` 时用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
+| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | merged to `main` | `manifest.display.tables[]` portable preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案已落地 |
 
 ## 进行中分支
 
-| 分支 | 路线图任务 | 状态 | 当前结果 |
-|---|---|---|---|
-| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | ready for merge | `manifest.display.tables[]` portable preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案已在本分支完成本地提交 |
+当前没有记录中的进行中功能分支。
 
 ## 建议后续分支
 
@@ -76,21 +76,10 @@
    - `long_short` 在 N7 中是诊断组合口径，不声明真实可融券做空或可交易策略。
    - 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致，不打印或公开原始 CSMAR 数据。
 
-2. `codex/contract-consumer-convergence`
-   - 收敛 `manifest.display` preview/download 解析，减少 evaluation runs 与 Factor Factory 的重复 helper。
-   - 将 factor-template endpoint 从 Pipeline route/service 中拆出，保持 Pipeline API 只负责 snapshot/run。
-   - 让前端通过后端下发的 preview endpoint metadata 消费 table preview，减少基于 path 的 route 推导。
-   - 统一组合相关但非 chart 的 display table preview 规则，让 diagnostics、N5 风险/regime 表和 N6 prediction 相关表按 metadata 声明随 `combination_id` 刷新，不继续增加前端 hardcoded table key。
-   - 把 A-share build/evaluate 调用沉成 service，CLI、pipeline runner 和 Factor Factory 都调用同一 service 层。
-   - 将 CSV upload 进一步标记为 legacy/dev，可用显式 dev/upload 命名或本地开关降低主路径误读。
-   - Pipeline Builder 执行 run 后刷新 run list、选中新 `pipeline/<run_ref or run_id>` 并切回 evidence workbench。
-   - 该分支不应重做视觉、不改 A-share `start_from` 语义、不引入外部 API/部署/交易能力。
-   - 计划约束：`manifest.json` 不写运行时 URL；API evidence payload 补充 `preview_url`；缺 preview metadata 的旧 schema `0.6` generated run 按 stale generated run 处理，必要时经审批重新生成。
-
-3. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
+2. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
    - 两者都应先写独立计划。
    - 不建议和 N2 frontend 同时抢同一批 artifact/API/frontend 文件。
-   - 若 N8 尚未完成，N5/N6 计划必须明确哪些 display/API/frontend helper 是复用现状，哪些留给 N8，避免隐性重构混入研究合同分支。
+   - N5/N6 计划应明确复用 N8 合入后的 display/API/frontend helper，避免隐性重构混入研究合同分支。
 
 ## 不建议并行的组合
 

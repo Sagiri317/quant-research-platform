@@ -1,6 +1,6 @@
 # Architecture Documents / 架构文档
 
-Phase 1 已完成代码功能复核和文档收口；验收结论已沉淀到 [phase-1-acceptance-record.md](phase-1-acceptance-record.md)。2026-05-24 已同步 `docs/code-map/` 与当前实现状态，并把历史设计、清单和目录迁移交接内容合并为当前文档集。已批准并落地的结构决策是：本地 API -> `interfaces/api/`，CLI -> `interfaces/cli/`，通用 reader -> `datasets`，A 股市场实现 -> `markets/implementations/a_share`，A 股 workflow runner -> `pipelines/a_share`；Phase 1 不创建 `apps/api`，不保留空 `markets/crypto` 实现。
+Phase 1 已完成代码功能复核和文档收口；验收结论已沉淀到 [phase-1-acceptance-record.md](phase-1-acceptance-record.md)。2026-05-27 已在 N8 合入 `main` 后同步 `docs/code-map/` 与当前实现状态，并把历史设计、清单和目录迁移交接内容合并为当前文档集。已批准并落地的结构决策是：本地 API -> `interfaces/api/`，CLI -> `interfaces/cli/`，通用 reader -> `datasets`，A 股市场实现 -> `markets/implementations/a_share`，A 股 workflow runner -> `pipelines/a_share`；Phase 1 不创建 `apps/api`，不保留空 `markets/crypto` 实现。
 
 本目录收拢 `quant-research-platform` 的架构蓝图、能力池和工程治理规则。
 

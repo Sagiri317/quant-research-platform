@@ -562,12 +562,12 @@
       n("N06", "build_factors", "a-share", "panel -> factors", "markets/implementations/a_share/factors/build_factors.py", "构建 slim factor table 和 forward labels。", 1310, 80),
       n("N07", "factor table", "a-share", "私有 processed", "data/processed_private/csmar/price_volume_factors_full/", "A-share adapter、pipeline runner 和 Factor Factory 的主输入。", 1560, 80),
 
-      n("N08", "A-share eval CLI", "a-share", "专用评估入口", "markets/implementations/a_share/evaluation/run_factor_evaluation.py", "A-share private/full evaluation 入口；用 year 定位文件，用 date 过滤 trade_date。", 1810, 530),
+      n("N08", "A-share eval service/CLI", "a-share", "专用评估入口", "markets/implementations/a_share/evaluation/service.py; run_factor_evaluation.py", "A-share private/full evaluation service；CLI 是薄包装，pipeline runner 也通过 service 调用 adapter。", 1810, 530),
       n("N09", "A-share adapter", "a-share", "factor -> spec", "markets/implementations/a_share/evaluation/evaluation_adapter.py", "读取 processed factor files，检查 label/factor/tradability 并构造 EvaluationSpec。", 2060, 360),
-      n("N10", "Pipeline runner", "pipeline", "start_from", "pipelines/a_share/runner.py", "从 existing_factors、rebuild_factors、rebuild_panel 或 rebuild_interim 开始，并继续到 evaluation。", 1810, 265),
+      n("N10", "Pipeline runner", "pipeline", "start_from", "pipelines/a_share/runner.py", "从 existing_factors、rebuild_factors、rebuild_panel 或 rebuild_interim 开始，并通过 A-share evaluation service 继续到 evaluation。", 1810, 265),
       n("N11", "Pipeline snapshots", "pipeline", "仅配置", "pipelines/a_share/snapshots.py", "写 run_config.yaml、warnings.json、summary.md；snapshot endpoint 不执行计算。", 1810, 405),
       n("N12", "Pipeline run API", "pipeline", "run/snapshot routes", "interfaces/api/routes/pipeline.py; interfaces/api/services/pipeline_service.py", "提供 /api/pipeline-snapshots 与 /api/pipeline-runs；不包含 factor-template discovery。", 1560, 265),
-      n("N13", "Pipeline Builder", "frontend", "UI", "web/src/features/pipeline/PipelineBuilder.tsx", "本地 workbench 的 pipeline 配置和可执行 run 控件；接收 Factor Studio 的 factorDraft。", 1310, 265),
+      n("N13", "Pipeline Builder", "frontend", "UI", "web/src/features/pipeline/PipelineBuilder.tsx", "本地 workbench 的 pipeline 配置和可执行 run 控件；run 完成后刷新 /api/runs 并切到 evidence workbench。", 1310, 265),
 
       n("N14", "EvaluationSpec", "evaluation", "输入契约", "evaluations/evaluation_spec.py", "共享 evaluation 输入契约。", 2310, 360),
       n("N15", "evaluate_to_payload", "evaluation", "共享计算入口", "evaluations/evaluation_runner.py", "计算 evaluation payload tables；A-share 专用路径直接调用它。", 2560, 360),
@@ -582,9 +582,9 @@
       n("N21", "Evidence API", "api", "runs/evidence", "interfaces/api/routes/runs.py", "run list、evidence payload、table previews 和受控 uploaded-panel 删除。", 3810, 430),
       n("N22", "Download API", "api", "direct/ZIP", "interfaces/api/routes/artifacts.py; interfaces/api/routes/downloads.py; interfaces/api/services/download_service.py", "Direct artifact、report.md 和 ZIP download；ZIP 规则委托 artifacts 层。", 3810, 570),
       n("N23", "Comparison API", "api", "comparison", "interfaces/api/routes/comparison.py", "为 API-visible runs 提供 comparison table 和 CSV。", 3810, 710),
-      n("N24", "FastAPI app", "api", "local app", "interfaces/api/app.py", "创建 ApiContext 并挂载 market、runs、downloads、pipeline、factory routers。", 60, 365),
+      n("N24", "FastAPI app", "api", "local app", "interfaces/api/app.py", "创建 ApiContext 并挂载 health、markets、factor_templates、pipeline、runs、uploads、artifacts、downloads、comparison、factor_factory routers。", 60, 365),
       n("N25", "React workbench", "frontend", "shell", "web/src/shell/App.tsx", "本地 evidence workbench shell；依赖方向 shell -> features -> shared。", 4060, 430),
-      n("N26", "Evidence feature", "frontend", "tables/charts", "web/src/features/evidence/", "消费 API 和 manifest.display 展示 summary、charts、CSV preview、report、downloads。", 4310, 570),
+      n("N26", "Evidence feature", "frontend", "tables/charts", "web/src/features/evidence/", "通过 API evidence/display payload 消费 manifest.display 派生的 summary、charts、CSV preview、report、downloads。", 4310, 570),
 
       n("N27", "Factor templates", "factory", "registry", "research/factor_factory/factor_registry.py", "受控 factor templates、inputs、outputs 和 capabilities。", 560, 265),
       n("N28", "Factory batch runner", "factory", "batch eval", "research/factor_factory/batch_runner.py", "批量候选因子经 A-share runner 执行，当前通常 start_from=existing_factors。", 1560, 600),
@@ -607,8 +607,8 @@
       e("E05", "N05", "N06", "reads", "build_factors 读取 panel。"),
       e("E06", "N06", "N07", "writes", "build_factors 写入 factor 和 label table。"),
       e("E07", "N07", "N09", "adapter input", "A-share adapter 读取 processed factor table。"),
-      e("E08", "N08", "N09", "calls", "A-share eval CLI 调用 adapter。"),
-      e("E09", "N10", "N09", "evaluates", "Pipeline runner 最终进入 A-share adapter。"),
+      e("E08", "N08", "N09", "calls", "A-share eval service 调用 adapter。"),
+      e("E09", "N10", "N08", "evaluates", "Pipeline runner 最终进入 A-share evaluation service。"),
       e("E10", "N01", "N10", "rebuild_interim", "从 raw/private input 进入 build_interim，并继续到 panel、factors 和 evaluation。"),
       e("E11", "N03", "N10", "rebuild_panel", "从 interim 层进入 build_panel，并继续到 factors 和 evaluation。"),
       e("E12", "N05", "N10", "rebuild_factors", "从已有 research panel 进入 build_factors，并继续到 evaluation。"),
@@ -630,7 +630,7 @@
       e("E27", "N24", "N20", "app context", "FastAPI app 创建 ApiContext，repository/services 从 context 读取 run roots。"),
       e("E28", "N21", "N25", "consumed by", "React shell 消费 evidence API。"),
       e("E29", "N22", "N26", "downloads", "Download API 提供 direct/ZIP download contract，Evidence download UI 消费；实际 request 由前端发起。"),
-      e("E30", "N18", "N26", "drives UI", "Frontend tables、charts、downloads 必须来自 manifest.display。"),
+      e("E30", "N21", "N26", "display payload", "Evidence feature 通过 API evidence/display payload 消费 manifest.display 派生的 tables、charts、downloads。"),
       e("E31", "N27", "N28", "templates", "Factory runner 使用受控 factor templates。"),
       e("E32", "N28", "N10", "batch runs", "Factory batch runner 调用 A-share pipeline runner。"),
       e("E33", "N28", "N29", "writes", "Factory 写 schema 0.1 artifacts。"),
@@ -638,7 +638,7 @@
       e("E35", "N37", "N31", "template payload", "Factor Studio 通过 GET /api/factor-templates?market=a_share 加载 templates。"),
       e("E36", "N32", "N20", "uploaded run visibility", "CSV Upload UI/API 生成本地 uploaded-panel run 后进入 API-visible run roots。"),
       e("E37", "N33", "N39", "generic evaluation", "evaluate-parquet 通过 run_evaluation wrapper 验证通用 Parquet adapter 和 shared evaluation layer。"),
-      e("E38", "N33", "N08", "A-share helper", "A-share 验收应使用 A-share 专用入口或 pipeline runner。"),
+      e("E38", "N33", "N08", "A-share helper", "A-share 验收应使用 A-share 专用入口或 pipeline runner；CLI 入口会调用 service。"),
       e("E39", "N27", "N37", "template endpoint", "Factor template API 从受控 registry 输出 payload。"),
       e("E40", "N24", "N12", "mounts", "FastAPI app 挂载 pipeline routes。"),
       e("E41", "N24", "N21", "mounts", "FastAPI app 挂载 runs/evidence routes。"),
@@ -652,6 +652,7 @@
       e("E49", "N30", "N36", "factory UI", "Factor Factory API payload 被 FactorFactoryRuns UI 消费；实际 request 由前端发起。"),
       e("E50", "N24", "N37", "mounts", "FastAPI app 单独挂载 factor-template router。"),
       e("E51", "N07", "N10", "existing_factors", "从已有 factor table 直接进入 evaluation。"),
+      e("E54", "N24", "N32", "mounts", "FastAPI app 挂载 legacy/dev upload routes：POST /api/runs 和 GET /api/templates/factor-csv。"),
       e("E53", "N39", "N15", "wraps", "run_evaluation 内部调用 evaluate_to_payload。")
     ];
 
@@ -680,7 +681,7 @@
         p("--windows", "20,60,120", "因子窗口"),
         p("--horizons", "1,5,10,20,60,120", "forward label horizon")
       ], "conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.factors.build_factors --factor-set price_volume"),
-      N08: entry("CLI module", "python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation", "A-share private/full evaluation 专用入口；这是 A-share adapter 验收入口之一。", [
+      N08: entry("Service + CLI module", "markets/implementations/a_share/evaluation/service.py + python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation", "A-share private/full evaluation 专用入口；CLI、pipeline runner 和本地调用共享 service request/result，并由 service 调用 adapter。", [
         p("--processed-root", "data/processed_private/csmar", "processed CSMAR 根目录"),
         p("--input-file", "\"\"", "本地调试/后端专用 Parquet override；不是 API/UI 验收入口"),
         p("--report-root", "reports/private_real/factor_evaluation/full_<start-year>_<end-year>", "输出根目录；省略时按年份生成"),
@@ -720,15 +721,13 @@
       N37: entry("HTTP API", "GET /api/factor-templates", "Factor Studio 通过这个 endpoint 读取 A-share controlled templates；它由 factor-template router/service 提供，不属于 pipeline run/snapshot 提交入口。", [
         p("market", "a_share", "query 参数；当前前端调用 listFactorTemplates('a_share')")
       ], "GET /api/factor-templates?market=a_share"),
-      N21: entry("HTTP API", "GET /api/runs/{source_alias}/{run_id}/evidence 和 table preview endpoints", "读取 API-visible evaluation run；身份必须保留 (source_alias, run_id)。", [
+      N21: entry("HTTP API", "GET /api/runs/{source_alias}/{run_id}/evidence 和 /tables/{table_key}/preview", "读取 API-visible evaluation run；身份必须保留 (source_alias, run_id)。Table preview 主入口由 manifest.display.tables[].preview 和运行时 preview_url 驱动；旧 metrics/portfolio/diagnostics/breakdowns routes 仅为兼容代理。", [
         p("source_alias", "path", "run root source，例如 pipeline / private / uploaded"),
         p("run_id", "path", "evaluation run id"),
-        p("metric_name", "path", "metrics / portfolio / diagnostics 表名"),
-        p("group", "path", "breakdowns 分组，例如 year / quarter / month"),
-        p("limit", "null", "table preview 行数；后端有最大限制"),
-        p("offset", "0", "table preview 起始行"),
-        p("combination_id", "null", "可选组合过滤")
-      ], "GET /api/runs/pipeline/demo_run/evidence\nGET /api/runs/pipeline/demo_run/metrics/combinations?limit=100&offset=0"),
+        p("table_key", "path", "manifest.display.tables key"),
+        p("limit/offset", "query", "bounded preview pagination"),
+        p("combination_id", "query", "仅对 preview metadata 声明支持的表生效")
+      ], "GET /api/runs/pipeline/demo_run/evidence\nGET /api/runs/pipeline/demo_run/tables/combinations/preview?limit=100&offset=0"),
       N22: entry("HTTP API", "GET/POST /api/runs/{source_alias}/{run_id}/download", "按 manifest.display.downloads 直接下载或打包 ZIP。", [
         p("source_alias", "path", "run root source"),
         p("run_id", "path", "evaluation run id"),

@@ -13,24 +13,23 @@
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 | N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 已验证，完整 2023-2025 canonical regeneration 按需执行 |
-| N8 | 架构简化与合同消费收敛 | P1 | ready for merge | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
+| N8 | 架构简化与合同消费收敛 | P1 | merged to `main` | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
 
 ## 当前推荐顺序
 
-N7 evaluation run identity 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id` 和 artifact/API/frontend 合同继续。
+N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同继续。
 
 ```text
-1. 合入 N8 架构简化与合同消费收敛
-2. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
-3. N5 风险、regime、成本和容量扩展
-4. N6 ML prediction handoff
-6. Pipeline history UI
+1. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
+2. N5 风险、regime、成本和容量扩展
+3. N6 ML prediction handoff
+4. Pipeline history UI
 ```
 
 原因：
 
 - N2 已合入 `main`：后端支持 `diagnostics/tradability_diagnostics.csv`，frontend evidence workbench 已基于 N7 `combination_id` 和 schema `0.6` 合同消费并展示诊断结果。
-- N8 应在 N5/N6 大范围新增 artifact/API/frontend 合同前推进，避免继续复制 display preview、download allowlist、template API 和 pipeline entry glue。
+- N8 已在 N5/N6 大范围新增 artifact/API/frontend 合同前合入；后续扩展应复用 display preview、download allowlist、template API 和 pipeline entry helper。
 - 完整 2023-2025 canonical regeneration 仍可作为公开安全展示或回归样例的后续验收步骤，但不再阻塞 N7 集成。
 - N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
 - N6 的 prediction handoff 需要稳定表达 date range、feature / signal、label、kernel、portfolio mode、factor set 和输入身份，并能在同一个 evaluation run 页面里切换结果。

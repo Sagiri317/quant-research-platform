@@ -25,7 +25,8 @@ data/raw_private/csmar/
 | raw -> interim | `quant_research_platform.markets.implementations.a_share.csmar.build_interim` | 标准化 CSMAR raw CSV |
 | interim -> panel | `quant_research_platform.markets.implementations.a_share.datasets.build_panel` | 生成 full research panel |
 | panel -> factors | `quant_research_platform.markets.implementations.a_share.factors.build_factors` | 生成 slim factor and label table |
-| factors -> evaluation | `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation` | A 股专用 evaluation CLI |
+| factors -> evaluation service | `quant_research_platform.markets.implementations.a_share.evaluation.service` | A 股 evaluation request/result service；CLI、pipeline runner 和 Factor Factory 的共享入口 |
+| evaluation service -> CLI | `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation` | A 股专用 evaluation CLI 薄包装 |
 | orchestrated run | `quant_research_platform.pipelines.a_share.runner.run_a_share_pipeline` | 按 `start_from` 执行到 evaluation |
 
 ## Pipeline Contract
@@ -91,19 +92,21 @@ output_root
 | `build_interim` | raw CSMAR | interim data |
 | `build_panel` | interim data | research panel |
 | `build_factors` | research panel | factor table |
-| `evaluate` | processed factor table / factor table + `PipelineConfig` | evaluation manifest, label availability, evaluation runs |
+| `evaluate` | processed factor table / factor table + `PipelineConfig` | 通过 A-share evaluation service 写出 evaluation manifest、label availability 和 evaluation runs |
 
 Runner 会写 `checkpoints.json` 和 `runtime_summary.json`。失败 checkpoint 只写稳定 failure code，不写 private path。
 
 ## Factor Factory
 
-Factor Factory 从 `config/a_share/factor_templates/` 展开 candidates。批量评估入口：
+Factor Factory 从 `config/a_share/factor_templates/` 展开 candidates。Factor Studio 通过
+`GET /api/factor-templates` 读取同一受控模板目录，template API 已独立于 pipeline
+snapshot/run routes。批量评估入口：
 
 ```text
 quant_research_platform.research.factor_factory.batch_runner.evaluate_existing_factor_candidates
 ```
 
-它为每个 candidate 构造 `PipelineConfig(start_from="existing_factors")`，通过统一 A 股 runner 评估已经存在的 factor table 列，并写出 Factor Factory artifact `0.1`。成功候选会读取 N7 `dimensions/combinations.csv` 和 `summaries/evaluation_summary.csv`，在 `candidate_summary.csv` 中按 `candidate_id + combination_id` 展开表现；失败候选继续写入 sanitized failure record。
+它为每个 candidate 构造 `PipelineConfig(start_from="existing_factors")`，通过统一 A 股 runner 和 A-share evaluation service 评估已经存在的 factor table 列，并写出 Factor Factory artifact `0.1`。成功候选会读取 N7 `dimensions/combinations.csv` 和 `summaries/evaluation_summary.csv`，在 `candidate_summary.csv` 中按 `candidate_id + combination_id` 展开表现；失败候选继续写入 sanitized failure record。
 
 ## 验证入口
 

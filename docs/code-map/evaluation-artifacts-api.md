@@ -281,7 +281,7 @@ Comparison 提供独立指标排名，不提供综合评分：
 | `web/src/features/evidence/RunComparison.tsx` | comparison UI。 |
 | `web/src/features/uploads/CreateRunPanel.tsx` | CSV upload local entry。 |
 | `web/src/features/factor-studio/FactorStudio.tsx` | factor expression draft。 |
-| `web/src/features/pipeline/PipelineBuilder.tsx` | pipeline snapshot request UI。 |
+| `web/src/features/pipeline/PipelineBuilder.tsx` | pipeline snapshot/run request UI；run 完成后刷新 run list 并选择 `pipeline/<run_ref or run_id>`。 |
 | `web/src/features/factor-factory/FactorFactoryRuns.tsx` | Factor Factory run browser。 |
 | `web/src/shared/factorDraft.ts` | Factor Studio 和 Pipeline Builder 共享的 factor draft state type/default。 |
 
@@ -307,7 +307,7 @@ Frontend rules:
 
 | Adapter | 入口 | 用途 |
 |---|---|---|
-| A 股 adapter | `run_factor_evaluation.py`, `evaluation_adapter.py` | A 股真实私有 processed factor run。 |
+| A 股 adapter/service | `run_factor_evaluation.py`, `service.py`, `evaluation_adapter.py` | A 股真实私有 processed factor run；CLI 和 pipeline runner 通过 service request/result 入口调用 adapter。 |
 | DataFrame/Python | 手动构造 `EvaluationSpec` | market module 或本地脚本直接调用。 |
 | Parquet helper | `make_parquet_evaluation_spec()` | 上游已有 local Parquet panel。 |
 | Parquet CLI | `qrp evaluate-parquet` | 外部/local Parquet adapter check。 |
