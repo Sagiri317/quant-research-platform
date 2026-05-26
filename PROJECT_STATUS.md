@@ -28,7 +28,7 @@ Playwright API+Web 联合验收、`git diff --check` 和 private/generated outpu
 
 ## 2026-05-26 N2 frontend diagnostics closeout signal
 
-N2 frontend diagnostics display 已在 `codex/tradability-workbench` 完成本轮实现：
+N2 frontend diagnostics display 已合入 `main`：
 React evidence workbench 通过 `manifest.display` 暴露的
 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API 展示
 Eligibility / Tradability 诊断；前端只消费 artifact/API 结果，不重新计算
@@ -39,7 +39,7 @@ CSV 明细预览仍按 display preview row limit 拉取；诊断卡片为了展�
 额外使用 diagnostics preview API 的 `limit=1&offset=total_rows-1` 读取单行，
 避免把前 20 行 preview 的末行误当作最新诊断，也不拉大表。验证包括前端
 Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network 检查和
-`git diff --check`。本分支未混入 N8 的 preview metadata、factor-template route
+`git diff --check`。该实现未混入 N8 的 preview metadata、factor-template route
 拆分、A-share service entry 或 CSV upload 边界收敛。
 
 ## 当前状态
@@ -47,7 +47,7 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 | 项目 | 当前事实 |
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
-| 当前分支 | `codex/tradability-workbench`；N2 frontend diagnostics display 已实现并通过本地验收，待合并后继续推进 N8、N5 和 N6 |
+| 当前分支 | `main`；N2 frontend diagnostics display 已合入，后续继续推进 N8、N5 和 N6 |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 raw/interim/processed 历史产物仍遵守私有边界 |
@@ -88,10 +88,10 @@ Phase 1 之后下一阶段进展：
 
 1. N3 Artifact ZIP packaging 已合入 `main`：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`。
 2. N1 A 股 pipeline start-from runner 已合入 `main`：外部接口为 snapshot/run split 和 `start_from` 模型，`POST /api/pipeline-snapshots` 只保存配置，`POST /api/pipeline-runs` 执行统一 runner 并固定运行到 evaluation。
-3. N2 后端 tradability artifact/API 已合入 `main`：新增 `diagnostics/tradability_diagnostics.csv`；该诊断最初在 schema `0.5` 期间落地，当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它；N2 frontend 已在 `codex/tradability-workbench` 实现并通过本地验收，待合并。
+3. N2 tradability diagnostics 已合入 `main`：后端新增 `diagnostics/tradability_diagnostics.csv`，该诊断最初在 schema `0.5` 期间落地，当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它；frontend evidence workbench 已消费 diagnostics preview API 并完成 eligibility / tradability 诊断展示。
 4. N4 前端 feature split 已合入 `main`：`web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract。
 5. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
-6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。N2 frontend 合并后，后续从 `main` 继续做 N8、N5 和 N6。
+6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。后续从 `main` 继续做 N8、N5 和 N6。
 7. N8 架构简化与合同消费收敛已加入后续路线图：在 N5/N6 扩展前，计划收敛 `manifest.display` preview/download helper、拆出 factor-template route/service、减少前端 preview route 推导，统一组合相关但非 chart 的 display table preview metadata，把 A-share build/evaluate 沉成 service，继续拆 Evidence feature-local 组件，并把 CSV upload 进一步标记为 legacy/dev。
 
 ## 当前研究资产
@@ -121,14 +121,13 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 合并或发布 `codex/tradability-workbench`，把 N2 frontend diagnostics display 纳入 `main`。
-2. 推进 N8 架构简化与合同消费收敛，先写详细计划，再单独处理跨 artifact/API/download/frontend/pipeline/Factor Factory 的收敛工作。
-3. 按需重新生成 2023-2025 canonical evaluation / Factor Factory 样例，并保留低内存 comparison、Evaluation Comparison Report、dataframe/tensor parity 和 API/frontend preview 作为验收门槛。
-4. 用当前 `main` 作为后续工作基线，旧 N7 implementation branch 不再作为当前基线。
-5. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
-6. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
-7. 已合并的 N1/N2/N3/N4/N7 工作树和分支可在用户批准 exact paths 后清理。
+1. 推进 N8 架构简化与合同消费收敛，先写详细计划，再单独处理跨 artifact/API/download/frontend/pipeline/Factor Factory 的收敛工作。
+2. 按需重新生成 2023-2025 canonical evaluation / Factor Factory 样例，并保留低内存 comparison、Evaluation Comparison Report、dataframe/tensor parity 和 API/frontend preview 作为验收门槛。
+3. 用当前 `main` 作为后续工作基线，旧 N7 implementation branch 不再作为当前基线。
+4. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
+5. 后续能力如 ML prediction pipeline、风险/中性化扩展、成本/容量/组合归因需要单独设计。
+6. 已合并的 N1/N2/N3/N4/N7 工作树和分支可在用户批准 exact paths 后清理。
 
 ## Root Handoff / 根目录回传信号
 
-Open: `codex/tradability-workbench` 已完成 N2 frontend diagnostics display，待合并；`docs/architecture/next-stage-roadmap.md` 和 `docs/architecture/next-stage-worktree-plan.md` 已记录 N8 架构简化与合同消费收敛。后续根目录 planning/status 同步时，应把下一步更新为 “merge N2 frontend、N8、N5、N6”，并保持 N8 不引入外部 API、部署、paper/live trading 或空未来目录。
+Open: N2 frontend diagnostics display 已合入 `main`；`docs/architecture/next-stage-roadmap.md` 和 `docs/architecture/next-stage-worktree-plan.md` 已记录 N8 架构简化与合同消费收敛。后续根目录 planning/status 同步时，应把下一步更新为 “N8、N5、N6”，并保持 N8 不引入外部 API、部署、paper/live trading 或空未来目录。

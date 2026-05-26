@@ -182,7 +182,7 @@ Phase 1 验收结论见 [docs/architecture/phase-1-acceptance-record.md](docs/ar
 - A 股 existing-factors start layer 小样本示例和 old/new 比较；
 - Factor Factory 小样本示例。
 
-本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。当前 A 股 pipeline 对外合同是 snapshot vs run：snapshot 只保存配置，run 只用 `start_from` 决定开始层，并固定运行到 evaluation。N1 start-from runner、N2 backend tradability artifact/API、N3 ZIP packaging 下沉、N4 frontend feature split 和 N7 evaluation run identity 已合入 `main`；N2 frontend diagnostics display 已在 `codex/tradability-workbench` 完成并待合并。下一批优先级是 N8 架构简化与合同消费收敛、按需重生成 2023-2025 canonical evaluation / Factor Factory 样例、risk/regime/cost/capacity 和 ML prediction handoff。
+本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。当前 A 股 pipeline 对外合同是 snapshot vs run：snapshot 只保存配置，run 只用 `start_from` 决定开始层，并固定运行到 evaluation。N1 start-from runner、N2 tradability artifact/API/frontend diagnostics display、N3 ZIP packaging 下沉、N4 frontend feature split 和 N7 evaluation run identity 已合入 `main`。下一批优先级是 N8 架构简化与合同消费收敛、按需重生成 2023-2025 canonical evaluation / Factor Factory 样例、risk/regime/cost/capacity 和 ML prediction handoff。
 
 新增或修改 artifacts 时必须同时检查：
 

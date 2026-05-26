@@ -7,7 +7,7 @@
 | 字段 | 内容 |
 |---|---|
 | 记录名称 | `quant_research_platform_a_share_module` |
-| 当前状态 | Phase 1 completed; N1/N2 backend/N3/N4/N7 merged to `main`; N2 frontend diagnostics display implemented on `codex/tradability-workbench`; N8 contract consumer convergence planned; code-map, architecture docs, skills, and root docs synchronized |
+| 当前状态 | Phase 1 completed; N1/N2/N3/N4/N7 merged to `main`; N8 contract consumer convergence planned; code-map, architecture docs, skills, and root docs synchronized |
 | 日期 | 2026-05-26 |
 | 项目定位 | 本地多市场量化研究平台；A 股为第一版完整 market module |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
@@ -34,7 +34,7 @@
 
 ## 下一阶段事项
 
-- N2 frontend diagnostics display 已在 `codex/tradability-workbench` 实现并通过本地验收；后端 `tradability_diagnostics` artifact/API 已合入 `main`。
+- N2 frontend diagnostics display 和后端 `tradability_diagnostics` artifact/API 已合入 `main`。
 - N8 架构简化与合同消费收敛已进入路线图；它应在 N5/N6 大范围扩展前收敛 display preview/download helper、factor-template API、A-share service entry 和 legacy/dev upload 边界。
 - 2023-2025 canonical evaluation / Factor Factory 样例可按需重新生成，用于展示和回归验收。
 - long-only 成本敏感性、regime、行业/市值中性化、风险暴露和正式组合约束分析仍需单独研究。

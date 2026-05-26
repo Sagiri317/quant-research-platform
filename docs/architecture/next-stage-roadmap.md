@@ -7,7 +7,7 @@
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
 | N1 | A 股 start-from pipeline runner | P0 | merged to `main` | 用统一 runner 从指定数据层开始，并运行到 evaluation |
-| N2 | Eligibility / tradability 诊断可视化 | P0 | backend artifact/API merged to `main`; frontend implemented on `codex/tradability-workbench`, pending merge | 让覆盖、过滤原因和影响先进入 artifact/API，并由 frontend 只读展示 |
+| N2 | Eligibility / tradability 诊断可视化 | P0 | merged to `main` | 让覆盖、过滤原因和影响进入 artifact/API，并由 frontend 只读展示 |
 | N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
 | N4 | 前端 feature split | P1 | merged to `main` | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
@@ -20,18 +20,17 @@
 N7 evaluation run identity 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id` 和 artifact/API/frontend 合同继续。
 
 ```text
-1. Merge N2 frontend diagnostics display
-2. N8 架构简化与合同消费收敛
-3. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
-4. N5 风险、regime、成本和容量扩展
-5. N6 ML prediction handoff
+1. N8 架构简化与合同消费收敛
+2. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
+3. N5 风险、regime、成本和容量扩展
+4. N6 ML prediction handoff
 6. Pipeline history UI
 ```
 
 原因：
 
-- N2 后端已支持 `diagnostics/tradability_diagnostics.csv`，N7 已稳定 `combination_id` 和 schema `0.6`，`codex/tradability-workbench` 已在当前合同上消费并展示诊断结果。
-- N8 不应阻塞 N2 frontend，但应在 N5/N6 大范围新增 artifact/API/frontend 合同前推进，避免继续复制 display preview、download allowlist、template API 和 pipeline entry glue。
+- N2 已合入 `main`：后端支持 `diagnostics/tradability_diagnostics.csv`，frontend evidence workbench 已基于 N7 `combination_id` 和 schema `0.6` 合同消费并展示诊断结果。
+- N8 应在 N5/N6 大范围新增 artifact/API/frontend 合同前推进，避免继续复制 display preview、download allowlist、template API 和 pipeline entry glue。
 - 完整 2023-2025 canonical regeneration 仍可作为公开安全展示或回归样例的后续验收步骤，但不再阻塞 N7 集成。
 - N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
 - N6 的 prediction handoff 需要稳定表达 date range、feature / signal、label、kernel、portfolio mode、factor set 和输入身份，并能在同一个 evaluation run 页面里切换结果。
@@ -91,7 +90,7 @@ conda run -n analysis python -m pytest -q tests/interfaces/api tests/research/fa
 
 - Backend artifact/API 已合并到 `main`。
 - 该 diagnostics 后端能力最初在 schema `0.5` 期间落地；当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它。
-- Frontend 展示已在 `codex/tradability-workbench` 实现：基于 N7 schema `0.6` / `combination_id` 合同消费 diagnostics。完整 2023-2025 canonical 样例可作为公开安全展示或后续回归输入，但不再是 N2 frontend 合并前置条件。
+- Frontend 展示已合入 `main`：基于 N7 schema `0.6` / `combination_id` 合同消费 diagnostics。完整 2023-2025 canonical 样例可作为公开安全展示或后续回归输入，但不再是 N2 frontend 验收前置条件。
 
 当前后端输出：
 

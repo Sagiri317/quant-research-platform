@@ -6,7 +6,7 @@
 
 - `main` 已包含 N1 A 股 `start_from` runner。
 - `main` 已包含 N2 backend artifact/API tradability diagnostics。
-- `codex/tradability-workbench` 已实现 N2 frontend diagnostics display，待合并到 `main`。
+- `main` 已包含 N2 frontend diagnostics display。
 - `main` 已包含 N3 Artifact ZIP packaging 下沉。
 - `main` 已包含 N4 frontend feature split。
 - `main` 已包含 N7 A 股 evaluation run identity、schema `0.6`、`combination_id`、kernel 维度、Factor Factory N7 artifact 读取和 public-downloadable metadata 脱敏。
@@ -34,7 +34,7 @@
 | `codex/artifact-zip-packaging` | N3 ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py` |
 | `codex/frontend-feature-split` | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
 | `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 已落地；完整 2023-2025 canonical regeneration 按需执行 |
-| `codex/tradability-workbench` | N2 frontend diagnostics display | ready for merge | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
+| `codex/tradability-workbench` | N2 frontend diagnostics display | merged to `main` | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
 
 ## 建议后续分支
 
@@ -70,12 +70,7 @@
    - `long_short` 在 N7 中是诊断组合口径，不声明真实可融券做空或可交易策略。
    - 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致，不打印或公开原始 CSMAR 数据。
 
-2. Merge `codex/tradability-workbench`
-   - N2 frontend diagnostics display 已实现，下一步是合并或发布该分支。
-   - 前端只展示，不重新计算 eligibility、tradability、IC、returns、weights 或 turnover。
-   - 诊断卡片只额外读取当前组合最后一行，不拉完整 diagnostics 表；后续 metadata/helper 收敛留给 N8。
-
-3. `codex/contract-consumer-convergence`
+2. `codex/contract-consumer-convergence`
    - 收敛 `manifest.display` preview/download 解析，减少 evaluation runs 与 Factor Factory 的重复 helper。
    - 将 factor-template endpoint 从 Pipeline route/service 中拆出，保持 Pipeline API 只负责 snapshot/run。
    - 让前端通过后端下发的 preview endpoint metadata 消费 table preview，减少基于 path 的 route 推导。
@@ -84,15 +79,14 @@
    - 将 CSV upload 进一步标记为 legacy/dev，可用显式 dev/upload 命名或本地开关降低主路径误读。
    - 该分支不应重做视觉、不改 A-share `start_from` 语义、不引入外部 API/部署/交易能力。
 
-4. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
+3. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
    - 两者都应先写独立计划。
    - 不建议和 N2 frontend 同时抢同一批 artifact/API/frontend 文件。
    - 若 N8 尚未完成，N5/N6 计划必须明确哪些 display/API/frontend helper 是复用现状，哪些留给 N8，避免隐性重构混入研究合同分支。
 
 ## 不建议并行的组合
 
-- 不要同时做 `codex/frontend-feature-split` 和 `codex/tradability-workbench`，除非已经约定 disjoint ownership。一个移动文件，一个加 UI，冲突概率高。
-- 不要把 `codex/tradability-artifacts` 和 `codex/tradability-workbench` 混到一个大分支。先把 artifact/API 合同稳定下来，再让前端消费。
+- `codex/frontend-feature-split`、`codex/tradability-artifacts` 和 `codex/tradability-workbench` 已完成；后续不要在 N8/N5/N6 中重新打开这些历史分支的范围。
 - N2 frontend 的最终验收应使用 N7 之后、包含 `tradability_diagnostics.csv` 的样例；旧私有样例缺少 diagnostics，不能证明真实展示路径。
 - 不要把 N5 风险/regime 扩展混进 N2 tradability 诊断。两者都属于 diagnostics，但研究语义和验收口径不同。
 - 不要把 N6 ML prediction handoff 混进现有 factor evaluation runner。Prediction 是新的输入合同，应单独设计。
