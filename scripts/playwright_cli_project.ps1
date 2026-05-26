@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $env:CODEX_HOME) {
-    $env:CODEX_HOME = Join-Path $HOME ".codex"
+    $env:CODEX_HOME = Join-Path $HOME ".agents"
 }
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path

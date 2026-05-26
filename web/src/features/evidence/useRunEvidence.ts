@@ -17,8 +17,6 @@ import {
 } from './runEvidenceState'
 import { useTablePreview } from './useTablePreview'
 
-const CHART_TABLE_ROW_LIMIT = 1000
-const COMBINATION_PREVIEW_TABLE_KEYS = new Set(['tradability_diagnostics'])
 const TRADABILITY_DIAGNOSTICS_TABLE_KEY = 'tradability_diagnostics'
 const LATEST_PREVIEW_SUFFIX = '__latest'
 
@@ -138,7 +136,7 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
       if (previewKeys.has(spec.key)) {
         return true
       }
-      return COMBINATION_PREVIEW_TABLE_KEYS.has(spec.key)
+      return spec.supportsCombinationFilter
     })
   }, [chartTableSpecs, selectedTableSpecs])
   const chartPreviewPrefix =
@@ -180,13 +178,13 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
         const payloads = await Promise.all(
           missingSpecs.map(async (spec) => {
             const payload = await fetchTablePreview(
-              spec.path,
+              spec.previewUrl,
               combinationPreviewLimit(spec, chartTableSpecs),
               selectedCombinationId,
             )
             const latestPayload =
               spec.key === TRADABILITY_DIAGNOSTICS_TABLE_KEY
-                ? await latestDiagnosticPreview(spec.path, payload, selectedCombinationId)
+                ? await latestDiagnosticPreview(spec, payload, selectedCombinationId)
                 : undefined
             return [spec.key, payload, latestPayload] as const
           }),
@@ -300,21 +298,43 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
 }
 
 async function latestDiagnosticPreview(
-  path: string,
+  spec: { previewUrl: string; supportsOffset?: boolean },
   previewPayload: TablePayload,
   selectedCombinationId: string,
-): Promise<TablePayload | undefined> {
+): Promise<TablePayload> {
   if (previewPayload.rows.length === 0) {
     return previewPayload
   }
   const totalRows = previewPayload.total_rows
-  if (typeof totalRows === 'number' && totalRows > previewPayload.rows.length) {
-    return fetchTablePreview(path, 1, selectedCombinationId, totalRows - 1)
+  if (
+    spec.supportsOffset &&
+    typeof totalRows === 'number' &&
+    previewPayload.total_rows_exact === true &&
+    totalRows > previewPayload.rows.length
+  ) {
+    return fetchTablePreview(
+      spec.previewUrl,
+      1,
+      selectedCombinationId,
+      totalRows - 1,
+    )
+  }
+  if (previewPayload.has_more && previewPayload.total_rows_exact === false) {
+    return emptyRowsPayload(previewPayload)
   }
   return singleRowPayload(
     previewPayload,
     previewPayload.rows[previewPayload.rows.length - 1],
   )
+}
+
+function emptyRowsPayload(payload: TablePayload): TablePayload {
+  return {
+    ...payload,
+    has_more: false,
+    rows: [],
+    total_rows: 0,
+  }
 }
 
 function singleRowPayload(
@@ -335,12 +355,12 @@ function latestPreviewKey(prefix: string, tableKey: string): string {
 }
 
 function combinationPreviewLimit(
-  spec: { key: string; previewRows?: number },
+  spec: { key: string; previewRows?: number; previewMaxRows?: number },
   chartTableSpecs: { key: string }[],
 ): number {
   const previewRows = spec.previewRows ?? 20
   if (chartTableSpecs.some((chartSpec) => chartSpec.key === spec.key)) {
-    return Math.max(previewRows, CHART_TABLE_ROW_LIMIT)
+    return Math.min(previewRows, spec.previewMaxRows ?? previewRows)
   }
   return previewRows
 }

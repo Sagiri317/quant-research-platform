@@ -13,6 +13,7 @@ from quant_research_platform.interfaces.api.routes import (
     comparison,
     downloads,
     factor_factory,
+    factor_templates,
     health,
     markets,
     pipeline,
@@ -32,6 +33,33 @@ from quant_research_platform.interfaces.api.services.run_repository import (
 DEFAULT_RUN_ROOT_ALIAS = _DEFAULT_RUN_ROOT_ALIAS
 PIPELINE_OUTPUT_ROOT_ENV = "QRP_PIPELINE_OUTPUT_ROOT"
 FACTOR_FACTORY_ROOT_ENV = "QRP_FACTOR_FACTORY_ROOT"
+
+
+def _pipeline_root_from_config(
+    configured_roots,
+    *,
+    pipeline_output_root: str | Path | None,
+    run_roots_were_explicit: bool,
+) -> Path:
+    if pipeline_output_root is not None:
+        return Path(pipeline_output_root)
+    env_value = os.environ.get(PIPELINE_OUTPUT_ROOT_ENV)
+    if env_value:
+        return Path(env_value)
+    if run_roots_were_explicit:
+        bases = [_run_root_project_base(root.path) for root in configured_roots]
+        if bases and all(base.is_absolute() for base in bases):
+            return Path(os.path.commonpath([str(base) for base in bases])) / (
+                "reports/private_real/pipeline_runs"
+            )
+    return Path("reports/private_real/pipeline_runs")
+
+
+def _run_root_project_base(path: Path) -> Path:
+    parent = path.parent
+    if parent.name == "reports":
+        return parent.parent
+    return parent
 
 
 def create_app(
@@ -62,15 +90,10 @@ def create_app(
         if run_roots is not None
         else run_roots_from_env()
     )
-    pipeline_root = (
-        Path(pipeline_output_root)
-        if pipeline_output_root is not None
-        else Path(
-            os.environ.get(
-                PIPELINE_OUTPUT_ROOT_ENV,
-                "reports/private_real/pipeline_runs",
-            )
-        )
+    pipeline_root = _pipeline_root_from_config(
+        configured_roots,
+        pipeline_output_root=pipeline_output_root,
+        run_roots_were_explicit=run_roots is not None,
     )
     factor_factory_output_root = (
         Path(factor_factory_root)
@@ -95,6 +118,7 @@ def create_app(
     for router in (
         health.router,
         markets.router,
+        factor_templates.router,
         pipeline.router,
         runs.router,
         uploads.router,

@@ -13,9 +13,9 @@ from .evaluation_adapter import (  # noqa: E402
     DATE_COLUMN,
     DEFAULT_RETURN_SOURCE_COLUMN,
     parse_columns,
-    run_processed_factor_evaluation,
     schema_columns,
 )
+from .service import AShareEvaluationRequest, run_a_share_evaluation  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,30 +141,36 @@ def main(argv: list[str] | None = None) -> int:
         except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
             print(f"ERROR: {exc}")
             return 2
-    _, manifest_path, run_records = run_processed_factor_evaluation(
-        processed_root=Path(args.processed_root),
-        report_root=report_root,
-        input_file=input_file,
-        start_year=args.start_year,
-        end_year=args.end_year,
-        requested_labels=requested_labels,
-        requested_factors=requested_features,
-        all_factors=False,
-        n_groups=args.n_groups,
-        start_date=args.start_date or None,
-        end_date=args.end_date or None,
-        return_source_column=args.return_source_column,
-        cost_bps=args.cost_bps,
-        portfolio_modes=tuple(args.portfolio_modes),
-        kernels=tuple(args.kernels),
-        segment_columns=parse_columns(args.segment_columns),
-        risk_column=args.risk_column or None,
-        neutralization_method=args.neutralization_method,
-        neutralization_group_columns=parse_columns(args.neutralization_group_columns),
-        neutralization_exposure_columns=parse_columns(
-            args.neutralization_exposure_columns
-        ),
+    result = run_a_share_evaluation(
+        AShareEvaluationRequest(
+            processed_root=Path(args.processed_root),
+            report_root=report_root,
+            input_file=input_file,
+            start_year=args.start_year,
+            end_year=args.end_year,
+            requested_labels=requested_labels,
+            requested_factors=requested_features,
+            all_factors=False,
+            n_groups=args.n_groups,
+            start_date=args.start_date or None,
+            end_date=args.end_date or None,
+            return_source_column=args.return_source_column,
+            cost_bps=args.cost_bps,
+            portfolio_modes=tuple(args.portfolio_modes),
+            kernels=tuple(args.kernels),
+            segment_columns=parse_columns(args.segment_columns),
+            risk_column=args.risk_column or None,
+            neutralization_method=args.neutralization_method,
+            neutralization_group_columns=parse_columns(
+                args.neutralization_group_columns
+            ),
+            neutralization_exposure_columns=parse_columns(
+                args.neutralization_exposure_columns
+            ),
+        )
     )
+    manifest_path = result.manifest_path
+    run_records = result.run_records
     manifest_path = Path(manifest_path)
     for run in run_records:
         print(

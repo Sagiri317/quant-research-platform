@@ -79,14 +79,15 @@ export function CreateRunPanel({
           <span className="eyebrow">开发辅助入口</span>
           <h2>开发用 CSV 上传</h2>
           <p>
-            上传本地 CSV，完成列映射和组合参数后生成可复查的 run。平台只读取你选择的文件，
+            上传本地 CSV，完成列映射和组合参数后生成 uploaded-panel 兼容样例。该入口用于
+            本地开发 smoke，不代表正式 A-share 私有数据运行链路；平台只读取你选择的文件，
             不下载外部数据，也不连接外部 API。
           </p>
         </div>
         <div className="create-steps" aria-label="新建回测步骤">
           <span>1 上传面板</span>
           <span>2 映射列名</span>
-          <span>3 生成结果文件</span>
+          <span>3 生成开发样例</span>
         </div>
       </section>
 
@@ -99,7 +100,7 @@ export function CreateRunPanel({
         </div>
         <TextField
           fieldName="run_id"
-          helperText="每次回测的唯一 ID；重复 ID 会覆盖同名输出目录。"
+          helperText="开发样例运行 ID；请避免和已有 uploaded-panel 样例重名。"
           label="运行编号"
           onChange={(value) => update('run_id', value)}
           required
@@ -235,8 +236,8 @@ export function CreateRunPanel({
           </span>
         </div>
         <div className="form-section-title wide">
-          <h3>回测设置</h3>
-          <p>默认设置适合先跑通流程；只有明确知道含义时再调整权重和分位数。</p>
+          <h3>样例评价设置</h3>
+          <p>默认设置适合验证 uploaded-panel 兼容路径；只有明确知道含义时再调整权重和分位数。</p>
         </div>
         <TextField
           fieldName="n_groups"
@@ -349,7 +350,7 @@ export function CreateRunPanel({
       {createError ? <div className="alert">{createError}</div> : null}
       <div className="form-actions">
         <button className="submit-run" disabled={submitting} type="submit">
-          {submitting ? '生成中...' : '生成回测'}
+          {submitting ? '生成中...' : '生成开发样例'}
         </button>
       </div>
     </form>

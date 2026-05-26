@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pandas as pd
 from fastapi import HTTPException
 
@@ -112,7 +114,7 @@ def run_evidence_payload(
         "summary": evidence_summary_payload(run.summary, ref),
         "report": {"markdown": run.report},
         "comparison": comparison_payload,
-        "display": run.manifest["display"],
+        "display": runtime_display_payload(run.manifest["display"], ref),
         "combination_summaries": combination_summaries_payload(run.tables),
         "tables": {
             metric_name: table_payload(frame)
@@ -120,6 +122,35 @@ def run_evidence_payload(
             if metric_name in table_names
         },
     }
+
+
+def runtime_display_payload(
+    display: object,
+    ref: RunRef,
+) -> dict[str, object]:
+    """Add API-runtime preview URLs to a portable artifact display manifest."""
+
+    if not isinstance(display, dict):
+        raise HTTPException(status_code=422, detail="manifest display invalid")
+    payload = copy.deepcopy(display)
+    tables = payload.get("tables")
+    if not isinstance(tables, list):
+        raise HTTPException(status_code=422, detail="manifest display.tables invalid")
+    base_path = f"/api/runs/{ref.source_alias}/{ref.run_id}"
+    for table in tables:
+        if not isinstance(table, dict):
+            raise HTTPException(
+                status_code=422,
+                detail="manifest display.tables entries invalid",
+            )
+        key = table.get("key")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(
+                status_code=422,
+                detail="manifest display table key invalid",
+            )
+        table["preview_url"] = f"{base_path}/tables/{key}/preview"
+    return payload
 
 
 def evidence_summary_payload(

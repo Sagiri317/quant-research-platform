@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from quant_research_platform.artifacts.display_tables import (
+    DISPLAY_PREVIEW_ROWS_DEFAULT,
+    build_display_table_preview_descriptor,
+)
+
 TABLE_LABELS = {
     "combinations": ("组合配置", "dimensions"),
     "ic": ("IC / RankIC", "metrics"),
@@ -206,8 +211,12 @@ def _table_entry(key: str, path: str) -> dict[str, object]:
         "download_item": path,
         "dimension_source": "dimensions/combinations.csv",
         "join_key": "combination_id" if supports_combination_filter else None,
-        "preview_rows": 20,
+        "preview_rows": DISPLAY_PREVIEW_ROWS_DEFAULT,
         "supports_combination_filter": supports_combination_filter,
+        "preview": build_display_table_preview_descriptor(
+            table_key=key,
+            supports_combination_filter=supports_combination_filter,
+        ),
     }
 
 

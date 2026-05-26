@@ -52,6 +52,8 @@ export function evidencePayload({
   summary?: Record<string, unknown>
   tables?: Record<string, ReturnType<typeof tablePayload>>
 } = {}) {
+  const sourceAlias = typeof summary.source_alias === 'string' ? summary.source_alias : 'core'
+  const runId = typeof summary.run_id === 'string' ? summary.run_id : 'demo'
   const evidenceTables = tables ?? {
     combinations: tablePayload([
       {
@@ -94,14 +96,24 @@ export function evidencePayload({
     report: { markdown: reportMarkdown },
     comparison: tablePayload(comparisonRows),
     combination_summaries: tablePayload(combinationSummaryRows ?? []),
-    display: display ?? displayPayload(evidenceTables, { includeDefaultTables: true }),
+    display:
+      display ??
+      displayPayload(evidenceTables, {
+        includeDefaultTables: true,
+        runId,
+        sourceAlias,
+      }),
     tables: evidenceTables,
   }
 }
 
 export function displayPayload(
   tables: Record<string, ReturnType<typeof tablePayload>>,
-  { includeDefaultTables = false }: { includeDefaultTables?: boolean } = {},
+  {
+    includeDefaultTables = false,
+    runId = 'demo',
+    sourceAlias = 'core',
+  }: { includeDefaultTables?: boolean; runId?: string; sourceAlias?: string } = {},
 ) {
   const tableKeys = includeDefaultTables
     ? Array.from(new Set([...DEFAULT_TABLE_KEYS, ...Object.keys(tables)]))
@@ -113,6 +125,8 @@ export function displayPayload(
     label: tableLabel(key),
     path: tableDownloadItem(key),
     format: key === 'weights' ? 'parquet' : 'csv',
+    preview: tablePreview(key),
+    preview_url: `/api/runs/${sourceAlias}/${runId}/tables/${key}/preview`,
     supports_combination_filter: tableSupportsCombinationFilter(key),
   }))
   const tableItems = tableEntries.map((table) => table.download_item)
@@ -342,4 +356,17 @@ function tableSupportsCombinationFilter(key: string) {
     'factor_coverage',
     'tradability_coverage',
   ].includes(key)
+}
+
+function tablePreview(key: string) {
+  const supportsCombinationFilter = tableSupportsCombinationFilter(key)
+  return {
+    kind: 'table',
+    table_key: key,
+    default_limit: 20,
+    max_limit: 1000,
+    supports_offset: true,
+    supports_combination_filter: supportsCombinationFilter,
+    filter_parameter: supportsCombinationFilter ? 'combination_id' : null,
+  }
 }

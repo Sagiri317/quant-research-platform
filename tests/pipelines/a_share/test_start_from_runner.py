@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -209,21 +210,22 @@ def test_rebuild_checkpoints_do_not_expose_private_layer_names(
         lambda argv: 0,
     )
 
-    def fake_run_processed_factor_evaluation(**kwargs):
+    def fake_run_a_share_evaluation(request):
+        kwargs = request.__dict__
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
         manifest_path = report_root / "manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
-        return (
-            __import__("pandas").DataFrame([{"rows": 5}]),
-            manifest_path,
-            [],
+        return SimpleNamespace(
+            label_summary=__import__("pandas").DataFrame([{"rows": 5}]),
+            manifest_path=manifest_path,
+            run_records=[],
         )
 
     monkeypatch.setattr(
         "quant_research_platform.pipelines.a_share.runner."
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
 
     result = run_a_share_pipeline(config)
@@ -238,7 +240,7 @@ def test_rebuild_checkpoints_do_not_expose_private_layer_names(
     assert str(tmp_path) not in checkpoints_text
 
 
-def test_evaluate_step_calls_processed_adapter(
+def test_evaluate_step_calls_a_share_evaluation_service(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -247,24 +249,25 @@ def test_evaluate_step_calls_processed_adapter(
     run_dir.mkdir(parents=True)
     calls = []
 
-    def fake_run_processed_factor_evaluation(**kwargs):
+    def fake_run_a_share_evaluation(request):
+        kwargs = request.__dict__
         calls.append(kwargs)
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
         manifest_path = report_root / "manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
-        return (
-            __import__("pandas").DataFrame(
+        return SimpleNamespace(
+            label_summary=__import__("pandas").DataFrame(
                 [{"label": "forward_return_1d", "rows": 7}]
             ),
-            manifest_path,
-            [],
+            manifest_path=manifest_path,
+            run_records=[],
         )
 
     monkeypatch.setattr(
         "quant_research_platform.pipelines.a_share.runner."
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
 
     payload = _run_evaluate_step(config, run_dir)

@@ -158,6 +158,44 @@ def test_default_api_run_list_exposes_default_pipeline_root(tmp_path, monkeypatc
     assert response.json()[0]["public_run_id"] == "pipeline/demo"
 
 
+def test_create_app_appends_default_pipeline_root_when_run_roots_env_is_unset(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QRP_RUN_ROOTS", raising=False)
+    monkeypatch.delenv("QRP_PIPELINE_OUTPUT_ROOT", raising=False)
+
+    app = create_app()
+
+    context = app.state.qrp_context
+    configured_roots = [
+        (root.source_alias, root.path.as_posix()) for root in context.run_roots
+    ]
+    assert configured_roots == [
+        ("platform", "reports/runs"),
+        ("pipeline", "reports/private_real/pipeline_runs"),
+    ]
+
+
+def test_create_app_does_not_duplicate_explicit_pipeline_root(tmp_path):
+    explicit_pipeline_root = tmp_path / "custom_pipeline_runs"
+
+    app = create_app(
+        run_roots=[
+            ("platform", tmp_path / "runs"),
+            ("pipeline", explicit_pipeline_root),
+        ],
+        pipeline_output_root=tmp_path / "ignored_pipeline_runs",
+    )
+
+    context = app.state.qrp_context
+    pipeline_roots = [
+        root.path for root in context.run_roots if root.source_alias == "pipeline"
+    ]
+    assert pipeline_roots == [explicit_pipeline_root]
+
+
 def test_api_run_list_skips_invalid_run_index_without_exposing_paths(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "good", run_id="good")
@@ -400,11 +438,11 @@ def test_api_metric_endpoint_uses_lightweight_table_preview(tmp_path, monkeypatc
 
 
 def test_api_metric_endpoint_streams_csv_preview(tmp_path, monkeypatch):
-    import quant_research_platform.interfaces.api.routes.runs as runs_route
+    from quant_research_platform.interfaces.api.services import table_preview_service
 
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
-    read_csv = runs_route.pd.read_csv
+    read_csv = table_preview_service.pd.read_csv
     chunked_paths: list[str] = []
 
     def spy_read_csv(path, *args, **kwargs):
@@ -412,7 +450,7 @@ def test_api_metric_endpoint_streams_csv_preview(tmp_path, monkeypatch):
             chunked_paths.append(str(path))
         return read_csv(path, *args, **kwargs)
 
-    monkeypatch.setattr(runs_route.pd, "read_csv", spy_read_csv)
+    monkeypatch.setattr(table_preview_service.pd, "read_csv", spy_read_csv)
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get("/api/runs/platform/demo/metrics/ic?limit=1")
@@ -705,6 +743,16 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
     assert display["schema_version"] == "0.6"
     assert {"combinations", "ic", "returns", "cumulative_returns"}.issubset(
         {table["key"] for table in display["tables"]}
+    )
+    display_tables = {table["key"]: table for table in display["tables"]}
+    assert display_tables["tradability_diagnostics"]["preview_url"] == (
+        "/api/runs/platform/demo/tables/tradability_diagnostics/preview"
+    )
+    assert display_tables["tradability_diagnostics"]["preview"]["table_key"] == (
+        "tradability_diagnostics"
+    )
+    assert display_tables["combinations"]["preview_url"] == (
+        "/api/runs/platform/demo/tables/combinations/preview"
     )
     assert [chart["id"] for chart in display["charts"]] == [
         "cumulative_returns",
@@ -1344,6 +1392,156 @@ def test_api_previews_tradability_diagnostics_table(tmp_path):
     payload = response.json()
     assert "eligible_rate" in payload["columns"]
     assert "entry_blocked_rate" in payload["columns"]
+
+
+def test_api_generic_table_preview_reads_display_table_by_key(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get(
+        "/api/runs/platform/demo/tables/tradability_diagnostics/preview"
+    )
+    legacy = client.get(
+        "/api/runs/platform/demo/diagnostics/tradability_diagnostics"
+    )
+
+    assert response.status_code == 200
+    assert legacy.status_code == 200
+    assert response.json()["columns"] == legacy.json()["columns"]
+    assert response.json()["rows"] == legacy.json()["rows"]
+    assert response.json()["limit"] == 20
+
+
+def test_api_generic_table_preview_supports_offset(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(
+        runs_root / "demo",
+        run_id="demo",
+        ic_values=[0.1, 0.2, 0.3],
+        rankic_values=[0.3, 0.4, 0.5],
+    )
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/tables/ic/preview?limit=1&offset=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["offset"] == 1
+    assert payload["rows"][0]["ic"] == pytest.approx(0.2)
+
+
+def test_api_generic_table_preview_rejects_oversized_limit(tmp_path):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/tables/weights/preview?limit=1001")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "limit must be between 1 and 1000"
+
+
+def test_api_generic_table_preview_rejects_combination_filter_for_static_table(
+    tmp_path,
+):
+    runs_root = tmp_path / "runs"
+    write_evaluation_set(runs_root / "demo", run_id="demo")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get(
+        "/api/runs/platform/demo/tables/combinations/preview?combination_id=demo"
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "table does not support combination_id filtering"
+    )
+
+
+def test_table_preview_service_rejects_missing_combination_filter_column(tmp_path):
+    from quant_research_platform.artifacts import ARTIFACT_SCHEMA_VERSION
+    from quant_research_platform.interfaces.api.services.table_preview_service import (
+        table_preview_payload,
+    )
+
+    pd.DataFrame({"timestamp": ["2026-01-01"], "value": [1.0]}).to_csv(
+        tmp_path / "custom.csv",
+        index=False,
+    )
+    manifest = {
+        "display": {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "tables": [
+                {
+                    "key": "custom",
+                    "path": "custom.csv",
+                    "preview": {
+                        "kind": "table",
+                        "table_key": "custom",
+                        "default_limit": 20,
+                        "max_limit": 1000,
+                        "supports_offset": True,
+                        "supports_combination_filter": True,
+                        "filter_parameter": "combination_id",
+                    },
+                }
+            ],
+        }
+    }
+
+    with pytest.raises(HTTPException) as exc:
+        table_preview_payload(
+            tmp_path,
+            manifest,
+            "custom",
+            combination_id="combo_a",
+            limit=None,
+            offset=0,
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "table is missing combination_id column"
+
+
+def test_api_generic_table_preview_rejects_table_not_in_display(tmp_path):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["metrics"]["private_debug"] = "metrics/private_debug.csv"
+    pd.DataFrame({"value": [1]}).to_csv(
+        run_dir / "metrics" / "private_debug.csv",
+        index=False,
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get("/api/runs/platform/demo/tables/private_debug/preview")
+
+    assert response.status_code == 422
+    assert "unknown artifacts.metrics" in response.json()["detail"]
+
+
+def test_api_rejects_stale_run_missing_display_preview_descriptor(tmp_path):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["display"]["tables"][0].pop("preview")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    assert client.get("/api/runs").json() == []
+    evidence = client.get("/api/runs/platform/demo/evidence")
+    preview = client.get("/api/runs/platform/demo/tables/ic/preview")
+
+    assert evidence.status_code == 422
+    assert "preview" in evidence.json()["detail"]
+    assert preview.status_code == 422
+    assert "preview" in preview.json()["detail"]
 
 
 def test_api_previews_parquet_weights_table(tmp_path):

@@ -11,12 +11,15 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from quant_research_platform.markets.implementations.a_share import evaluation
 from quant_research_platform.markets.implementations.a_share.csmar import (
     build_interim,
 )
 from quant_research_platform.markets.implementations.a_share.datasets import (
     build_panel,
+)
+from quant_research_platform.markets.implementations.a_share.evaluation.service import (
+    AShareEvaluationRequest,
+    run_a_share_evaluation,
 )
 from quant_research_platform.markets.implementations.a_share.factors import (
     build_factors,
@@ -42,10 +45,6 @@ EvaluateStep = Callable[[PipelineConfig, Path], StepPayload]
 build_interim_main = build_interim.main
 build_panel_main = build_panel.main
 build_factors_main = build_factors.main
-run_processed_factor_evaluation = (
-    evaluation.evaluation_adapter.run_processed_factor_evaluation
-)
-
 
 class PipelineRunnerError(RuntimeError):
     """Raised when the A-share pipeline cannot continue."""
@@ -419,29 +418,32 @@ def _run_evaluate_step(
     *,
     n_groups: int = 5,
 ) -> dict[str, Any]:
-    label_summary, manifest_path, _run_records = run_processed_factor_evaluation(
-        processed_root=config.processed_root,
-        report_root=run_dir / "evaluation",
-        start_year=_start_year(config),
-        end_year=_end_year(config),
-        requested_labels=config.label_columns,
-        requested_factors=resolve_processed_factor_columns(config),
-        all_factors=False,
-        n_groups=n_groups,
-        start_date=config.date_start,
-        end_date=config.date_end,
-        return_source_column=config.return_source_column,
-        cost_bps=config.cost_bps,
-        portfolio_modes=(config.portfolio_mode,),
-        kernels=(config.kernel,),
-        source_alias="pipeline",
-        manifest_run_id=run_dir.name,
+    result = run_a_share_evaluation(
+        AShareEvaluationRequest(
+            processed_root=config.processed_root,
+            report_root=run_dir / "evaluation",
+            start_year=_start_year(config),
+            end_year=_end_year(config),
+            requested_labels=config.label_columns,
+            requested_factors=resolve_processed_factor_columns(config),
+            all_factors=False,
+            n_groups=n_groups,
+            start_date=config.date_start,
+            end_date=config.date_end,
+            return_source_column=config.return_source_column,
+            cost_bps=config.cost_bps,
+            portfolio_modes=(config.portfolio_mode,),
+            kernels=(config.kernel,),
+            source_alias="pipeline",
+            manifest_run_id=run_dir.name,
+        )
     )
+    label_summary = result.label_summary
     row_count = int(label_summary["rows"].max()) if "rows" in label_summary else None
     return {
         "artifact": "evaluation/manifest.json",
         "row_count": row_count,
-        "evaluation_artifact_path": manifest_path,
+        "evaluation_artifact_path": result.manifest_path,
     }
 
 

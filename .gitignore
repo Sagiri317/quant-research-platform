@@ -28,6 +28,9 @@ web/coverage/
 web/playwright-report/
 web/test-results/
 .playwright-cli/
+.codex/browser-runs/
+.codex/browser-pipeline-runs/
+.codex/browser-factor-factory/
 .codex/run-logs/
 *.egg-info/
 coverage/

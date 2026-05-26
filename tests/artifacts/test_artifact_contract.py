@@ -28,6 +28,10 @@ from quant_research_platform.artifacts.artifact_writer import (
     write_evaluation_set_artifacts,
 )
 from quant_research_platform.artifacts.display_manifest import build_display_manifest
+from quant_research_platform.artifacts.display_tables import (
+    display_table_preview_limits,
+    resolve_display_table_artifact_path,
+)
 from quant_research_platform.artifacts.manifest_validation import (
     validate_display_manifest,
 )
@@ -153,6 +157,60 @@ def test_display_manifest_rejects_preview_rows_above_api_limit(tmp_path):
 
     with pytest.raises(ValueError, match="preview_rows"):
         validate_display_manifest(manifest)
+
+
+def test_display_manifest_rejects_missing_preview_descriptor(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    manifest["display"]["tables"][0].pop("preview")
+
+    with pytest.raises(ValueError, match="preview"):
+        validate_display_manifest(manifest)
+
+
+def test_display_manifest_rejects_duplicate_table_keys(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    duplicate = dict(manifest["display"]["tables"][0])
+    manifest["display"]["tables"].append(duplicate)
+
+    with pytest.raises(ValueError, match="duplicate display table key"):
+        validate_display_manifest(manifest)
+
+
+def test_display_manifest_rejects_preview_descriptor_mismatch(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    table = next(
+        table
+        for table in manifest["display"]["tables"]
+        if table["key"] == "tradability_diagnostics"
+    )
+    table["preview"]["supports_combination_filter"] = False
+
+    with pytest.raises(ValueError, match="preview"):
+        validate_display_manifest(manifest)
+
+
+def test_display_table_resolver_reads_preview_limits_and_artifact_path(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+
+    path = resolve_display_table_artifact_path(
+        manifest,
+        tmp_path,
+        "tradability_diagnostics",
+    )
+    preview = display_table_preview_limits(
+        manifest,
+        "tradability_diagnostics",
+    )
+
+    assert path == tmp_path / "diagnostics" / "tradability_diagnostics.csv"
+    assert preview.default_limit == 20
+    assert preview.max_limit == 1000
+    assert preview.supports_combination_filter is True
+    assert preview.filter_parameter == "combination_id"
 
 
 def test_display_manifest_rejects_filterable_combinations_table(tmp_path):

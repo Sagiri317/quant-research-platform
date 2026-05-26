@@ -39,6 +39,7 @@ export type TablePayload = {
   columns: string[]
   rows: Record<string, unknown>[]
   total_rows?: number
+  total_rows_exact?: boolean
   offset?: number
   limit?: number | null
   has_more?: boolean
@@ -210,11 +211,25 @@ export type RunTableSpec = {
   key: string
   label: string
   path: string
+  previewUrl: string
   downloadItem: string
   evidenceKey: string
   format?: string
   previewRows: number
+  previewMaxRows: number
+  supportsOffset: boolean
   supportsCombinationFilter: boolean
+  filterParameter: string | null
+}
+
+export type RunDisplayTablePreview = {
+  kind: 'table' | string
+  table_key: string
+  default_limit: number
+  max_limit: number
+  supports_offset: boolean
+  supports_combination_filter: boolean
+  filter_parameter?: string | null
 }
 
 export type RunDisplayTable = {
@@ -226,6 +241,8 @@ export type RunDisplayTable = {
   format?: 'csv' | 'parquet' | string
   role?: string
   join_key?: string | null
+  preview?: RunDisplayTablePreview
+  preview_url?: string
   preview_rows?: number
   supports_combination_filter?: boolean
 }
@@ -424,52 +441,48 @@ export function runTableSpecsFromDisplay(
   run: RunSummary,
   display: RunDisplay | null,
 ): RunTableSpec[] {
+  void run
   if (!display) {
     return []
   }
   return display.tables.map((table) => ({
     key: table.key,
     label: table.label,
-    path: tableApiPath(run, table),
+    path: table.path,
+    previewUrl: tablePreviewUrl(table),
     downloadItem: table.download_item,
     evidenceKey: table.key,
     format: table.format,
-    previewRows: table.preview_rows ?? 20,
-    supportsCombinationFilter: table.supports_combination_filter !== false,
+    previewRows: tablePreviewDefaultLimit(table),
+    previewMaxRows: table.preview?.max_limit ?? 1000,
+    supportsOffset: table.preview?.supports_offset === true,
+    supportsCombinationFilter: tablePreviewSupportsCombinationFilter(table),
+    filterParameter: table.preview?.filter_parameter ?? null,
   }))
 }
 
-function tableApiPath(run: RunSummary, table: RunDisplayTable): string {
-  const metricName = table.path.split('/').pop()?.replace(/\.(csv|parquet)$/, '') ?? table.key
-  const prefix = runApiPath(run)
-  if (table.path === 'dimensions/combinations.csv') {
-    return `${prefix}/metrics/combinations`
+function tablePreviewUrl(table: RunDisplayTable): string {
+  if (!table.preview_url) {
+    throw new Error(`Display table ${table.key} missing preview_url`)
   }
-  if (table.path.startsWith('portfolio/')) {
-    return `${prefix}/portfolio/${encodeURIComponent(metricName)}`
+  return table.preview_url
+}
+
+function tablePreviewDefaultLimit(table: RunDisplayTable): number {
+  if (!table.preview) {
+    throw new Error(`Display table ${table.key} missing preview metadata`)
   }
-  if (table.path.startsWith('diagnostics/')) {
-    return `${prefix}/diagnostics/${encodeURIComponent(metricName)}`
+  if (table.preview.kind !== 'table' || table.preview.table_key !== table.key) {
+    throw new Error(`Display table ${table.key} has stale preview metadata`)
   }
-  if (
-    table.path.startsWith('breakdowns/year/') ||
-    table.path.startsWith('breakdowns/quarter/') ||
-    table.path.startsWith('breakdowns/month/')
-  ) {
-    const parts = table.path.split('/')
-    const group = parts[1]
-    return `${prefix}/breakdowns/${encodeURIComponent(group)}/${encodeURIComponent(metricName)}`
+  return table.preview.default_limit
+}
+
+function tablePreviewSupportsCombinationFilter(table: RunDisplayTable): boolean {
+  if (!table.preview) {
+    throw new Error(`Display table ${table.key} missing preview metadata`)
   }
-  if (table.path.startsWith('input_quality/')) {
-    return `${prefix}/metrics/${encodeURIComponent(metricName)}`
-  }
-  if (table.path.startsWith('summaries/')) {
-    return `${prefix}/metrics/${encodeURIComponent(metricName)}`
-  }
-  if (table.path.startsWith('metrics/')) {
-    return `${prefix}/metrics/${encodeURIComponent(metricName)}`
-  }
-  throw new Error(`Unsupported display table path: ${table.path}`)
+  return table.preview.supports_combination_filter
 }
 
 export function artifactDownloadUrl(run: RunSummary, downloadItem: string): string {

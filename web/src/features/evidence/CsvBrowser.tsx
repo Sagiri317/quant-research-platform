@@ -36,7 +36,7 @@ export function CsvBrowser({
   return (
     <section className="data-section">
       <div className="section-title">
-        <h3>明细表预览</h3>
+        <h3>Artifact 明细预览</h3>
         <div className="section-actions">
           {activeTableSpec ? (
             <a
@@ -73,7 +73,7 @@ export function CsvBrowser({
         </button>
       </div>
       {expanded && loading ? (
-        <div className="csv-preview-placeholder">正在读取当前明细表预览...</div>
+        <div className="csv-preview-placeholder">正在读取当前 artifact 明细预览...</div>
       ) : activePayload && expanded ? (
         <DataTable
           label={`${activeTableSpec?.label ?? activeTable} 表格`}
@@ -82,7 +82,7 @@ export function CsvBrowser({
         />
       ) : (
         <div className="csv-preview-placeholder">
-          默认不展开明细行。选择表格后点击“展开预览”，最多显示前{' '}
+          默认不展开明细行。选择表格后点击“展开预览”，最多显示 artifact preview 的前{' '}
           {activePreviewRows} 行；完整数据请下载 {activeFormat}。
         </div>
       )}

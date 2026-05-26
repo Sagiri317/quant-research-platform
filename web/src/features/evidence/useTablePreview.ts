@@ -59,7 +59,7 @@ export function useTablePreview({
       try {
         setLoadingPreviewKey(cacheKey)
         const payload = await fetchTablePreview(
-          tableSpec.path,
+          tableSpec.previewUrl,
           tableSpec.previewRows ?? DEFAULT_TABLE_PREVIEW_ROW_LIMIT,
           combinationFilter,
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -54,7 +55,7 @@ def test_pipeline_step_registry_rejects_retired_processed_evaluation_step() -> N
         get_pipeline_step_contract("processed_evaluation")
 
 
-def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summary(
+def test_existing_factors_runner_calls_a_share_service_and_writes_runtime_summary(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -62,7 +63,8 @@ def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summar
 
     calls: list[dict[str, object]] = []
 
-    def fake_run_processed_factor_evaluation(**kwargs):
+    def fake_run_a_share_evaluation(request):
+        kwargs = request.__dict__
         calls.append(kwargs)
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
@@ -83,12 +85,16 @@ def test_existing_factors_runner_calls_a_share_adapter_and_writes_runtime_summar
             ),
             encoding="utf-8",
         )
-        return label_summary, manifest_path, [{"run_id": "evaluation_run"}]
+        return SimpleNamespace(
+            label_summary=label_summary,
+            manifest_path=manifest_path,
+            run_records=[{"run_id": "evaluation_run"}],
+        )
 
     monkeypatch.setattr(
         runner_module,
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
     processed_root = tmp_path / "processed"
     config = _valid_config(tmp_path)
@@ -151,7 +157,8 @@ def test_existing_factors_runner_does_not_overwrite_existing_run_dir(
 ) -> None:
     import quant_research_platform.pipelines.a_share.runner as runner_module
 
-    def fake_run_processed_factor_evaluation(**kwargs):
+    def fake_run_a_share_evaluation(request):
+        kwargs = request.__dict__
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
         manifest_path = report_root / "manifest.json"
@@ -159,12 +166,16 @@ def test_existing_factors_runner_does_not_overwrite_existing_run_dir(
             '{"artifact_type": "evaluation_set"}',
             encoding="utf-8",
         )
-        return pd.DataFrame([{"rows": 1}]), manifest_path, []
+        return SimpleNamespace(
+            label_summary=pd.DataFrame([{"rows": 1}]),
+            manifest_path=manifest_path,
+            run_records=[],
+        )
 
     monkeypatch.setattr(
         runner_module,
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
     config = _valid_config(tmp_path)
     config.start_from = "existing_factors"
@@ -183,13 +194,13 @@ def test_existing_factors_runner_does_not_overwrite_existing_run_dir(
 def test_existing_factors_runner_records_failed_step(tmp_path, monkeypatch) -> None:
     import quant_research_platform.pipelines.a_share.runner as runner_module
 
-    def fail_run_processed_factor_evaluation(**_kwargs):
+    def fail_run_a_share_evaluation(_request):
         raise FileNotFoundError("missing processed factor table")
 
     monkeypatch.setattr(
         runner_module,
-        "run_processed_factor_evaluation",
-        fail_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fail_run_a_share_evaluation,
     )
 
     config = _valid_config(tmp_path)
@@ -224,13 +235,13 @@ def test_existing_factors_runner_records_sanitized_failure_code(
 ) -> None:
     import quant_research_platform.pipelines.a_share.runner as runner_module
 
-    def fail_run_processed_factor_evaluation(**_kwargs):
+    def fail_run_a_share_evaluation(_request):
         raise ValueError("required column rev_20d missing from private table")
 
     monkeypatch.setattr(
         runner_module,
-        "run_processed_factor_evaluation",
-        fail_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fail_run_a_share_evaluation,
     )
 
     config = _valid_config(tmp_path)
@@ -320,18 +331,23 @@ def test_existing_factors_runner_allows_existing_column_expression(
     config.factor_template_source = None
     config.factor_expression = "custom_factor_1"
 
-    def fake_run_processed_factor_evaluation(**kwargs):
+    def fake_run_a_share_evaluation(request):
+        kwargs = request.__dict__
         label_summary = pd.DataFrame({"label": ["forward_return_1d"], "rows": [8]})
         report_root = kwargs["report_root"]
         report_root.mkdir(parents=True)
         manifest_path = report_root / "manifest.json"
         manifest_path.write_text("{}", encoding="utf-8")
-        return label_summary, manifest_path, []
+        return SimpleNamespace(
+            label_summary=label_summary,
+            manifest_path=manifest_path,
+            run_records=[],
+        )
 
     monkeypatch.setattr(
         "quant_research_platform.pipelines.a_share.runner."
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
 
     result = run_a_share_pipeline(config)

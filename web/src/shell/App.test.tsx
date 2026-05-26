@@ -575,10 +575,31 @@ describe('App', () => {
 
   test('can execute an A-share pipeline run with selected kernel and start layer', async () => {
     let pipelineRequest: Record<string, unknown> | undefined
-    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    let runListRequests = 0
+    const pipelineRun = {
+      source_alias: 'pipeline',
+      run_id: 'a_share_reversal_smoke',
+      public_run_id: 'pipeline/a_share_reversal_smoke',
+      project: 'quant-research-platform',
+      kind: 'factor',
+      domain: 'a_share',
+      data_stage: 'approved_offline_real_data',
+      uses_external_data: true,
+      n_rows_evaluated: 643973,
+      label_columns: ['forward_return_1d', 'forward_return_20d'],
+      return_source_column: 'forward_return_1d',
+      n_combinations: 2,
+      weight_method: 'equal_weight_quantile',
+      portfolio_mode: 'long_only',
+      mean_final_return: 0.02,
+      mean_turnover: 0.49,
+      total_cost: 0,
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/api/runs')) {
-        return jsonResponse([])
+        runListRequests += 1
+        return jsonResponse(runListRequests === 1 ? [] : [pipelineRun])
       }
       if (url.endsWith('/api/factor-templates?market=a_share')) {
         return jsonResponse([])
@@ -605,8 +626,12 @@ describe('App', () => {
           },
         ])
       }
+      if (url.endsWith('/api/runs/pipeline/a_share_reversal_smoke/evidence')) {
+        return jsonResponse(evidencePayload({ comparisonRows: [] }))
+      }
       return tableResponse([])
-    }) as typeof fetch
+    })
+    globalThis.fetch = fetchMock as typeof fetch
 
     render(<App />)
 
@@ -630,8 +655,13 @@ describe('App', () => {
       })
     })
     expect(pipelineRequest).not.toHaveProperty('input_file')
-    expect(screen.getByText('evaluation/manifest.json')).toBeInTheDocument()
-    expect(screen.getByText('pipeline run ready')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(runListRequests).toBeGreaterThanOrEqual(2)
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/runs/pipeline/a_share_reversal_smoke/evidence',
+    )
+    expect(await screen.findByText('pipeline/a_share_reversal_smoke')).toBeInTheDocument()
   })
 
   test('defaults to an interview workbench with compact diagnostic charts and delivery tabs', async () => {
@@ -708,7 +738,7 @@ describe('App', () => {
     expect(await screen.findByTestId('net-portfolio-return-chart')).toBeInTheDocument()
     expect(await screen.findByTestId('turnover-chart')).toBeInTheDocument()
     expect(await screen.findByTestId('cost-chart')).toBeInTheDocument()
-    expect(screen.getByText('明细表预览')).toBeInTheDocument()
+    expect(screen.getByText('Artifact 明细预览')).toBeInTheDocument()
     expect(screen.getByText('结果文件下载')).toBeInTheDocument()
   })
 
@@ -780,7 +810,7 @@ describe('App', () => {
           },
         ])
       }
-      if (url.includes('/metrics/ic_summary')) {
+      if (url.includes('/tables/ic_summary/preview')) {
         return tableResponse([
           {
             feature: 'factor',
@@ -791,7 +821,7 @@ describe('App', () => {
           },
         ])
       }
-      if (url.includes('/metrics/ic')) {
+      if (url.includes('/tables/ic/preview')) {
         return tableResponse(
           Array.from({ length: 30 }, (_, index) => ({
             timestamp: `2026-01-${String(index + 1).padStart(2, '0')}`,
@@ -800,7 +830,7 @@ describe('App', () => {
           })),
         )
       }
-      if (url.includes('/portfolio/returns')) {
+      if (url.includes('/tables/returns/preview')) {
         return tableResponse([
           {
             timestamp: '2026-01-01',
@@ -810,7 +840,7 @@ describe('App', () => {
           },
         ])
       }
-      if (url.includes('/portfolio/cumulative_returns')) {
+      if (url.includes('/tables/cumulative_returns/preview')) {
         return tableResponse([
           {
             timestamp: '2026-01-01',
@@ -820,7 +850,7 @@ describe('App', () => {
           },
         ])
       }
-      if (url.includes('/metrics/performance_summary')) {
+      if (url.includes('/tables/performance_summary/preview')) {
         return tableResponse([
           {
             feature: 'factor',
@@ -830,7 +860,7 @@ describe('App', () => {
           },
         ])
       }
-      if (url.includes('/metrics/group_spread_summary')) {
+      if (url.includes('/tables/group_spread_summary/preview')) {
         return tableResponse([{ feature: 'factor', top_bottom_spread_mean: 0.02 }])
       }
       if (url.includes('/portfolio/exposure-summary')) {
@@ -891,9 +921,13 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: '删除回测' })).not.toBeInTheDocument()
     expect(screen.getAllByText('当前组合最终收益').length).toBeGreaterThan(0)
     const summary = screen.getByLabelText('核心摘要')
-    expect(within(summary).getByText('0.02')).toBeInTheDocument()
+    const finalReturnMetric = within(summary)
+      .getByText('当前组合最终收益')
+      .closest('.metric')
+    expect(finalReturnMetric).not.toBeNull()
+    expect(within(finalReturnMetric as HTMLElement).getByText('--')).toBeInTheDocument()
     expect(
-      screen.getByText('当前组合最终收益为 0.02，回撤和收益曲线需要一起看。'),
+      screen.getByText('当前组合最终收益为 --，回撤和收益曲线需要一起看。'),
     ).toBeInTheDocument()
     expect(screen.getAllByText('ICIR').length).toBeGreaterThan(0)
     expect(screen.getByText('核心摘要')).toBeInTheDocument()
@@ -970,7 +1004,7 @@ describe('App', () => {
     })
     expect(within(performance).getByText('sharpe_like')).toBeInTheDocument()
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/demo/metrics/performance_summary?limit=20&combination_id=factor__forward_return__dataframe__long_only',
+      'http://127.0.0.1:8000/api/runs/core/demo/tables/performance_summary/preview?limit=20&combination_id=factor__forward_return__dataframe__long_only',
     )
     expect(screen.getByRole('link', { name: '下载当前 CSV' })).toHaveAttribute(
       'href',
@@ -1042,6 +1076,16 @@ describe('App', () => {
         return jsonResponse(
           evidencePayload({
             comparisonRows: [],
+            summary: {
+              run_id: 'combo_chart_demo',
+              source_alias: 'core',
+              project: 'quant-research-platform',
+              kind: 'factor',
+              domain: 'a_share',
+              data_stage: 'approved_offline_real_data',
+              uses_external_data: true,
+              n_rows_evaluated: 100,
+            },
             tables: {
               combinations: tablePayload([]),
               cumulative_returns: tablePayload([
@@ -1276,18 +1320,18 @@ describe('App', () => {
         if (url.endsWith('/api/comparison')) {
           return tableResponse([])
         }
-      if (url.includes('/metrics/ic_summary')) {
+      if (url.includes('/tables/ic_summary/preview')) {
           return tableResponse([{ feature: 'factor', mean_ic: 0.4, icir: 0 }])
         }
-        if (url.includes('/portfolio/cumulative_returns')) {
+        if (url.includes('/tables/cumulative_returns/preview')) {
           return tableResponse([{ timestamp: '2026-01-01', cumulative_net_return: 0.04 }])
         }
-        if (url.includes('/portfolio/returns')) {
+        if (url.includes('/tables/returns/preview')) {
           return tableResponse([
             { timestamp: '2026-01-01', net_portfolio_return: 0.04 },
           ])
         }
-        if (url.includes('/metrics/ic')) {
+        if (url.includes('/tables/ic/preview')) {
           return tableResponse([{ timestamp: '2026-01-01', ic: 0.4, rankic: 0.5 }])
         }
         return tableResponse([{ timestamp: '2026-01-01', value: 1 }])
@@ -1300,8 +1344,8 @@ describe('App', () => {
     expect(screen.getByLabelText('新建回测说明')).toBeInTheDocument()
     expect(screen.getByText('1 上传面板')).toBeInTheDocument()
     expect(screen.getByText('2 映射列名')).toBeInTheDocument()
-    expect(screen.getByText('3 生成结果文件')).toBeInTheDocument()
-    expect(screen.getByText('上传因子面板')).toBeInTheDocument()
+    expect(screen.getByText('3 生成开发样例')).toBeInTheDocument()
+    expect(screen.getByText('开发 CSV 面板')).toBeInTheDocument()
     expect(screen.queryByText('core/demo')).not.toBeInTheDocument()
     expect(screen.getByText('必填列')).toBeInTheDocument()
     expect(screen.getByText('可选列')).toBeInTheDocument()
@@ -1320,7 +1364,7 @@ describe('App', () => {
     expect(screen.getByLabelText('项目名 project')).toBeInTheDocument()
     expect(screen.getByText('基础信息')).toBeInTheDocument()
     expect(screen.getByText('CSV 列映射')).toBeInTheDocument()
-    expect(screen.getByText('回测设置')).toBeInTheDocument()
+    expect(screen.getByText('样例评价设置')).toBeInTheDocument()
     expect(screen.getByText('高级设置')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '研究类型 kind' })).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '数据阶段 data_stage' })).toBeInTheDocument()
@@ -1346,7 +1390,7 @@ describe('App', () => {
       '证据工作台',
       'CSV 上传（开发）',
     ])
-    expect(screen.getByRole('button', { name: '生成回测' })).toHaveClass(
+    expect(screen.getByRole('button', { name: '生成开发样例' })).toHaveClass(
       'submit-run',
     )
 
@@ -1379,7 +1423,7 @@ describe('App', () => {
     expect(screen.getAllByText('timestamp').length).toBeGreaterThan(0)
     expect(screen.getAllByText('forward_return').length).toBeGreaterThan(0)
     expect(screen.getAllByText('forward_return_1d').length).toBeGreaterThan(0)
-    fireEvent.click(screen.getByRole('button', { name: '生成回测' }))
+    fireEvent.click(screen.getByRole('button', { name: '生成开发样例' }))
 
     expect(await screen.findByText('已生成回测：core/uploaded_demo')).toBeInTheDocument()
     expect((await screen.findAllByText('core/uploaded_demo')).length).toBeGreaterThan(
@@ -1420,7 +1464,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('上传文件 factor CSV'), {
       target: { files: [file] },
     })
-    fireEvent.click(screen.getByRole('button', { name: '生成回测' }))
+    fireEvent.click(screen.getByRole('button', { name: '生成开发样例' }))
 
     expect(
       await screen.findByText('CSV 缺少列：forward_return, forward_return_1d'),
@@ -1642,7 +1686,7 @@ describe('App', () => {
         },
       ]),
     }
-    const display = displayPayload(tables)
+    const display = displayPayload(tables, { runId: 'manifest_demo' })
     display.charts = [
       {
         description: 'manifest configured chart',
@@ -1738,6 +1782,17 @@ describe('App', () => {
         return jsonResponse(
           evidencePayload({
             comparisonRows: [],
+            summary: {
+              run_id: 'combo_chart_demo',
+              source_alias: 'core',
+              project: 'quant-research-platform',
+              kind: 'factor',
+              domain: 'a_share',
+              data_stage: 'approved_offline_real_data',
+              uses_external_data: true,
+              n_rows_evaluated: 100,
+              weight_config: { method: 'equal_weight_quantile' },
+            },
             tables: {
               combinations: tablePayload([
                 {
@@ -1825,6 +1880,17 @@ describe('App', () => {
         return jsonResponse(
           evidencePayload({
             comparisonRows: [],
+            summary: {
+              run_id: 'combo_chart_demo',
+              source_alias: 'core',
+              project: 'quant-research-platform',
+              kind: 'factor',
+              domain: 'a_share',
+              data_stage: 'approved_offline_real_data',
+              uses_external_data: true,
+              n_rows_evaluated: 100,
+              weight_config: { method: 'equal_weight_quantile' },
+            },
             tables: {
               combinations: tablePayload([
                 {
@@ -1857,8 +1923,10 @@ describe('App', () => {
         )
       }
       if (
-        url ===
-        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/portfolio/cumulative_returns?limit=1000&combination_id=combo_2'
+        url.includes(
+          '/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview',
+        ) &&
+        url.includes('combination_id=combo_2')
       ) {
         return tableResponse([
           {
@@ -1876,8 +1944,10 @@ describe('App', () => {
         ])
       }
       if (
-        url ===
-        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/portfolio/cumulative_returns?limit=1000&combination_id=combo_1'
+        url.includes(
+          '/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview',
+        ) &&
+        url.includes('combination_id=combo_1')
       ) {
         return tableResponse([
           {
@@ -1885,6 +1955,25 @@ describe('App', () => {
             timestamp: '2026-01-01',
             cumulative_net_return: 0.02,
             drawdown: 0,
+          },
+        ])
+      }
+      if (
+        url.includes('combo_chart_demo') &&
+        url.includes('combination_id=combo_2')
+      ) {
+        return tableResponse([
+          {
+            combination_id: 'combo_2',
+            timestamp: '2026-01-01',
+            cumulative_net_return: 0.04,
+            drawdown: 0,
+          },
+          {
+            combination_id: 'combo_2',
+            timestamp: '2026-01-02',
+            cumulative_net_return: 0.05,
+            drawdown: -0.01,
           },
         ])
       }
@@ -1905,13 +1994,18 @@ describe('App', () => {
     })
 
     await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=20&combination_id=combo_2',
+      )
+    })
+    await waitFor(() => {
       expect(screen.getByTestId('cumulative-returns-chart')).toHaveAttribute(
         'data-row-count',
         '2',
       )
     })
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/portfolio/cumulative_returns?limit=1000&combination_id=combo_2',
+      'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=20&combination_id=combo_2',
     )
   })
 
@@ -1942,6 +2036,16 @@ describe('App', () => {
         return jsonResponse(
           evidencePayload({
             comparisonRows: [],
+            summary: {
+              run_id: 'combo_chart_error',
+              source_alias: 'core',
+              project: 'quant-research-platform',
+              kind: 'factor',
+              domain: 'a_share',
+              data_stage: 'approved_offline_real_data',
+              uses_external_data: true,
+              n_rows_evaluated: 100,
+            },
             tables: {
               combinations: tablePayload([
                 {
@@ -1974,8 +2078,10 @@ describe('App', () => {
         )
       }
       if (
-        url ===
-        'http://127.0.0.1:8000/api/runs/core/combo_chart_error/portfolio/cumulative_returns?limit=1000&combination_id=combo_2'
+        url.includes(
+          '/api/runs/core/combo_chart_error/tables/cumulative_returns/preview',
+        ) &&
+        url.includes('combination_id=combo_2')
       ) {
         return Promise.resolve({
           ok: false,

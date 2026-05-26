@@ -79,10 +79,13 @@ For artifact/API/frontend contract work, explicitly review these invariants befo
 - Schema required files and columns are enforced by both the full loader and any lightweight index/list path that makes runs API-visible.
 - `manifest.display` remains the only exposure source for evidence payloads, table previews, direct downloads, ZIP downloads, frontend tables, charts, and download presets.
 - Preview endpoints have bounded defaults, hard maximum limits, and clear low-memory metadata such as `has_more` and whether row counts are exact.
+- `manifest.display.tables[].key` values are unique. Duplicate keys must fail artifact validation because table lookup, API preview, frontend state, and downloads all treat the key as a single contract identity.
 - Download services package files from manifest-resolved artifact paths and do not full-load Parquet tables for metadata-only or selected-file downloads.
 - Public-downloadable metadata such as `config.json` and `lineage.json` is sanitized consistently at writer, direct-download, and ZIP-packaging paths, including selected ZIP cache fingerprints.
 - Frontend selected-run and selected-combination state drives fresh table/chart previews when the initial evidence payload is intentionally truncated.
-- Frontend summary cards must not infer "latest" rows from a truncated preview page. When a card needs the last row for a filtered `combination_id`, use bounded preview pagination such as `limit=1&offset=total_rows-1`, or make the UI copy explicitly say it is showing a preview slice.
+- Frontend summary cards must not infer "latest" rows from a truncated preview page or from non-exact row counts. When a card needs the last row for a filtered `combination_id`, use bounded preview pagination such as `limit=1&offset=total_rows-1` only when the preview payload marks `total_rows_exact=true`; otherwise make the UI copy explicitly say it is showing a preview slice or do not render a latest-row claim.
+- Frontend table and chart preview requests must respect API-provided `preview.max_limit` / `previewMaxRows`. Do not hardcode a larger limit, including for chart tables.
+- Generated schema-`0.6` runs that lack current `manifest.display.tables[].preview` metadata are stale. API list/evidence/preview entry points must skip or reject them through tests instead of weakening validation.
 - Factor Factory consumes the current artifact/API contract without forcing N7 evaluation artifacts to preserve retired fields.
 - Retired public fields and table names are absent from current `src/` and `web/` contracts; allowed historical references and negative tests must be intentional.
 - Private/generated outputs remain ignored and untracked.
@@ -92,6 +95,7 @@ For artifact/API/frontend contract work, explicitly review these invariants befo
 - Fix confirmed P0/P1/P2 issues in the same round when they affect the requested contract, correctness, memory safety, private-data safety, or user-visible behavior.
 - Do not expand the release-blocking scope for P3 cleanup, future hardening, or historical documentation that is intentionally marked as old context. Record it as residual risk when it is not part of the current change.
 - After each fix, run the narrowest relevant test or static check and do a focused re-review of the touched surface.
+- After route/service entry splits, update wrapper tests to monkeypatch the symbol that the tested module actually resolves, usually the imported service entry in the wrapper module. Do not keep tests patched to retired lower-level symbols just because they existed before the split.
 - Do one final cold-start review after the relevant broad verification passes, or earlier if broad verification exposes a new failure domain.
 - Stop the review loop only when enforceable invariants have tests or static checks, relevant verification passes, one final review finds no confirmed blocker, and private/generated outputs remain untracked.
 - If new issues keep appearing in the same surface, convert the repeated reviewer question into a test or static check before doing another manual pass.

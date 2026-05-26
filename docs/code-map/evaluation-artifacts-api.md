@@ -26,8 +26,9 @@ market adapter / upload / parquet helper
 - API/frontend 合同使用 `kernel` 和 `return_source_column`。
 - `compare_evaluation_sets` 是低内存 summary comparison；更详细的
   `write_evaluation_comparison_report()` 只输出 CSV/JSON/Markdown，不进入主网页。
-- Parquet table preview 由 evidence API 提供 20 行预览能力，frontend 通过
-  `manifest.display.tables` 消费，不绕过 display contract。
+- Table preview 由 evidence API 提供 bounded preview 能力，frontend 通过
+  API evidence payload 中的 `manifest.display.tables[].preview_url` 和
+  portable preview descriptor 消费，不从 artifact path 重新推导 route。
 - Public-downloadable metadata files, currently `config.json` and `lineage.json`,
   are sanitized consistently when written, directly downloaded, and packaged in
   selected ZIPs; selected ZIP cache fingerprints hash the sanitized dynamic
@@ -150,6 +151,7 @@ breakdowns/month/
 | `artifact_schema.py` | `ARTIFACT_SCHEMA_VERSION`, `EVALUATION_SET_ARTIFACT_TYPE`, `build_evaluation_set_artifact_paths` | schema version、required tables、path contract。 |
 | `artifact_type_registry.py` | `ArtifactTypeContract`, `EVALUATION_SET_CONTRACT` | 轻量 artifact type registry。 |
 | `display_manifest.py` | `build_display_manifest` | 构造 `manifest.display`。 |
+| `display_tables.py` | `build_display_table_preview_descriptor`, `display_table_artifact_path`, `display_download_items` | display table preview/download descriptor、路径解析和 row-limit 合同 helper。 |
 | `manifest_validation.py` | `validate_artifact_schema_version`, `validate_display_manifest`, `validate_evaluation_set_table_columns` | schema/display/path/table/chart validation。 |
 | `public_metadata.py` | `sanitize_public_metadata` | public-downloadable metadata 脱敏；移除 backend-only input fields，并隐藏私有或本机路径。 |
 | `artifact_writer.py` | `ArtifactOutputs`, `write_evaluation_set_artifacts`, `build_evaluation_set_manifest` | 写 evaluation-set artifacts。 |
@@ -180,8 +182,9 @@ N2 tradability diagnostics 作为 `diagnostics/tradability_diagnostics.csv`
 通过 `manifest.display` 暴露；前端应通过常规 diagnostics preview/download API
 消费该表，不重新计算 eligibility、can_enter 或 can_exit 计数。
 Evidence workbench 的诊断卡片展示当前组合最后一行时，应使用低内存 preview
-分页语义读取单行，例如在首个 preview payload 返回 `total_rows` 后请求
-`limit=1&offset=total_rows-1&combination_id=...`；CSV 明细预览仍保持
+分页语义读取单行；只有首个 preview payload 返回 `total_rows_exact=true` 时，
+前端才可请求 `limit=1&offset=total_rows-1&combination_id=...`。如果 row
+count 非精确，卡片不得把 preview 页里的末行声明为最新诊断；CSV 明细预览仍保持
 display preview row limit，不为了卡片拉完整 diagnostics 表。
 新生成的 schema `0.6` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
 需要重新生成后才能由当前 loader/API 加载。
@@ -191,6 +194,7 @@ display preview row limit，不为了卡片拉完整 diagnostics 表。
 - `display.schema_version == "0.6"`。
 - `display.tables` 必须覆盖 artifact CSV tables。
 - 每个 display table 必须有 matching download item。
+- 每个 display table 必须有 portable `preview` descriptor；`preview.table_key` 必须等于 table key，`default_limit` 必须等于合同 preview row limit，`supports_combination_filter` 与 `filter_parameter` 必须一致。
 - download preset 只能引用已暴露 items。
 - path 必须是 portable relative POSIX path。
 - chart columns 必须存在于对应 table。
@@ -203,8 +207,10 @@ display preview row limit，不为了卡片拉完整 diagnostics 表。
 | `run_repository.py` | `interfaces/api/services/run_repository.py` | run roots、run discovery、run index、loader wrapper、uploaded-run delete。 |
 | `download_service.py` | `interfaces/api/services/download_service.py` | direct download、report download 和 selected ZIP 的 HTTP response adapter。 |
 | `comparison_service.py` | `interfaces/api/services/comparison_service.py` | API-visible comparison JSON/CSV。 |
-| `pipeline_service.py` | `interfaces/api/services/pipeline_service.py` | factor templates、pipeline snapshots、`start_from` pipeline run dispatch。 |
-| `upload_service.py` | `interfaces/api/services/upload_service.py` | CSV upload -> `EvaluationSpec` -> evaluation run。 |
+| `factor_template_service.py` | `interfaces/api/services/factor_template_service.py` | controlled factor template catalog 和 template source metadata。 |
+| `pipeline_service.py` | `interfaces/api/services/pipeline_service.py` | pipeline snapshots、`start_from` pipeline run dispatch。 |
+| `table_preview_service.py` | `interfaces/api/services/table_preview_service.py` | `manifest.display.tables` gated CSV/Parquet preview、limit/offset/combination filter。 |
+| `upload_service.py` | `interfaces/api/services/upload_service.py` | legacy/dev uploaded-panel CSV smoke -> `EvaluationSpec` -> evaluation run。 |
 
 `run_repository` 身份规则：
 
@@ -220,12 +226,13 @@ RunRef = (source_alias, run_id, path)
 |---|---|---|
 | `routes/health.py` | `/health` | 健康检查和安全 root 摘要。 |
 | `routes/markets.py` | `/markets`, `/api/markets` | 市场能力；A 股 enabled，其他 planned/disabled。 |
-| `routes/pipeline.py` | `/api/factor-templates`, `/api/pipeline-snapshots`, `/api/pipeline-runs` | templates、snapshot 状态、`start_from` runner 状态。 |
-| `routes/runs.py` | `/api/runs`, evidence, table previews | run list、删除 uploaded run、evidence、metrics/portfolio/diagnostics/breakdowns preview。 |
+| `routes/factor_templates.py` | `/api/factor-templates` | factor template catalog。 |
+| `routes/pipeline.py` | `/api/pipeline-snapshots`, `/api/pipeline-runs` | snapshot 状态、`start_from` runner 状态。 |
+| `routes/runs.py` | `/api/runs`, evidence, table previews | run list、删除 uploaded run、evidence、generic `/tables/{table_key}/preview` 和兼容 metrics/portfolio/diagnostics/breakdowns preview。 |
 | `routes/artifacts.py` | `/api/runs/{source_alias}/{run_id}/artifacts/{artifact_item:path}` | display-exposed artifact direct download。 |
 | `routes/downloads.py` | `/report.md`, `/download` | report 和 selected ZIP download。 |
 | `routes/comparison.py` | `/api/comparison`, `/api/comparison.csv` | API-visible runs comparison。 |
-| `routes/uploads.py` | `/api/templates/factor-csv`, `POST /api/runs` | CSV upload 保留入口。 |
+| `routes/uploads.py` | `/api/templates/factor-csv`, `POST /api/runs` | CSV upload 保留为 legacy/dev uploaded-panel smoke / compatibility 入口。 |
 | `routes/factor_factory.py` | `/api/factor-factory-runs` | Factor Factory artifact `0.1` 浏览和下载。 |
 
 ## Download Contract
@@ -268,7 +275,7 @@ Comparison 提供独立指标排名，不提供综合评分：
 | `web/src/features/evidence/useRunEvidence.ts` | evidence fetch。 |
 | `web/src/features/evidence/runEvidenceState.ts` | run/combination switching state helpers。 |
 | `web/src/features/evidence/ResultsView.tsx` | summary、tables、charts、report view composition。 |
-| `web/src/features/evidence/CsvBrowser.tsx` / `web/src/features/uploads/CsvPreviewPanel.tsx` | API table preview。 |
+| `web/src/features/evidence/CsvBrowser.tsx` / `web/src/features/uploads/CsvPreviewPanel.tsx` | API table preview；artifact inspection / audit support，不是通用 CSV viewer。 |
 | `web/src/features/evidence/RunCharts.tsx` | display-driven charts。 |
 | `web/src/features/evidence/ArtifactDownloads.tsx` | display-driven direct/ZIP downloads。 |
 | `web/src/features/evidence/RunComparison.tsx` | comparison UI。 |
@@ -290,6 +297,7 @@ Comparison 提供独立指标排名，不提供综合评分：
 Frontend rules:
 
 - 消费 API 和 `manifest.display`。
+- Table preview 使用 API evidence payload 下发的 `preview_url` 和 `preview` metadata；不根据 display table `path` 推导 preview endpoint。
 - 不直接读本地文件。
 - 不重新计算 IC、RankIC、weights、turnover、cumulative returns 或 cost。
 - run switching / combination switching 不能显示 stale evidence。
@@ -303,7 +311,8 @@ Frontend rules:
 | DataFrame/Python | 手动构造 `EvaluationSpec` | market module 或本地脚本直接调用。 |
 | Parquet helper | `make_parquet_evaluation_spec()` | 上游已有 local Parquet panel。 |
 | Parquet CLI | `qrp evaluate-parquet` | 外部/local Parquet adapter check。 |
-| CSV upload | `POST /api/runs` | 本地调试/兼容入口。 |
+| A 股 evaluation service | `markets/implementations/a_share/evaluation/service.py` | CLI、pipeline runner 和后续本地调用共享的 A-share evaluation request/result 入口。 |
+| CSV upload | `POST /api/runs` | legacy/dev uploaded-panel smoke / compatibility 入口。 |
 
 ## Verification Surface
 

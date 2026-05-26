@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -497,14 +498,14 @@ def test_run_factor_evaluation_cli_passes_evaluation_runtime_options(
 ) -> None:
     captured = {}
 
-    def fake_run_processed_factor_evaluation(**kwargs):
-        captured.update(kwargs)
-        return pd.DataFrame(), tmp_path / "manifest.json", []
+    def fake_run_a_share_evaluation(request):
+        captured.update(request.__dict__)
+        return SimpleNamespace(manifest_path=tmp_path / "manifest.json", run_records=[])
 
     monkeypatch.setattr(
         run_factor_evaluation,
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
 
     exit_code = run_factor_evaluation.main(
@@ -778,14 +779,14 @@ def test_run_factor_evaluation_cli_defaults_to_full_report_root(
 ) -> None:
     captured = {}
 
-    def fake_run_processed_factor_evaluation(**kwargs):
-        captured.update(kwargs)
-        return pd.DataFrame(), "manifest.json", []
+    def fake_run_a_share_evaluation(request):
+        captured.update(request.__dict__)
+        return SimpleNamespace(manifest_path="manifest.json", run_records=[])
 
     monkeypatch.setattr(
         run_factor_evaluation,
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
 
     exit_code = run_factor_evaluation.main(["--features", "rev_20d"])
@@ -803,14 +804,14 @@ def test_run_factor_evaluation_cli_derives_default_report_root_from_years(
 ) -> None:
     captured = {}
 
-    def fake_run_processed_factor_evaluation(**kwargs):
-        captured.update(kwargs)
-        return pd.DataFrame(), "manifest.json", []
+    def fake_run_a_share_evaluation(request):
+        captured.update(request.__dict__)
+        return SimpleNamespace(manifest_path="manifest.json", run_records=[])
 
     monkeypatch.setattr(
         run_factor_evaluation,
-        "run_processed_factor_evaluation",
-        fake_run_processed_factor_evaluation,
+        "run_a_share_evaluation",
+        fake_run_a_share_evaluation,
     )
 
     exit_code = run_factor_evaluation.main(

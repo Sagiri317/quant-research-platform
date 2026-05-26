@@ -34,13 +34,19 @@
 | `codex/artifact-zip-packaging` | N3 ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py` |
 | `codex/frontend-feature-split` | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
 | `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 已落地；完整 2023-2025 canonical regeneration 按需执行 |
-| `codex/tradability-workbench` | N2 frontend diagnostics display | merged to `main` | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
+| `codex/tradability-workbench` | N2 frontend diagnostics display | merged to `main` | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片仅在 preview payload 标记 `total_rows_exact=true` 时用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
+
+## 进行中分支
+
+| 分支 | 路线图任务 | 状态 | 当前结果 |
+|---|---|---|---|
+| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | in progress | `manifest.display.tables[]` portable preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry 和 CSV upload legacy/dev 文案已在本分支实现中 |
 
 ## 建议后续分支
 
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
-| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | `manifest.display` preview/download helper、factor-template route/service 拆分、preview endpoint metadata、A-share service entry、CSV upload legacy/dev 降级；计划见 [`docs/superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md`](../superpowers/plans/2026-05-26-n8-contract-consumer-convergence.md) | 基于 N7 schema `0.6` / `combination_id`、N2 backend diagnostics、N3 artifact package 和 N4 frontend feature split | 中到高。横跨 API、artifact、pipeline、Factor Factory 和 frontend，按计划分 4 个 slice 推进 |
+| `codex/tradability-diagnostics-summary` | N2 follow-up / diagnostics summary | `tradability_diagnostics_summary` artifact、display/API exposure、frontend summary card copy/tests | 依赖 N8 display preview contract 合并后再做；前端只消费 artifact/API summary，不从 preview 计算全交易日平均 | 中。涉及 artifact/API/frontend 合同，但研究语义窄 |
 | `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N7 evaluation run identity 和样例稳定；复用 N2 诊断 artifact/display 模式 | 中到高。需要先写详细计划 |
 | `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 N7 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
 

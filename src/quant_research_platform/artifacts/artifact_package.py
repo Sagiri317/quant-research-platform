@@ -12,6 +12,13 @@ from pathlib import Path, PurePosixPath
 
 from quant_research_platform.artifacts.artifact_loader import LoadedEvaluationSet
 from quant_research_platform.artifacts.artifact_schema import ARTIFACT_SCHEMA_VERSION
+from quant_research_platform.artifacts.display_tables import (
+    display_download_items,
+    display_download_table_key,
+    display_table_artifact_path,
+    resolve_artifact_contract_path,
+    validate_display_contract_path,
+)
 from quant_research_platform.artifacts.public_metadata import sanitize_public_metadata
 
 
@@ -80,20 +87,10 @@ def resolve_manifest_display_artifact_path(
 def _display_download_items(manifest: dict[str, object]) -> set[str]:
     """Validate display version and return manifest.display download items."""
 
-    display = _require_supported_display_manifest(manifest)
-    downloads = display.get("downloads")
-    if not isinstance(downloads, dict) or not isinstance(downloads.get("items"), list):
-        raise ArtifactPackageError("manifest display downloads invalid")
-    items: set[str] = set()
-    for option in downloads["items"]:
-        if not isinstance(option, dict):
-            raise ArtifactPackageError("manifest display downloads invalid")
-        item = option.get("item")
-        if not isinstance(item, str) or not item:
-            raise ArtifactPackageError("manifest display download item invalid")
-        _validate_download_item_name(item)
-        items.add(item)
-    return items
+    try:
+        return display_download_items(manifest)
+    except ValueError as exc:
+        raise ArtifactPackageError(str(exc)) from exc
 
 
 def build_selected_artifact_zip(
@@ -292,17 +289,9 @@ def _artifact_relative_path(
         return value if value == item else None
     if item in {"manifest.json", "config.json", "lineage.json", "summary.json"}:
         return item
-    display = run.manifest.get("display")
-    if isinstance(display, dict):
-        downloads = display.get("downloads")
-        if isinstance(downloads, dict):
-            for option in downloads.get("items", []):
-                if not isinstance(option, dict) or option.get("item") != item:
-                    continue
-                table_name = option.get("table")
-                if not isinstance(table_name, str):
-                    return None
-                return _table_relative_path(artifacts, table_name)
+    table_name = display_download_table_key(run.manifest, item)
+    if table_name is not None:
+        return display_table_artifact_path(run.manifest, table_name)
     return None
 
 
@@ -319,17 +308,9 @@ def _artifact_relative_path_from_manifest(
         return value if value == item else None
     if item in {"manifest.json", "config.json", "lineage.json", "summary.json"}:
         return item
-    display = manifest.get("display")
-    if isinstance(display, dict):
-        downloads = display.get("downloads")
-        if isinstance(downloads, dict):
-            for option in downloads.get("items", []):
-                if not isinstance(option, dict) or option.get("item") != item:
-                    continue
-                table_name = option.get("table")
-                if not isinstance(table_name, str):
-                    return None
-                return _table_relative_path(artifacts, table_name)
+    table_name = display_download_table_key(manifest, item)
+    if table_name is not None:
+        return display_table_artifact_path(manifest, table_name)
     return None
 
 
@@ -357,14 +338,10 @@ def _table_relative_path(
 
 
 def _validate_download_item_name(item: str) -> None:
-    parsed = PurePosixPath(item)
-    if (
-        not item
-        or "\\" in item
-        or parsed.is_absolute()
-        or any(part in {"", ".", ".."} for part in parsed.parts)
-    ):
-        raise ArtifactPackageError(f"下载项路径不安全：{item}")
+    try:
+        validate_display_contract_path(item, source=f"display download item {item}")
+    except ValueError as exc:
+        raise ArtifactPackageError(f"下载项路径不安全：{item}") from exc
 
 
 def _validate_cache_path_segment(value: str, *, source: str) -> None:
@@ -466,14 +443,10 @@ def _require_supported_display_manifest(
 
 
 def _resolve_artifact_path(output_dir: Path, relative_path: str, item: str) -> Path:
-    candidate = (output_dir / relative_path).resolve()
-    resolved_output_dir = output_dir.resolve()
-    if (
-        resolved_output_dir not in candidate.parents
-        and candidate != resolved_output_dir
-    ):
-        raise ArtifactPackageError(f"下载项路径越界：{item}")
-    return candidate
+    try:
+        return resolve_artifact_contract_path(output_dir, relative_path, item)
+    except ValueError as exc:
+        raise ArtifactPackageError(f"下载项路径越界：{item}") from exc
 
 
 def _cache_identity_segment(value: str) -> str:

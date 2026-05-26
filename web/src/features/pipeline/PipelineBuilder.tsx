@@ -11,9 +11,11 @@ import type { FactorDraft } from '../../shared/factorDraft'
 
 export function PipelineBuilder({
   factorDraft,
+  onRunCompleted,
   onFactorDraftChange,
 }: {
   factorDraft: FactorDraft
+  onRunCompleted?: (created: PipelineRunSummary) => Promise<void> | void
   onFactorDraftChange: (draft: FactorDraft) => void
 }) {
   const [runId, setRunId] = useState('a_share_reversal_smoke')
@@ -63,6 +65,9 @@ export function PipelineBuilder({
           ? await getPipelineRunCheckpoints(checkpointRef)
           : await getPipelineSnapshotCheckpoints(checkpointRef),
       )
+      if (submissionMode === 'run') {
+        await onRunCompleted?.(created)
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '流程快照生成失败')
     } finally {

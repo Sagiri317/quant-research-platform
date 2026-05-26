@@ -97,11 +97,10 @@ export function ResultsView({
   const selectedMetrics = useMemo(
     () =>
       selectedCombinationMetrics({
-        chartTables,
         combinationSummaries,
         selectedCombinationId,
       }),
-    [chartTables, combinationSummaries, selectedCombinationId],
+    [combinationSummaries, selectedCombinationId],
   )
   const boundary = boundaryText(run, runBoundary)
   return (
@@ -405,24 +404,17 @@ function boundaryText(run: RunSummary, runBoundary?: string): string {
 }
 
 function selectedCombinationMetrics({
-  chartTables,
   combinationSummaries,
   selectedCombinationId,
 }: {
-  chartTables: Record<string, TablePayload>
   combinationSummaries: TablePayload | null
   selectedCombinationId: string
 }): SelectedCombinationMetrics {
   const summaryRow = combinationSummaries?.rows.find(
     (row) => String(row.combination_id ?? '') === selectedCombinationId,
   )
-  const cumulativeReturnRows = chartTables.cumulative_returns?.rows ?? []
-  const finalCumulativeReturnRow =
-    cumulativeReturnRows[cumulativeReturnRows.length - 1]
   return {
-    finalReturn:
-      numericValue(summaryRow?.final_cumulative_net_return) ??
-      numericValue(finalCumulativeReturnRow?.cumulative_net_return),
+    finalReturn: numericValue(summaryRow?.final_cumulative_net_return),
     icir: numericValue(summaryRow?.icir),
     maxDrawdown: numericValue(summaryRow?.max_drawdown),
     meanIc: numericValue(summaryRow?.mean_ic),

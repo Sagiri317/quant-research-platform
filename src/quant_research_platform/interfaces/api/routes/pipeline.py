@@ -1,4 +1,4 @@
-"""Factor template, pipeline snapshot, and pipeline run routes."""
+"""Pipeline snapshot and executable pipeline run routes."""
 
 from __future__ import annotations
 
@@ -10,19 +10,11 @@ from quant_research_platform.interfaces.api.services.pipeline_service import (
     PipelineSnapshotRequestPayload,
     create_pipeline_run_payload,
     create_pipeline_snapshot_payload,
-    list_factor_template_payloads,
     pipeline_checkpoint_payloads,
     pipeline_run_status_payload,
 )
 
 router = APIRouter()
-
-
-@router.get("/api/factor-templates")
-def factor_templates(market: str = "a_share") -> list[dict[str, object]]:
-    """Return editable factor expression templates."""
-
-    return list_factor_template_payloads(market)
 
 
 @router.post("/api/pipeline-snapshots", status_code=status.HTTP_201_CREATED)

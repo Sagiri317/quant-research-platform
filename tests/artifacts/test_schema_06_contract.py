@@ -158,8 +158,26 @@ def test_writer_persists_schema_06_star_artifact_with_parquet_weights(tmp_path) 
     assert display_tables["weights"]["join_key"] == "combination_id"
     assert display_tables["weights"]["preview_rows"] == 20
     assert display_tables["weights"]["supports_combination_filter"] is True
+    assert display_tables["weights"]["preview"] == {
+        "kind": "table",
+        "table_key": "weights",
+        "default_limit": 20,
+        "max_limit": 1000,
+        "supports_offset": True,
+        "supports_combination_filter": True,
+        "filter_parameter": "combination_id",
+    }
     assert display_tables["label_availability"]["join_key"] is None
     assert display_tables["label_availability"]["supports_combination_filter"] is False
+    assert display_tables["label_availability"]["preview"] == {
+        "kind": "table",
+        "table_key": "label_availability",
+        "default_limit": 20,
+        "max_limit": 1000,
+        "supports_offset": True,
+        "supports_combination_filter": False,
+        "filter_parameter": None,
+    }
 
 
 def _metadata() -> dict[str, object]:

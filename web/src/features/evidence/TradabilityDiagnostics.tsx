@@ -64,7 +64,7 @@ export function TradabilityDiagnostics({
           <h3>Eligibility / Tradability 诊断</h3>
           <p>
             来自 diagnostics/tradability_diagnostics.csv，仅展示 artifact/API
-            返回结果。
+            返回的单个诊断切片；全交易日平均指标后续由 summary artifact 提供。
           </p>
         </div>
         <span>{String(selectedRow.timestamp ?? '最新切片')}</span>

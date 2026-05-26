@@ -17,9 +17,11 @@ from quant_research_platform.artifacts.artifact_schema import (
     EVALUATION_SET_SUMMARY_TABLES,
     OPTIONAL_ARTIFACT_GROUPS,
 )
+from quant_research_platform.artifacts.display_tables import (
+    DISPLAY_PREVIEW_ROWS_MAX,
+    display_table_preview_limits,
+)
 from quant_research_platform.runtime.run_metadata import validate_run_metadata
-
-DISPLAY_PREVIEW_ROWS_MAX = 1000
 
 TRADABILITY_DIAGNOSTIC_COLUMNS = frozenset(
     {
@@ -378,6 +380,7 @@ def validate_display_manifest(manifest: dict[str, object]) -> None:
         raise ValueError("manifest display.tables must be a list.")
     table_paths: dict[str, str] = {}
     table_downloads: dict[str, str] = {}
+    table_keys: set[str] = set()
     for table in tables:
         if not isinstance(table, dict):
             raise ValueError("manifest display.tables entries must be objects.")
@@ -388,6 +391,9 @@ def validate_display_manifest(manifest: dict[str, object]) -> None:
         role = table.get("role")
         if not isinstance(key, str) or not key:
             raise ValueError("manifest display table key must be a non-empty string.")
+        if key in table_keys:
+            raise ValueError(f"manifest display duplicate display table key: {key!r}.")
+        table_keys.add(key)
         if key not in artifact_paths:
             raise ValueError(f"manifest display table {key!r} is not an artifact.")
         if path != artifact_paths[key]:
@@ -428,6 +434,27 @@ def validate_display_manifest(manifest: dict[str, object]) -> None:
             or preview_rows > DISPLAY_PREVIEW_ROWS_MAX
         ):
             raise ValueError(f"manifest display table {key!r} preview_rows invalid.")
+        preview = display_table_preview_limits(manifest, key)
+        if preview.default_limit != preview_rows:
+            raise ValueError(
+                f"manifest display table {key!r} preview default_limit must "
+                "match preview_rows."
+            )
+        if preview.supports_combination_filter != table.get(
+            "supports_combination_filter"
+        ):
+            raise ValueError(
+                f"manifest display table {key!r} preview filter support mismatch."
+            )
+        expected_filter = (
+            "combination_id"
+            if table.get("supports_combination_filter") is True
+            else None
+        )
+        if preview.filter_parameter != expected_filter:
+            raise ValueError(
+                f"manifest display table {key!r} preview filter_parameter mismatch."
+            )
         validate_display_path(path, source=f"display table {key}")
         table_paths[key] = path
         table_downloads[key] = download_item

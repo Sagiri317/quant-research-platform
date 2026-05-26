@@ -13,7 +13,7 @@
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 | N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 已验证，完整 2023-2025 canonical regeneration 按需执行 |
-| N8 | 架构简化与合同消费收敛 | P1 | planned | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
+| N8 | 架构简化与合同消费收敛 | P1 | in progress | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
 
 ## 当前推荐顺序
 
@@ -100,6 +100,8 @@ diagnostics/tradability_diagnostics.csv
 
 后续扩展可以单独设计按年、按 segment 的派生表；当前 N2 前端任务应先消费 `tradability_diagnostics.csv`，不要依赖尚未落地的 summary/by-year/by-segment 文件名。
 
+后续任务：保留现有 Eligibility / Tradability 诊断卡片作为单个切片的快速提示，但 UI 文案应避免把它解释为全期间诊断结论。若需要“所有交易日平均指标”，应新增 artifact/API 暴露的 `tradability_diagnostics_summary` 一类汇总表，按 `combination_id` 输出 `n_trading_days`、平均 `eligible_rate`、平均 `can_enter_rate`、平均 `can_exit_rate`、平均 `entry_blocked_rate` 和平均 `exit_blocked_rate` 等字段；前端只消费该 summary，不从 preview 前若干行临时计算。
+
 非目标：
 
 - 不把 tradability 诊断写成真实可交易保证。
@@ -111,7 +113,8 @@ diagnostics/tradability_diagnostics.csv
 - API preview 和 direct/ZIP download 只通过 `manifest.display` 访问。
 - 前端不重新计算，只展示 artifact/API 结果。
 - Diagnostics 展示落在 `web/src/features/evidence/` 的 feature-local 组件和测试中；不要继续把新增 UI 逻辑堆进 shell-level `App.test.tsx`。
-- CSV 明细预览保持 display preview row limit；诊断卡片若需要当前组合最后一行，应通过 bounded preview metadata 或当前 API 的 `limit=1&offset=total_rows-1` 单行读取，不为卡片拉完整 diagnostics 表。
+- CSV 明细预览保持 display preview row limit；诊断卡片若需要当前组合最后一行，应通过 bounded preview metadata 单行读取，且只有 preview payload 标记 `total_rows_exact=true` 时才可使用 `limit=1&offset=total_rows-1`，不为卡片拉完整 diagnostics 表。
+- 全交易日平均诊断应作为后续 artifact summary 合同实现，不混入 N8 preview 收敛，也不通过提高 preview 行数或前端扫描 CSV 实现。
 
 实现顺序说明：
 
@@ -330,6 +333,14 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 - preview 是 artifact inspection / audit support，不扩展成通用 CSV viewer，也不提高默认 preview 行数来规避 latest-row 问题。
 - 旧 generated run 如果缺少当前 display preview metadata，按 stale generated run 处理；需要展示或验收时按审批重新生成，而不是放宽当前合同。
 - CSV upload 后端兼容保留，前端和文档降级为 legacy/dev uploaded-panel smoke 路径，不删除、不扩展。
+
+当前实现状态：
+
+- `manifest.display.tables[]` 已增加 portable preview descriptor；display validation 要求 preview metadata 与 table key、preview row limit、combination filter parameter 一致。
+- API evidence payload 保持 manifest portable，在运行时为 display table 补充 `preview_url`；generic table preview route 为 `/api/runs/{source_alias}/{run_id}/tables/{table_key}/preview`，旧 family preview routes 只作为兼容入口代理到同一 service。
+- React evidence workbench 只消费 API 下发的 preview metadata，不再从 display table path 推导 preview route；CSV upload UI 文案降级为 legacy/dev uploaded-panel smoke / compatibility path。
+- `GET /api/factor-templates` 已拆到独立 factor-template route/service；pipeline route/service 只保留 snapshot/run 职责。
+- A-share evaluation 已有 service entry；CLI 和 pipeline runner 通过 service request/result 调用，schema 仍保持 `0.6`。
 
 非目标：
 

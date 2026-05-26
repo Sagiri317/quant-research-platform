@@ -28,6 +28,7 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 - Run list, run evidence, CSV preview, direct CSV download, ZIP download, and comparison endpoints consume the same display contract.
 - Multi-root evaluation APIs and frontend state must not collapse runs by `run_id` alone; `source_alias` is part of the identity.
 - Direct CSV links validate display schema and exposed download items.
+- Display tables that declare `supports_combination_filter=true` must actually contain a `combination_id` column when a preview request includes `combination_id`; reject missing filter columns instead of returning an unfiltered preview.
 - ZIP item selection validates against the manifest before creating cache paths or writing temporary ZIP files.
 - Uploaded-run deletion is limited to `summary.data_stage == "uploaded_panel"`, configured run roots, immediate child run directories, and directories containing `manifest.json`.
 - Bad or stale runs are rejected or excluded at the earliest reasonable entry point.

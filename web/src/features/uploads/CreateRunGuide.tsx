@@ -4,7 +4,7 @@ export function CreateRunGuide() {
   return (
     <section className="data-section">
       <div className="section-title">
-        <h3>上传因子面板</h3>
+        <h3>开发 CSV 面板</h3>
         <a className="template-link" href={FACTOR_CSV_TEMPLATE_URL}>
           下载模板 CSV
         </a>
@@ -34,7 +34,8 @@ export function CreateRunGuide() {
           <h4>数据约束</h4>
           <p>
             timestamp 需可解析为日期时间；asset 按字符串处理；feature 和
-            label 必须是数值；收益来源列用于生成真实回测曲线。本地平台只评估上传的 CSV。
+            label 必须是数值；收益来源列用于生成本地 artifact 预览曲线。本入口只评估上传的
+            CSV，不代表正式 A-share 私有数据链路。
           </p>
         </article>
       </div>

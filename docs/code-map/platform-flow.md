@@ -181,7 +181,7 @@ rebuild_interim  -> build_interim -> build_panel -> build_factors -> evaluation
 主要 API 面：
 
 - Runs/evidence: `GET /api/runs`、`GET /api/runs/{source_alias}/{run_id}/evidence`
-- Table preview: `GET /api/runs/{source_alias}/{run_id}/metrics/{metric_name}`、`portfolio/{metric_name}`、`diagnostics/{metric_name}`、`breakdowns/{group}/{metric_name}`
+- Table preview: 主入口是 `GET /api/runs/{source_alias}/{run_id}/tables/{table_key}/preview`，由 `manifest.display.tables[]` 的 portable preview descriptor 和运行时 `preview_url` 驱动；旧 `metrics/{metric_name}`、`portfolio/{metric_name}`、`diagnostics/{metric_name}`、`breakdowns/{group}/{metric_name}` routes 仅作为兼容代理。
 - Downloads: `GET /api/runs/{source_alias}/{run_id}/artifacts/{artifact_item:path}`、`GET /api/runs/{source_alias}/{run_id}/report.md`、`POST|GET /api/runs/{source_alias}/{run_id}/download`
 - Comparison: `GET /api/comparison`、`GET /api/comparison.csv`
 - Pipeline: `POST /api/pipeline-snapshots`、`POST /api/pipeline-runs`

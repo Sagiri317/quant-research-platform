@@ -596,7 +596,7 @@
       n("N34", "Artifact ZIP package", "evaluation", "selected ZIP", "artifacts/artifact_package.py", "按照 manifest.display.downloads 校验并组装 selected artifact ZIP。", 3560, 570),
       n("N35", "Offline comparison writer", "cli", "local CSV", "artifacts/artifact_comparison.py", "qrp compare 从 completed evaluation-set artifact 目录写离线 comparison CSV；不是 API comparison endpoint。", 3060, 830),
       n("N36", "FactorFactoryRuns UI", "frontend", "factory UI", "web/src/features/factor-factory/FactorFactoryRuns.tsx", "前端浏览 Factor Factory run list、detail、table preview 和 artifact downloads。", 2310, 740),
-      n("N37", "Factor template API", "api", "template endpoint", "interfaces/api/routes/pipeline.py; interfaces/api/services/pipeline_service.py", "GET /api/factor-templates?market=a_share，从 registry 输出可编辑模板 payload。", 810, 265)
+      n("N37", "Factor template API", "api", "template endpoint", "interfaces/api/routes/factor_templates.py; interfaces/api/services/factor_template_service.py", "GET /api/factor-templates?market=a_share，从 registry 输出可编辑模板 payload；不属于 pipeline snapshot/run route。", 810, 265)
     ];
 
     const edges = [
@@ -650,7 +650,7 @@
       e("E47", "N33", "N35", "offline compare", "qrp compare 调用 write_run_comparison 写本地 comparison CSV。"),
       e("E48", "N31", "N13", "draft handoff", "Factor Studio 的 factorDraft 交给 Pipeline Builder 继续生成 snapshot 或 run。"),
       e("E49", "N30", "N36", "factory UI", "Factor Factory API payload 被 FactorFactoryRuns UI 消费；实际 request 由前端发起。"),
-      e("E50", "N24", "N37", "mounts", "FastAPI app 通过 pipeline router 挂载 factor-template endpoint。"),
+      e("E50", "N24", "N37", "mounts", "FastAPI app 单独挂载 factor-template router。"),
       e("E51", "N07", "N10", "existing_factors", "从已有 factor table 直接进入 evaluation。"),
       e("E53", "N39", "N15", "wraps", "run_evaluation 内部调用 evaluate_to_payload。")
     ];
@@ -717,7 +717,7 @@
         p("kernel", "dataframe", "evaluation kernel"),
         p("start_from", "required for /api/pipeline-runs", "existing_factors / rebuild_factors / rebuild_panel / rebuild_interim")
       ], "{\n  \"market\": \"a_share\",\n  \"run_id\": \"demo_run\",\n  \"date_start\": \"2024-01-01\",\n  \"date_end\": \"2025-12-31\",\n  \"factor_expression\": \"rank(close / delay(close, 20))\",\n  \"label_columns\": [\"forward_return_20d\"],\n  \"start_from\": \"existing_factors\"\n}"),
-      N37: entry("HTTP API", "GET /api/factor-templates", "Factor Studio 通过这个 endpoint 读取 A-share controlled templates；它属于 pipeline router，但不是 pipeline run/snapshot 提交入口。", [
+      N37: entry("HTTP API", "GET /api/factor-templates", "Factor Studio 通过这个 endpoint 读取 A-share controlled templates；它由 factor-template router/service 提供，不属于 pipeline run/snapshot 提交入口。", [
         p("market", "a_share", "query 参数；当前前端调用 listFactorTemplates('a_share')")
       ], "GET /api/factor-templates?market=a_share"),
       N21: entry("HTTP API", "GET /api/runs/{source_alias}/{run_id}/evidence 和 table preview endpoints", "读取 API-visible evaluation run；身份必须保留 (source_alias, run_id)。", [

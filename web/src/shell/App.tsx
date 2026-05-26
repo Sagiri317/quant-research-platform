@@ -17,6 +17,7 @@ import { useRuns } from '../features/runs/useRuns'
 function App() {
   const {
     loadingRuns,
+    refreshRuns,
     removeRun,
     runListError,
     runs,
@@ -144,6 +145,20 @@ function App() {
           <PipelineBuilder
             factorDraft={factorDraft}
             onFactorDraftChange={setFactorDraft}
+            onRunCompleted={async (created) => {
+              const primaryPublicRunId = `pipeline/${created.run_ref ?? created.run_id}`
+              const fallbackPublicRunIds =
+                created.run_ref && created.run_ref !== created.run_id
+                  ? [`pipeline/${created.run_id}`]
+                  : []
+              setRunCacheVersion((version) => version + 1)
+              await refreshRuns({
+                fallbackPublicRunIds,
+                selectPublicRunId: primaryPublicRunId,
+              })
+              setViewMode('results')
+              setSuccessMessage(`Pipeline run ready: ${primaryPublicRunId}`)
+            }}
           />
         ) : null}
         {viewMode === 'checkpoints' ? <DataCheckpoints /> : null}

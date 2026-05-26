@@ -1,12 +1,47 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { type RunSummary, fetchRuns } from '../../shared/api/api'
 import { messageFrom } from '../../shared/format'
+
+type RefreshRunsOptions = {
+  fallbackPublicRunIds?: string[]
+  selectPublicRunId?: string
+}
+
+function selectedPublicRunId(
+  runs: RunSummary[],
+  options: RefreshRunsOptions = {},
+) {
+  const candidates = [
+    options.selectPublicRunId,
+    ...(options.fallbackPublicRunIds ?? []),
+  ].filter((id): id is string => Boolean(id))
+  const matched = candidates.find((id) =>
+    runs.some((run) => run.public_run_id === id),
+  )
+  return matched ?? runs[0]?.public_run_id ?? ''
+}
 
 export function useRuns() {
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [loadingRuns, setLoadingRuns] = useState(true)
   const [runListError, setRunListError] = useState('')
+
+  const refreshRuns = useCallback(async (options: RefreshRunsOptions = {}) => {
+    try {
+      setLoadingRuns(true)
+      const nextRuns = await fetchRuns()
+      setRuns(nextRuns)
+      setSelectedId(selectedPublicRunId(nextRuns, options))
+      setRunListError('')
+      return nextRuns
+    } catch (caught) {
+      setRunListError(messageFrom(caught))
+      throw caught
+    } finally {
+      setLoadingRuns(false)
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -18,7 +53,7 @@ export function useRuns() {
           return
         }
         setRuns(nextRuns)
-        setSelectedId(nextRuns[0]?.public_run_id ?? '')
+        setSelectedId(selectedPublicRunId(nextRuns))
         setRunListError('')
       } catch (caught) {
         if (!cancelled) {
@@ -59,6 +94,7 @@ export function useRuns() {
 
   return {
     loadingRuns,
+    refreshRuns,
     removeRun,
     runListError,
     runs,

@@ -353,10 +353,10 @@ describe('api client', () => {
       json: async () => ({ columns: [], rows: [] }),
     } as Response)
 
-    await fetchTablePreview('/api/runs/core/demo/metrics/ic', 20, 'combo_b')
+    await fetchTablePreview('/api/runs/core/demo/tables/ic/preview', 20, 'combo_b')
 
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/demo/metrics/ic?limit=20&combination_id=combo_b',
+      'http://127.0.0.1:8000/api/runs/core/demo/tables/ic/preview?limit=20&combination_id=combo_b',
     )
   })
 
@@ -366,14 +366,19 @@ describe('api client', () => {
       json: async () => ({ columns: [], rows: [] }),
     } as Response)
 
-    await fetchTablePreview('/api/runs/core/demo/diagnostics/tradability_diagnostics', 1, 'combo_b', 129)
+    await fetchTablePreview(
+      '/api/runs/core/demo/tables/tradability_diagnostics/preview',
+      1,
+      'combo_b',
+      129,
+    )
 
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/demo/diagnostics/tradability_diagnostics?limit=1&offset=129&combination_id=combo_b',
+      'http://127.0.0.1:8000/api/runs/core/demo/tables/tradability_diagnostics/preview?limit=1&offset=129&combination_id=combo_b',
     )
   })
 
-  test('runTableSpecsFromDisplay maps top-level combinations table to preview JSON route', () => {
+  test('runTableSpecsFromDisplay consumes runtime preview metadata', () => {
     const specs = runTableSpecsFromDisplay(
       {
         source_alias: 'core',
@@ -400,18 +405,33 @@ describe('api client', () => {
             key: 'combinations',
             label: '组合配置',
             path: 'dimensions/combinations.csv',
+            preview: {
+              kind: 'table',
+              table_key: 'combinations',
+              default_limit: 20,
+              max_limit: 1000,
+              supports_offset: true,
+              supports_combination_filter: false,
+              filter_parameter: null,
+            },
+            preview_url: '/api/runs/core/demo/tables/combinations/preview',
             supports_combination_filter: false,
           },
         ],
       },
     )
 
-    expect(specs[0].path).toBe('/api/runs/core/demo/metrics/combinations')
+    expect(specs[0].path).toBe('dimensions/combinations.csv')
+    expect(specs[0].previewUrl).toBe(
+      '/api/runs/core/demo/tables/combinations/preview',
+    )
+    expect(specs[0].previewRows).toBe(20)
+    expect(specs[0].previewMaxRows).toBe(1000)
     expect(specs[0].supportsCombinationFilter).toBe(false)
   })
 
-  test('runTableSpecsFromDisplay maps breakdown tables to preview JSON routes', () => {
-    const specs = runTableSpecsFromDisplay(
+  test('runTableSpecsFromDisplay rejects missing runtime preview URL', () => {
+    expect(() => runTableSpecsFromDisplay(
       {
         source_alias: 'core',
         run_id: 'demo',
@@ -437,18 +457,23 @@ describe('api client', () => {
             key: 'performance_by_year',
             label: '按年绩效',
             path: 'breakdowns/year/performance_summary.csv',
+            preview: {
+              kind: 'table',
+              table_key: 'performance_by_year',
+              default_limit: 20,
+              max_limit: 1000,
+              supports_offset: true,
+              supports_combination_filter: true,
+              filter_parameter: 'combination_id',
+            },
             supports_combination_filter: true,
           },
         ],
       },
-    )
-
-    expect(specs[0].path).toBe(
-      '/api/runs/core/demo/breakdowns/year/performance_summary',
-    )
+    )).toThrow('missing preview_url')
   })
 
-  test('runTableSpecsFromDisplay rejects unsupported table path shapes', () => {
+  test('runTableSpecsFromDisplay rejects stale preview metadata', () => {
     expect(() =>
       runTableSpecsFromDisplay(
         {
@@ -476,12 +501,13 @@ describe('api client', () => {
               key: 'custom_alpha',
               label: '自定义 Alpha',
               path: 'custom/alpha.csv',
+              preview_url: '/api/runs/core/demo/tables/custom_alpha/preview',
               supports_combination_filter: true,
             },
           ],
         },
       ),
-    ).toThrow('Unsupported display table path')
+    ).toThrow('missing preview metadata')
   })
 
   test('fetch helpers stringify structured FastAPI validation details', async () => {
