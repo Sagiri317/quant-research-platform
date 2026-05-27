@@ -335,7 +335,7 @@ comparison report；这些目录仍属于私有本地 evidence，不应提交或
 
 - `manifest.display.tables[]` 已增加 portable preview descriptor；display validation 要求 preview metadata 与 table key、preview row limit、combination filter parameter 一致。
 - API evidence payload 保持 manifest portable，在运行时为 display table 补充 `preview_url`；generic table preview route 为 `/api/runs/{source_alias}/{run_id}/tables/{table_key}/preview`，旧 family preview routes 只作为兼容入口代理到同一 service。
-- React evidence workbench 只消费 API 下发的 preview metadata，不再从 display table path 推导 preview route；CSV upload UI 文案降级为 legacy/dev uploaded-panel smoke / compatibility path。
+- React evidence workbench 只消费 API 下发的 preview metadata，不再从 display table path 推导 preview route；chart surfaces 通过 bounded preview pagination 拼接当前组合时间轴，CSV 明细仍保持默认 preview row limit；CSV upload UI 文案降级为 legacy/dev uploaded-panel smoke / compatibility path。
 - `GET /api/factor-templates` 已拆到独立 factor-template route/service；pipeline route/service 只保留 snapshot/run 职责。
 - A-share evaluation 已有 service entry；CLI 和 pipeline runner 通过 service request/result 调用，schema 仍保持 `0.6`。
 - Pipeline Builder 执行 run 后会刷新 `/api/runs`、选择 `pipeline/<run_ref or run_id>` 并切回 evidence workbench；这属于本地 workbench 挂载体验，不改变 pipeline `start_from` 语义。

@@ -7,12 +7,12 @@
 | 字段 | 内容 |
 |---|---|
 | 记录名称 | `quant_research_platform_a_share_module` |
-| 当前状态 | Phase 1 completed; N1/N2/N3/N4/N7 merged to `main`; N8 contract consumer convergence planned; code-map, architecture docs, skills, and root docs synchronized |
-| 日期 | 2026-05-26 |
+| 当前状态 | Phase 1 completed; N1/N2/N3/N4/N7/N8 merged to `main`; 2023-2025 canonical / `rev_120d` evidence and chart pagination synchronized |
+| 日期 | 2026-05-27 |
 | 项目定位 | 本地多市场量化研究平台；A 股为第一版完整 market module |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
-| 主要产物 | `panel_full/research_panel_2014_2025.parquet`；`price_volume_factors_full/price_volume_factors_2014_2025.parquet` |
-| evaluation | schema `0.6` evaluation-layer-backed evaluation；`manifest.display` 驱动 API、下载和 evidence workbench |
+| 主要产物 | `panel_full/research_panel_2014_2025.parquet`；`price_volume_factors_full/price_volume_factors_2014_2025.parquet`；2023-2025 canonical / `rev_120d` evaluation samples；Factor Factory `rev_120d` smoke |
+| evaluation | schema `0.6` evaluation-layer-backed evaluation；`manifest.display` 驱动 API、下载、CSV preview 和 evidence workbench charts |
 | 公开边界 | CSMAR 明细数据、private reports 和可还原 vendor 数据不公开 |
 
 ## 方法证据
@@ -31,11 +31,12 @@
 - 默认窗口为 `20, 60, 120`；forward labels 为 `1, 5, 10, 20, 60, 120` 个交易日。
 - 历史 2024-2025 long-only 第一版诊断中，反转类因子是主要候选。
 - 历史 long-only 不变量曾检查通过：`portfolio_mode=long_only`、`short_count=0`、`short_return=0`，0 成本下 `net_portfolio_return == gross_portfolio_return == long_return`。
+- 当前 2023-2025 canonical sample 覆盖 `mom_20d`、`vol_20d`、`avg_amount_20d` 和 `rev_120d`；`rev_120d` parity shard 覆盖 dataframe/tensor 与 long-only/long-short。
+- Evidence workbench 图表通过 bounded preview pagination 展示当前组合时间轴；CSV 明细仍保持 preview row limit，完整数据走下载。
 
 ## 下一阶段事项
 
-- N2 frontend diagnostics display 和后端 `tradability_diagnostics` artifact/API 已合入 `main`。
-- N8 架构简化与合同消费收敛已进入路线图；它应在 N5/N6 大范围扩展前收敛 display preview/download helper、factor-template API、A-share service entry 和 legacy/dev upload 边界。
-- 2023-2025 canonical evaluation / Factor Factory 样例可按需重新生成，用于展示和回归验收。
+- N1/N2/N3/N4/N7/N8 均已合入 `main`，后续扩展应复用 display preview/download helper、factor-template API、A-share service entry 和 legacy/dev upload 边界。
+- 2023-2025 canonical evaluation、`rev_120d` parity shard 和 Factor Factory smoke 可作为后续展示与回归验收入口。
 - long-only 成本敏感性、regime、行业/市值中性化、风险暴露和正式组合约束分析仍需单独研究。
 - ML prediction pipeline 的 time split、防泄漏、model manifest 和失败实验记录仍需单独设计。

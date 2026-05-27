@@ -1,6 +1,7 @@
-﻿# 用途：停止由 start_private_workbench.ps1 记录的本项目 API/Web 进程。
-# 安全边界：只停止 PID 文件中记录且进程快照匹配的进程；不会按端口盲目杀进程。
+﻿# 用途：停止本项目本地 API/Web 进程。
+# 安全边界：优先停止 PID 文件中记录且进程快照匹配的进程；PID 文件缺失或失效时，只停止监听目标端口且命令行匹配本项目 API/Web 的进程。
 [CmdletBinding(SupportsShouldProcess = $true)]
+# 兼容 PID 文件丢失或被清空的场景：监听进程必须同时匹配端口和当前项目命令行。
 param(
     [int[]]$Ports = @(8000, 5173),
     [string]$ProjectRoot = ""
@@ -12,6 +13,7 @@ if (-not $ProjectRoot) {
 }
 $LogRoot = Join-Path $ProjectRoot ".codex\run-logs"
 $PidFile = Join-Path $LogRoot "workbench-pids.json"
+$ProjectRootSlash = $ProjectRoot.Replace("\", "/")
 
 function Get-RecordedWorkbenchPids {
     if (-not (Test-Path $PidFile)) {
@@ -72,7 +74,22 @@ function Test-ProjectProcess {
     if (Test-RecordedProcess -ProcessId $ProcessId) {
         return $true
     }
-    return $false
+    $current = Get-ProcessSnapshot -ProcessId $ProcessId
+    if ($null -eq $current) {
+        return $false
+    }
+    $commandLine = ([string]$current.commandLine).Replace("\", "/")
+    if ($commandLine.Contains("quant_research_platform.interfaces.api.app:app")) {
+        return $true
+    }
+    if (-not $commandLine.Contains($ProjectRootSlash)) {
+        return $false
+    }
+    return (
+        $commandLine.Contains("/web/node_modules/") -or
+        $commandLine.Contains("/vite/bin/vite.js") -or
+        ($commandLine.Contains("npm") -and $commandLine.Contains("run") -and $commandLine.Contains("dev"))
+    )
 }
 
 $connections = foreach ($port in $Ports) {
@@ -97,7 +114,7 @@ foreach ($processId in $processIds) {
     }
     $description = "pid=$processId name=$($process.ProcessName)"
     if (-not (Test-ProjectProcess -ProcessId $processId)) {
-        Write-Host "Skipped $description because it was not recorded by scripts\start_private_workbench.ps1"
+        Write-Host "Skipped $description because it was not recorded and does not look like this project's API/Web process"
         continue
     }
     if ($PSCmdlet.ShouldProcess($description, "Stop local workbench process")) {

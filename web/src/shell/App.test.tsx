@@ -1995,7 +1995,7 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=20&combination_id=combo_2',
+        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=1000&combination_id=combo_2',
       )
     })
     await waitFor(() => {
@@ -2005,7 +2005,7 @@ describe('App', () => {
       )
     })
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=20&combination_id=combo_2',
+      'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=1000&combination_id=combo_2',
     )
   })
 

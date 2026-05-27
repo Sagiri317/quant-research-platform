@@ -212,7 +212,7 @@ React workbench 的依赖方向是：
 web/src/shell -> web/src/features -> web/src/shared
 ```
 
-`web/src/features/evidence/` 通过 API evidence/display payload 消费由 `manifest.display` 驱动的表格、图表、CSV preview、report 和下载；`web/src/features/factor-studio/` 通过 `GET /api/factor-templates` 读取受控模板，并把 `factorDraft` 交给 `web/src/features/pipeline/` 的 Pipeline Builder；Pipeline Builder 执行 run 后刷新 `/api/runs`、选中 `pipeline/<run_ref or run_id>` 并切回 evidence workbench；`web/src/features/factor-factory/` 通过 Factor Factory API 浏览 run、table preview 和 artifact downloads；`web/src/features/uploads/` 是本地 CSV upload 兼容/调试路径，不是 A-share 私有主链路。
+`web/src/features/evidence/` 通过 API evidence/display payload 消费由 `manifest.display` 驱动的表格、图表、CSV preview、report 和下载；图表源表按 `preview.max_limit` 通过 `limit` / `offset` / `has_more` 分页拼接当前组合时间序列，CSV 明细仍保持 display preview row limit 并把完整行数据交给下载入口；`web/src/features/factor-studio/` 通过 `GET /api/factor-templates` 读取受控模板，并把 `factorDraft` 交给 `web/src/features/pipeline/` 的 Pipeline Builder；Pipeline Builder 执行 run 后刷新 `/api/runs`、选中 `pipeline/<run_ref or run_id>` 并切回 evidence workbench；`web/src/features/factor-factory/` 通过 Factor Factory API 浏览 run、table preview 和 artifact downloads；`web/src/features/uploads/` 是本地 CSV upload 兼容/调试路径，不是 A-share 私有主链路。
 
 交互 HTML 的连线按数据/契约可用流阅读，不逐条等同 HTTP request 方向；具体调用方向在入口节点详情里说明。默认布局以左到右主流向为准，局部上下回流用于减少交叉和遮挡。交互 HTML 允许少量复合节点：只有前端 UI 与后端 API 是单一路径、没有复用分叉、没有独立职责边界时才合并，并且节点必须显式标注为 `Frontend + API`。当前 `CSV Upload UI/API (legacy/dev)` 就是这种复合节点；Factor Factory UI 与 API、Pipeline Builder 与 Pipeline API、Factor Studio 与 factor-template endpoint 都保持拆分。
 

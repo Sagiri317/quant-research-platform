@@ -19,6 +19,7 @@ import { useTablePreview } from './useTablePreview'
 
 const TRADABILITY_DIAGNOSTICS_TABLE_KEY = 'tradability_diagnostics'
 const LATEST_PREVIEW_SUFFIX = '__latest'
+const MAX_CHART_PREVIEW_PAGES = 100
 
 export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0) {
   const [runState, setRunState] = useState<RunState>(EMPTY_RUN_STATE)
@@ -177,9 +178,9 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
       try {
         const payloads = await Promise.all(
           missingSpecs.map(async (spec) => {
-            const payload = await fetchTablePreview(
-              spec.previewUrl,
-              combinationPreviewLimit(spec, chartTableSpecs),
+            const payload = await fetchCombinationPreview(
+              spec,
+              chartTableSpecs,
               selectedCombinationId,
             )
             const latestPayload =
@@ -354,13 +355,110 @@ function latestPreviewKey(prefix: string, tableKey: string): string {
   return `${prefix}::${tableKey}${LATEST_PREVIEW_SUFFIX}`
 }
 
+type CombinationPreviewSpec = {
+  key: string
+  previewRows?: number
+  previewMaxRows?: number
+  previewUrl: string
+  supportsOffset?: boolean
+}
+
+async function fetchCombinationPreview(
+  spec: CombinationPreviewSpec,
+  chartTableSpecs: { key: string }[],
+  selectedCombinationId: string,
+): Promise<TablePayload> {
+  const limit = combinationPreviewLimit(spec, chartTableSpecs)
+  const payload = await fetchTablePreview(
+    spec.previewUrl,
+    limit,
+    selectedCombinationId,
+  )
+  if (!isChartTableSpec(spec, chartTableSpecs) || !spec.supportsOffset) {
+    return payload
+  }
+  return fetchRemainingChartPreviewPages(
+    spec,
+    payload,
+    selectedCombinationId,
+    limit,
+  )
+}
+
+async function fetchRemainingChartPreviewPages(
+  spec: CombinationPreviewSpec,
+  firstPayload: TablePayload,
+  selectedCombinationId: string,
+  limit: number,
+): Promise<TablePayload> {
+  if (!firstPayload.has_more || firstPayload.rows.length === 0) {
+    return firstPayload
+  }
+  const rows = [...firstPayload.rows]
+  const baseOffset =
+    typeof firstPayload.offset === 'number' ? firstPayload.offset : 0
+  let nextOffset = baseOffset + firstPayload.rows.length
+  const exactTotal =
+    firstPayload.total_rows_exact === true &&
+    typeof firstPayload.total_rows === 'number'
+      ? firstPayload.total_rows
+      : undefined
+  let currentHasMore = firstPayload.has_more
+  let pagesRead = 1
+
+  while (
+    currentHasMore &&
+    pagesRead < MAX_CHART_PREVIEW_PAGES &&
+    (exactTotal === undefined || nextOffset < exactTotal)
+  ) {
+    const page = await fetchTablePreview(
+      spec.previewUrl,
+      limit,
+      selectedCombinationId,
+      nextOffset,
+    )
+    pagesRead += 1
+    if (page.rows.length === 0) {
+      currentHasMore = false
+      break
+    }
+    rows.push(...page.rows)
+    nextOffset += page.rows.length
+    currentHasMore = page.has_more === true
+  }
+
+  return {
+    ...firstPayload,
+    has_more: currentHasMore,
+    limit,
+    rows,
+    total_rows:
+      exactTotal !== undefined && rows.length >= exactTotal
+        ? exactTotal
+        : currentHasMore
+          ? firstPayload.total_rows
+          : rows.length,
+    total_rows_exact:
+      exactTotal !== undefined && rows.length >= exactTotal
+        ? true
+        : !currentHasMore,
+  }
+}
+
 function combinationPreviewLimit(
   spec: { key: string; previewRows?: number; previewMaxRows?: number },
   chartTableSpecs: { key: string }[],
 ): number {
   const previewRows = spec.previewRows ?? 20
-  if (chartTableSpecs.some((chartSpec) => chartSpec.key === spec.key)) {
-    return Math.min(previewRows, spec.previewMaxRows ?? previewRows)
+  if (isChartTableSpec(spec, chartTableSpecs)) {
+    return spec.previewMaxRows ?? previewRows
   }
   return previewRows
+}
+
+function isChartTableSpec(
+  spec: { key: string },
+  chartTableSpecs: { key: string }[],
+): boolean {
+  return chartTableSpecs.some((chartSpec) => chartSpec.key === spec.key)
 }

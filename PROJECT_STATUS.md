@@ -1,5 +1,18 @@
 # Quant Research Platform 项目状态
 
+## 2026-05-27 evidence workbench chart pagination signal
+
+React evidence workbench 已修复图表时间轴截断问题：`manifest.display.charts`
+引用的当前组合图表源表通过 API 提供的 `preview.max_limit` 做 bounded page
+读取，并在 `has_more=true` 时用 `offset` 自动继续拼接。CSV 明细仍保持
+display preview row limit，完整数据继续通过 direct artifact download / ZIP
+download 获取；前端不重新计算 IC、returns、weights、turnover、eligibility 或
+tradability。
+
+本轮同时收紧 `scripts/stop_workbench.ps1`：PID 文件丢失或被清空时，脚本会在
+目标端口上 fallback 识别当前项目 API/Web 进程并停止，避免本地 FastAPI/Vite
+服务残留。该脚本仍只用于本地 workbench，不授权广义进程清理或目录删除。
+
 ## 2026-05-27 2023-2025 canonical sample regeneration signal
 
 已按需生成 2023-2025 private canonical evaluation / Factor Factory 样例，并把
@@ -185,7 +198,7 @@ Phase 1 之后下一阶段进展：
 
 1. 单独推进 N5 风险/regime/成本/容量扩展；不要把 ML prediction handoff 混入该分支。
 2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor evaluation contract 分离。
-3. 基于已补齐的 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison 与浏览器验收作为后续回归门槛。
+3. 基于已补齐的 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison、图表分页预览和浏览器验收作为后续回归门槛。
 4. 暂缓 `tradability_diagnostics_summary`：当前因子分析流程优先补完整，后续再决定是否新增 artifact/API summary。
 5. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
 6. 如需单个 32-combination 2023-2025 run，先处理 weights/remap 低内存写出问题，不要直接扩大一次性 full run。
@@ -193,4 +206,4 @@ Phase 1 之后下一阶段进展：
 
 ## Root Handoff / 根目录回传信号
 
-Open 2026-05-27: 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和 frontend acceptance 证据已补齐；后续分别推进 N5/N6。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。
+Open 2026-05-27: 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。

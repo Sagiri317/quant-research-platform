@@ -129,7 +129,106 @@ describe('useRunEvidence diagnostics previews', () => {
       expect(screen.getByTestId('chart-rows')).toHaveTextContent('2'),
     )
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/chart_demo/tables/cumulative_returns/preview?limit=20&combination_id=combo_b',
+      'http://127.0.0.1:8000/api/runs/core/chart_demo/tables/cumulative_returns/preview?limit=200&combination_id=combo_b',
+    )
+  })
+
+  test('paginates chart previews until the selected combination chart is complete', async () => {
+    const run: RunSummary = {
+      data_stage: 'synthetic_only',
+      domain: 'core_synthetic',
+      kind: 'factor',
+      mean_turnover: 0,
+      n_rows_evaluated: 10,
+      project: 'quant-research-platform',
+      public_run_id: 'core/paged_chart_demo',
+      run_id: 'paged_chart_demo',
+      source_alias: 'core',
+      total_cost: 0,
+      uses_external_data: false,
+      weight_method: 'equal_weight_quantile',
+    }
+    const tables = {
+      combinations: tablePayload([{ combination_id: 'combo_a' }]),
+      cumulative_returns: tablePayload([]),
+      ic: tablePayload([]),
+      returns: tablePayload([]),
+    }
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/runs/core/paged_chart_demo/evidence')) {
+        const display = displayPayload(tables, { runId: 'paged_chart_demo' })
+        display.charts = display.charts.filter(
+          (chart) => chart.id === 'cumulative_returns',
+        )
+        const cumulativeReturns = display.tables.find(
+          (table) => table.key === 'cumulative_returns',
+        )
+        if (cumulativeReturns) {
+          cumulativeReturns.preview.max_limit = 1
+        }
+        return jsonResponse(evidencePayload({ display, tables }))
+      }
+      if (
+        url.includes(
+          '/api/runs/core/paged_chart_demo/tables/cumulative_returns/preview',
+        )
+      ) {
+        if (url.includes('offset=1')) {
+          return jsonResponse({
+            ...tablePayload([
+              {
+                combination_id: 'combo_a',
+                timestamp: '2026-01-02',
+                cumulative_net_return: 0.2,
+                drawdown: 0,
+              },
+            ]),
+            has_more: false,
+            limit: 1,
+            offset: 1,
+            total_rows: 2,
+            total_rows_exact: false,
+          })
+        }
+        return jsonResponse({
+          ...tablePayload([
+            {
+              combination_id: 'combo_a',
+              timestamp: '2026-01-01',
+              cumulative_net_return: 0.1,
+              drawdown: 0,
+            },
+          ]),
+          has_more: true,
+          limit: 1,
+          offset: 0,
+          total_rows: 2,
+          total_rows_exact: false,
+        })
+      }
+      return tableResponse([])
+    }) as typeof fetch
+
+    function EvidenceProbe() {
+      const { chartTables } = useRunEvidence(run)
+      return (
+        <div data-testid="chart-rows">
+          {chartTables.cumulative_returns?.rows.length ?? 0}
+        </div>
+      )
+    }
+
+    render(<EvidenceProbe />)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('chart-rows')).toHaveTextContent('2'),
+    )
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/runs/core/paged_chart_demo/tables/cumulative_returns/preview?limit=1&combination_id=combo_a',
+    )
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/runs/core/paged_chart_demo/tables/cumulative_returns/preview?limit=1&offset=1&combination_id=combo_a',
     )
   })
 

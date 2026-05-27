@@ -178,6 +178,10 @@ breakdowns/month/
 - download presets。
 
 API 和 frontend 不允许绕过它访问隐式文件。
+Evidence workbench 的图表可以用 preview API 读取当前组合的完整时间序列，
+但必须按 `preview.max_limit` 分页，通过 `offset` / `has_more` 继续拼接；
+不得为了长样本把单次 `limit` 硬编码到 display contract 之外。CSV 明细预览
+仍保持 display preview row limit，完整行数据走 direct download / ZIP download。
 N2 tradability diagnostics 作为 `diagnostics/tradability_diagnostics.csv`
 通过 `manifest.display` 暴露；前端应通过常规 diagnostics preview/download API
 消费该表，不重新计算 eligibility、can_enter 或 can_exit 计数。
