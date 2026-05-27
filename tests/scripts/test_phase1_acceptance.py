@@ -122,6 +122,7 @@ def test_factory_smoke_output_root_is_private_reports(monkeypatch, tmp_path):
             return (
                 _candidate("momentum_60d__window_20@1"),
                 _candidate("reversal_20d__window_20@1"),
+                _candidate("reversal_20d__window_120@1"),
             )
 
     class FakeRegistryFactory:
@@ -138,6 +139,7 @@ def test_factory_smoke_output_root_is_private_reports(monkeypatch, tmp_path):
         return [
             _record("momentum_60d__window_20@1", factory_run),
             _record("reversal_20d__window_20@1", factory_run),
+            _record("reversal_20d__window_120@1", factory_run),
         ]
 
     monkeypatch.setattr(phase1_acceptance, "PROJECT_ROOT", tmp_path)
@@ -163,6 +165,7 @@ def test_factory_smoke_output_root_is_private_reports(monkeypatch, tmp_path):
     summary_path = phase1_acceptance.run_factory_smoke("unit_stamp")
 
     expected_root = tmp_path / "reports/private_real/ff/unit_stamp"
+    assert captured["candidate_count"] == 3
     assert captured["output_dir"] == expected_root
     assert captured["base_output_root"] == expected_root
     assert summary_path == expected_root / "phase1_factory_smoke_summary.json"

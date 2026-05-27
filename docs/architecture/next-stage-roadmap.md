@@ -12,7 +12,7 @@
 | N4 | 前端 feature split | P1 | merged to `main` | 拆分当前平铺 workbench，降低后续功能耦合 |
 | N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
-| N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 已验证，完整 2023-2025 canonical regeneration 按需执行 |
+| N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 曾用于验收，当前保留 2023-2025 canonical sample / `rev_120d` parity shard |
 | N8 | 架构简化与合同消费收敛 | P1 | merged to `main` | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
 
 ## 当前推荐顺序
@@ -20,17 +20,16 @@
 N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同继续。
 
 ```text
-1. Optional 2023-2025 canonical evaluation / Factor Factory regeneration
-2. N5 风险、regime、成本和容量扩展
-3. N6 ML prediction handoff
-4. Pipeline history UI
+1. N5 风险、regime、成本和容量扩展
+2. N6 ML prediction handoff
+3. Pipeline history UI
 ```
 
 原因：
 
 - N2 已合入 `main`：后端支持 `diagnostics/tradability_diagnostics.csv`，frontend evidence workbench 已基于 N7 `combination_id` 和 schema `0.6` 合同消费并展示诊断结果。
 - N8 已在 N5/N6 大范围新增 artifact/API/frontend 合同前合入；后续扩展应复用 display preview、download allowlist、template API 和 pipeline entry helper。
-- 完整 2023-2025 canonical regeneration 仍可作为公开安全展示或回归样例的后续验收步骤，但不再阻塞 N7 集成。
+- 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和 frontend acceptance 已生成；后续不要直接扩大一次性 full run。
 - N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
 - N6 的 prediction handoff 需要稳定表达 date range、feature / signal、label、kernel、portfolio mode、factor set 和输入身份，并能在同一个 evaluation run 页面里切换结果。
 
@@ -242,7 +241,7 @@ benchmark profile set config
 tradability/evaluation config when it changes behavior
 ```
 
-默认展示样例：
+原 N7 目标展示样例：
 
 ```text
 date range: 2023-01-01 -> 2025-12-31
@@ -254,11 +253,17 @@ factors: mom_20d, vol_20d, avg_amount_20d
 cost_bps: 0
 ```
 
-这会形成 1 个默认 `EvaluationMatrixRun`，内部至少包含 24 个 `combination_id` 结果切片：
+该目标形态会形成 1 个默认 `EvaluationMatrixRun`，内部至少包含 24 个
+`combination_id` 结果切片：
 
 ```text
 2 kernels x 2 portfolio modes x 2 labels x 3 features = 24 result combinations
 ```
+
+当前本机已验收并保留的样例采用低内存 shard 口径：8-combination canonical
+run 覆盖 4 features x 2 labels x dataframe x long_only，另以 `rev_120d`
+parity shard 覆盖 2 kernels x 2 portfolio modes x 2 labels。单个
+32-combination 2023-2025 full run 需先处理 weights/remap 低内存写出路径。
 
 其中 `factor_set` 是一起输入计算的 feature 批次；第一阶段仍保持每个 feature column 单独评价。未来如果要评价多因子整体 signal，应作为新的 signal/model 结果轴加入，而不是取代单 feature 评价。
 
@@ -274,18 +279,10 @@ cost_bps: 0
 
 历史样例状态：
 
-现有 2023-2025 smoke 和 Factor Factory 样例已保留为历史参考目录，不进入 N7 正式 compare contract。当前目录包括：
-
-```text
-reports/private_real/factor_evaluation/smoke_2023_2025_dataframe_long_only_baseline_before_2023_2025_regen
-reports/private_real/factor_evaluation/smoke_2023_2025_dataframe_long_short_baseline_before_2023_2025_regen
-reports/private_real/factor_evaluation/smoke_2023_2025_tensor_long_only_baseline_before_2023_2025_regen
-reports/private_real/factor_evaluation/smoke_2023_2025_tensor_long_short_baseline_before_2023_2025_regen
-reports/private_real/ff/0523_baseline_before_2023_2025_regen
-reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_regen
-```
-
-这些目录位于 `reports/private_real/`，仍属于私有本地 evidence，不应提交或公开。
+早期 2023-2025 smoke 和 Factor Factory baseline 样例只保留为历史记录，不进入 N7
+正式 compare contract。当前本地 `reports/private_real/` 保留 2023-2025 canonical
+sample、`rev_120d` parity shard、当前 Factor Factory smoke 和 acceptance
+comparison report；这些目录仍属于私有本地 evidence，不应提交或公开。
 
 验收边界：
 
@@ -300,9 +297,10 @@ reports/private_real/ff/20260523_acceptance_latest_baseline_before_2023_2025_reg
 - dataframe / tensor 共同覆盖结果应能做 parity 对照：结构和离散字段 exact match；same-kernel 回归建议 `rtol=1e-12, atol=1e-12`；dataframe/tensor common metrics 建议 `rtol=1e-9, atol=1e-10`；cumulative returns / drawdown 等长链路指标建议 `rtol=1e-8, atol=1e-10`。
 - `compare_evaluation_sets` 应改成默认低内存的网页/API summary comparison，只读 summary、manifest、combinations 和必要 summary metrics，继续支持大样本快速比较，并作为网页 comparison cards / tables / charts 的数据源。
 - 新增更详细的低内存 Evaluation Comparison Report，只输出表格、JSON 和 Markdown 报告，不进入主网页展示；它用于比较 schema `0.6` combinations 和 kernel parity。大样本验收不得使用会读完整 weights 或大时序表的 comparison 路径。
-- 第一晚真实数据验收先跑 `reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1`，覆盖 2023-01-01 到 2023-06-30 的 24 个 result combinations；不要求和旧样例做结果一致性比较。
-- 完整 canonical root 固定为 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`，应等 schema/unit tests、2023H1 real smoke、low-memory summary comparison、Evaluation Comparison Report、parity 和前端 20 行 preview 通过后再跑。
-- 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致。
+- 2023H1 smoke 曾作为第一晚真实数据验收，覆盖 2023-01-01 到 2023-06-30 的 24 个 result combinations；该本地 run 目录已在 2023-2025 样例验收后清理，不再作为当前可浏览证据。
+- 当前 canonical root 为 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`，覆盖 4 features x 2 labels x dataframe x long_only；`reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1` 覆盖 `rev_120d` 的 kernel / portfolio mode parity。
+- 32-combination 2023-2025 full run 需要先处理 weights/remap 低内存写出路径，或继续按 shard 作为正式回归输入。
+- 2023-2025 样例生成后，应在实现验收阶段比较新实现输出是否一致。
 - 对比不读取或打印原始 CSMAR 私有数据。
 - 前端 root 配置后续可以指向新的 2023-2025 evaluation 展示 root。
 

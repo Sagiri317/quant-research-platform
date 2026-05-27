@@ -222,6 +222,7 @@ def run_factory_smoke(stamp: str) -> Path:
     selected_ids = {
         "momentum_60d__window_20@1",
         "reversal_20d__window_20@1",
+        "reversal_20d__window_120@1",
     }
     candidates = tuple(
         candidate

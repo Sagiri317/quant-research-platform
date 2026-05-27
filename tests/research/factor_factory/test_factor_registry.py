@@ -24,6 +24,7 @@ def test_factor_template_registry_loads_controlled_a_share_templates() -> None:
         "momentum_60d__window_60@1",
         "reversal_20d__window_20@1",
         "reversal_20d__window_60@1",
+        "reversal_20d__window_120@1",
     }
     reversal = by_id["reversal_20d__window_20@1"]
     assert reversal.dependencies == ("close",)
@@ -31,6 +32,7 @@ def test_factor_template_registry_loads_controlled_a_share_templates() -> None:
     assert reversal.parameters == {"window": 20}
     assert reversal.time_semantics["decision_time_column"] == "trade_date"
     assert by_id["momentum_60d__window_60@1"].output_column == "mom_60d"
+    assert by_id["reversal_20d__window_120@1"].output_column == "rev_120d"
     assert by_id["liquidity_20d__window_20@1"].output_column == "avg_amount_20d"
     assert by_id["liquidity_20d__window_20@1"].inputs == ("amount",)
     assert reversal.sample_start == "2024-01-01"

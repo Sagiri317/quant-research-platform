@@ -1,5 +1,41 @@
 # Quant Research Platform 项目状态
 
+## 2026-05-27 2023-2025 canonical sample regeneration signal
+
+已按需生成 2023-2025 private canonical evaluation / Factor Factory 样例，并把
+受控 A-share reversal template grid 扩展到 `20,60,120`，使 Factor Factory
+可自然生成 `reversal_20d__window_120@1` / `rev_120d` 候选。artifact schema
+仍为 `0.6`，Factor Factory artifact 仍为 `0.1`，未引入 N5/N6 合同。
+
+本轮生成物：
+
+- `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`：2023-2025
+  canonical evaluation sample，覆盖
+  `mom_20d, vol_20d, avg_amount_20d, rev_120d x 2 labels x dataframe x long_only`
+  共 8 个 combinations。
+- `reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1`：
+  120 日反转 parity shard，覆盖
+  `rev_120d x 2 labels x 2 kernels x 2 portfolio modes` 共 8 个 combinations。
+- `reports/private_real/ff/20260527_rev120_factory_smoke_v1`：Factor Factory
+  smoke，候选为 `momentum_60d__window_20@1`、`reversal_20d__window_20@1` 和
+  `reversal_20d__window_120@1`，3 个候选全部成功。
+- `reports/private_real/factor_evaluation/comparisons/20260527_n7_2023_2025_rev120_acceptance`：
+  低内存 Evaluation Comparison Report，比较 canonical sample 与 `rev_120d`
+  parity shard，并生成 CSV/JSON/Markdown/parity 明细。
+
+浏览器验收已通过本地 FastAPI + Vite workbench：run list 展示
+`n7_private/n7_eval_2023_2025_v1` 与
+`n7_private/n7_eval_2023_2025_rev120_v1`；evidence workbench 可选中两者；
+canonical sample 的 feature selector 包含
+`mom_20d, vol_20d, avg_amount_20d, rev_120d`；CSV 明细通过 artifact preview
+限量展开；结果文件下载列表来自 `manifest.display`；Factor Factory 视图显示
+`f_factory 3/3 success`，候选表包含 `reversal_20d__window_120@1` / `rev_120d`。
+
+一次性生成 4 features x 2 labels x 2 kernels x 2 portfolio modes 的 32-combination
+full run 在当前本机内存条件下触发 weights materialization 内存峰值；因此当前可用验收样例采用
+8-combination canonical run + `rev_120d` parity shard。后续如需单个 32-combination
+run，应先设计低内存 weights/remap 写出路径，或继续按 shard 作为正式回归输入。
+
 ## 2026-05-26 N8 contract consumer convergence closeout signal
 
 N8 架构简化与合同消费收敛已合入 `main`。本轮保持 artifact schema `0.6`：
@@ -32,13 +68,13 @@ schema `0.6`，一个 API-visible run 内含多个 `combination_id`；第一阶�
 `--features` 和一行多值 `--labels / --kernels / --portfolio-modes`，保留
 CLI/backend-only `--input-file` 与不写 artifact 的 `--dry-run`。
 
-已生成并验证 private smoke：
-`reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1`，覆盖
-24 个 combinations。验证包括 schema 0.6 artifact load、低内存 comparison、
-CSV/JSON/Markdown Evaluation Comparison Report、dataframe/tensor parity、API
-evidence 和 Parquet weights 20 行 preview。完整
+曾生成并验证 2023H1 private smoke，覆盖 24 个 combinations。验证包括
+schema 0.6 artifact load、低内存 comparison、CSV/JSON/Markdown
+Evaluation Comparison Report、dataframe/tensor parity、API evidence 和 Parquet
+weights 20 行 preview。该历史 smoke run 目录已在 2023-2025 样例验收后清理；
+当前保留的
 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` canonical regeneration
-本轮未提前执行。
+已在 2026-05-27 按 8-combination canonical run 生成。
 
 2026-05-26 最终 review 修复已合入当前 `main`：`config.json` / `lineage.json` 等
 public-downloadable metadata 在 writer、direct download、selected ZIP 和 ZIP
@@ -125,6 +161,9 @@ Phase 1 之后下一阶段进展：
 - `data/interim_private/csmar/`：规范化、裁剪、可人工审计的 interim 层。
 - `data/processed_private/csmar/panel_full/research_panel_2014_2025.parquet`：full research panel。
 - `data/processed_private/csmar/price_volume_factors_full/price_volume_factors_2014_2025.parquet`：slim factor and label table。
+- `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`：当前 2023-2025 schema `0.6` canonical sample，含 `rev_120d`。
+- `reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1`：当前 2023-2025 `rev_120d` kernel / portfolio mode parity shard。
+- `reports/private_real/ff/20260527_rev120_factory_smoke_v1`：当前 Factor Factory `rev_120d` smoke 样例。
 - `reports/private_real/factor_evaluation/full_2024_2025/`：历史 2024-2025 long-only full-sample factor evaluation；旧 schema run 已退出当前有效 run 口径。
 
 这些产物是私有真实数据产物，不作为公开材料提交或复制。
@@ -144,13 +183,14 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 按需重新生成 2023-2025 canonical evaluation / Factor Factory 样例，并保留低内存 comparison、Evaluation Comparison Report、dataframe/tensor parity 和 API/frontend preview 作为验收门槛。
-2. 单独推进 N5 风险/regime/成本/容量扩展；不要把 ML prediction handoff 混入该分支。
-3. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor evaluation contract 分离。
-4. 后续补一个窄范围 `tradability_diagnostics_summary` 任务：保留当前 Eligibility / Tradability 诊断卡片作为单切片快速提示，但新增 artifact/API summary 后再展示所有交易日平均 `eligible_rate`、`can_enter_rate`、`can_exit_rate`、`entry_blocked_rate`、`exit_blocked_rate` 等指标；前端不得从 preview 行临时计算全期间均值。
+1. 单独推进 N5 风险/regime/成本/容量扩展；不要把 ML prediction handoff 混入该分支。
+2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor evaluation contract 分离。
+3. 基于已补齐的 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison 与浏览器验收作为后续回归门槛。
+4. 暂缓 `tradability_diagnostics_summary`：当前因子分析流程优先补完整，后续再决定是否新增 artifact/API summary。
 5. 继续扩展前保留当前 P4/P5 smoke 命令作为回归门槛，并为新增能力写明确验收口径。
-6. 已合并的 N1/N2/N3/N4/N7/N8 工作树和分支可在用户批准 exact paths 后清理。
+6. 如需单个 32-combination 2023-2025 run，先处理 weights/remap 低内存写出问题，不要直接扩大一次性 full run。
+7. 已合并的 N1/N2/N3/N4/N7/N8 工作树和分支可在用户批准 exact paths 后清理。
 
 ## Root Handoff / 根目录回传信号
 
-Closed 2026-05-26: N8 contract consumer convergence 已合入 `main`；根目录 planning/status 已同步为“按需重生成 canonical 样例，再分别推进 N5/N6”。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。
+Open 2026-05-27: 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和 frontend acceptance 证据已补齐；后续分别推进 N5/N6。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。

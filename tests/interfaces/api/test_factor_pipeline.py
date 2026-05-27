@@ -44,7 +44,7 @@ def test_factor_templates_are_loaded_from_config() -> None:
     assert reversal["outputs"] == ["rev_20d"]
     assert "existing_factors" in reversal["capabilities"]
     assert reversal["grid_parameter"] == "window"
-    assert reversal["grid_values"] == ["20", "60"]
+    assert reversal["grid_values"] == ["20", "60", "120"]
 
 
 def test_pipeline_snapshot_writes_config_and_checkpoints(tmp_path) -> None:

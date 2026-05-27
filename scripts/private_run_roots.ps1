@@ -8,4 +8,4 @@ $QrpPrivateRunRoots = @(
 ) -join [System.IO.Path]::PathSeparator
 
 $QrpPipelineOutputRoot = "reports/private_real/pipeline_runs"
-$QrpFactorFactoryRoot = "reports/private_real/ff/20260525_n7_ff_smoke_v2/factor_factory"
+$QrpFactorFactoryRoot = "reports/private_real/ff/20260527_rev120_factory_smoke_v1/factor_factory"

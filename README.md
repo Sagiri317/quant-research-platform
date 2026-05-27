@@ -23,10 +23,15 @@ Schema `0.6` 的核心输出包括 `portfolio/weights.parquet`、
 Pipeline Builder payloads 和 saved snapshots 不暴露该字段。`--dry-run` 会检查
 输入文件、日期覆盖、required columns、组合展开和输出目录，不写 artifact。
 
-已完成 2023H1 private smoke：
-`reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1`，覆盖
-`3 features x 2 labels x 2 kernels x 2 portfolio modes = 24` 个 combinations。
-完整 2023-2025 canonical regeneration 尚未在本轮提前执行。
+历史 2023H1 private smoke 曾覆盖
+`3 features x 2 labels x 2 kernels x 2 portfolio modes = 24` 个 combinations；
+该本地 run 目录已在 2023-2025 样例验收后清理，不再作为当前可浏览证据。
+当前保留的 2023-2025 private canonical 样例：
+`reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` 覆盖
+`mom_20d, vol_20d, avg_amount_20d, rev_120d x 2 labels x dataframe x long_only = 8`
+个 combinations；`reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1`
+覆盖 `rev_120d x 2 labels x 2 kernels x 2 portfolio modes = 8` 个 combinations，
+用于 120 日反转的 kernel / portfolio mode parity smoke。
 
 本项目是本地多市场量化研究平台。当前第一个完整 market module 是 A 股：它把用户已批准的本地 CSMAR 数据转换为可复现的 interim 数据、research panel、factor table、pipeline snapshots 和 evaluation artifacts，并在同一项目内提供 evaluation layer、artifact contract、FastAPI evidence API 和 React evidence workbench。
 

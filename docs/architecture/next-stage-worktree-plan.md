@@ -11,7 +11,7 @@
 - `main` 已包含 N4 frontend feature split。
 - `main` 已包含 N7 A 股 evaluation run identity、schema `0.6`、`combination_id`、kernel 维度、Factor Factory N7 artifact 读取和 public-downloadable metadata 脱敏。
 - `main` 已包含 N8 contract consumer convergence：portable display preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案。
-- 2023-2025 smoke evaluation 与 Factor Factory 旧样例已保留为 `*_baseline_before_2023_2025_regen` 历史参考目录，不进入 N7 正式 compare contract。
+- 早期 2023-2025 smoke evaluation 与 Factor Factory 旧样例只保留为历史记录，不进入 N7 正式 compare contract；当前本地 `reports/private_real/` 保留 2023-2025 canonical、`rev_120d` parity shard 和当前 Factor Factory smoke。
 - Pipeline 对外语言固定为 snapshot vs run：
   - `POST /api/pipeline-snapshots` 只保存配置。
   - `POST /api/pipeline-runs` 执行到 evaluation。
@@ -34,7 +34,7 @@
 | `codex/tradability-artifacts` | N2 后端 artifact/API 诊断 | merged to `main` | `diagnostics/tradability_diagnostics.csv` 最初在 schema `0.5` 期间落地，当前 schema `0.6` 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露 |
 | `codex/artifact-zip-packaging` | N3 ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py` |
 | `codex/frontend-feature-split` | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
-| `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 已落地；完整 2023-2025 canonical regeneration 按需执行 |
+| `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 曾用于验收；当前保留 2023-2025 canonical / `rev_120d` evidence |
 | `codex/tradability-workbench` | N2 frontend diagnostics display | merged to `main` | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片仅在 preview payload 标记 `total_rows_exact=true` 时用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
 | `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | merged to `main` | `manifest.display.tables[]` portable preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案已落地 |
 
@@ -71,8 +71,8 @@
    - `compare_evaluation_sets` 应改成默认低内存的网页/API summary comparison，只读 summary、manifest、combinations 和必要 summary metrics，继续支持大样本快速比较，并作为网页 comparison cards / tables / charts 的数据源。
    - 新增更详细的低内存 Evaluation Comparison Report，只输出表格、JSON 和 Markdown 报告，不进入主网页展示；它用于比较 schema `0.6` combinations 和 kernel parity。大样本验收不得使用会读完整 weights 或大时序表的 comparison 路径。
    - dataframe / tensor 共同覆盖结果应做 parity 对照：结构 exact match；same-kernel 回归建议 `rtol=1e-12, atol=1e-12`；dataframe/tensor common metrics 建议 `rtol=1e-9, atol=1e-10`；cumulative path metrics 建议 `rtol=1e-8, atol=1e-10`。
-   - 第一晚真实数据验收先跑 `reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1`，覆盖 2023-01-01 到 2023-06-30 的 24 个 result combinations；不要求和旧样例做结果一致性比较。
-   - 完整 canonical root 固定为 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`，应等 schema/unit tests、2023H1 real smoke、low-memory summary comparison、Evaluation Comparison Report、parity 和前端 20 行 preview 通过后再跑。
+   - 2023H1 real smoke 曾作为第一晚真实数据验收，覆盖 2023-01-01 到 2023-06-30 的 24 个 result combinations；该本地 run 目录已在 2023-2025 样例验收后清理，不再作为当前可浏览证据。
+   - 当前 canonical root 固定为 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`；`reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1` 保留 `rev_120d` kernel / portfolio mode parity evidence。
    - `long_short` 在 N7 中是诊断组合口径，不声明真实可融券做空或可交易策略。
    - 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致，不打印或公开原始 CSMAR 数据。
 
