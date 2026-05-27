@@ -1,5 +1,22 @@
 # Quant Research Platform 项目状态
 
+## 2026-05-28 schema 0.7 diagnostics spec closeout signal
+
+N5 / schema `0.7` diagnostics framework spec 已完成规划收口，当前重点转为下一对话编写
+implementation plan。spec 决策包括：schema `0.7` 完全不兼容 schema `0.6`；新 run
+生成完整 evaluation_set artifact；`run_context.json` 合并原 `config.json` /
+`lineage.json`；required diagnostics 合同包含 `dimensions/diagnostic_policies.csv`、
+`diagnostics/diagnostic_summary.csv`、`diagnostics/diagnostic_metrics.csv` 和
+`input_quality/coverage_summary.csv`；conditional materialized views 由
+`DiagnosticPolicy.output_tables[]` 与 `DiagnosticsSpec.materialized_views[]` 共同触发；
+runtime / API / artifact / frontend / test 命名不使用 `N5` / `n5_`。
+
+本轮多次 schema review 的结论已沉淀到项目维护 skill：后续 schema 合同以代码 schema
+registry 和测试作为字段数、grain、unique key、required-if / nullable-if 规则的 source of
+truth；规划文档只冻结架构和不可逆合同。下一步建议写最小 vertical-slice implementation
+plan：先实现 schema registry、required files、writer/loader validation、`manifest.display`、
+API preview/download 和最小 generic frontend display，再逐步补 conditional diagnostics views。
+
 ## 2026-05-27 evidence workbench chart pagination signal
 
 React evidence workbench 已修复图表时间轴截断问题：`manifest.display.charts`

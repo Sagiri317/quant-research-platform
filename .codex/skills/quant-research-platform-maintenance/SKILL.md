@@ -58,11 +58,13 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 ## Contract Work Loop
 
 1. Define invariants first: artifact type, schema version, table names, required columns, `combination_id` semantics, `manifest.display` tables/downloads/presets/charts, API-visible identity, and low-memory behavior.
-2. Map every enforceable invariant to pytest, Vitest, or an existing static check before relying on review text. Add positive and negative coverage when code changes are in scope.
-3. Update producer, writer, loader validation, lightweight run index, API payload/download behavior, frontend consumers, tests, docs, and code maps in the same round when the contract changes.
-4. Remove retired compatibility in one pass when old generated runs are no longer supported. Search for stale schema versions, retired summary fields, old table names, and frontend-only shortcuts.
-5. Review the diff by surface: artifact contract, API/downloads, frontend UI, A-share pipeline/runtime, Factor Factory, tests/fixtures, docs/skills, generated outputs, and gitignore.
-6. For docs-only drift, verify against current code paths before preserving command examples or path names.
+2. For every artifact table, define the field list, grain, unique key / sort key, status fields, and missing-input semantics together. Do not accept a table contract where one of those pieces is only implied by prose.
+3. Treat code schema registries and tests as the source of truth for field counts, required/conditional/optional totals, `required_if` / `nullable_if` rules, and generated file indexes. Markdown may explain the contract, but should not remain the only place where counts or keys are maintained.
+4. Map every enforceable invariant to pytest, Vitest, or an existing static check before relying on review text. Add positive and negative coverage when code changes are in scope.
+5. Update producer, writer, loader validation, lightweight run index, API payload/download behavior, frontend consumers, tests, docs, and code maps in the same round when the contract changes.
+6. Remove retired compatibility in one pass when old generated runs are no longer supported. Search for stale schema versions, retired summary fields, old table names, and frontend-only shortcuts.
+7. Review the diff by surface: artifact contract, API/downloads, frontend UI, A-share pipeline/runtime, Factor Factory, tests/fixtures, docs/skills, generated outputs, and gitignore.
+8. For docs-only drift, verify against current code paths before preserving command examples or path names.
 
 ## Rule Placement
 
@@ -77,7 +79,10 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 For artifact/API/frontend contract work, explicitly review these invariants before calling the branch ready:
 
 - Schema required files and columns are enforced by both the full loader and any lightweight index/list path that makes runs API-visible.
+- Schema field counts, directory totals, required/conditional/optional status, table grain, unique keys, sort keys, and registry appendix entries agree with each other.
+- Required-if, nullable-if, sentinel, and family-specific validation rules are represented in schema registry/tests rather than only in prose.
 - `manifest.display` remains the only exposure source for evidence payloads, table previews, direct downloads, ZIP downloads, frontend tables, charts, and download presets.
+- `manifest.display.tables[].path` and download item paths resolve only to run-relative paths declared in `manifest.artifacts`.
 - Preview endpoints have bounded defaults, hard maximum limits, and clear low-memory metadata such as `has_more` and whether row counts are exact.
 - `manifest.display.tables[].key` values are unique. Duplicate keys must fail artifact validation because table lookup, API preview, frontend state, and downloads all treat the key as a single contract identity.
 - Download services package files from manifest-resolved artifact paths and do not full-load Parquet tables for metadata-only or selected-file downloads.
@@ -95,6 +100,8 @@ For artifact/API/frontend contract work, explicitly review these invariants befo
 
 - Fix confirmed P0/P1/P2 issues in the same round when they affect the requested contract, correctness, memory safety, private-data safety, or user-visible behavior.
 - Do not expand the release-blocking scope for P3 cleanup, future hardening, or historical documentation that is intentionally marked as old context. Record it as residual risk when it is not part of the current change.
+- For planning specs, run at most one broad multi-perspective review and one cold-start review before moving to implementation planning. If additional issues keep appearing after that, convert the contract into schema registry/tests instead of expanding Markdown prose.
+- Use three independent review lenses for broad schema work: schema/field consistency, engineering/API/display contract, and quant research semantics. Avoid repeated local-only review loops that keep finding the same synchronization class.
 - After each fix, run the narrowest relevant test or static check and do a focused re-review of the touched surface.
 - After route/service entry splits, update wrapper tests to monkeypatch the symbol that the tested module actually resolves, usually the imported service entry in the wrapper module. Do not keep tests patched to retired lower-level symbols just because they existed before the split.
 - Do one final cold-start review after the relevant broad verification passes, or earlier if broad verification exposes a new failure domain.
