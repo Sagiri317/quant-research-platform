@@ -69,7 +69,19 @@ evaluations/                                         # 统一评价系统，接�
   neutralization.py                                  # 中性化逻辑，例如 group demean、OLS 和未来风险暴露中性化
   period_breakdowns.py                               # 按年份、月份、regime 或事件窗口切分评价结果
   evaluation_report.py                               # 评价报告文本和解释层，不负责 artifact 写盘
+  diagnostics/                                      # evaluation run 的后置诊断层
+    policies.py                                    # DiagnosticPolicy、disabled policy、decision_usable 和未来信息防护
+    inputs.py                                      # DiagnosticInputBundle、optional input 映射和时间语义元数据
+    metrics.py                                     # DiagnosticMetricSpec 和诊断指标计算
+    runner.py                                      # 从 evaluation payload 生成 diagnostic frames，不写 artifact
+    views.py                                       # 条件诊断视图的 path/key/status/display 可见性
 ```
+
+`evaluations/diagnostics/` 属于 evaluation layer 的后置解释和诊断子包。它消费 evaluation payload、weights、returns、已映射的 optional columns 和 policy metadata，输出由 registry 定义的 diagnostic frames 给 artifact writer。
+
+它不负责 vendor/raw 数据接入、不负责组合仿真、不负责优化器、不负责正式 risk/regime/capacity model，也不连接 API、web、paper trading、live trading 或外部服务。
+
+正式 risk/regime/cost/capacity 研究能力仍属于后续 C3；N5 v1 diagnostics 只是在 evaluation artifact 内暴露描述性 proxy diagnostics。
 
 ### Kernels / 数值计算内核
 
@@ -189,6 +201,7 @@ data_quality                                          # 缺失、重复、延迟
 
 ```text
 artifacts/                                           # 研究和评价产物合同层，是 API、下载和前端展示的来源
+  schema_registry.py                                 # artifact files、fields、grain、keys、条件规则、sentinel 和 display/download 可见性的代码权威
   artifact_schema.py                                 # artifact schema 版本和顶层持久化合同
   display_manifest.py                                # manifest.display 构造，作为前端、图表、表格和下载的唯一展示合同
   display_tables.py                                  # manifest.display table preview/download descriptor、路径解析和 row-limit helper
@@ -458,6 +471,9 @@ compliance                                           # 许可、发布、免责�
 - 小数据 smoke。
 
 ### C3: 风险、regime、成本和容量扩展
+
+N5 schema diagnostics 可以基于已有项目内本地输入暴露 v1 描述性 proxy diagnostics，但这不代表 C3 已完成。
+C3 仍然是正式 risk model、regime system、cost grid、capacity curve、stress/scenario analysis 和仿真级假设的完整研究能力。
 
 - exposure columns。
 - risk / regime diagnostics。

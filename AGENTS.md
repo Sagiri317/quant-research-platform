@@ -10,7 +10,7 @@ Project purpose:
 
 - Local multi-market quantitative research platform.
 - A-share is the first complete market module, backed by local private CSMAR data.
-- Evaluation layer, artifact schema `0.6`, local API, downloads, and React evidence workbench live inside this project.
+- Evaluation layer, artifact schemas, local API, downloads, and React evidence workbench live inside this project.
 - Crypto and other markets are planned/disabled only until separately designed and tested; do not keep empty implementation packages for them.
 - Do not add sibling workspace projects as runtime dependencies or active sources unless the user explicitly asks.
 - Code and public-safe aggregate summaries may later be published after review.
@@ -18,9 +18,9 @@ Project purpose:
 
 Current structure:
 
-- `src/quant_research_platform/evaluations/`: evaluation contracts, panel validation, run orchestration, and result objects.
+- `src/quant_research_platform/evaluations/`: evaluation contracts, panel validation, run orchestration, result objects, and evaluation diagnostics subpackages.
 - `src/quant_research_platform/kernels/`: DataFrame and tensor helper implementations.
-- `src/quant_research_platform/artifacts/`: schema `0.6` writer, loader, inventory, comparison, and `manifest.display`.
+- `src/quant_research_platform/artifacts/`: artifact registry, writer, loader, inventory, comparison, and `manifest.display`.
 - `src/quant_research_platform/interfaces/api/`: local FastAPI evidence API routes, service layer, CSV preview, and downloads.
 - `src/quant_research_platform/interfaces/cli/`: `qrp` / `python -m quant_research_platform.interfaces.cli` commands.
 - `src/quant_research_platform/datasets/`: generic CSV / Parquet readers and dataset access helpers.
@@ -70,7 +70,7 @@ pyproject.toml
 .gitignore
 ```
 
-Private data directories may be read or transformed only when the user has approved that task:
+Private data directories may be read or transformed only when the user has approved that task. Task-specific data approvals belong in the active implementation plan or PR summary, not as permanent AGENTS rules.
 
 ```text
 data/raw_private/
@@ -147,12 +147,14 @@ Platform evaluation contract:
 
 - Market modules produce explicit DataFrames or Parquet inputs.
 - Evaluation layer receives `EvaluationSpec` and runs `run_evaluation(spec)`.
-- Evaluation artifacts use schema `0.6`.
-- A-share full/private evaluation runs should use `python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`, not the generic `evaluate-parquet` CLI. Use `--start-year/--end-year` to locate the processed factor file and `--start-date/--end-date` for `trade_date` filtering.
+- Evaluation diagnostics belong under `evaluations/diagnostics/` as post-run explanation logic, not as a top-level platform `diagnostics/` domain.
+- A-share full/private evaluation runs should use the current A-share private evaluation entry point documented in the project maintenance reference, not the generic `evaluate-parquet` CLI.
 - Use generic `evaluate-parquet` only for external/local Parquet adapter checks or non-A-share inputs. Do not treat a temporary sliced Parquet plus `evaluate-parquet` as proof that the A-share adapter pipeline works.
-- The current frontend Pipeline Builder defaults to a configuration snapshot flow through `POST /api/pipeline-snapshots`. Executable A-share pipeline requests use `POST /api/pipeline-runs` with `start_from` set to `existing_factors`, `rebuild_factors`, `rebuild_panel`, or `rebuild_interim`; every executable run continues through evaluation.
-- API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` in run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend routing.
+- API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` in run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend routing. Portable artifacts must not serialize local API routing aliases unless a current schema contract explicitly allows it.
 - `manifest.display` is the source of truth for API evidence, CSV preview, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
+- Direct and ZIP download identities should use display-approved item references, not frontend-invented raw paths.
+- Chart surfaces should use API/display-declared chart payloads, not frontend inference from truncated preview rows.
+- Factor Factory has its own artifact contract; do not conflate it with evaluation-run artifact contracts.
 - Do not create frontend-only or backend-only artifact shortcuts that bypass `manifest.display`.
 - When artifact, API, or frontend contracts change, update the producer, writer, loader, lightweight index, API payloads/routes, download packaging, frontend consumers, tests, docs, and code maps in the same round. Do not weaken validation to keep stale generated runs visible; regenerate stale runs instead.
 
@@ -177,11 +179,13 @@ Important test surfaces:
 - processed panel construction.
 - price-volume factor and forward label logic.
 - A-share pipeline config snapshots and factor expression parsing.
-- evaluation layer contract, artifact schema `0.6`, and `manifest.display`.
+- evaluation layer contract, current artifact schemas, retired-schema rejection coverage, and `manifest.display`.
 - API evidence, CSV preview, direct download, ZIP download, and comparison endpoints.
 - React evidence workbench state, run switching, combination switching, and download picker parity.
 
 Contract rules that can be mechanically checked should live in pytest or Vitest rather than only in agent instructions. Use the project maintenance skill for detailed review surfaces and verification sequencing.
+
+Artifact/API/frontend/A-share/Factor Factory contract work must use the project maintenance skill and cross-check the referenced engineering and quant research standards before changing public contracts, diagnostics semantics, generated outputs, or trading-adjacent wording.
 
 For frontend Playwright acceptance of API-backed workbench flows, start both the local FastAPI API service and the Vite frontend service before testing. Do not count an API-offline `Failed to fetch` state as acceptance evidence unless the task is explicitly UI-only.
 
@@ -197,6 +201,8 @@ Do not run slow, network-heavy, destructive, or environment-changing commands wi
 - [PROJECT_STATUS.md](PROJECT_STATUS.md): current local status, next tasks, decisions, and root handoff.
 - [docs/architecture/README.md](docs/architecture/README.md): architecture document index and new-session reading order.
 - [docs/architecture/target-architecture-and-capabilities.md](docs/architecture/target-architecture-and-capabilities.md): final target architecture and future capability boundary.
+- [docs/architecture/engineering-standards.md](docs/architecture/engineering-standards.md): long-term module boundaries, contracts, versioning, errors, testing, generated outputs, API/frontend, security, and scale rules.
+- [docs/architecture/quant-research-standards.md](docs/architecture/quant-research-standards.md): long-term quant research rules for point-in-time data, eligibility/tradability, bias controls, costs, capacity, benchmarks, risk, lineage, and trading-boundary semantics.
 - [docs/architecture/phase-1-acceptance-record.md](docs/architecture/phase-1-acceptance-record.md): Phase 1 implemented scope and acceptance evidence.
 - [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md): next-stage architecture debt and task priorities.
 - [docs/csmar_data_manual.md](docs/csmar_data_manual.md): CSMAR download, fields, data rules, schema, and private report template.

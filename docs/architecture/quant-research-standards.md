@@ -147,6 +147,22 @@ cash_or_risk_free_baseline                            # 现金或无风险利率
 
 没有基准的表现只能作为描述性诊断，不应作为 alpha 结论。
 
+## 8.1 Proxy Diagnostics 表述边界
+
+risk、regime、cost、liquidity、capacity、benchmark 或 market segment 的描述性诊断，不是 alpha、可交易性、可部署性或 live performance 的证明。
+
+Proxy diagnostic 必须说明输入来源、时间语义、缺失输入处理，以及是否可用于决策。
+
+缺少 benchmark、regime、liquidity、capacity 或 risk 输入时，应产生 unavailable/warning diagnostics，不能推断结论。
+
+Capacity proxy、ADV participation、liquidity bucket、turnover cost、benchmark-relative metric 或 risk exposure diagnostic，不得表述为可执行容量、已验证风险模型、paper trading readiness、live trading readiness 或投资建议。
+
+Ex-post 输入或缺少 timing metadata 的输入必须标记为不可用于决策。
+
+N5 schema diagnostics 可以基于已有项目内本地输入暴露 v1 描述性 proxy diagnostics，但这不代表 C3 已完成。
+
+C3 仍然是正式 risk model、regime system、cost grid、capacity curve、stress/scenario analysis 和仿真级假设的完整研究能力。
+
 ## 9. 风险、场景和 Regime
 
 研究应能解释风险来源，而不只报告收益。

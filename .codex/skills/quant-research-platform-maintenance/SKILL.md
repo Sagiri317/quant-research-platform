@@ -16,44 +16,28 @@ Project `AGENTS.md` owns hard safety boundaries: local-only scope, approved Cond
 1. Read project `AGENTS.md`.
 2. Inspect only the requested surface and its linked contract files.
 3. If the change touches schema, API payloads, downloads, frontend evidence state, A-share runs, Factor Factory runs, or generated evidence, read [references/contracts-and-verification.md](references/contracts-and-verification.md).
-4. If the change touches `docs/code-map/platform-flow.md` or `docs/code-map/platform-flow-interactive.html`, read [references/code-map-flow.md](references/code-map-flow.md).
-5. Keep `PROJECT_STATUS.md` and workspace-root handoff rules as defined by `AGENTS.md`; do not edit root workspace files unless explicitly asked.
+4. If the change touches schema/artifact contracts, `manifest.display`, API/download/frontend exposure, module boundaries, dependency direction, testing layers, generated outputs, scale, or security boundaries, read `docs/architecture/engineering-standards.md`.
+5. If the change touches schema `0.7` diagnostics, diagnostic tables, diagnostic UI/report wording, factor evaluation semantics, diagnostics interpretation, tradability, costs, liquidity, capacity, benchmarks, risk, lineage, or paper/live trading wording, read `docs/architecture/quant-research-standards.md`.
+6. If the change touches `docs/code-map/platform-flow.md` or `docs/code-map/platform-flow-interactive.html`, read [references/code-map-flow.md](references/code-map-flow.md).
+7. Keep `PROJECT_STATUS.md` and workspace-root handoff rules as defined by `AGENTS.md`; do not edit root workspace files unless explicitly asked.
 
 Use PowerShell `Select-String` if `rg` is unavailable or denied.
 
-## Contract Map
+## Stability Model
 
-| Surface | Start here |
-| --- | --- |
-| Evaluation artifact schema `0.6` | `src/quant_research_platform/artifacts/artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py` |
-| `manifest.display` | `src/quant_research_platform/artifacts/display_manifest.py`, `manifest_validation.py` |
-| Artifact ZIP packaging | `src/quant_research_platform/artifacts/artifact_package.py`, `tests/artifacts/test_artifact_package.py` |
-| Evidence API and downloads | `src/quant_research_platform/interfaces/api/routes/`, `interfaces/api/services/`, `interfaces/api/app.py`, `interfaces/api/run_index.py` |
-| A-share runtime paths | `src/quant_research_platform/markets/implementations/a_share/runtime/storage.py`, `runtime/check_processed_space.py` |
-| A-share private evaluation | `src/quant_research_platform/markets/implementations/a_share/evaluation/run_factor_evaluation.py`, `evaluation/evaluation_adapter.py` |
-| A-share Pipeline Builder API | `src/quant_research_platform/interfaces/api/routes/pipeline.py`, `interfaces/api/services/pipeline_service.py`, `src/quant_research_platform/pipelines/a_share/` |
-| Factor Factory schema `0.1` | `src/quant_research_platform/research/factor_factory/`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py` |
-| N8 contract surfaces | display preview/download helpers, factor-template route/service split, A-share service entry, CSV upload legacy/dev boundary |
-| Frontend shell | `web/src/shell/App.tsx`, `web/src/shell/App.test.tsx` |
-| Frontend evidence workbench | `web/src/features/evidence/ResultsView.tsx`, `web/src/features/evidence/RunCharts.tsx`, `web/src/features/evidence/ArtifactDownloads.tsx`, `web/src/features/evidence/CsvBrowser.tsx`, `web/src/features/evidence/runEvidenceState.ts`, `web/src/features/evidence/useRunEvidence.ts` |
-| Frontend creation surfaces | `web/src/features/uploads/`, `web/src/features/factor-studio/`, `web/src/features/factor-factory/`, `web/src/features/pipeline/`, `web/src/features/runs/` |
-| Frontend shared contracts | `web/src/shared/api/api.ts`, `web/src/shared/factorDraft.ts`, `web/src/shared/ui/components.tsx`, `web/src/shared/downloads.ts`, `web/src/shared/format.ts` |
-| Local scripts | `scripts/check_all.ps1`, `scripts/start_private_workbench.ps1`, `scripts/start_api_private_runs.ps1`, `scripts/start_web.ps1`, `scripts/stop_workbench.ps1`, `scripts/private_run_roots.ps1`, `scripts/playwright_cli_project.ps1`, `scripts/phase1_acceptance.py`, `scripts/verify_code_map_flow.ps1` |
-| Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/architecture/`, `docs/code-map/` |
+Keep this `SKILL.md` as the stable workflow layer. Put change-prone project facts in [references/contracts-and-verification.md](references/contracts-and-verification.md), including schema versions, source-file maps, script names, API route names, browser acceptance inputs, and current verification commands.
 
-## Operating Rules
+Stable responsibilities:
 
-- Evaluation runs are `artifact_type="evaluation_set"` with `artifact_schema_version="0.6"`.
-- Factor Factory runs are `artifact_type="factor_factory_run"` with `artifact_schema_version="0.1"`.
-- Do not conflate the two schema versions; tests, API validation, docs, and frontend types must name the artifact type they are checking.
-- `manifest.display` remains the only UI/download exposure contract for run artifacts.
-- Artifact ZIP assembly belongs in `artifacts/artifact_package.py`; API download services should orchestrate responses instead of owning artifact packaging rules.
-- Preserve API-visible evaluation run identity as `(source_alias, run_id)` across run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend route state.
-- Pipeline Builder defaults to snapshot creation through `POST /api/pipeline-snapshots`. Executable A-share pipeline requests use `POST /api/pipeline-runs` with `start_from`; every executable run continues through evaluation.
-- Factor Studio and Pipeline Builder must keep A-share enabled and crypto/other markets disabled or planned until real modules exist.
-- Frontend dependency direction is `shell -> features -> shared`; `web/src/shared/*` must not import from `features/*` or `shell/*`, and cross-feature imports should stay rare.
-- For N5/N6 and later research-contract work, reuse the N8 display-helper, factor-template, A-share service-entry, and CSV-upload boundary cleanup surfaces. Do not re-open or replace them inside a research-contract branch unless a written plan states the exact shared files, tests, and rollback path.
-- Generated runs under `reports/private_real/`, `reports/runs/`, and `reports/profiles/` are evidence, not authority docs. Regenerate stale runs instead of weakening loaders.
+- Preserve project safety boundaries from `AGENTS.md`; do not move task-specific approvals into permanent rules.
+- Keep generated artifacts as the contract source for evidence flows, with `manifest.display` as the UI/API/download exposure boundary.
+- Keep artifact types explicit. Do not conflate evaluation-run artifacts, Factor Factory artifacts, generated evidence, and historical/rejection fixtures.
+- Keep schema registries and tests as the source of truth for field lists, grain, unique keys, conditional rules, and required generated files.
+- Prefer linked updates across producer, writer, loader, lightweight index, API, downloads, frontend consumers, tests, docs, and code maps when a public contract changes.
+- Cross-check architecture, engineering, and quant research standards before changing long-term module boundaries, artifact/API/frontend exposure, diagnostics interpretation, or trading-adjacent wording.
+- Treat generated runs as evidence, not authority docs. Regenerate stale runs instead of weakening validation to keep them visible.
+
+Before using concrete paths, scripts, schema numbers, or route names, load the current contract reference.
 
 ## Contract Work Loop
 
@@ -76,25 +60,15 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 
 ## Review Checklist
 
-For artifact/API/frontend contract work, explicitly review these invariants before calling the branch ready:
+For artifact/API/frontend contract work, review the stable invariant classes here, then load the current reference for exact schema names, files, and commands:
 
-- Schema required files and columns are enforced by both the full loader and any lightweight index/list path that makes runs API-visible.
-- Schema field counts, directory totals, required/conditional/optional status, table grain, unique keys, sort keys, and registry appendix entries agree with each other.
-- Required-if, nullable-if, sentinel, and family-specific validation rules are represented in schema registry/tests rather than only in prose.
-- `manifest.display` remains the only exposure source for evidence payloads, table previews, direct downloads, ZIP downloads, frontend tables, charts, and download presets.
-- `manifest.display.tables[].path` and download item paths resolve only to run-relative paths declared in `manifest.artifacts`.
-- Preview endpoints have bounded defaults, hard maximum limits, and clear low-memory metadata such as `has_more` and whether row counts are exact.
-- `manifest.display.tables[].key` values are unique. Duplicate keys must fail artifact validation because table lookup, API preview, frontend state, and downloads all treat the key as a single contract identity.
-- Download services package files from manifest-resolved artifact paths and do not full-load Parquet tables for metadata-only or selected-file downloads.
-- Public-downloadable metadata such as `config.json` and `lineage.json` is sanitized consistently at writer, direct-download, and ZIP-packaging paths, including selected ZIP cache fingerprints.
-- Frontend selected-run and selected-combination state drives fresh table/chart previews when the initial evidence payload is intentionally truncated.
-- Frontend summary cards must not infer "latest" rows from a truncated preview page or from non-exact row counts. When a card needs the last row for a filtered `combination_id`, use bounded preview pagination such as `limit=1&offset=total_rows-1` only when the preview payload marks `total_rows_exact=true`; otherwise make the UI copy explicitly say it is showing a preview slice or do not render a latest-row claim.
-- Frontend table and chart preview requests must respect API-provided `preview.max_limit` / `previewMaxRows`. Do not hardcode a larger limit, including for chart tables.
-- Chart surfaces that need a complete selected-combination time axis should page through the preview API with bounded `limit` plus `offset` / `has_more`; CSV/detail table previews should keep the display default row limit and point users to downloads for full rows.
-- Generated schema-`0.6` runs that lack current `manifest.display.tables[].preview` metadata are stale. API list/evidence/preview entry points must skip or reject them through tests instead of weakening validation.
-- Factor Factory consumes the current artifact/API contract without forcing N7 evaluation artifacts to preserve retired fields.
-- Retired public fields and table names are absent from current `src/` and `web/` contracts; allowed historical references and negative tests must be intentional.
-- Private/generated outputs remain ignored and untracked.
+- Required files, required columns, field counts, grain, unique keys, sort keys, conditional rules, and generated-file indexes are enforced by registry-backed tests.
+- `manifest.display` is the only exposure source for evidence payloads, previews, downloads, frontend tables, charts, and presets.
+- Lightweight list/index paths reject stale or invalid artifacts before making them API-visible.
+- Preview/download paths are bounded, display-approved, path-safe, and avoid full-loading large tables for metadata-only operations.
+- Frontend state follows API/display contracts for selected run, selected combination, table previews, charts, reports, and downloads.
+- Retired public fields, routes, table names, and compatibility wrappers are either absent from current contracts or explicitly covered as historical/rejection tests.
+- Private paths, secrets, task-local aliases, generated outputs, and row-level private data do not leak into portable artifacts, API metadata, logs, downloads, or commits.
 
 ## Review Stop Rules
 
@@ -112,30 +86,22 @@ Use [references/contracts-and-verification.md](references/contracts-and-verifica
 
 ## Verification Profiles
 
-Run the narrowest relevant checks first. For broad contract work, prefer the relevant subset rather than a single unconditional full-suite command:
+Run the narrowest relevant checks first. Load [references/contracts-and-verification.md](references/contracts-and-verification.md) for the current command set and acceptance wrappers.
 
-```powershell
-$env:PYTHONUTF8="1"
-$env:PYTHONPATH="src"
-conda run -n analysis python -m pytest -q tests/artifacts tests/interfaces/api
-conda run -n analysis python -m pytest -q tests/evaluations tests/pipelines/a_share tests/markets/implementations/a_share/evaluation tests/research/factor_factory
-conda run -n analysis python -m ruff check src tests
-Push-Location web; try { npm test -- --run --maxWorkers=1; npm run lint; npm run build } finally { Pop-Location }
-git diff --check
-```
+Stable verification rules:
 
-For source/static hygiene, use targeted searches when relevant instead of creating a separate gate script by default. Search for retired fields, private/local-only inputs leaking into API/frontend/pipeline surfaces, API full-load hot paths, and untracked generated outputs. Promote any recurring static check into tests or a lightweight script only when manual repetition becomes error-prone.
-
-Use `scripts/phase1_acceptance.py` only for Phase 1 private acceptance tasks that intentionally touch `reports/private_real/`: `rename-baseline`, `run`, `compare`, or `factory-smoke`. It is not a routine unit-test substitute, and it should not be used for public-safe or source-only documentation checks.
-
-For frontend evidence-workbench changes, run browser acceptance only when the UI behavior changed. For API-backed workbench flows, start both backend and frontend services with `scripts/start_api_private_runs.ps1` and `scripts/start_web.ps1`, then stop them with `scripts/stop_workbench.ps1`. Use `scripts/playwright_cli_project.ps1` for Playwright CLI work in this repository so screenshots, traces, PDFs, videos, and binary response bodies land under ignored `.playwright-cli/` instead of a top-level `output/` directory. List any logs, downloads, screenshots, or cache outputs before cleanup. Follow project deletion rules exactly.
+- Prefer focused pytest/Vitest/static checks for the touched contract before broad verification.
+- Use targeted searches for retired fields, private/local-only inputs leaking into API/frontend/pipeline surfaces, API full-load hot paths, and untracked generated outputs.
+- Promote recurring static checks into tests or lightweight scripts only when manual repetition becomes error-prone.
+- For browser acceptance, start both API and frontend services, record service evidence, stop only recorded services, and list generated browser artifacts before cleanup.
+- Always include `git diff --check`; include `git status --short` when generated, private, browser, or acceptance outputs may have changed.
 
 ## Reference Loading
 
 Read [references/contracts-and-verification.md](references/contracts-and-verification.md) when you need detailed exit criteria for:
 
-- evaluation-set schema `0.6`;
-- Factor Factory schema `0.1`;
+- current evaluation-set artifact schema;
+- current Factor Factory artifact contract;
 - API/download validation;
 - frontend state and browser acceptance;
 - A-share pipeline/runtime boundaries;

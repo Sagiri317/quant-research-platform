@@ -1,6 +1,8 @@
 # N5 Research Diagnostics Framework 设计
 
-状态：设计草案，等待用户 review 后再写 implementation plan
+> Implementation note (2026-05-28): this design spec is historical design context. The executable contract and user-approved defaults are in `docs/superpowers/plans/2026-05-28-schema-07-diagnostics-framework.md`. That plan supersedes this spec on implementation scope, Phase 1B full-v1 materialized views, Slice 11B project-internal data acceptance, time-breakdown registry decisions, API-derived `ChartSpec`, download `{kind,key}` identity, diagnostics code ownership under `evaluations/diagnostics/`, and remaining product-question defaults.
+
+状态：historical / superseded。执行以 `docs/superpowers/plans/2026-05-28-schema-07-diagnostics-framework.md` 为准。
 日期：2026-05-27
 范围：N5 风险、regime、成本、容量和基础组合假设诊断；不包含 N6 ML prediction handoff、组合优化器、事件驱动仿真、paper/live trading、外部 API 或部署能力。
 
@@ -1769,6 +1771,12 @@ status_reason
 
 ### 6.14 Schema `0.7` 文件与字段数量统计
 
+Execution note: this section is historical design seed. The implementation plan makes
+`schema_registry.py` plus pytest/Vitest the source of truth for final field counts,
+grain, unique keys, required files, `required_if` / `nullable_if` / sentinel rules,
+and generated-file/display exposure. Do not maintain these totals only by editing
+this Markdown section.
+
 统计口径：
 
 - 表格文件按本 spec 列出的 schema `0.7` contract fields 统计；
@@ -1828,6 +1836,9 @@ status_reason
 本 appendix 只覆盖 required 最小 schema 的 registry index / implementation checklist。
 正文各文件的字段列表是 canonical contract；字段级机器合同必须落在代码中的 schema registry。
 本文不在 Markdown 中展开 139 个字段的完整 `name/dtype/nullable/unit/enum` 表，避免文档和代码漂移。
+Implementation authority now sits in the schema `0.7` plan and the resulting
+registry-backed tests. If this appendix and code disagree after implementation,
+fix the registry/tests first and treat this appendix as stale explanatory context.
 
 通用 dtype：
 
@@ -2282,6 +2293,11 @@ Browser acceptance is required only after workbench behavior changes. API-backed
 
 ## 11. Implementation Plan Outline
 
+Superseded for execution: use `docs/superpowers/plans/2026-05-28-schema-07-diagnostics-framework.md`,
+especially its Pre-Decided Defaults, Phase Grouping, and Phase 1B/11B acceptance
+sections. This outline remains useful design context, but it is not the active
+implementation checklist.
+
 Implementation v1 默认 `DiagnosticsSpec.materialized_views=[]`。第一刀验收优先依赖
 `diagnostics/diagnostic_summary.csv` 和 `diagnostics/diagnostic_metrics.csv`；conditional
 materialized views 只在用户、CLI/config 或验收明确请求时生成。
@@ -2320,6 +2336,12 @@ The implementation plan should split the work into reviewable vertical slices:
 Do not start with frontend UI. The artifact contract and backend validation must land first.
 
 ## 12. Remaining Product Questions
+
+Superseded for execution blockers: the active implementation plan has resolved the
+schema identity, API migration, display/download coverage, browser acceptance input,
+private-data boundary, scale baseline, benchmark-missing semantics, and optional
+diagnostic-observation defaults for v1. Treat the questions below as historical
+context unless the plan explicitly reopens one.
 
 These are non-blocking product / research choices. Schema identity, API migration,
 display/download coverage, and field-count accounting must be resolved before implementation planning;

@@ -25,6 +25,8 @@ runtime/                                             # 本地运行上下文，�
 - `research` 不能直接触发 `trading` 或真实外部连接。
 - `markets` 不能读取凭据、连接 vendor API 或承担用户权限逻辑。
 - 跨目录调用优先依赖 `Spec`、`Schema`、`Manifest`、`Payload`、`Result` 等合同对象。
+- `evaluations/diagnostics/` 属于 evaluation layer，可以依赖 evaluation contracts、diagnostic input bundle 和纯计算 helper；不得依赖 `artifacts/`、`interfaces/api/` 或 `web/`。
+- Artifact writer 可以消费 diagnostic frames，并通过 artifact registry 校验它们；API 和 frontend 只能消费 artifact/display outputs，不能消费 diagnostics calculation internals。
 
 ## 2. 合同对象
 
@@ -55,6 +57,7 @@ market_registry.py                                   # 市场实现和 capabilit
 kernel_registry.py                                   # dataframe、tensor、GPU、distributed 计算内核注册
 pipeline_step_registry.py                            # pipeline step 注册
 artifact_type_registry.py                            # artifact type 和 display contract 注册
+schema_registry.py                                   # artifact table/file contract、字段、grain、key、条件规则和 display/download 可见性注册
 ```
 
 注册对象必须声明：
@@ -66,6 +69,13 @@ inputs                                                # 输入字段、schema �
 outputs                                               # 输出字段、schema 或产物
 capabilities                                          # 支持能力，例如 daily bars、options chain、live trading
 ```
+
+Schema registry 归属：
+
+- 可机械校验的 artifact table / file contract 必须落在代码 registry 和测试里，不能只靠 Markdown 维护。
+- Registry 负责字段名、dtype、nullable 规则、grain、unique key、sort key、required files、conditional required files、sentinel values、generated-file index、display/download 可见性。
+- Writer、loader、lightweight run index、API payload builder、download packaging 和 frontend shared types 必须消费或测试 registry contract，不能各自维护平行字段清单。
+- `manifest.display` 仍然是用户可见暴露边界。Registry-backed contract 不授权 frontend-only shortcut，也不授权 backend-only hidden download。
 
 ## 4. 版本和迁移
 

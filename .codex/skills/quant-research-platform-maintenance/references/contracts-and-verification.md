@@ -2,15 +2,50 @@
 
 Load this reference when changing or reviewing artifact/API/frontend/A-share/Factor Factory contracts. Keep one-time run results, benchmark numbers, debug logs, and deleted temporary artifacts out of this file.
 
+## Stability Model
+
+This reference is the project-specific and change-prone layer for the maintenance skill. Update it when schema versions, source paths, script names, API route names, browser acceptance inputs, or current verification commands change. Keep the parent `SKILL.md` focused on stable workflow principles and review behavior.
+
+Long-term standards remain separate authority sources:
+
+- `docs/architecture/target-architecture-and-capabilities.md` defines the target architecture and current/local-vs-future capability boundary.
+- `docs/architecture/engineering-standards.md` defines durable engineering rules for module boundaries, contracts, versioning, errors, tests, generated outputs, API/frontend behavior, security, and scale.
+- `docs/architecture/quant-research-standards.md` defines durable quant research rules for point-in-time data, eligibility/tradability, bias controls, factor provenance, costs, capacity, benchmarks, risk, lineage, and trading-boundary semantics.
+
+Use this reference for current QRP contract facts; use the architecture standards for long-lived principles. Entries marked "planned" are target contracts from the schema `0.7` implementation plan and must not be treated as current-file failures before their owning slice lands.
+
+Artifact-relative diagnostics paths such as `diagnostics/diagnostic_summary.csv` do not imply a top-level `src/quant_research_platform/diagnostics/` package. Schema `0.7` diagnostics implementation code lives under `src/quant_research_platform/evaluations/diagnostics/`.
+
+## Current and Planned Source Map
+
+| Surface | Start here |
+| --- | --- |
+| Evaluation artifact schema `0.7` planned until Slice 2 | `src/quant_research_platform/artifacts/schema_registry.py`, `artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py` |
+| Evaluation diagnostics planned until schema `0.7` slices land | `src/quant_research_platform/evaluations/diagnostics/` |
+| `manifest.display` | `src/quant_research_platform/artifacts/display_manifest.py`, `manifest_validation.py` |
+| Artifact ZIP packaging | `src/quant_research_platform/artifacts/artifact_package.py`, `tests/artifacts/test_artifact_package.py` |
+| Evidence API and downloads | `src/quant_research_platform/interfaces/api/routes/`, `interfaces/api/services/`, `interfaces/api/app.py`, `interfaces/api/run_index.py` |
+| A-share runtime paths | `src/quant_research_platform/markets/implementations/a_share/runtime/storage.py`, `runtime/check_processed_space.py` |
+| A-share private evaluation | `src/quant_research_platform/markets/implementations/a_share/evaluation/run_factor_evaluation.py`, `evaluation/evaluation_adapter.py` |
+| A-share Pipeline Builder API | `src/quant_research_platform/interfaces/api/routes/pipeline.py`, `interfaces/api/services/pipeline_service.py`, `src/quant_research_platform/pipelines/a_share/` |
+| Factor Factory schema `0.1` | `src/quant_research_platform/research/factor_factory/`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py` |
+| Frontend evidence workbench | `web/src/features/evidence/`, `web/src/shared/api/api.ts`, `web/src/shared/downloads.ts` |
+| Frontend creation surfaces | `web/src/features/uploads/`, `web/src/features/factor-studio/`, `web/src/features/factor-factory/`, `web/src/features/pipeline/`, `web/src/features/runs/` |
+| Local scripts | see [Local Scripts](#local-scripts) |
+| Docs and maps | `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `RESEARCH_CARD.md`, `PROJECT_STATUS.md`, `docs/architecture/`, `docs/code-map/` |
+
 ## Artifact Types
 
-### `evaluation_set` schema `0.6`
+### `evaluation_set` schema `0.7`
 
-- Source files: `src/quant_research_platform/artifacts/artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py`, `display_manifest.py`.
-- Writer emits `artifact_schema_version="0.6"` and `artifact_type="evaluation_set"` in `manifest.json` and `summary.json`.
+- Planned/current source files after Slice 2: `src/quant_research_platform/artifacts/schema_registry.py`, `artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py`, `display_manifest.py`.
+- Writer emits `artifact_schema_version="0.7"` and `artifact_type="evaluation_set"` in `manifest.json` and `summary.json`.
 - Loader rejects unsupported artifact schema versions and unsupported artifact types.
 - `manifest.display.schema_version` must match the current evaluation artifact schema and must be validated at API/UI entry points.
 - All display tables must map to real artifact CSV paths; all download items must be backed by `manifest.display` or an explicitly allowed metadata item.
+- Schema `0.7` direct and ZIP downloads use display refs `{kind, key}`; raw artifact-relative strings are not the public item contract.
+- Schema `0.7` portable metadata uses `run_context.json`; `config.json` and `lineage.json` are retired names used only for negative/static coverage.
+- Schema `0.7` primary cumulative-return charts render API-provided derived chart payloads from registry `ChartSpec`; do not restore `portfolio/cumulative_returns.csv`.
 - Required table additions intentionally invalidate stale generated runs; reject and regenerate them instead of adding optional loader fallbacks.
 - Never reintroduce `artifacts.xlsx`, old `total_*_portfolio_return` summary fields, direct frontend assumptions about undeclared files, or fallback loaders that silently accept retired schemas.
 
@@ -19,7 +54,7 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 - Source files: `src/quant_research_platform/research/factor_factory/reports.py`, `batch_runner.py`, `src/quant_research_platform/interfaces/api/routes/factor_factory.py`, `web/src/features/factor-factory/FactorFactoryRuns.tsx`, `web/src/shared/api/api.ts`.
 - Writer emits `artifact_schema_version="0.1"` and `artifact_type="factor_factory_run"`.
 - API detail routes must reject wrong artifact types, wrong schema versions, missing/invalid `display`, unsafe paths, and stale manifests.
-- API and frontend should expose candidate summaries through `manifest.display`; successful N7-backed summaries use `candidate_id + combination_id` plus public metrics and `run_ref`, not raw private paths.
+- API and frontend should expose candidate summaries through `manifest.display`; successful schema `0.7` evaluation-backed summaries use `candidate_id + combination_id` plus public metrics and `run_ref`, not raw private paths.
 - Factor Factory batch runs should write distinct factory run directories and avoid overwriting candidate reports by default.
 - Candidate summaries and failed logs must sanitize private raw/interim/processed/report paths.
 
@@ -37,7 +72,8 @@ Load this reference when changing or reviewing artifact/API/frontend/A-share/Fac
 
 Use this section when reviewing, extending, or protecting the already-merged N8 contract-consumer surfaces rather than adding a new research diagnostic.
 
-- Shared `manifest.display` preview/download helpers may serve both evaluation runs and Factor Factory, but they must keep artifact type and schema validation explicit: evaluation-set schema `0.6` is not Factor Factory schema `0.1`.
+- Shared `manifest.display` preview/download helpers may serve both evaluation runs and Factor Factory, but they must keep artifact type and schema validation explicit: evaluation-set schema `0.7` is not Factor Factory schema `0.1`.
+- Factor Factory active evaluation-set consumers must migrate to schema `0.7`; `factor_factory_run` remains schema `0.1`, and `factor_summary.csv` remains the downstream comparison contract.
 - Factor-template discovery should be separable from pipeline snapshot/run submission. If `GET /api/factor-templates` moves out of pipeline routes, keep Factor Studio behavior stable and keep Pipeline API focused on snapshot/run.
 - Frontend table preview should consume backend-provided endpoint metadata when available. Avoid duplicating backend route rules in frontend path inference.
 - A-share build/evaluate service extraction should make CLI, pipeline runner, and Factor Factory thinner callers of the same service layer; it must not change `start_from` semantics or imply build-only pipeline runs.
@@ -50,7 +86,7 @@ Use this section when reviewing, extending, or protecting the already-merged N8 
 - Combination switching updates every combination-dependent surface.
 - Display-manifest table paths cover dimensions, metrics, portfolio, diagnostics, and breakdown tables; dimension tables such as `dimensions/combinations.csv` must have a preview route.
 - Disabled or unavailable tabs reset to the first valid tab.
-- Cumulative returns and IC / RankIC remain primary evidence charts. Turnover, single-period return, and cost diagnostics stay subordinate or switchable.
+- API-derived cumulative returns and IC / RankIC remain primary evidence charts. Turnover, single-period return, and cost diagnostics stay subordinate or switchable.
 - `web/src/features/factor-studio/FactorStudio.tsx` and `web/src/features/pipeline/PipelineBuilder.tsx` must keep A-share as the enabled market and crypto/other markets disabled or planned until real modules exist.
 - Frontend dependencies must follow `shell -> features -> shared`; `shared/*` must not import from `features/*` or `shell/*`.
 - Frontend creation surfaces should not imply deployment, trading, paper trading, or one-click full raw-data rebuilds.
@@ -69,7 +105,7 @@ Use this section when reviewing, extending, or protecting the already-merged N8 
 
 ## Local Scripts
 
-All local launch and verification helpers now live directly under `scripts/`:
+All local launch and verification helpers live directly under `scripts/`. Existing helpers are:
 
 - `scripts/check_all.ps1`
 - `scripts/start_private_workbench.ps1`
@@ -81,9 +117,23 @@ All local launch and verification helpers now live directly under `scripts/`:
 - `scripts/phase1_acceptance.py`
 - `scripts/verify_code_map_flow.ps1`
 
+Schema `0.7` plan-owned helpers are planned until their slices implement them:
+
+- `scripts/check_schema_07_project_acceptance.ps1`
+- `scripts/check_schema_07_browser_acceptance.ps1`
+- `scripts/check_schema_07_data_scale.py`
+- `scripts/check_schema_07_stale_contract.py`
+- `scripts/check_schema_07_docs_links.py`
+
 Do not document stale `scripts/local/` or `scripts/build/` command paths.
 
-`scripts/phase1_acceptance.py` is a private Phase 1 acceptance helper. Use it only when the task intentionally covers acceptance baseline renaming, 2024 acceptance run regeneration, compact comparison, or Factor Factory smoke under `reports/private_real/`. It is not a routine check for docs-only, source-only, or public-safe work.
+After implemented, `scripts/check_schema_07_project_acceptance.ps1` is the schema `0.7` Slice 11B project-internal acceptance wrapper. It should verify API/Vite service absence with recorded PIDs plus configured/default/known alternate ports, workbench lockfiles, and command-line process records; fail closed if service ownership is uncertain; use the mandatory current generated-run scale baseline; call the A-share private evaluation entry point; run Factor Factory/factor-summary smoke when applicable; validate manifest/display/download/private-path leak behavior; and print only project-relative path/count output.
+
+After implemented, `scripts/check_schema_07_data_scale.py` is the mandatory schema `0.7` data-scale preflight and comparison helper. It should inspect only project-local run roots, output aggregate counts/sizes/project-relative paths, and fail closed when rows, combinations, date span, or output footprint exceed the current generated-run baseline.
+
+After implemented, `scripts/check_schema_07_browser_acceptance.ps1` is the schema `0.7` browser acceptance entry point. It uses project-local generated Factor Factory runs and ordinary evaluation runs, records local service evidence, and may orchestrate `scripts/start_api_private_runs.ps1` plus `scripts/start_web.ps1`.
+
+`scripts/phase1_acceptance.py` is a legacy/private Phase 1 acceptance helper until migrated by the schema `0.7` plan. Do not use it as the schema `0.7` completion gate.
 
 Use `scripts/playwright_cli_project.ps1` for Playwright CLI browser checks in this repository. It runs the global Codex Playwright wrapper from `.playwright-cli/`, keeping generated screenshots, traces, PDFs, videos, and binary response bodies under the ignored project-local Playwright workspace instead of creating top-level `output/`.
 
@@ -116,7 +166,7 @@ Use these severities during branch review:
 
 - P0: data loss, private-data exposure, destructive filesystem behavior, secret exposure, or a blocker that prevents the requested workflow from running.
 - P1: wrong results, wrong run identity, wrong artifact/API/frontend contract, low-memory path that can still full-load large artifacts, or stale validation that makes invalid runs API-visible.
-- P2: user-visible inconsistency, missing required display/download coverage, incomplete negative validation, maintainability issue that is likely to cause the next N7/Factor Factory change to break.
+- P2: user-visible inconsistency, missing required display/download coverage, incomplete negative validation, maintainability issue that is likely to cause the next schema/Factor Factory change to break.
 - P3: naming polish, historical doc cleanup, optional hardening, or future-proofing that does not affect the current contract.
 
 A confirmed issue is one that is reproducible from code, tests, generated artifacts, or a specific documented contract. Fix confirmed P0/P1/P2 issues in the current round when they are inside the requested surface. For P3 findings, either fix them if the change is small and isolated or record them as residual risk; do not keep reopening the whole branch for low-impact polish.
@@ -149,6 +199,7 @@ Useful surfaces:
 Use browser acceptance when frontend behavior changes:
 
 - API-backed workbench Playwright acceptance must start both the local FastAPI API service and the Vite frontend service before testing; do not treat an API-offline `Failed to fetch` state as acceptance evidence unless the task is explicitly UI-only.
+- After implemented, schema `0.7` browser acceptance must use `scripts/check_schema_07_browser_acceptance.ps1` against project-local generated Factor Factory and ordinary evaluation runs.
 - default result browser page loads and renders the selected run;
 - run and combination switching update all dependent surfaces;
 - full report mode expands expected evidence surfaces without internal implementation notes;
@@ -164,7 +215,7 @@ After browser acceptance, stop local services and list validation outputs before
 ## Skill and Memory Sedimentation
 
 - Keep global skills for cross-project rules: Windows/Conda command forms, memory hygiene, generic skill authoring, and repository-agnostic review patterns.
-- Keep this project skill for `quant-research-platform` contracts, local paths, artifact schema versions, and private-data boundaries.
+- Keep hard private-data boundaries in project `AGENTS.md`. Keep this project skill/reference for `quant-research-platform` contract review surfaces, local paths, artifact schema versions, and task-specific private-data acceptance checks.
 - When a drift fix teaches a reusable cross-project lesson, record the recommendation in this project skill or reference first if the user did not ask for global memory. Promote it to global memory or a global skill only with explicit approval.
 - Do not store transient run evidence, deleted paths, commit hashes, or temporary debug output as skill guidance.
 - Prefer a lean `SKILL.md` plus linked references over a single large instruction file; add references only when they change future behavior.
