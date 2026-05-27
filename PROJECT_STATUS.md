@@ -206,4 +206,11 @@ Phase 1 之后下一阶段进展：
 
 ## Root Handoff / 根目录回传信号
 
-Open 2026-05-27: 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。
+子项目会话如果改变当前主题、阶段、里程碑、阻塞、下一步、公开成熟度，或
+数据/API/Git/Conda/隐私边界，应在本表新增 `open` 信号。根目录同步完成后，
+将状态改为 `closed` 并记录同步日期。普通实现细节、测试、notebook 调试和
+局部代码变更不进入根目录，除非它们改变里程碑级状态。
+
+| 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
+|---|---|---|---|---|
+| 2026-05-27 | milestone | 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |

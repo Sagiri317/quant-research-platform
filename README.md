@@ -1,43 +1,20 @@
 # Quant Research Platform
 
-## N7 当前 Evaluation 合同（2026-05-26）
-
-当前新生成的 evaluation artifacts 使用 schema `0.6`。一个 API-visible
-evaluation run 可以包含多个 `combination_id`，组合维度由
-`dimensions/combinations.csv` 管理；第一阶段 required columns 仅为
-`combination_id, feature, label, kernel, portfolio_mode`。成本、权重方法、
-benchmark、universe、eligibility 和 tradability 等 run-level constant 配置写入
-`config.json` / `lineage.json`，不写入 combinations 维度表。
-这两个 public-downloadable metadata 文件在写入、direct download 和 selected ZIP
-打包路径上统一脱敏，不暴露 private data path 或本机绝对路径。
-
-Schema `0.6` 的核心输出包括 `portfolio/weights.parquet`、
-`portfolio/cumulative_returns.csv`、`metrics/performance_summary.csv`、
-`diagnostics/tradability_diagnostics.csv`、`input_quality/*.csv` 和
-`summaries/evaluation_summary.csv`。公开合同使用 `kernel` 和
-`return_source_column`；不再使用旧的 external `engine` / `pnl_return_column`
-命名。A 股第一阶段只接受显式 `--features`，并使用一行多值
-`--features / --labels / --kernels / --portfolio-modes`。
-
-`--input-file` 只保留给后端和本地 CLI；API request models、frontend forms、
-Pipeline Builder payloads 和 saved snapshots 不暴露该字段。`--dry-run` 会检查
-输入文件、日期覆盖、required columns、组合展开和输出目录，不写 artifact。
-
-历史 2023H1 private smoke 曾覆盖
-`3 features x 2 labels x 2 kernels x 2 portfolio modes = 24` 个 combinations；
-该本地 run 目录已在 2023-2025 样例验收后清理，不再作为当前可浏览证据。
-当前保留的 2023-2025 private canonical 样例：
-`reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` 覆盖
-`mom_20d, vol_20d, avg_amount_20d, rev_120d x 2 labels x dataframe x long_only = 8`
-个 combinations；`reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1`
-覆盖 `rev_120d x 2 labels x 2 kernels x 2 portfolio modes = 8` 个 combinations，
-用于 120 日反转的 kernel / portfolio mode parity smoke。
-
 本项目是本地多市场量化研究平台。当前第一个完整 market module 是 A 股：它把用户已批准的本地 CSMAR 数据转换为可复现的 interim 数据、research panel、factor table、pipeline snapshots 和 evaluation artifacts，并在同一项目内提供 evaluation layer、artifact contract、FastAPI evidence API 和 React evidence workbench。
 
-边界不变：本项目不是投资建议、实盘交易、paper trading、生产交易系统或部署服务；不登录 CSMAR，不自动下载数据，不连接券商、交易所或外部行情 API，不处理账号、密码、cookie、token 或 `.env`。
+本项目类型：`research platform / local quant research infrastructure`。
 
-## 平台定位
+当前边界：本项目不是投资建议、实盘交易、paper trading、生产交易系统或部署服务；不登录 CSMAR，不自动下载数据，不连接券商、交易所或外部行情 API，不处理账号、密码、cookie、token 或 `.env`。
+
+数据阶段：A 股使用本地已批准离线真实数据；CSMAR raw / interim / processed 和 `reports/private_real/` 均为私有边界，不提交、不公开。
+
+## 研究问题
+
+- 如何把本地私有 A 股数据整理为可复现、可审计、可扩展的 research platform artifact？
+- 如何用统一的 evaluation contract、`manifest.display`、API/download/frontend 合同支撑 factor evaluation、Pipeline Builder 和 Factor Factory？
+- 如何在不暴露私有数据、不连接外部 API、不暗示交易能力的前提下，保留可验证的研究证据链？
+
+## 方法概览
 
 ```text
 local approved data
@@ -53,12 +30,51 @@ local approved data
 
 - A 股是 enabled market module，数据源边界是用户手工导出的本地 CSMAR 文件。
 - Evaluation layer、artifact writer/loader、schema `0.6`、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
-- Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为辅助入口保留。
+- Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为 legacy/dev uploaded-panel smoke / compatibility 入口保留。
 - Pipeline Builder 前端默认生成配置快照，调用 `POST /api/pipeline-snapshots`；也可切换到执行模式，调用 `POST /api/pipeline-runs`。
 - 可执行 pipeline 调用的公开控制参数是 `kernel` 和 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并且一定运行到 evaluation。
 - Factor Factory 已有后端 registry、批量评估、API 浏览入口和本地 workbench 浏览入口；candidate summary 按 `candidate_id + combination_id` 展开 N7 evaluation results。
-- Evidence workbench 已消费 `diagnostics/tradability_diagnostics.csv`，按当前 `combination_id` 展示 Eligibility / Tradability 诊断；前端只展示 artifact/API 结果，不重新计算 eligibility、tradability 或 performance metrics。
+- Evidence workbench 只展示 artifact/API 结果，不重新计算 eligibility、tradability、IC、returns、weights 或 turnover；图表通过 bounded preview pagination 拼接当前组合时间轴，CSV 明细仍保持 preview row limit。
 - Crypto 和其他市场只显示为 planned / disabled，不代表真实数据、交易或空实现包。
+
+## 核心结果
+
+| 发现 | 证据 | 状态 |
+|---|---|---|
+| 平台合同已迁入 `quant_research_platform` 命名空间 | schema `0.6` artifacts、`manifest.display`、FastAPI evidence API、download contract 和 React evidence workbench | 已验证 |
+| A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 只保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
+| N1/N2/N3/N4/N7/N8 已合入 `main` | Pipeline runner、tradability diagnostics、ZIP packaging、frontend feature split、run identity、contract consumer convergence | 已验证 |
+| 当前 2023-2025 evidence 可作为回归入口 | `n7_eval_2023_2025_v1`、`n7_eval_2023_2025_rev120_v1`、Factor Factory `rev_120d` smoke 和低内存 comparison | 已验证 |
+| 下一阶段研究合同仍需单独设计 | N5 risk/regime/cost/capacity 与 N6 ML prediction handoff | 待推进 |
+
+## 复现方式
+
+常用后端检查：
+
+```powershell
+$env:PYTHONPATH="src"
+conda run -n analysis python -m pytest -q
+conda run -n analysis python -m ruff check src tests
+```
+
+前端检查在 `web/` 下运行：
+
+```powershell
+npm test -- --run --maxWorkers=1
+npm run lint
+npm run build
+```
+
+本地 API + React workbench：
+
+```powershell
+scripts\start_private_workbench.ps1
+scripts\stop_workbench.ps1
+```
+
+当前阶段：Phase 1 completed；N1/N2/N3/N4/N7/N8 merged to `main`；后续 N5/N6 独立推进。
+
+最近一次检查见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
 
 ## 当前结构
 
@@ -81,6 +97,15 @@ scripts/                 local launch, acceptance, and check scripts
 data/                    local private data boundary
 reports/private_real/    local private real-data outputs
 docs/code-map/           source reading map
+```
+
+研究项目配套文档：
+
+```text
+REPORT.md               正式研究报告
+RESEARCH_CARD.md        给作者和 Codex 使用的证据底稿
+PROJECT_STATUS.md       本地维护状态、任务、想法和决策
+AGENTS.md               Codex 安全规则
 ```
 
 ## A 股 Pipeline 接口
@@ -115,22 +140,6 @@ GET /api/pipeline-runs/{run_id}
 GET /api/pipeline-runs/{run_id}/checkpoints
 ```
 
-## 常用验证
-
-```powershell
-$env:PYTHONPATH="src"
-conda run -n analysis python -m pytest -q
-conda run -n analysis python -m ruff check src tests
-```
-
-前端验证在 `web/` 下运行：
-
-```powershell
-npm test -- --run --maxWorkers=1
-npm run lint
-npm run build
-```
-
 ## A 股专用入口
 
 A 股真实私有数据流程优先使用 market module 自身入口，不要为了日期过滤临时绕到通用 `evaluate-parquet`。
@@ -155,12 +164,36 @@ conda run -n analysis python -m quant_research_platform.markets.implementations.
   --end-year 2025 `
   --start-date 2024-01-01 `
   --end-date 2024-12-31 `
-  --features mom_20d vol_20d amihud_20d `
+  --features mom_20d vol_20d avg_amount_20d rev_120d `
   --labels forward_return_5d forward_return_20d `
   --portfolio-modes long_only `
   --kernels dataframe `
   --report-root reports/private_real/factor_evaluation/example_2024_dataframe_long_only
 ```
+
+## Artifact 和 Workbench 合同
+
+当前新生成的 evaluation artifacts 使用 schema `0.6`。一个 API-visible evaluation run 可以包含多个 `combination_id`，组合维度由 `dimensions/combinations.csv` 管理；第一阶段 required columns 仅为 `combination_id, feature, label, kernel, portfolio_mode`。
+
+成本、权重方法、benchmark、universe、eligibility 和 tradability 等 run-level constant 配置写入 `config.json` / `lineage.json`，不写入 combinations 维度表。这两个 public-downloadable metadata 文件在写入、direct download 和 selected ZIP 打包路径上统一脱敏，不暴露 private data path 或本机绝对路径。
+
+Schema `0.6` 的核心输出包括 `portfolio/weights.parquet`、`portfolio/cumulative_returns.csv`、`metrics/performance_summary.csv`、`diagnostics/tradability_diagnostics.csv`、`input_quality/*.csv` 和 `summaries/evaluation_summary.csv`。公开合同使用 `kernel` 和 `return_source_column`；不再使用旧的 external `engine` / `pnl_return_column` 命名。
+
+Evaluation run 使用 artifact schema `0.6`。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
+
+当前保留的 2023-2025 private canonical 样例：
+
+- `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` 覆盖 `mom_20d, vol_20d, avg_amount_20d, rev_120d x 2 labels x dataframe x long_only = 8` 个 combinations。
+- `reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1` 覆盖 `rev_120d x 2 labels x 2 kernels x 2 portfolio modes = 8` 个 combinations，用于 120 日反转的 kernel / portfolio mode parity smoke。
+- `reports/private_real/ff/20260527_rev120_factory_smoke_v1` 是当前 Factor Factory `rev_120d` smoke 样例。
+
+新增或修改 artifacts 时必须同时检查：
+
+- writer / loader 是否仍只接受当前 schema；
+- `manifest.display.tables`、downloads、presets、charts 是否覆盖实际展示项；
+- API evidence、direct download、ZIP download 是否只暴露 display contract 中的条目；
+- 前端 run switching / combination switching 是否不会显示旧状态；
+- docs 和 code map 是否同步。
 
 ## 私有数据边界
 
@@ -175,34 +208,22 @@ reports/private_real/
 
 CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报告和任何凭据都不得复制到公开材料、GitHub、issue、PR 或聊天记录中。公开材料只允许使用代码、方法说明和脱敏聚合结论，并且必须避免写成真实收益承诺或投资建议。
 
-## Artifact 和 Workbench 合同
+## 限制
 
-Evaluation run 使用 artifact schema `0.6`。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。
-
-本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
-
-Phase 1 验收结论见 [docs/architecture/phase-1-acceptance-record.md](docs/architecture/phase-1-acceptance-record.md)。2026-05-23 已完成代码复核和测试验收；Phase 1 功能已补齐：
-
-- Factor Factory 本地 workbench 浏览入口；
-- A 股 existing-factors start layer 小样本示例和 old/new 比较；
-- Factor Factory 小样本示例。
-
-本项目内已记录 root handoff signal；workspace-root 状态回传属于工作区级同步任务。Phase 1 之后的项目内架构债见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。当前 A 股 pipeline 对外合同是 snapshot vs run：snapshot 只保存配置，run 只用 `start_from` 决定开始层，并固定运行到 evaluation。N1 start-from runner、N2 tradability artifact/API/frontend diagnostics display、N3 ZIP packaging 下沉、N4 frontend feature split、N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`。下一批优先级是按需重生成 2023-2025 canonical evaluation / Factor Factory 样例、risk/regime/cost/capacity 和 ML prediction handoff。
-
-新增或修改 artifacts 时必须同时检查：
-
-- writer / loader 是否仍只接受当前 schema；
-- `manifest.display.tables`、downloads、presets、charts 是否覆盖实际展示项；
-- API evidence、direct download、ZIP download 是否只暴露 display contract 中的条目；
-- 前端 run switching / combination switching 是否不会显示旧状态；
-- docs 和 code map 是否同步。
+- 当前完整 market module 只有 A 股；crypto 和其他市场只是 planned / disabled 能力表述，不保留空实现包。
+- 当前只覆盖第一批 price-volume factors。
+- N5 risk/regime/cost/capacity 与 N6 ML prediction handoff 仍需单独设计和验证。
+- 模拟盘不属于当前范围；未来如果做，必须保持与真实交易接口隔离，并单独审批。
+- CSMAR 明细数据和可还原 vendor 数据的报告不公开。
 
 ## 阅读顺序
 
-1. [PROJECT_STATUS.md](PROJECT_STATUS.md)
-2. [ARCHITECTURE.md](ARCHITECTURE.md)
-3. [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md)
-4. [docs/code-map/README.md](docs/code-map/README.md)
-5. [docs/csmar_data_manual.md](docs/csmar_data_manual.md)
-6. [RESEARCH_CARD.md](RESEARCH_CARD.md)
-7. [REPORT.md](REPORT.md)
+1. [README.md](README.md)：项目公开入口。
+2. [REPORT.md](REPORT.md)：完整研究叙事。
+3. [RESEARCH_CARD.md](RESEARCH_CARD.md)：证据底稿。
+4. [PROJECT_STATUS.md](PROJECT_STATUS.md)：本地维护状态。
+5. [ARCHITECTURE.md](ARCHITECTURE.md)：平台架构。
+6. [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md)：evaluation 输入输出合同。
+7. [docs/code-map/README.md](docs/code-map/README.md)：源码阅读地图。
+8. [docs/csmar_data_manual.md](docs/csmar_data_manual.md)：CSMAR 数据说明。
+9. [AGENTS.md](AGENTS.md)：Codex 规则。
