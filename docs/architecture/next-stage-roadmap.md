@@ -179,14 +179,77 @@ web/src/shared/ui/
 
 目标：
 
-- 补充风险暴露、regime 切片、成本敏感性和流动性/容量诊断。
-- 形成后续研究报告所需的稳定诊断表。
+- 把风险暴露、regime 切片、成本侵蚀、流动性/容量压力和 A 股执行假设制度化为
+  evaluation artifact、API preview/download 和 workbench 可消费的诊断输出。
+- 形成后续研究报告所需的稳定诊断表，而不是只停留在 notebook 或一次性脚本里。
+- 让收益来源、风险暴露、成本假设、容量约束和组合构建贡献可以分开解释。
+
+最小可交付范围：
+
+- Signal / regime：在现有 IC、RankIC、分组收益、long-only / long-short
+  诊断基础上，新增按当时可知 regime 或事件窗口切分的稳定性表。
+- Risk diagnostics：覆盖 market beta、行业、市值、风格、波动率和流动性暴露；
+  支持 neutralized IC / return、drawdown、stress test 和 crowding proxy 的第一版诊断。
+- Cost diagnostics：从固定 bps baseline 扩展到 flat、linear、piecewise-linear
+  和 quadratic cost profile；记录 turnover、ADV participation、slippage、market
+  impact、break-even cost 和 cost-adjusted return。
+- Capacity diagnostics：输出 liquidity bucket、ADV participation cap、capacity
+  proxy 和 capacity curve；只解释流动性压力和容量敏感性，不写成真实可交易规模承诺。
+- Portfolio construction：先补规则型权重和约束诊断，包括 equal weight、
+  top/bottom quantile、long-only top N、volatility scaling 和 industry neutral
+  weight；single-name cap、industry cap、turnover cap、liquidity filter、
+  ADV cap 和 beta neutral adjustment 先作为约束诊断或下一阶段配置，不引入优化器。
+- A 股约束：显式记录涨跌停、停牌、T+1、印花税、小盘流动性、收盘成交假设、
+  行业/市值暴露伪装 Alpha 的检查，以及 `long_short` 仅为因子分组诊断口径。
+
+建议新增 artifact：
+
+```text
+dimensions/regime_definitions.csv
+breakdowns/regime_performance.csv
+dimensions/cost_profiles.csv
+diagnostics/risk_exposure.csv
+diagnostics/neutralized_signal_diagnostics.csv
+diagnostics/stress_test_summary.csv
+diagnostics/cost_sensitivity.csv
+diagnostics/capacity_diagnostics.csv
+diagnostics/capacity_curve.csv
+```
+
+字段方向：
+
+- 所有组合相关表必须带 `combination_id`，并通过 `manifest.display.tables`
+  声明是否支持 `combination_id` 过滤、preview row limit、download item 和图表来源。
+- Regime 定义至少记录 `regime_id`、`regime_family`、规则、输入列、阈值、
+  lookback 和是否使用未来收益；正式规则必须 `uses_future_return=false`。
+- Risk exposure 至少记录 `exposure_name`、`exposure_type`、long / short /
+  net / gross exposure，并能区分缺字段、不可用和有效暴露。
+- Cost profiles 至少记录 `cost_profile_id`、`model_type`、佣金、印花税、
+  slippage、spread、impact 和买卖方向是否不对称。
+- Capacity diagnostics 至少记录 liquidity bucket、ADV proxy、participation
+  rate proxy、cap breach 和 warning；字段名不得暗示真实可管理资金规模。
 
 非目标：
 
 - 不写成真实收益承诺。
-- 不进入交易风控或实盘控制。
+- 不进入交易风控、paper trading、live trading、券商/交易所连接、外部数据 API、
+  部署服务或自动化执行能力。
 - 不把 regime 用未来收益定义。
+- 不训练 ML model，不混入 N6 prediction handoff。
+- 不实现组合优化器、事件驱动撮合、真实成交回放、borrow availability、保证金或融券成本模型。
+- 不为 N5 新增外部数据下载、凭据、API key 或自动登录。
+
+验收：
+
+- 新增诊断表由 artifact writer 写出，loader 和 manifest validation 能校验；
+  stale generated runs 不应通过放宽合同变成可见结果。
+- API preview、direct download 和 ZIP download 只通过 `manifest.display` 暴露新增表。
+- React evidence workbench 只消费 API/display metadata；组合切换时 N5 表和图按
+  preview metadata 刷新，不在前端重新计算风险、成本、容量或中性化结果。
+- A 股私有样例优先复用当前 2023-2025 canonical run 与 `rev_120d` parity shard；
+  不直接扩大到单个 32-combination full run，除非先处理低内存 weights/remap 写出。
+- private CSMAR data、`reports/private_real/` 生成物、本机绝对路径和凭据不得进入
+  Git、public-downloadable metadata、日志或普通报告。
 
 ## N6 ML Prediction Handoff
 

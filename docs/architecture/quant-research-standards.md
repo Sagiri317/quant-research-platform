@@ -120,7 +120,17 @@ funding                                               # 融资、永续 funding 
 capacity_curve                                        # 策略容量曲线
 ```
 
-容量结果必须写成诊断和约束，不写成真实可交易规模承诺。
+成本模型应分层记录。固定 bps 只能作为 baseline；正式研究诊断应能区分
+flat cost、linear turnover cost、piecewise-linear impact 和 quadratic impact。
+当市场存在买卖方向不对称费用时，必须明确记录买入、卖出和税费假设。
+
+A 股研究至少应显式记录佣金、印花税、过户费或费用假设，以及涨跌停、停牌、
+T+1、收盘成交假设、小盘流动性和无法成交样本处理。没有这些假设的结果只能
+作为信号诊断，不应描述为可交易策略表现。
+
+容量结果必须写成诊断和约束，不写成真实可交易规模承诺。capacity proxy、
+ADV participation、liquidity bucket 和 capacity curve 只能解释流动性压力与
+研究容量敏感性，不代表真实可管理资金规模、真实成交能力或实盘可交易承诺。
 
 ## 8. 基准和对照
 
@@ -152,6 +162,10 @@ tail_risk                                             # 尾部风险、极端回
 ```
 
 Regime 必须在当时可知，不能用未来收益定义。
+
+股票因子研究必须检查行业、市值、风格、波动率和流动性暴露，避免把行业轮动、
+小盘暴露、低流动性溢价或波动率暴露误写成纯 Alpha。中性化后的 IC、RankIC
+或收益诊断应与原始诊断并列展示，而不是覆盖原始结果。
 
 ## 10. 复现和 Lineage
 
@@ -215,6 +229,9 @@ paper_exchange                                       # 模拟交易所或模拟�
 - 回测必须记录 fill model、slippage model、fee model、latency model、market impact model 和 rejected order 规则。
 - 停牌、涨跌停、无成交、borrow 不可得、保证金不足和交易时段外订单必须显式处理。
 - 回测结果必须能区分信号贡献、组合构建贡献、执行假设贡献和成本假设贡献。
+- A 股日频评价如果没有建模 borrow availability、融券成本、保证金、short
+  availability、成交约束和容量约束，`long_short` 只能作为因子分组诊断口径，
+  不能描述为真实可融券做空策略。
 
 ## 13. 模型风险和策略生命周期
 
