@@ -8,6 +8,8 @@
 
 以下 Mermaid 连线表示数据、契约或 payload 可用流；HTTP request 方向以 API 列表和节点说明为准。
 
+阅读目标是追踪当前实现，不承载 roadmap、架构债、历史 closeout 或里程碑叙事。
+
 ### A-share 主链路
 
 ```mermaid
@@ -133,6 +135,22 @@ CSMAR raw CSV
 
 私有数据边界必须保持清楚：`data/raw_private/`、`data/interim_private/`、`data/processed_private/` 和 `reports/private_real/` 都是本地私有面，不提交、不发布、不通过 API 对外暴露。项目不负责登录 CSMAR、自动下载、管理凭据、连接券商/交易所 API、纸面交易、实盘交易或投资建议。
 
+## 从数据到 Workbench 的阅读路径
+
+1. 从 `build_interim`、`build_panel`、`build_factors` 确认 raw -> interim -> panel -> factor table 的输入输出。
+2. 从 A-share evaluation service 确认 `PipelineConfig` / CLI 如何进入 A-share adapter。
+3. 从 `EvaluationSpec`、`evaluate_to_payload`、`write_evaluation_set_artifacts` 确认 evaluation payload 如何落为 schema `0.7` artifacts。
+4. 从 `manifest.display` 确认 table、chart、download 和 ZIP 暴露项。
+5. 从 FastAPI routes/services 追到 React workbench consumer，确认 `(source_alias, run_id)` 没有丢失。
+
+## Runtime Tracing Checklist
+
+- 入口：CLI、Pipeline API、Factor Factory、CSV upload compatibility 是否进入各自当前 service。
+- 数据：私有 raw/interim/processed 路径是否只在本地 runtime 使用。
+- 合同：artifact table 是否通过 `manifest.display` 暴露，而不是被 API/frontend 隐式猜测。
+- 身份：`source_alias` 和 `run_id` 是否贯穿 run list、evidence、preview、download、comparison 和 frontend state。
+- 前端：feature 是否只消费 API/display payload，不直接读取本地 artifact path。
+
 ## A-share 私有数据与评估
 
 - `build_interim` 读取用户手动导出的 CSMAR raw CSV，写入审计友好的 interim CSV。
@@ -199,7 +217,7 @@ rebuild_interim  -> build_interim -> build_panel -> build_factors -> evaluation
 - Factor Factory: `GET /api/factor-factory-runs`、`GET /api/factor-factory-runs/{run_id}`、`GET /api/factor-factory-runs/{run_id}/tables/{table_key}`、`GET /api/factor-factory-runs/{run_id}/artifacts/{artifact_item:path}`
 - CSV upload compatibility: `POST /api/runs`、`GET /api/templates/factor-csv`，仅用于本地 local/dev 上传路径，不是 A-share 私有主链路。
 
-关键 N8 helper/service：
+关键 helper/service：
 
 - `src/quant_research_platform/artifacts/display_tables.py`: manifest display table preview/download resolver。
 - `src/quant_research_platform/interfaces/api/payloads.py::runtime_display_payload`: 运行时补充 API-only `preview_url`。

@@ -1,6 +1,8 @@
 # Code Map 总览
 
-本目录是 `quant-research-platform` 的源码阅读地图。它记录当前代码事实，不替代研究报告、数据手册、架构蓝图或项目状态。
+本目录是 `quant-research-platform` 的源码阅读地图。`docs/code-map/` is the Current Implementation Learning Layer.
+
+它记录当前代码事实、runtime flow、entrypoints、module relations、artifact/API/frontend tracing，以及新人接手时需要的实现阅读路径。它不替代研究报告、数据手册、架构蓝图、roadmap、治理文件或项目状态。
 
 入口文档：
 
@@ -38,7 +40,22 @@
 | evaluation run 没有 schema `0.7` 或 `manifest.display` | `evaluation-artifacts-api.md` |
 | cumulative returns、turnover、download、ZIP 或 workbench 展示不一致 | `evaluation-artifacts-api.md` |
 | API 里 `source_alias + run_id` 身份丢失 | `evaluation-artifacts-api.md` -> `platform-flow.md` |
-| 后续架构债和 Phase 2/Future 边界不清楚 | `platform-flow.md` |
+| 想从数据入口一路追到 workbench 展示 | `platform-flow.md` -> `a-share-data-and-pipeline.md` -> `evaluation-artifacts-api.md` |
+
+## 职责边界
+
+code-map 只回答“当前系统怎么工作”：
+
+- current implementation reality。
+- runtime flow / entrypoints / module relations。
+- artifact table -> `manifest.display` -> API route -> frontend consumer 的追踪。
+- onboarding / developer learning 阅读路径。
+
+code-map 不承担：
+
+- roadmap、future architecture 或 architecture debt 管理。
+- governance、project status 或 root handoff。
+- historical closeout、completed milestone story 或研究叙事。
 
 ## 维护规则
 

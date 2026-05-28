@@ -1,6 +1,8 @@
 # Evaluation / Artifacts / API 地图
 
-## 当前合同快照（schema 0.7 / N5 v1 groundwork）
+本文是 evaluation artifact -> `manifest.display` -> API route -> frontend consumer 的 contract tracing layer。它只记录当前实现合同，不承担 roadmap、historical closeout、governance 或 project status。
+
+## 当前合同快照（schema 0.7）
 
 当前新生成的 evaluation-set artifact 使用 schema `0.7`：
 
@@ -34,8 +36,8 @@ market adapter / upload / parquet helper
   are sanitized consistently when written, directly downloaded, and packaged in
   selected ZIPs; selected ZIP cache fingerprints hash the sanitized dynamic
   metadata bytes.
-- N5 v1 diagnostics groundwork 已落地：`diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 schema `0.7` required diagnostics tables；risk/regime/cost/capacity 相关 materialized views 仍是 conditional descriptive proxy outputs。
-- Full N5 capability（true risk decomposition、capacity model、PIT regime engine、neutralized diagnostics、simulation semantics）仍是 future work。
+- `diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 schema `0.7` required diagnostics tables。
+- risk/regime/cost/capacity 相关 materialized views 是 conditional descriptive proxy outputs；只有 materialized 后才进入 `manifest.display` 暴露面。
 
 本文记录当前 evaluation layer、artifact schema `0.7`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
 
@@ -192,7 +194,7 @@ Evidence workbench 的诊断卡片展示当前组合最后一行时，应使用�
 前端才可请求 `limit=1&offset=total_rows-1&combination_id=...`。如果 row
 count 非精确，卡片不得把 preview 页里的末行声明为最新诊断；CSV 明细预览仍保持
 display preview row limit，不为了卡片拉完整 diagnostics 表。
-在当前 schema `0.7` 中，`diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 required diagnostics tables；`tradability_diagnostics` 是 conditional / historical N2 display surface，只有 materialized 后才通过 `manifest.display` 暴露。缺少当前 required diagnostics tables 的旧 run 不再兼容，需要重新生成后才能由当前 loader/API 加载。
+在当前 schema `0.7` 中，`diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 required diagnostics tables；`tradability_diagnostics` 是 conditional display surface，只有 materialized 后才通过 `manifest.display` 暴露。缺少当前 required diagnostics tables 的旧 run 不再兼容，需要重新生成后才能由当前 loader/API 加载。
 
 校验要求：
 
@@ -239,6 +241,17 @@ RunRef = (source_alias, run_id, path)
 | `routes/comparison.py` | `/api/comparison`, `/api/comparison.csv` | API-visible runs comparison。 |
 | `routes/uploads.py` | `/api/templates/factor-csv`, `POST /api/runs` | CSV upload 保留为 legacy/dev uploaded-panel smoke / compatibility 入口。 |
 | `routes/factor_factory.py` | `/api/factor-factory-runs` | Factor Factory artifact `0.1` 浏览和下载。 |
+
+## Artifact -> Display -> API -> Frontend Tracing
+
+| Contract item | Artifact / runtime source | `manifest.display` role | API route/service | Frontend consumer |
+|---|---|---|---|---|
+| Evidence summary | `summary.json`, `run_context.json`, loaded artifact metadata | display metadata and public evidence payload boundary | `routes/runs.py`, `run_repository.py` | `useRunEvidence.ts`, `ResultsView.tsx` |
+| Display table preview | CSV/Parquet table listed by schema/display | `display.tables[].preview` defines `table_key`, limits, filter support and portable descriptor | `GET /api/runs/{source_alias}/{run_id}/tables/{table_key}/preview`, `table_preview_service.py` | `CsvBrowser.tsx`, evidence tables |
+| Display charts | chart source tables and required columns | `display.charts` defines chart source and columns | evidence payload plus preview API for paged source rows | `RunCharts.tsx` |
+| Direct artifact download | display-approved artifact item | `display.downloads.items` gates item availability and portable path | `routes/artifacts.py`, `download_service.py`, `artifact_package.py` | `ArtifactDownloads.tsx` |
+| Selected ZIP | display-approved download items and presets | `display.downloads.presets` references exposed items only | `routes/downloads.py`, `build_selected_artifact_zip` | `ArtifactDownloads.tsx` |
+| API-visible identity | run root index and loaded run | not stored as portable local path truth | `RunRef = (source_alias, run_id, path)` across routes/services | run selection, evidence state, comparison state |
 
 ## Download Contract
 
@@ -319,24 +332,17 @@ Frontend rules:
 | A 股 evaluation service | `markets/implementations/a_share/evaluation/service.py` | CLI、pipeline runner 和后续本地调用共享的 A-share evaluation request/result 入口。 |
 | CSV upload | `POST /api/runs` | legacy/dev uploaded-panel smoke / compatibility 入口。 |
 
-## Verification Surface
+## Contract Tracing Checklist
 
-当前合同变更后优先跑：
+读或改当前实现时，按这条链路逐段确认：
 
-```powershell
-$env:PYTHONUTF8="1"
-$env:PYTHONPATH="src"
-conda run -n analysis python -m pytest -q tests/evaluations tests/artifacts tests/interfaces/api
-conda run -n analysis python -m ruff check src tests
-Push-Location web
-npm test -- --run --maxWorkers=1
-npm run lint
-npm run build
-Pop-Location
-git diff --check
-```
+1. Artifact schema registry / writer 是否定义并写出 required files、required columns、conditional tables 和 portable paths。
+2. `manifest.display` 是否覆盖需要展示的 table、chart、direct download、ZIP item 和 preset。
+3. Loader / run repository 是否只让 completed、schema-supported、display-valid 的 run 进入 API-visible index。
+4. API route/service 是否通过 `manifest.display` 和 `source_alias + run_id` 解析 preview、download、comparison 和 evidence payload。
+5. Frontend consumer 是否只使用 API/display payload，不重新推导 artifact path、不绕过 preview/download contract。
 
-需要覆盖的负例：
+常见断点：
 
 - unsupported artifact schema。
 - missing display table/download。

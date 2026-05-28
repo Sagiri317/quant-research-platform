@@ -1,22 +1,22 @@
 # Next Stage Worktree Plan / 下一阶段分支与工作树计划
 
-本文把 [next-stage-roadmap.md](next-stage-roadmap.md) 的近期任务拆成适合隔离开发的分支和工作树。它不是功能验收记录；功能验收仍以后续各分支的测试和 code review 为准。
+本文只记录当前 active branches、future branch suggestions 和 current worktree strategy。
+已完成分支历史、旧 smoke run stories 和 implementation-heavy notes 不在本文展开。
+功能验收仍以后续各分支的测试和 code review 为准。
 
 ## 当前基线
 
-- `main` 已包含 N1 A 股 `start_from` runner。
-- `main` 已包含 N2 backend artifact/API tradability diagnostics。
-- `main` 已包含 N2 frontend diagnostics display。
-- `main` 已包含 N3 Artifact ZIP packaging 下沉。
-- `main` 已包含 N4 frontend feature split。
-- `main` 已包含 N7 A 股 evaluation run identity、历史 schema `0.6`、`combination_id`、kernel 维度、Factor Factory N7 artifact 读取和 public-downloadable metadata 脱敏；当前后续实现应以 schema `0.7` 合同为准。
-- `main` 已包含 N8 contract consumer convergence：portable display preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案。
-- 早期 2023-2025 smoke evaluation 与 Factor Factory 旧样例只保留为历史记录，不进入当前正式 compare contract；当前本地 `reports/private_real/` 保留 schema `0.7` 2023-2025 canonical、`rev_120d` parity shard 和当前 Factor Factory smoke。
+- 当前主线是 `main`。
+- N1/N2/N3/N4/N7/N8 已合入 `main`，后续新任务应基于当前 schema `0.7`、
+  `combination_id`、portable display preview metadata 和 artifact/API/frontend 合同。
+- 当前本地 `reports/private_real/` 保留 schema `0.7` 2023-2025 canonical、
+  `rev_120d` parity shard 和当前 Factor Factory smoke；旧 schema runs 和早期 smoke
+  只作为历史记录。
 - Pipeline 对外语言固定为 snapshot vs run：
   - `POST /api/pipeline-snapshots` 只保存配置。
   - `POST /api/pipeline-runs` 执行到 evaluation。
   - executable run 只用 `start_from` 控制开始层。
-- 当前没有保留已完成 N1/N3 的本地工作树；N7 已合入 `main`，新任务应从干净 `main` 创建新工作树。
+- 当前没有记录中的进行中功能分支。
 
 ## 原则
 
@@ -26,72 +26,40 @@
 - 工作树创建前必须确认当前 checkout 干净，并确认 `.worktrees/` 被 Git 忽略。
 - Vite 默认资源清理仍是独立低优先级 hygiene，不混进功能分支。
 
-## 已完成分支
-
-| 分支 | 路线图任务 | 状态 | 结果 |
-|---|---|---|---|
-| `codex/a-share-build-runner` | N1 A 股 start-from runner | merged to `main` | snapshot/run split、`start_from` runner、完整 checkpoint 链和 Factor Factory existing-factors start layer 已落地 |
-| `codex/tradability-artifacts` | N2 后端 artifact/API 诊断 | merged to `main` | `diagnostics/tradability_diagnostics.csv` 最初在 schema `0.5` 期间落地，历史 schema `0.6` 合同曾通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露；当前 schema `0.7` 由 registry / display 合同声明 |
-| `codex/artifact-zip-packaging` | N3 ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py` |
-| `codex/frontend-feature-split` | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract |
-| `codex/n7-evaluation-run-implementation` | N7 A 股 evaluation run identity 与 2023H1 smoke | merged to `main` | 历史 schema `0.6`、`combination_id`、kernel 维度、N7 evaluation artifact、Factor Factory 读取、public-downloadable metadata 脱敏和 2023H1 private smoke 曾用于验收；当前保留 schema `0.7` 2023-2025 canonical / `rev_120d` evidence |
-| `codex/tradability-workbench` | N2 frontend diagnostics display | merged to `main` | Evidence workbench 消费 `diagnostics/tradability_diagnostics.csv` / diagnostics preview API；诊断卡片仅在 preview payload 标记 `total_rows_exact=true` 时用 `limit=1&offset=total_rows-1` 读取当前组合最后一行，CSV 明细预览仍保持 20 行；未混入 N8 横切收敛 |
-| `codex/contract-consumer-convergence` | N8 架构简化与合同消费收敛 | merged to `main` | `manifest.display.tables[]` portable preview descriptor、runtime `preview_url`、generic table preview route、factor-template route/service 拆分、A-share evaluation service entry、Pipeline Builder run 后自动挂载到 evidence workbench 和 CSV upload legacy/dev 文案已落地 |
-
-## 进行中分支
-
-当前没有记录中的进行中功能分支。
-
 ## 建议后续分支
 
 | 分支 | 路线图任务 | 范围 | 依赖 | 冲突风险 |
 |---|---|---|---|---|
-| `codex/tradability-diagnostics-summary` | N2 follow-up / diagnostics summary | `tradability_diagnostics_summary` artifact、display/API exposure、frontend summary card copy/tests | 依赖 N8 display preview contract 合并后再做；前端只消费 artifact/API summary，不从 preview 计算全交易日平均 | 中。涉及 artifact/API/frontend 合同，但研究语义窄 |
-| `codex/risk-regime-diagnostics` | N5 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 N7 evaluation run identity 和样例稳定；复用 N2 诊断 artifact/display 模式 | 中到高。需要先写详细计划 |
-| `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 N7 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
+| `codex/tradability-diagnostics-summary` | N2 follow-up / diagnostics summary | `tradability_diagnostics_summary` artifact、display/API exposure、frontend summary card copy/tests | 依赖当前 display preview contract；前端只消费 artifact/API summary，不从 preview 计算全交易日平均 | 中。涉及 artifact/API/frontend 合同，但研究语义窄 |
+| `codex/risk-regime-diagnostics` | N5 full 风险、regime、成本和容量扩展 | research diagnostics artifacts、API exposure、report/docs | 依赖 schema `0.7`、current canonical sample 和 N8 display/API/frontend helper | 中到高。需要先写详细计划 |
+| `codex/ml-prediction-handoff` | N6 ML prediction handoff | prediction manifest、handoff schema、evaluation adapter-like input、tests/docs | 可独立设计，但应复用 evaluation run identity，不能混入 N2/N5 | 中到高。合同设计优先 |
+| `codex/pipeline-history-ui` | Pipeline history UI | 本地 workbench history visibility，不改变 snapshot/run/start_from 语义 | 依赖当前 pipeline API 和 evidence run selection 行为 | 中。容易和 pipeline semantics 或 frontend state 混淆 |
 
 ## 推荐顺序
 
-1. N7 已完成并合入 `main`
-   - 先稳定“一个 API-visible run 是一个 `EvaluationMatrixRun`”的长期语义。
-   - Evaluation run 内部用 `combination_id` 管理 feature / label / portfolio mode / kernel / factor set 等结果切片。
-   - `factor_set` 是一起输入计算的 feature 批次；第一阶段保持每个 feature column 单独评价。
-   - Tensor 是长期主路径，应支持 matrix-native 输入和 combination-keyed 输出；dataframe 是 reference / fallback / debugging 路径。
-   - 2023-2025 canonical 样例默认覆盖 tensor/dataframe、long-only/long-short、`forward_return_5d`/`forward_return_20d`，以及 `mom_20d`、`vol_20d`、`avg_amount_20d` 三个 feature。
-   - 默认样例应形成 1 个 evaluation run，内部至少 24 个 result combinations：`2 kernels x 2 modes x 2 labels x 3 features`。
-   - 新样例应包含当前 artifact contract 要求的 diagnostics，包括 `diagnostics/tradability_diagnostics.csv`。
-   - 新样例应使用 N7 后的 `kernel` 命名和当前 schema `0.7` evaluation-set 合同；旧 schema `0.5` / `0.6` 样例不进入正式 compare contract。
-   - Schema `0.7` 应按 star schema 组织：`dimensions/combinations.csv` 是维度 source of truth，fact tables 以 `combination_id` 连接，不在大表里重复塞入所有字符串维度。
-   - `manifest.display` 应声明 `dimension_source`、table format、join key、downloads 和 charts；前端从 display contract 与 combinations 表生成 selectors。
-   - 前端不做视觉重设计，但必须完整展示 schema `0.7` 暴露的用户可见结果；所有 display tables，包括 Parquet `weights`，都必须支持 bounded preview。
-   - `weights` 第一阶段就直接写 Parquet，不再把完整 weights CSV 作为主产物。
-   - Factor Factory 应适配 N7 evaluation run 合同，用 `candidate_id + combination_id` 汇总候选表现；不要让 N7 迁就旧 candidate-run 心智。
-   - Factor Factory 第一阶段只做适配，不强制 bump schema；只有持久化 artifact 结构变化时才单独 bump。
-   - `kernel` 是 evaluation run 内的维度，tensor/dataframe 不再拆成用户可见散 run。
-   - `compare_evaluation_sets` 应改成默认低内存的网页/API summary comparison，只读 summary、manifest、combinations 和必要 summary metrics，继续支持大样本快速比较，并作为网页 comparison cards / tables / charts 的数据源。
-   - 新增更详细的低内存 Evaluation Comparison Report，只输出表格、JSON 和 Markdown 报告，不进入主网页展示；它用于比较 schema `0.7` combinations 和 kernel parity。大样本验收不得使用会读完整 weights 或大时序表的 comparison 路径。
-   - dataframe / tensor 共同覆盖结果应做 parity 对照：结构 exact match；same-kernel 回归建议 `rtol=1e-12, atol=1e-12`；dataframe/tensor common metrics 建议 `rtol=1e-9, atol=1e-10`；cumulative path metrics 建议 `rtol=1e-8, atol=1e-10`。
-   - 2023H1 real smoke 曾作为第一晚真实数据验收，覆盖 2023-01-01 到 2023-06-30 的 24 个 result combinations；该本地 run 目录已在 2023-2025 样例验收后清理，不再作为当前可浏览证据。
-   - 当前 canonical root 固定为 `reports/private_real/factor_evaluation/schema07_eval_2023_2025_v1`；`reports/private_real/factor_evaluation/schema07_eval_2023_2025_rev120_v1` 保留 `rev_120d` kernel / portfolio mode parity evidence。
-   - `long_short` 在 N7 中是诊断组合口径，不声明真实可融券做空或可交易策略。
-   - 完整 2023-2025 样例生成后，再在实现验收阶段比较新实现输出是否一致，不打印或公开原始 CSMAR 数据。
+1. `codex/risk-regime-diagnostics`
+   - 先写独立计划。
+   - 不混入 N6 prediction handoff。
+   - 复用当前 display preview、download allowlist、A-share service entry 和 current evidence samples。
 
-2. `codex/risk-regime-diagnostics` 或 `codex/ml-prediction-handoff`
-   - 两者都应先写独立计划。
-   - 不建议和 N2 frontend 同时抢同一批 artifact/API/frontend 文件。
-   - N5/N6 计划应明确复用 N8 合入后的 display/API/frontend helper，避免隐性重构混入研究合同分支。
+2. `codex/ml-prediction-handoff`
+   - 单独设计 prediction input contract。
+   - 不把模型训练、model registry 或 feature store 混入当前阶段。
+
+3. `codex/tradability-diagnostics-summary` 或 `codex/pipeline-history-ui`
+   - 前者是窄 diagnostics summary。
+   - 后者是本地 workbench 可见性改善，不改变 pipeline runtime 语义。
 
 ## 不建议并行的组合
 
-- `codex/frontend-feature-split`、`codex/tradability-artifacts`、`codex/tradability-workbench` 和 `codex/contract-consumer-convergence` 已完成；后续不要在 N5/N6 中重新打开这些历史分支的范围。
-- N2 frontend 的最终验收应使用 N7 之后、包含 `tradability_diagnostics.csv` 的样例；旧私有样例缺少 diagnostics，不能证明真实展示路径。
-- 不要把 N5 风险/regime 扩展混进 N2 tradability 诊断。两者都属于 diagnostics，但研究语义和验收口径不同。
+- 不要把 N5 风险/regime 扩展混进 N2 tradability summary。两者都属于 diagnostics，但研究语义和验收口径不同。
 - 不要把 N6 ML prediction handoff 混进现有 factor evaluation runner。Prediction 是新的输入合同，应单独设计。
-- N5/N6 应复用 N8 已合入的 display preview、download allowlist、factor-template API、A-share service entry 和 CSV upload legacy/dev 边界；不要在研究合同分支里重新打开这些横切清理。
+- N5/N6 不应重新打开 N8 已收敛的 display preview、download allowlist、factor-template API、A-share service entry 和 CSV upload legacy/dev 边界。
+- Pipeline history UI 不应和 pipeline runtime semantics 改动混在同一分支。
 
 ## 工作树创建策略
 
-N7 已合入 `main`；不要再创建旧的 A-share run identity 或 N7 implementation 工作树。后续新任务从干净 `main` 创建新工作树：
+后续新任务从干净 `main` 创建新工作树：
 
 ```powershell
 git status --short
@@ -101,7 +69,8 @@ git check-ignore -q .worktrees
 git worktree add ".worktrees/<task-name>" -b "codex/<task-name>"
 ```
 
-如果 `.worktrees/` 未被忽略，先更新 `.gitignore` 并单独提交该治理变更，再创建工作树。不要把工作树目录加入 Git。
+如果 `.worktrees/` 未被忽略，先更新 `.gitignore` 并单独提交该治理变更，再创建工作树。
+不要把工作树目录加入 Git。
 
 ## 每个分支的最低验收
 
@@ -141,16 +110,15 @@ Pop-Location
 git diff --check
 ```
 
-需要真实浏览器 UI 抽查时，按项目维护 skill 的浏览器验收流程启动本地 API/Vite 并运行 Playwright，避免生成顶层 `output/`：
+需要真实浏览器 UI 抽查时，按项目维护 skill 的浏览器验收流程启动本地 API/Vite
+并运行 Playwright，避免生成顶层 `output/`：
 
 ```powershell
 scripts\start_private_workbench.ps1
 scripts\stop_workbench.ps1
 ```
 
-## 相关计划文件
+## 相关路线图
 
-- N7 设计 spec：[../superpowers/specs/2026-05-25-n7-a-share-run-identity-design.md](../superpowers/specs/2026-05-25-n7-a-share-run-identity-design.md)
-- N1 归档计划：[../superpowers/plans/2026-05-24-a-share-build-runner.md](../superpowers/plans/2026-05-24-a-share-build-runner.md)
-- N3 归档计划：[../superpowers/plans/2026-05-24-artifact-zip-packaging.md](../superpowers/plans/2026-05-24-artifact-zip-packaging.md)
-- N4 计划草案：[../superpowers/plans/2026-05-24-frontend-feature-split.md](../superpowers/plans/2026-05-24-frontend-feature-split.md)
+- Active roadmap: [next-stage-roadmap.md](next-stage-roadmap.md)
+- Current status and valid samples: [../../PROJECT_STATUS.md](../../PROJECT_STATUS.md)

@@ -23,6 +23,8 @@ Project `AGENTS.md` owns hard safety boundaries: local-only scope, approved Cond
 
 Use PowerShell `Select-String` if `rg` is unavailable or denied.
 
+For medium+ tasks, stop before implementation with a task brief, implementation plan, scope declaration, and explicit human approval. Keep the summary format concrete: Changed, Not changed, Risks, Scope check.
+
 ## Stability Model
 
 Keep this `SKILL.md` as the stable workflow layer. Put change-prone project facts in [references/contracts-and-verification.md](references/contracts-and-verification.md), including schema versions, source-file maps, script names, API route names, browser acceptance inputs, and current verification commands.
@@ -30,12 +32,15 @@ Keep this `SKILL.md` as the stable workflow layer. Put change-prone project fact
 Stable responsibilities:
 
 - Preserve project safety boundaries from `AGENTS.md`; do not move task-specific approvals into permanent rules.
+- Current phase is Local Research Platform, with Stable Core + High-Velocity Research Edge. Do not add speculative infrastructure or unimplemented topology during maintenance work.
 - Keep generated artifacts as the contract source for evidence flows, with `manifest.display` as the UI/API/download exposure boundary.
 - Keep artifact types explicit. Do not conflate evaluation-run artifacts, Factor Factory artifacts, generated evidence, and historical/rejection fixtures.
 - Keep schema registries and tests as the source of truth for field lists, grain, unique keys, conditional rules, and required generated files.
-- Prefer linked updates across producer, writer, loader, lightweight index, API, downloads, frontend consumers, tests, docs, and code maps when a public contract changes.
+- Prefer linked updates across writer, loader, `manifest.display`, API payloads/routes, downloads, frontend consumers, tests, docs, and code maps when a public contract changes.
 - Cross-check architecture, engineering, and quant research standards before changing long-term module boundaries, artifact/API/frontend exposure, diagnostics interpretation, or trading-adjacent wording.
 - Treat generated runs as evidence, not authority docs. Regenerate stale runs instead of weakening validation to keep them visible.
+- Active docs should contain current operational truth only: current status, blockers, next steps, handoff, and valid samples.
+- `docs/code-map/` is the Current Implementation Learning Layer: current implementation reality, runtime flow, entrypoints, module relations, artifact/API/frontend tracing, and onboarding. Do not put roadmap, governance, unimplemented architecture planning, project status, historical closeout, or research narrative there.
 
 Before using concrete paths, scripts, schema numbers, or route names, load the current contract reference.
 
@@ -45,7 +50,7 @@ Before using concrete paths, scripts, schema numbers, or route names, load the c
 2. For every artifact table, define the field list, grain, unique key / sort key, status fields, and missing-input semantics together. Do not accept a table contract where one of those pieces is only implied by prose.
 3. Treat code schema registries and tests as the source of truth for field counts, required/conditional/optional totals, `required_if` / `nullable_if` rules, and generated file indexes. Markdown may explain the contract, but should not remain the only place where counts or keys are maintained.
 4. Map every enforceable invariant to pytest, Vitest, or an existing static check before relying on review text. Add positive and negative coverage when code changes are in scope.
-5. Update producer, writer, loader validation, lightweight run index, API payload/download behavior, frontend consumers, tests, docs, and code maps in the same round when the contract changes.
+5. Update writer, loader validation, `manifest.display`, lightweight run index, API payload/download behavior, frontend consumers, tests, docs, and code maps in the same round when the contract changes.
 6. Remove retired compatibility in one pass when old generated runs are no longer supported. Search for stale schema versions, retired summary fields, old table names, and frontend-only shortcuts.
 7. Review the diff by surface: artifact contract, API/downloads, frontend UI, A-share pipeline/runtime, Factor Factory, tests/fixtures, docs/skills, generated outputs, and gitignore.
 8. For docs-only drift, verify against current code paths before preserving command examples or path names.
