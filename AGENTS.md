@@ -56,6 +56,30 @@ Small local edits such as typing improvements, logging cleanup, parser cleanup, 
 
 If an approved artifact/API/frontend/evaluation contract change has already happened, keep the linked surfaces synchronized: producer, writer, loader, API payloads/routes, download packaging, frontend consumers, tests, docs, and code maps must not be left half-updated.
 
+### CURRENT_PHASE
+
+Local Research Platform.
+
+Current architecture style: Stable Core + High-Velocity Research Edge.
+
+Current work must stay centered on factor research, evaluations, artifact generation, local evidence workflow, and A-share research reliability. Future capabilities may influence boundary design, but must not add complexity to the current implementation.
+
+Out of scope for this phase: distributed runtime, workers/schedulers, billing/compliance, live trading, feature store, model registry, and autonomous agents.
+
+Contract rule: `manifest.display` is the only user-display contract. Do not bypass `manifest.display`, artifact flow, or evidence flow with frontend-only, backend-only, or task-local shortcuts.
+
+### AI_STOP_CONDITIONS
+
+Stop and request human confirmation when contract meaning is unclear, schema semantics are unclear, a task touches multiple architecture layers, a new abstraction/framework/dependency is proposed, work crosses the current phase boundary, public contracts change, or directory structure changes.
+
+### FORBIDDEN_AUTONOMOUS_ACTIONS
+
+Do not autonomously expand market scope, execution scope, deployment scope, runtime topology, public contracts, schemas, dependencies, directory layout, orchestration, plugin systems, or generalized governance infrastructure.
+
+### TASK_PROTOCOL
+
+Medium+ tasks must start from a task brief, implementation plan, review summary, and scope check. The brief should identify allowed scope, forbidden scope, relevant contracts, files to inspect, expected changes, required tests, definition of done, and risks.
+
 ## 3. Editable Area
 
 Project-level Codex may edit:

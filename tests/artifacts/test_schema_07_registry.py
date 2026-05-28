@@ -70,6 +70,12 @@ def test_schema_07_registry_owns_table_paths_keys_and_display_eligibility() -> N
         "metric_family",
         "metric_name",
     )
+    assert specs["ic_breakdown_by_month"].path == "breakdowns/month/ic.csv"
+    assert specs["ic_breakdown_by_month"].unique_key == (
+        "combination_id",
+        "period_type",
+        "period",
+    )
 
 
 def test_schema_07_chart_registry_declares_derived_cumulative_return() -> None:

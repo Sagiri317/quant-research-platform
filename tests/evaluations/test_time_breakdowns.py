@@ -98,6 +98,69 @@ def test_time_breakdowns_write_year_quarter_month_summary_artifacts(tmp_path):
     assert "evaluation_metrics_summary_by_month" in loaded.tables
 
 
+def test_monthly_ic_breakdown_is_written_and_display_declared(tmp_path):
+    spec = EvaluationSpec(
+        panel=_two_year_panel(),
+        feature_columns=("factor",),
+        label_columns=("forward_return",),
+        metadata={
+            "run_id": "monthly_ic_breakdown_run",
+            "project": "quant-research-platform",
+            "kind": "factor",
+            "domain": "evaluation_synthetic",
+            "data_stage": "synthetic_only",
+            "uses_external_data": False,
+        },
+        weight_configs=(WeightConfig(top_quantile=0.5, bottom_quantile=0.5),),
+        n_groups=2,
+        time_breakdowns=("month",),
+        output_dir=tmp_path,
+    )
+
+    result = run_evaluation(spec)
+
+    output_path = tmp_path / "breakdowns" / "month" / "ic.csv"
+    assert output_path.exists()
+    assert "ic_breakdown_by_month" in result.metrics
+    monthly_ic = pd.read_csv(output_path)
+    assert list(monthly_ic.columns) == [
+        "combination_id",
+        "period_type",
+        "period",
+        "period_start",
+        "period_end",
+        "mean_ic",
+        "std_ic",
+        "icir",
+        "positive_ic_rate",
+        "mean_rankic",
+        "std_rankic",
+        "rankicir",
+        "positive_rankic_rate",
+        "n_observations",
+        "diagnostic_status",
+        "status_reason",
+        "warning",
+    ]
+    assert monthly_ic["period_type"].eq("month").all()
+    assert set(monthly_ic["period"]) == {"2025-12", "2026-01"}
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert (
+        manifest["artifacts"]["breakdowns/month"]["ic_breakdown_by_month"]
+        == "breakdowns/month/ic.csv"
+    )
+    display_tables = {table["key"]: table for table in manifest["display"]["tables"]}
+    assert display_tables["ic_breakdown_by_month"]["path"] == (
+        "breakdowns/month/ic.csv"
+    )
+    download_items = {
+        (item["kind"], item["key"])
+        for item in manifest["display"]["downloads"]["items"]
+    }
+    assert ("table", "ic_breakdown_by_month") in download_items
+
+
 def test_time_breakdown_performance_slices_overall_returns_without_reweighting():
     from quant_research_platform.evaluations.period_breakdowns import (
         build_time_breakdown_metrics,

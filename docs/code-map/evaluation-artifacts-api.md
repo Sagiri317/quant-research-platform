@@ -140,6 +140,7 @@ summary.json plus metrics/evaluation_metrics_summary.csv
 breakdowns/year/
 breakdowns/quarter/
 breakdowns/month/
+breakdowns/month/ic.csv
 ```
 
 `comparison.csv` 不是单个 evaluation run 的物理必备文件。它是 `manifest.display.downloads` 暴露的动态 index item，由 API comparison 或 `write_run_comparison` 按多个 completed runs 生成。

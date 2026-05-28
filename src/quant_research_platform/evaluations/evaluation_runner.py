@@ -1072,6 +1072,11 @@ def _schema_07_breakdown_tables(
         performance = tables.get(f"performance_summary_by_{period}", pd.DataFrame())
         if ic.empty and spread.empty and performance.empty:
             continue
+        if period == "month" and not ic.empty:
+            result["ic_breakdown_by_month"] = _schema_07_monthly_ic_breakdown(
+                tables["ic"],
+                id_remap,
+            )
         result[f"evaluation_metrics_summary_by_{period}"] = _schema_07_period_metrics(
             period=period,
             ic_summary=_remap_fact_table(ic, id_remap),
@@ -1079,6 +1084,81 @@ def _schema_07_breakdown_tables(
             performance_summary=_remap_fact_table(performance, id_remap),
         )
     return result
+
+
+def _schema_07_monthly_ic_breakdown(
+    ic: pd.DataFrame,
+    id_remap: dict[str, str],
+) -> pd.DataFrame:
+    columns = [
+        "combination_id",
+        "period_type",
+        "period",
+        "period_start",
+        "period_end",
+        "mean_ic",
+        "std_ic",
+        "icir",
+        "positive_ic_rate",
+        "mean_rankic",
+        "std_rankic",
+        "rankicir",
+        "positive_rankic_rate",
+        "n_observations",
+        "diagnostic_status",
+        "status_reason",
+        "warning",
+    ]
+    frame = _remap_fact_table(ic, id_remap)
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.copy()
+    timestamp = pd.to_datetime(frame["timestamp"])
+    frame["period"] = timestamp.dt.to_period("M").astype(str)
+    records = []
+    for (combination_id, period), group in frame.groupby(
+        ["combination_id", "period"],
+        sort=True,
+        dropna=False,
+    ):
+        ic_values = pd.to_numeric(group["ic"], errors="coerce").dropna()
+        rankic_values = pd.to_numeric(group["rankic"], errors="coerce").dropna()
+        mean_ic = float(ic_values.mean()) if len(ic_values) else 0.0
+        std_ic = float(ic_values.std(ddof=0)) if len(ic_values) else 0.0
+        mean_rankic = float(rankic_values.mean()) if len(rankic_values) else 0.0
+        std_rankic = float(rankic_values.std(ddof=0)) if len(rankic_values) else 0.0
+        records.append(
+            {
+                "combination_id": combination_id,
+                "period_type": "month",
+                "period": period,
+                "period_start": period,
+                "period_end": period,
+                "mean_ic": mean_ic,
+                "std_ic": std_ic,
+                "icir": _safe_ratio(mean_ic, std_ic),
+                "positive_ic_rate": (
+                    float((ic_values > 0).mean()) if len(ic_values) else 0.0
+                ),
+                "mean_rankic": mean_rankic,
+                "std_rankic": std_rankic,
+                "rankicir": _safe_ratio(mean_rankic, std_rankic),
+                "positive_rankic_rate": (
+                    float((rankic_values > 0).mean()) if len(rankic_values) else 0.0
+                ),
+                "n_observations": int(len(group)),
+                "diagnostic_status": "ok",
+                "status_reason": "",
+                "warning": "",
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return float(numerator / denominator)
 
 
 def _schema_07_period_metrics(
