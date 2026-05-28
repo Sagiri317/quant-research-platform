@@ -52,7 +52,7 @@ Codex may improve implementation efficiency, reduce repetitive work, and make lo
 
 Default to one research semantic layer per task: data, factor, signal, portfolio, evaluation semantics, trading-adjacent semantics, simulation semantics, or execution. Avoid cross-layer rewrites unless the user has approved that scope.
 
-Public interfaces, artifact schemas, data schemas, factor output formats, evaluation/backtest semantics, module boundaries, new dependencies, new abstractions, and data storage structures require approval before implementation.
+Public interfaces, artifact schemas, data schemas, factor output formats, evaluation semantics, trading-adjacent semantics, simulation semantics, module boundaries, new dependencies, new abstractions, and data storage structures require approval before implementation.
 
 Small local edits such as typing improvements, logging cleanup, parser cleanup, lint/format fixes, focused test additions, and local duplicate-code reduction may proceed when they do not change contracts, schemas, public interfaces, or research semantics.
 
