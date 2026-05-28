@@ -80,6 +80,8 @@ Do not autonomously expand market scope, execution scope, deployment scope, runt
 
 Medium+ tasks must start from a task brief, implementation plan, review summary, and scope check. The brief should identify allowed scope, forbidden scope, relevant contracts, files to inspect, expected changes, required tests, definition of done, and risks.
 
+Medium+ tasks must stop and wait for explicit human approval after producing the task brief, implementation plan, and scope declaration, and before implementation begins.
+
 ## 3. Editable Area
 
 Project-level Codex may edit:
