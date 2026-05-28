@@ -1,6 +1,6 @@
 # Evaluation / Artifacts / API 地图
 
-## N7 当前合同快照（schema 0.7）
+## 当前合同快照（schema 0.7 / N5 v1 groundwork）
 
 当前新生成的 evaluation-set artifact 使用 schema `0.7`：
 
@@ -21,8 +21,9 @@ market adapter / upload / parquet helper
   `combination_id, feature, label, kernel, portfolio_mode`。
 - fact tables 通过 `combination_id` join 维度表；run-level constant 配置写入
   `run_context.json`。
-- required portfolio outputs 包括 `portfolio/weights.parquet` 和
-  `API-derived primary_cumulative_return chart from portfolio/returns.csv`；不再写 schema `0.7` 的 `pnl.csv`。
+- required portfolio output 包括 `portfolio/returns.csv`；`portfolio/weights.parquet`
+  只在 materialized 后通过 display contract 暴露。`API-derived primary_cumulative_return`
+  chart 从 `portfolio/returns.csv` 派生；不再写 schema `0.7` 的 `pnl.csv`。
 - API/frontend 合同使用 `kernel` 和 `return_source_column`。
 - `compare_evaluation_sets` 是低内存 summary comparison；更详细的
   `write_evaluation_comparison_report()` 只输出 CSV/JSON/Markdown，不进入主网页。
@@ -33,6 +34,8 @@ market adapter / upload / parquet helper
   are sanitized consistently when written, directly downloaded, and packaged in
   selected ZIPs; selected ZIP cache fingerprints hash the sanitized dynamic
   metadata bytes.
+- N5 v1 diagnostics groundwork 已落地：`diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 schema `0.7` required diagnostics tables；risk/regime/cost/capacity 相关 materialized views 仍是 conditional descriptive proxy outputs。
+- Full N5 capability（true risk decomposition、capacity model、PIT regime engine、neutralized diagnostics、simulation semantics）仍是 future work。
 
 本文记录当前 evaluation layer、artifact schema `0.7`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
 
@@ -114,25 +117,22 @@ artifact_schema_version = "0.7"
 
 ```text
 manifest.json
-run_context.json
 summary.json
 run_context.json
 dimensions/combinations.csv
+dimensions/diagnostic_policies.csv
 report.md
 metrics/ic.csv
-metrics/evaluation_metrics_summary.csv
 metrics/grouped_returns.csv
 metrics/evaluation_metrics_summary.csv
-metrics/evaluation_metrics_summary.csv
-portfolio/weights.parquet
 portfolio/returns.csv
+input_quality/coverage_summary.csv
+diagnostics/diagnostic_summary.csv
+diagnostics/diagnostic_metrics.csv
 API-derived primary_cumulative_return chart from portfolio/returns.csv
-diagnostics/tradability_diagnostics.csv
-input_quality/coverage_summary.csv
-input_quality/coverage_summary.csv
-input_quality/coverage_summary.csv
-summary.json plus metrics/evaluation_metrics_summary.csv
 ```
+
+Conditional materialized tables can include `portfolio/weights.parquet`, `diagnostics/tradability_diagnostics.csv`, `diagnostics/tradability_summary.csv`, `diagnostics/scenario_metrics.csv`, `diagnostics/exposure_capacity_summary.csv`, and `diagnostics/portfolio_risk_summary.csv` when requested and available.
 
 启用 `time_breakdowns` 后会按配置出现可选目录：
 
@@ -192,8 +192,7 @@ Evidence workbench 的诊断卡片展示当前组合最后一行时，应使用�
 前端才可请求 `limit=1&offset=total_rows-1&combination_id=...`。如果 row
 count 非精确，卡片不得把 preview 页里的末行声明为最新诊断；CSV 明细预览仍保持
 display preview row limit，不为了卡片拉完整 diagnostics 表。
-新生成的 schema `0.7` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
-需要重新生成后才能由当前 loader/API 加载。
+在当前 schema `0.7` 中，`diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 required diagnostics tables；`tradability_diagnostics` 是 conditional / historical N2 display surface，只有 materialized 后才通过 `manifest.display` 暴露。缺少当前 required diagnostics tables 的旧 run 不再兼容，需要重新生成后才能由当前 loader/API 加载。
 
 校验要求：
 

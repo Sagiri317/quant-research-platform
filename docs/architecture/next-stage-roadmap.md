@@ -10,7 +10,7 @@
 | N2 | Eligibility / tradability 诊断可视化 | P0 | merged to `main` | 让覆盖、过滤原因和影响进入 artifact/API，并由 frontend 只读展示 |
 | N3 | Artifact ZIP packaging 下沉 | P1 | merged to `main` | 把下载打包规则从 API service 下沉到 `artifacts/` |
 | N4 | 前端 feature split | P1 | merged to `main` | 拆分当前平铺 workbench，降低后续功能耦合 |
-| N5 | 风险、regime、成本和容量扩展 | P1 | planned | 补研究诊断，形成正式研究扩展路径 |
+| N5 | 风险、regime、成本和容量扩展 | P1 | partial implementation / contract groundwork | N5 v1 descriptive proxy diagnostics 已落地；full capability 仍需单独设计和验证 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 | N7 | A 股 evaluation run identity 与 2023-2025 样例生成 | P0 | merged to `main` | 稳定一个 API-visible `EvaluationMatrixRun`，用 `combination_id` 管理 feature / label / mode / kernel 结果切片；2023H1 private smoke 曾用于验收，当前保留 2023-2025 canonical sample / `rev_120d` parity shard |
 | N8 | 架构简化与合同消费收敛 | P1 | merged to `main` | 收敛 `manifest.display` 消费、Factor template API、A-share service entry 和 legacy/dev 入口，降低 N5/N6 扩展前的耦合 |
@@ -19,8 +19,10 @@
 
 N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`。当前后续实现应基于 schema `0.7`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同继续。
 
+N5 当前不再是纯 planned：schema `0.7` 已落地 N5 v1 descriptive proxy diagnostics 和 artifact/display/API/frontend groundwork；下面的 N5 任务指 full risk/regime/cost/capacity capability 的后续扩展。
+
 ```text
-1. N5 风险、regime、成本和容量扩展
+1. N5 full 风险、regime、成本和容量扩展
 2. N6 ML prediction handoff
 3. Pipeline history UI
 ```
@@ -30,7 +32,7 @@ N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`
 - N2 已合入 `main`：后端支持 `diagnostics/tradability_diagnostics.csv`，frontend evidence workbench 曾基于 N7 `combination_id` 和历史 schema `0.6` 合同消费并展示诊断结果。
 - N8 已在 N5/N6 大范围新增 artifact/API/frontend 合同前合入；后续扩展应复用 display preview、download allowlist、template API 和 pipeline entry helper。
 - 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和 frontend acceptance 已生成；后续不要直接扩大一次性 full run。
-- N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
+- N5 full capability 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式；当前 v1 groundwork 已复用 schema `0.7` registry、required diagnostics tables 和 display/API/frontend 模式。
 - N6 的 prediction handoff 需要稳定表达 date range、feature / signal、label、kernel、portfolio mode、factor set 和输入身份，并能在同一个 evaluation run 页面里切换结果。
 
 ## N1 A 股 Start-From Pipeline Runner
@@ -176,6 +178,12 @@ web/src/shared/ui/
 - Factor Factory browser 仍不暴露 private filesystem paths。
 
 ## N5 风险、Regime、成本和容量扩展
+
+当前实现状态：
+
+- N5 v1 已是 partial implementation + contract groundwork：schema `0.7` 已包含 diagnostics registry、required diagnostics tables、`diagnostic_summary` / `diagnostic_metrics`、conditional materialized views、`manifest.display`、API preview/download 和 frontend evidence flow。
+- 当前 risk/regime/cost/capacity 输出是 post-run descriptive proxy diagnostics，不是正式 risk model、capacity model、regime engine、backtest、simulation 或 trading system。
+- 下方目标保留为 full N5 capability 的 future work，不升级当前 phase，也不扩大当前实现范围。
 
 目标：
 
@@ -355,7 +363,7 @@ comparison report；这些目录仍属于私有本地 evidence，不应提交或
 - `manifest.display` 必须声明 `dimension_source`、表路径、格式、join key、downloads 和 charts；前端不得硬编码未声明表路径。
 - 前端不做视觉重设计，但必须完整展示当前 schema `0.7` 暴露的用户可见结果；所有 display tables，包括 Parquet `weights`，都必须支持 bounded preview。
 - `weights` 第一阶段就直接写 Parquet，不再把完整 weights CSV 作为主产物。
-- 新 artifacts 包含当前 artifact contract 要求的 diagnostics，包括 `diagnostics/tradability_diagnostics.csv`。
+- 新 artifacts 包含当前 artifact contract 要求的 diagnostics，包括 `dimensions/diagnostic_policies.csv`、`diagnostics/diagnostic_summary.csv` 和 `diagnostics/diagnostic_metrics.csv`；`diagnostics/tradability_diagnostics.csv` 属于 conditional / historical N2 display surface。
 - 前端后续可以在一个 evaluation run 页面内切换 feature / label / portfolio mode / kernel 展示不同 combination result。
 - dataframe / tensor 共同覆盖结果应能做 parity 对照：结构和离散字段 exact match；same-kernel 回归建议 `rtol=1e-12, atol=1e-12`；dataframe/tensor common metrics 建议 `rtol=1e-9, atol=1e-10`；cumulative returns / drawdown 等长链路指标建议 `rtol=1e-8, atol=1e-10`。
 - `compare_evaluation_sets` 应改成默认低内存的网页/API summary comparison，只读 summary、manifest、combinations 和必要 summary metrics，继续支持大样本快速比较，并作为网页 comparison cards / tables / charts 的数据源。

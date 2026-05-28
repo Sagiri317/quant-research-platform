@@ -46,7 +46,7 @@ local approved data
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 只保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | N1/N2/N3/N4/N7/N8 已合入 `main` | Pipeline runner、tradability diagnostics、ZIP packaging、frontend feature split、run identity、contract consumer convergence | 已验证 |
 | 当前 2023-2025 evidence 可作为回归入口 | `schema07_eval_2023_2025_v1`、`schema07_eval_2023_2025_rev120_v1` 和 Factor Factory `rev_120d` smoke | 已验证 |
-| 下一阶段研究合同仍需单独设计 | N5 risk/regime/cost/capacity 与 N6 ML prediction handoff | 待推进 |
+| N5 v1 diagnostics groundwork 已落地，full capability 仍需单独设计 | schema `0.7` diagnostics registry、diagnostic artifacts、`manifest.display` / API / frontend evidence flow 已有描述性 proxy diagnostics；true risk / regime / capacity / simulation 仍是未来工作 | partial implementation / contract groundwork |
 
 ## 复现方式
 
@@ -178,9 +178,11 @@ conda run -n analysis python -m quant_research_platform.markets.implementations.
 
 成本、权重方法、benchmark、universe、eligibility、tradability、生成环境和输入 lineage 等 run-level 配置写入 `run_context.json`，不进入 combinations 维度表；portable artifacts 不再写出 `config.json` 或 `lineage.json`。
 
-Schema `0.7` 的核心输出包括 `metrics/ic.csv`、`metrics/grouped_returns.csv`、`metrics/evaluation_metrics_summary.csv`、`portfolio/returns.csv`、`portfolio/weights.parquet`、`input_quality/coverage_summary.csv`、`diagnostics/diagnostic_summary.csv` 和 `diagnostics/diagnostic_metrics.csv`；启用 year / month breakdown 时还会分别生成 `breakdowns/year/ic.csv` 和 `breakdowns/month/ic.csv` 作为 IC / RankIC breakdown artifacts。公开合同使用 `kernel` 和 `return_source_column`；diagnostics 中的 risk/regime/cost/capacity 是 descriptive proxy diagnostics，不代表 alpha proof、真实 capacity、validated risk model、paper/live trading 或 investment advice。
+Schema `0.7` 的 required 输出包括 `metrics/ic.csv`、`metrics/grouped_returns.csv`、`metrics/evaluation_metrics_summary.csv`、`portfolio/returns.csv`、`input_quality/coverage_summary.csv`、`dimensions/diagnostic_policies.csv`、`diagnostics/diagnostic_summary.csv` 和 `diagnostics/diagnostic_metrics.csv`；`portfolio/weights.parquet` 与其他 diagnostics materialized views 只在请求并生成时暴露。启用 year / month breakdown 时还会分别生成 `breakdowns/year/ic.csv` 和 `breakdowns/month/ic.csv` 作为 IC / RankIC breakdown artifacts。公开合同使用 `kernel` 和 `return_source_column`；diagnostics 中的 risk/regime/cost/capacity 是 descriptive proxy diagnostics，不代表 alpha proof、真实 capacity、validated risk model、paper/live trading 或 investment advice。
 
 Evaluation run 使用 artifact schema `0.7`。`src/quant_research_platform/artifacts/schema_registry.py` 与 tests 是字段数、grain、unique key、required_if / nullable_if、sentinel、generated files、display/download eligibility 的 source of truth。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
+
+N5 v1 当前状态是 partial implementation + contract groundwork：已通过 schema registry、required diagnostics tables 和 conditional materialized views 承载 post-run descriptive proxy diagnostics。risk/regime/cost/capacity 仍只是不用于决策的 proxy diagnostics，不是正式 risk model、capacity model、regime engine、backtest 或 simulation system。
 
 当前保留的 2023-2025 private canonical 样例：
 
@@ -213,7 +215,7 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 
 - 当前完整 market module 只有 A 股；crypto 和其他市场只是 planned / disabled 能力表述，不保留空实现包。
 - 当前只覆盖第一批 price-volume factors。
-- N5 risk/regime/cost/capacity 与 N6 ML prediction handoff 仍需单独设计和验证。
+- N5 full risk/regime/cost/capacity capability 与 N6 ML prediction handoff 仍需单独设计和验证；当前 N5 v1 只代表 descriptive proxy diagnostics 和 artifact/display contract groundwork。
 - 模拟盘不属于当前范围；未来如果做，必须保持与真实交易接口隔离，并单独审批。
 - CSMAR 明细数据和可还原 vendor 数据的报告不公开。
 

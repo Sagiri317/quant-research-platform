@@ -1,8 +1,7 @@
 # Quant Research Platform 项目状态
 ## 2026-05-28 schema 0.7 diagnostics implementation open signal
 
-Schema `0.7` / N5 v1 diagnostics implementation is now the active branch topic on
-`codex/schema-07-diagnostics-implementation`. This replaces schema `0.6` at runtime:
+Schema `0.7` / N5 v1 diagnostics implementation has landed as current Local Research Platform groundwork. This replaces schema `0.6` at runtime:
 new evaluation-set artifacts use `run_id`, `summary.json`, `run_context.json`,
 registry-backed required tables, `manifest.display` compact download refs, generic
 `/tables/{table_key}/preview`, and post-run diagnostics under
@@ -14,9 +13,9 @@ trading, order routing, deployment, or investment advice. Private CSMAR data and
 `reports/private_real/` remain local/private and are not copied into portable
 metadata.
 
-Root handoff status: open. Workspace-root planning/status sync is needed after this
-project branch is accepted or merged; this project-local update does not edit root
-planning files.
+Root handoff status: open. Workspace-root planning/status sync is needed for this
+N5 capability classification; this project-local update does not edit root planning
+files.
 
 ## 2026-05-28 maintenance surface cleanup signal
 
@@ -172,11 +171,11 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
 | 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
-| 当前分支 | `codex/schema-07-diagnostics-implementation`；schema `0.7` diagnostics framework 正在实现和验收 |
+| 当前分支 | `main`；schema `0.7` / N5 v1 diagnostics groundwork 已落地，后续 full N5 capability 仍需单独设计和验证 |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 raw/interim/processed 历史产物仍遵守私有边界 |
-| 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
+| 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、N5 v1 descriptive proxy diagnostics、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
 | 前端状态 | 本地 workbench 已中文化；Factor Studio 可把表达式/模板传给 Pipeline Builder；Pipeline Builder 默认写配置快照，也可切换执行模式调用 `POST /api/pipeline-runs` |
 | A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation |
 | Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner，并用 `candidate_id + combination_id` 汇总 N7 evaluation results |
@@ -192,6 +191,7 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 
 - 用户入口文档改为 Chinese-first 的平台说明。
 - `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、当前 artifact schema `0.7`、`manifest.display`、API/download/frontend 边界。
+- Schema `0.7` / N5 v1 已形成 partial implementation + contract groundwork：required diagnostics tables、conditional diagnostics views、display/API/frontend evidence flow 已落地；full risk/regime/cost/capacity capability 仍是 future work。
 - `docs/architecture/target-architecture-and-capabilities.md` 合并最终目录结构与未来能力池，保留 A 股、ML prediction、风险、regime、workbench、未来模拟盘和商业化平台边界，但不把未来能力写成当前已实现范围。
 - `docs/architecture/phase-1-acceptance-record.md` 记录 Phase 1 已实现范围、冻结合同、测试证据和后续架构债。
 - `docs/architecture/next-stage-roadmap.md` 把 Phase 1 后的架构债提上日程，按任务列出目标、非目标、验收口径和测试边界。
@@ -218,6 +218,7 @@ Phase 1 之后下一阶段进展：
 5. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
 6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；历史 schema `0.6` 曾按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。
 7. N8 架构简化与合同消费收敛已合入 `main`：已收敛 `manifest.display` preview/download helper、拆出 factor-template route/service、减少前端 preview route 推导，统一 display table preview metadata，把 A-share evaluation 沉成 service entry，把 Pipeline Builder run 完成后自动挂载到 evidence workbench，并把 CSV upload 标记为 legacy/dev uploaded-panel smoke 路径。
+8. N5 v1 diagnostics groundwork 已落地：risk/regime/cost/capacity 相关输出是 post-run descriptive proxy diagnostics，不是 alpha proof、validated risk model、real capacity analysis、simulation 或 trading system。
 
 ## 当前研究资产
 
@@ -250,7 +251,7 @@ Phase 1 之后下一阶段进展：
 
 ## 下一步
 
-1. 单独推进 N5 风险/regime/成本/容量扩展；不要把 ML prediction handoff 混入该分支。
+1. 单独推进 full N5 风险/regime/成本/容量能力（超出 v1 descriptive proxy groundwork 的部分）；不要把 ML prediction handoff 混入该分支。
 2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor evaluation contract 分离。
 3. 基于已补齐的 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison、图表分页预览和浏览器验收作为后续回归门槛。
 4. 暂缓 `tradability_diagnostics_summary`：当前因子分析流程优先补完整，后续再决定是否新增 artifact/API summary。
