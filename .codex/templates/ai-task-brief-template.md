@@ -42,6 +42,22 @@ Local Research Platform
 - Context packet:
 - Expected output:
 
+## Documentation Sync Plan
+
+- Changed surface:
+- Active docs to check:
+- Code-map update needed: yes/no
+- PROJECT_STATUS update needed: yes/no
+- README update needed: yes/no
+- Out-of-scope docs follow-up:
+
+## Archive Candidate Check
+
+- New or completed docs created:
+- Historical docs touched:
+- Archive candidates expected:
+- Physical archive allowed by envelope: yes/no
+
 ## Allowed Scope
 
 ## Forbidden Scope
@@ -72,6 +88,8 @@ Stop for human confirmation if contract meaning, schema semantics, public interf
 - Context Loaded
 - Subagents Used
 - Tests Run
+- Documentation Sync
+- Archive Candidates
 - Residual Risks
 - Scope Check
 

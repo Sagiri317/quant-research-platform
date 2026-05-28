@@ -78,6 +78,54 @@ Use this workflow only after the user has approved the bounded execution envelop
 - Do not let multiple subagents modify schema, API payloads, frontend shared types, `manifest.display`, generated-file indexes, or other shared contracts in parallel.
 - The main agent integrates subagent output, checks scope, and verifies that assigned files stayed within the approved envelope.
 
+## Documentation Sync Gate
+
+Run this end-of-task checklist before final reporting for medium+ tasks, goals, and overnight runs:
+
+1. Review `git diff --name-only`.
+2. Map changed files to the task surface.
+3. Check whether linked active docs need sync.
+4. Update linked active docs only when they are inside the approved scope.
+5. If needed doc sync is outside scope, report it as follow-up / residual risk.
+6. Do not update archived docs to current truth unless explicitly requested.
+
+Surface-to-doc map:
+
+- Artifact schema / `manifest.display`: `EVALUATION_INTERFACE.md`, `docs/code-map/evaluation-artifacts-api.md`, contracts reference.
+- API/download/evidence: `docs/code-map/evaluation-artifacts-api.md`.
+- Frontend evidence: `docs/code-map/evaluation-artifacts-api.md`.
+- A-share pipeline: `docs/code-map/a-share-data-and-pipeline.md`.
+- Factor Factory: `docs/code-map/a-share-data-and-pipeline.md`; contracts reference if artifact/API contract changed.
+- Current status / milestone / blocker / next step: `PROJECT_STATUS.md`.
+- Project entry workflow: `README.md`.
+- Architecture/future boundary: `docs/architecture/*`.
+
+## Archive Candidate Gate
+
+Run this end-of-task checklist before final reporting. It reports candidates only; it does not authorize moving, deleting, or rewriting archive content.
+
+Archive candidate signals:
+
+- Dated implementation plan / spec / closeout.
+- Completed task execution record.
+- Old schema or old milestone record.
+- Current summary already exists elsewhere.
+- Active placement risks misleading future agents.
+
+Physical archive movement is allowed only when the approved envelope explicitly allows archive movement.
+
+Final reports must include:
+
+```text
+Archive Candidates:
+- path:
+- reason:
+- active references:
+- recommended action:
+```
+
+If none, write `Archive Candidates: none`.
+
 ## Rule Placement
 
 - Put hard project boundaries in `AGENTS.md`: private data, Conda/Git/deletion safety, `(source_alias, run_id)`, `manifest.display`, frontend dependency direction, and schema-change synchronization.
