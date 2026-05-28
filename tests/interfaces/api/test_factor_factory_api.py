@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from quant_research_platform.interfaces.api.app import create_app
@@ -293,6 +294,27 @@ def test_factor_factory_record_sanitizes_local_absolute_failure_reason():
     assert "C:/Users" not in row["failure_reason"]
 
 
+@pytest.mark.parametrize(
+    "path_text",
+    [
+        "/home/user/vendor/input.csv",
+        "/Users/user/vendor/input.csv",
+        "/mnt/data/vendor/input.csv",
+    ],
+)
+def test_factor_factory_record_sanitizes_posix_absolute_failure_reason(path_text):
+    record = _candidate_record(
+        "broken@1",
+        status="failed",
+        failure_reason=f"Failed(path={path_text})",
+    )
+
+    row = record.to_row()
+
+    assert "[local-path]" in row["failure_reason"]
+    assert path_text not in row["failure_reason"]
+
+
 def test_factor_factory_api_rejects_private_markers_in_preview_and_download(tmp_path):
     factory_root = tmp_path / "factor_factory_runs"
     run_dir = factory_root / "factory_demo"
@@ -349,3 +371,105 @@ def test_factor_factory_api_rejects_local_absolute_paths_in_preview_and_download
     assert artifact.status_code == 422
     assert "Users" not in table.text
     assert "Users" not in artifact.text
+
+
+@pytest.mark.parametrize(
+    "path_text",
+    [
+        "/home/user/vendor/input.csv",
+        "/Users/user/vendor/input.csv",
+        "/mnt/data/vendor/input.csv",
+    ],
+)
+def test_factor_factory_api_rejects_posix_absolute_paths_in_display(
+    tmp_path,
+    path_text,
+):
+    factory_root = tmp_path / "factor_factory_runs"
+    run_dir = factory_root / "factory_demo"
+    _write_factor_factory_run(run_dir)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["display"]["tables"][0]["label"] = path_text
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_factory_root=factory_root,
+        )
+    )
+
+    response = client.get("/api/factor-factory-runs/factory_demo")
+
+    assert response.status_code == 422
+    assert path_text not in response.text
+
+
+@pytest.mark.parametrize(
+    "path_text",
+    [
+        "/home/user/vendor/input.csv",
+        "/Users/user/vendor/input.csv",
+        "/mnt/data/vendor/input.csv",
+    ],
+)
+def test_factor_factory_api_rejects_posix_absolute_paths_in_preview_and_download(
+    tmp_path,
+    path_text,
+):
+    factory_root = tmp_path / "factor_factory_runs"
+    run_dir = factory_root / "factory_demo"
+    _write_factor_factory_run(run_dir)
+    summary_path = run_dir / "candidate_summary.csv"
+    summary_text = summary_path.read_text(encoding="utf-8")
+    summary_path.write_text(
+        summary_text.replace("factory_run", path_text),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_factory_root=factory_root,
+        )
+    )
+
+    table = client.get("/api/factor-factory-runs/factory_demo/tables/candidate_summary")
+    artifact = client.get(
+        "/api/factor-factory-runs/factory_demo/artifacts/candidate_summary.csv"
+    )
+
+    assert table.status_code == 422
+    assert artifact.status_code == 422
+    assert path_text not in table.text
+    assert path_text not in artifact.text
+
+
+@pytest.mark.parametrize(
+    "display_text",
+    [
+        "/api/factor-factory-runs/factory_demo",
+        "candidate_summary.csv",
+        "https://example.com/api/factor-factory-runs/factory_demo",
+    ],
+)
+def test_factor_factory_api_allows_public_api_relative_and_url_paths(
+    tmp_path,
+    display_text,
+):
+    factory_root = tmp_path / "factor_factory_runs"
+    run_dir = factory_root / "factory_demo"
+    _write_factor_factory_run(run_dir)
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["display"]["tables"][0]["label"] = display_text
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_factory_root=factory_root,
+        )
+    )
+
+    response = client.get("/api/factor-factory-runs/factory_demo")
+
+    assert response.status_code == 200

@@ -14,18 +14,18 @@ run-level constant 配置，包括成本、权重方法、benchmark、universe�
 eligibility、tradability、生成环境和 lineage 摘要，写入 `run_context.json`，不进入
 `dimensions/combinations.csv`。实际结果值仍写入 schema registry 声明的 fact tables，例如
 `metrics/evaluation_metrics_summary.csv`、`portfolio/returns.csv`、
-`portfolio/weights.parquet`、`input_quality/coverage_summary.csv` 和 `diagnostics/diagnostic_summary.csv`。
+`input_quality/coverage_summary.csv`、`diagnostics/diagnostic_summary.csv`，以及
+按请求 materialized 的 `portfolio/weights.parquet`。
 
 公开命名使用 `kernel` 和 `return_source_column`。旧的 external `engine`
-compatibility、`pnl_return_column`、`portfolio/pnl.csv` 和 `portfolio/positions.csv` 不属于 schema `0.7` 合同；累计收益图由 API/display chart payload 派生，不再作为落盘 artifact；权重表为 required Parquet：
-`portfolio/weights.parquet`。
+compatibility、`pnl_return_column`、`portfolio/pnl.csv` 和 `portfolio/positions.csv` 不属于 schema `0.7` 合同；累计收益图由 API/display chart payload 派生，不再作为落盘 artifact；`portfolio/weights.parquet` 是 conditional / materialized-on-request 输出，不是 required table。
 
 A 股本地 CLI 第一阶段只使用显式 features，且多值参数写在同一行：
 
 ```powershell
 conda run -n analysis python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation `
   --processed-root data/processed_private/csmar `
-  --report-root reports/private_real/factor_evaluation/n7_eval_2023h1_smoke_v1 `
+  --report-root reports/private_real/factor_evaluation/schema_07_dev_smoke `
   --start-year 2023 `
   --end-year 2025 `
   --start-date 2023-01-01 `
@@ -288,12 +288,14 @@ report.md
 metrics/ic.csv
 metrics/grouped_returns.csv
 metrics/evaluation_metrics_summary.csv
-portfolio/weights.parquet
 portfolio/returns.csv
 input_quality/coverage_summary.csv
 diagnostics/diagnostic_summary.csv
 diagnostics/diagnostic_metrics.csv
 ```
+
+Conditional / materialized-on-request 输出包括 `portfolio/weights.parquet`；
+只有请求并生成后才通过 `manifest.display` 暴露为可预览或可下载表。
 
 启用 `time_breakdowns` 后，会按实际配置出现 `breakdowns/year/`、`breakdowns/quarter/` 或 `breakdowns/month/`。启用 year / month breakdown 时，`breakdowns/year/ic.csv` 和 `breakdowns/month/ic.csv` 会分别作为 `ic_breakdown_by_year` 和 `ic_breakdown_by_month` 写出 IC / RankIC breakdown。整体 time breakdown 是从完整 overall run path 中按 period 切片统计，不重新运行年度 / 季度 / 月度回测，不清仓，也不重新生成 weights 或 portfolio returns path。
 

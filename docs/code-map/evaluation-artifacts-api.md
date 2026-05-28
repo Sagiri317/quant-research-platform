@@ -32,10 +32,10 @@ market adapter / upload / parquet helper
 - Table preview 由 evidence API 提供 bounded preview 能力，frontend 通过
   API evidence payload 中的 `manifest.display.tables[].preview_url` 和
   portable preview descriptor 消费，不从 artifact path 重新推导 route。
-- Public-downloadable metadata files, currently `run_context.json`,
-  are sanitized consistently when written, directly downloaded, and packaged in
-  selected ZIPs; selected ZIP cache fingerprints hash the sanitized dynamic
-  metadata bytes.
+- Public-downloadable metadata files, currently `manifest.json`, `summary.json`
+  and `run_context.json`, are sanitized consistently when written, directly
+  downloaded, and packaged in selected ZIPs through the artifact package
+  metadata output helper.
 - `diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 schema `0.7` required diagnostics tables。
 - risk/regime/cost/capacity 相关 materialized views 是 conditional descriptive proxy outputs；只有 materialized 后才进入 `manifest.display` 暴露面。
 
@@ -162,7 +162,7 @@ breakdowns/month/ic.csv
 | `artifact_loader.py` | `LoadedEvaluationSet`, `load_evaluation_set` | 严格读取 completed run。 |
 | `artifact_inventory.py` | `index_evaluation_sets` | 离线 run inventory。 |
 | `artifact_comparison.py` | `compare_evaluation_sets`, `write_run_comparison` | 离线 run comparison。 |
-| `artifact_package.py` | `build_selected_artifact_zip`, `public_config_bytes`, `public_lineage_bytes`, `require_manifest_display_download_item`, `resolve_manifest_display_artifact_path` | manifest.display download gate、direct artifact path resolution、selected ZIP file collection、dynamic metadata handling、cache fingerprint、ZIP writing。 |
+| `artifact_package.py` | `build_selected_artifact_zip`, `public_metadata_bytes`, `require_manifest_display_download_item`, `resolve_manifest_display_artifact_path` | manifest.display download gate、direct artifact path resolution、selected ZIP file collection、public-safe metadata output、cache fingerprint、ZIP writing。 |
 
 明确不支持：
 

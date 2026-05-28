@@ -14,7 +14,9 @@ PRIVATE_PATH_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 LOCAL_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:[A-Za-z]:/|//)[^,\s;)\]]+"
+    r"(?<![A-Za-z0-9])(?:[A-Za-z]:/|/(?:home|users|mnt)/)[^,\s;)\]]+"
+    r"|(?<![A-Za-z0-9:])//[^,\s;)\]]+",
+    flags=re.IGNORECASE,
 )
 
 

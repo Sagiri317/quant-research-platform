@@ -32,7 +32,8 @@ PRIVATE_TEXT_MARKERS = (
     "processed_private",
 )
 LOCAL_ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:[A-Za-z]:/|//)[^,\s;)\]]+",
+    r"(?<![A-Za-z0-9])(?:[A-Za-z]:/|/(?:home|users|mnt)/)[^,\s;)\]]+"
+    r"|(?<![A-Za-z0-9:])//[^,\s;)\]]+",
 )
 
 

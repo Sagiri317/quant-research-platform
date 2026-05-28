@@ -159,6 +159,15 @@ def _selected_zip_cache_path(
     fingerprint: list[str] = []
     for item in items:
         _validate_download_item_name(item)
+        if item in _PUBLIC_METADATA_ITEMS:
+            content = public_metadata_bytes(
+                run.output_dir,
+                item,
+                fallback=_metadata_fallback(run, item),
+            )
+            digest = hashlib.sha256(content).hexdigest()
+            fingerprint.append(f"{item}\0metadata\0{digest}")
+            continue
         source_path = _download_item_path(run, item)
         if source_path is not None:
             stat = source_path.stat()
@@ -198,6 +207,16 @@ def _resolve_download_item(
             media_type=_media_type_for_item(item),
             content=dynamic_items[item](),
         )
+    if item in _PUBLIC_METADATA_ITEMS:
+        return _ResolvedDownloadItem(
+            name=_metadata_file_name(item),
+            media_type="application/json",
+            content=public_metadata_bytes(
+                run.output_dir,
+                item,
+                fallback=_metadata_fallback(run, item),
+            ),
+        )
     source_path = _download_item_path(run, item)
     if source_path is not None:
         return _ResolvedDownloadItem(
@@ -212,24 +231,6 @@ def _resolve_download_item(
             name="report.md",
             media_type="text/markdown; charset=utf-8",
             content=run.report.encode("utf-8"),
-        )
-    if item == "metadata_file:manifest":
-        return _ResolvedDownloadItem(
-            name="manifest.json",
-            media_type="application/json",
-            content=_json_bytes(run.manifest),
-        )
-    if item == "metadata_file:run_context":
-        return _ResolvedDownloadItem(
-            name="run_context.json",
-            media_type="application/json",
-            content=_json_bytes(run.run_context),
-        )
-    if item == "metadata_file:summary":
-        return _ResolvedDownloadItem(
-            name="summary.json",
-            media_type="application/json",
-            content=_json_bytes(run.summary),
         )
     display = run.manifest.get("display")
     if isinstance(display, dict):
@@ -401,14 +402,27 @@ def _json_bytes(payload: dict[str, object]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def _public_metadata_bytes(
+_PUBLIC_METADATA_ITEMS = {
+    "metadata_file:manifest",
+    "metadata_file:summary",
+    "metadata_file:run_context",
+}
+
+
+def public_metadata_bytes(
     output_dir: Path,
-    file_name: str,
+    item: str,
     *,
     fallback: dict[str, object] | None = None,
 ) -> bytes:
+    """Return sanitized JSON bytes for public metadata downloads."""
+
     return _json_bytes(
-        _public_metadata_payload(output_dir, file_name, fallback=fallback)
+        _public_metadata_payload(
+            output_dir,
+            _metadata_file_name(item),
+            fallback=fallback,
+        )
     )
 
 
@@ -429,6 +443,29 @@ def _public_metadata_payload(
     if not isinstance(sanitized, dict):
         raise ArtifactPackageError(f"{file_name} must contain an object")
     return sanitized
+
+
+def _metadata_file_name(item: str) -> str:
+    if item == "metadata_file:manifest":
+        return "manifest.json"
+    if item == "metadata_file:summary":
+        return "summary.json"
+    if item == "metadata_file:run_context":
+        return "run_context.json"
+    raise ArtifactPackageError(f"unknown metadata item: {item}")
+
+
+def _metadata_fallback(
+    run: LoadedEvaluationSet,
+    item: str,
+) -> dict[str, object] | None:
+    if item == "metadata_file:manifest":
+        return run.manifest
+    if item == "metadata_file:summary":
+        return run.summary
+    if item == "metadata_file:run_context":
+        return run.run_context
+    return None
 
 
 def _write_selected_zip(

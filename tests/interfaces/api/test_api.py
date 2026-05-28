@@ -1148,6 +1148,53 @@ def test_api_direct_metadata_download_uses_canonical_file_path(tmp_path):
     assert response.json()["run_id"] == "demo"
 
 
+@pytest.mark.parametrize(
+    ("item", "filename", "mutate"),
+    [
+        (
+            "metadata_file:manifest",
+            "manifest.json",
+            lambda payload: payload.update({"local_path": "/home/user/manifest"}),
+        ),
+        (
+            "metadata_file:summary",
+            "summary.json",
+            lambda payload: payload.update({"input_path": "/Users/user/summary"}),
+        ),
+        (
+            "metadata_file:run_context",
+            "run_context.json",
+            lambda payload: payload["config"].update(
+                {"output_dir": "/mnt/private/run_context"}
+            ),
+        ),
+    ],
+)
+def test_api_direct_metadata_download_sanitizes_output(
+    tmp_path,
+    item,
+    filename,
+    mutate,
+):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    metadata_path = run_dir / filename
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    mutate(payload)
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.get(f"/api/runs/platform/demo/artifacts/{item}")
+
+    assert response.status_code == 200
+    text = response.text
+    assert "/home/user" not in text
+    assert "/Users/user" not in text
+    assert "/mnt/private" not in text
+    assert "[redacted-path]" in text
+
+
 def test_api_downloads_artifact_csv_without_full_artifact_load(
     tmp_path,
     monkeypatch,
@@ -1804,6 +1851,28 @@ def test_api_selected_zip_metadata_download_uses_canonical_file_path(tmp_path):
     assert response.status_code == 200
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         assert json.loads(archive.read("summary.json"))["run_id"] == "demo"
+
+
+def test_api_selected_zip_sanitizes_metadata_output(tmp_path):
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "demo"
+    write_evaluation_set(run_dir, run_id="demo")
+    summary_path = run_dir / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["input_path"] = "/Users/user/private/summary"
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    client = TestClient(create_app(run_roots=[("platform", runs_root)]))
+
+    response = client.post(
+        "/api/runs/platform/demo/download",
+        json={"items": ["metadata_file:summary"]},
+    )
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        text = archive.read("summary.json").decode("utf-8")
+        assert "/Users/user" not in text
+        assert "[redacted-path]" in text
 
 
 def test_api_selected_artifact_zip_reuses_files_and_writes_cache(

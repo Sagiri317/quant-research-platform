@@ -88,6 +88,53 @@ def test_selected_zip_uses_canonical_metadata_files(tmp_path) -> None:
         assert "evaluation_id" not in json.loads(archive.read("summary.json"))
 
 
+def test_selected_zip_sanitizes_public_metadata_files_at_output(tmp_path) -> None:
+    write_evaluation_set(tmp_path / "run", run_id="demo")
+    run = load_evaluation_set(tmp_path / "run")
+    metadata_payloads = {
+        "manifest.json": json.loads(
+            (tmp_path / "run" / "manifest.json").read_text(encoding="utf-8")
+        ),
+        "summary.json": json.loads(
+            (tmp_path / "run" / "summary.json").read_text(encoding="utf-8")
+        ),
+        "run_context.json": json.loads(
+            (tmp_path / "run" / "run_context.json").read_text(encoding="utf-8")
+        ),
+    }
+    metadata_payloads["manifest.json"]["local_path"] = "/home/user/private/manifest"
+    metadata_payloads["summary.json"]["input_path"] = "/Users/user/private/summary"
+    metadata_payloads["run_context.json"]["config"]["output_dir"] = (
+        "/mnt/private/run_context"
+    )
+    for filename, payload in metadata_payloads.items():
+        (tmp_path / "run" / filename).write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
+    zip_path = build_selected_artifact_zip(
+        run,
+        source_alias="platform",
+        run_id="demo",
+        items=[
+            "metadata_file:manifest",
+            "metadata_file:summary",
+            "metadata_file:run_context",
+        ],
+        cache_root=tmp_path / "download_cache",
+    )
+
+    with zipfile.ZipFile(zip_path) as archive:
+        for filename in ("manifest.json", "summary.json", "run_context.json"):
+            payload = json.loads(archive.read(filename))
+            text = json.dumps(payload)
+            assert "/home/user" not in text
+            assert "/Users/user" not in text
+            assert "/mnt/private" not in text
+            assert "[redacted-path]" in text
+
+
 def test_resolve_manifest_display_artifact_path_uses_display_table_mapping(
     tmp_path,
 ) -> None:

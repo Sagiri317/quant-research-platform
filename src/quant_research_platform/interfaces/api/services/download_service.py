@@ -58,6 +58,22 @@ def direct_manifest_download_response(
         raise HTTPException(status_code=422, detail=f"未知下载项：{artifact_item}")
     if not path.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
+    if artifact_item in {
+        "metadata_file:manifest",
+        "metadata_file:summary",
+        "metadata_file:run_context",
+    }:
+        try:
+            content = package.public_metadata_bytes(output_dir, artifact_item)
+        except ArtifactPackageError as exc:
+            raise _package_error(exc) from exc
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{path.name}"',
+            },
+        )
     return FileResponse(
         path,
         media_type=_media_type_for_path(path),
