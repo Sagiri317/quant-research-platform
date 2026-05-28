@@ -38,6 +38,7 @@ export function ArtifactDownloads({
             {downloadPresets.map((preset) => (
               <button
                 className="preset-button"
+                data-testid={`download-preset-${preset.key}`}
                 key={preset.key}
                 onClick={() => onPreset(preset.key)}
                 type="button"
@@ -82,6 +83,7 @@ export function ArtifactDownloads({
           </span>
           <button
             className="submit-run"
+            data-testid="download-selected-artifacts"
             disabled={downloading}
             onClick={onDownload}
             type="button"

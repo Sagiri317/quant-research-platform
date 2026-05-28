@@ -54,6 +54,7 @@ export function CsvBrowser({
           <span>选择明细表</span>
           <select
             aria-label="选择明细表"
+            data-testid="csv-table-select"
             onChange={(event) => onActiveTableChange(event.target.value)}
             value={activeTable}
           >
@@ -66,6 +67,7 @@ export function CsvBrowser({
         </label>
         <button
           className="preset-button"
+          data-testid="csv-preview-toggle"
           onClick={onToggleExpanded}
           type="button"
         >

@@ -60,25 +60,23 @@ test('schema 0.7 workbench renders diagnostics and display-backed downloads', as
   expect(factoryRuns.length).toBeGreaterThan(0)
 
   await page.goto(webBaseUrl)
-  await page.getByRole('button', { exact: true, name: '证据工作台' }).click()
+  await page.getByTestId('view-mode-results').click()
   await expect(page.locator('.run-list')).toContainText(run.public_run_id)
-  await page.getByRole('button', { name: run.public_run_id }).click()
+  await page.getByTestId(`run-selector-${run.public_run_id}`).click()
 
-  await page.getByRole('tab', { exact: true, name: 'CSV 明细' }).click()
-  await page.locator('.csv-table-select select').selectOption('diagnostic_summary')
-  await page.getByRole('button', { exact: true, name: '展开预览' }).click()
+  await page.getByTestId('delivery-tab-csv').click()
+  await page.getByTestId('csv-table-select').selectOption('diagnostic_summary')
+  await page.getByTestId('csv-preview-toggle').click()
   await expect(page.locator('table')).toContainText('diagnostic_status')
 
-  await page.getByRole('tab', { exact: true, name: '结果文件下载' }).click()
-  await page
-    .getByRole('button', { exact: true, name: firstDownloadPreset.label })
-    .click()
+  await page.getByTestId('delivery-tab-downloads').click()
+  await page.getByTestId(`download-preset-${firstDownloadPreset.key}`).click()
   const download = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { exact: true, name: '下载所选' }).click(),
+    page.getByTestId('download-selected-artifacts').click(),
   ]).then(([artifactDownload]) => artifactDownload)
   expect(download.suggestedFilename()).toContain('selected_artifacts.zip')
 
-  await page.getByRole('button', { exact: true, name: '因子工厂' }).click()
+  await page.getByTestId('view-mode-factory').click()
   await expect(page.locator('.factory-run-list')).toContainText(factoryRuns[0].run_id)
 })

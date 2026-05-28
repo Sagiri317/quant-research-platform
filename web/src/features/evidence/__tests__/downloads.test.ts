@@ -45,4 +45,25 @@ describe('artifact download contract helpers', () => {
       'table:ic',
     ])
   })
+
+  test('does not expose legacy raw download item strings in evaluation picker', () => {
+    const displayDownloads: RunDisplayDownloads = {
+      items: [
+        { kind: 'table', key: 'ic', label: 'IC' },
+        { kind: 'table', item: 'metrics/returns.csv', label: 'Legacy raw path' },
+      ],
+      presets: [
+        {
+          key: 'all',
+          label: 'All',
+          items: [{ kind: 'table', key: 'ic' }, 'metrics/returns.csv'],
+        },
+      ],
+    }
+
+    expect(buildDownloadOptions(displayDownloads)).toEqual([
+      { label: 'IC', item: 'table:ic' },
+    ])
+    expect(defaultDownloadItems(displayDownloads)).toEqual(['table:ic'])
+  })
 })

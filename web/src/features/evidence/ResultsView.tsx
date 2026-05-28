@@ -330,6 +330,7 @@ function DeliveryTabs({
         {tabs.map((tab) => (
           <button
             aria-selected={deliveryTab === tab.key}
+            data-testid={`delivery-tab-${tab.key}`}
             disabled={tab.disabled}
             key={tab.key}
             onClick={() => onSelectTab(tab.key)}

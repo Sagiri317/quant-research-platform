@@ -1,5 +1,6 @@
 import {
   displayRefKey,
+  type RunDisplayRef,
   type RunDisplayDownloadPreset,
   type RunDisplayDownloads,
 } from './api/api'
@@ -13,10 +14,17 @@ export function buildDownloadOptions(displayDownloads?: RunDisplayDownloads): Do
   if (!displayDownloads) {
     return []
   }
-  return displayDownloads.items.map((option) => ({
-    label: option.label,
-    item: option.item ?? displayRefKey({ kind: option.kind, key: option.key ?? option.item ?? '' }),
-  }))
+  return displayDownloads.items.flatMap((option) => {
+    if (!option.key) {
+      return []
+    }
+    return [
+      {
+        label: option.label,
+        item: displayRefKey({ kind: option.kind, key: option.key }),
+      },
+    ]
+  })
 }
 
 export function defaultDownloadItems(
@@ -61,5 +69,15 @@ export function triggerBrowserDownloadUrl(url: string) {
 function compactPresetItems(
   items: RunDisplayDownloadPreset['items'] | undefined,
 ): string[] | undefined {
-  return items?.map(displayRefKey)
+  return items?.filter(isDisplayRef).map(displayRefKey)
+}
+
+function isDisplayRef(item: string | RunDisplayRef): item is RunDisplayRef {
+  return (
+    typeof item !== 'string' &&
+    typeof item.kind === 'string' &&
+    item.kind.length > 0 &&
+    typeof item.key === 'string' &&
+    item.key.length > 0
+  )
 }

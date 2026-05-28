@@ -43,6 +43,7 @@ export function Sidebar({
           <button
             aria-pressed={viewMode === mode}
             className={viewMode === mode ? 'mode active' : 'mode'}
+            data-testid={`view-mode-${mode}`}
             key={mode}
             onClick={() => onViewModeChange(mode)}
             type="button"
@@ -59,6 +60,7 @@ export function Sidebar({
             runs.map((run) => (
               <button
                 className={run.public_run_id === selectedId ? 'run active' : 'run'}
+                data-testid={`run-selector-${run.public_run_id}`}
                 key={run.public_run_id}
                 onClick={() => onSelectRun(run.public_run_id)}
                 type="button"
