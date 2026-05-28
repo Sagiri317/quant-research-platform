@@ -12,11 +12,11 @@ Long-term standards remain separate authority sources:
 - `docs/architecture/engineering-standards.md` defines durable engineering rules for module boundaries, contracts, versioning, errors, tests, generated outputs, API/frontend behavior, security, and scale.
 - `docs/architecture/quant-research-standards.md` defines durable quant research rules for point-in-time data, eligibility/tradability, bias controls, factor provenance, costs, capacity, benchmarks, risk, lineage, and trading-boundary semantics.
 
-Use this reference for current QRP contract facts; use the architecture standards for long-lived principles. Entries marked "planned" are target contracts from the schema `0.7` implementation plan and must not be treated as current-file failures before their owning slice lands.
+Use this reference for current QRP contract facts; use the architecture standards for long-lived principles. Entries marked "future" or "planned" are not current-file requirements unless current code, tests, or docs also define them as active contracts.
 
 Artifact-relative diagnostics paths such as `diagnostics/diagnostic_summary.csv` do not imply a top-level `src/quant_research_platform/diagnostics/` package. Schema `0.7` diagnostics implementation code lives under `src/quant_research_platform/evaluations/diagnostics/`.
 
-## Current and Planned Source Map
+## Current Source Map
 
 | Surface | Start here |
 | --- | --- |
@@ -38,7 +38,8 @@ Artifact-relative diagnostics paths such as `diagnostics/diagnostic_summary.csv`
 
 ### `evaluation_set` schema `0.7`
 
-- Planned/current source files after Slice 2: `src/quant_research_platform/artifacts/schema_registry.py`, `artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py`, `display_manifest.py`.
+- Current source files: `src/quant_research_platform/artifacts/schema_registry.py`, `artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py`, `display_manifest.py`.
+- Schema `0.7` evaluation-set artifacts and N5 v1 descriptive proxy diagnostics are current groundwork. Full N5 risk/regime/cost/capacity capability remains future work unless separately designed and approved.
 - Writer emits `artifact_schema_version="0.7"` and `artifact_type="evaluation_set"` in `manifest.json` and `summary.json`.
 - Loader rejects unsupported artifact schema versions and unsupported artifact types.
 - `manifest.display.schema_version` must match the current evaluation artifact schema and must be validated at API/UI entry points.

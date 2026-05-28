@@ -33,7 +33,7 @@ Current structure:
 - `docs/architecture/`: target architecture and capabilities, engineering and quant research standards, Phase 1 acceptance record, and next-stage roadmap.
 - `docs/code-map/`: current source reading map, including platform flow, A-share data/pipeline, and evaluation/artifact/API/frontend contracts.
 
-- Do not create repo-level `apps/api` in Phase 1; it is a future deployable app shell for Phase 2.
+- Do not create repo-level `apps/api` in the current Local Research Platform phase; it is a future deployable app shell.
 - Do not create empty Future directories or empty market implementations merely as planning markers.
 
 Hard boundaries:
@@ -66,13 +66,15 @@ Current architecture style: Stable Core + High-Velocity Research Edge.
 
 Current work must stay centered on factor research, evaluations, artifact generation, local evidence workflow, and A-share research reliability. Future capabilities may influence boundary design, but must not add complexity to the current implementation.
 
-Out of scope for this phase: distributed runtime, workers/schedulers, billing/compliance, live trading, feature store, model registry, and autonomous agents.
+Out of scope for this phase: distributed runtime, workers/schedulers, billing/compliance, live trading, feature store, model registry, and runtime autonomous agents.
 
 Contract rule: `manifest.display` is the only user-display contract. Do not bypass `manifest.display`, artifact flow, or evidence flow with frontend-only, backend-only, or task-local shortcuts.
 
 ### AI_STOP_CONDITIONS
 
 Stop and request human confirmation when contract meaning is unclear, schema semantics are unclear, a task touches multiple architecture layers, a new abstraction/framework/dependency is proposed, work crosses the current phase boundary, public contracts change, or directory structure changes.
+
+Goal / Overnight Run stop conditions include schema change, `manifest.display` change, public API or frontend shared contract change, directory restructuring, new dependency, new abstraction/framework, market/frequency/simulation/trading scope expansion, private/generated data edits, file deletion, archive or historical-doc physical moves, and unclear blast radius.
 
 ### FORBIDDEN_AUTONOMOUS_ACTIONS
 
@@ -83,6 +85,24 @@ Do not autonomously expand market scope, execution scope, deployment scope, runt
 Medium+ tasks must start from a task brief, implementation plan, scope declaration, stop conditions, and verification plan. The brief should identify task mode, context loaded, context routing, allowed scope, forbidden scope, relevant contracts, files to inspect, expected changes, required tests, definition of done, and risks.
 
 Medium+ tasks must stop and wait for explicit human approval after producing the task brief, implementation plan, and scope declaration, and before implementation begins.
+
+Decision Tasks must plan only and wait for approval before implementation.
+
+Governed Batches may execute without per-step approval only after the user approves a clear bounded execution envelope.
+
+Goal / Overnight Runs may execute autonomously only after the user approves a bounded execution envelope containing: goal, task mode, allowed scope, forbidden scope, files/directories in scope, contracts that must not change, permitted subagent roles, verification commands, stop conditions, and final report format.
+
+Within an approved envelope, Codex may split work, use permitted subagents, read relevant files, edit in-scope files, run approved checks, and fix confirmed in-scope P0/P1/P2 issues without asking for each small step. Codex must stop and request confirmation when a stop condition is reached.
+
+### Subagent Protocol
+
+Subagents are allowed only inside an approved task envelope.
+
+Each subagent must receive a narrow context packet containing: goal, assigned files/directories, allowed changes, forbidden changes, relevant contracts, relevant tests/checks, stop conditions, and expected output.
+
+Subagents do not inherit project-level permissions from the parent goal, must not edit outside assigned scope, and must not independently modify shared contracts.
+
+Shared contracts must be owned by the main agent or one explicit contract integrator.
 
 ## 3. Editable Area
 

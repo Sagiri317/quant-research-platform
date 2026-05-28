@@ -35,7 +35,7 @@ Keep this `SKILL.md` as the stable workflow layer. Put change-prone project fact
 Stable responsibilities:
 
 - Preserve project safety boundaries from `AGENTS.md`; do not move task-specific approvals into permanent rules.
-- Current phase is Local Research Platform, with Stable Core + High-Velocity Research Edge. Do not add speculative infrastructure or unimplemented topology during maintenance work.
+- Current phase, architecture style, and hard stop boundaries are owned by `AGENTS.md`; load it before applying this workflow.
 - Keep generated artifacts as the contract source for evidence flows, with `manifest.display` as the UI/API/download exposure boundary.
 - Keep artifact types explicit. Do not conflate evaluation-run artifacts, Factor Factory artifacts, generated evidence, and historical/rejection fixtures.
 - Keep schema registries and tests as the source of truth for field lists, grain, unique keys, conditional rules, and required generated files.
@@ -57,6 +57,26 @@ Before using concrete paths, scripts, schema numbers, or route names, load the c
 6. Remove retired compatibility in one pass when old generated runs are no longer supported. Search for stale schema versions, retired summary fields, old table names, and frontend-only shortcuts.
 7. Review the diff by surface: artifact contract, API/downloads, frontend UI, A-share pipeline/runtime, Factor Factory, tests/fixtures, docs/skills, generated outputs, and gitignore.
 8. For docs-only drift, verify against current code paths before preserving command examples or path names.
+
+## Goal / Long-Run Workflow
+
+Use this workflow only after the user has approved the bounded execution envelope required by `AGENTS.md`.
+
+1. Confirm the approved envelope and final report format.
+2. Load context through [references/context-routing.md](references/context-routing.md).
+3. Split work only by disjoint file ownership.
+4. Keep shared contracts under the main agent or one explicit contract integrator.
+5. Run narrow checks after each slice.
+6. Fix confirmed P0/P1/P2 issues that are inside the approved scope without asking again.
+7. Stop on `AGENTS.md` stop conditions or when blast radius becomes unclear.
+8. End with the approved final report.
+
+## Subagent Coordination Workflow
+
+- Give each subagent a narrow context packet and disjoint write scope.
+- Reviewer subagents should not edit implementation unless explicitly assigned that role.
+- Do not let multiple subagents modify schema, API payloads, frontend shared types, `manifest.display`, generated-file indexes, or other shared contracts in parallel.
+- The main agent integrates subagent output, checks scope, and verifies that assigned files stayed within the approved envelope.
 
 ## Rule Placement
 
