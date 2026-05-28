@@ -2,6 +2,8 @@
 
 本文定义 `quant-research-platform` 的横切工程规则。它回答模块如何依赖、合同如何版本化、错误如何分类、测试如何守边界，以及未来扩展如何接入；目录归属以 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md) 为准。
 
+Current phase stop rule: 当前阶段是 Local Research Platform，架构风格是 Stable Core + High-Velocity Research Edge。本文中的 `apps/`、`workers`、`schedulers`、`storage`、`jobs` 等词汇是 long-term boundary vocabulary；除非当前任务已经明确批准并落在当前阶段，否则不得据此创建 speculative infrastructure、future capability scaffolding 或部署/调度/存储/作业系统。
+
 ## 1. 模块边界
 
 ```text
@@ -197,7 +199,7 @@ logs                                                  # 运行日志和服务日
 
 ## 10. Apps 和 Package 边界
 
-未来网站化后采用 repo-level `apps/`，避免可部署应用和可复用平台代码混在一起。
+未来网站化后采用 repo-level `apps/`，避免可部署应用和可复用平台代码混在一起。该段只定义长期边界词汇，不授权当前 Local Research Platform 阶段创建 repo-level `apps/`、workers、schedulers 或部署装配层。
 
 ```text
 apps/web                                             # 前端应用入口，负责路由、页面、状态管理、API client 和可视化
@@ -211,13 +213,14 @@ src/quant_research_platform                          # 平台领域代码，负�
 
 - `apps/*` 可以依赖 `src/quant_research_platform/*`，反向依赖禁止。
 - `apps/*` 里只允许薄装配代码，不能出现因子公式、评价指标、撮合逻辑、交易风控或数据清洗主逻辑。
-- 本地 Phase 1 保留 `web/` 作为当前 workbench；本地 FastAPI 适配迁到 `src/quant_research_platform/interfaces/api/`，不再以旧顶层 API 包作为目标位置。
-- Phase 2 才创建 repo-level `apps/api`，它是可部署 HTTP 应用装配层；Phase 1 的 `interfaces/api` 是本地接口适配层，二者功能不重叠。
+- 当前 Local Research Platform 阶段保留 `web/` 作为当前 workbench；本地 FastAPI 适配迁到 `src/quant_research_platform/interfaces/api/`，不再以旧顶层 API 包作为目标位置。
+- 未来网站化阶段才创建 repo-level `apps/api`，它是可部署 HTTP 应用装配层；当前阶段的 `interfaces/api` 是本地接口适配层，二者功能不重叠。
 - `interfaces/` 是平台代码中的交互合同和适配层，不是长期可部署应用目录。
+- 当前阶段不得为了 future capability 创建空 `apps/*`、workers、schedulers 或 package shells。
 
 ## 11. Storage 和 Repository 规则
 
-`storage/` 是持久化基础设施，不是所有数据库对象的归宿。
+`storage/` 是长期持久化基础设施词汇，不是所有数据库对象的归宿；当前阶段不因该词汇创建持久化基础设施目录或数据库层。
 
 ```text
 storage/database_session.py                          # 数据库连接、事务和 session 生命周期
@@ -238,7 +241,7 @@ storage/search_index.py                              # 搜索索引适配
 
 ## 12. Jobs、Workers 和调度规则
 
-长任务必须通过 job 合同管理，不能让 HTTP request 直接执行重计算。
+长任务必须通过 job 合同管理，不能让 HTTP request 直接执行重计算。该规则属于长期平台边界；当前阶段不创建 job system、worker runtime 或 scheduler，除非有单独批准的当前阶段任务。
 
 ```text
 JobSpec                                              # 用户或系统提交的任务输入

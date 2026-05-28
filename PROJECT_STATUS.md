@@ -171,6 +171,7 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 | 项目 | 当前事实 |
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
+| 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
 | 当前分支 | `codex/schema-07-diagnostics-implementation`；schema `0.7` diagnostics framework 正在实现和验收 |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
@@ -187,7 +188,7 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 
 本轮目标是把项目身份从单一 A 股研究项目切换为 `quant-research-platform`。最终功能和架构目标已收敛在 `docs/architecture/target-architecture-and-capabilities.md`；历史迁移计划、历史迁移设计和旧 Phase 1 任务拆解已由当前验收记录替代，不再作为当前待办清单。
 
-当前阶段已完成可提交的迁移、核心合同闭环、Factor Factory 前端浏览入口和 P4/P5 小样本示例。2026-05-23 已完成 Phase 1 代码功能复核；2026-05-24 已同步 `docs/code-map/`、`docs/architecture/` 和项目根目录文档的当前架构表述。验收结论见 `docs/architecture/phase-1-acceptance-record.md`；下一阶段任务见 `docs/architecture/next-stage-roadmap.md`。Phase 1 功能已实现并通过测试：
+当前阶段是 Local Research Platform。Phase 1 是历史验收状态，不是当前叙事中心；后续 roadmap 只作为边界和待设计事项，不授权当前阶段增加 speculative infrastructure 或 future capability contamination。当前阶段已完成可提交的迁移、核心合同闭环、Factor Factory 前端浏览入口和 P4/P5 小样本示例。2026-05-23 已完成 Phase 1 代码功能复核；2026-05-24 已同步 `docs/code-map/`、`docs/architecture/` 和项目根目录文档的当前架构表述。验收结论见 `docs/architecture/phase-1-acceptance-record.md`；下一阶段任务见 `docs/architecture/next-stage-roadmap.md`。Phase 1 功能已实现并通过测试：
 
 - 用户入口文档改为 Chinese-first 的平台说明。
 - `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、当前 artifact schema `0.7`、`manifest.display`、API/download/frontend 边界。

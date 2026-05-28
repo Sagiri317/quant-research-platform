@@ -12,7 +12,14 @@ Evaluation layer 负责：
 - Weights、turnover、portfolio returns、cost、cumulative returns 和 performance summary。
 - `manifest.json`、`summary.json`、`run_context.json`、`dimensions/combinations.csv`、`dimensions/diagnostic_policies.csv`、CSV/Parquet tables 和 `report.md`。
 - Completed evaluation-set artifacts 的读取、契约校验、comparison summary。
-- 本地 FastAPI API 和 React/Vite evidence workbench。
+
+Evaluation layer 不拥有 API 或 workbench。当前展示链路必须保持为：
+
+```text
+evaluation -> artifacts -> manifest.display -> API -> frontend
+```
+
+FastAPI evidence API、downloads 和 React/Vite evidence workbench 都是 artifact/display consumers，只消费 artifact registry、loader 和 `manifest.display` 暴露的结果。
 
 Market module 负责：
 
@@ -124,7 +131,7 @@ breakdowns/month/
 
 ## Phase 2 边界
 
-Phase 1 中 `interfaces/api` 是本地 FastAPI 适配层。未来 `apps/api` 是可部署 HTTP 应用装配层，两者职责不同，不在当前阶段创建或合并。
+当前 Local Research Platform 阶段中 `interfaces/api` 是本地 FastAPI 适配层。未来 `apps/api` 是可部署 HTTP 应用装配层，两者职责不同，不在当前阶段创建或合并。
 
 平台边界：
 

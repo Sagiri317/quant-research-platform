@@ -1,6 +1,6 @@
 # Quant Research Platform
 
-本项目是本地多市场量化研究平台。当前第一个完整 market module 是 A 股：它把用户已批准的本地 CSMAR 数据转换为可复现的 interim 数据、research panel、factor table、pipeline snapshots 和 evaluation artifacts，并在同一项目内提供 evaluation layer、artifact contract、FastAPI evidence API 和 React evidence workbench。
+本项目当前阶段是 Local Research Platform：本地多市场量化研究平台。当前第一个完整 market module 是 A 股：它把用户已批准的本地 CSMAR 数据转换为可复现的 interim 数据、research panel、factor table、pipeline snapshots 和 evaluation artifacts，并在同一项目内提供 evaluation layer、artifact contract、FastAPI evidence API 和 React evidence workbench。
 
 本项目类型：`research platform / local quant research infrastructure`。
 
@@ -22,6 +22,7 @@ local approved data
 -> research panel / factor table
 -> evaluation layer
 -> schema 0.7 artifacts
+-> manifest.display
 -> API / downloads / evidence workbench
 -> report and research evidence
 ```
@@ -72,7 +73,7 @@ scripts\start_private_workbench.ps1
 scripts\stop_workbench.ps1
 ```
 
-当前阶段：Phase 1 completed；N1/N2/N3/N4/N7/N8 merged to `main`；后续 N5/N6 独立推进。
+当前阶段：Local Research Platform。Phase 1 已完成是历史验收状态；N1/N2/N3/N4/N7/N8 merged to `main` 是已完成事实；后续 N5/N6 独立推进，不能让 roadmap 成为当前实现范围或引入 speculative infrastructure。
 
 最近一次检查见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
 

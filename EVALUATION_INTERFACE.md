@@ -41,9 +41,9 @@ conda run -n analysis python -m quant_research_platform.markets.implementations.
 frontend forms、Pipeline Builder payloads 或 saved snapshots。`--dry-run`
 只检查输入文件、日期覆盖、required columns、组合展开和输出目录，不写 artifact。
 
-本文是 `quant-research-platform` 内部 market module 和外部本地研究脚本接入 evaluation layer 的接口文档。它只定义 evaluation layer 需要什么输入、如何调用、会写出什么结果；不绑定具体市场，也不处理真实数据许可、下载、凭据或交易。
+本文是 `quant-research-platform` 内部 market module 和外部本地研究脚本接入 evaluation layer 的接口文档。它只定义 evaluation layer 需要什么输入、如何调用、会写出什么 evaluation artifacts；不绑定具体市场，也不处理真实数据许可、下载、凭据、仿真、回测系统或交易。
 
-Evaluation layer 的职责是评价已经构造好的 factor / prediction panel，并写出标准 evaluation-set artifacts。它不下载数据、不清洗 vendor/raw data、不读取 credentials、不训练 ML model，也不判断真实市场 alpha。
+Evaluation layer 的职责是评价已经构造好的 factor / prediction panel，并写出标准 evaluation-set artifacts。它不下载数据、不清洗 vendor/raw data、不读取 credentials、不训练 ML model，也不判断真实市场 alpha。`EvaluationSpec` 是 evaluation artifact contract，不是 `BacktestSpec`、`SimulationSpec` 或 trading contract。
 
 ## 1. 统一 Contract
 
@@ -113,19 +113,19 @@ Panel 必须是 `timestamp x asset` long format。每行代表一个资产在一
 - grouped returns；
 - group spread diagnostics。
 
-`return_source_column` 用于真实回测收益路径：
+`return_source_column` 用于 evaluation portfolio-return path / diagnostic return path：
 
 - `portfolio/returns.csv`；
-- `portfolio/returns.csv`；
+- evaluation cumulative return diagnostics；
 - `metrics/evaluation_metrics_summary.csv`；
 - year / quarter / month breakdown 中的 performance metrics。
 
 默认规则：
 
-- 如果显式传入 `return_source_column`，evaluation layer 使用该列计算 portfolio returns 和 cumulative returns。
+- 如果显式传入 `return_source_column`，evaluation layer 使用该列计算 evaluation portfolio returns 和 cumulative return diagnostics。
 - 如果未显式传入，evaluation layer 默认查找 `forward_return_1d`。
 - 如果两者都没有，evaluation layer 拒绝运行。
-- 5d / 20d / 60d 等 longer-horizon label 只作为 diagnostics，不自动当作真实日频累计收益曲线。
+- 5d / 20d / 60d 等 longer-horizon label 只作为 diagnostics，不自动当作日频 evaluation portfolio-return path，更不构成真实 backtest、simulation 或 trading return path。
 
 ## 4. Python API
 
@@ -314,4 +314,5 @@ Evaluation layer 不负责：
 - 维护 market module 私有数据目录；
 - 判断数据许可或公开边界；
 - 发布 GitHub、部署服务、登录系统或数据库；
+- 定义 `BacktestSpec`、`SimulationSpec`、订单生命周期、成交模型、滑点模型或撮合语义；
 - paper trading、live trading 或 investment advice。
