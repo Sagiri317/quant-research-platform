@@ -9,7 +9,8 @@
 - 项目边界：[../../README.md](../../README.md)
 - 当前事实：[../../PROJECT_STATUS.md](../../PROJECT_STATUS.md)
 - 架构边界：[../architecture/README.md](../architecture/README.md)
-- CSMAR 字段口径：[../csmar_data_manual.md](../csmar_data_manual.md)
+- A 股 CSMAR 字段口径：[../data/a-share-csmar-data-manual.md](../data/a-share-csmar-data-manual.md)
+- A 股字段可用性：[../data/a-share-field-inventory.md](../data/a-share-field-inventory.md)
 
 ## 当前文件
 

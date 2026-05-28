@@ -80,6 +80,8 @@ label_horizons
 output_root
 ```
 
+字段在 full panel、slim factor table、evaluation input 和 N5 diagnostics 中的当前可用性见 [../data/a-share-field-inventory.md](../data/a-share-field-inventory.md)。CSMAR vendor-specific 数据源、字段映射和列裁剪见 [../data/a-share-csmar-data-manual.md](../data/a-share-csmar-data-manual.md)。
+
 `factor_expression` 可以是受控表达式；执行 run 时也允许指向已经存在的 processed factor column。`processed_factor_column` 可用于明确指定候选因子列。
 
 ## Step Registry

@@ -1,6 +1,8 @@
-# CSMAR 数据手册
+# A 股 CSMAR 数据手册
 
-本文档说明本项目的 CSMAR 私有数据流程。账号、密码、cookie、token、网页截图和 vendor 明细数据都不进入公开材料。
+本文档说明本项目 A 股 CSMAR vendor-specific 私有数据流程。账号、密码、cookie、token、网页截图、股票代码样本和 vendor 明细数据都不进入公开材料。
+
+字段在 full panel、slim factor table、evaluation input 和 N5 diagnostics 中的当前可用性见 [a-share-field-inventory.md](a-share-field-inventory.md)。本文只记录 CSMAR 来源、raw/interim/processed 流程、字段映射、列裁剪和隐私边界。
 
 ## 数据层
 

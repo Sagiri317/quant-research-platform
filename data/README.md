@@ -38,5 +38,6 @@ processed_private/csmar/
 
 ## 相关文档
 
-- CSMAR 数据手册：[../docs/csmar_data_manual.md](../docs/csmar_data_manual.md)
+- A 股 CSMAR 数据手册：[../docs/data/a-share-csmar-data-manual.md](../docs/data/a-share-csmar-data-manual.md)
+- A 股字段可用性清单：[../docs/data/a-share-field-inventory.md](../docs/data/a-share-field-inventory.md)
 - 平台源码阅读地图：[../docs/code-map/README.md](../docs/code-map/README.md)

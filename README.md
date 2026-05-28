@@ -105,6 +105,7 @@ config/a_share/          A-share factor templates and pipeline configs
 scripts/                 local workbench launch/stop scripts and private run roots
 data/                    local private data boundary
 reports/private_real/    local private real-data outputs
+docs/data/               data documentation and field availability
 docs/code-map/           source reading map
 ```
 
@@ -237,5 +238,6 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 6. [docs/architecture/ai-native-engineering-principles.md](docs/architecture/ai-native-engineering-principles.md)：AI-native 长期工程原则。
 7. [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md)：evaluation 输入输出合同。
 8. [docs/code-map/README.md](docs/code-map/README.md)：源码阅读地图。
-9. [docs/csmar_data_manual.md](docs/csmar_data_manual.md)：CSMAR 数据说明。
-10. [AGENTS.md](AGENTS.md)：Codex 规则。
+9. [docs/data/a-share-csmar-data-manual.md](docs/data/a-share-csmar-data-manual.md)：A 股 CSMAR 数据说明。
+10. [docs/data/a-share-field-inventory.md](docs/data/a-share-field-inventory.md)：A 股字段可用性清单。
+11. [AGENTS.md](AGENTS.md)：Codex 规则。
