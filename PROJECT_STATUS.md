@@ -79,8 +79,8 @@ evidence only; they are not current valid run-contract examples.
 ## 已完成工作摘要
 
 - Phase 1 已完成并由 `docs/architecture/phase-1-acceptance-record.md` 作为历史验收记录保存。
-- N1/N2/N3/N4/N7/N8 已合入 `main`；详细实现和旧 schema 验收故事不再作为当前状态展开，必要时查 Git history、`docs/superpowers/` historical execution records 和相关 code-map。
-- 2026-05-28 maintenance surface cleanup 已收敛当前脚本/agent helper 边界：用户可见 workbench scripts 保留在 `scripts/`，agent-only verification helpers 归项目维护 skill，`docs/superpowers/` plans/specs 作为 historical execution records。
+- N1/N2/N3/N4/N7/N8 已合入 `main`；详细实现和旧 schema 验收故事不再作为当前状态展开，必要时查 Git history、`docs/archive/superpowers/` historical execution records 和相关 code-map。
+- 2026-05-28 maintenance surface cleanup 已收敛当前脚本/agent helper 边界：用户可见 workbench scripts 保留在 `scripts/`，agent-only verification helpers 归项目维护 skill，`docs/archive/superpowers/` plans/specs 作为 historical execution records。
 
 ## Root Handoff / 根目录回传信号
 

@@ -13,7 +13,7 @@ Use this reference to decide which files to read for a QRP task. Keep loading na
 | README, architecture index, project-facing docs | The target doc, `AGENTS.md`, and only directly linked current docs needed to verify wording. |
 | Decision task, architecture planning, or future capability boundary | `docs/architecture/target-architecture-and-capabilities.md`, `docs/architecture/next-stage-roadmap.md`, and the relevant standards. Ordinary coding tasks should not load target architecture by default. |
 | Worktree, branch, or operations planning | `docs/architecture/next-stage-worktree-plan.md` while it remains active; if archived later, load it only as historical operations context. |
-| Historical plans/specs under `docs/superpowers/` | Load only when tracing prior decisions, negative/rejection coverage, or explicitly cited historical context. Do not treat these files as current contract truth without confirmation from current docs, code, or tests. |
+| Historical plans/specs under `docs/archive/superpowers/` | Load only when tracing prior decisions, negative/rejection coverage, or explicitly cited historical context. Do not treat these files as current contract truth without confirmation from current docs, code, or tests. |
 
 Ordinary coding tasks do not load `docs/architecture/target-architecture-and-capabilities.md` by default. Load target architecture only for future capability, architecture planning, or phase-boundary tasks.
 

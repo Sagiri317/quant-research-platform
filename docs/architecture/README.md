@@ -25,7 +25,7 @@ Codex context loading order:
 
 Archive candidates:
 
-- `docs/superpowers/` 当前是 historical execution records / archive candidate。引用它时应分类为 historical reference、archive candidate reference 或仍被当前文档明确继承的 active reference。
+- `docs/archive/superpowers/` 是已归档 historical execution records。引用它时应分类为 historical reference 或仍被当前文档明确继承的 active reference。
 - [next-stage-worktree-plan.md](next-stage-worktree-plan.md) 当前更像 operations planning；若继续活跃，未来候选位置是 `docs/operations/next-stage-worktree-plan.md`；若被路线图替代，候选位置是 `docs/archive/operations/next-stage-worktree-plan.md`。
 
 本目录中的文档是设计和治理依据，不代表所有目录或能力都已经实现。

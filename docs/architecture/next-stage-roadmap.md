@@ -44,7 +44,7 @@
 | N8 架构简化与合同消费收敛 | merged to `main` | display preview/download helper、factor-template API、A-share service entry 和 legacy/dev upload 边界已收敛 |
 
 完成任务的详细 implementation notes 和历史验收记录应查 Git history、
-`docs/superpowers/` historical execution records、`PROJECT_STATUS.md` 的短摘要和
+`docs/archive/superpowers/` historical execution records、`PROJECT_STATUS.md` 的短摘要和
 `docs/code-map/` 当前实现图谱；本文不再承载 closeout。
 
 ## N5 full 风险、Regime、成本和容量扩展
