@@ -4,6 +4,8 @@ Rules for Codex work in `quant-research-platform`.
 
 This file is for safety and execution boundaries only. Project narrative belongs in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md), [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md), [REPORT.md](REPORT.md), [RESEARCH_CARD.md](RESEARCH_CARD.md), [PROJECT_STATUS.md](PROJECT_STATUS.md), and [docs/architecture/](docs/architecture/).
 
+Background engineering principles are described in [docs/architecture/ai-native-engineering-principles.md](docs/architecture/ai-native-engineering-principles.md), but Codex execution boundaries are still governed by this `AGENTS.md`.
+
 ## 1. Scope
 
 Project purpose:

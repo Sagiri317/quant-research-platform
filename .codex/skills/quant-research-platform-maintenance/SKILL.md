@@ -11,6 +11,8 @@ Keep generated artifacts as the source of truth, `manifest.display` as the API/U
 
 Project `AGENTS.md` owns hard safety boundaries: local-only scope, approved Conda environment, data/API/secrets limits, forbidden operations, private CSMAR boundaries, and editable areas. This skill owns the operational workflow for artifact/API/frontend/A-share/Factor Factory contract changes and the docs that describe them.
 
+The principles behind this workflow are described in `docs/architecture/ai-native-engineering-principles.md`, but actual execution remains governed by this skill and project `AGENTS.md`.
+
 ## Start Here
 
 1. Read project `AGENTS.md`.

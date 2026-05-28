@@ -226,7 +226,8 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 3. [RESEARCH_CARD.md](RESEARCH_CARD.md)：证据底稿。
 4. [PROJECT_STATUS.md](PROJECT_STATUS.md)：本地维护状态。
 5. [ARCHITECTURE.md](ARCHITECTURE.md)：平台架构。
-6. [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md)：evaluation 输入输出合同。
-7. [docs/code-map/README.md](docs/code-map/README.md)：源码阅读地图。
-8. [docs/csmar_data_manual.md](docs/csmar_data_manual.md)：CSMAR 数据说明。
-9. [AGENTS.md](AGENTS.md)：Codex 规则。
+6. [docs/architecture/ai-native-engineering-principles.md](docs/architecture/ai-native-engineering-principles.md)：AI-native 长期工程原则。
+7. [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md)：evaluation 输入输出合同。
+8. [docs/code-map/README.md](docs/code-map/README.md)：源码阅读地图。
+9. [docs/csmar_data_manual.md](docs/csmar_data_manual.md)：CSMAR 数据说明。
+10. [AGENTS.md](AGENTS.md)：Codex 规则。
