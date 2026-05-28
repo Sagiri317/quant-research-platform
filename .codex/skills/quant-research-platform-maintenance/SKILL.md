@@ -26,7 +26,7 @@ The principles behind this workflow are described in `docs/architecture/ai-nativ
 
 Use PowerShell `Select-String` if `rg` is unavailable or denied.
 
-For medium+ tasks, stop before implementation with a task brief, implementation plan, scope declaration, and explicit human approval. Keep the summary format concrete: Changed, Not changed, Risks, Scope check.
+For medium+ tasks, stop before implementation with a task brief, implementation plan, scope declaration, and explicit human approval. Use the current final report format: Changed, Not Changed, Contracts Touched, Context Loaded, Subagents Used, Tests Run, Residual Risks, Scope Check.
 
 ## Stability Model
 

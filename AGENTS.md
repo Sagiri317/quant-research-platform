@@ -18,20 +18,7 @@ Project purpose:
 - Code and public-safe aggregate summaries may later be published after review.
 - CSMAR raw/interim/processed data and private real reports remain private.
 
-Current structure:
-
-- `src/quant_research_platform/evaluations/`: evaluation contracts, panel validation, run orchestration, result objects, and evaluation diagnostics subpackages.
-- `src/quant_research_platform/kernels/`: DataFrame and tensor helper implementations.
-- `src/quant_research_platform/artifacts/`: artifact registry, writer, loader, inventory, comparison, and `manifest.display`.
-- `src/quant_research_platform/interfaces/api/`: local FastAPI evidence API routes, service layer, CSV preview, and downloads.
-- `src/quant_research_platform/interfaces/cli/`: `qrp` / `python -m quant_research_platform.interfaces.cli` commands.
-- `src/quant_research_platform/datasets/`: generic CSV / Parquet readers and dataset access helpers.
-- `src/quant_research_platform/markets/implementations/a_share/`: CSMAR-backed A-share market implementation, including data fields, factors, labels, validation, runtime helpers, and evaluation adapter.
-- `src/quant_research_platform/pipelines/a_share/`: A-share workflow orchestration, runner, checkpoint, snapshots, and step registry.
-- `web/`: React/Vite local evidence workbench.
-- `scripts/`: local-only workbench launch/stop scripts and private run-root defaults.
-- `docs/architecture/`: target architecture and capabilities, engineering and quant research standards, Phase 1 acceptance record, and next-stage roadmap.
-- `docs/code-map/`: current source reading map, including platform flow, A-share data/pipeline, and evaluation/artifact/API/frontend contracts.
+Current source maps and implementation entry points live in [docs/code-map/](docs/code-map/) and `.codex/skills/quant-research-platform-maintenance/references/contracts-and-verification.md`. Use [context-routing.md](.codex/skills/quant-research-platform-maintenance/references/context-routing.md) to choose task-specific context instead of broad-loading the repository.
 
 - Do not create repo-level `apps/api` in the current Local Research Platform phase; it is a future deployable app shell.
 - Do not create empty Future directories or empty market implementations merely as planning markers.
@@ -236,23 +223,9 @@ For frontend Playwright acceptance of API-backed workbench flows, follow the pro
 
 Do not run slow, network-heavy, destructive, or environment-changing commands without explicit approval.
 
-## 8. Documentation Roles
+## 8. Documentation and Context Routing
 
-- [README.md](README.md): current platform entry.
-- [ARCHITECTURE.md](ARCHITECTURE.md): platform architecture and module boundaries.
-- [EVALUATION_INTERFACE.md](EVALUATION_INTERFACE.md): evaluation layer input/output contract.
-- [REPORT.md](REPORT.md): formal research report.
-- [RESEARCH_CARD.md](RESEARCH_CARD.md): evidence ledger.
-- [PROJECT_STATUS.md](PROJECT_STATUS.md): current local status, next tasks, decisions, and root handoff.
-- [docs/architecture/README.md](docs/architecture/README.md): architecture document index and new-session reading order.
-- [docs/architecture/target-architecture-and-capabilities.md](docs/architecture/target-architecture-and-capabilities.md): final target architecture and future capability boundary.
-- [docs/architecture/engineering-standards.md](docs/architecture/engineering-standards.md): long-term module boundaries, contracts, versioning, errors, testing, generated outputs, API/frontend, security, and scale rules.
-- [docs/architecture/quant-research-standards.md](docs/architecture/quant-research-standards.md): long-term quant research rules for point-in-time data, eligibility/tradability, bias controls, costs, capacity, benchmarks, risk, lineage, and trading-boundary semantics.
-- [docs/architecture/phase-1-acceptance-record.md](docs/architecture/phase-1-acceptance-record.md): Phase 1 implemented scope and acceptance evidence.
-- [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md): next-stage architecture debt and task priorities.
-- [docs/csmar_data_manual.md](docs/csmar_data_manual.md): CSMAR download, fields, data rules, schema, and private report template.
-- [docs/code-map/](docs/code-map/): current source reading map, including platform flow, A-share data/pipeline, and evaluation/artifact/API/frontend contracts.
-- `.codex/skills/quant-research-platform-maintenance/SKILL.md`: project-local maintenance workflow, review stop rules, and verification sequencing for artifact/API/frontend contract changes.
+Use [README.md](README.md) as the project entry, [PROJECT_STATUS.md](PROJECT_STATUS.md) for current status and root handoff, [docs/code-map/](docs/code-map/) for implementation maps, and [context-routing.md](.codex/skills/quant-research-platform-maintenance/references/context-routing.md) to choose task-specific docs. Use `.codex/skills/quant-research-platform-maintenance/SKILL.md` for artifact/API/frontend/A-share/Factor Factory maintenance workflow.
 
 If GPT Pro or other external tools are used, they must receive an explicit context packet or public link. Context packets are managed by the root workflow; do not create a project-local packet cache unless approved.
 
