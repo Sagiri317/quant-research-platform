@@ -19,8 +19,8 @@ N5 v1 risk/regime/cost/capacity 输出仍只是 descriptive proxy diagnostics。
 order routing、deployment 或 investment advice。Private CSMAR data 和
 `reports/private_real/` 继续保持本地私有，不进入 portable metadata。
 
-Root handoff status: open. Workspace-root planning/status 需要同步当前 N5 capability
-classification；本项目状态更新不直接编辑 root planning files。
+Root handoff status: closed 2026-05-28. Workspace-root planning/status 已同步当前
+N5 capability classification；后续 full N5 capability 和 N6 仍需单独设计。
 
 ## 当前状态
 
@@ -91,5 +91,5 @@ evidence only; they are not current valid run-contract examples.
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
-| 2026-05-28 | capability | Schema `0.7` / N5 v1 diagnostics implementation 已落地；full N5 capability 和 N6 仍需单独设计。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
+| 2026-05-28 | capability | Schema `0.7` / N5 v1 diagnostics implementation 已落地；full N5 capability 和 N6 仍需单独设计。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-28 |
 | 2026-05-27 | milestone | 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-27 |
