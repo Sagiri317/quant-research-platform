@@ -1,5 +1,13 @@
 # Phase 1 Acceptance Record / Phase 1 验收记录
 
+> Historical boundary marker:
+> 本文记录的是 2026-05-23 / 2026-05-24 附近的 Phase 1 历史冻结状态。
+> 文中的 schema `0.5`、Phase 1 合同、API / artifact 语义、N1/N7 前后里程碑表述
+> 都是当时验收上下文，不应解读为当前运行合同或 implementation reality。
+> 当前运行合同、schema、artifact flow 和实现现实以 [README.md](../../README.md)、
+> [EVALUATION_INTERFACE.md](../../EVALUATION_INTERFACE.md)、[docs/code-map/](../code-map/)、
+> schema registry 和当前 tests 为准。
+
 本文记录 `quant-research-platform` Phase 1 已完成事实。它替代旧的 Phase 1 设计文档和执行清单，作为历史验收记录保存，不再作为下一阶段实施计划。
 
 ## 验收结论
