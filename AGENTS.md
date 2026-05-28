@@ -50,7 +50,7 @@ Hard boundaries:
 
 Codex may improve implementation efficiency, reduce repetitive work, and make local implementation improvements. Codex must not proactively change QRP system topology, core architecture, market scope, data scope, execution scope, or deployment scope.
 
-Default to one research semantic layer per task: data, factor, signal, portfolio, evaluation-backtest, or execution. Avoid cross-layer rewrites unless the user has approved that scope.
+Default to one research semantic layer per task: data, factor, signal, portfolio, evaluation semantics, trading-adjacent semantics, simulation semantics, or execution. Avoid cross-layer rewrites unless the user has approved that scope.
 
 Public interfaces, artifact schemas, data schemas, factor output formats, evaluation/backtest semantics, module boundaries, new dependencies, new abstractions, and data storage structures require approval before implementation.
 
@@ -80,7 +80,7 @@ Do not autonomously expand market scope, execution scope, deployment scope, runt
 
 ### TASK_PROTOCOL
 
-Medium+ tasks must start from a task brief, implementation plan, review summary, and scope check. The brief should identify allowed scope, forbidden scope, relevant contracts, files to inspect, expected changes, required tests, definition of done, and risks.
+Medium+ tasks must start from a task brief, implementation plan, scope declaration, stop conditions, and verification plan. The brief should identify task mode, context loaded, context routing, allowed scope, forbidden scope, relevant contracts, files to inspect, expected changes, required tests, definition of done, and risks.
 
 Medium+ tasks must stop and wait for explicit human approval after producing the task brief, implementation plan, and scope declaration, and before implementation begins.
 

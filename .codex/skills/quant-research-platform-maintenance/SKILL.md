@@ -21,7 +21,8 @@ The principles behind this workflow are described in `docs/architecture/ai-nativ
 4. If the change touches schema/artifact contracts, `manifest.display`, API/download/frontend exposure, module boundaries, dependency direction, testing layers, generated outputs, scale, or security boundaries, read `docs/architecture/engineering-standards.md`.
 5. If the change touches schema `0.7` diagnostics, diagnostic tables, diagnostic UI/report wording, factor evaluation semantics, diagnostics interpretation, tradability, costs, liquidity, capacity, benchmarks, risk, lineage, or paper/live trading wording, read `docs/architecture/quant-research-standards.md`.
 6. If the change touches `docs/code-map/platform-flow.md` or `docs/code-map/platform-flow-interactive.html`, read [references/code-map-flow.md](references/code-map-flow.md).
-7. Keep `PROJECT_STATUS.md` and workspace-root handoff rules as defined by `AGENTS.md`; do not edit root workspace files unless explicitly asked.
+7. For task-specific context selection, use [references/context-routing.md](references/context-routing.md). Keep it as routing guidance, not an additional approval layer.
+8. Keep `PROJECT_STATUS.md` and workspace-root handoff rules as defined by `AGENTS.md`; do not edit root workspace files unless explicitly asked.
 
 Use PowerShell `Select-String` if `rg` is unavailable or denied.
 
@@ -116,3 +117,5 @@ Read [references/contracts-and-verification.md](references/contracts-and-verific
 - skill-governance and global-skill sedimentation recommendations.
 
 Read [references/code-map-flow.md](references/code-map-flow.md) when changing or reviewing `docs/code-map/platform-flow.md` or `docs/code-map/platform-flow-interactive.html`, especially node/edge coverage, API/frontend relationship direction, interactive edge editing, or MD/HTML synchronization.
+
+Read [references/context-routing.md](references/context-routing.md) when deciding which project docs to load for a task. It is a short routing matrix only; it does not replace `AGENTS.md`, this skill, or current code/tests.

@@ -4,7 +4,7 @@ Phase 1 已完成代码功能复核和文档收口；验收结论已沉淀到 [p
 
 本目录收拢 `quant-research-platform` 的架构蓝图、能力池和工程治理规则。
 
-阅读顺序：
+Human reading order:
 
 1. [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)：最终功能和架构目标；合并原目标目录结构和未来能力池，保留目标细节，同时标明当前已落地边界。
 2. [ai-native-engineering-principles.md](ai-native-engineering-principles.md)：AI-native engineering mental model 和长期工程原则；不是当前实现状态、roadmap 或 Codex 执行规则。
@@ -13,5 +13,19 @@ Phase 1 已完成代码功能复核和文档收口；验收结论已沉淀到 [p
 5. [phase-1-acceptance-record.md](phase-1-acceptance-record.md)：Phase 1 已实现功能、验收证据、冻结合同和遗留架构债。
 6. [next-stage-roadmap.md](next-stage-roadmap.md)：Phase 1 之后的下一阶段任务、验收口径和测试边界。
 7. [next-stage-worktree-plan.md](next-stage-worktree-plan.md)：下一阶段已完成和后续分支、工作树、依赖和最低验收拆分。
+
+Codex context loading order:
+
+1. 普通实现或修复任务先读根目录 [../../AGENTS.md](../../AGENTS.md)，再按任务表面加载相关当前文件。
+2. artifact schema、`manifest.display`、API/download、frontend evidence、generated runs 任务先读 `.codex/skills/quant-research-platform-maintenance/references/contracts-and-verification.md`。
+3. 诊断语义、tradability、cost、capacity、risk、benchmark 或 trading-adjacent wording 任务再读 [quant-research-standards.md](quant-research-standards.md)。
+4. 模块边界、合同版本、测试、生成物、API/frontend 边界或安全规则任务再读 [engineering-standards.md](engineering-standards.md)。
+5. Decision Task、architecture planning 或 future capability boundary task 才默认读取 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)；普通 coding task 不默认加载它。
+6. `next-stage-worktree-plan.md` 当前仍作为 active operations reference；如果未来移动到 `docs/operations/` 或 `docs/archive/operations/`，这里需要同步更新。
+
+Archive candidates:
+
+- `docs/superpowers/` 当前是 historical execution records / archive candidate。引用它时应分类为 historical reference、archive candidate reference 或仍被当前文档明确继承的 active reference。
+- [next-stage-worktree-plan.md](next-stage-worktree-plan.md) 当前更像 operations planning；若继续活跃，未来候选位置是 `docs/operations/next-stage-worktree-plan.md`；若被路线图替代，候选位置是 `docs/archive/operations/next-stage-worktree-plan.md`。
 
 本目录中的文档是设计和治理依据，不代表所有目录或能力都已经实现。

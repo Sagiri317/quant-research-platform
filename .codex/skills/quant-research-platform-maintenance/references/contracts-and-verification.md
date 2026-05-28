@@ -8,7 +8,7 @@ This reference is the project-specific and change-prone layer for the maintenanc
 
 Long-term standards remain separate authority sources:
 
-- `docs/architecture/target-architecture-and-capabilities.md` defines the target architecture and current/local-vs-future capability boundary.
+- `docs/architecture/target-architecture-and-capabilities.md` defines the target architecture and current/local-vs-future capability boundary; load it for Decision Tasks, architecture planning, and future capability boundary tasks, not by default for ordinary coding tasks.
 - `docs/architecture/engineering-standards.md` defines durable engineering rules for module boundaries, contracts, versioning, errors, tests, generated outputs, API/frontend behavior, security, and scale.
 - `docs/architecture/quant-research-standards.md` defines durable quant research rules for point-in-time data, eligibility/tradability, bias controls, factor provenance, costs, capacity, benchmarks, risk, lineage, and trading-boundary semantics.
 
@@ -20,8 +20,8 @@ Artifact-relative diagnostics paths such as `diagnostics/diagnostic_summary.csv`
 
 | Surface | Start here |
 | --- | --- |
-| Evaluation artifact schema `0.7` planned until Slice 2 | `src/quant_research_platform/artifacts/schema_registry.py`, `artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py` |
-| Evaluation diagnostics planned until schema `0.7` slices land | `src/quant_research_platform/evaluations/diagnostics/` |
+| Evaluation artifact schema `0.7` current source files | `src/quant_research_platform/artifacts/schema_registry.py`, `artifact_schema.py`, `artifact_writer.py`, `artifact_loader.py`, `manifest_validation.py` |
+| Evaluation diagnostics current groundwork | `src/quant_research_platform/evaluations/diagnostics/` |
 | `manifest.display` | `src/quant_research_platform/artifacts/display_manifest.py`, `manifest_validation.py` |
 | Artifact ZIP packaging | `src/quant_research_platform/artifacts/artifact_package.py`, `tests/artifacts/test_artifact_package.py` |
 | Evidence API and downloads | `src/quant_research_platform/interfaces/api/routes/`, `interfaces/api/services/`, `interfaces/api/app.py`, `interfaces/api/run_index.py` |
