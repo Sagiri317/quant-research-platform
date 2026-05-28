@@ -98,6 +98,69 @@ def test_time_breakdowns_write_year_quarter_month_summary_artifacts(tmp_path):
     assert "evaluation_metrics_summary_by_month" in loaded.tables
 
 
+def test_yearly_ic_breakdown_is_written_and_display_declared(tmp_path):
+    spec = EvaluationSpec(
+        panel=_two_year_panel(),
+        feature_columns=("factor",),
+        label_columns=("forward_return",),
+        metadata={
+            "run_id": "yearly_ic_breakdown_run",
+            "project": "quant-research-platform",
+            "kind": "factor",
+            "domain": "evaluation_synthetic",
+            "data_stage": "synthetic_only",
+            "uses_external_data": False,
+        },
+        weight_configs=(WeightConfig(top_quantile=0.5, bottom_quantile=0.5),),
+        n_groups=2,
+        time_breakdowns=("year",),
+        output_dir=tmp_path,
+    )
+
+    result = run_evaluation(spec)
+
+    output_path = tmp_path / "breakdowns" / "year" / "ic.csv"
+    assert output_path.exists()
+    assert "ic_breakdown_by_year" in result.metrics
+    yearly_ic = pd.read_csv(output_path)
+    assert list(yearly_ic.columns) == [
+        "combination_id",
+        "period_type",
+        "period",
+        "period_start",
+        "period_end",
+        "mean_ic",
+        "std_ic",
+        "icir",
+        "positive_ic_rate",
+        "mean_rankic",
+        "std_rankic",
+        "rankicir",
+        "positive_rankic_rate",
+        "n_observations",
+        "diagnostic_status",
+        "status_reason",
+        "warning",
+    ]
+    assert yearly_ic["period_type"].eq("year").all()
+    assert set(yearly_ic["period"].astype(str)) == {"2025", "2026"}
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert (
+        manifest["artifacts"]["breakdowns/year"]["ic_breakdown_by_year"]
+        == "breakdowns/year/ic.csv"
+    )
+    display_tables = {table["key"]: table for table in manifest["display"]["tables"]}
+    assert display_tables["ic_breakdown_by_year"]["path"] == (
+        "breakdowns/year/ic.csv"
+    )
+    download_items = {
+        (item["kind"], item["key"])
+        for item in manifest["display"]["downloads"]["items"]
+    }
+    assert ("table", "ic_breakdown_by_year") in download_items
+
+
 def test_monthly_ic_breakdown_is_written_and_display_declared(tmp_path):
     spec = EvaluationSpec(
         panel=_two_year_panel(),

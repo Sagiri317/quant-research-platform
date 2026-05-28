@@ -112,6 +112,24 @@ _MONTHLY_IC_BREAKDOWN_COLUMNS = (
     *_COMMON_STATUS_COLUMNS,
 )
 
+_YEARLY_IC_BREAKDOWN_COLUMNS = (
+    "combination_id",
+    "period_type",
+    "period",
+    "period_start",
+    "period_end",
+    "mean_ic",
+    "std_ic",
+    "icir",
+    "positive_ic_rate",
+    "mean_rankic",
+    "std_rankic",
+    "rankicir",
+    "positive_rankic_rate",
+    "n_observations",
+    *_COMMON_STATUS_COLUMNS,
+)
+
 _TABLE_SPECS = (
     TableSpec(
         key="combinations",
@@ -449,6 +467,18 @@ _TABLE_SPECS = (
             section="diagnostics",
             display_order=150,
         ),
+    ),
+    TableSpec(
+        key="ic_breakdown_by_year",
+        path="breakdowns/year/ic.csv",
+        columns=_YEARLY_IC_BREAKDOWN_COLUMNS,
+        grain=("combination_id", "period_type", "period"),
+        unique_key=("combination_id", "period_type", "period"),
+        sort_key=("period_start", "combination_id"),
+        materialization="generated",
+        status_column="diagnostic_status",
+        sentinel_values=_STATUS_SENTINELS,
+        display=DisplaySpec(True, True, section="breakdowns", display_order=180),
     ),
     TableSpec(
         key="ic_breakdown_by_month",

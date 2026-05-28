@@ -138,6 +138,7 @@ summary.json plus metrics/evaluation_metrics_summary.csv
 
 ```text
 breakdowns/year/
+breakdowns/year/ic.csv
 breakdowns/quarter/
 breakdowns/month/
 breakdowns/month/ic.csv

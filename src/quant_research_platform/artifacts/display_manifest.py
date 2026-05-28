@@ -32,6 +32,7 @@ TABLE_LABELS = {
     "exposure_capacity_summary": ("暴露和容量代理", "diagnostics"),
     "portfolio_risk_summary": ("组合风险代理", "diagnostics"),
     "diagnostic_observations": ("诊断观察", "diagnostics"),
+    "ic_breakdown_by_year": ("年度 IC / RankIC", "breakdowns"),
     "ic_breakdown_by_month": ("月度 IC / RankIC", "breakdowns"),
     "evaluation_metrics_summary_by_year": ("年度评价指标", "breakdowns"),
     "evaluation_metrics_summary_by_quarter": ("季度评价指标", "breakdowns"),

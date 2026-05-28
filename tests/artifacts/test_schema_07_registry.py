@@ -70,6 +70,12 @@ def test_schema_07_registry_owns_table_paths_keys_and_display_eligibility() -> N
         "metric_family",
         "metric_name",
     )
+    assert specs["ic_breakdown_by_year"].path == "breakdowns/year/ic.csv"
+    assert specs["ic_breakdown_by_year"].unique_key == (
+        "combination_id",
+        "period_type",
+        "period",
+    )
     assert specs["ic_breakdown_by_month"].path == "breakdowns/month/ic.csv"
     assert specs["ic_breakdown_by_month"].unique_key == (
         "combination_id",
