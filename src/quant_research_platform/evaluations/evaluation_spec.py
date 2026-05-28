@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 from quant_research_platform.kernels.kernel_protocol import (
     PORTFOLIO_MODES,
     WEIGHT_DIRECTIONS,
@@ -38,6 +39,7 @@ TENSOR_AGGREGATION_DTYPES = {"float64"}
 __all__ = [
     "CostConfig",
     "DEFAULT_RETURN_SOURCE_COLUMN",
+    "DiagnosticsSpec",
     "EVALUATION_KERNELS",
     "EvaluationSpec",
     "ExecutionConfig",
@@ -69,9 +71,7 @@ class EvaluationSpec:
     weight_configs: tuple[WeightConfig, ...] = field(
         default_factory=lambda: (WeightConfig(),)
     )
-    execution_config: ExecutionConfig = field(
-        default_factory=lambda: ExecutionConfig()
-    )
+    execution_config: ExecutionConfig = field(default_factory=lambda: ExecutionConfig())
     tradability_config: TradabilityConfig = field(
         default_factory=lambda: TradabilityConfig()
     )
@@ -93,6 +93,7 @@ class EvaluationSpec:
     return_source_column: str | None = None
     output_dir: str | Path = Path("reports/runs/demo")
     profile_config: ProfileConfig = field(default_factory=ProfileConfig)
+    diagnostics_spec: DiagnosticsSpec = field(default_factory=DiagnosticsSpec.disabled)
     domain_notes: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -127,7 +128,7 @@ class EvaluationSpec:
             raise TypeError("weight_configs must contain WeightConfig objects.")
         if len(self.weight_configs) != 1:
             raise ValueError(
-                "schema 0.6 evaluation sets support exactly one run-level "
+                "schema 0.7 evaluation sets support exactly one run-level "
                 "weight_config; vary portfolio_mode, kernel, feature, or label "
                 "as combination dimensions."
             )
@@ -137,8 +138,8 @@ class EvaluationSpec:
             raise TypeError("cost_configs must contain CostConfig objects.")
         if len(self.cost_configs) != 1:
             raise ValueError(
-                "schema 0.6 evaluation sets support exactly one run-level "
-                "cost_config; cost is persisted in config.json/lineage.json."
+                "schema 0.7 evaluation sets support exactly one run-level "
+                "cost_config; cost is persisted in run_context.json."
             )
         if not isinstance(self.execution_config, ExecutionConfig):
             raise TypeError("execution_config must be an ExecutionConfig.")
@@ -179,6 +180,11 @@ class EvaluationSpec:
             raise ValueError("return_source_column must be a non-empty string.")
         if not isinstance(self.profile_config, ProfileConfig):
             raise TypeError("profile_config must be a ProfileConfig.")
+        object.__setattr__(
+            self,
+            "diagnostics_spec",
+            DiagnosticsSpec.from_request(self.diagnostics_spec),
+        )
 
     def panel_spec_for_label(self, label_column: str) -> PanelSpec:
         """Build the metric kernel panel spec for one label."""
@@ -242,9 +248,7 @@ class NeutralizationConfig:
         """Validate neutralization method and group or exposure columns."""
 
         if self.method not in NEUTRALIZATION_METHODS:
-            raise ValueError(
-                f"method must be one of {sorted(NEUTRALIZATION_METHODS)}."
-            )
+            raise ValueError(f"method must be one of {sorted(NEUTRALIZATION_METHODS)}.")
         if self.fit_scope not in NEUTRALIZATION_FIT_SCOPES:
             raise ValueError(
                 f"fit_scope must be one of {sorted(NEUTRALIZATION_FIT_SCOPES)}."
@@ -368,8 +372,7 @@ class TensorBatchConfig:
             )
         if self.aggregation_dtype not in TENSOR_AGGREGATION_DTYPES:
             raise ValueError(
-                "aggregation_dtype must be one of "
-                f"{sorted(TENSOR_AGGREGATION_DTYPES)}."
+                f"aggregation_dtype must be one of {sorted(TENSOR_AGGREGATION_DTYPES)}."
             )
         _validate_optional_positive_int(self.signal_chunk_size, "signal_chunk_size")
         _validate_optional_positive_int(self.label_chunk_size, "label_chunk_size")

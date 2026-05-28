@@ -8,6 +8,7 @@ import {
   type FactorFactoryDownloadItem,
   type FactorFactoryRunDetail,
   type FactorFactoryRunSummary,
+  type RunDisplayRef,
   type TablePayload,
 } from '../../shared/api/api'
 
@@ -301,8 +302,11 @@ export function FactorFactoryRuns() {
                     <div>
                       {preset.items.map((item) => (
                         <a
-                          href={factorFactoryArtifactDownloadUrl(detail.run.run_id, item)}
-                          key={item}
+                          href={factorFactoryArtifactDownloadUrl(
+                            detail.run.run_id,
+                            presetItemKey(item),
+                          )}
+                          key={presetItemKey(item)}
                         >
                           {presetItemLabel(item, detail.display.downloads.items)}
                         </a>
@@ -332,10 +336,15 @@ function selectPreviewTable(
 }
 
 function presetItemLabel(
-  item: string,
+  item: string | RunDisplayRef,
   downloadItems: FactorFactoryDownloadItem[],
 ): string {
-  return downloadItems.find((downloadItem) => downloadItem.item === item)?.label ?? item
+  const key = presetItemKey(item)
+  return downloadItems.find((downloadItem) => downloadItem.item === key)?.label ?? key
+}
+
+function presetItemKey(item: string | RunDisplayRef): string {
+  return typeof item === 'string' ? item : `${item.kind}:${item.key}`
 }
 
 function hasMoreRows(table: TablePayload, fallbackOffset: number): boolean {

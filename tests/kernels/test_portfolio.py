@@ -526,22 +526,20 @@ def test_detailed_cost_config_splits_buy_sell_slippage_and_spread_costs() -> Non
 def test_simulation_uses_detailed_cost_config_when_provided() -> None:
     spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
 
-    _positions, _turnover, returns, _diagnostics = (
-        simulate_weighted_long_short_returns(
-            _ranking_panel(),
-            spec,
-            WeightConfig(
-                top_quantile=1 / 3,
-                bottom_quantile=1 / 3,
-                cost_bps=99,
-            ),
-            cost_config=CostConfig(
-                buy_cost_bps=10,
-                sell_cost_bps=20,
-                slippage_bps=2,
-                spread_bps=1,
-            ),
-        )
+    _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
+        _ranking_panel(),
+        spec,
+        WeightConfig(
+            top_quantile=1 / 3,
+            bottom_quantile=1 / 3,
+            cost_bps=99,
+        ),
+        cost_config=CostConfig(
+            buy_cost_bps=10,
+            sell_cost_bps=20,
+            slippage_bps=2,
+            spread_bps=1,
+        ),
     )
 
     assert returns["cost"].round(6).tolist() == [0.0036, 0.0072]
@@ -621,12 +619,10 @@ def test_simulation_streams_portfolio_path_without_rebuilding_from_positions(
         fail_rebuild,
     )
 
-    _positions, turnover, returns, _diagnostics = (
-        simulate_weighted_long_short_returns(
-            _ranking_panel(),
-            PanelSpec(feature_columns=("factor",), label_column="forward_return"),
-            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
-        )
+    _positions, turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
+        _ranking_panel(),
+        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 
     assert turnover["turnover"].tolist() == [2.0, 4.0]
@@ -644,12 +640,10 @@ def test_simulation_calculates_long_short_legs_without_dataframe_dropna(
     original_dropna = pd.DataFrame.dropna
     monkeypatch.setattr(pd.DataFrame, "dropna", fail_dropna)
 
-    _positions, _turnover, returns, _diagnostics = (
-        simulate_weighted_long_short_returns(
-            _ranking_panel(),
-            PanelSpec(feature_columns=("factor",), label_column="forward_return"),
-            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
-        )
+    _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
+        _ranking_panel(),
+        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 
     assert returns["gross_portfolio_return"].round(6).tolist() == [0.02, 0.02]
@@ -673,9 +667,9 @@ def test_calculate_cumulative_returns_accumulates_by_feature() -> None:
 
     cumulative_returns = calculate_cumulative_returns(returns)
 
-    ordered = cumulative_returns.sort_values(
-        ["feature", "timestamp"]
-    ).reset_index(drop=True)
+    ordered = cumulative_returns.sort_values(["feature", "timestamp"]).reset_index(
+        drop=True
+    )
     assert ordered["cumulative_net_return"].round(6).tolist() == [
         -0.01,
         0.03,

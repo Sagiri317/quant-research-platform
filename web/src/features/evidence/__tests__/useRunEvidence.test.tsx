@@ -20,7 +20,7 @@ afterEach(() => {
 })
 
 describe('useRunEvidence diagnostics previews', () => {
-  test('refreshes chart tables from metadata preview URLs on combination change', async () => {
+  test('derives the primary cumulative return chart from the returns preview API', async () => {
     const run: RunSummary = {
       data_stage: 'synthetic_only',
       domain: 'core_synthetic',
@@ -52,14 +52,6 @@ describe('useRunEvidence diagnostics previews', () => {
           portfolio_mode: 'long_only',
         },
       ]),
-      cumulative_returns: tablePayload([
-        {
-          combination_id: 'combo_a',
-          timestamp: '2026-01-01',
-          cumulative_net_return: 0.1,
-          drawdown: 0,
-        },
-      ]),
       ic: tablePayload([]),
       returns: tablePayload([]),
     }
@@ -67,11 +59,9 @@ describe('useRunEvidence diagnostics previews', () => {
       const url = String(input)
       if (url.endsWith('/api/runs/core/chart_demo/evidence')) {
         const display = displayPayload(tables, { runId: 'chart_demo' })
-        const cumulativeReturns = display.tables.find(
-          (table) => table.key === 'cumulative_returns',
-        )
-        if (cumulativeReturns) {
-          cumulativeReturns.preview.max_limit = 200
+        const returns = display.tables.find((table) => table.key === 'returns')
+        if (returns?.preview) {
+          returns.preview.max_limit = 200
         }
         return jsonResponse(
           evidencePayload({
@@ -81,20 +71,18 @@ describe('useRunEvidence diagnostics previews', () => {
         )
       }
       if (
-        url.includes('/api/runs/core/chart_demo/tables/cumulative_returns/preview')
+        url.includes('/api/runs/core/chart_demo/tables/returns/preview')
       ) {
         return tableResponse([
           {
             combination_id: 'combo_b',
             timestamp: '2026-01-01',
-            cumulative_net_return: 0.2,
-            drawdown: 0,
+            net_return: 0.2,
           },
           {
             combination_id: 'combo_b',
             timestamp: '2026-01-02',
-            cumulative_net_return: 0.3,
-            drawdown: -0.01,
+            net_return: 0.25,
           },
         ])
       }
@@ -111,7 +99,13 @@ describe('useRunEvidence diagnostics previews', () => {
         <>
           <div data-testid="selected">{selectedCombinationId}</div>
           <div data-testid="chart-rows">
-            {chartTables.cumulative_returns?.rows.length ?? 0}
+            {chartTables.primary_cumulative_return?.rows.length ?? 0}
+          </div>
+          <div data-testid="last-cumulative">
+            {String(
+              chartTables.primary_cumulative_return?.rows[1]
+                ?.cumulative_net_return ?? 'missing',
+            )}
           </div>
           <button onClick={() => setSelectedCombinationId('combo_b')} type="button">
             select combo b
@@ -128,8 +122,12 @@ describe('useRunEvidence diagnostics previews', () => {
     await waitFor(() =>
       expect(screen.getByTestId('chart-rows')).toHaveTextContent('2'),
     )
+    expect(screen.getByTestId('last-cumulative')).toHaveTextContent('0.5')
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/chart_demo/tables/cumulative_returns/preview?limit=200&combination_id=combo_b',
+      'http://127.0.0.1:8000/api/runs/core/chart_demo/tables/returns/preview?limit=200&combination_id=combo_b',
+    )
+    expect(globalThis.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining(`/tables/${'cumulative' + '_returns'}/preview`),
     )
   })
 
@@ -150,7 +148,6 @@ describe('useRunEvidence diagnostics previews', () => {
     }
     const tables = {
       combinations: tablePayload([{ combination_id: 'combo_a' }]),
-      cumulative_returns: tablePayload([]),
       ic: tablePayload([]),
       returns: tablePayload([]),
     }
@@ -159,19 +156,17 @@ describe('useRunEvidence diagnostics previews', () => {
       if (url.endsWith('/api/runs/core/paged_chart_demo/evidence')) {
         const display = displayPayload(tables, { runId: 'paged_chart_demo' })
         display.charts = display.charts.filter(
-          (chart) => chart.id === 'cumulative_returns',
+          (chart) => chart.id === 'primary_cumulative_return',
         )
-        const cumulativeReturns = display.tables.find(
-          (table) => table.key === 'cumulative_returns',
-        )
-        if (cumulativeReturns) {
-          cumulativeReturns.preview.max_limit = 1
+        const returns = display.tables.find((table) => table.key === 'returns')
+        if (returns?.preview) {
+          returns.preview.max_limit = 1
         }
         return jsonResponse(evidencePayload({ display, tables }))
       }
       if (
         url.includes(
-          '/api/runs/core/paged_chart_demo/tables/cumulative_returns/preview',
+          '/api/runs/core/paged_chart_demo/tables/returns/preview',
         )
       ) {
         if (url.includes('offset=1')) {
@@ -180,8 +175,7 @@ describe('useRunEvidence diagnostics previews', () => {
               {
                 combination_id: 'combo_a',
                 timestamp: '2026-01-02',
-                cumulative_net_return: 0.2,
-                drawdown: 0,
+                net_return: 0.1,
               },
             ]),
             has_more: false,
@@ -196,8 +190,7 @@ describe('useRunEvidence diagnostics previews', () => {
             {
               combination_id: 'combo_a',
               timestamp: '2026-01-01',
-              cumulative_net_return: 0.1,
-              drawdown: 0,
+              net_return: 0.1,
             },
           ]),
           has_more: true,
@@ -214,7 +207,7 @@ describe('useRunEvidence diagnostics previews', () => {
       const { chartTables } = useRunEvidence(run)
       return (
         <div data-testid="chart-rows">
-          {chartTables.cumulative_returns?.rows.length ?? 0}
+          {chartTables.primary_cumulative_return?.rows.length ?? 0}
         </div>
       )
     }
@@ -225,10 +218,10 @@ describe('useRunEvidence diagnostics previews', () => {
       expect(screen.getByTestId('chart-rows')).toHaveTextContent('2'),
     )
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/paged_chart_demo/tables/cumulative_returns/preview?limit=1&combination_id=combo_a',
+      'http://127.0.0.1:8000/api/runs/core/paged_chart_demo/tables/returns/preview?limit=1&combination_id=combo_a',
     )
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/paged_chart_demo/tables/cumulative_returns/preview?limit=1&offset=1&combination_id=combo_a',
+      'http://127.0.0.1:8000/api/runs/core/paged_chart_demo/tables/returns/preview?limit=1&offset=1&combination_id=combo_a',
     )
   })
 
@@ -251,9 +244,6 @@ describe('useRunEvidence diagnostics previews', () => {
       combinations: tablePayload([
         { combination_id: 'combo_a' },
         { combination_id: 'combo_b' },
-      ]),
-      cumulative_returns: tablePayload([
-        { combination_id: 'combo_a', timestamp: '2026-01-01', cumulative_net_return: 0.1 },
       ]),
       ic: tablePayload([
         { combination_id: 'combo_a', timestamp: '2026-01-01', ic: 0.2, rankic: 0.3 },
@@ -373,7 +363,6 @@ describe('useRunEvidence diagnostics previews', () => {
         { combination_id: 'combo_a' },
         { combination_id: 'combo_b' },
       ]),
-      cumulative_returns: tablePayload([]),
       ic: tablePayload([]),
       returns: tablePayload([]),
       tradability_diagnostics: tablePayload([]),

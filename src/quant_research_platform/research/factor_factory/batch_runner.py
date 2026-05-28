@@ -30,8 +30,8 @@ def evaluate_existing_factor_candidates(
     """Evaluate candidates independently; one failure does not stop the batch."""
 
     output_path = Path(output_dir)
-    factory_run_dir = output_path / "factor_factory" / _factory_run_id(
-        base_config.run_id
+    factory_run_dir = (
+        output_path / "factor_factory" / _factory_run_id(base_config.run_id)
     )
     if factory_run_dir.exists():
         raise FileExistsError(factory_run_dir)
@@ -174,41 +174,40 @@ def _evaluation_artifact_dir(result: object) -> Path | None:
 
 def _candidate_combination_summary(run_dir: Path) -> pd.DataFrame:
     combinations_path = run_dir / "dimensions" / "combinations.csv"
-    evaluation_summary_path = run_dir / "summaries" / "evaluation_summary.csv"
+    evaluation_metrics_path = run_dir / "metrics" / "evaluation_metrics_summary.csv"
     if not combinations_path.is_file():
         raise ValueError("missing dimensions/combinations.csv")
-    if not evaluation_summary_path.is_file():
-        raise ValueError("missing summaries/evaluation_summary.csv")
+    if not evaluation_metrics_path.is_file():
+        raise ValueError("missing metrics/evaluation_metrics_summary.csv")
     combinations = pd.read_csv(combinations_path)
-    evaluation_summary = pd.read_csv(evaluation_summary_path)
+    evaluation_metrics = pd.read_csv(evaluation_metrics_path)
     _require_columns(
         combinations,
         "dimensions/combinations.csv",
         {"combination_id", "feature", "label", "kernel", "portfolio_mode"},
     )
     _require_columns(
-        evaluation_summary,
-        "summaries/evaluation_summary.csv",
+        evaluation_metrics,
+        "metrics/evaluation_metrics_summary.csv",
         {
             "combination_id",
-            "mean_ic",
-            "final_cumulative_net_return",
-            "mean_turnover",
-            "total_cost",
+            "metric_name",
+            "metric_value",
         },
     )
     if combinations.empty:
         raise ValueError("evaluation artifact has no combinations")
-    if evaluation_summary.empty:
-        raise ValueError("evaluation artifact has no evaluation_summary rows")
+    if evaluation_metrics.empty:
+        raise ValueError("evaluation artifact has no evaluation_metrics_summary rows")
+    combination_metrics = _wide_evaluation_metrics(evaluation_metrics)
     missing_summary = sorted(
         set(combinations["combination_id"].astype(str)).difference(
-            evaluation_summary["combination_id"].astype(str)
+            combination_metrics["combination_id"].astype(str)
         )
     )
     if missing_summary:
         raise ValueError(
-            "summaries/evaluation_summary.csv missing combinations: "
+            "metrics/evaluation_metrics_summary.csv missing combinations: "
             f"{missing_summary}"
         )
     metric_columns = [
@@ -219,12 +218,36 @@ def _candidate_combination_summary(run_dir: Path) -> pd.DataFrame:
         "total_cost",
     ]
     merged = combinations.merge(
-        evaluation_summary[metric_columns],
+        combination_metrics[metric_columns],
         on="combination_id",
         how="left",
         validate="one_to_one",
     )
     return merged
+
+
+def _wide_evaluation_metrics(evaluation_metrics: pd.DataFrame) -> pd.DataFrame:
+    metric_names = {
+        "mean_ic",
+        "final_cumulative_net_return",
+        "mean_turnover",
+        "total_cost",
+    }
+    filtered = evaluation_metrics[
+        evaluation_metrics["metric_name"].isin(metric_names)
+    ].copy()
+    if filtered.empty:
+        return pd.DataFrame(columns=["combination_id", *sorted(metric_names)])
+    return (
+        filtered.pivot_table(
+            index="combination_id",
+            columns="metric_name",
+            values="metric_value",
+            aggfunc="first",
+        )
+        .reset_index()
+        .rename_axis(columns=None)
+    )
 
 
 def _require_columns(frame: pd.DataFrame, source: str, columns: set[str]) -> None:

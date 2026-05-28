@@ -1,24 +1,23 @@
 # Evaluation 接口说明
 
-## N7 当前合同（schema 0.6）
+## 当前合同（schema 0.7）
 
-从 N7 起，新写出的 evaluation-set artifact schema 为 `0.6`。一个
-API-visible evaluation run 可以包含多个 result combinations；用户可见维度只通过
-`dimensions/combinations.csv` 表达，第一阶段 required columns 为：
+新写出的 evaluation-set artifact schema 为 `0.7`。一个
+API-visible evaluation run 可以包含多个 result combinations；组合维度通过
+`dimensions/combinations.csv` 表达，diagnostics policy 维度通过 `dimensions/diagnostic_policies.csv` 表达，组合表核心 columns 为：
 
 ```text
 combination_id, feature, label, kernel, portfolio_mode
 ```
 
 run-level constant 配置，包括成本、权重方法、benchmark、universe、
-eligibility 和 tradability 配置，写入 `config.json` / `lineage.json`，不进入
-`dimensions/combinations.csv`。实际结果值仍写入 fact tables，例如
-`metrics/performance_summary.csv`、`portfolio/returns.csv`、
-`portfolio/weights.parquet` 和 `diagnostics/tradability_diagnostics.csv`。
+eligibility、tradability、生成环境和 lineage 摘要，写入 `run_context.json`，不进入
+`dimensions/combinations.csv`。实际结果值仍写入 schema registry 声明的 fact tables，例如
+`metrics/evaluation_metrics_summary.csv`、`portfolio/returns.csv`、
+`portfolio/weights.parquet`、`input_quality/coverage_summary.csv` 和 `diagnostics/diagnostic_summary.csv`。
 
 公开命名使用 `kernel` 和 `return_source_column`。旧的 external `engine`
-compatibility、`pnl_return_column`、`portfolio/pnl.csv` 和 `portfolio/positions.csv` 不属于 schema `0.6` 合同；累计收益表为
-`portfolio/cumulative_returns.csv`，权重表为 required Parquet：
+compatibility、`pnl_return_column`、`portfolio/pnl.csv` 和 `portfolio/positions.csv` 不属于 schema `0.7` 合同；累计收益图由 API/display chart payload 派生，不再作为落盘 artifact；权重表为 required Parquet：
 `portfolio/weights.parquet`。
 
 A 股本地 CLI 第一阶段只使用显式 features，且多值参数写在同一行：
@@ -68,7 +67,7 @@ Evaluation layer 的职责是评价已经构造好的 factor / prediction panel�
 ```text
 input transport -> input adapter -> EvaluationSpec
                 -> run_evaluation
-                -> schema 0.6 evaluation-set artifacts
+                -> schema 0.7 evaluation-set artifacts
 ```
 
 ## 2. Long Panel Schema
@@ -117,8 +116,8 @@ Panel 必须是 `timestamp x asset` long format。每行代表一个资产在一
 `return_source_column` 用于真实回测收益路径：
 
 - `portfolio/returns.csv`；
-- `portfolio/cumulative_returns.csv`；
-- `metrics/performance_summary.csv`；
+- `portfolio/returns.csv`；
+- `metrics/evaluation_metrics_summary.csv`；
 - year / quarter / month breakdown 中的 performance metrics。
 
 默认规则：
@@ -281,32 +280,27 @@ conda run -n analysis python -m quant_research_platform.interfaces.cli evaluate-
 
 ```text
 manifest.json
-config.json
 summary.json
-lineage.json
+run_context.json
 dimensions/combinations.csv
+dimensions/diagnostic_policies.csv
 report.md
 metrics/ic.csv
-metrics/ic_summary.csv
 metrics/grouped_returns.csv
-metrics/group_spread_summary.csv
-metrics/performance_summary.csv
+metrics/evaluation_metrics_summary.csv
 portfolio/weights.parquet
 portfolio/returns.csv
-portfolio/cumulative_returns.csv
-diagnostics/tradability_diagnostics.csv
-input_quality/label_availability.csv
-input_quality/factor_coverage.csv
-input_quality/tradability_coverage.csv
-summaries/evaluation_summary.csv
+input_quality/coverage_summary.csv
+diagnostics/diagnostic_summary.csv
+diagnostics/diagnostic_metrics.csv
 ```
 
 启用 `time_breakdowns` 后，会按实际配置出现 `breakdowns/year/`、`breakdowns/quarter/` 或 `breakdowns/month/`。这些 time breakdown 是从完整 overall run path 中按 period 切片统计，不重新运行年度 / 季度 / 月度回测，不清仓，也不重新生成 weights 或 portfolio returns path。
 
-`manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.6"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。
+`manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.7"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。
 
-`config.json` 和 `lineage.json` 属于 public-downloadable metadata：writer、direct download
-和 selected ZIP packaging 都必须使用统一脱敏后的内容，不暴露 private data path 或本机绝对路径；selected ZIP cache fingerprint 也使用脱敏后的动态 metadata bytes。
+`run_context.json` 是 schema `0.7` 的 portable metadata：writer、direct download
+和 selected ZIP packaging 都必须使用 display/download 合同允许的内容，不暴露 private data path 或本机绝对路径；portable artifacts 不再写出单独的 `config.json` 或 `lineage.json`。
 
 ## 9. Evaluation Layer 不负责的边界
 

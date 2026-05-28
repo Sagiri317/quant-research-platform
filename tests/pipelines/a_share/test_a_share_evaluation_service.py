@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 from quant_research_platform.markets.implementations.a_share.evaluation.service import (
     AShareEvaluationRequest,
     run_a_share_evaluation,
@@ -74,5 +75,6 @@ def test_a_share_evaluation_service_delegates_to_processed_adapter(
             "neutralization_exposure_columns": (),
             "source_alias": "pipeline",
             "manifest_run_id": "service_smoke",
+            "diagnostics_spec": DiagnosticsSpec.disabled(),
         }
     ]

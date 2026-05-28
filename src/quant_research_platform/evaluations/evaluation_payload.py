@@ -14,5 +14,6 @@ class EvaluationRunPayload:
 
     summary: dict[str, Any]
     config: dict[str, Any]
+    run_context: dict[str, Any]
     tables: dict[str, pd.DataFrame]
     report: str

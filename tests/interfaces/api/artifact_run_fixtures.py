@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.artifacts.display_manifest import build_display_manifest
 from tests.artifacts.artifact_fixtures import write_evaluation_set as _write_artifact
 
@@ -25,7 +27,7 @@ def write_evaluation_set(
     n_rows_evaluated: int = 12,
     time_breakdowns: tuple[str, ...] = (),
 ) -> None:
-    """Write the schema 0.6 artifact fixture used by API tests."""
+    """Write the schema 0.7 artifact fixture used by API tests."""
 
     _write_artifact(
         output_dir,
@@ -45,6 +47,38 @@ def write_evaluation_set(
     )
     if time_breakdowns:
         _add_breakdown_markers(output_dir, time_breakdowns)
+    _add_weights_marker(output_dir)
+
+
+def _refresh_display(output_dir: Path) -> None:
+    manifest_path = output_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["display"] = build_display_manifest(
+        manifest["artifacts"],
+        schema_version=manifest["artifact_schema_version"],
+        default_selection=manifest["display"]["default_selection"],
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _add_weights_marker(output_dir: Path) -> None:
+    directory = output_dir / "portfolio"
+    directory.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "combination_id": ["factor__forward_return__dataframe__long_short"],
+            "timestamp": ["2026-01-01"],
+            "asset": ["asset_001"],
+            "target_weight": [1.0],
+        }
+    ).to_parquet(directory / "weights.parquet", index=False)
+    manifest_path = output_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"].setdefault("portfolio", {})["weights"] = (
+        "portfolio/weights.parquet"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _refresh_display(output_dir)
 
 
 def _add_breakdown_markers(output_dir: Path, time_breakdowns: tuple[str, ...]) -> None:
@@ -55,28 +89,22 @@ def _add_breakdown_markers(output_dir: Path, time_breakdowns: tuple[str, ...]) -
             continue
         directory = output_dir / "breakdowns" / "year"
         directory.mkdir(parents=True, exist_ok=True)
-        for name in ("ic_summary", "group_spread_summary", "performance_summary"):
-            (directory / f"{name}.csv").write_text(
-                "combination_id,year,feature,label,kernel,portfolio_mode\n"
-                "factor__forward_return__dataframe__long_short,2026,factor,"
-                "forward_return,dataframe,long_short\n",
-                encoding="utf-8",
-            )
+        (directory / "evaluation_metrics_summary.csv").write_text(
+            "combination_id,period_type,period,period_start,period_end,"
+            "metric_family,metric_name,metric_value,unit,n_observations,"
+            "diagnostic_status,status_reason,warning\n"
+            "factor__forward_return__dataframe__long_short,year,2026,"
+            "2026-01-01,2026-12-31,portfolio,final_cumulative_net_return,"
+            "0.029,ratio,1,ok,,\n",
+            encoding="utf-8",
+        )
         manifest_path = output_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         artifacts = manifest["artifacts"]
-        artifacts["breakdowns/year"] = {
-            "ic_summary_by_year": "breakdowns/year/ic_summary.csv",
-            "group_spread_summary_by_year": (
-                "breakdowns/year/group_spread_summary.csv"
-            ),
-            "performance_summary_by_year": (
-                "breakdowns/year/performance_summary.csv"
+        artifacts["breakdowns"] = {
+            "evaluation_metrics_summary_by_year": (
+                "breakdowns/year/evaluation_metrics_summary.csv"
             ),
         }
-        manifest["display"] = build_display_manifest(
-            artifacts,
-            schema_version=manifest["artifact_schema_version"],
-            default_selection=manifest["display"]["default_selection"],
-        )
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        _refresh_display(output_dir)

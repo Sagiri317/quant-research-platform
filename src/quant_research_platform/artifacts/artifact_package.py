@@ -15,7 +15,6 @@ from quant_research_platform.artifacts.artifact_schema import ARTIFACT_SCHEMA_VE
 from quant_research_platform.artifacts.display_tables import (
     display_download_items,
     display_download_table_key,
-    display_table_artifact_path,
     resolve_artifact_contract_path,
     validate_display_contract_path,
 )
@@ -79,8 +78,6 @@ def resolve_manifest_display_artifact_path(
     relative_path = _artifact_relative_path_from_manifest(manifest, item)
     if relative_path is None:
         return None
-    if item in {"report.md", "manifest.json", "config.json", "summary.json"}:
-        relative_path = item
     return _resolve_artifact_path(output_dir, relative_path, item)
 
 
@@ -101,6 +98,7 @@ def build_selected_artifact_zip(
     items: list[str],
     cache_root: Path,
     dynamic_items: dict[str, _DynamicDownloadResolver] | None = None,
+    runtime_display_item_refs: set[str] | None = None,
 ) -> Path:
     """Build or reuse a selected artifact ZIP and return its cache path."""
 
@@ -108,6 +106,11 @@ def build_selected_artifact_zip(
     if not unique_items:
         raise ArtifactPackageError("请选择至少一个下载项。")
     allowed_items = _display_download_items(run.manifest)
+    if dynamic_items:
+        allowed_dynamic_items = set(dynamic_items).intersection(
+            runtime_display_item_refs or set()
+        )
+        allowed_items.update(allowed_dynamic_items)
     for item in unique_items:
         _validate_download_item_name(item)
         if item not in allowed_items:
@@ -156,18 +159,11 @@ def _selected_zip_cache_path(
     fingerprint: list[str] = []
     for item in items:
         _validate_download_item_name(item)
-        if item in {"config.json", "lineage.json"}:
-            digest = hashlib.sha256(
-                _public_metadata_bytes(run.output_dir, item)
-            ).hexdigest()
-            fingerprint.append(f"{item}\0dynamic\0{digest}")
-            continue
         source_path = _download_item_path(run, item)
         if source_path is not None:
             stat = source_path.stat()
             fingerprint.append(
-                f"{item}\0{source_path.as_posix()}\0{stat.st_size}\0"
-                f"{stat.st_mtime_ns}"
+                f"{item}\0{source_path.as_posix()}\0{stat.st_size}\0{stat.st_mtime_ns}"
             )
             continue
         if dynamic_items and item in dynamic_items:
@@ -198,44 +194,40 @@ def _resolve_download_item(
     _validate_download_item_name(item)
     if dynamic_items and item in dynamic_items:
         return _ResolvedDownloadItem(
-            name=item,
+            name=_dynamic_archive_name(item),
             media_type=_media_type_for_item(item),
             content=dynamic_items[item](),
         )
     source_path = _download_item_path(run, item)
     if source_path is not None:
         return _ResolvedDownloadItem(
-            name=item,
+            name=_archive_name_for_item(run, item),
             media_type=_media_type_for_item(item),
             source_path=source_path,
         )
-    if item == "report.md":
+    if item == "metadata_file:report":
+        if run.report is None:
+            raise ArtifactPackageError("report is not available for this run")
         return _ResolvedDownloadItem(
-            name=item,
+            name="report.md",
             media_type="text/markdown; charset=utf-8",
             content=run.report.encode("utf-8"),
         )
-    if item == "manifest.json":
+    if item == "metadata_file:manifest":
         return _ResolvedDownloadItem(
-            name=item,
+            name="manifest.json",
             media_type="application/json",
             content=_json_bytes(run.manifest),
         )
-    if item == "config.json":
+    if item == "metadata_file:run_context":
         return _ResolvedDownloadItem(
-            name=item,
+            name="run_context.json",
             media_type="application/json",
-            content=_public_metadata_bytes(run.output_dir, item, fallback=run.config),
+            content=_json_bytes(run.run_context),
         )
-    if item == "lineage.json":
+    if item == "metadata_file:summary":
         return _ResolvedDownloadItem(
-            name=item,
-            media_type="application/json",
-            content=public_lineage_bytes(run.output_dir),
-        )
-    if item == "summary.json":
-        return _ResolvedDownloadItem(
-            name=item,
+            name="summary.json",
             media_type="application/json",
             content=_json_bytes(run.summary),
         )
@@ -244,7 +236,9 @@ def _resolve_download_item(
         downloads = display.get("downloads")
         if isinstance(downloads, dict):
             for option in downloads.get("items", []):
-                if not isinstance(option, dict) or option.get("item") != item:
+                if not isinstance(option, dict):
+                    continue
+                if f"{option.get('kind')}:{option.get('key')}" != item:
                     continue
                 metric_name = option.get("table")
                 if not isinstance(metric_name, str):
@@ -260,12 +254,27 @@ def _resolve_download_item(
     raise ArtifactPackageError(f"未知下载项：{item}")
 
 
+def _archive_name_for_item(run: LoadedEvaluationSet, item: str) -> str:
+    relative = _artifact_relative_path(
+        run,
+        item,
+        run.manifest.get("artifacts", {})
+        if isinstance(run.manifest.get("artifacts"), dict)
+        else {},
+    )
+    return relative or item.replace(":", "_")
+
+
+def _dynamic_archive_name(item: str) -> str:
+    if item == "dynamic:comparison":
+        return "comparison.csv"
+    return item.replace(":", "_")
+
+
 def _download_item_path(run: LoadedEvaluationSet, item: str) -> Path | None:
     """Return an existing artifact file path; dynamic content returns None."""
 
     _validate_download_item_name(item)
-    if item in {"config.json", "lineage.json"}:
-        return None
     artifacts = run.manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         return None
@@ -284,14 +293,18 @@ def _artifact_relative_path(
     artifacts: dict[object, object],
 ) -> str | None:
     _validate_download_item_name(item)
-    if item == "report.md":
+    if item == "metadata_file:report":
         value = artifacts.get("report")
-        return value if value == item else None
-    if item in {"manifest.json", "config.json", "lineage.json", "summary.json"}:
-        return item
+        return value if value == "report.md" else None
+    if item == "metadata_file:manifest":
+        return "manifest.json"
+    if item == "metadata_file:summary":
+        return "summary.json"
+    if item == "metadata_file:run_context":
+        return "run_context.json"
     table_name = display_download_table_key(run.manifest, item)
     if table_name is not None:
-        return display_table_artifact_path(run.manifest, table_name)
+        return _download_item_relative_path(run.manifest, item)
     return None
 
 
@@ -303,14 +316,41 @@ def _artifact_relative_path_from_manifest(
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         return None
-    if item == "report.md":
+    if item == "metadata_file:report":
         value = artifacts.get("report")
-        return value if value == item else None
-    if item in {"manifest.json", "config.json", "lineage.json", "summary.json"}:
-        return item
+        return value if value == "report.md" else None
+    if item == "metadata_file:manifest":
+        return "manifest.json"
+    if item == "metadata_file:summary":
+        return "summary.json"
+    if item == "metadata_file:run_context":
+        return "run_context.json"
     table_name = display_download_table_key(manifest, item)
     if table_name is not None:
-        return display_table_artifact_path(manifest, table_name)
+        return _download_item_relative_path(manifest, item)
+    return None
+
+
+def _download_item_relative_path(manifest: dict[str, object], item: str) -> str | None:
+    display = manifest.get("display")
+    if not isinstance(display, dict):
+        return None
+    downloads = display.get("downloads")
+    if not isinstance(downloads, dict):
+        return None
+    entries = downloads.get("items")
+    if not isinstance(entries, list):
+        return None
+    for option in entries:
+        if not isinstance(option, dict):
+            continue
+        if f"{option.get('kind')}:{option.get('key')}" != item:
+            continue
+        path = option.get("path")
+        if not isinstance(path, str):
+            return None
+        validate_display_contract_path(path, source=f"display download item {item}")
+        return path
     return None
 
 
@@ -361,18 +401,6 @@ def _json_bytes(payload: dict[str, object]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def public_lineage_bytes(output_dir: Path) -> bytes:
-    """Return API-safe lineage metadata without private/local input file fields."""
-
-    return _public_metadata_bytes(output_dir, "lineage.json")
-
-
-def public_config_bytes(output_dir: Path) -> bytes:
-    """Return API-safe config metadata without private/local path fields."""
-
-    return _public_metadata_bytes(output_dir, "config.json")
-
-
 def _public_metadata_bytes(
     output_dir: Path,
     file_name: str,
@@ -419,12 +447,8 @@ def _write_selected_zip(
         ) as archive:
             for item in unique_items:
                 _validate_download_item_name(item)
-                source_path = _download_item_path(run, item)
-                if source_path is not None:
-                    archive.write(source_path, item)
-                    continue
                 resolved = _resolve_download_item(run, item, dynamic_items)
-                archive.writestr(item, resolved.require_content())
+                archive.writestr(resolved.name, resolved.require_content())
         temporary_path.replace(zip_path)
     finally:
         if temporary_path.exists():

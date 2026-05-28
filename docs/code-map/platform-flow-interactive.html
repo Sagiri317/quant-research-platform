@@ -453,7 +453,7 @@
     <div>
       <h1>Quant Research Platform 交互 Code Map</h1>
       <p class="subtitle">
-        当前工程事实图谱：A-share 私有数据链路、start_from pipeline runner、evaluation schema 0.6、
+        当前工程事实图谱：A-share 私有数据链路、start_from pipeline runner、evaluation schema 0.7、
         manifest.display、API/download/frontend、Factor Factory 和 CLI。默认布局以左到右主流向为准，局部上下回流用于减少遮挡；画布可平移缩放，节点可拖动。
         连线表示主要数据/契约可用方向，不逐条等同 HTTP request 方向。
       </p>
@@ -572,8 +572,8 @@
       n("N14", "EvaluationSpec", "evaluation", "输入契约", "evaluations/evaluation_spec.py", "共享 evaluation 输入契约。", 2310, 360),
       n("N15", "evaluate_to_payload", "evaluation", "共享计算入口", "evaluations/evaluation_runner.py", "计算 evaluation payload tables；A-share 专用路径直接调用它。", 2560, 360),
       n("N16", "Kernels", "evaluation", "计算辅助", "kernels/", "DataFrame 和 tensor helper。", 2560, 500),
-      n("N38", "artifact writer", "evaluation", "payload -> files", "artifacts/artifact_writer.py", "write_evaluation_set_artifacts 写 schema 0.6 evaluation-set run directory。", 2810, 360),
-      n("N17", "schema 0.6 artifacts", "evaluation", "evaluation_set", "artifacts/artifact_writer.py", "写 schema 0.6 evaluation-set run directory。", 3060, 360),
+      n("N38", "artifact writer", "evaluation", "payload -> files", "artifacts/artifact_writer.py", "write_evaluation_set_artifacts 写 schema 0.7 evaluation-set run directory。", 2810, 360),
+      n("N17", "schema 0.7 artifacts", "evaluation", "evaluation_set", "artifacts/artifact_writer.py", "写 schema 0.7 evaluation-set run directory。", 3060, 360),
       n("N18", "manifest.display", "evaluation", "展示契约", "artifacts/display_manifest.py", "API evidence、previews、charts、downloads、ZIP 和 frontend 的唯一展示源。", 3310, 360),
       n("N19", "artifact loader", "evaluation", "严格读取", "artifacts/artifact_loader.py", "严格加载 completed evaluation-set artifacts，拒绝缺表或 stale run。", 3060, 500),
       n("N39", "run_evaluation", "evaluation", "generic wrapper", "evaluations/evaluation_runner.py", "通用 wrapper：调用 evaluate_to_payload 后写 artifacts；qrp evaluate-parquet 使用它。", 2310, 500),
@@ -588,7 +588,7 @@
 
       n("N27", "Factor templates", "factory", "registry", "research/factor_factory/factor_registry.py", "受控 factor templates、inputs、outputs 和 capabilities。", 560, 265),
       n("N28", "Factory batch runner", "factory", "batch eval", "research/factor_factory/batch_runner.py", "批量候选因子经 A-share runner 执行，当前通常 start_from=existing_factors。", 1560, 600),
-      n("N29", "Factory artifacts", "factory", "schema 0.1", "research/factor_factory/reports.py", "Factor Factory run schema 0.1，不同于 evaluation-set schema 0.6。", 1810, 740),
+      n("N29", "Factory artifacts", "factory", "schema 0.1", "research/factor_factory/reports.py", "Factor Factory run schema 0.1，不同于 evaluation-set schema 0.7。", 1810, 740),
       n("N30", "Factor Factory API", "api", "factory routes", "interfaces/api/routes/factor_factory.py", "浏览 Factor Factory runs、tables 和 display-approved artifacts。", 2060, 740),
       n("N31", "Factor Studio", "frontend", "draft UI", "web/src/features/factor-studio/FactorStudio.tsx", "通过 listFactorTemplates('a_share') 读取 API templates 后编辑受控因子草稿。", 1060, 265),
       n("N32", "CSV Upload UI/API", "frontend-api", "legacy/dev", "web/src/features/uploads/CreateRunPanel.tsx; web/src/features/uploads/useCreateRun.ts; web/src/shared/api/api.ts#createRun; interfaces/api/routes/uploads.py", "复合节点：前端 CSV 上传 UI 和 POST /api/runs 兼容 API；早期本地调试路径，不是 A-share 私有主链路。", 3060, 690),
@@ -619,7 +619,7 @@
       e("E17", "N14", "N15", "input", "A-share adapter 构造 EvaluationSpec 后进入 evaluate_to_payload。"),
       e("E18", "N15", "N16", "uses", "Evaluation computation 使用 kernels。"),
       e("E19", "N15", "N38", "payload", "evaluate_to_payload 返回 tables/config/report payload。"),
-      e("E52", "N38", "N17", "writes", "write_evaluation_set_artifacts 写 schema 0.6 artifacts。"),
+      e("E52", "N38", "N17", "writes", "write_evaluation_set_artifacts 写 schema 0.7 artifacts。"),
       e("E20", "N17", "N18", "declares", "artifact manifest 声明 display。"),
       e("E21", "N17", "N19", "loaded by", "loader 严格读取 artifacts。"),
       e("E22", "N18", "N21", "exposes", "Evidence API 只暴露 display-approved tables。"),
@@ -721,7 +721,7 @@
       N37: entry("HTTP API", "GET /api/factor-templates", "Factor Studio 通过这个 endpoint 读取 A-share controlled templates；它由 factor-template router/service 提供，不属于 pipeline run/snapshot 提交入口。", [
         p("market", "a_share", "query 参数；当前前端调用 listFactorTemplates('a_share')")
       ], "GET /api/factor-templates?market=a_share"),
-      N21: entry("HTTP API", "GET /api/runs/{source_alias}/{run_id}/evidence 和 /tables/{table_key}/preview", "读取 API-visible evaluation run；身份必须保留 (source_alias, run_id)。Table preview 主入口由 manifest.display.tables[].preview 和运行时 preview_url 驱动；旧 metrics/portfolio/diagnostics/breakdowns routes 仅为兼容代理。", [
+      N21: entry("HTTP API", "GET /api/runs/{source_alias}/{run_id}/evidence 和 /tables/{table_key}/preview", "读取 API-visible evaluation run；身份必须保留 (source_alias, run_id)。Table preview 主入口由 manifest.display.tables[].preview 和运行时 preview_url 驱动；旧 metrics/portfolio/diagnostics routes 已退役，breakdowns route 仅保留已版本化的 current breakdowns 查询。", [
         p("source_alias", "path", "run root source，例如 pipeline / private / uploaded"),
         p("run_id", "path", "evaluation run id"),
         p("table_key", "path", "manifest.display.tables key"),
@@ -787,7 +787,7 @@
         p("qrp evaluate-parquet --portfolio-mode", "long_short", "组合模式"),
         p("qrp evaluate-parquet --top-quantile", "0.2", "long leg quantile"),
         p("qrp evaluate-parquet --bottom-quantile", "0.2", "short leg quantile"),
-        p("qrp evaluate-parquet --cost-bps", "0.0", "schema 0.6 当前只接受一个 run-level cost"),
+        p("qrp evaluate-parquet --cost-bps", "0.0", "schema 0.7 当前只接受一个 run-level cost"),
         p("qrp evaluate-parquet --risk-column", "optional", "风险列"),
         p("qrp evaluate-parquet --eligibility-column", "optional", "eligibility mask"),
         p("qrp evaluate-parquet --can-enter-column", "optional", "can-enter mask"),

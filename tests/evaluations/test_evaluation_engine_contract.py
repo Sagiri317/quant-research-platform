@@ -6,6 +6,7 @@ import pytest
 from quant_research_platform.evaluations.evaluation_runner import run_evaluation
 from quant_research_platform.evaluations.evaluation_spec import (
     CostConfig,
+    DiagnosticsSpec,
     EvaluationSpec,
     ExecutionConfig,
     NeutralizationConfig,
@@ -50,13 +51,14 @@ def test_cumulative_returns_use_return_source_column_for_portfolio_path(
     assert set(result.metrics["returns"]["return_source_column"]) == {
         "forward_return_1d"
     }
-    cumulative = result.metrics["cumulative_returns"].sort_values(
-        "timestamp"
-    ).reset_index(drop=True)
-    assert cumulative["net_return"].tolist() == pytest.approx([0.03, 0.03])
-    assert cumulative["cumulative_net_return"].tolist() == pytest.approx([0.03, 0.06])
-    assert result.summary["schema"]["label_columns"] == ["forward_return_20d"]
-    assert result.summary["schema"]["return_source_column"] == "forward_return_1d"
+    returns = result.metrics["returns"].sort_values("timestamp").reset_index(drop=True)
+    assert returns["net_return"].tolist() == pytest.approx([0.03, 0.03])
+    assert (1.0 + returns["net_return"]).cumprod().sub(1.0).tolist() == pytest.approx(
+        [0.03, 0.0609]
+    )
+    base = result.summary["base_evaluation"]
+    assert base["label_columns"] == ["forward_return_20d"]
+    assert base["return_source_column"] == "forward_return_1d"
 
 
 def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
@@ -82,14 +84,15 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
 
     expected_paths = {
         "manifest": tmp_path / "manifest.json",
-        "config": tmp_path / "config.json",
-        "lineage": tmp_path / "lineage.json",
+        "run_context": tmp_path / "run_context.json",
         "summary": tmp_path / "summary.json",
         "combinations": tmp_path / "dimensions" / "combinations.csv",
         "ic": tmp_path / "metrics" / "ic.csv",
-        "performance_summary": tmp_path / "metrics" / "performance_summary.csv",
-        "weights": tmp_path / "portfolio" / "weights.parquet",
-        "cumulative_returns": tmp_path / "portfolio" / "cumulative_returns.csv",
+        "evaluation_metrics_summary": (
+            tmp_path / "metrics" / "evaluation_metrics_summary.csv"
+        ),
+        "returns": tmp_path / "portfolio" / "returns.csv",
+        "diagnostic_summary": tmp_path / "diagnostics" / "diagnostic_summary.csv",
         "report": tmp_path / "report.md",
     }
     for path in expected_paths.values():
@@ -97,9 +100,13 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
 
     manifest = json.loads(expected_paths["manifest"].read_text(encoding="utf-8"))
     summary = json.loads(expected_paths["summary"].read_text(encoding="utf-8"))
-    assert manifest["artifact_schema_version"] == "0.6"
+    run_context = json.loads(expected_paths["run_context"].read_text(encoding="utf-8"))
+    assert manifest["artifact_schema_version"] == "0.7"
     assert manifest["artifact_type"] == "evaluation_set"
-    assert manifest["evaluation_id"] == "unit_factor_run"
+    assert manifest["run_id"] == "unit_factor_run"
+    assert "evaluation_id" not in manifest
+    assert not (tmp_path / "config.json").exists()
+    assert not (tmp_path / "lineage.json").exists()
     assert manifest["artifacts"]["dimensions"]["combinations"] == (
         "dimensions/combinations.csv"
     )
@@ -109,103 +116,40 @@ def test_run_evaluation_writes_evaluation_set_artifacts(tmp_path):
         "combinations",
         "ic",
         "returns",
-        "cumulative_returns",
-        "weights",
-        "tradability_diagnostics",
-        "evaluation_summary",
+        "evaluation_metrics_summary",
+        "coverage_summary",
+        "diagnostic_summary",
+        "diagnostic_metrics",
     }.issubset(table_keys)
     assert {chart["id"] for chart in display["charts"]} == {
-        "cumulative_returns",
-        "ic_rankic",
-        "net_portfolio_return",
-        "turnover",
-        "cost",
+        "primary_cumulative_return",
     }
     all_download = next(
         preset for preset in display["downloads"]["presets"] if preset["key"] == "all"
     )
-    assert "portfolio/cumulative_returns.csv" in all_download["items"]
-    assert "portfolio/weights.parquet" in all_download["items"]
+    assert {"kind": "table", "key": "returns"} in all_download["items"]
+    assert {"kind": "metadata_file", "key": "run_context"} in all_download["items"]
     assert "artifacts.xlsx" not in all_download["items"]
     assert all(
-        item["item"] != "artifacts.xlsx"
-        for item in display["downloads"]["items"]
+        item.get("key") != "artifacts.xlsx" for item in display["downloads"]["items"]
     )
     assert summary["n_combinations"] == 2
     assert set(result.metrics) >= {
         "ic",
-        "ic_summary",
         "grouped_returns",
-        "group_spread_summary",
-        "performance_summary",
+        "evaluation_metrics_summary",
+        "coverage_summary",
         "returns",
-        "cumulative_returns",
-        "weights",
-        "tradability_diagnostics",
-        "label_availability",
-        "factor_coverage",
-        "tradability_coverage",
-        "evaluation_summary",
+        "diagnostic_policies",
+        "diagnostic_summary",
+        "diagnostic_metrics",
     }
-    tradability_diagnostics = result.metrics["tradability_diagnostics"]
-    assert {
-        "eligible_rate",
-        "can_enter_rate",
-        "can_exit_rate",
-        "entry_blocked_rate",
-        "exit_blocked_rate",
-    }.issubset(tradability_diagnostics.columns)
-    assert (
-        tradability_diagnostics[
-            [
-                "eligible_rate",
-                "can_enter_rate",
-                "can_exit_rate",
-                "entry_blocked_rate",
-                "exit_blocked_rate",
-            ]
-        ]
-        .apply(pd.to_numeric, errors="coerce")
-        .ge(0.0)
-        .all()
-        .all()
-    )
-    assert (
-        tradability_diagnostics[
-            [
-                "eligible_rate",
-                "can_enter_rate",
-                "can_exit_rate",
-                "entry_blocked_rate",
-                "exit_blocked_rate",
-            ]
-        ]
-        .apply(pd.to_numeric, errors="coerce")
-        .le(1.0)
-        .all()
-        .all()
-    )
-    sample = tradability_diagnostics.iloc[0]
-    assert sample["eligible_rate"] == pytest.approx(
-        sample["eligible_count"] / sample["universe_count"]
-    )
-    assert sample["can_enter_rate"] == pytest.approx(
-        sample["can_enter_count"] / sample["eligible_count"]
-    )
-    assert sample["can_exit_rate"] == pytest.approx(
-        sample["can_exit_count"] / sample["universe_count"]
-    )
-    assert set(pd.read_parquet(expected_paths["weights"])["combination_id"]).issubset(
-        set(result.combinations["combination_id"])
-    )
-    performance_summary = pd.read_csv(expected_paths["performance_summary"])
+    assert summary["run_id"] == run_context["provenance"]["run_id"]
+    metrics = pd.read_csv(expected_paths["evaluation_metrics_summary"])
     combinations = pd.read_csv(expected_paths["combinations"])
-    assert "final_cumulative_gross_return" in performance_summary.columns
-    assert "final_cumulative_net_return" in performance_summary.columns
-    assert "total_gross_portfolio_return" not in performance_summary.columns
-    assert "total_net_portfolio_return" not in performance_summary.columns
-    evaluation_summary = pd.read_csv(tmp_path / "summaries" / "evaluation_summary.csv")
-    assert "final_cumulative_net_return" in evaluation_summary.columns
+    assert "final_cumulative_net_return" in set(metrics["metric_name"])
+    assert "performance_summary" not in table_keys
+    assert "cumulative_returns" not in table_keys
     assert "total_net_portfolio_return" not in combinations.columns
 
 
@@ -379,17 +323,9 @@ def test_tensor_kernel_uses_tensor_metric_path(tmp_path, monkeypatch):
 
     result = run_evaluation(spec)
 
-    assert result.summary["kernel"] == "tensor"
+    assert result.summary["base_evaluation"]["kernel"] == "tensor"
     assert not result.metrics["returns"].empty
-    assert not result.metrics["cumulative_returns"].empty
-    assert not result.metrics["tradability_diagnostics"].empty
-    assert {
-        "eligible_rate",
-        "can_enter_rate",
-        "can_exit_rate",
-        "entry_blocked_rate",
-        "exit_blocked_rate",
-    }.issubset(result.metrics["tradability_diagnostics"].columns)
+    assert not result.metrics["diagnostic_summary"].empty
 
 
 def test_tensor_kernel_passes_configured_value_dtype_to_tensor_conversion(
@@ -426,6 +362,9 @@ def test_tensor_kernel_passes_configured_value_dtype_to_tensor_conversion(
         kernel="tensor",
         tensor_config=TensorBatchConfig(value_dtype="float32"),
         output_dir=tmp_path,
+        diagnostics_spec=DiagnosticsSpec.from_request(
+            {"enabled": True, "materialized_views": ["weights"]}
+        ),
     )
 
     run_evaluation(spec)
@@ -487,6 +426,9 @@ def test_inverse_vol_scaled_weights_use_risk_column(tmp_path):
             ),
         ),
         output_dir=tmp_path,
+        diagnostics_spec=DiagnosticsSpec.from_request(
+            {"enabled": True, "materialized_views": ["weights"]}
+        ),
     )
 
     result = run_evaluation(spec)
@@ -497,6 +439,11 @@ def test_inverse_vol_scaled_weights_use_risk_column(tmp_path):
         "target_weight"
     ]
     assert long_weights["D"] > long_weights["B"]
+    run_context = json.loads((tmp_path / "run_context.json").read_text())
+    assert (
+        run_context["provenance"]["diagnostic_policy_fingerprint"]
+        == "n5_v1_descriptive_proxy"
+    )
 
 
 def test_explicit_execution_tradability_and_cost_configs_are_recorded(tmp_path):
@@ -537,7 +484,10 @@ def test_explicit_execution_tradability_and_cost_configs_are_recorded(tmp_path):
 
     run_evaluation(spec)
 
-    config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    run_context = json.loads(
+        (tmp_path / "run_context.json").read_text(encoding="utf-8")
+    )
+    config = run_context["config"]["evaluation_spec"]
     summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
     assert config["execution_config"]["execution_lag"] == 1
     assert config["tradability_config"]["eligibility_column"] == "eligible"
@@ -576,6 +526,9 @@ def test_evaluation_spec_applies_tradability_config_to_positions(tmp_path):
         weight_configs=(WeightConfig(top_quantile=0.25, bottom_quantile=0.25),),
         tradability_config=TradabilityConfig(eligibility_column="eligible"),
         output_dir=tmp_path,
+        diagnostics_spec=DiagnosticsSpec.from_request(
+            {"enabled": True, "materialized_views": ["weights"]}
+        ),
     )
 
     result = run_evaluation(spec)
@@ -605,8 +558,9 @@ def test_evaluation_spec_applies_neutralization_before_scoring(tmp_path):
 
     result = run_evaluation(spec)
 
-    assert result.config["neutralization_config"]["method"] == "demean_by_group"
-    assert result.config["neutralization_config"]["group_columns"] == ("industry",)
+    neutralization = result.config["evaluation_spec"]["neutralization_config"]
+    assert neutralization["method"] == "demean_by_group"
+    assert neutralization["group_columns"] == ("industry",)
     assert "neutralization_config" not in result.summary
 
 
@@ -712,20 +666,17 @@ def test_segmented_combinations_use_aggregate_summary_metrics(tmp_path):
         output_dir=tmp_path,
     )
 
-    result = run_evaluation(spec)
+    run_evaluation(spec)
     combinations = pd.read_csv(tmp_path / "dimensions" / "combinations.csv")
-    evaluation_summary = pd.read_csv(tmp_path / "summaries" / "evaluation_summary.csv")
+    evaluation_metrics = pd.read_csv(
+        tmp_path / "metrics" / "evaluation_metrics_summary.csv"
+    )
 
     assert len(combinations) == 1
-    assert evaluation_summary.loc[0, "final_cumulative_net_return"] == pytest.approx(
-        result.metrics["performance_summary"]["final_cumulative_net_return"].mean()
-    )
-    assert evaluation_summary.loc[0, "total_cost"] == pytest.approx(
-        result.metrics["performance_summary"]["total_cost"].sum()
-    )
-    assert evaluation_summary.loc[0, "mean_ic"] == pytest.approx(
-        result.metrics["ic_summary"]["mean_ic"].mean()
-    )
+    metric_values = evaluation_metrics.set_index("metric_name")["metric_value"]
+    assert "final_cumulative_net_return" in metric_values
+    assert "total_cost" in metric_values
+    assert "mean_ic" in metric_values
 
 
 def test_evaluation_spec_requires_minimum_run_metadata() -> None:

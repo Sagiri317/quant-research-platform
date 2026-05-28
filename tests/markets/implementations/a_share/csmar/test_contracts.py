@@ -50,8 +50,7 @@ def make_mock_daily_market() -> pd.DataFrame:
 
 def test_parse_preferred_csmar_filename() -> None:
     metadata = parse_raw_filename(
-        "csmar__daily_market__all_a_ex_bjse__20140101_20181231__"
-        "export-20260514.csv"
+        "csmar__daily_market__all_a_ex_bjse__20140101_20181231__export-20260514.csv"
     )
 
     assert metadata.dataset == "daily_market"
@@ -65,15 +64,13 @@ def test_parse_preferred_csmar_filename() -> None:
 def test_parse_rejects_unknown_dataset() -> None:
     with pytest.raises(ValueError, match="Unknown CSMAR dataset"):
         parse_raw_filename(
-            "csmar__unknown__all_a_ex_bjse__20140101_20181231__"
-            "export-20260514.csv"
+            "csmar__unknown__all_a_ex_bjse__20140101_20181231__export-20260514.csv"
         )
 
 
 def test_parse_accepts_index_info_dataset() -> None:
     metadata = parse_raw_filename(
-        "csmar__index_info__all_a_ex_bjse__20140101_20260514__"
-        "export-20260514.xlsx"
+        "csmar__index_info__all_a_ex_bjse__20140101_20260514__export-20260514.xlsx"
     )
 
     assert metadata.dataset == "index_info"
@@ -180,8 +177,7 @@ def test_maps_actual_adjust_factor_columns_to_internal_names() -> None:
 
 def test_raw_export_inspection_reads_header_only_and_checks_metadata(tmp_path) -> None:
     export = tmp_path / (
-        "csmar__daily_market__all_a_ex_bjse__20140101_20181231__"
-        "export-20260514.csv"
+        "csmar__daily_market__all_a_ex_bjse__20140101_20181231__export-20260514.csv"
     )
     export.write_text(
         ",".join(
@@ -267,8 +263,7 @@ def test_raw_export_inspection_accepts_csmar_native_filename(tmp_path) -> None:
 
 def test_builds_raw_export_metadata_sidecar_payload(tmp_path) -> None:
     export = tmp_path / (
-        "csmar__adjustment__all_a_ex_bjse__20240101_20251231__"
-        "export-20260515.csv"
+        "csmar__adjustment__all_a_ex_bjse__20240101_20251231__export-20260515.csv"
     )
     export.write_text(
         ",".join(
@@ -308,8 +303,7 @@ def test_builds_raw_export_metadata_sidecar_payload(tmp_path) -> None:
 
 def test_raw_export_tree_can_inspect_and_write_metadata(tmp_path) -> None:
     export = tmp_path / (
-        "csmar__adjustment__all_a_ex_bjse__20240101_20251231__"
-        "export-20260515.csv"
+        "csmar__adjustment__all_a_ex_bjse__20240101_20251231__export-20260515.csv"
     )
     export.write_text(
         ",".join(
@@ -326,8 +320,7 @@ def test_raw_export_tree_can_inspect_and_write_metadata(tmp_path) -> None:
         encoding="utf-8",
     )
     description = tmp_path / (
-        "csmar__adjustment__all_a_ex_bjse__20240101_20251231__"
-        "__description__.txt"
+        "csmar__adjustment__all_a_ex_bjse__20240101_20251231____description__.txt"
     )
     description.write_text("说明", encoding="utf-8")
 
@@ -512,8 +505,10 @@ def test_writes_benchmark_index_market_with_ohlc_flag(tmp_path) -> None:
     frame = pd.read_csv(
         out / "benchmark_index_market_2024.csv", dtype={"index_code": str}
     )
-    assert (out / "benchmark_index_market_2024.csv").read_bytes().startswith(
-        b"\xef\xbb\xbf"
+    assert (
+        (out / "benchmark_index_market_2024.csv")
+        .read_bytes()
+        .startswith(b"\xef\xbb\xbf")
     )
     assert set(frame["index_code"].astype(str)) == {"000300", "000905"}
     assert frame["benchmark_tier"].tolist() == [

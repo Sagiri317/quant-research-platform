@@ -11,7 +11,7 @@ if (-not $env:CODEX_HOME) {
     $env:CODEX_HOME = Join-Path $HOME ".agents"
 }
 
-$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
 $PlaywrightDir = Join-Path $ProjectRoot ".playwright-cli"
 $PWCLI = Join-Path $env:CODEX_HOME "skills\playwright\scripts\playwright_cli.ps1"
 

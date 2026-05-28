@@ -17,20 +17,19 @@ def run_payload(run: LoadedEvaluationSet, ref: RunRef) -> dict[str, object]:
 
     summary = run.summary
     config = run.config
-    performance = run.tables["performance_summary"]
-    ic_summary = run.tables["ic_summary"]
+    metrics = run.tables["evaluation_metrics_summary"]
     combinations = run.tables["combinations"]
-    run_id = str(summary["evaluation_id"])
+    run_id = str(summary["run_id"])
+    base = _base_evaluation(summary)
     return {
         "source_alias": ref.source_alias,
         "run_id": run_id,
-        "evaluation_id": run_id,
         "public_run_id": ref.public_run_id,
         "project": str(summary["project"]),
         "kind": str(summary["kind"]),
-        "domain": str(summary["domain"]),
+        "domain": str(base.get("domain", "evaluation")),
         "data_stage": str(summary["data_stage"]),
-        "uses_external_data": bool(summary["uses_external_data"]),
+        "uses_external_data": bool(base.get("uses_external_data", False)),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "label_columns": label_columns(summary),
         "return_source_column": return_source_column(summary),
@@ -39,20 +38,17 @@ def run_payload(run: LoadedEvaluationSet, ref: RunRef) -> dict[str, object]:
         "n_combinations": int(summary["n_combinations"]),
         "breakdown_columns": breakdown_columns(summary),
         "combinations": table_payload(combinations),
-        "mean_final_return": mean_numeric(
-            performance,
-            final_cumulative_net_return_column(performance),
-        ),
-        "mean_turnover": mean_numeric(performance, "mean_turnover"),
-        "total_cost": sum_numeric(performance, "total_cost"),
-        "sharpe_like": mean_numeric(performance, "sharpe_like"),
-        "sortino_like": mean_numeric(performance, "sortino_like"),
-        "max_drawdown": min_numeric(performance, "max_drawdown"),
-        "win_rate": mean_numeric(performance, "win_rate"),
-        "mean_ic": mean_numeric(ic_summary, "mean_ic"),
-        "mean_rankic": mean_numeric(ic_summary, "mean_rankic"),
-        "icir": mean_numeric(ic_summary, "icir"),
-        "rankicir": mean_numeric(ic_summary, "rankicir"),
+        "mean_final_return": metric_value(metrics, "final_cumulative_net_return"),
+        "mean_turnover": metric_value(metrics, "mean_turnover"),
+        "total_cost": metric_value(metrics, "total_cost"),
+        "sharpe_like": metric_value(metrics, "sharpe_like"),
+        "sortino_like": metric_value(metrics, "sortino_like"),
+        "max_drawdown": metric_value(metrics, "max_drawdown"),
+        "win_rate": metric_value(metrics, "win_rate"),
+        "mean_ic": metric_value(metrics, "mean_ic"),
+        "mean_rankic": metric_value(metrics, "mean_rankic"),
+        "icir": metric_value(metrics, "icir"),
+        "rankicir": metric_value(metrics, "rankicir"),
     }
 
 
@@ -61,17 +57,18 @@ def run_index_payload(record: RunIndexRecord) -> dict[str, object]:
 
     summary = record.summary
     config = record.config
-    run_id = str(summary["evaluation_id"])
+    metrics = record.evaluation_metrics_summary
+    run_id = str(summary["run_id"])
+    base = _base_evaluation(summary)
     return {
         "source_alias": record.ref.source_alias,
         "run_id": run_id,
-        "evaluation_id": run_id,
         "public_run_id": record.ref.public_run_id,
         "project": str(summary["project"]),
         "kind": str(summary["kind"]),
-        "domain": str(summary["domain"]),
+        "domain": str(base.get("domain", "evaluation")),
         "data_stage": str(summary["data_stage"]),
-        "uses_external_data": bool(summary["uses_external_data"]),
+        "uses_external_data": bool(base.get("uses_external_data", False)),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "label_columns": label_columns(summary),
         "return_source_column": return_source_column(summary),
@@ -79,20 +76,17 @@ def run_index_payload(record: RunIndexRecord) -> dict[str, object]:
         "portfolio_mode": portfolio_mode(config),
         "n_combinations": int(summary["n_combinations"]),
         "breakdown_columns": breakdown_columns(summary),
-        "mean_final_return": mean_numeric(
-            record.performance_summary,
-            final_cumulative_net_return_column(record.performance_summary),
-        ),
-        "mean_turnover": mean_numeric(record.performance_summary, "mean_turnover"),
-        "total_cost": sum_numeric(record.performance_summary, "total_cost"),
-        "sharpe_like": mean_numeric(record.performance_summary, "sharpe_like"),
-        "sortino_like": mean_numeric(record.performance_summary, "sortino_like"),
-        "max_drawdown": min_numeric(record.performance_summary, "max_drawdown"),
-        "win_rate": mean_numeric(record.performance_summary, "win_rate"),
-        "mean_ic": mean_numeric(record.ic_summary, "mean_ic"),
-        "mean_rankic": mean_numeric(record.ic_summary, "mean_rankic"),
-        "icir": mean_numeric(record.ic_summary, "icir"),
-        "rankicir": mean_numeric(record.ic_summary, "rankicir"),
+        "mean_final_return": metric_value(metrics, "final_cumulative_net_return"),
+        "mean_turnover": metric_value(metrics, "mean_turnover"),
+        "total_cost": metric_value(metrics, "total_cost"),
+        "sharpe_like": metric_value(metrics, "sharpe_like"),
+        "sortino_like": metric_value(metrics, "sortino_like"),
+        "max_drawdown": metric_value(metrics, "max_drawdown"),
+        "win_rate": metric_value(metrics, "win_rate"),
+        "mean_ic": metric_value(metrics, "mean_ic"),
+        "mean_rankic": metric_value(metrics, "mean_rankic"),
+        "icir": metric_value(metrics, "icir"),
+        "rankicir": metric_value(metrics, "rankicir"),
     }
 
 
@@ -112,7 +106,7 @@ def run_evidence_payload(
     )
     return {
         "summary": evidence_summary_payload(run.summary, ref),
-        "report": {"markdown": run.report},
+        "report": None if run.report is None else {"markdown": run.report},
         "comparison": comparison_payload,
         "display": runtime_display_payload(run.manifest["display"], ref),
         "combination_summaries": combination_summaries_payload(run.tables),
@@ -150,6 +144,26 @@ def runtime_display_payload(
                 detail="manifest display table key invalid",
             )
         table["preview_url"] = f"{base_path}/tables/{key}/preview"
+    downloads = payload.get("downloads")
+    if isinstance(downloads, dict):
+        items = downloads.get("items")
+        if isinstance(items, list):
+            items.append(
+                {
+                    "kind": "dynamic",
+                    "key": "comparison",
+                    "label": "Comparison comparison.csv",
+                    "path": "comparison.csv",
+                    "download_url": f"{base_path}/artifacts/dynamic:comparison",
+                }
+            )
+        presets = downloads.get("presets")
+        if isinstance(presets, list):
+            for preset in presets:
+                if isinstance(preset, dict) and preset.get("key") == "all":
+                    preset_items = preset.get("items")
+                    if isinstance(preset_items, list):
+                        preset_items.append({"kind": "dynamic", "key": "comparison"})
     return payload
 
 
@@ -158,6 +172,9 @@ def evidence_summary_payload(
     ref: RunRef,
 ) -> dict[str, object]:
     payload = dict(summary)
+    base = _base_evaluation(summary)
+    payload["domain"] = str(base.get("domain", "evaluation"))
+    payload["uses_external_data"] = bool(base.get("uses_external_data", False))
     payload["source_alias"] = ref.source_alias
     payload["run_id"] = ref.run_id
     payload["public_run_id"] = ref.public_run_id
@@ -167,7 +184,7 @@ def evidence_summary_payload(
 def evidence_load_table_names(manifest: dict[str, object]) -> set[str]:
     """返回构造 evidence payload 所需的 artifact tables。"""
 
-    return {"combinations", "ic_summary", "performance_summary"}
+    return {"combinations", "evaluation_metrics_summary", "diagnostic_summary"}
 
 
 def evidence_payload_table_names(manifest: dict[str, object]) -> set[str]:
@@ -189,7 +206,7 @@ def display_chart_table_names(manifest: dict[str, object]) -> set[str]:
     for chart in charts:
         if not isinstance(chart, dict):
             continue
-        table_name = chart.get("table")
+        table_name = chart.get("source_table_key")
         if isinstance(table_name, str) and table_name:
             table_names.add(table_name)
     return table_names
@@ -207,31 +224,9 @@ def combination_summaries_payload(
     for column in COMBINATION_SUMMARY_METRIC_COLUMNS:
         if column in summary.columns:
             summary = summary.drop(columns=column)
-    ic_summary = _aggregate_combination_summary(
-        tables.get("ic_summary"),
-        {
-            "mean_ic": "mean",
-            "icir": "mean",
-            "mean_rankic": "mean",
-            "rankicir": "mean",
-        },
-    )
-    performance_summary = _aggregate_combination_summary(
-        tables.get("performance_summary"),
-        {
-            "final_cumulative_net_return": "mean",
-            "sharpe_like": "mean",
-            "sortino_like": "mean",
-            "max_drawdown": "min",
-            "win_rate": "mean",
-            "mean_turnover": "mean",
-            "total_cost": "sum",
-        },
-    )
-    for frame in (performance_summary, ic_summary):
-        if frame.empty:
-            continue
-        summary = summary.merge(frame, on="combination_id", how="left")
+    metric_summary = _wide_evaluation_metrics(tables.get("evaluation_metrics_summary"))
+    if not metric_summary.empty:
+        summary = summary.merge(metric_summary, on="combination_id", how="left")
     ordered_columns = [
         column for column in COMBINATION_SUMMARY_COLUMNS if column in summary.columns
     ]
@@ -295,6 +290,26 @@ def _aggregate_combination_summary(
     )
 
 
+def _wide_evaluation_metrics(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    required = {"combination_id", "metric_name", "metric_value"}
+    if not required.issubset(frame.columns):
+        return pd.DataFrame()
+    values = frame[["combination_id", "metric_name", "metric_value"]].copy()
+    values["metric_value"] = pd.to_numeric(values["metric_value"], errors="coerce")
+    return (
+        values.pivot_table(
+            index="combination_id",
+            columns="metric_name",
+            values="metric_value",
+            aggfunc="mean",
+        )
+        .reset_index()
+        .rename_axis(None, axis=1)
+    )
+
+
 def metric_payload(
     run: LoadedEvaluationSet,
     metric_name: str,
@@ -347,6 +362,10 @@ def weight_method(config: dict[str, object]) -> str:
     """从 summary 的 weight_config 中读取 weighting method。"""
 
     configs = config.get("weight_configs")
+    if not isinstance(configs, list):
+        evaluation_spec = config.get("evaluation_spec")
+        if isinstance(evaluation_spec, dict):
+            configs = evaluation_spec.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and isinstance(first.get("method"), str):
@@ -360,6 +379,10 @@ def portfolio_mode(config: dict[str, object]) -> str:
     """从 summary 的 weight_config 中读取 portfolio mode。"""
 
     modes = config.get("portfolio_modes")
+    if not isinstance(modes, list):
+        evaluation_spec = config.get("evaluation_spec")
+        if isinstance(evaluation_spec, dict):
+            modes = evaluation_spec.get("portfolio_modes")
     if isinstance(modes, list) and modes:
         normalized = [str(mode) for mode in modes if mode]
         if len(set(normalized)) > 1:
@@ -367,6 +390,10 @@ def portfolio_mode(config: dict[str, object]) -> str:
         if normalized:
             return normalized[0]
     configs = config.get("weight_configs")
+    if not isinstance(configs, list):
+        evaluation_spec = config.get("evaluation_spec")
+        if isinstance(evaluation_spec, dict):
+            configs = evaluation_spec.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and isinstance(first.get("portfolio_mode"), str):
@@ -379,7 +406,7 @@ def portfolio_mode(config: dict[str, object]) -> str:
 def label_columns(summary: dict[str, object]) -> list[str]:
     """从 summary schema 中读取 label columns。"""
 
-    schema = summary.get("schema")
+    schema = _base_evaluation(summary)
     if isinstance(schema, dict) and isinstance(schema.get("label_columns"), list):
         return [str(value) for value in schema["label_columns"]]
     return []
@@ -388,7 +415,7 @@ def label_columns(summary: dict[str, object]) -> list[str]:
 def return_source_column(summary: dict[str, object]) -> str | None:
     """从 summary schema 中读取收益来源 column。"""
 
-    schema = summary.get("schema")
+    schema = _base_evaluation(summary)
     if isinstance(schema, dict) and schema.get("return_source_column") is not None:
         return str(schema["return_source_column"])
     return None
@@ -397,7 +424,7 @@ def return_source_column(summary: dict[str, object]) -> str | None:
 def breakdown_columns(summary: dict[str, object]) -> list[str]:
     """从 summary 中读取已生成的 time breakdown columns。"""
 
-    value = summary.get("breakdown_columns")
+    value = _base_evaluation(summary).get("breakdown_columns")
     if isinstance(value, list):
         return [str(item) for item in value]
     return []
@@ -407,6 +434,20 @@ def mean_numeric(frame: pd.DataFrame, column: str) -> float:
     """按数值列计算 mean，非数值输入先转成 NaN。"""
 
     return float(pd.to_numeric(frame[column], errors="coerce").mean())
+
+
+def metric_value(frame: pd.DataFrame, metric_name: str) -> float:
+    if frame.empty or "metric_name" not in frame.columns:
+        return 0.0
+    rows = frame[frame["metric_name"] == metric_name]
+    if rows.empty:
+        return 0.0
+    return float(pd.to_numeric(rows["metric_value"], errors="coerce").mean())
+
+
+def _base_evaluation(summary: dict[str, object]) -> dict[str, object]:
+    value = summary.get("base_evaluation")
+    return value if isinstance(value, dict) else {}
 
 
 def final_cumulative_net_return_column(frame: pd.DataFrame) -> str:

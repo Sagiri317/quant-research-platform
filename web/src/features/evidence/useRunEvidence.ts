@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   type RunSummary,
+  type RunDisplayChart,
   type TablePayload,
   fetchTablePreview,
   fetchRunEvidence,
@@ -128,7 +129,11 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     [exposedRunState.tables.combinations, selectedCombinationId],
   )
   const chartTableSpecs = useMemo(() => {
-    const tableKeys = new Set(displayCharts.map((chart) => chart.table))
+    const tableKeys = new Set(
+      displayCharts
+        .map(chartSourceTableKey)
+        .filter((key): key is string => Boolean(key)),
+    )
     return selectedTableSpecs.filter((spec) => tableKeys.has(spec.key))
   }, [displayCharts, selectedTableSpecs])
   const selectedCombinationPreviewSpecs = useMemo(() => {
@@ -183,11 +188,14 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
               chartTableSpecs,
               selectedCombinationId,
             )
+            const chartPayloads = displayCharts
+              .filter((chart) => chartSourceTableKey(chart) === spec.key)
+              .map((chart) => [chartDataTableKey(chart), deriveChartPayload(chart, payload)] as const)
             const latestPayload =
               spec.key === TRADABILITY_DIAGNOSTICS_TABLE_KEY
                 ? await latestDiagnosticPreview(spec, payload, selectedCombinationId)
                 : undefined
-            return [spec.key, payload, latestPayload] as const
+            return [spec.key, payload, latestPayload, chartPayloads] as const
           }),
         )
         if (cancelled) {
@@ -195,8 +203,11 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
         }
         setChartPreviewPayloads((current) => {
           const next = { ...current }
-          for (const [key, payload, latestPayload] of payloads) {
+          for (const [key, payload, latestPayload, chartPayloads] of payloads) {
             next[`${chartPreviewPrefix}::${key}`] = payload
+            for (const [chartKey, chartPayload] of chartPayloads) {
+              next[`${chartPreviewPrefix}::${chartKey}`] = chartPayload
+            }
             if (latestPayload) {
               next[latestPreviewKey(chartPreviewPrefix, key)] = latestPayload
             }
@@ -218,6 +229,7 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
     chartPreviewPayloads,
     chartPreviewPrefix,
     chartTableSpecs,
+    displayCharts,
     selectedCombinationPreviewSpecs,
     selectedCombinationExists,
     selectedCombinationId,
@@ -236,22 +248,39 @@ export function useRunEvidence(selectedRun: RunSummary | null, cacheVersion = 0)
   )
   const chartTables = useMemo(() => {
     const next = { ...filteredTables }
-    if (!chartPreviewPrefix) {
-      return next
-    }
-    for (const spec of selectedCombinationPreviewSpecs) {
-      const payload = chartPreviewPayloads[`${chartPreviewPrefix}::${spec.key}`]
-      if (payload !== undefined) {
-        const existingRows = next[spec.key]?.rows.length ?? 0
-        if (payload.rows.length > 0 || existingRows === 0) {
-          next[spec.key] = payload
+    if (chartPreviewPrefix) {
+      for (const spec of selectedCombinationPreviewSpecs) {
+        const payload = chartPreviewPayloads[`${chartPreviewPrefix}::${spec.key}`]
+        if (payload !== undefined) {
+          const existingRows = next[spec.key]?.rows.length ?? 0
+          if (payload.rows.length > 0 || existingRows === 0) {
+            next[spec.key] = payload
+          }
         }
+      }
+    }
+    for (const chart of displayCharts) {
+      const previewPayload = chartPreviewPrefix
+        ? chartPreviewPayloads[`${chartPreviewPrefix}::${chartDataTableKey(chart)}`]
+        : undefined
+      if (previewPayload !== undefined) {
+        const existingRows = next[chartDataTableKey(chart)]?.rows.length ?? 0
+        if (previewPayload.rows.length > 0 || existingRows === 0) {
+          next[chartDataTableKey(chart)] = previewPayload
+          continue
+        }
+      }
+      const sourceKey = chartSourceTableKey(chart)
+      const sourcePayload = sourceKey ? next[sourceKey] : undefined
+      if (sourcePayload !== undefined) {
+        next[chartDataTableKey(chart)] = deriveChartPayload(chart, sourcePayload)
       }
     }
     return next
   }, [
     chartPreviewPayloads,
     chartPreviewPrefix,
+    displayCharts,
     filteredTables,
     selectedCombinationPreviewSpecs,
   ])
@@ -403,7 +432,7 @@ async function fetchRemainingChartPreviewPages(
     typeof firstPayload.total_rows === 'number'
       ? firstPayload.total_rows
       : undefined
-  let currentHasMore = firstPayload.has_more
+  let currentHasMore: boolean = firstPayload.has_more === true
   let pagesRead = 1
 
   while (
@@ -461,4 +490,48 @@ function isChartTableSpec(
   chartTableSpecs: { key: string }[],
 ): boolean {
   return chartTableSpecs.some((chartSpec) => chartSpec.key === spec.key)
+}
+
+function chartSourceTableKey(chart: RunDisplayChart): string | undefined {
+  return chart.source_table_key
+}
+
+function chartDataTableKey(chart: RunDisplayChart): string {
+  if (chart.kind === 'derived_cumulative_return') {
+    return chart.id
+  }
+  return chart.source_table_key ?? chart.id
+}
+
+function deriveChartPayload(
+  chart: RunDisplayChart,
+  payload: TablePayload,
+): TablePayload {
+  if (
+    chart.transform !== 'compound_cumulative_return' ||
+    !chart.input_series ||
+    !chart.output_series
+  ) {
+    return payload
+  }
+  let compounded = 1
+  const rows = payload.rows.map((row) => {
+    const periodReturn = numeric(row[chart.input_series as string])
+    if (periodReturn !== undefined) {
+      compounded *= 1 + periodReturn
+    }
+    return {
+      ...row,
+      [chart.output_series as string]: compounded - 1,
+    }
+  })
+  return {
+    ...payload,
+    columns: Array.from(new Set([...payload.columns, chart.output_series])),
+    rows,
+  }
+}
+
+function numeric(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }

@@ -12,10 +12,7 @@ from quant_research_platform.interfaces.api.models import (
     RunRef,
 )
 from quant_research_platform.interfaces.api.payloads import (
-    final_cumulative_net_return_column,
-    mean_numeric,
-    min_numeric,
-    sum_numeric,
+    metric_value,
     weight_method,
 )
 
@@ -71,8 +68,7 @@ def comparison_record(
     """提取一个已加载 run 的 comparison row。"""
 
     summary = run.summary
-    ic_summary = run.tables["ic_summary"]
-    performance = run.tables["performance_summary"]
+    metrics = run.tables["evaluation_metrics_summary"]
     return {
         "source_alias": ref.source_alias,
         "public_run_id": ref.public_run_id,
@@ -81,18 +77,15 @@ def comparison_record(
         "kind": str(summary["kind"]),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "weight_method": weight_method(run.config),
-        "mean_ic": mean_numeric(ic_summary, "mean_ic"),
-        "mean_rankic": mean_numeric(ic_summary, "mean_rankic"),
-        "mean_final_return": mean_numeric(
-            performance,
-            final_cumulative_net_return_column(performance),
-        ),
-        "mean_turnover": mean_numeric(performance, "mean_turnover"),
-        "total_cost": sum_numeric(performance, "total_cost"),
-        "sharpe_like": mean_numeric(performance, "sharpe_like"),
-        "sortino_like": mean_numeric(performance, "sortino_like"),
-        "max_drawdown": min_numeric(performance, "max_drawdown"),
-        "win_rate": mean_numeric(performance, "win_rate"),
+        "mean_ic": metric_value(metrics, "mean_ic"),
+        "mean_rankic": metric_value(metrics, "mean_rankic"),
+        "mean_final_return": metric_value(metrics, "final_cumulative_net_return"),
+        "mean_turnover": metric_value(metrics, "mean_turnover"),
+        "total_cost": metric_value(metrics, "total_cost"),
+        "sharpe_like": metric_value(metrics, "sharpe_like"),
+        "sortino_like": metric_value(metrics, "sortino_like"),
+        "max_drawdown": metric_value(metrics, "max_drawdown"),
+        "win_rate": metric_value(metrics, "win_rate"),
     }
 
 
@@ -100,6 +93,7 @@ def comparison_index_record(record: RunIndexRecord) -> dict[str, object]:
     """提取一个轻量 run index 的 comparison row。"""
 
     summary = record.summary
+    metrics = record.evaluation_metrics_summary
     return {
         "source_alias": record.ref.source_alias,
         "public_run_id": record.ref.public_run_id,
@@ -108,18 +102,15 @@ def comparison_index_record(record: RunIndexRecord) -> dict[str, object]:
         "kind": str(summary["kind"]),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "weight_method": weight_method(record.config),
-        "mean_ic": mean_numeric(record.ic_summary, "mean_ic"),
-        "mean_rankic": mean_numeric(record.ic_summary, "mean_rankic"),
-        "mean_final_return": mean_numeric(
-            record.performance_summary,
-            final_cumulative_net_return_column(record.performance_summary),
-        ),
-        "mean_turnover": mean_numeric(record.performance_summary, "mean_turnover"),
-        "total_cost": sum_numeric(record.performance_summary, "total_cost"),
-        "sharpe_like": mean_numeric(record.performance_summary, "sharpe_like"),
-        "sortino_like": mean_numeric(record.performance_summary, "sortino_like"),
-        "max_drawdown": min_numeric(record.performance_summary, "max_drawdown"),
-        "win_rate": mean_numeric(record.performance_summary, "win_rate"),
+        "mean_ic": metric_value(metrics, "mean_ic"),
+        "mean_rankic": metric_value(metrics, "mean_rankic"),
+        "mean_final_return": metric_value(metrics, "final_cumulative_net_return"),
+        "mean_turnover": metric_value(metrics, "mean_turnover"),
+        "total_cost": metric_value(metrics, "total_cost"),
+        "sharpe_like": metric_value(metrics, "sharpe_like"),
+        "sortino_like": metric_value(metrics, "sortino_like"),
+        "max_drawdown": metric_value(metrics, "max_drawdown"),
+        "win_rate": metric_value(metrics, "win_rate"),
     }
 
 

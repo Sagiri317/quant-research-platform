@@ -1,6 +1,6 @@
 # Quant Research Platform 架构说明
 
-`quant-research-platform` 是本地多市场量化研究平台。Market module 负责市场数据、信号、label、预测和研究语境；evaluation layer 负责把 long-format panel 或 market adapter 输出转换为 schema `0.6` artifacts；API 和 React workbench 只消费 artifacts 中的 `manifest.display`。
+`quant-research-platform` 是本地多市场量化研究平台。Market module 负责市场数据、信号、label、预测和研究语境；evaluation layer 负责把 long-format panel 或 market adapter 输出转换为 schema `0.7` artifacts；API 和 React workbench 只消费 artifacts 中的 `manifest.display`。
 
 ## 职责边界
 
@@ -10,7 +10,7 @@ Evaluation layer 负责：
 - Long panel schema validation。
 - IC / RankIC、grouped returns、spread diagnostics。
 - Weights、turnover、portfolio returns、cost、cumulative returns 和 performance summary。
-- `manifest.json`、`config.json`、`summary.json`、`dimensions/combinations.csv`、CSV tables 和 `report.md`。
+- `manifest.json`、`summary.json`、`run_context.json`、`dimensions/combinations.csv`、`dimensions/diagnostic_policies.csv`、CSV/Parquet tables 和 `report.md`。
 - Completed evaluation-set artifacts 的读取、契约校验、comparison summary。
 - 本地 FastAPI API 和 React/Vite evidence workbench。
 
@@ -34,7 +34,7 @@ local approved data
 -> A-share evaluation adapter
 -> EvaluationSpec
 -> run_evaluation
--> schema 0.6 evaluation-set artifacts
+-> schema 0.7 evaluation-set artifacts
 -> manifest.display
 -> FastAPI evidence API
 -> React evidence workbench
@@ -106,8 +106,7 @@ Evaluation set 输出：
 
 ```text
 manifest.json
-config.json
-lineage.json
+run_context.json
 summary.json
 dimensions/combinations.csv
 report.md
@@ -119,7 +118,7 @@ breakdowns/quarter/
 breakdowns/month/
 ```
 
-`manifest.json` 和 `summary.json` 均包含 `artifact_schema_version: "0.6"` 与 `artifact_type: "evaluation_set"`。Manifest 中的 artifact 路径必须是 portable relative paths，不写入 Windows drive letter、用户目录或绝对路径。Public-downloadable `config.json` 和 `lineage.json` 必须在 writer、direct download 和 selected ZIP 路径上统一脱敏，不暴露 private data path 或本机绝对路径。
+`manifest.json` 和 `summary.json` 均包含 `artifact_schema_version: "0.7"` 与 `artifact_type: "evaluation_set"`。Manifest 中的 artifact 路径必须是 portable relative paths，不写入 Windows drive letter、用户目录或绝对路径。`run_context.json` 合并配置、provenance、环境和 lineage 摘要；writer、loader、direct download 和 selected ZIP 路径必须只暴露 display/download 合同允许的 portable metadata 和表格。
 
 `manifest.display` 是 API、下载和 React workbench 的展示合同。新增 artifact 时，writer / loader、API payload/download、frontend display consumers、tests 和 docs 必须同步。Evidence workbench 对 diagnostics 只展示 artifact/API 返回结果；例如 tradability 诊断卡片用 preview 分页读取当前组合最后一行，不在前端重新计算 eligibility 或 tradability。
 

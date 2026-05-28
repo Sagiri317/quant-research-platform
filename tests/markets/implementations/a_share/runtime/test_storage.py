@@ -60,9 +60,7 @@ def test_collect_observed_processed_bytes_counts_full_processed_files(tmp_path) 
     panel_dir.mkdir(parents=True)
     factor_dir.mkdir(parents=True)
     (panel_dir / "research_panel_2014_2025.parquet").write_bytes(b"panel-full")
-    (factor_dir / "price_volume_factors_2014_2025.parquet").write_bytes(
-        b"factor-full"
-    )
+    (factor_dir / "price_volume_factors_2014_2025.parquet").write_bytes(b"factor-full")
 
     observed = space_gate.collect_observed_processed_bytes(
         processed_root,

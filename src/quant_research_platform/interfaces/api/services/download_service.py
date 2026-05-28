@@ -15,14 +15,17 @@ from quant_research_platform.artifacts import LoadedEvaluationSet
 from quant_research_platform.artifacts import artifact_package as package
 from quant_research_platform.artifacts.artifact_package import ArtifactPackageError
 
+RUNTIME_COMPARISON_DOWNLOAD_REF = "dynamic:comparison"
+
 
 @dataclass(frozen=True)
 class _LightweightDownloadRun:
     output_dir: Path
     manifest: dict[str, object]
     config: dict[str, object] = field(default_factory=dict)
+    run_context: dict[str, object] = field(default_factory=dict)
     summary: dict[str, object] = field(default_factory=dict)
-    report: str = ""
+    report: str | None = None
     tables: dict[str, Any] = field(default_factory=dict)
 
 
@@ -34,6 +37,15 @@ def direct_manifest_download_response(
 ) -> Response:
     """只依赖轻量 manifest 返回一个 display 暴露的下载项。"""
 
+    runtime_dynamic_items = _runtime_display_dynamic_items(comparison_csv)
+    if artifact_item in runtime_dynamic_items:
+        if comparison_csv is None:
+            raise HTTPException(status_code=422, detail="comparison.csv 不可用。")
+        return Response(
+            content=runtime_dynamic_items[artifact_item](),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="comparison.csv"'},
+        )
     try:
         path = package.resolve_manifest_display_artifact_path(
             manifest,
@@ -42,40 +54,14 @@ def direct_manifest_download_response(
         )
     except ArtifactPackageError as exc:
         raise _package_error(exc) from exc
-    if artifact_item == "comparison.csv":
-        if comparison_csv is None:
-            raise HTTPException(status_code=422, detail="comparison.csv 不可用。")
-        return Response(
-            content=comparison_csv(),
-            media_type="text/csv; charset=utf-8",
-            headers={
-                "Content-Disposition": 'attachment; filename="comparison.csv"'
-            },
-        )
     if path is None:
         raise HTTPException(status_code=422, detail=f"未知下载项：{artifact_item}")
     if not path.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
-    if artifact_item == "config.json":
-        return Response(
-            content=package.public_config_bytes(output_dir),
-            media_type="application/json",
-            headers={
-                "Content-Disposition": 'attachment; filename="config.json"'
-            },
-        )
-    if artifact_item == "lineage.json":
-        return Response(
-            content=package.public_lineage_bytes(output_dir),
-            media_type="application/json",
-            headers={
-                "Content-Disposition": 'attachment; filename="lineage.json"'
-            },
-        )
     return FileResponse(
         path,
-        media_type=_media_type_for_item(artifact_item),
-        filename=Path(artifact_item).name,
+        media_type=_media_type_for_path(path),
+        filename=path.name,
     )
 
 
@@ -95,7 +81,7 @@ def report_markdown_response_from_manifest(
         report_path = package.resolve_manifest_display_artifact_path(
             manifest,
             output_dir,
-            "report.md",
+            "metadata_file:report",
         )
     except ArtifactPackageError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -130,7 +116,8 @@ def selected_download_response(
             run_id=run_id,
             items=items,
             cache_root=cache_root,
-            dynamic_items={"comparison.csv": comparison_csv},
+            dynamic_items=_runtime_display_dynamic_items(comparison_csv),
+            runtime_display_item_refs=_runtime_display_dynamic_refs(comparison_csv),
         )
     except ArtifactPackageError as exc:
         raise _package_error(exc) from exc
@@ -157,14 +144,18 @@ def selected_download_response_from_manifest(
             _LightweightDownloadRun(
                 output_dir=output_dir,
                 manifest=manifest,
-                config=_read_optional_json(output_dir / "config.json"),
+                config=_read_optional_json(output_dir / "run_context.json").get(
+                    "config", {}
+                ),
+                run_context=_read_optional_json(output_dir / "run_context.json"),
                 summary=_read_optional_json(output_dir / "summary.json"),
             ),
             source_alias=source_alias,
             run_id=run_id,
             items=items,
             cache_root=cache_root,
-            dynamic_items={"comparison.csv": comparison_csv},
+            dynamic_items=_runtime_display_dynamic_items(comparison_csv),
+            runtime_display_item_refs=_runtime_display_dynamic_refs(comparison_csv),
         )
     except ArtifactPackageError as exc:
         raise _package_error(exc) from exc
@@ -186,7 +177,27 @@ def _package_error(exc: ArtifactPackageError) -> HTTPException:
     return HTTPException(status_code=422, detail=str(exc))
 
 
+def _runtime_display_dynamic_items(
+    comparison_csv: Callable[[], bytes] | None,
+) -> dict[str, Callable[[], bytes]]:
+    if comparison_csv is None:
+        return {}
+    return {RUNTIME_COMPARISON_DOWNLOAD_REF: comparison_csv}
+
+
+def _runtime_display_dynamic_refs(
+    comparison_csv: Callable[[], bytes] | None,
+) -> set[str]:
+    return set(_runtime_display_dynamic_items(comparison_csv))
+
+
 def _media_type_for_item(item: str) -> str:
+    if item.startswith("metadata_file:"):
+        return (
+            "text/markdown; charset=utf-8"
+            if item.endswith(":report")
+            else "application/json"
+        )
     if item.endswith(".csv"):
         return "text/csv; charset=utf-8"
     if item.endswith(".parquet"):
@@ -194,5 +205,17 @@ def _media_type_for_item(item: str) -> str:
     if item.endswith(".md"):
         return "text/markdown; charset=utf-8"
     if item.endswith(".json"):
+        return "application/json"
+    return "application/octet-stream"
+
+
+def _media_type_for_path(path: Path) -> str:
+    if path.suffix == ".csv":
+        return "text/csv; charset=utf-8"
+    if path.suffix == ".parquet":
+        return "application/vnd.apache.parquet"
+    if path.suffix == ".md":
+        return "text/markdown; charset=utf-8"
+    if path.suffix == ".json":
         return "application/json"
     return "application/octet-stream"

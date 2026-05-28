@@ -1,4 +1,4 @@
-"""本地 evidence workbench 的 display manifest helper。"""
+"""Display manifest builder for schema 0.7 evaluation-set artifacts."""
 
 from __future__ import annotations
 
@@ -8,108 +8,34 @@ from quant_research_platform.artifacts.display_tables import (
     DISPLAY_PREVIEW_ROWS_DEFAULT,
     build_display_table_preview_descriptor,
 )
+from quant_research_platform.artifacts.schema_registry import (
+    EVALUATION_SET_SCHEMA_VERSION,
+    chart_specs,
+    get_table_spec,
+)
 
 TABLE_LABELS = {
     "combinations": ("组合配置", "dimensions"),
     "ic": ("IC / RankIC", "metrics"),
-    "ic_summary": ("IC / RankIC 汇总", "metrics"),
     "grouped_returns": ("分组收益", "metrics"),
-    "group_spread_summary": ("分组 Spread 汇总", "metrics"),
-    "performance_summary": ("Performance 汇总", "metrics"),
+    "evaluation_metrics_summary": ("评价指标汇总", "metrics"),
     "returns": ("组合收益明细", "portfolio"),
-    "cumulative_returns": ("累计收益曲线", "portfolio"),
+    "coverage_summary": ("输入覆盖汇总", "input_quality"),
+    "diagnostic_policies": ("诊断策略", "dimensions"),
+    "diagnostic_summary": ("诊断总览", "diagnostics"),
+    "diagnostic_metrics": ("诊断指标", "diagnostics"),
+    "portfolio_assumptions": ("组合假设", "dimensions"),
     "weights": ("目标权重", "portfolio"),
     "tradability_diagnostics": ("可交易性诊断", "diagnostics"),
-    "label_availability": ("Label 可用性", "input_quality"),
-    "factor_coverage": ("Factor 覆盖", "input_quality"),
-    "tradability_coverage": ("可交易字段覆盖", "input_quality"),
-    "evaluation_summary": ("评价摘要", "summary"),
+    "tradability_summary": ("可交易性汇总", "diagnostics"),
+    "scenario_metrics": ("场景指标", "diagnostics"),
+    "exposure_capacity_summary": ("暴露和容量代理", "diagnostics"),
+    "portfolio_risk_summary": ("组合风险代理", "diagnostics"),
+    "diagnostic_observations": ("诊断观察", "diagnostics"),
+    "evaluation_metrics_summary_by_year": ("年度评价指标", "breakdowns"),
+    "evaluation_metrics_summary_by_quarter": ("季度评价指标", "breakdowns"),
+    "evaluation_metrics_summary_by_month": ("月度评价指标", "breakdowns"),
 }
-
-TABLE_ORDER = tuple(TABLE_LABELS)
-
-CHARTS = [
-    {
-        "id": "cumulative_returns",
-        "title": "累计组合收益",
-        "description": "净值曲线和回撤",
-        "section": "primary",
-        "kind": "line",
-        "table": "cumulative_returns",
-        "x": "timestamp",
-        "include_zero": True,
-        "series": [
-            {
-                "key": "cumulative_net_return",
-                "label": "cumulative_net_return",
-                "color": "#2563eb",
-                "format": "percent",
-            },
-            {
-                "key": "drawdown",
-                "label": "drawdown",
-                "color": "#dc2626",
-                "format": "percent",
-            },
-        ],
-    },
-    {
-        "id": "ic_rankic",
-        "title": "IC / RankIC",
-        "description": "IC 和 RankIC 的时间序列",
-        "section": "primary",
-        "kind": "line",
-        "table": "ic",
-        "x": "timestamp",
-        "series": [
-            {"key": "ic", "label": "ic", "color": "#2563eb"},
-            {"key": "rankic", "label": "rankic", "color": "#059669"},
-        ],
-    },
-    {
-        "id": "net_portfolio_return",
-        "title": "单期净收益",
-        "description": "每期组合净收益",
-        "section": "diagnostic",
-        "kind": "bar",
-        "table": "returns",
-        "x": "timestamp",
-        "include_zero": True,
-        "series": [
-            {
-                "key": "net_portfolio_return",
-                "label": "net_portfolio_return",
-                "color": "#2563eb",
-            },
-        ],
-    },
-    {
-        "id": "turnover",
-        "title": "换手率",
-        "description": "每期换手强度",
-        "section": "diagnostic",
-        "kind": "bar",
-        "table": "returns",
-        "x": "timestamp",
-        "include_zero": True,
-        "series": [
-            {"key": "turnover", "label": "turnover", "color": "#f59e0b"},
-        ],
-    },
-    {
-        "id": "cost",
-        "title": "单期成本",
-        "description": "每期成本拖累",
-        "section": "diagnostic",
-        "kind": "bar",
-        "table": "returns",
-        "x": "timestamp",
-        "include_zero": True,
-        "series": [
-            {"key": "cost", "label": "cost", "color": "#dc2626"},
-        ],
-    },
-]
 
 
 def build_display_manifest(
@@ -118,66 +44,78 @@ def build_display_manifest(
     schema_version: str,
     default_selection: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """从 artifact path contract 构造前端 display contract。"""
+    """Build schema 0.7 manifest.display from declared artifacts."""
 
+    if schema_version != EVALUATION_SET_SCHEMA_VERSION:
+        raise ValueError("display schema_version must be 0.7.")
     tables = _table_entries(artifacts)
-    table_items = [str(table["download_item"]) for table in tables]
     metadata_items = [
-        {"item": "report.md", "label": "研究报告 report.md", "kind": "report"},
-        {"item": "comparison.csv", "label": "Run 对比 comparison.csv", "kind": "index"},
-        {"item": "manifest.json", "label": "Manifest manifest.json", "kind": "json"},
-        {"item": "config.json", "label": "Config config.json", "kind": "json"},
-        {"item": "lineage.json", "label": "Lineage lineage.json", "kind": "json"},
-        {"item": "summary.json", "label": "Summary summary.json", "kind": "json"},
+        {
+            "kind": "metadata_file",
+            "key": "manifest",
+            "label": "Manifest manifest.json",
+            "path": "manifest.json",
+        },
+        {
+            "kind": "metadata_file",
+            "key": "summary",
+            "label": "Summary summary.json",
+            "path": "summary.json",
+        },
+        {
+            "kind": "metadata_file",
+            "key": "run_context",
+            "label": "Run context run_context.json",
+            "path": "run_context.json",
+        },
     ]
+    if artifacts.get("report") == "report.md":
+        metadata_items.append(
+            {
+                "kind": "metadata_file",
+                "key": "report",
+                "label": "研究报告 report.md",
+                "path": "report.md",
+            }
+        )
+    table_items = [
+        {
+            "kind": "table",
+            "key": key,
+            "label": f"{_table_label(key)} {_format_label_for_path(path)}",
+            "path": path,
+            "table": key,
+        }
+        for key, path in _download_table_paths(artifacts).items()
+    ]
+    all_item_refs = [
+        {"kind": item["kind"], "key": item["key"]}
+        for item in [*metadata_items, *table_items]
+    ]
+    table_item_refs = [{"kind": "table", "key": str(table["key"])} for table in tables]
     return {
         "schema_version": schema_version,
         "dimension_source": "dimensions/combinations.csv",
         "default_selection": dict(default_selection or {}),
         "tables": tables,
-        "charts": [
-            chart
-            for chart in CHARTS
-            if any(table["key"] == chart["table"] for table in tables)
-        ],
+        "charts": [_chart_entry(chart) for chart in chart_specs()],
         "downloads": {
-            "items": [
-                *metadata_items,
-                *[
-                    {
-                        "item": str(table["download_item"]),
-                        "label": (
-                            f"{table['label']} "
-                            f"{_table_format_label(table)}"
-                        ),
-                        "kind": "table",
-                        "table": table["key"],
-                    }
-                    for table in tables
-                ],
-            ],
+            "items": [*metadata_items, *table_items],
             "presets": [
-                {
-                    "key": "all",
-                    "label": "全选",
-                    "items": [item["item"] for item in metadata_items] + table_items,
-                },
-                {"key": "report", "label": "仅报告", "items": ["report.md"]},
+                {"key": "all", "label": "全选", "items": all_item_refs},
                 {
                     "key": "tables",
                     "label": "仅表格",
-                    "items": ["comparison.csv", *table_items],
+                    "items": table_item_refs,
                 },
                 {
                     "key": "repro",
                     "label": "复现包",
                     "items": [
-                        "report.md",
-                        "comparison.csv",
-                        "manifest.json",
-                        "config.json",
-                        "summary.json",
-                        *table_items,
+                        {"kind": "metadata_file", "key": "manifest"},
+                        {"kind": "metadata_file", "key": "summary"},
+                        {"kind": "metadata_file", "key": "run_context"},
+                        *table_item_refs,
                     ],
                 },
             ],
@@ -186,33 +124,47 @@ def build_display_manifest(
 
 
 def _table_entries(artifacts: Mapping[str, object]) -> list[dict[str, object]]:
-    paths = _table_paths(artifacts)
-    ordered_keys = [key for key in TABLE_ORDER if key in paths]
-    extra_keys = sorted(key for key in paths if key not in TABLE_LABELS)
-    return [_table_entry(key, paths[key]) for key in [*ordered_keys, *extra_keys]]
+    paths = {
+        key: path
+        for key, path in _table_paths(artifacts).items()
+        if get_table_spec(key).display.eligible
+    }
+    entries = [_table_entry(key, path) for key, path in paths.items()]
+    return sorted(
+        entries,
+        key=lambda entry: (
+            entry["section_order"],
+            entry["display_order"],
+            entry["key"],
+        ),
+    )
 
 
 def _table_entry(key: str, path: str) -> dict[str, object]:
-    label, role = TABLE_LABELS.get(key, (_humanize_key(key), _role_for_path(path)))
+    spec = get_table_spec(key)
+    label, role = TABLE_LABELS.get(
+        key, (key.replace("_", " ").title(), spec.display.section)
+    )
     table_format = "parquet" if path.endswith(".parquet") else "csv"
-    supports_combination_filter = key not in {
-        "combinations",
-        "label_availability",
-        "factor_coverage",
-        "tradability_coverage",
-    }
+    supports_combination_filter = spec.display.supports_combination_filter
     return {
         "key": key,
         "label": label,
         "group": role,
         "role": role,
+        "section": spec.display.section,
+        "section_order": spec.display.section_order,
+        "display_order": spec.display.display_order,
         "path": path,
         "format": table_format,
-        "download_item": path,
+        "download_ref": {"kind": "table", "key": key},
         "dimension_source": "dimensions/combinations.csv",
         "join_key": "combination_id" if supports_combination_filter else None,
         "preview_rows": DISPLAY_PREVIEW_ROWS_DEFAULT,
         "supports_combination_filter": supports_combination_filter,
+        "conditional": spec.materialization != "required",
+        "required": spec.materialization == "required",
+        "empty_state": "No rows are available for this table.",
         "preview": build_display_table_preview_descriptor(
             table_key=key,
             supports_combination_filter=supports_combination_filter,
@@ -222,16 +174,12 @@ def _table_entry(key: str, path: str) -> dict[str, object]:
 
 def _table_paths(artifacts: Mapping[str, object]) -> dict[str, str]:
     paths: dict[str, str] = {}
-    dimensions = artifacts.get("dimensions")
-    if isinstance(dimensions, Mapping):
-        combinations = dimensions.get("combinations")
-        if isinstance(combinations, str):
-            paths["combinations"] = combinations
-    for group in ("metrics", "portfolio", "diagnostics", "input_quality", "summaries"):
-        _extend_section_paths(paths, artifacts.get(group))
-    for group, section in artifacts.items():
-        if isinstance(group, str) and group.startswith("breakdowns/"):
-            _extend_section_paths(paths, section)
+    for section in artifacts.values():
+        if not isinstance(section, Mapping):
+            continue
+        for key, path in section.items():
+            if isinstance(key, str) and isinstance(path, str):
+                paths[key] = path
     return paths
 
 
@@ -239,32 +187,42 @@ def _table_format_label(table: Mapping[str, object]) -> str:
     return "Parquet" if table.get("format") == "parquet" else "CSV"
 
 
-def _extend_section_paths(paths: dict[str, str], section: object) -> None:
-    if not isinstance(section, Mapping):
-        return
-    for key, path in section.items():
-        if isinstance(key, str) and isinstance(path, str):
-            paths[key] = path
+def _format_label_for_path(path: str) -> str:
+    return "Parquet" if path.endswith(".parquet") else "CSV"
 
 
-def _role_for_path(path: str) -> str:
-    if path.startswith("dimensions/"):
-        return "dimensions"
-    if path.startswith("portfolio/"):
-        return "portfolio"
-    if path.startswith("diagnostics/"):
-        return "diagnostics"
-    if path.startswith("input_quality/"):
-        return "input_quality"
-    if path.startswith("summaries/"):
-        return "summary"
-    if path.startswith("breakdowns/"):
-        return "breakdown"
-    return "metrics"
+def _table_label(key: str) -> str:
+    label, _role = TABLE_LABELS.get(
+        key,
+        (key.replace("_", " ").title(), get_table_spec(key).display.section),
+    )
+    return label
 
 
-def _humanize_key(key: str) -> str:
-    return key.replace("_", " ").title()
+def _download_table_paths(artifacts: Mapping[str, object]) -> dict[str, str]:
+    return {
+        key: path
+        for key, path in _table_paths(artifacts).items()
+        if get_table_spec(key).display.download_eligible
+    }
+
+
+def _chart_entry(chart) -> dict[str, object]:
+    return {
+        "id": chart.key,
+        "title": "累计组合净收益",
+        "description": "由组合收益表按组合派生的累计净收益。",
+        "section": "primary",
+        "kind": chart.kind,
+        "source_table_key": chart.source_table_key,
+        "source_path": chart.source_path,
+        "x": chart.x_column,
+        "grouping_column": chart.grouping_column,
+        "input_series": chart.input_series,
+        "transform": chart.transform,
+        "output_series": chart.output_series,
+        "supports_combination_filter": chart.supports_combination_filter,
+    }
 
 
 __all__ = ["build_display_manifest"]

@@ -86,9 +86,10 @@ def test_batch_runner_records_success_and_unmappable_candidate(
     )
 
     assert [record.status for record in records] == ["success", "success", "failed"]
-    assert records[0].run_dir == (
-        tmp_path / "runs" / "factory_run_reversal_20d_1"
-    ).as_posix()
+    assert (
+        records[0].run_dir
+        == (tmp_path / "runs" / "factory_run_reversal_20d_1").as_posix()
+    )
     assert records[0].combination_id == "combo_1"
     assert records[1].combination_id == "combo_2"
     assert records[2].failure_code == "missing_processed_factor"
@@ -299,7 +300,7 @@ def test_batch_runner_sanitizes_local_absolute_failure_reason(
 
 def _write_n7_evaluation_summary(run_dir) -> None:
     (run_dir / "dimensions").mkdir(parents=True)
-    (run_dir / "summaries").mkdir(parents=True)
+    (run_dir / "metrics").mkdir(parents=True)
     pd.DataFrame(
         [
             {
@@ -318,29 +319,36 @@ def _write_n7_evaluation_summary(run_dir) -> None:
             },
         ]
     ).to_csv(run_dir / "dimensions" / "combinations.csv", index=False)
-    pd.DataFrame(
-        [
-            {
-                "combination_id": "combo_1",
-                "feature": "rev_20d",
-                "label": "forward_return_1d",
-                "kernel": "dataframe",
-                "portfolio_mode": "long_only",
-                "mean_ic": 0.11,
-                "final_cumulative_net_return": 0.03,
-                "mean_turnover": 0.4,
-                "total_cost": 0.01,
-            },
-            {
-                "combination_id": "combo_2",
-                "feature": "rev_20d",
-                "label": "forward_return_20d",
-                "kernel": "tensor",
-                "portfolio_mode": "long_only",
-                "mean_ic": 0.22,
-                "final_cumulative_net_return": 0.06,
-                "mean_turnover": 0.5,
-                "total_cost": 0.02,
-            },
-        ]
-    ).to_csv(run_dir / "summaries" / "evaluation_summary.csv", index=False)
+    metric_rows = []
+    for combination_id, values in {
+        "combo_1": {
+            "mean_ic": 0.11,
+            "final_cumulative_net_return": 0.03,
+            "mean_turnover": 0.4,
+            "total_cost": 0.01,
+        },
+        "combo_2": {
+            "mean_ic": 0.22,
+            "final_cumulative_net_return": 0.06,
+            "mean_turnover": 0.5,
+            "total_cost": 0.02,
+        },
+    }.items():
+        for metric_name, metric_value in values.items():
+            metric_rows.append(
+                {
+                    "combination_id": combination_id,
+                    "metric_family": "factory_fixture",
+                    "metric_name": metric_name,
+                    "metric_value": metric_value,
+                    "unit": "ratio",
+                    "n_observations": 1,
+                    "diagnostic_status": "ok",
+                    "status_reason": "",
+                    "warning": "",
+                }
+            )
+    pd.DataFrame(metric_rows).to_csv(
+        run_dir / "metrics" / "evaluation_metrics_summary.csv",
+        index=False,
+    )

@@ -79,7 +79,7 @@ export function ResultsView({
   onSelectedCombinationChange: (combinationId: string) => void
   onToggleDownloadItem: (item: string) => void
   onToggleTablePreview: () => void
-  reportMarkdown: string
+  reportMarkdown: string | null
   run: RunSummary
   runBoundary?: string
   runComparison: TablePayload | null
@@ -92,8 +92,12 @@ export function ResultsView({
 }) {
   const [viewMode, setViewMode] = useState<EvidenceViewMode>('workbench')
   const [deliveryTab, setDeliveryTab] = useState<DeliveryTab>('metrics')
+  const hasReport = reportMarkdown !== null
   const activeDeliveryTab =
-    deliveryTab === 'comparison' && runComparison === null ? 'metrics' : deliveryTab
+    (deliveryTab === 'comparison' && runComparison === null) ||
+    (deliveryTab === 'report' && !hasReport)
+      ? 'metrics'
+      : deliveryTab
   const selectedMetrics = useMemo(
     () =>
       selectedCombinationMetrics({
@@ -144,6 +148,7 @@ export function ResultsView({
               activeTableSpec={activeTableSpec}
               boundary={boundary}
               canShowComparison={runComparison !== null}
+              canShowReport={hasReport}
               deliveryTab={activeDeliveryTab}
               downloadError={downloadError}
               downloadNotice={downloadNotice}
@@ -256,6 +261,7 @@ function DeliveryTabs({
   activeTableSpec,
   boundary,
   canShowComparison,
+  canShowReport,
   deliveryTab,
   downloadError,
   downloadNotice,
@@ -282,6 +288,7 @@ function DeliveryTabs({
   activeTableSpec: RunTableSpec | undefined
   boundary: string
   canShowComparison: boolean
+  canShowReport: boolean
   deliveryTab: DeliveryTab
   downloadError: string
   downloadNotice: string
@@ -294,7 +301,7 @@ function DeliveryTabs({
   onSelectTab: (tab: DeliveryTab) => void
   onToggleDownloadItem: (item: string) => void
   onToggleTablePreview: () => void
-  reportMarkdown: string
+  reportMarkdown: string | null
   run: RunSummary
   runComparison: TablePayload | null
   selectedDownloadItems: string[]
@@ -305,7 +312,7 @@ function DeliveryTabs({
 }) {
   const tabs: { key: DeliveryTab; label: string; disabled?: boolean }[] = [
     { key: 'metrics', label: '指标详情' },
-    { key: 'report', label: '研究报告' },
+    { key: 'report', disabled: !canShowReport, label: '研究报告' },
     { key: 'csv', label: 'CSV 明细' },
     { key: 'comparison', disabled: !canShowComparison, label: '运行对比' },
     { key: 'downloads', label: '结果文件下载' },
@@ -380,7 +387,7 @@ function DeliveryTabs({
 function ReportSection({
   reportMarkdown,
 }: {
-  reportMarkdown: string
+  reportMarkdown: string | null
 }) {
   return (
     <section className="data-section">
@@ -388,7 +395,11 @@ function ReportSection({
         <h3>研究报告</h3>
         <span>在结果文件下载中选择 report.md</span>
       </div>
-      <ReportView markdown={reportMarkdown} />
+      {reportMarkdown === null ? (
+        <p className="empty-state">No report.md is available for this run.</p>
+      ) : (
+        <ReportView markdown={reportMarkdown} />
+      )}
     </section>
   )
 }

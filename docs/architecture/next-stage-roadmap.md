@@ -17,7 +17,7 @@
 
 ## 当前推荐顺序
 
-N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`。当前后续实现应基于 `main` 的 schema `0.6`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同继续。
+N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`。当前后续实现应基于 schema `0.7`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同继续。
 
 ```text
 1. N5 风险、regime、成本和容量扩展
@@ -27,7 +27,7 @@ N7 evaluation run identity 和 N8 contract consumer convergence 已合入 `main`
 
 原因：
 
-- N2 已合入 `main`：后端支持 `diagnostics/tradability_diagnostics.csv`，frontend evidence workbench 已基于 N7 `combination_id` 和 schema `0.6` 合同消费并展示诊断结果。
+- N2 已合入 `main`：后端支持 `diagnostics/tradability_diagnostics.csv`，frontend evidence workbench 曾基于 N7 `combination_id` 和历史 schema `0.6` 合同消费并展示诊断结果。
 - N8 已在 N5/N6 大范围新增 artifact/API/frontend 合同前合入；后续扩展应复用 display preview、download allowlist、template API 和 pipeline entry helper。
 - 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和 frontend acceptance 已生成；后续不要直接扩大一次性 full run。
 - N5 会继续新增 diagnostics artifacts，应复用 N2/N7 的 artifact/display/API/frontend 模式。
@@ -87,8 +87,8 @@ conda run -n analysis python -m pytest -q tests/interfaces/api tests/research/fa
 当前后端状态：
 
 - Backend artifact/API 已合并到 `main`。
-- 该 diagnostics 后端能力最初在 schema `0.5` 期间落地；当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它。
-- Frontend 展示已合入 `main`：基于 N7 schema `0.6` / `combination_id` 合同消费 diagnostics。完整 2023-2025 canonical 样例可作为公开安全展示或后续回归输入，但不再是 N2 frontend 验收前置条件。
+- 该 diagnostics 后端能力最初在 schema `0.5` 期间落地；历史 schema `0.6` evaluation-set 合同曾通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它。
+- Frontend 展示已合入 `main`：曾基于 N7 历史 schema `0.6` / `combination_id` 合同消费 diagnostics。完整 2023-2025 canonical 样例可作为公开安全展示或后续回归输入，但不再是 N2 frontend 验收前置条件。
 
 当前后端输出：
 
@@ -338,7 +338,7 @@ parity shard 覆盖 2 kernels x 2 portfolio modes x 2 labels。单个
 - `kernels/` 中 tensor 是长期主路径，应支持 matrix-native 输入和 combination-keyed 输出；dataframe 是 reference / fallback / debugging 路径。
 - `research/factor_factory/` 是 Factor templates / candidates 到 downstream evaluation 的批量入口；它应适配 N7 evaluation run 合同，可用 `candidate_id + combination_id` 汇总候选表现，而不是让 N7 迁就旧 candidate-run 心智。
 - `pipelines/a_share/` 只负责 `PipelineConfig`、`start_from`、snapshot、checkpoint 和 runtime status；不负责选择前端默认样例、样例命名或研究展示矩阵。
-- `scripts/phase1_acceptance.py` 保留为 Phase 1 验收工具，不继续扩张成长期样例生成系统。
+- 历史 Phase 1 验收脚本已退役；长期回归入口应落在项目维护 skill、pytest/Vitest 或 A 股专用 module entry，而不是继续扩张临时样例脚本。
 
 历史样例状态：
 
@@ -350,18 +350,18 @@ comparison report；这些目录仍属于私有本地 evidence，不应提交或
 验收边界：
 
 - 能 plan/dry-run 出将生成的 2023-2025 evaluation run、`combination_id` 列表和输出路径。
-- N7 新生成物使用 schema `0.6` evaluation-set 合同；旧 schema `0.5` run 不进入正式 compare contract。
+- N7 历史生成物使用 schema `0.6` evaluation-set 合同；旧 schema `0.5` run 不进入正式 compare contract。
 - 新 artifacts 使用围绕 `dimensions/combinations.csv` 的 star schema；大 fact tables 以 `combination_id` 连接维度，不重复写入所有字符串维度。
 - `manifest.display` 必须声明 `dimension_source`、表路径、格式、join key、downloads 和 charts；前端不得硬编码未声明表路径。
-- 前端不做视觉重设计，但必须完整展示 schema `0.6` 暴露的用户可见结果；所有 display tables，包括 Parquet `weights`，都必须支持 20 行 preview。
+- 前端不做视觉重设计，但必须完整展示当前 schema `0.7` 暴露的用户可见结果；所有 display tables，包括 Parquet `weights`，都必须支持 bounded preview。
 - `weights` 第一阶段就直接写 Parquet，不再把完整 weights CSV 作为主产物。
 - 新 artifacts 包含当前 artifact contract 要求的 diagnostics，包括 `diagnostics/tradability_diagnostics.csv`。
 - 前端后续可以在一个 evaluation run 页面内切换 feature / label / portfolio mode / kernel 展示不同 combination result。
 - dataframe / tensor 共同覆盖结果应能做 parity 对照：结构和离散字段 exact match；same-kernel 回归建议 `rtol=1e-12, atol=1e-12`；dataframe/tensor common metrics 建议 `rtol=1e-9, atol=1e-10`；cumulative returns / drawdown 等长链路指标建议 `rtol=1e-8, atol=1e-10`。
 - `compare_evaluation_sets` 应改成默认低内存的网页/API summary comparison，只读 summary、manifest、combinations 和必要 summary metrics，继续支持大样本快速比较，并作为网页 comparison cards / tables / charts 的数据源。
-- 新增更详细的低内存 Evaluation Comparison Report，只输出表格、JSON 和 Markdown 报告，不进入主网页展示；它用于比较 schema `0.6` combinations 和 kernel parity。大样本验收不得使用会读完整 weights 或大时序表的 comparison 路径。
+- 新增更详细的低内存 Evaluation Comparison Report，只输出表格、JSON 和 Markdown 报告，不进入主网页展示；它用于比较当前 schema `0.7` combinations 和 kernel parity。大样本验收不得使用会读完整 weights 或大时序表的 comparison 路径。
 - 2023H1 smoke 曾作为第一晚真实数据验收，覆盖 2023-01-01 到 2023-06-30 的 24 个 result combinations；该本地 run 目录已在 2023-2025 样例验收后清理，不再作为当前可浏览证据。
-- 当前 canonical root 为 `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`，覆盖 4 features x 2 labels x dataframe x long_only；`reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1` 覆盖 `rev_120d` 的 kernel / portfolio mode parity。
+- 当前 canonical root 为 `reports/private_real/factor_evaluation/schema07_eval_2023_2025_v1`，覆盖 4 features x 2 labels x dataframe x long_only；`reports/private_real/factor_evaluation/schema07_eval_2023_2025_rev120_v1` 覆盖 `rev_120d` 的 kernel / portfolio mode parity。
 - 32-combination 2023-2025 full run 需要先处理 weights/remap 低内存写出路径，或继续按 shard 作为正式回归输入。
 - 2023-2025 样例生成后，应在实现验收阶段比较新实现输出是否一致。
 - 对比不读取或打印原始 CSMAR 私有数据。
@@ -378,7 +378,7 @@ comparison report；这些目录仍属于私有本地 evidence，不应提交或
 
 建议范围：
 
-- 抽共享的 `manifest.display` preview/download resolver，用于 evaluation runs 和 Factor Factory 的 table preview、download allowlist 和 display path resolution；保留 evaluation-set schema `0.6` 与 Factor Factory schema `0.1` 的类型边界。
+- 抽共享的 `manifest.display` preview/download resolver，用于 evaluation runs 和 Factor Factory 的 table preview、download allowlist 和 display path resolution；保留历史 evaluation-set schema `0.6` 与 Factor Factory schema `0.1` 的类型边界。
 - 将 `GET /api/factor-templates` 从 Pipeline route/service 中拆成独立 factor-template route/service；Pipeline API 只保留 snapshot/run 职责，Factor Studio 只依赖 template API。
 - 让 evidence/display payload 提供 table preview endpoint metadata（例如 `preview_url` 或等价字段），减少前端根据 `manifest.display.tables.path` 推导 `metrics/portfolio/diagnostics/breakdowns` 路由的双写规则。
 - 收敛组合相关但非 chart 的 display table preview 逻辑：由 `manifest.display.tables` 或后端 preview metadata 明确声明哪些表需要随 `combination_id` 刷新、默认 preview endpoint 和 preview row limit；前端不再为每个 diagnostics 表追加 hardcoded table key。
@@ -389,7 +389,7 @@ comparison report；这些目录仍属于私有本地 evidence，不应提交或
 计划决策：
 
 - `manifest.json` 保持可移植；不写入 `source_alias`、`run_id`、host 或运行时 URL。
-- schema `0.6` 的 `manifest.display.tables` 增加 portable preview descriptor；API 在 evidence payload 中运行时补充 `preview_url`。
+- 历史 schema `0.6` 的 `manifest.display.tables` 增加 portable preview descriptor；API 在 evidence payload 中运行时补充 `preview_url`。
 - preview 是 artifact inspection / audit support，不扩展成通用 CSV viewer，也不提高默认 preview 行数来规避 latest-row 问题。
 - 旧 generated run 如果缺少当前 display preview metadata，按 stale generated run 处理；需要展示或验收时按审批重新生成，而不是放宽当前合同。
 - CSV upload 后端兼容保留，前端和文档降级为 legacy/dev uploaded-panel smoke 路径，不删除、不扩展。
@@ -400,7 +400,7 @@ comparison report；这些目录仍属于私有本地 evidence，不应提交或
 - API evidence payload 保持 manifest portable，在运行时为 display table 补充 `preview_url`；generic table preview route 为 `/api/runs/{source_alias}/{run_id}/tables/{table_key}/preview`，旧 family preview routes 只作为兼容入口代理到同一 service。
 - React evidence workbench 只消费 API 下发的 preview metadata，不再从 display table path 推导 preview route；chart surfaces 通过 bounded preview pagination 拼接当前组合时间轴，CSV 明细仍保持默认 preview row limit；CSV upload UI 文案降级为 legacy/dev uploaded-panel smoke / compatibility path。
 - `GET /api/factor-templates` 已拆到独立 factor-template route/service；pipeline route/service 只保留 snapshot/run 职责。
-- A-share evaluation 已有 service entry；CLI 和 pipeline runner 通过 service request/result 调用，schema 仍保持 `0.6`。
+- A-share evaluation 已有 service entry；CLI 和 pipeline runner 通过 service request/result 调用；当前 schema `0.7` 已替代历史 schema `0.6`。
 - Pipeline Builder 执行 run 后会刷新 `/api/runs`、选择 `pipeline/<run_ref or run_id>` 并切回 evidence workbench；这属于本地 workbench 挂载体验，不改变 pipeline `start_from` 语义。
 
 非目标：

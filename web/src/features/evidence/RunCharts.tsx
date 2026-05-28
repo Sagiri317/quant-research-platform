@@ -3,7 +3,7 @@ import { RunBarChartPanel, RunLineChartPanel } from './charts'
 import { formatPercent } from '../../shared/format'
 import { useMemo, useState } from 'react'
 
-const ALLOWED_CHART_KINDS = new Set(['line', 'bar'])
+const ALLOWED_CHART_KINDS = new Set(['line', 'bar', 'derived_cumulative_return'])
 const MAX_DENSE_BAR_ROWS = 160
 
 export function RunCharts({
@@ -76,15 +76,15 @@ function renderChart(
   chart: RunDisplayChart,
   tables: Record<string, TablePayload>,
 ) {
-  const rows = tables[chart.table].rows
+  const rows = tables[chartDataTableKey(chart)].rows
   const kind = effectiveChartKind(chart, rows.length)
   const props = {
     chartKind: kind,
     description: chart.description,
     includeZero: chart.include_zero,
     rows,
-    series: chart.series,
-    testId: `${chart.id.replaceAll('_', '-')}-chart`,
+    series: chartSeries(chart),
+    testId: chartTestId(chart),
     title: chart.title,
     valueFormatter: chartUsesPercent(chart) ? formatPercent : undefined,
     xKey: chart.x,
@@ -103,11 +103,14 @@ function isDiagnosticChart(chart: RunDisplayChart): boolean {
 function effectiveChartKind(
   chart: RunDisplayChart,
   rowCount: number,
-): RunDisplayChart['kind'] {
+): 'line' | 'bar' {
+  if (chart.kind === 'derived_cumulative_return') {
+    return 'line'
+  }
   if (chart.kind === 'bar' && rowCount > MAX_DENSE_BAR_ROWS) {
     return 'line'
   }
-  return chart.kind
+  return chart.kind === 'bar' ? 'bar' : 'line'
 }
 
 function isRenderableChart(
@@ -117,7 +120,7 @@ function isRenderableChart(
   if (!ALLOWED_CHART_KINDS.has(chart.kind)) {
     return false
   }
-  const table = tables[chart.table]
+  const table = tables[chartDataTableKey(chart)]
   if (!table) {
     return false
   }
@@ -127,7 +130,7 @@ function isRenderableChart(
   if (!table.columns.includes(chart.x)) {
     return false
   }
-  return chart.series.some(
+  return chartSeries(chart).some(
     (series) =>
       table.columns.includes(series.key) &&
       table.rows.some((row) => typeof row[series.key] === 'number'),
@@ -135,5 +138,39 @@ function isRenderableChart(
 }
 
 function chartUsesPercent(chart: RunDisplayChart): boolean {
-  return chart.series.some((series) => series.format === 'percent')
+  return chartSeries(chart).some((series) => series.format === 'percent')
+}
+
+function chartDataTableKey(chart: RunDisplayChart): string {
+  if (chart.kind === 'derived_cumulative_return') {
+    return chart.id
+  }
+  return chart.source_table_key ?? chart.id
+}
+
+function chartTestId(chart: RunDisplayChart): string {
+  if (chart.id === 'primary_cumulative_return') {
+    return 'cumulative-returns-chart'
+  }
+  if (chart.id === 'net_return') {
+    return 'net-portfolio-return-chart'
+  }
+  return `${chart.id.replaceAll('_', '-')}-chart`
+}
+
+function chartSeries(chart: RunDisplayChart) {
+  if (chart.series && chart.series.length > 0) {
+    return chart.series
+  }
+  if (!chart.output_series) {
+    return []
+  }
+  return [
+    {
+      color: '#2563eb',
+      format: 'percent' as const,
+      key: chart.output_series,
+      label: chart.output_series,
+    },
+  ]
 }

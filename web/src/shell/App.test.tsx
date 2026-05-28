@@ -1,4 +1,4 @@
-import '@testing-library/jest-dom/vitest'
+﻿import '@testing-library/jest-dom/vitest'
 import {
   cleanup,
   fireEvent,
@@ -810,7 +810,7 @@ describe('App', () => {
           },
         ])
       }
-      if (url.includes('/tables/ic_summary/preview')) {
+      if (url.includes('/tables/evaluation_metrics_summary/preview')) {
         return tableResponse([
           {
             feature: 'factor',
@@ -834,23 +834,23 @@ describe('App', () => {
         return tableResponse([
           {
             timestamp: '2026-01-01',
-            net_portfolio_return: 0.02,
+            net_return: 0.02,
             turnover: 1.1,
             cost: 0.001,
           },
         ])
       }
-      if (url.includes('/tables/cumulative_returns/preview')) {
+      if (url.includes('/tables/returns/preview')) {
         return tableResponse([
           {
             timestamp: '2026-01-01',
-            net_portfolio_return: 0.02,
+            net_return: 0.02,
             cumulative_net_return: 0.02,
             drawdown: 0,
           },
         ])
       }
-      if (url.includes('/tables/performance_summary/preview')) {
+      if (url.includes('/tables/evaluation_metrics_summary/preview')) {
         return tableResponse([
           {
             feature: 'factor',
@@ -862,9 +862,6 @@ describe('App', () => {
       }
       if (url.includes('/tables/group_spread_summary/preview')) {
         return tableResponse([{ feature: 'factor', top_bottom_spread_mean: 0.02 }])
-      }
-      if (url.includes('/portfolio/exposure-summary')) {
-        return tableResponse([{ feature: 'factor', mean_gross_exposure: 1 }])
       }
       return tableResponse([{ timestamp: '2026-01-01', value: 1 }])
     }) as typeof fetch
@@ -896,9 +893,11 @@ describe('App', () => {
     expect(globalThis.fetch).toHaveBeenCalledWith(
       'http://127.0.0.1:8000/api/runs/core/demo/evidence',
     )
-    expect(globalThis.fetch).not.toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/demo/metrics/ic',
-    )
+    expect(
+      (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.every(
+        ([url]) => !String(url).includes('/' + 'metrics/'),
+      ),
+    ).toBe(true)
     expect(screen.getByText('在结果文件下载中选择 comparison.csv')).toBeInTheDocument()
     const comparisonTable = screen.getByRole('table', { name: '运行对比表格' })
     expect(within(comparisonTable).getByText('n_rows_evaluated')).toBeInTheDocument()
@@ -985,7 +984,7 @@ describe('App', () => {
     )
     expect(screen.getByRole('link', { name: '下载当前 CSV' })).toHaveAttribute(
       'href',
-      'http://127.0.0.1:8000/api/runs/core/demo/artifacts/metrics/ic.csv',
+      'http://127.0.0.1:8000/api/runs/core/demo/artifacts/table%3Aic',
     )
 
     fireEvent.click(screen.getByRole('button', { name: '展开预览' }))
@@ -994,21 +993,21 @@ describe('App', () => {
       target: { value: 'returns' },
     })
     const table = screen.getByRole('table', { name: '组合收益明细 表格' })
-    expect(within(table).getByText('net_portfolio_return')).toBeInTheDocument()
+    expect(within(table).getByText('net_return')).toBeInTheDocument()
 
     fireEvent.change(screen.getByRole('combobox', { name: '选择明细表' }), {
-      target: { value: 'performance_summary' },
+      target: { value: 'evaluation_metrics_summary' },
     })
     const performance = await screen.findByRole('table', {
-      name: '绩效汇总 表格',
+      name: '评价指标汇总 表格',
     })
-    expect(within(performance).getByText('sharpe_like')).toBeInTheDocument()
+    expect(within(performance).getByText('mean_ic')).toBeInTheDocument()
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/demo/tables/performance_summary/preview?limit=20&combination_id=factor__forward_return__dataframe__long_only',
+      'http://127.0.0.1:8000/api/runs/core/demo/tables/evaluation_metrics_summary/preview?limit=20&combination_id=factor__forward_return__dataframe__long_only',
     )
     expect(screen.getByRole('link', { name: '下载当前 CSV' })).toHaveAttribute(
       'href',
-      'http://127.0.0.1:8000/api/runs/core/demo/artifacts/metrics/performance_summary.csv',
+      'http://127.0.0.1:8000/api/runs/core/demo/artifacts/table%3Aevaluation_metrics_summary',
     )
   })
 
@@ -1040,15 +1039,19 @@ describe('App', () => {
     render(<App />)
 
     expect(await screen.findByTestId('cumulative-returns-chart')).toBeInTheDocument()
-    expect(within(screen.getByTestId('cumulative-returns-chart')).getAllByText('cumulative_net_return').length).toBeGreaterThan(1)
-    expect(within(screen.getByTestId('cumulative-returns-chart')).getAllByText('drawdown').length).toBeGreaterThan(1)
+    expect(within(screen.getByTestId('cumulative-returns-chart')).getAllByText('cumulative_net_return').length).toBeGreaterThan(0)
+    expect(within(screen.getByTestId('cumulative-returns-chart')).queryByText('drawdown')).not.toBeInTheDocument()
     expect(within(screen.getByTestId('ic-rankic-chart')).getAllByText('rankic').length).toBeGreaterThan(1)
     expect(
       within(screen.getByTestId('net-portfolio-return-chart')).getAllByText(
-        'net_portfolio_return',
+        'net_return',
       ).length,
     ).toBeGreaterThan(1)
-    expect(within(screen.getByTestId('cumulative-returns-chart')).getByText('净值曲线和回撤')).toBeInTheDocument()
+    expect(
+      within(screen.getByTestId('cumulative-returns-chart')).getByText(
+        'Derived from returns.net_return by the display chart contract.',
+      ),
+    ).toBeInTheDocument()
   })
 
   test('renders chart range readouts as structured tokens and splits return diagnostics', async () => {
@@ -1088,28 +1091,16 @@ describe('App', () => {
             },
             tables: {
               combinations: tablePayload([]),
-              cumulative_returns: tablePayload([
-                {
-                  timestamp: '2026-01-01',
-                  cumulative_net_return: -0.1,
-                  drawdown: -0.12,
-                },
-                {
-                  timestamp: '2026-01-02',
-                  cumulative_net_return: 0.2,
-                  drawdown: 0,
-                },
-              ]),
               returns: tablePayload([
                 {
                   timestamp: '2026-01-01',
-                  net_portfolio_return: -0.01,
+                  net_return: -0.1,
                   turnover: 0.3,
                   cost: 0.0001,
                 },
                 {
                   timestamp: '2026-01-02',
-                  net_portfolio_return: 0.02,
+                  net_return: 0.3333333333333333,
                   turnover: 0.8,
                   cost: 0.0004,
                 },
@@ -1118,6 +1109,22 @@ describe('App', () => {
             },
           }),
         )
+      }
+      if (url.includes('/tables/returns/preview')) {
+        return tableResponse([
+          {
+            timestamp: '2026-01-01',
+            net_return: -0.1,
+            turnover: 0.3,
+            cost: 0.0001,
+          },
+          {
+            timestamp: '2026-01-02',
+            net_return: 0.3333333333333333,
+            turnover: 0.8,
+            cost: 0.0004,
+          },
+        ])
       }
       if (url.endsWith('/api/comparison')) {
         return tableResponse([])
@@ -1132,8 +1139,7 @@ describe('App', () => {
     expect(within(cumulativeReturnsChart).queryByText('数值范围')).not.toBeInTheDocument()
     expect(within(cumulativeReturnsChart).getAllByText('cumulative_net_return').length).toBeGreaterThan(1)
     expect(within(cumulativeReturnsChart).getByText('-10.00% ~ 20.00%')).toBeInTheDocument()
-    expect(within(cumulativeReturnsChart).getAllByText('drawdown').length).toBeGreaterThan(1)
-    expect(within(cumulativeReturnsChart).getByText('-12.00% ~ 0.00%')).toBeInTheDocument()
+    expect(within(cumulativeReturnsChart).queryByText('drawdown')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '完整报告' }))
     await waitFor(() => {
       expect(screen.getByTestId('net-portfolio-return-chart')).toBeInTheDocument()
@@ -1167,12 +1173,11 @@ describe('App', () => {
           evidencePayload({
             comparisonRows: [],
             tables: {
-              cumulative_returns: tablePayload([]),
               ic: tablePayload([]),
               returns: tablePayload(
                 Array.from({ length: 180 }, (_, index) => ({
                   timestamp: `2026-01-${String((index % 28) + 1).padStart(2, '0')}`,
-                  net_portfolio_return: index / 1000,
+                  net_return: index / 1000,
                   turnover: 0.4,
                   cost: 0.001,
                 })),
@@ -1221,7 +1226,6 @@ describe('App', () => {
             ...evidencePayload().tables,
             ic: tablePayload([]),
             returns: tablePayload([]),
-            cumulative_returns: tablePayload([]),
           },
         })
       }
@@ -1320,15 +1324,15 @@ describe('App', () => {
         if (url.endsWith('/api/comparison')) {
           return tableResponse([])
         }
-      if (url.includes('/tables/ic_summary/preview')) {
+      if (url.includes('/tables/evaluation_metrics_summary/preview')) {
           return tableResponse([{ feature: 'factor', mean_ic: 0.4, icir: 0 }])
         }
-        if (url.includes('/tables/cumulative_returns/preview')) {
+        if (url.includes('/tables/returns/preview')) {
           return tableResponse([{ timestamp: '2026-01-01', cumulative_net_return: 0.04 }])
         }
         if (url.includes('/tables/returns/preview')) {
           return tableResponse([
-            { timestamp: '2026-01-01', net_portfolio_return: 0.04 },
+            { timestamp: '2026-01-01', net_return: 0.04 },
           ])
         }
         if (url.includes('/tables/ic/preview')) {
@@ -1522,7 +1526,7 @@ describe('App', () => {
     expect(screen.getByText(/浏览器已接管下载/)).toBeInTheDocument()
     const anchor = anchorClick.mock.contexts[0] as HTMLAnchorElement
     expect(anchor.href).toBe(
-      'http://127.0.0.1:8000/api/runs/core/demo/download?items=report.md&items=metrics%2Fic.csv',
+      'http://127.0.0.1:8000/api/runs/core/demo/download?items=metadata_file%3Areport&items=table%3Aic',
     )
     expect(anchorClick).toHaveBeenCalled()
     expect(globalThis.fetch).not.toHaveBeenCalledWith(
@@ -1580,10 +1584,10 @@ describe('App', () => {
       expect(anchorClick).toHaveBeenCalled()
     })
     const anchor = anchorClick.mock.contexts[0] as HTMLAnchorElement
-    expect(anchor.href).not.toContain('metrics_by_year%2Fic_summary_by_year.csv')
-    expect(anchor.href).not.toContain('metrics_by_quarter%2Fic_summary_by_quarter.csv')
+    expect(anchor.href).not.toContain('metrics_by_year%2Fevaluation_metrics_summary_by_year.csv')
+    expect(anchor.href).not.toContain('metrics_by_quarter%2Fevaluation_metrics_summary_by_quarter.csv')
     expect(anchor.href).not.toContain('artifacts.xlsx')
-    expect(anchor.href).toContain('items=portfolio%2Freturns.csv')
+    expect(anchor.href).toContain('items=table%3Areturns')
   })
 
   test('deletes an uploaded run after confirmation', async () => {
@@ -1675,14 +1679,13 @@ describe('App', () => {
 
   test('renders tables downloads and charts from evidence display manifest', async () => {
     const tables = {
-      performance_summary: tablePayload([
+      evaluation_metrics_summary: tablePayload([
         { timestamp: '2026-01-01', alpha_score: 0.7 },
       ]),
-      cumulative_returns: tablePayload([
+      returns: tablePayload([
         {
           timestamp: '2026-01-01',
-          cumulative_net_return: 0.12,
-          drawdown: -0.02,
+          net_return: 0.12,
         },
       ]),
     }
@@ -1690,20 +1693,15 @@ describe('App', () => {
     display.charts = [
       {
         description: 'manifest configured chart',
-        id: 'custom_cumulative_returns',
+        id: 'custom_primary_cumulative_return',
         include_zero: true,
-        kind: 'line',
+        input_series: 'net_return',
+        kind: 'derived_cumulative_return',
+        output_series: 'cumulative_net_return',
         section: 'primary',
-        series: [
-          {
-            color: '#2563eb',
-            format: 'percent',
-            key: 'cumulative_net_return',
-            label: 'cumulative_net_return',
-          },
-        ],
-        table: 'cumulative_returns',
+        source_table_key: 'returns',
         title: 'Manifest Returns',
+        transform: 'compound_cumulative_return',
         x: 'timestamp',
       },
     ]
@@ -1742,14 +1740,14 @@ describe('App', () => {
     expect(await screen.findByText('Manifest Returns')).toBeInTheDocument()
     expect(screen.queryByTestId('ic-rankic-chart')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: '结果文件下载' }))
-    expect(screen.getByRole('checkbox', { name: '绩效汇总 CSV' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '评价指标汇总 CSV' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: 'CSV 明细' }))
     expect(screen.getByRole('combobox', { name: '选择明细表' })).toHaveValue(
-      'performance_summary',
+      'evaluation_metrics_summary',
     )
     expect(screen.getByRole('link', { name: '下载当前 CSV' })).toHaveAttribute(
       'href',
-      'http://127.0.0.1:8000/api/runs/core/manifest_demo/artifacts/metrics/performance_summary.csv',
+      'http://127.0.0.1:8000/api/runs/core/manifest_demo/artifacts/table%3Aevaluation_metrics_summary',
     )
   })
 
@@ -1810,21 +1808,18 @@ describe('App', () => {
                   portfolio_mode: 'market_neutral',
                 },
               ]),
-              cumulative_returns: tablePayload([
+              returns: tablePayload([
                 {
                   combination_id: 'combo_1',
                   timestamp: '2026-01-01',
-                  cumulative_net_return: 0.02,
-                  drawdown: 0,
+                  net_return: 0.02,
                 },
                 {
                   combination_id: 'combo_2',
                   timestamp: '2026-01-01',
-                  cumulative_net_return: 0.04,
-                  drawdown: 0,
+                  net_return: 0.04,
                 },
               ]),
-              returns: tablePayload([]),
               ic: tablePayload([]),
             },
           }),
@@ -1908,15 +1903,13 @@ describe('App', () => {
                   portfolio_mode: 'long_only',
                 },
               ]),
-              cumulative_returns: tablePayload([
+              returns: tablePayload([
                 {
                   combination_id: 'combo_1',
                   timestamp: '2026-01-01',
-                  cumulative_net_return: 0.02,
-                  drawdown: 0,
+                  net_return: 0.02,
                 },
               ]),
-              returns: tablePayload([]),
               ic: tablePayload([]),
             },
           }),
@@ -1924,7 +1917,7 @@ describe('App', () => {
       }
       if (
         url.includes(
-          '/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview',
+          '/api/runs/core/combo_chart_demo/tables/returns/preview',
         ) &&
         url.includes('combination_id=combo_2')
       ) {
@@ -1932,20 +1925,18 @@ describe('App', () => {
           {
             combination_id: 'combo_2',
             timestamp: '2026-01-01',
-            cumulative_net_return: 0.04,
-            drawdown: 0,
+            net_return: 0.04,
           },
           {
             combination_id: 'combo_2',
             timestamp: '2026-01-02',
-            cumulative_net_return: 0.05,
-            drawdown: -0.01,
+            net_return: 0.0096153846153846,
           },
         ])
       }
       if (
         url.includes(
-          '/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview',
+          '/api/runs/core/combo_chart_demo/tables/returns/preview',
         ) &&
         url.includes('combination_id=combo_1')
       ) {
@@ -1953,8 +1944,7 @@ describe('App', () => {
           {
             combination_id: 'combo_1',
             timestamp: '2026-01-01',
-            cumulative_net_return: 0.02,
-            drawdown: 0,
+            net_return: 0.02,
           },
         ])
       }
@@ -1966,14 +1956,12 @@ describe('App', () => {
           {
             combination_id: 'combo_2',
             timestamp: '2026-01-01',
-            cumulative_net_return: 0.04,
-            drawdown: 0,
+            net_return: 0.04,
           },
           {
             combination_id: 'combo_2',
             timestamp: '2026-01-02',
-            cumulative_net_return: 0.05,
-            drawdown: -0.01,
+            net_return: 0.0096153846153846,
           },
         ])
       }
@@ -1995,7 +1983,7 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=1000&combination_id=combo_2',
+        'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/returns/preview?limit=1000&combination_id=combo_2',
       )
     })
     await waitFor(() => {
@@ -2005,7 +1993,7 @@ describe('App', () => {
       )
     })
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/cumulative_returns/preview?limit=1000&combination_id=combo_2',
+      'http://127.0.0.1:8000/api/runs/core/combo_chart_demo/tables/returns/preview?limit=1000&combination_id=combo_2',
     )
   })
 
@@ -2063,15 +2051,13 @@ describe('App', () => {
                   portfolio_mode: 'long_only',
                 },
               ]),
-              cumulative_returns: tablePayload([
+              returns: tablePayload([
                 {
                   combination_id: 'combo_1',
                   timestamp: '2026-01-01',
-                  cumulative_net_return: 0.02,
-                  drawdown: 0,
+                  net_return: 0.02,
                 },
               ]),
-              returns: tablePayload([]),
               ic: tablePayload([]),
             },
           }),
@@ -2079,7 +2065,7 @@ describe('App', () => {
       }
       if (
         url.includes(
-          '/api/runs/core/combo_chart_error/tables/cumulative_returns/preview',
+          '/api/runs/core/combo_chart_error/tables/returns/preview',
         ) &&
         url.includes('combination_id=combo_2')
       ) {
@@ -2088,6 +2074,20 @@ describe('App', () => {
           status: 500,
           json: async () => ({ detail: 'chart preview unavailable' }),
         } as Response)
+      }
+      if (
+        url.includes(
+          '/api/runs/core/combo_chart_error/tables/returns/preview',
+        ) &&
+        url.includes('combination_id=combo_1')
+      ) {
+        return tableResponse([
+          {
+            combination_id: 'combo_1',
+            timestamp: '2026-01-01',
+            net_return: 0.02,
+          },
+        ])
       }
       if (url.includes('combo_chart_error') && url.includes('combination_id=')) {
         return tableResponse([])
@@ -2173,7 +2173,6 @@ describe('App', () => {
                   label: 'forward_return',
                 },
               ]),
-              cumulative_returns: tablePayload([]),
               returns: tablePayload([]),
               ic: tablePayload([]),
             },
@@ -2206,7 +2205,6 @@ describe('App', () => {
                   label: 'forward_return',
                 },
               ]),
-              cumulative_returns: tablePayload([]),
               returns: tablePayload([]),
               ic: tablePayload([]),
             },
@@ -2305,7 +2303,7 @@ describe('App', () => {
     expect(evidenceFetches).toHaveLength(2)
   })
 
-  test('formats chart values as percentages and toggles series from the legend', async () => {
+  test('formats chart values as percentages and keeps the primary series visible', async () => {
     globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/api/runs')) {
@@ -2333,23 +2331,32 @@ describe('App', () => {
             comparisonRows: [],
             tables: {
               combinations: tablePayload([]),
-              cumulative_returns: tablePayload([
+              returns: tablePayload([
                 {
                   timestamp: '2026-01-01',
-                  cumulative_net_return: 1.1219,
-                  drawdown: -0.3156,
+                  net_return: 1.1219,
                 },
                 {
                   timestamp: '2026-01-02',
-                  cumulative_net_return: 0.8844,
-                  drawdown: -0.4856,
+                  net_return: -0.1119308167208634,
                 },
               ]),
-              returns: tablePayload([]),
               ic: tablePayload([]),
             },
           }),
         )
+      }
+      if (url.includes('/api/runs/core/chart_demo/tables/returns/preview')) {
+        return tableResponse([
+          {
+            timestamp: '2026-01-01',
+            net_return: 1.1219,
+          },
+          {
+            timestamp: '2026-01-02',
+            net_return: -0.1119308167208634,
+          },
+        ])
       }
       if (url.endsWith('/api/comparison')) {
         return tableResponse([])
@@ -2361,11 +2368,11 @@ describe('App', () => {
 
     const chart = await screen.findByTestId('cumulative-returns-chart')
     expect(within(chart).getByText(/112\.19%/)).toBeInTheDocument()
-    const drawdownToggle = within(chart).getByRole('button', { name: '隐藏 drawdown' })
-    fireEvent.click(drawdownToggle)
-    expect(within(chart).getByRole('button', { name: '显示 drawdown' })).toHaveAttribute(
+    const cumulativeToggle = within(chart).getByRole('button', { name: '隐藏 cumulative_net_return' })
+    fireEvent.click(cumulativeToggle)
+    expect(within(chart).getByRole('button', { name: '隐藏 cumulative_net_return' })).toHaveAttribute(
       'aria-pressed',
-      'false',
+      'true',
     )
   })
 
@@ -2411,21 +2418,18 @@ describe('App', () => {
                   portfolio_mode: 'long_only',
                 },
               ]),
-              cumulative_returns: tablePayload([
+              returns: tablePayload([
                 {
                   combination_id: 'combo_a',
                   timestamp: '2026-01-01',
-                  cumulative_net_return: 0.11,
-                  drawdown: -0.01,
+                  net_return: 0.11,
                 },
                 {
                   combination_id: 'combo_b',
                   timestamp: '2026-01-01',
-                  cumulative_net_return: 0.33,
-                  drawdown: -0.03,
+                  net_return: 0.33,
                 },
               ]),
-              returns: tablePayload([]),
               ic: tablePayload([]),
             },
             combinationSummaryRows: [
@@ -2464,6 +2468,30 @@ describe('App', () => {
       if (url.endsWith('/api/comparison')) {
         return tableResponse([])
       }
+      if (
+        url.includes('/api/runs/core/combo_metrics/tables/returns/preview') &&
+        url.includes('combination_id=combo_b')
+      ) {
+        return tableResponse([
+          {
+            combination_id: 'combo_b',
+            timestamp: '2026-01-01',
+            net_return: 0.33,
+          },
+        ])
+      }
+      if (
+        url.includes('/api/runs/core/combo_metrics/tables/returns/preview') &&
+        url.includes('combination_id=combo_a')
+      ) {
+        return tableResponse([
+          {
+            combination_id: 'combo_a',
+            timestamp: '2026-01-01',
+            net_return: 0.11,
+          },
+        ])
+      }
       return tableResponse([])
     }) as typeof fetch
 
@@ -2485,11 +2513,11 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'CSV 明细' }))
     fireEvent.change(screen.getByRole('combobox', { name: '选择明细表' }), {
-      target: { value: 'cumulative_returns' },
+      target: { value: 'returns' },
     })
     fireEvent.click(screen.getByRole('button', { name: '展开预览' }))
-    const cumulativeReturnsTable = screen.getByRole('table', { name: '累计收益曲线 表格' })
-    expect(within(cumulativeReturnsTable).queryByText('combo_a')).not.toBeInTheDocument()
-    expect(within(cumulativeReturnsTable).getByText('combo_b')).toBeInTheDocument()
+    const returnsTable = screen.getByRole('table', { name: '组合收益明细 表格' })
+    expect(within(returnsTable).queryByText('combo_a')).not.toBeInTheDocument()
+    expect(within(returnsTable).getByText('combo_b')).toBeInTheDocument()
   })
 })

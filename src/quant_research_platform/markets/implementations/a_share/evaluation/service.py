@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
+
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 
 from .evaluation_adapter import (
     DEFAULT_A_SHARE_SOURCE_ALIAS,
@@ -40,6 +42,7 @@ class AShareEvaluationRequest:
     neutralization_exposure_columns: tuple[str, ...] = ()
     source_alias: str = DEFAULT_A_SHARE_SOURCE_ALIAS
     manifest_run_id: str | None = None
+    diagnostics_spec: DiagnosticsSpec = field(default_factory=DiagnosticsSpec.disabled)
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,7 @@ def run_a_share_evaluation(request: AShareEvaluationRequest) -> AShareEvaluation
         neutralization_exposure_columns=request.neutralization_exposure_columns,
         source_alias=request.source_alias,
         manifest_run_id=request.manifest_run_id,
+        diagnostics_spec=request.diagnostics_spec,
     )
     return AShareEvaluationResult(
         label_summary=label_summary,

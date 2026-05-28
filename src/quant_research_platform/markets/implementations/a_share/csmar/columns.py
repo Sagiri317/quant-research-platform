@@ -178,8 +178,7 @@ def load_or_create_column_overrides(path: Path) -> dict[str, dict[str, object]]:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(default_override_payload(), ensure_ascii=False, indent=2)
-            + "\n",
+            json.dumps(default_override_payload(), ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
     return json.loads(path.read_text(encoding="utf-8"))

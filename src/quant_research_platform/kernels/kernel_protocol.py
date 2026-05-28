@@ -127,13 +127,11 @@ class TradabilityConfig:
         _validate_optional_column_name(self.can_exit_column, "can_exit_column")
         if self.blocked_entry_policy not in BLOCKED_ENTRY_POLICIES:
             raise ValueError(
-                "blocked_entry_policy must be one of "
-                f"{sorted(BLOCKED_ENTRY_POLICIES)}."
+                f"blocked_entry_policy must be one of {sorted(BLOCKED_ENTRY_POLICIES)}."
             )
         if self.blocked_exit_policy not in BLOCKED_EXIT_POLICIES:
             raise ValueError(
-                "blocked_exit_policy must be one of "
-                f"{sorted(BLOCKED_EXIT_POLICIES)}."
+                f"blocked_exit_policy must be one of {sorted(BLOCKED_EXIT_POLICIES)}."
             )
 
 

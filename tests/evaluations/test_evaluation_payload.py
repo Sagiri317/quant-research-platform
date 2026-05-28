@@ -31,15 +31,16 @@ def test_evaluate_to_payload_builds_contract_without_writing_artifacts(tmp_path)
     assert isinstance(payload, EvaluationRunPayload)
     assert "artifact_schema_version" not in payload.summary
     assert "artifact_type" not in payload.summary
-    assert payload.summary["evaluation_id"] == "payload_only"
-    assert payload.config["metadata"]["run_id"] == "payload_only"
+    assert payload.summary["run_id"] == "payload_only"
+    assert "evaluation_id" not in payload.summary
+    assert payload.config["evaluation_spec"]["metadata"]["run_id"] == "payload_only"
     assert not hasattr(payload, "artifact_paths")
     assert set(payload.tables) >= {
         "combinations",
         "ic",
         "returns",
-        "cumulative_returns",
-        "weights",
+        "evaluation_metrics_summary",
+        "coverage_summary",
     }
     assert "Evaluation Set Report" in payload.report
     assert not (output_dir / "manifest.json").exists()

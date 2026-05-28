@@ -63,9 +63,9 @@ export type RunDetail = {
 
 export type RunEvidence = {
   summary: RunDetail
-  report: {
+  report?: {
     markdown: string
-  }
+  } | null
   comparison: TablePayload
   combination_summaries?: TablePayload
   display: RunDisplay
@@ -135,6 +135,7 @@ export type PipelineSnapshotRequest = {
   return_source_column: string
   portfolio_mode: string
   processed_factor_column?: string
+  diagnostics?: string[]
   run_id: string
 }
 
@@ -237,7 +238,7 @@ export type RunDisplayTable = {
   label: string
   group: string
   path: string
-  download_item: string
+  download_ref?: RunDisplayRef
   format?: 'csv' | 'parquet' | string
   role?: string
   join_key?: string | null
@@ -258,25 +259,35 @@ export type RunDisplayChart = {
   description?: string
   id: string
   include_zero?: boolean
-  kind: 'line' | 'bar'
+  input_series?: string
+  kind: 'line' | 'bar' | 'derived_cumulative_return' | string
+  output_series?: string
   section?: 'primary' | 'diagnostic' | string
-  series: RunDisplayChartSeries[]
-  table: string
+  series?: RunDisplayChartSeries[]
+  source_table_key?: string
   title: string
+  transform?: string
   x: string
 }
 
+export type RunDisplayRef = {
+  kind: string
+  key: string
+}
+
 export type RunDisplayDownloadItem = {
-  item: string
+  item?: string
+  key?: string
   kind: string
   label: string
+  path?: string
   table?: string
 }
 
 export type RunDisplayDownloadPreset = {
   key: string
   label: string
-  items: string[]
+  items: Array<string | RunDisplayRef>
 }
 
 export type RunDisplayDownloads = {
@@ -450,7 +461,7 @@ export function runTableSpecsFromDisplay(
     label: table.label,
     path: table.path,
     previewUrl: tablePreviewUrl(table),
-    downloadItem: table.download_item,
+    downloadItem: tableDownloadRef(table),
     evidenceKey: table.key,
     format: table.format,
     previewRows: tablePreviewDefaultLimit(table),
@@ -486,7 +497,7 @@ function tablePreviewSupportsCombinationFilter(table: RunDisplayTable): boolean 
 }
 
 export function artifactDownloadUrl(run: RunSummary, downloadItem: string): string {
-  const encodedItem = downloadItem.split('/').map(encodeURIComponent).join('/')
+  const encodedItem = encodeURIComponent(downloadItem)
   return `${API_BASE_URL}${runApiPath(run)}/artifacts/${encodedItem}`
 }
 
@@ -501,6 +512,20 @@ export function factorFactoryArtifactDownloadUrl(
 
 function runApiPath(run: RunSummary): string {
   return `/api/runs/${encodeURIComponent(run.source_alias)}/${encodeURIComponent(run.run_id)}`
+}
+
+function tableDownloadRef(table: RunDisplayTable): string {
+  if (table.download_ref) {
+    return displayRefKey(table.download_ref)
+  }
+  throw new Error(`Display table ${table.key} missing download_ref`)
+}
+
+export function displayRefKey(ref: string | RunDisplayRef): string {
+  if (typeof ref === 'string') {
+    return ref
+  }
+  return `${ref.kind}:${ref.key}`
 }
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {

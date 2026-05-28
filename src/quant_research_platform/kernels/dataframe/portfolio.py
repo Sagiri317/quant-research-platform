@@ -523,18 +523,16 @@ def simulate_long_short_returns(
     """结合 turnover-based costs 评估 equal-weight long-short returns。"""
 
     feature = _select_feature(spec, feature_column)
-    _positions, _turnover, returns, _diagnostics = (
-        simulate_weighted_long_short_returns(
-            frame,
-            spec,
-            WeightConfig(
-                method="equal_weight_quantile",
-                top_quantile=top_quantile,
-                bottom_quantile=bottom_quantile,
-                cost_bps=cost_bps,
-            ),
-            portfolio_features=(feature,),
-        )
+    _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
+        frame,
+        spec,
+        WeightConfig(
+            method="equal_weight_quantile",
+            top_quantile=top_quantile,
+            bottom_quantile=bottom_quantile,
+            cost_bps=cost_bps,
+        ),
+        portfolio_features=(feature,),
     )
     return returns[RETURNS_COLUMNS]
 
@@ -779,9 +777,9 @@ def _build_feature_positions(
     feature_values = timestamp_frame[feature].to_numpy(dtype="float64", copy=False)
     valid_mask = ~pd.isna(feature_values)
     if tradability_config.eligibility_column is not None:
-        valid_mask &= timestamp_frame[
-            tradability_config.eligibility_column
-        ].to_numpy(dtype=bool, copy=False)
+        valid_mask &= timestamp_frame[tradability_config.eligibility_column].to_numpy(
+            dtype=bool, copy=False
+        )
     if (
         tradability_config.blocked_entry_policy == "redistribute"
         and tradability_config.can_enter_column is not None
@@ -976,9 +974,8 @@ def _lookup_turnover(
     group_values: dict[str, object],
     segment_columns: tuple[str, ...],
 ) -> float:
-    filters = (
-        (turnover["timestamp"] == group_values["timestamp"])
-        & (turnover["feature"] == group_values["feature"])
+    filters = (turnover["timestamp"] == group_values["timestamp"]) & (
+        turnover["feature"] == group_values["feature"]
     )
     for segment in segment_columns:
         filters &= turnover[segment] == group_values[segment]
@@ -991,9 +988,8 @@ def _lookup_cost(
     group_values: dict[str, object],
     segment_columns: tuple[str, ...],
 ) -> float:
-    filters = (
-        (cost_breakdown["timestamp"] == group_values["timestamp"])
-        & (cost_breakdown["feature"] == group_values["feature"])
+    filters = (cost_breakdown["timestamp"] == group_values["timestamp"]) & (
+        cost_breakdown["feature"] == group_values["feature"]
     )
     for segment in segment_columns:
         filters &= cost_breakdown[segment] == group_values[segment]

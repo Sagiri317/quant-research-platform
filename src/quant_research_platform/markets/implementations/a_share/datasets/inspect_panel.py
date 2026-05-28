@@ -26,10 +26,7 @@ def _print_report_summary(report) -> None:
     print(f"  can_enter: {report.stats.get('can_enter_counts', {})}")
     print(f"  can_exit: {report.stats.get('can_exit_counts', {})}")
     for issue in report.issues:
-        print(
-            f"  {issue.severity}: {issue.check} count={issue.count} "
-            f"{issue.message}"
-        )
+        print(f"  {issue.severity}: {issue.check} count={issue.count} {issue.message}")
 
 
 def main(argv: list[str] | None = None) -> int:

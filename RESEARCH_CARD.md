@@ -12,13 +12,13 @@
 | 项目定位 | 本地多市场量化研究平台；A 股为第一版完整 market module |
 | 数据 | CSMAR 手工导出；2014-2025 raw -> interim -> full panel -> full factor |
 | 主要产物 | `panel_full/research_panel_2014_2025.parquet`；`price_volume_factors_full/price_volume_factors_2014_2025.parquet`；2023-2025 canonical / `rev_120d` evaluation samples；Factor Factory `rev_120d` smoke |
-| evaluation | schema `0.6` evaluation-layer-backed evaluation；`manifest.display` 驱动 API、下载、CSV preview 和 evidence workbench charts |
+| evaluation | schema `0.7` evaluation-layer-backed evaluation；schema registry 和 `manifest.display` 驱动 API、下载、CSV preview 和 evidence workbench charts |
 | 公开边界 | CSMAR 明细数据、private reports 和可还原 vendor 数据不公开 |
 
 ## 方法证据
 
 - `src/quant_research_platform/evaluations/`：`EvaluationSpec`、panel validation、`run_evaluation`。
-- `src/quant_research_platform/artifacts/`：schema `0.6` writer / loader / display contract。
+- `src/quant_research_platform/artifacts/`：schema `0.7` registry / writer / loader / display contract。
 - `src/quant_research_platform/interfaces/api/`：本地 evidence API、CSV preview、direct download、ZIP download。
 - `src/quant_research_platform/markets/implementations/a_share/`：CSMAR-backed A-share data、factor、validation、evaluation adapter。
 - `src/quant_research_platform/pipelines/a_share/`：A 股 workflow runner、checkpoint 和 pipeline contracts。

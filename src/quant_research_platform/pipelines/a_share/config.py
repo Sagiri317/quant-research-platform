@@ -8,6 +8,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
+from quant_research_platform.evaluations.diagnostics.spec import (
+    IMPLEMENTED_MATERIALIZED_VIEWS,
+    REQUESTABLE_MATERIALIZED_VIEWS,
+)
 from quant_research_platform.kernels.kernel_registry import supported_kernel_names
 from quant_research_platform.markets.implementations.a_share.factors import (
     expressions,
@@ -79,9 +83,7 @@ class PipelineConfig:
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> PipelineConfig:
         payload = dict(values)
-        payload["output_root"] = Path(
-            payload.get("output_root", DEFAULT_OUTPUT_ROOT)
-        )
+        payload["output_root"] = Path(payload.get("output_root", DEFAULT_OUTPUT_ROOT))
         payload["raw_root"] = Path(payload.get("raw_root", "data/raw_private/csmar"))
         payload["interim_root"] = Path(
             payload.get("interim_root", "data/interim_private/csmar")
@@ -186,21 +188,38 @@ def validate_pipeline_config(
                 )
             )
         else:
-            if (
-                "industry_neutrality" in config.diagnostics
-                and "industry" not in expression.dependencies
-            ):
-                result.warnings.append(
-                    ValidationIssue(
-                        severity="warning",
-                        code="missing_optional_industry",
-                        message=(
-                            "industry_neutrality diagnostics requested, but the "
-                            "factor expression does not depend on industry"
-                        ),
-                        field="diagnostics",
-                    )
-                )
+            del expression
+
+    unknown_diagnostics = sorted(
+        set(config.diagnostics).difference(REQUESTABLE_MATERIALIZED_VIEWS)
+    )
+    if unknown_diagnostics:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="unsupported_diagnostics",
+                message=(
+                    "unsupported diagnostics materialized views: "
+                    f"{unknown_diagnostics}"
+                ),
+                field="diagnostics",
+            )
+        )
+    unimplemented_diagnostics = sorted(
+        set(config.diagnostics).difference(IMPLEMENTED_MATERIALIZED_VIEWS)
+    )
+    if unimplemented_diagnostics and not unknown_diagnostics:
+        result.blocking.append(
+            ValidationIssue(
+                severity="blocking",
+                code="unimplemented_diagnostics",
+                message=(
+                    "diagnostics materialized views are registered but not "
+                    f"implemented: {unimplemented_diagnostics}"
+                ),
+                field="diagnostics",
+            )
+        )
 
     if config.start_from not in SUPPORTED_START_FROM:
         result.blocking.append(

@@ -24,9 +24,7 @@ def test_time_breakdowns_write_year_quarter_month_summary_artifacts(tmp_path):
             "data_stage": "synthetic_only",
             "uses_external_data": False,
         },
-        weight_configs=(
-            WeightConfig(top_quantile=0.5, bottom_quantile=0.5),
-        ),
+        weight_configs=(WeightConfig(top_quantile=0.5, bottom_quantile=0.5),),
         n_groups=2,
         time_breakdowns=("year", "quarter", "month"),
         output_dir=tmp_path,
@@ -36,79 +34,68 @@ def test_time_breakdowns_write_year_quarter_month_summary_artifacts(tmp_path):
 
     summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
-    assert summary["breakdown_enabled"] is True
-    assert summary["breakdown_columns"] == ["year", "quarter", "month"]
+    base = summary["base_evaluation"]
+    assert base["breakdown_enabled"] is True
+    assert base["breakdown_columns"] == ["year", "quarter", "month"]
     assert (
-        summary["period_breakdown_policy"]
+        base["period_breakdown_policy"]
         == "slice_overall_returns_rebase_period_drawdown"
     )
-    assert manifest["breakdown_enabled"] is True
-    assert manifest["breakdown_columns"] == ["year", "quarter", "month"]
+    manifest_base = manifest["base_evaluation"]
+    assert manifest_base["breakdown_enabled"] is True
+    assert manifest_base["breakdown_columns"] == ["year", "quarter", "month"]
     assert (
-        manifest["period_breakdown_policy"]
+        manifest_base["period_breakdown_policy"]
         == "slice_overall_returns_rebase_period_drawdown"
     )
 
     for period in ("year", "quarter", "month"):
         directory = tmp_path / "breakdowns" / period
-        for name in (
-            f"ic_summary_by_{period}",
-            f"group_spread_summary_by_{period}",
-            f"performance_summary_by_{period}",
-        ):
-            file_name = name.removesuffix(f"_by_{period}")
-            assert (directory / f"{file_name}.csv").exists()
-            assert name in result.metrics
-            assert period in result.metrics[name].columns
-            assert (
-                manifest["artifacts"][f"breakdowns/{period}"][name]
-                == f"breakdowns/{period}/{file_name}.csv"
-            )
-            display_tables = {
-                table["key"]: table for table in manifest["display"]["tables"]
-            }
-            display_downloads = manifest["display"]["downloads"]
-            download_items = {
-                item["item"] for item in display_downloads["items"]
-            }
-            assert display_tables[name]["path"] == (
-                f"breakdowns/{period}/{file_name}.csv"
-            )
-            assert f"breakdowns/{period}/{file_name}.csv" in download_items
-            all_preset = next(
-                preset
-                for preset in display_downloads["presets"]
-                if preset["key"] == "all"
-            )
-            assert f"breakdowns/{period}/{file_name}.csv" in all_preset["items"]
+        name = f"evaluation_metrics_summary_by_{period}"
+        assert (directory / "evaluation_metrics_summary.csv").exists()
+        assert name in result.metrics
+        assert result.metrics[name]["period_type"].eq(period).all()
+        assert (
+            manifest["artifacts"][f"breakdowns/{period}"][name]
+            == f"breakdowns/{period}/evaluation_metrics_summary.csv"
+        )
+        display_tables = {
+            table["key"]: table for table in manifest["display"]["tables"]
+        }
+        display_downloads = manifest["display"]["downloads"]
+        download_items = {
+            (item["kind"], item["key"]) for item in display_downloads["items"]
+        }
+        assert display_tables[name]["path"] == (
+            f"breakdowns/{period}/evaluation_metrics_summary.csv"
+        )
+        assert ("table", name) in download_items
+        all_preset = next(
+            preset for preset in display_downloads["presets"] if preset["key"] == "all"
+        )
+        assert {"kind": "table", "key": name} in all_preset["items"]
 
     performance_by_year = pd.read_csv(
-        tmp_path / "breakdowns" / "year" / "performance_summary.csv"
+        tmp_path / "breakdowns" / "year" / "evaluation_metrics_summary.csv"
     )
-    assert set(performance_by_year["year"]) == {2025, 2026}
-    assert dict(
-        zip(
-            performance_by_year["year"],
-            performance_by_year["periods"],
-            strict=True,
-        )
-    ) == {
+    periods = performance_by_year[
+        performance_by_year["metric_name"].eq("periods")
+    ].set_index("period")["metric_value"]
+    assert set(periods.index.astype(int)) == {2025, 2026}
+    assert periods.astype(float).to_dict() == {
         2025: 2,
         2026: 2,
     }
-    drawdowns = dict(
-        zip(
-            performance_by_year["year"],
-            performance_by_year["max_drawdown"],
-            strict=True,
-        )
-    )
+    drawdowns = performance_by_year[
+        performance_by_year["metric_name"].eq("max_drawdown")
+    ].set_index("period")["metric_value"]
+    drawdowns = pd.to_numeric(drawdowns)
     assert drawdowns[2025] == pytest.approx(-0.2)
     assert drawdowns[2026] == pytest.approx(-0.1)
 
     loaded = load_evaluation_set(tmp_path)
-    assert "ic_summary_by_year" in loaded.tables
-    assert "performance_summary_by_month" in loaded.tables
+    assert "evaluation_metrics_summary_by_year" in loaded.tables
+    assert "evaluation_metrics_summary_by_month" in loaded.tables
 
 
 def test_time_breakdown_performance_slices_overall_returns_without_reweighting():
@@ -118,9 +105,7 @@ def test_time_breakdown_performance_slices_overall_returns_without_reweighting()
 
     returns = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(
-                ["2025-12-31", "2026-01-02", "2026-01-03"]
-            ),
+            "timestamp": pd.to_datetime(["2025-12-31", "2026-01-02", "2026-01-03"]),
             "feature": ["factor", "factor", "factor"],
             "label": ["forward_return", "forward_return", "forward_return"],
             "long_return": [0.4, -0.2, 0.1],

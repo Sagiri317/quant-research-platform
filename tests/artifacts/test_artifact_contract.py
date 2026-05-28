@@ -29,11 +29,17 @@ from quant_research_platform.artifacts.artifact_writer import (
 )
 from quant_research_platform.artifacts.display_manifest import build_display_manifest
 from quant_research_platform.artifacts.display_tables import (
+    display_download_items,
     display_table_preview_limits,
     resolve_display_table_artifact_path,
 )
 from quant_research_platform.artifacts.manifest_validation import (
     validate_display_manifest,
+)
+from quant_research_platform.artifacts.schema_registry import (
+    RETIRED_SCHEMA_06_IDENTITIES,
+    required_metadata_files,
+    required_table_keys,
 )
 from quant_research_platform.interfaces.api.run_index import load_run_index
 from tests.artifacts.artifact_fixtures import write_evaluation_set
@@ -45,51 +51,39 @@ def test_load_evaluation_set_reads_manifest_summary_tables_and_report(tmp_path):
     loaded = load_evaluation_set(tmp_path)
 
     assert loaded.output_dir == tmp_path
-    assert loaded.manifest["evaluation_id"] == "run_a"
+    assert loaded.manifest["run_id"] == "run_a"
+    assert "evaluation_id" not in loaded.manifest
     assert loaded.manifest["artifact_schema_version"] == ARTIFACT_SCHEMA_VERSION
     assert loaded.manifest["artifact_type"] == "evaluation_set"
-    assert loaded.manifest["domain"] == "evaluation_synthetic"
+    assert loaded.manifest["base_evaluation"]["domain"] == "evaluation_synthetic"
     assert loaded.manifest["data_stage"] == "synthetic_only"
-    assert loaded.manifest["uses_external_data"] is False
+    assert loaded.manifest["base_evaluation"]["uses_external_data"] is False
     assert loaded.summary["artifact_schema_version"] == ARTIFACT_SCHEMA_VERSION
-    assert loaded.summary["domain"] == "evaluation_synthetic"
-    assert loaded.summary["uses_external_data"] is False
+    assert loaded.summary["run_id"] == "run_a"
+    assert loaded.summary["base_evaluation"]["domain"] == "evaluation_synthetic"
+    assert loaded.summary["base_evaluation"]["uses_external_data"] is False
     assert loaded.summary["n_rows_evaluated"] == 12
-    assert set(loaded.tables) == {
-        "combinations",
-        "ic",
-        "ic_summary",
-        "grouped_returns",
-        "group_spread_summary",
-        "performance_summary",
-        "returns",
-        "cumulative_returns",
-        "weights",
-        "tradability_diagnostics",
-        "label_availability",
-        "factor_coverage",
-        "tradability_coverage",
-        "evaluation_summary",
-    }
+    assert loaded.run_context["provenance"]["run_id"] == "run_a"
+    assert set(loaded.tables) == set(required_table_keys())
     display_tables = {
-        table["key"]: table
-        for table in loaded.manifest["display"]["tables"]
+        table["key"]: table for table in loaded.manifest["display"]["tables"]
     }
-    assert display_tables["tradability_diagnostics"]["path"] == (
-        "diagnostics/tradability_diagnostics.csv"
+    assert display_tables["diagnostic_summary"]["path"] == (
+        "diagnostics/diagnostic_summary.csv"
     )
-    download_items = {
-        item["item"]
-        for item in loaded.manifest["display"]["downloads"]["items"]
-    }
-    assert "diagnostics/tradability_diagnostics.csv" in download_items
-    assert "portfolio/weights.parquet" in download_items
-    assert "lineage.json" in download_items
-    download_labels = {
-        item["item"]: item["label"]
-        for item in loaded.manifest["display"]["downloads"]["items"]
-    }
-    assert download_labels["portfolio/weights.parquet"].endswith("Parquet")
+    download_items = display_download_items(loaded.manifest)
+    assert {
+        "metadata_file:manifest",
+        "metadata_file:summary",
+        "metadata_file:run_context",
+        "metadata_file:report",
+        "table:diagnostic_summary",
+        "table:evaluation_metrics_summary",
+        "table:returns",
+        "table:coverage_summary",
+    }.issubset(download_items)
+    assert "dynamic:comparison" not in download_items
+    assert not any(item in RETIRED_SCHEMA_06_IDENTITIES for item in download_items)
     assert loaded.tables["ic"]["ic"].tolist() == [0.4]
     assert loaded.report == "# Report\n"
 
@@ -102,13 +96,17 @@ def test_artifact_split_modules_expose_current_evaluation_set_contract():
     assert contract.name == "evaluation_set"
     assert contract.version == ARTIFACT_SCHEMA_VERSION
     assert contract.inputs == ("EvaluationRunPayload",)
-    assert "manifest.json" in contract.outputs
+    assert contract.outputs == required_metadata_files()
     assert "metrics/ic.csv" in contract.downloads
-    assert "portfolio/weights.parquet" in contract.downloads
-    assert "lineage.json" in contract.outputs
+    assert "metrics/evaluation_metrics_summary.csv" in contract.downloads
+    assert "diagnostics/diagnostic_summary.csv" in contract.downloads
+    assert "lineage.json" not in contract.outputs
+    assert "config.json" not in contract.outputs
+    assert "portfolio/cumulative_returns.csv" not in contract.downloads
     assert "ic" not in contract.downloads
     assert "display" in contract.capabilities
     assert set(contract.tables) == set(EVALUATION_SET_REQUIRED_TABLES)
+    assert set(contract.tables) == set(required_table_keys())
     assert callable(load_evaluation_set_from_target_module)
     assert callable(compare_evaluation_sets)
     assert callable(index_evaluation_sets)
@@ -146,7 +144,7 @@ def test_load_evaluation_set_reports_missing_manifest_section(tmp_path):
     del manifest["artifacts"]["portfolio"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="portfolio"):
+    with pytest.raises(ValueError, match="returns"):
         load_evaluation_set(tmp_path)
 
 
@@ -174,7 +172,7 @@ def test_display_manifest_rejects_duplicate_table_keys(tmp_path):
     duplicate = dict(manifest["display"]["tables"][0])
     manifest["display"]["tables"].append(duplicate)
 
-    with pytest.raises(ValueError, match="duplicate display table key"):
+    with pytest.raises(ValueError, match="duplicate or invalid table key"):
         validate_display_manifest(manifest)
 
 
@@ -184,7 +182,7 @@ def test_display_manifest_rejects_preview_descriptor_mismatch(tmp_path):
     table = next(
         table
         for table in manifest["display"]["tables"]
-        if table["key"] == "tradability_diagnostics"
+        if table["key"] == "diagnostic_summary"
     )
     table["preview"]["supports_combination_filter"] = False
 
@@ -199,14 +197,14 @@ def test_display_table_resolver_reads_preview_limits_and_artifact_path(tmp_path)
     path = resolve_display_table_artifact_path(
         manifest,
         tmp_path,
-        "tradability_diagnostics",
+        "diagnostic_summary",
     )
     preview = display_table_preview_limits(
         manifest,
-        "tradability_diagnostics",
+        "diagnostic_summary",
     )
 
-    assert path == tmp_path / "diagnostics" / "tradability_diagnostics.csv"
+    assert path == tmp_path / "diagnostics" / "diagnostic_summary.csv"
     assert preview.default_limit == 20
     assert preview.max_limit == 1000
     assert preview.supports_combination_filter is True
@@ -237,10 +235,12 @@ def test_run_index_rejects_display_chart_missing_columns(tmp_path):
             "id": "stale-chart",
             "title": "Stale chart",
             "description": "References a removed column",
-            "kind": "line",
-            "table": "returns",
+            "kind": "derived_cumulative_return",
+            "source_table_key": "returns",
             "x": "timestamp",
-            "series": [{"key": "missing_return_column"}],
+            "input_series": "missing_return_column",
+            "transform": "compound_cumulative_return",
+            "output_series": "missing_cumulative_return",
         }
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -249,14 +249,84 @@ def test_run_index_rejects_display_chart_missing_columns(tmp_path):
         load_run_index("platform", tmp_path)
 
 
-def test_load_evaluation_set_rejects_legacy_run_without_tradability_table(tmp_path):
+def test_run_index_rejects_display_chart_missing_source_table(tmp_path):
     write_evaluation_set(tmp_path)
     manifest_path = tmp_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    del manifest["artifacts"]["diagnostics"]["tradability_diagnostics"]
+    manifest["display"]["charts"][0]["source_table_key"] = "weights"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="diagnostics.tradability_diagnostics"):
+    with pytest.raises(ValueError, match="source table mismatch"):
+        load_run_index("platform", tmp_path)
+
+
+def test_run_index_rejects_display_chart_stale_source_path(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["display"]["charts"][0]["source_path"] = (
+        "portfolio/cumulative_returns.csv"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_path mismatch"):
+        load_run_index("platform", tmp_path)
+
+
+def test_run_index_rejects_duplicate_schema_registry_unique_key(tmp_path):
+    write_evaluation_set(tmp_path)
+    diagnostics_path = tmp_path / "diagnostics" / "diagnostic_summary.csv"
+    diagnostics = pd.read_csv(diagnostics_path)
+    pd.concat([diagnostics, diagnostics.iloc[[0]]], ignore_index=True).to_csv(
+        diagnostics_path,
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="diagnostic_summary duplicate unique key"):
+        load_run_index("platform", tmp_path)
+
+
+def test_display_manifest_requires_registry_charts(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    manifest["display"].pop("charts")
+
+    with pytest.raises(ValueError, match="display.charts"):
+        validate_display_manifest(manifest)
+
+
+def test_display_manifest_rejects_legacy_chart_table_field(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["display"]["charts"][0]["table"] = "portfolio/cumulative_returns"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not include table"):
+        load_run_index("platform", tmp_path)
+
+
+def test_display_manifest_rejects_preset_unexposed_metadata_ref(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    manifest["display"]["downloads"]["presets"][0]["items"].append(
+        {"kind": "metadata_file", "key": "lineage"}
+    )
+
+    with pytest.raises(ValueError, match="unexposed item"):
+        validate_display_manifest(manifest)
+
+
+def test_load_evaluation_set_rejects_legacy_schema_06_table_identity(tmp_path):
+    write_evaluation_set(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["metrics"]["performance_summary"] = (
+        "metrics/performance_summary.csv"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="retired identity"):
         load_evaluation_set(tmp_path)
 
 
@@ -272,17 +342,17 @@ def test_load_evaluation_set_reports_missing_required_csv_column(tmp_path):
         }
     ).to_csv(tmp_path / "metrics" / "ic.csv", index=False)
 
-    with pytest.raises(ValueError, match="ic is missing columns"):
+    with pytest.raises(ValueError, match="ic missing columns"):
         load_evaluation_set(tmp_path)
 
 
-def test_load_evaluation_set_reports_missing_tradability_diagnostic_column(tmp_path):
+def test_load_evaluation_set_reports_missing_diagnostic_summary_column(tmp_path):
     write_evaluation_set(tmp_path)
-    path = tmp_path / "diagnostics" / "tradability_diagnostics.csv"
-    diagnostics = pd.read_csv(path).drop(columns=["eligible_rate"])
+    path = tmp_path / "diagnostics" / "diagnostic_summary.csv"
+    diagnostics = pd.read_csv(path).drop(columns=["decision_usable"])
     diagnostics.to_csv(path, index=False)
 
-    with pytest.raises(ValueError, match="tradability_diagnostics is missing columns"):
+    with pytest.raises(ValueError, match="diagnostic_summary missing columns"):
         load_evaluation_set(tmp_path)
 
 
@@ -306,55 +376,42 @@ def test_load_evaluation_set_rejects_legacy_0_4_artifacts(tmp_path):
         if file_name == "manifest.json":
             payload["display"]["schema_version"] = "0.4"
         path.write_text(json.dumps(payload), encoding="utf-8")
-    performance_path = tmp_path / "metrics" / "performance_summary.csv"
-    performance = pd.read_csv(performance_path).rename(
-        columns={
-            "final_cumulative_gross_return": "total_gross_portfolio_return",
-            "final_cumulative_net_return": "total_net_portfolio_return",
-        }
-    )
-    performance.to_csv(performance_path, index=False)
 
     with pytest.raises(ValueError, match="unsupported artifact_schema_version"):
         load_evaluation_set(tmp_path)
 
 
-def test_load_evaluation_set_rejects_stale_return_columns_under_current_schema(
+def test_load_evaluation_set_rejects_stale_schema_06_return_columns(
     tmp_path,
 ):
     write_evaluation_set(tmp_path)
-    performance_path = tmp_path / "metrics" / "performance_summary.csv"
-    performance = pd.read_csv(performance_path).rename(
-        columns={
-            "final_cumulative_gross_return": "total_gross_portfolio_return",
-            "final_cumulative_net_return": "total_net_portfolio_return",
-        }
+    returns_path = tmp_path / "portfolio" / "returns.csv"
+    returns = pd.read_csv(returns_path).rename(
+        columns={"net_return": "net_portfolio_return"}
     )
-    performance.to_csv(performance_path, index=False)
+    returns.to_csv(returns_path, index=False)
 
-    with pytest.raises(ValueError, match="retired columns"):
+    with pytest.raises(ValueError, match="returns missing columns"):
         load_evaluation_set(tmp_path)
 
 
-def test_load_evaluation_set_requires_current_final_return_columns(tmp_path):
+def test_load_evaluation_set_requires_current_evaluation_metric_columns(tmp_path):
     write_evaluation_set(tmp_path)
-    performance_path = tmp_path / "metrics" / "performance_summary.csv"
-    performance = pd.read_csv(performance_path).drop(
-        columns=["final_cumulative_net_return"]
-    )
-    performance.to_csv(performance_path, index=False)
+    metrics_path = tmp_path / "metrics" / "evaluation_metrics_summary.csv"
+    metrics = pd.read_csv(metrics_path).drop(columns=["metric_value"])
+    metrics.to_csv(metrics_path, index=False)
 
-    with pytest.raises(ValueError, match="performance_summary is missing columns"):
+    with pytest.raises(ValueError, match="evaluation_metrics_summary missing columns"):
         load_evaluation_set(tmp_path)
 
 
-def test_load_evaluation_set_requires_index_performance_columns(tmp_path):
+def test_load_evaluation_set_requires_current_coverage_columns(tmp_path):
     write_evaluation_set(tmp_path)
-    performance_path = tmp_path / "metrics" / "performance_summary.csv"
-    performance = pd.read_csv(performance_path).drop(columns=["sharpe_like"])
-    performance.to_csv(performance_path, index=False)
+    coverage_path = tmp_path / "input_quality" / "coverage_summary.csv"
+    coverage = pd.read_csv(coverage_path).drop(columns=["coverage_rate"])
+    coverage.to_csv(coverage_path, index=False)
 
-    with pytest.raises(ValueError, match="performance_summary is missing columns"):
+    with pytest.raises(ValueError, match="coverage_summary missing columns"):
         load_evaluation_set(tmp_path)
 
 
@@ -366,15 +423,16 @@ def test_load_evaluation_set_rejects_display_download_item_that_escapes_zip(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["display"]["downloads"]["items"].append(
         {
-            "item": "../evil.csv",
-            "label": "Unsafe",
             "kind": "table",
-            "table": "ic",
+            "key": "../evil",
+            "label": "Unsafe",
+            "path": "../evil.csv",
+            "table": "../evil",
         }
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="display"):
+    with pytest.raises(ValueError, match="path mismatch"):
         load_evaluation_set(tmp_path)
 
 
@@ -387,7 +445,7 @@ def test_load_evaluation_set_rejects_display_manifest_missing_artifact_table(
     manifest["display"]["tables"] = [
         table
         for table in manifest["display"]["tables"]
-        if table.get("key") != "performance_summary"
+        if table.get("key") != "evaluation_metrics_summary"
     ]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -402,7 +460,7 @@ def test_load_evaluation_set_rejects_unknown_artifact_entries(tmp_path):
     manifest["artifacts"]["private_debug"] = "private/debug.csv"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="unknown artifact groups"):
+    with pytest.raises(ValueError, match="unknown artifact group"):
         load_evaluation_set(tmp_path)
 
 
@@ -410,10 +468,10 @@ def test_load_evaluation_set_rejects_missing_metadata_artifact_key(tmp_path):
     write_evaluation_set(tmp_path)
     manifest_path = tmp_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    del manifest["artifacts"]["lineage"]
+    del manifest["artifacts"]["run_context"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="missing required artifact groups"):
+    with pytest.raises(ValueError, match="must include run_context"):
         load_evaluation_set(tmp_path)
 
 
@@ -421,12 +479,10 @@ def test_load_evaluation_set_rejects_unknown_artifact_table_entries(tmp_path):
     write_evaluation_set(tmp_path)
     manifest_path = tmp_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifacts"]["summaries"]["private_debug"] = (
-        "summaries/private_debug.csv"
-    )
+    manifest["artifacts"]["metrics"]["private_debug"] = "metrics/private_debug.csv"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="unknown artifacts.summaries"):
+    with pytest.raises(ValueError, match="not in schema registry"):
         load_evaluation_set(tmp_path)
 
 
@@ -436,14 +492,16 @@ def test_load_evaluation_set_rejects_unknown_display_download_item(tmp_path):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["display"]["downloads"]["items"].append(
         {
-            "item": "missing.csv",
+            "kind": "table",
+            "key": "missing",
             "label": "Missing",
-            "kind": "csv",
+            "path": "missing.csv",
+            "table": "missing",
         }
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="known metadata item or table artifact"):
+    with pytest.raises(ValueError, match="path mismatch"):
         load_evaluation_set(tmp_path)
 
 
@@ -453,7 +511,7 @@ def test_writer_rejects_missing_required_table_before_writing(tmp_path):
     write_evaluation_set(source)
     loaded = load_evaluation_set(source)
     tables = dict(loaded.tables)
-    tables.pop("cumulative_returns")
+    tables.pop("diagnostic_summary")
 
     with pytest.raises(ValueError, match="missing required evaluation-set tables"):
         write_evaluation_set_artifacts(
@@ -478,10 +536,12 @@ def test_writer_rejects_display_chart_missing_columns_before_writing(tmp_path):
         {
             "id": "bad-chart",
             "title": "Bad chart",
-            "kind": "line",
-            "table": "ic",
+            "kind": "derived_cumulative_return",
+            "source_table_key": "ic",
             "x": "timestamp",
-            "series": [{"key": "missing_ic_column", "label": "Missing"}],
+            "input_series": "missing_ic_column",
+            "transform": "compound_cumulative_return",
+            "output_series": "missing_cumulative_ic",
         }
     )
 
@@ -505,14 +565,12 @@ def test_writer_rejects_display_table_missing_from_write_payload(tmp_path):
     loaded = load_evaluation_set(source)
     tables = dict(loaded.tables)
     manifest = json.loads(json.dumps(loaded.manifest))
-    manifest["artifacts"]["summaries"]["custom_summary"] = (
-        "summaries/custom_summary.csv"
-    )
-    manifest["display"] = build_display_manifest(
-        manifest["artifacts"],
-        schema_version=ARTIFACT_SCHEMA_VERSION,
-    )
-    with pytest.raises(ValueError, match="unknown artifacts.summaries"):
+    manifest["display"]["tables"] = [
+        table
+        for table in manifest["display"]["tables"]
+        if table.get("key") != "diagnostic_summary"
+    ]
+    with pytest.raises(ValueError, match="display.tables must cover"):
         write_evaluation_set_artifacts(
             target,
             manifest=manifest,
@@ -531,7 +589,14 @@ def test_writer_rejects_tables_not_declared_by_manifest(tmp_path):
     write_evaluation_set(source)
     loaded = load_evaluation_set(source)
     tables = dict(loaded.tables)
-    tables["private_debug"] = tables["ic"].copy()
+    tables["weights"] = pd.DataFrame(
+        {
+            "combination_id": ["factor__forward_return__dataframe__long_short"],
+            "timestamp": ["2026-01-01"],
+            "asset": ["asset_001"],
+            "target_weight": [1.0],
+        }
+    )
 
     with pytest.raises(ValueError, match="not declared by manifest"):
         write_evaluation_set_artifacts(
@@ -546,24 +611,14 @@ def test_writer_rejects_tables_not_declared_by_manifest(tmp_path):
     assert not (target / "manifest.json").exists()
 
 
-def test_load_evaluation_set_rejects_display_chart_for_unknown_table(tmp_path):
+def test_load_evaluation_set_rejects_summary_with_evaluation_id(tmp_path):
     write_evaluation_set(tmp_path)
-    manifest_path = tmp_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["display"]["charts"].append(
-        {
-            "id": "unknown",
-            "title": "Unknown",
-            "description": "Unknown chart",
-            "kind": "line",
-            "table": "missing_table",
-            "x": "timestamp",
-            "series": [{"key": "value", "color": "#111827"}],
-        }
-    )
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    summary_path = tmp_path / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["evaluation_id"] = summary["run_id"]
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="display chart"):
+    with pytest.raises(ValueError, match="must not serialize evaluation_id"):
         load_evaluation_set(tmp_path)
 
 
@@ -576,21 +631,21 @@ def test_load_evaluation_set_rejects_report_path_that_escapes_run_dir(tmp_path):
     manifest["artifacts"]["report"] = "../outside_report.md"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="unsafe"):
+    with pytest.raises(ValueError, match="report.md"):
         load_evaluation_set(tmp_path)
 
 
 def test_load_run_index_rejects_metric_path_that_escapes_run_dir(tmp_path):
     write_evaluation_set(tmp_path)
-    outside_performance = tmp_path.parent / "outside_performance_summary.csv"
-    outside_performance.write_bytes(
-        (tmp_path / "metrics" / "performance_summary.csv").read_bytes()
+    outside_metrics = tmp_path.parent / "outside_evaluation_metrics_summary.csv"
+    outside_metrics.write_bytes(
+        (tmp_path / "metrics" / "evaluation_metrics_summary.csv").read_bytes()
     )
     manifest_path = tmp_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifacts"]["metrics"][
-        "performance_summary"
-    ] = "../outside_performance_summary.csv"
+    manifest["artifacts"]["metrics"]["evaluation_metrics_summary"] = (
+        "../outside_evaluation_metrics_summary.csv"
+    )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="unsafe"):
@@ -599,21 +654,21 @@ def test_load_run_index_rejects_metric_path_that_escapes_run_dir(tmp_path):
 
 def test_load_run_index_rejects_missing_required_artifact_file(tmp_path):
     write_evaluation_set(tmp_path)
-    (tmp_path / "portfolio" / "weights.parquet").unlink()
+    (tmp_path / "diagnostics" / "diagnostic_summary.csv").unlink()
 
-    with pytest.raises(FileNotFoundError, match="portfolio/weights.parquet"):
+    with pytest.raises(FileNotFoundError, match="diagnostics/diagnostic_summary.csv"):
         load_run_index("platform", tmp_path)
 
 
 def test_load_run_index_rejects_missing_required_columns(tmp_path):
     write_evaluation_set(tmp_path)
-    performance_path = tmp_path / "metrics" / "performance_summary.csv"
-    performance = pd.read_csv(performance_path).drop(
-        columns=["mean_net_portfolio_return"]
-    )
-    performance.to_csv(performance_path, index=False)
+    metrics_path = tmp_path / "metrics" / "evaluation_metrics_summary.csv"
+    metrics = pd.read_csv(metrics_path).drop(columns=["metric_value"])
+    metrics.to_csv(metrics_path, index=False)
 
-    with pytest.raises(ValueError, match="performance_summary is missing columns"):
+    with pytest.raises(
+        ValueError, match="evaluation_metrics_summary is missing columns"
+    ):
         load_run_index("platform", tmp_path)
 
 
@@ -624,7 +679,7 @@ def test_load_run_index_rejects_unknown_artifact_entries(tmp_path):
     manifest["artifacts"]["private_debug"] = "private/debug.csv"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="unknown artifact groups"):
+    with pytest.raises(ValueError, match="unknown artifact group"):
         load_run_index("platform", tmp_path)
 
 
@@ -637,10 +692,12 @@ def test_load_evaluation_set_rejects_display_chart_for_missing_columns(tmp_path)
             "id": "bad_columns",
             "title": "Bad columns",
             "description": "Bad chart",
-            "kind": "line",
-            "table": "ic",
+            "kind": "derived_cumulative_return",
+            "source_table_key": "ic",
             "x": "missing_timestamp",
-            "series": [{"key": "missing_ic", "color": "#111827"}],
+            "input_series": "missing_ic",
+            "transform": "compound_cumulative_return",
+            "output_series": "missing_cumulative_ic",
         }
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -649,24 +706,14 @@ def test_load_evaluation_set_rejects_display_chart_for_missing_columns(tmp_path)
         load_evaluation_set(tmp_path)
 
 
-def test_load_evaluation_set_rejects_display_chart_for_unsupported_kind(tmp_path):
+def test_load_evaluation_set_rejects_manifest_with_evaluation_id(tmp_path):
     write_evaluation_set(tmp_path)
     manifest_path = tmp_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["display"]["charts"].append(
-        {
-            "id": "scatter",
-            "title": "Scatter",
-            "description": "Unsupported chart",
-            "kind": "scatter",
-            "table": "ic",
-            "x": "timestamp",
-            "series": [{"key": "ic", "color": "#111827"}],
-        }
-    )
+    manifest["evaluation_id"] = manifest["run_id"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="display chart"):
+    with pytest.raises(ValueError, match="must not serialize evaluation_id"):
         load_evaluation_set(tmp_path)
 
 
@@ -674,24 +721,21 @@ def test_load_evaluation_set_rejects_missing_minimum_run_metadata(tmp_path):
     write_evaluation_set(tmp_path)
     summary_path = tmp_path / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    summary.pop("domain", None)
+    summary.pop("base_evaluation", None)
     summary_path.write_text(json.dumps(summary), encoding="utf-8")
 
     with pytest.raises(ValueError, match="summary.json is missing required fields"):
         load_evaluation_set(tmp_path)
 
 
-def test_load_evaluation_set_rejects_non_boolean_external_data_flag(tmp_path):
+def test_load_evaluation_set_rejects_run_context_id_mismatch(tmp_path):
     write_evaluation_set(tmp_path)
-    manifest_path = tmp_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["uses_external_data"] = "false"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    run_context_path = tmp_path / "run_context.json"
+    run_context = json.loads(run_context_path.read_text(encoding="utf-8"))
+    run_context["provenance"]["run_id"] = "other"
+    run_context_path.write_text(json.dumps(run_context), encoding="utf-8")
 
-    with pytest.raises(
-        TypeError,
-        match="manifest.json uses_external_data must be bool",
-    ):
+    with pytest.raises(ValueError, match="run_id"):
         load_evaluation_set(tmp_path)
 
 

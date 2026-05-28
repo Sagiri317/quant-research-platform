@@ -22,7 +22,7 @@ flowchart LR
   spec["EvaluationSpec"]
   payload["evaluate_to_payload"]
   writer["write_evaluation_set_artifacts"]
-  artifacts["schema 0.6 evaluation_set"]
+  artifacts["schema 0.7 evaluation_set"]
   display["manifest.display"]
 
   raw --> interim --> panel --> factors
@@ -38,7 +38,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  artifacts["schema 0.6 evaluation_set"]
+  artifacts["schema 0.7 evaluation_set"]
   display["manifest.display"]
   loader["artifact loader"]
   package["Artifact ZIP package\nartifact_package.py"]
@@ -81,9 +81,9 @@ flowchart LR
   factory_artifacts["Factor Factory artifacts\nschema 0.1"]
   factory_api["Factor Factory API\n(run_id)"]
   factory_ui["FactorFactoryRuns UI"]
-  upload["CSV Upload UI/API\nlegacy/dev"]
-  upload_service["upload_service\nlegacy/dev"]
-  uploaded_artifacts["uploaded evaluation_set\nschema 0.6"]
+  upload["CSV Upload UI/API\nlocal/dev"]
+  upload_service["upload_service\nlocal/dev"]
+  uploaded_artifacts["uploaded evaluation_set\nschema 0.7"]
   run_repo["run_repository\nAPI-visible roots"]
   evidence_api["Evidence API\n(source_alias, run_id)"]
   a_share_cli["A-share eval CLI\nrun_factor_evaluation"]
@@ -110,7 +110,7 @@ flowchart LR
 
 - `run_evaluation` 是 `qrp evaluate-parquet` 等通用入口使用的 wrapper，不是 A-share 私有主链路的必经节点。
 - Factor Studio 通过 `GET /api/factor-templates` 读取模板，不直接绕过 API 访问 registry。
-- CSV Upload UI/API 是本地 legacy/dev 兼容路径，不是 A-share 私有主链路。
+- CSV Upload UI/API 是本地 local/dev 兼容路径，不是 A-share 私有主链路。
 
 ## 主链路
 
@@ -126,7 +126,7 @@ CSMAR raw CSV
 -> EvaluationSpec
 -> evaluate_to_payload
 -> write_evaluation_set_artifacts
--> schema 0.6 evaluation_set artifacts
+-> schema 0.7 evaluation_set artifacts
 -> manifest.display
 -> API / downloads / React workbench
 ```
@@ -179,8 +179,8 @@ rebuild_interim  -> build_interim -> build_panel -> build_factors -> evaluation
 
 ## Evaluation、Artifact 与显示契约
 
-- Evaluation artifact 类型是 `evaluation_set`，schema version 是 `0.6`。
-- `EvaluationSpec` 是 evaluation layer 的输入契约；A-share 专用评估路径构造 `EvaluationSpec` 后调用 `evaluate_to_payload(spec)`，合并 payload 后由 `write_evaluation_set_artifacts(...)` 写出 schema `0.6` artifacts。
+- Evaluation artifact 类型是 `evaluation_set`，schema version 是 `0.7`。
+- `EvaluationSpec` 是 evaluation layer 的输入契约；A-share 专用评估路径构造 `EvaluationSpec` 后调用 `evaluate_to_payload(spec)`，合并 payload 后由 `write_evaluation_set_artifacts(...)` 写出 schema `0.7` artifacts。
 - `run_evaluation(spec)` 是通用 wrapper，当前由 `qrp evaluate-parquet` 等通用入口使用，内部同样调用 `evaluate_to_payload(spec)` 并写出 artifacts。
 - `manifest.display` 是 API evidence、CSV preview、direct download、ZIP download、frontend tables、frontend charts 和 download presets 的唯一展示契约。
 - API-visible evaluation run identity 是 `(source_alias, run_id)`；run list、evidence routes、CSV preview、direct download、ZIP cache path、comparison payload 和 frontend routing 都必须保留这个身份。
@@ -197,7 +197,7 @@ rebuild_interim  -> build_interim -> build_panel -> build_factors -> evaluation
 - Pipeline: `POST /api/pipeline-snapshots`、`POST /api/pipeline-runs`
 - Factor templates: `GET /api/factor-templates`
 - Factor Factory: `GET /api/factor-factory-runs`、`GET /api/factor-factory-runs/{run_id}`、`GET /api/factor-factory-runs/{run_id}/tables/{table_key}`、`GET /api/factor-factory-runs/{run_id}/artifacts/{artifact_item:path}`
-- CSV upload compatibility: `POST /api/runs`、`GET /api/templates/factor-csv`，仅用于本地 legacy/dev 上传路径，不是 A-share 私有主链路。
+- CSV upload compatibility: `POST /api/runs`、`GET /api/templates/factor-csv`，仅用于本地 local/dev 上传路径，不是 A-share 私有主链路。
 
 关键 N8 helper/service：
 
@@ -214,13 +214,13 @@ web/src/shell -> web/src/features -> web/src/shared
 
 `web/src/features/evidence/` 通过 API evidence/display payload 消费由 `manifest.display` 驱动的表格、图表、CSV preview、report 和下载；图表源表按 `preview.max_limit` 通过 `limit` / `offset` / `has_more` 分页拼接当前组合时间序列，CSV 明细仍保持 display preview row limit 并把完整行数据交给下载入口；`web/src/features/factor-studio/` 通过 `GET /api/factor-templates` 读取受控模板，并把 `factorDraft` 交给 `web/src/features/pipeline/` 的 Pipeline Builder；Pipeline Builder 执行 run 后刷新 `/api/runs`、选中 `pipeline/<run_ref or run_id>` 并切回 evidence workbench；`web/src/features/factor-factory/` 通过 Factor Factory API 浏览 run、table preview 和 artifact downloads；`web/src/features/uploads/` 是本地 CSV upload 兼容/调试路径，不是 A-share 私有主链路。
 
-交互 HTML 的连线按数据/契约可用流阅读，不逐条等同 HTTP request 方向；具体调用方向在入口节点详情里说明。默认布局以左到右主流向为准，局部上下回流用于减少交叉和遮挡。交互 HTML 允许少量复合节点：只有前端 UI 与后端 API 是单一路径、没有复用分叉、没有独立职责边界时才合并，并且节点必须显式标注为 `Frontend + API`。当前 `CSV Upload UI/API (legacy/dev)` 就是这种复合节点；Factor Factory UI 与 API、Pipeline Builder 与 Pipeline API、Factor Studio 与 factor-template endpoint 都保持拆分。
+交互 HTML 的连线按数据/契约可用流阅读，不逐条等同 HTTP request 方向；具体调用方向在入口节点详情里说明。默认布局以左到右主流向为准，局部上下回流用于减少交叉和遮挡。交互 HTML 允许少量复合节点：只有前端 UI 与后端 API 是单一路径、没有复用分叉、没有独立职责边界时才合并，并且节点必须显式标注为 `Frontend + API`。当前 `CSV Upload UI/API (local/dev)` 就是这种复合节点；Factor Factory UI 与 API、Pipeline Builder 与 Pipeline API、Factor Studio 与 factor-template endpoint 都保持拆分。
 
 ## Factor Factory
 
 - Factor Factory 使用 `research/factor_factory/` 下的模板注册、batch runner 和 report writer。
 - Factory batch runner 当前以 controlled factor templates 生成候选，并调用 A-share runner，通常从 `start_from=existing_factors` 开始。
-- Factor Factory artifact schema 是 `0.1`，不同于 evaluation-set schema `0.6`；不要把二者混为同一个 artifact contract。
+- Factor Factory artifact schema 是 `0.1`，不同于 evaluation-set schema `0.7`；不要把二者混为同一个 artifact contract。
 - Factor Factory API 只暴露 manifest/display 允许的 run detail、table preview 和 artifact download；前端 `FactorFactoryRuns` 是单独 UI 消费者，不与 API 节点合并。
 
 ## CLI 入口

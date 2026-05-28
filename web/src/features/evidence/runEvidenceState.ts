@@ -9,7 +9,7 @@ export type RunState = {
   combinationSummaries: TablePayload | null
   detail: RunDetail | null
   display: RunDisplay | null
-  reportMarkdown: string
+  reportMarkdown: string | null
   tables: Record<string, TablePayload>
   comparison: TablePayload | null
 }
@@ -18,7 +18,7 @@ export const EMPTY_RUN_STATE: RunState = {
   combinationSummaries: null,
   detail: null,
   display: null,
-  reportMarkdown: '',
+  reportMarkdown: null,
   tables: {},
   comparison: null,
 }
@@ -28,7 +28,7 @@ export function buildRunStateFromEvidence(evidence: RunEvidence): RunState {
     detail: evidence.summary,
     display: evidence.display,
     combinationSummaries: evidence.combination_summaries ?? null,
-    reportMarkdown: evidence.report?.markdown ?? '',
+    reportMarkdown: evidence.report?.markdown ?? null,
     comparison: evidence.comparison ?? null,
     tables: evidence.tables ?? {},
   }

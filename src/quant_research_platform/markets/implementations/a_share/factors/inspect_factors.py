@@ -27,10 +27,7 @@ def _print_report_summary(report) -> None:
         f"labels={report.stats.get('label_count')}"
     )
     for issue in report.issues:
-        print(
-            f"  {issue.severity}: {issue.check} count={issue.count} "
-            f"{issue.message}"
-        )
+        print(f"  {issue.severity}: {issue.check} count={issue.count} {issue.message}")
 
 
 def main(argv: list[str] | None = None) -> int:

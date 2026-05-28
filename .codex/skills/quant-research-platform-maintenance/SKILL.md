@@ -105,7 +105,7 @@ Read [references/contracts-and-verification.md](references/contracts-and-verific
 - API/download validation;
 - frontend state and browser acceptance;
 - A-share pipeline/runtime boundaries;
-- Phase 1 acceptance script usage;
+- generated-run acceptance and cleanup rules;
 - skill-governance and global-skill sedimentation recommendations.
 
 Read [references/code-map-flow.md](references/code-map-flow.md) when changing or reviewing `docs/code-map/platform-flow.md` or `docs/code-map/platform-flow-interactive.html`, especially node/edge coverage, API/frontend relationship direction, interactive edge editing, or MD/HTML synchronization.

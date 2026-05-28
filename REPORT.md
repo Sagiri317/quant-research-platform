@@ -13,7 +13,7 @@
 | 第一市场模块 | A 股 |
 | 数据源 | CSMAR，用户手工导出 |
 | 数据范围 | 2014-2025 interim / panel / factor 已有历史产物 |
-| 评估范围 | 历史 2024-2025 long-only full-sample evaluation；当前保留 2023-2025 schema `0.6` canonical sample、`rev_120d` kernel / portfolio parity shard 和 Factor Factory smoke；N1/N2/N3/N4/N7/N8 已合入 `main` |
+| 评估范围 | 历史 2024-2025 long-only full-sample evaluation；当前保留 2023-2025 schema `0.7` canonical sample、`rev_120d` kernel / portfolio parity shard 和 Factor Factory smoke；N1/N2/N3/N4/N7/N8 已合入 `main` |
 | universe | 第一版 A 股范围，排除 B 股和北交所 |
 | 私有边界 | raw/interim/processed 和 private reports 不公开、不提交 |
 
@@ -26,7 +26,7 @@ CSMAR raw exports
   -> price_volume_factors_2014_2025.parquet
   -> EvaluationSpec
   -> quant_research_platform.run_evaluation
-  -> schema 0.6 artifacts
+  -> schema 0.7 artifacts
   -> API / downloads / evidence workbench
 ```
 
@@ -53,7 +53,7 @@ reports/private_real/ff/
   20260527_rev120_factory_smoke_v1/
 ```
 
-当前标准 evaluation run 应输出 schema `0.6` artifacts，并通过 `manifest.display` 暴露可浏览表格、下载项、下载 preset 和图表配置。没有进入 `manifest.display` 的文件不应成为前端或下载接口的隐式展示项。
+当前标准 evaluation run 应输出 schema `0.7` artifacts，并通过 schema registry 和 `manifest.display` 暴露可浏览表格、下载项、下载 preset 和图表配置。没有进入 `manifest.display` 的文件不应成为前端或下载接口的隐式展示项。
 
 ## Evaluation 口径
 

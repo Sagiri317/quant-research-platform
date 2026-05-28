@@ -11,6 +11,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 from quant_research_platform.markets.implementations.a_share.csmar import (
     build_interim,
 )
@@ -45,6 +46,7 @@ EvaluateStep = Callable[[PipelineConfig, Path], StepPayload]
 build_interim_main = build_interim.main
 build_panel_main = build_panel.main
 build_factors_main = build_factors.main
+
 
 class PipelineRunnerError(RuntimeError):
     """Raised when the A-share pipeline cannot continue."""
@@ -436,6 +438,12 @@ def _run_evaluate_step(
             kernels=(config.kernel,),
             source_alias="pipeline",
             manifest_run_id=run_dir.name,
+            diagnostics_spec=DiagnosticsSpec.from_request(
+                {
+                    "enabled": bool(config.diagnostics),
+                    "materialized_views": list(config.diagnostics),
+                }
+            ),
         )
     )
     label_summary = result.label_summary

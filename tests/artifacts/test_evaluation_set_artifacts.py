@@ -24,7 +24,7 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
         label_columns=("ret_5d", "ret_20d"),
         return_source_column="forward_return_1d",
         metadata={
-            "evaluation_id": "evaluation_demo",
+            "run_id": "evaluation_demo",
             "project": "quant-research-platform",
             "kind": "factor",
             "domain": "evaluation_synthetic",
@@ -49,18 +49,23 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
     summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
     combinations = pd.read_csv(output_dir / "dimensions" / "combinations.csv")
     returns = pd.read_csv(output_dir / "portfolio" / "returns.csv")
-    cumulative_returns = pd.read_csv(
-        output_dir / "portfolio" / "cumulative_returns.csv"
-    )
-    weights = pd.read_parquet(output_dir / "portfolio" / "weights.parquet")
     ic = pd.read_csv(output_dir / "metrics" / "ic.csv")
+    run_context = json.loads(
+        (output_dir / "run_context.json").read_text(encoding="utf-8")
+    )
 
     assert manifest["artifact_schema_version"] == ARTIFACT_SCHEMA_VERSION
     assert manifest["artifact_type"] == "evaluation_set"
     assert summary["artifact_type"] == "evaluation_set"
+    assert summary["run_id"] == "evaluation_demo"
     assert summary["n_combinations"] == 4
-    assert manifest["kernel"] == "dataframe"
-    assert "engine" not in manifest
+    assert manifest["run_id"] == "evaluation_demo"
+    assert "evaluation_id" not in manifest
+    assert not (output_dir / "config.json").exists()
+    assert not (output_dir / "lineage.json").exists()
+    assert (output_dir / "metrics" / "evaluation_metrics_summary.csv").is_file()
+    assert (output_dir / "input_quality" / "coverage_summary.csv").is_file()
+    assert (output_dir / "diagnostics" / "diagnostic_summary.csv").is_file()
     assert result.combinations_path == output_dir / "dimensions" / "combinations.csv"
     assert not (output_dir / "portfolio" / "long_short.csv").exists()
     assert not (output_dir / "portfolio" / "pnl.csv").exists()
@@ -79,24 +84,34 @@ def test_run_evaluation_writes_batch_native_evaluation_set(tmp_path):
     assert set(combinations["label"]) == {"ret_5d", "ret_20d"}
     assert {
         "gross_portfolio_return",
-        "net_portfolio_return",
+        "net_return",
         "short_count",
     }.issubset(returns.columns)
     assert returns["short_count"].eq(0).all()
     assert "return_source_column" in returns.columns
-    assert "target_weight" in weights.columns
-    for frame in (returns, cumulative_returns, weights, ic):
+    assert not (output_dir / "portfolio" / "weights.parquet").exists()
+    assert not (output_dir / "portfolio" / "cumulative_returns.csv").exists()
+    for frame in (returns, ic):
         assert "combination_id" in frame.columns
         assert "weight_id" not in frame.columns
         assert "cost_id" not in frame.columns
+    assert "net_return" in returns.columns
+    assert "net_portfolio_return" not in returns.columns
+    assert run_context["provenance"]["run_id"] == "evaluation_demo"
+    assert run_context["config"]["diagnostics_spec"] == {
+        "enabled": False,
+        "policy_ids": [],
+        "materialized_views": [],
+    }
     loaded = load_evaluation_set(output_dir)
-    assert loaded.summary["evaluation_id"] == "evaluation_demo"
+    assert loaded.summary["run_id"] == "evaluation_demo"
     assert set(loaded.tables) >= {
         "combinations",
         "returns",
-        "cumulative_returns",
-        "weights",
         "ic",
+        "evaluation_metrics_summary",
+        "coverage_summary",
+        "diagnostic_summary",
     }
     assert "long_short" not in loaded.tables
 

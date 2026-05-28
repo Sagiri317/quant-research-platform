@@ -19,12 +19,10 @@ def index_evaluation_sets(runs_root: str | Path) -> pd.DataFrame:
     run_dirs = _discover_run_dirs(root)
     if not run_dirs:
         raise ValueError(f"runs_root contains no evaluation-set artifacts: {root}")
-    records = [
-        _run_index_record(load_evaluation_set(run_dir)) for run_dir in run_dirs
-    ]
-    return pd.DataFrame.from_records(records).sort_values(
-        "evaluation_id"
-    ).reset_index(drop=True)
+    records = [_run_index_record(load_evaluation_set(run_dir)) for run_dir in run_dirs]
+    return (
+        pd.DataFrame.from_records(records).sort_values("run_id").reset_index(drop=True)
+    )
 
 
 def _discover_run_dirs(runs_root: Path) -> list[Path]:
@@ -40,29 +38,33 @@ def _discover_run_dirs(runs_root: Path) -> list[Path]:
 def _run_index_record(run: LoadedEvaluationSet) -> dict[str, object]:
     summary = run.summary
     config = run.config
-    performance = run.tables["performance_summary"]
+    metrics = run.tables["evaluation_metrics_summary"]
+    base_evaluation = summary.get("base_evaluation")
+    if not isinstance(base_evaluation, dict):
+        base_evaluation = {}
     return {
-        "evaluation_id": str(summary["evaluation_id"]),
+        "run_id": str(summary["run_id"]),
         "project": str(summary["project"]),
         "kind": str(summary["kind"]),
-        "domain": str(summary["domain"]),
+        "domain": str(base_evaluation.get("domain", "evaluation")),
         "data_stage": str(summary["data_stage"]),
-        "uses_external_data": bool(summary["uses_external_data"]),
+        "uses_external_data": bool(base_evaluation.get("uses_external_data", False)),
         "n_rows_evaluated": int(summary["n_rows_evaluated"]),
         "n_combinations": int(summary["n_combinations"]),
         "weight_method": _weight_method(config),
         "portfolio_mode": _portfolio_mode(config),
-        "mean_final_return": _mean_numeric(
-            performance,
-            "final_cumulative_net_return",
-        ),
-        "mean_turnover": _mean_numeric(performance, "mean_turnover"),
-        "total_cost": _sum_numeric(performance, "total_cost"),
+        "mean_final_return": _metric_value(metrics, "final_cumulative_net_return"),
+        "mean_turnover": _metric_value(metrics, "mean_turnover"),
+        "total_cost": _metric_value(metrics, "total_cost"),
     }
 
 
 def _weight_method(config: dict[str, object]) -> str:
     configs = config.get("weight_configs")
+    if not isinstance(configs, list):
+        evaluation_spec = config.get("evaluation_spec")
+        if isinstance(evaluation_spec, dict):
+            configs = evaluation_spec.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and first.get("method") is not None:
@@ -79,6 +81,10 @@ def _portfolio_mode(config: dict[str, object]) -> str:
         if normalized:
             return normalized[0]
     configs = config.get("weight_configs")
+    if not isinstance(configs, list):
+        evaluation_spec = config.get("evaluation_spec")
+        if isinstance(evaluation_spec, dict):
+            configs = evaluation_spec.get("weight_configs")
     if isinstance(configs, list) and configs:
         first = configs[0]
         if isinstance(first, dict) and first.get("portfolio_mode") is not None:
@@ -92,6 +98,13 @@ def _mean_numeric(frame: pd.DataFrame, column: str) -> float:
 
 def _sum_numeric(frame: pd.DataFrame, column: str) -> float:
     return float(pd.to_numeric(frame[column], errors="coerce").sum())
+
+
+def _metric_value(frame: pd.DataFrame, metric_name: str) -> float:
+    rows = frame[frame["metric_name"] == metric_name]
+    if rows.empty:
+        return 0.0
+    return float(pd.to_numeric(rows["metric_value"], errors="coerce").mean())
 
 
 __all__ = ["index_evaluation_sets"]

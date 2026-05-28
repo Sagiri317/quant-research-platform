@@ -62,11 +62,13 @@ Artifact-relative diagnostics paths such as `diagnostics/diagnostic_summary.csv`
 
 - Run list, run evidence, CSV preview, direct CSV download, ZIP download, and comparison endpoints consume the same display contract.
 - Multi-root evaluation APIs and frontend state must not collapse runs by `run_id` alone; `source_alias` is part of the identity.
+- Portable artifact metadata must remain source-root independent: do not write `source_alias`, runtime URLs, host names, local API route aliases, or cache paths into `manifest.json`, `summary.json`, `run_context.json`, or display descriptors unless the current schema explicitly allows it. Add runtime-only fields such as `preview_url` in the API payload.
 - Direct CSV links validate display schema and exposed download items.
 - Display tables that declare `supports_combination_filter=true` must actually contain a `combination_id` column when a preview request includes `combination_id`; reject missing filter columns instead of returning an unfiltered preview.
 - ZIP item selection validates against the manifest before creating cache paths or writing temporary ZIP files.
 - Uploaded-run deletion is limited to `summary.data_stage == "uploaded_panel"`, configured run roots, immediate child run directories, and directories containing `manifest.json`.
 - Bad or stale runs are rejected or excluded at the earliest reasonable entry point.
+- Chart and table previews should use API/display-declared metadata. Do not infer chart sources or direct-download paths in the frontend from truncated CSV preview rows or artifact-relative path heuristics.
 
 ## N8 Contract Consumer Convergence
 
@@ -97,6 +99,8 @@ Use this section when reviewing, extending, or protecting the already-merged N8 
 - A-share private evaluation should use `python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`.
 - Use `--start-year/--end-year` to locate processed factor files and `--start-date/--end-date` for `trade_date` row filtering.
 - Generic `evaluate-parquet` is only for evaluation-layer, adapter, or non-A-share local Parquet checks. It is not proof that the A-share adapter selected the right coverage file, date-filtered correctly, wrote label availability summaries, or preserved private run metadata.
+- Before running Factor Factory, A-share factor generation, private evaluation, or pipeline execution, check whether local API/Vite workbench services are active. If ownership is unknown, fail closed and ask the user rather than auto-killing processes or running data jobs concurrently with an unowned service.
+- Keep `start_from` semantics explicit: snapshot routes write configuration only, executable pipeline routes continue through evaluation, and Factor Factory should call the shared A-share service layer instead of CLI-style `main(argv)` internals.
 - `POST /api/pipeline-snapshots` writes configuration snapshots only: `run_config.yaml`, `warnings.json`, and `summary.md`.
 - `POST /api/pipeline-runs` executes the A-share pipeline with `start_from`. Supported start layers are `existing_factors`, `rebuild_factors`, `rebuild_panel`, and `rebuild_interim`; every executable run continues through evaluation.
 - The canonical executable runner is `src/quant_research_platform/pipelines/a_share/runner.py::run_a_share_pipeline`.
@@ -105,49 +109,84 @@ Use this section when reviewing, extending, or protecting the already-merged N8 
 
 ## Local Scripts
 
-All local launch and verification helpers live directly under `scripts/`. Existing helpers are:
+Keep repository scripts as user-facing local workbench controls only:
 
-- `scripts/check_all.ps1`
 - `scripts/start_private_workbench.ps1`
-- `scripts/start_api_private_runs.ps1`
-- `scripts/start_web.ps1`
 - `scripts/stop_workbench.ps1`
 - `scripts/private_run_roots.ps1`
-- `scripts/playwright_cli_project.ps1`
-- `scripts/phase1_acceptance.py`
-- `scripts/verify_code_map_flow.ps1`
 
-Schema `0.7` plan-owned helpers are planned until their slices implement them:
+Do not add agent-only acceptance wrappers, one-off parity scripts, stale-contract search scripts, or broad verification aggregators to `scripts/` by default. Put those flows in this skill reference, in pytest/Vitest when they enforce a durable contract, or in a temporary command captured in the task summary.
 
-- `scripts/check_schema_07_project_acceptance.ps1`
-- `scripts/check_schema_07_browser_acceptance.ps1`
-- `scripts/check_schema_07_data_scale.py`
-- `scripts/check_schema_07_stale_contract.py`
-- `scripts/check_schema_07_docs_links.py`
+Reusable agent-only helpers live under this skill's `scripts/` directory:
 
-Do not document stale `scripts/local/` or `scripts/build/` command paths.
+- `scripts/verify_code_map_flow.ps1`: code-map Markdown/HTML static verification.
+- `scripts/playwright_cli_project.ps1`: Playwright CLI wrapper that keeps browser artifacts under project-local `.playwright-cli/`.
 
-After implemented, `scripts/check_schema_07_project_acceptance.ps1` is the schema `0.7` Slice 11B project-internal acceptance wrapper. It should verify API/Vite service absence with recorded PIDs plus configured/default/known alternate ports, workbench lockfiles, and command-line process records; fail closed if service ownership is uncertain; use the mandatory current generated-run scale baseline; call the A-share private evaluation entry point; run Factor Factory/factor-summary smoke when applicable; validate manifest/display/download/private-path leak behavior; and print only project-relative path/count output.
+Do not document stale `scripts/local/`, `scripts/build/`, retired schema acceptance scripts, or Phase 1 sample-regeneration scripts as current entry points.
 
-After implemented, `scripts/check_schema_07_data_scale.py` is the mandatory schema `0.7` data-scale preflight and comparison helper. It should inspect only project-local run roots, output aggregate counts/sizes/project-relative paths, and fail closed when rows, combinations, date span, or output footprint exceed the current generated-run baseline.
+When a verification command is mainly for agents, prefer a skill script, pytest/Vitest, or a task-local command over a repository `scripts/` file. Repository scripts should be things the user plausibly runs directly, such as opening/closing the workbench or setting private run roots.
 
-After implemented, `scripts/check_schema_07_browser_acceptance.ps1` is the schema `0.7` browser acceptance entry point. It uses project-local generated Factor Factory runs and ordinary evaluation runs, records local service evidence, and may orchestrate `scripts/start_api_private_runs.ps1` plus `scripts/start_web.ps1`.
+## Agent Implementation Loop
 
-`scripts/phase1_acceptance.py` is a legacy/private Phase 1 acceptance helper until migrated by the schema `0.7` plan. Do not use it as the schema `0.7` completion gate.
+Use this loop for broad schema, artifact, API, frontend, A-share, or Factor Factory implementation goals:
 
-Use `scripts/playwright_cli_project.ps1` for Playwright CLI browser checks in this repository. It runs the global Codex Playwright wrapper from `.playwright-cli/`, keeping generated screenshots, traces, PDFs, videos, and binary response bodies under the ignored project-local Playwright workspace instead of creating top-level `output/`.
+1. Open or use an explicit goal when the user asks for full implementation and verification.
+2. Split independent work only where file ownership is clear. Give each implementation subagent a disjoint write scope and tell it not to revert unrelated changes.
+3. Keep shared contracts under the main agent or a single contract integrator: schema registry, `manifest.display`, API payload identity, generated-file indexes, and cross-surface naming.
+4. Run narrow checks after each slice before broad verification.
+5. After implementation, run a cold review with reviewers that did not participate in implementation. Use separate lenses for schema/artifact/API, frontend/download/workbench, and quant/private-data semantics when the surface is broad.
+6. Fix confirmed P0/P1/P2 issues, rerun affected checks, close the old reviewer, and start a new focused cold review. Repeat until no confirmed P0/P1/P2 remains.
+7. Treat P3 as optional cleanup unless it affects the current contract or the user explicitly asks to address it.
 
-Use `scripts/verify_code_map_flow.ps1` for static checks on `docs/code-map/platform-flow.md` and `docs/code-map/platform-flow-interactive.html`: UTF-8 readability, critical Markdown terms, parsed HTML node/edge endpoints, directed-cycle detection, static node overlap detection, Bezier-only edge model, and `git diff --check`.
+Do not continue broad plan/spec review once implementation is already approved unless a new P0/P1/P2 blocker appears.
+
+## Spec And Plan Review Loop
+
+Use this loop before implementing large specs or irreversible contracts:
+
+1. Draft the spec or implementation plan with explicit non-goals, data/privacy boundaries, generated-output rules, and acceptance gates.
+2. Review with separate lenses: schema/field consistency, engineering/API/display contract, quant semantics/private boundary, and frontend/workbench behavior where relevant.
+3. Fix confirmed P0/P1/P2 findings and do one fresh cold review before moving to implementation.
+4. If repeated review keeps finding the same class of issue, convert the issue into schema registry rules, pytest/Vitest coverage, or a static check instead of expanding prose.
+5. Once implementation is approved, stop broad plan/spec review and execute the plan.
+
+## Agent Verification Playbook
+
+Prefer durable tests over scripts. When an agent needs a temporary verification method:
+
+- Data-scale gate: inspect only aggregate counts, sizes, date spans, combination counts, and project-relative run paths. Do not print row-level private data. Compare against a known generated-run baseline before larger project-internal runs.
+- Browser acceptance: verify API/Vite ports are not already owned by unknown processes; start local API and Vite with recorded PIDs; run Playwright against the workbench; stop only recorded PIDs; list generated browser artifacts before cleanup.
+- Stale-contract search: search for retired schema versions, table names, routes, metadata files, raw download item strings, and compatibility wording. Classify remaining hits as current, historical, negative-test, plan/spec, removed, or current-facing stale. Do not blanket-allowlist `docs/`, `AGENTS.md`, or skill references; they may contain current instructions that need repair.
+- Private-path leak check: search portable artifacts, API payload fixtures, frontend display payloads, downloads, reports, and logs for local drive paths, private layer markers, credentials, source aliases where disallowed, and row-level private data.
+- Code-map check: verify Markdown/HTML code-map links and graph invariants directly or through a temporary local command; keep the detailed procedure in `references/code-map-flow.md`.
+- Windows command-form check: avoid long multiline `conda run ... python -c` diagnostics. Prefer a checked helper, direct module invocation through `conda run -n analysis python -m ...`, or a short project-local script when the diagnostic needs structured output.
+
+If a temporary verification proves a durable invariant, migrate it to pytest, Vitest, or a small library helper instead of preserving a standalone script.
+
+## Generated Output Cleanup
+
+Before deleting generated, private, cache, or acceptance outputs:
+
+1. List exact project-relative paths, file counts, sizes, and last modified times.
+2. Search current docs, code, tests, run roots, API config, and skill references for references to the path.
+3. Classify each path as current evidence, historical evidence, cache, temporary parity output, stale generated run, or unknown.
+4. Keep current evidence until the replacement run and docs are in place.
+5. Cache directories such as download ZIP caches can be removed after exact-path approval because they are regenerated on demand.
+6. Acceptance-only directories can be removed after exact-path approval only when no current docs, tests, wrappers, or workbench run roots reference them.
+7. Stale generated runs should be regenerated under the current schema when needed; do not weaken loader, API, frontend, or display validation to keep them visible.
+8. Never delete raw/interim/processed private data, credentials, dependency directories, or unknown generated roots through cleanup convenience steps.
 
 ## Docs and Code-Map Drift Checks
 
 When docs describe artifact, API, download, frontend, A-share pipeline, or Factor Factory contracts, verify them against code before preserving names or commands:
 
+- Check current-facing root documents together: `AGENTS.md`, `README.md`, `ARCHITECTURE.md`, `EVALUATION_INTERFACE.md`, `PROJECT_STATUS.md`, `docs/architecture/`, `docs/code-map/`, and this skill reference. Historical plans/specs can remain historical, but they must not be presented as current commands or current artifact roots.
 - Check FastAPI route coverage against `docs/code-map/platform-flow.md`; include route additions such as upload templates, delete routes, comparison, pipeline, and Factor Factory endpoints.
 - Check referenced source/doc/script paths in root docs, `docs/architecture/`, and `docs/code-map/`; future-target paths must be explicitly described as planned or suggested, not current files.
 - Search for retired document names, old code-map fragments, stale module paths, stale script directories, retired schema fields, and hidden frontend/backend shortcuts.
 - Run Markdown link checks for root docs plus `docs/`, and use `git diff --check` before claiming the docs are synchronized.
-- For docs-only work, prefer lightweight import/route checks over private acceptance runs; do not use `scripts/phase1_acceptance.py` unless private Phase 1 evidence regeneration is in scope.
+- For docs-only work, prefer lightweight import/route checks over private acceptance runs. Historical Phase 1 sample-regeneration scripts are retired and should not be used as current completion gates.
+- If a cleanup or migration changes repository scripts, mirror that in user-facing docs and this skill reference in the same round so a future agent does not revive retired wrappers.
 
 ## Invariant Mapping
 
@@ -199,7 +238,7 @@ Useful surfaces:
 Use browser acceptance when frontend behavior changes:
 
 - API-backed workbench Playwright acceptance must start both the local FastAPI API service and the Vite frontend service before testing; do not treat an API-offline `Failed to fetch` state as acceptance evidence unless the task is explicitly UI-only.
-- After implemented, schema `0.7` browser acceptance must use `scripts/check_schema_07_browser_acceptance.ps1` against project-local generated Factor Factory and ordinary evaluation runs.
+- Schema `0.7` browser acceptance should use the Agent Verification Playbook above against project-local generated Factor Factory and ordinary evaluation runs.
 - default result browser page loads and renders the selected run;
 - run and combination switching update all dependent surfaces;
 - full report mode expands expected evidence surfaces without internal implementation notes;

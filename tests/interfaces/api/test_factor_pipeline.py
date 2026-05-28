@@ -22,6 +22,22 @@ def test_api_markets_endpoint_matches_web_contract() -> None:
     assert markets[1]["status"] == "planned"
 
 
+def test_api_cors_accepts_configured_local_vite_origin(monkeypatch) -> None:
+    monkeypatch.setenv("QRP_CORS_ORIGINS", "http://127.0.0.1:5174")
+    client = TestClient(create_app(run_roots=[("platform", "reports/runs")]))
+
+    response = client.options(
+        "/api/runs",
+        headers={
+            "Origin": "http://127.0.0.1:5174",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5174"
+
+
 def test_factor_templates_are_loaded_from_config() -> None:
     client = TestClient(create_app(run_roots=[("platform", "reports/runs")]))
 
@@ -65,6 +81,7 @@ def test_pipeline_snapshot_writes_config_and_checkpoints(tmp_path) -> None:
         "cost_bps": 10,
         "return_source_column": "forward_return_1d",
         "label_columns": ["forward_return_1d", "forward_return_20d"],
+        "diagnostics": ["scenario_metrics"],
     }
 
     created = client.post("/api/pipeline-snapshots", json=payload)
@@ -80,6 +97,9 @@ def test_pipeline_snapshot_writes_config_and_checkpoints(tmp_path) -> None:
     assert str(tmp_path) not in json.dumps(created_json)
     assert (run_dir / "run_config.yaml").is_file()
     assert (run_dir / "warnings.json").is_file()
+    run_config = (run_dir / "run_config.yaml").read_text(encoding="utf-8")
+    assert "diagnostics:" in run_config
+    assert "  - scenario_metrics" in run_config
 
     status = client.get("/api/pipeline-snapshots/api_snapshot_smoke")
     checkpoints = client.get("/api/pipeline-snapshots/api_snapshot_smoke/checkpoints")
@@ -153,6 +173,7 @@ def test_pipeline_run_executes_from_existing_factors(
     monkeypatch,
 ) -> None:
     from quant_research_platform.interfaces.api.services import pipeline_service
+
     factor_pipeline = pipeline_service
 
     calls: list[object] = []
@@ -242,8 +263,9 @@ def test_pipeline_run_executes_from_existing_factors(
 
     assert client.get("/api/pipeline-snapshots/api_existing_factors").status_code == 404
     assert (
-        client.get("/api/pipeline-snapshots/api_existing_factors/checkpoints")
-        .status_code
+        client.get(
+            "/api/pipeline-snapshots/api_existing_factors/checkpoints"
+        ).status_code
         == 404
     )
 
@@ -526,6 +548,7 @@ def test_pipeline_run_failure_response_hides_private_paths(
     monkeypatch,
 ) -> None:
     from quant_research_platform.interfaces.api.services import pipeline_service
+
     factor_pipeline = pipeline_service
 
     def fake_run_a_share_pipeline(config):

@@ -47,6 +47,8 @@ def test_pipeline_step_registry_declares_evaluation_step() -> None:
     assert "PipelineConfig" in contract.inputs
     assert "processed_factor_table" in contract.inputs
     assert "evaluation/manifest.json" in contract.outputs
+    assert "evaluation/run_context.json" in contract.outputs
+    assert "evaluation/config.json" not in contract.outputs
     assert "checkpoint" in contract.capabilities
 
 
@@ -80,7 +82,8 @@ def test_existing_factors_runner_calls_a_share_service_and_writes_runtime_summar
             json.dumps(
                 {
                     "artifact_type": "evaluation_set",
-                    "evaluation_id": "evaluation_run",
+                    "artifact_schema_version": "0.7",
+                    "run_id": "evaluation_run",
                 }
             ),
             encoding="utf-8",
@@ -100,6 +103,7 @@ def test_existing_factors_runner_calls_a_share_service_and_writes_runtime_summar
     config = _valid_config(tmp_path)
     config.start_from = "existing_factors"
     config.processed_root = processed_root
+    config.diagnostics = ("scenario_metrics",)
 
     result = run_a_share_pipeline(
         config,
@@ -126,6 +130,8 @@ def test_existing_factors_runner_calls_a_share_service_and_writes_runtime_summar
     assert calls[0]["n_groups"] == 3
     assert calls[0]["kernels"] == ("tensor",)
     assert calls[0]["source_alias"] == "pipeline"
+    assert calls[0]["diagnostics_spec"].enabled is True
+    assert calls[0]["diagnostics_spec"].materialized_views == ("scenario_metrics",)
     summary = json.loads(result.runtime_summary_path.read_text(encoding="utf-8"))
     assert summary["status"] == "ready"
     assert summary["start_from"] == "existing_factors"
@@ -298,8 +304,9 @@ def test_existing_factors_runner_smoke_writes_schema_artifacts_and_index(
     assert evaluate_checkpoint.row_count == 36
     manifest = json.loads(result.evaluation_artifact_path.read_text(encoding="utf-8"))
     assert manifest["artifact_type"] == "evaluation_set"
-    assert manifest["artifact_schema_version"] == "0.6"
-    assert manifest["evaluation_id"] == "e2e_run"
+    assert manifest["artifact_schema_version"] == "0.7"
+    assert manifest["run_id"] == "e2e_run"
+    assert "evaluation_id" not in manifest
     assert manifest["display"]["tables"][0]["key"] == "combinations"
     records = discover_run_indexes([RunRoot("pipeline", output_root)])
     assert [record.ref.public_run_id for record in records] == ["pipeline/e2e_run"]
@@ -345,8 +352,7 @@ def test_existing_factors_runner_allows_existing_column_expression(
         )
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "run_a_share_evaluation",
+        "quant_research_platform.pipelines.a_share.runner.run_a_share_evaluation",
         fake_run_a_share_evaluation,
     )
 

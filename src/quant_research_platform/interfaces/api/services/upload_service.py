@@ -116,8 +116,7 @@ def user_facing_error(exc: Exception) -> str:
         return f"CSV 缺少必需列：{missing}"
     if "Portfolio cumulative returns require return_source_column" in message:
         return (
-            "CSV 缺少收益来源列；请选择 return_source_column "
-            "或提供 forward_return_1d。"
+            "CSV 缺少收益来源列；请选择 return_source_column 或提供 forward_return_1d。"
         )
     if "must be numeric" in message or "could not convert" in message:
         return "因子列、标签列和收益来源列必须是数值。"

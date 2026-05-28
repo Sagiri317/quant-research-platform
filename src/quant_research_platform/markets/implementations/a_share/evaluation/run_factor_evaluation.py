@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
+
 from .evaluation_adapter import (  # noqa: E402
     DATE_COLUMN,
     DEFAULT_RETURN_SOURCE_COLUMN,
@@ -65,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--neutralization-method", default="none")
     parser.add_argument("--neutralization-group-columns", default="")
     parser.add_argument("--neutralization-exposure-columns", default="")
+    parser.add_argument("--diagnostics-enabled", action="store_true")
+    parser.add_argument("--diagnostic-view", action="append", default=[])
     args = parser.parse_args(argv)
 
     report_root = (
@@ -167,6 +171,12 @@ def main(argv: list[str] | None = None) -> int:
             neutralization_exposure_columns=parse_columns(
                 args.neutralization_exposure_columns
             ),
+            diagnostics_spec=DiagnosticsSpec.from_request(
+                {
+                    "enabled": args.diagnostics_enabled,
+                    "materialized_views": args.diagnostic_view,
+                }
+            ),
         )
     )
     manifest_path = result.manifest_path
@@ -178,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             f"labels={len(run['labels'])} features={len(run['features'])} "
             f"output={run['output_dir']}"
         )
-    print(f"wrote {manifest_path.parent / 'input_quality' / 'label_availability.csv'}")
+    print(f"wrote {manifest_path.parent / 'input_quality' / 'coverage_summary.csv'}")
     print(f"wrote {manifest_path}")
     return 0
 
@@ -195,9 +205,8 @@ def _count_trade_date_rows(
         import pyarrow.dataset as ds
 
         trade_date = ds.field(DATE_COLUMN)
-        date_filter = (
-            (trade_date >= pd.Timestamp(start_date).to_pydatetime())
-            & (trade_date <= pd.Timestamp(end_date).to_pydatetime())
+        date_filter = (trade_date >= pd.Timestamp(start_date).to_pydatetime()) & (
+            trade_date <= pd.Timestamp(end_date).to_pydatetime()
         )
         return int(ds.dataset(path, format="parquet").count_rows(filter=date_filter))
     except ImportError:

@@ -49,6 +49,23 @@ PERFORMANCE_COLUMNS = (
     "mean_turnover",
 )
 
+METRIC_NAME_TO_SUMMARY_COLUMN = {
+    "mean_ic": "mean_ic",
+    "icir": "icir",
+    "positive_ic_rate": "positive_ic_rate",
+    "mean_rankic": "mean_rankic",
+    "rankicir": "rankicir",
+    "positive_rankic_rate": "positive_rankic_rate",
+    "top_bottom_spread_mean": "top_bottom_spread_mean",
+    "top_bottom_spread_hit_rate": "top_bottom_spread_hit_rate",
+    "group_monotonicity_score": "group_monotonicity_score",
+    "final_cumulative_net_return": "mean_net_portfolio_return",
+    "mean_net_portfolio_return": "mean_net_portfolio_return",
+    "sharpe_like": "sharpe_like",
+    "max_drawdown": "max_drawdown",
+    "mean_turnover": "mean_turnover",
+}
+
 MARKDOWN_COLUMNS = (
     "feature",
     "mean_ic",
@@ -88,7 +105,7 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _discover_schema_06_run_dirs(report_root: Path) -> list[Path]:
+def _discover_schema_07_run_dirs(report_root: Path) -> list[Path]:
     if (report_root / "manifest.json").is_file():
         return [report_root]
     if not report_root.exists():
@@ -100,32 +117,22 @@ def _discover_schema_06_run_dirs(report_root: Path) -> list[Path]:
     ]
 
 
-def _read_metric_csv(run_dir: Path, filename: str) -> pd.DataFrame:
-    path = run_dir / "metrics" / filename
+def _read_metric_csv(run_dir: Path, relative_path: str) -> pd.DataFrame:
+    path = run_dir / relative_path
     if not path.exists():
         raise FileNotFoundError(f"missing evaluation metric file: {path}")
     return pd.read_csv(path)
 
 
-def _read_breakdown_metric_csv(run_dir: Path, filename: str) -> pd.DataFrame:
-    path = run_dir / "breakdowns" / "year" / filename
-    if not path.exists():
-        raise FileNotFoundError(f"missing evaluation breakdown metric file: {path}")
-    return pd.read_csv(path)
-
-
 def _has_year_breakdown(run_dir: Path) -> bool:
-    return (
-        run_dir / "breakdowns" / "year" / "ic_summary.csv"
-    ).exists()
+    return (run_dir / "breakdowns" / "year" / "evaluation_metrics_summary.csv").exists()
 
 
-def _load_label_availability(report_root: Path) -> pd.DataFrame:
-    path = report_root / "input_quality" / "label_availability.csv"
+def _load_coverage_summary(report_root: Path) -> pd.DataFrame:
+    path = report_root / "input_quality" / "coverage_summary.csv"
     if not path.exists():
         return pd.DataFrame(
             columns=[
-                "year",
                 "label",
                 "label_non_null_rate",
                 "eligible_rows",
@@ -134,38 +141,48 @@ def _load_label_availability(report_root: Path) -> pd.DataFrame:
             ]
         )
     frame = pd.read_csv(path)
-    renamed = frame.rename(
-        columns={
-            "non_null_rate": "label_non_null_rate",
-            "coverage_rate": "label_non_null_rate",
+    label_rows = frame[frame["input_family"].eq("label")].copy()
+    if label_rows.empty:
+        return pd.DataFrame(
+            columns=[
+                "label",
+                "label_non_null_rate",
+                "eligible_rows",
+                "can_enter_rows",
+                "can_exit_rows",
+            ]
+        )
+    result = pd.DataFrame(
+        {
+            "label": label_rows["input_name"],
+            "label_non_null_rate": label_rows["coverage_rate"],
         }
     )
-    for column in (
-        "year",
-        "label",
-        "label_non_null_rate",
-        "eligible_rows",
-        "can_enter_rows",
-        "can_exit_rows",
+    tradability = frame[frame["input_family"].eq("tradability")].set_index("input_name")
+    for output_column, input_name in (
+        ("eligible_rows", "eligible"),
+        ("can_enter_rows", "can_enter"),
+        ("can_exit_rows", "can_exit"),
     ):
-        if column not in renamed.columns:
-            renamed[column] = pd.NA
-    return renamed[
-        [
-            "year",
-            "label",
-            "label_non_null_rate",
-            "eligible_rows",
-            "can_enter_rows",
-            "can_exit_rows",
-        ]
-    ]
+        result[output_column] = (
+            tradability.loc[input_name, "available_rows"]
+            if input_name in tradability.index
+            else pd.NA
+        )
+    return result
 
 
 def _load_run_summary(run_dir: Path) -> dict[str, Any]:
     path = run_dir / "summary.json"
     if not path.exists():
         return {}
+    return _read_json(path)
+
+
+def _load_run_context(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "run_context.json"
+    if not path.exists():
+        raise FileNotFoundError(f"missing evaluation run context file: {path}")
     return _read_json(path)
 
 
@@ -212,49 +229,108 @@ def _build_one_run_summary(
     run_dir: Path,
 ) -> pd.DataFrame:
     run_summary = _load_run_summary(run_dir)
-    config_path = run_dir / "config.json"
-    config = _read_json(config_path) if config_path.exists() else {}
+    run_context = _load_run_context(run_dir)
     combinations = pd.read_csv(run_dir / "dimensions" / "combinations.csv")
-    label_availability = _load_label_availability(run_dir)
-    portfolio_mode = _portfolio_mode(config, combinations)
-    has_year_breakdown = _has_year_breakdown(run_dir)
-    if has_year_breakdown:
-        ic_summary = _read_breakdown_metric_csv(run_dir, "ic_summary.csv")
-        spread_summary = _read_breakdown_metric_csv(
-            run_dir,
-            "group_spread_summary.csv",
-        )
-        performance_summary = _read_breakdown_metric_csv(
-            run_dir,
-            "performance_summary.csv",
+    coverage = _load_coverage_summary(run_dir)
+    base_metrics = _metrics_long_to_wide(
+        _read_metric_csv(run_dir, "metrics/evaluation_metrics_summary.csv")
+    )
+    if _has_year_breakdown(run_dir):
+        metrics = _metrics_long_to_wide(
+            _read_metric_csv(
+                run_dir,
+                "breakdowns/year/evaluation_metrics_summary.csv",
+            )
         )
     else:
-        ic_summary = _read_metric_csv(run_dir, "ic_summary.csv")
-        spread_summary = _read_metric_csv(run_dir, "group_spread_summary.csv")
-        performance_summary = _read_metric_csv(run_dir, "performance_summary.csv")
-    performance_summary = _normalize_performance_summary(
-        performance_summary,
-        portfolio_mode=portfolio_mode,
-    )
-    performance_columns = [
-        column
-        for column in PERFORMANCE_COLUMNS
-        if column in performance_summary.columns
-    ]
-    performance_summary = performance_summary[performance_columns]
-
-    merged = _merge_metric_frame(ic_summary, spread_summary)
-    merged = _merge_metric_frame(merged, performance_summary)
-    merged["run_id"] = run_summary.get("evaluation_id", run_dir.name)
+        metrics = base_metrics.copy()
+        metrics["year"] = pd.NA
+    merged = combinations.merge(metrics, on="combination_id", how="inner")
+    merged = _fill_missing_metrics_from_base(merged, base_metrics)
+    merged["run_id"] = _run_id(run_summary, run_context, run_dir)
     merged["n_rows_evaluated"] = run_summary.get("n_rows_evaluated", pd.NA)
-    return _merge_label_availability(merged, label_availability)
+    return _merge_coverage_summary(merged, coverage)
+
+
+def _metrics_long_to_wide(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["combination_id"])
+    normalized = frame.copy()
+    normalized["summary_column"] = normalized["metric_name"].map(
+        METRIC_NAME_TO_SUMMARY_COLUMN
+    )
+    normalized = normalized[normalized["summary_column"].notna()]
+    index_columns = [
+        column
+        for column in ("combination_id", "period_type", "period")
+        if column in normalized.columns
+    ]
+    if not index_columns:
+        index_columns = ["combination_id"]
+    wide = normalized.pivot_table(
+        index=index_columns,
+        columns="summary_column",
+        values="metric_value",
+        aggfunc="first",
+    ).reset_index()
+    wide.columns.name = None
+    if "period_type" in wide.columns:
+        wide = wide[wide["period_type"].eq("year")].drop(
+            columns=["period_type"],
+            errors="ignore",
+        )
+    if "period" in wide.columns:
+        wide = wide.rename(columns={"period": "year"})
+    return wide
+
+
+def _fill_missing_metrics_from_base(
+    metrics: pd.DataFrame,
+    base_metrics: pd.DataFrame,
+) -> pd.DataFrame:
+    fallback_columns = [
+        column
+        for column in SUMMARY_COLUMNS
+        if column in base_metrics.columns and column not in {"year", "run_id"}
+    ]
+    if not fallback_columns:
+        return metrics
+    base = base_metrics[["combination_id", *fallback_columns]].copy()
+    merged = metrics.merge(
+        base,
+        on="combination_id",
+        how="left",
+        suffixes=("", "_overall"),
+    )
+    for column in fallback_columns:
+        fallback = f"{column}_overall"
+        if fallback not in merged.columns:
+            continue
+        if column in merged.columns:
+            merged[column] = merged[column].combine_first(merged[fallback])
+        else:
+            merged[column] = merged[fallback]
+        merged = merged.drop(columns=[fallback])
+    return merged
+
+
+def _run_id(
+    run_summary: dict[str, Any],
+    run_context: dict[str, Any],
+    run_dir: Path,
+) -> str:
+    if run_summary.get("run_id"):
+        return str(run_summary["run_id"])
+    provenance = run_context.get("provenance", {})
+    if isinstance(provenance, dict) and provenance.get("run_id"):
+        return str(provenance["run_id"])
+    return run_dir.name
 
 
 def _portfolio_mode(config: dict[str, Any], combinations: pd.DataFrame) -> str:
     if "portfolio_mode" in combinations.columns:
         modes = sorted(
-            str(value)
-            for value in combinations["portfolio_mode"].dropna().unique()
+            str(value) for value in combinations["portfolio_mode"].dropna().unique()
         )
         if len(modes) == 1:
             return modes[0]
@@ -271,25 +347,25 @@ def _portfolio_mode(config: dict[str, Any], combinations: pd.DataFrame) -> str:
     return "multiple" if modes else "long_short"
 
 
-def _merge_label_availability(
+def _merge_coverage_summary(
     metrics: pd.DataFrame,
-    label_availability: pd.DataFrame,
+    coverage_summary: pd.DataFrame,
 ) -> pd.DataFrame:
-    if label_availability.empty:
+    if coverage_summary.empty:
         return metrics
     if (
         "year" in metrics.columns
-        and "year" in label_availability.columns
-        and label_availability["year"].notna().any()
+        and "year" in coverage_summary.columns
+        and coverage_summary["year"].notna().any()
     ):
         return metrics.merge(
-            label_availability,
+            coverage_summary,
             on=["year", "label"],
             how="left",
             validate="many_to_one",
         )
     return metrics.merge(
-        label_availability.drop(columns=["year"], errors="ignore"),
+        coverage_summary.drop(columns=["year"], errors="ignore"),
         on=["label"],
         how="left",
         validate="many_to_one",
@@ -301,7 +377,7 @@ def build_factor_summary_frame(report_root: Path) -> pd.DataFrame:
 
     frames = [
         _build_one_run_summary(run_dir)
-        for run_dir in _discover_schema_06_run_dirs(report_root)
+        for run_dir in _discover_schema_07_run_dirs(report_root)
     ]
     if not frames:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
@@ -361,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--report-root",
         default="reports/private_real/factor_evaluation/full_2024_2025",
-        help="Schema 0.6 evaluation-set run directory or directory of run directories.",
+        help="Schema 0.7 evaluation-set run directory or directory of run directories.",
     )
     parser.add_argument("--output-csv", default="")
     parser.add_argument("--output-md", default="")

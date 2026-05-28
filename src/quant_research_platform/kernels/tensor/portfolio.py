@@ -143,16 +143,14 @@ def build_tensor_portfolio_artifacts(
         timestamp_input = measure_stage(
             "metric",
             "positions.prepare_timestamp",
-            lambda timestamp_frame=timestamp_frame: (
-                _prepare_timestamp_position_input(
-                    timestamp_frame=timestamp_frame,
-                    spec=spec,
-                    features=features,
-                    weight_config=weight_config,
-                    tradability_config=tradability_config,
-                    return_source_column=return_source_column,
-                    value_dtype=dtype,
-                )
+            lambda timestamp_frame=timestamp_frame: _prepare_timestamp_position_input(
+                timestamp_frame=timestamp_frame,
+                spec=spec,
+                features=features,
+                weight_config=weight_config,
+                tradability_config=tradability_config,
+                return_source_column=return_source_column,
+                value_dtype=dtype,
             ),
             sample_memory=False,
         )
@@ -184,23 +182,23 @@ def build_tensor_portfolio_artifacts(
                 if previous_array_state is not None and not previous_assets_match
                 else {}
             )
-            diagnostic, position_values, previous_values = (
-                measure_stage(
-                    "metric",
-                    "positions.rank_select",
-                    lambda feature=feature,
-                    cached_previous_values=cached_previous_values,
-                    previous_map=previous_map,
-                    timestamp_input=timestamp_input: _build_tensor_feature_positions(
+            diagnostic, position_values, previous_values = measure_stage(
+                "metric",
+                "positions.rank_select",
+                lambda feature=feature,
+                cached_previous_values=cached_previous_values,
+                previous_map=previous_map,
+                timestamp_input=timestamp_input: (
+                    _build_tensor_feature_positions(
                         timestamp_input=timestamp_input,
                         feature=feature,
                         weight_config=weight_config,
                         tradability_config=tradability_config,
                         previous_positions=previous_map,
                         cached_previous_values=cached_previous_values,
-                    ),
-                    sample_memory=False,
-                )
+                    )
+                ),
+                sample_memory=False,
             )
             (
                 nonzero_offsets,
@@ -1057,8 +1055,7 @@ def _position_map_from_arrays(
 ) -> dict[str, float]:
     nonzero_offsets = np.flatnonzero(positions != 0.0)
     return {
-        assets[int(offset)]: float(positions[int(offset)])
-        for offset in nonzero_offsets
+        assets[int(offset)]: float(positions[int(offset)]) for offset in nonzero_offsets
     }
 
 

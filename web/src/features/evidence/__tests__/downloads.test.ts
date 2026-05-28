@@ -12,21 +12,37 @@ describe('artifact download contract helpers', () => {
   test('uses manifest presets for default download selection', () => {
     const displayDownloads: RunDisplayDownloads = {
       items: [
-        { item: 'report.md', kind: 'file', label: 'Report' },
-        { item: 'comparison.csv', kind: 'file', label: 'Comparison' },
-        { item: 'metrics/ic.csv', kind: 'table', label: 'IC' },
+        { kind: 'metadata_file', key: 'report', label: 'Report' },
+        { kind: 'dynamic', key: 'comparison', label: 'Comparison' },
+        { kind: 'table', key: 'ic', label: 'IC' },
       ],
       presets: [
-        { key: 'all', label: 'All', items: ['report.md', 'comparison.csv', 'metrics/ic.csv'] },
-        { key: 'report', label: 'Report pack', items: ['report.md', 'comparison.csv'] },
+        {
+          key: 'all',
+          label: 'All',
+          items: [
+            { kind: 'metadata_file', key: 'report' },
+            { kind: 'table', key: 'ic' },
+          ],
+        },
+        {
+          key: 'report',
+          label: 'Report pack',
+          items: [
+            { kind: 'metadata_file', key: 'report' },
+            { kind: 'dynamic', key: 'comparison' },
+          ],
+        },
       ],
     }
 
-    expect(defaultDownloadItems(displayDownloads)).toEqual(['report.md', 'comparison.csv'])
+    expect(defaultDownloadItems(displayDownloads)).toEqual([
+      'metadata_file:report',
+      'dynamic:comparison',
+    ])
     expect(presetDownloadItems(displayDownloads, 'all')).toEqual([
-      'report.md',
-      'comparison.csv',
-      'metrics/ic.csv',
+      'metadata_file:report',
+      'table:ic',
     ])
   })
 })

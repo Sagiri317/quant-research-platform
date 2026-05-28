@@ -14,6 +14,13 @@ from quant_research_platform.artifacts.manifest_validation import (
     validate_display_manifest,
     validate_evaluation_set_payload,
     validate_evaluation_set_table_columns,
+    validate_portable_run_identity,
+    validate_run_context_payload,
+    validate_summary_payload,
+)
+from quant_research_platform.artifacts.schema_registry import (
+    get_table_spec,
+    validate_table_contract,
 )
 
 from .models import RunIndexRecord, RunRef
@@ -23,73 +30,59 @@ def load_run_index(source_alias: str, path: Path) -> RunIndexRecord:
     """读取一个 artifact run 的轻量 index，不加载全部 metrics。"""
 
     manifest = read_json(path / "manifest.json")
-    config = read_json(path / "config.json")
+    run_context = read_json(path / "run_context.json")
     summary = read_json(path / "summary.json")
     validate_artifact_schema_version(manifest, source="manifest.json")
-    validate_artifact_schema_version(summary, source="summary.json")
     validate_evaluation_set_payload(manifest, source="manifest.json")
-    validate_evaluation_set_payload(summary, source="summary.json")
+    validate_summary_payload(summary)
+    validate_run_context_payload(run_context, summary=summary)
+    validate_portable_run_identity(manifest, summary, run_context)
     validate_display_manifest(manifest)
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ValueError("manifest.json must contain an artifacts object.")
     table_paths = evaluation_set_csv_paths(artifacts)
-    table_headers = {
-        name: read_manifest_table_header(require_index_file(path, relative_path))
+    table_files = {
+        name: require_index_file(path, relative_path)
         for name, relative_path in table_paths.items()
     }
-    validate_evaluation_set_table_columns(table_headers)
+    table_headers = {
+        name: read_manifest_table_header(table_file)
+        for name, table_file in table_files.items()
+    }
+    validate_run_index_table_contracts(table_headers, table_files)
     validate_display_chart_columns(manifest, table_headers)
     report_path = artifacts.get("report")
-    if not isinstance(report_path, str) or not report_path:
-        raise ValueError("manifest artifacts must include report.")
-    require_index_file(path, report_path)
-    require_index_file(path, "lineage.json")
+    if report_path is not None:
+        if not isinstance(report_path, str) or not report_path:
+            raise ValueError("manifest artifacts.report must be a non-empty string.")
+        require_index_file(path, report_path)
     metrics = artifacts.get("metrics")
     if not isinstance(metrics, dict):
         raise ValueError("manifest artifacts must contain a metrics object.")
 
-    ic_summary = read_manifest_metric(
+    evaluation_metrics_summary = read_manifest_metric(
         path,
         metrics,
-        "ic_summary",
+        "evaluation_metrics_summary",
         required_columns={
-            "mean_ic",
-            "std_ic",
-            "mean_rankic",
-            "std_rankic",
-            "icir",
-            "rankicir",
-            "positive_ic_rate",
-            "positive_rankic_rate",
+            "combination_id",
+            "metric_family",
+            "metric_name",
+            "metric_value",
         },
     )
-    performance_summary = read_manifest_metric(
-        path,
-        metrics,
-        "performance_summary",
-        required_columns={
-            "periods",
-            "final_cumulative_gross_return",
-            "final_cumulative_net_return",
-            "mean_net_portfolio_return",
-            "mean_turnover",
-            "total_cost",
-            "sharpe_like",
-            "sortino_like",
-            "max_drawdown",
-            "win_rate",
-        },
-    )
-    run_id = str(summary["evaluation_id"])
+    run_id = str(summary["run_id"])
     return RunIndexRecord(
         ref=RunRef(source_alias, run_id, path),
         manifest=manifest,
-        config=config,
+        config=run_context.get("config", {})
+        if isinstance(run_context.get("config"), dict)
+        else {},
+        run_context=run_context,
         summary=summary,
-        ic_summary=ic_summary,
-        performance_summary=performance_summary,
+        evaluation_metrics_summary=evaluation_metrics_summary,
     )
 
 
@@ -118,6 +111,57 @@ def read_manifest_table_header(path: Path) -> pd.DataFrame:
     if path.suffix == ".parquet":
         return pd.DataFrame(columns=pq.ParquetFile(path).schema_arrow.names)
     return pd.read_csv(path, nrows=0)
+
+
+def validate_run_index_table_contracts(
+    table_headers: dict[str, pd.DataFrame],
+    table_files: dict[str, Path],
+) -> None:
+    """Run schema-registry row checks while reading only validation columns."""
+
+    validate_evaluation_set_table_columns(table_headers)
+    for name, header in table_headers.items():
+        spec = get_table_spec(name)
+        rows = read_manifest_table_contract_rows(
+            table_files[name],
+            spec_key=name,
+            columns=tuple(str(column) for column in header.columns),
+        )
+        validate_table_contract(
+            spec,
+            rows=rows,
+            columns=tuple(str(column) for column in header.columns),
+        )
+
+
+def read_manifest_table_contract_rows(
+    path: Path,
+    *,
+    spec_key: str,
+    columns: tuple[str, ...],
+) -> list[dict[str, object]]:
+    """Read only registry columns needed for run-index row validation."""
+
+    spec = get_table_spec(spec_key)
+    validation_columns = tuple(
+        dict.fromkeys(
+            column
+            for column in (
+                *spec.unique_key,
+                *(spec.required_if),
+                *(spec.sentinel_values),
+                *((spec.status_column,) if spec.status_column is not None else ()),
+            )
+            if column in columns
+        )
+    )
+    if not validation_columns:
+        return []
+    if path.suffix == ".parquet":
+        frame = pq.read_table(path, columns=list(validation_columns)).to_pandas()
+    else:
+        frame = pd.read_csv(path, usecols=list(validation_columns))
+    return frame.to_dict(orient="records")
 
 
 def read_json(path: Path) -> dict[str, object]:

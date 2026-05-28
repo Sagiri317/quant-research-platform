@@ -36,6 +36,8 @@ def test_pipeline_step_registry_declares_ordered_build_steps() -> None:
         "factor_table",
         "PipelineConfig",
     )
+    assert "evaluation/run_context.json" in evaluate.outputs
+    assert "evaluation/config.json" not in evaluate.outputs
     assert "checkpoint" in evaluate.capabilities
 
 
@@ -69,28 +71,23 @@ def test_pipeline_runner_returns_result_type_for_full_start_layer(
     config = _full_config(tmp_path)
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_interim_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_interim_step",
         lambda config: {"row_count": 1, "artifact": "interim"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         lambda config: {"row_count": 2, "artifact": "panel"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_factors_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_factors_step",
         lambda config: {"row_count": 3, "artifact": "factors"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_evaluate_step",
+        "quant_research_platform.pipelines.a_share.runner._run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
             "artifact": "evaluation/manifest.json",
-            "evaluation_artifact_path": run_dir
-            / "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir / "evaluation/manifest.json",
         },
     )
 
@@ -127,18 +124,15 @@ def test_build_step_wrappers_pass_expected_arguments(
         return 0
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "build_interim_main",
+        "quant_research_platform.pipelines.a_share.runner.build_interim_main",
         fake_build_interim,
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "build_panel_main",
+        "quant_research_platform.pipelines.a_share.runner.build_panel_main",
         fake_build_panel,
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "build_factors_main",
+        "quant_research_platform.pipelines.a_share.runner.build_factors_main",
         fake_build_factors,
     )
 
@@ -176,8 +170,7 @@ def test_build_step_wrappers_suppress_private_cli_output(
         return 0
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "build_panel_main",
+        "quant_research_platform.pipelines.a_share.runner.build_panel_main",
         fake_build_panel,
     )
 
@@ -195,18 +188,15 @@ def test_rebuild_checkpoints_do_not_expose_private_layer_names(
     config.start_from = "rebuild_interim"
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "build_interim_main",
+        "quant_research_platform.pipelines.a_share.runner.build_interim_main",
         lambda argv: 0,
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "build_panel_main",
+        "quant_research_platform.pipelines.a_share.runner.build_panel_main",
         lambda argv: 0,
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "build_factors_main",
+        "quant_research_platform.pipelines.a_share.runner.build_factors_main",
         lambda argv: 0,
     )
 
@@ -223,16 +213,13 @@ def test_rebuild_checkpoints_do_not_expose_private_layer_names(
         )
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "run_a_share_evaluation",
+        "quant_research_platform.pipelines.a_share.runner.run_a_share_evaluation",
         fake_run_a_share_evaluation,
     )
 
     result = run_a_share_pipeline(config)
 
-    checkpoints_text = (result.run_dir / "checkpoints.json").read_text(
-        encoding="utf-8"
-    )
+    checkpoints_text = (result.run_dir / "checkpoints.json").read_text(encoding="utf-8")
     assert "raw_private" not in checkpoints_text
     assert "interim_private" not in checkpoints_text
     assert "processed_private" not in checkpoints_text
@@ -265,8 +252,7 @@ def test_evaluate_step_calls_a_share_evaluation_service(
         )
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "run_a_share_evaluation",
+        "quant_research_platform.pipelines.a_share.runner.run_a_share_evaluation",
         fake_run_a_share_evaluation,
     )
 
@@ -274,9 +260,7 @@ def test_evaluate_step_calls_a_share_evaluation_service(
 
     assert payload["row_count"] == 7
     assert payload["artifact"] == "evaluation/manifest.json"
-    assert payload["evaluation_artifact_path"] == (
-        run_dir / "evaluation/manifest.json"
-    )
+    assert payload["evaluation_artifact_path"] == (run_dir / "evaluation/manifest.json")
     assert calls[0]["processed_root"] == config.processed_root
     assert calls[0]["report_root"] == run_dir / "evaluation"
     assert calls[0]["start_year"] == 2024
@@ -292,28 +276,23 @@ def test_pipeline_runner_writes_runtime_summary_and_checkpoints(
 ) -> None:
     config = _full_config(tmp_path)
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_interim_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_interim_step",
         lambda config: {"row_count": 1, "artifact": "interim"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         lambda config: {"row_count": 2, "artifact": "panel"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_factors_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_factors_step",
         lambda config: {"row_count": 3, "artifact": "factors"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_evaluate_step",
+        "quant_research_platform.pipelines.a_share.runner._run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
             "artifact": "evaluation/manifest.json",
-            "evaluation_artifact_path": run_dir
-            / "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir / "evaluation/manifest.json",
         },
     )
 
@@ -344,28 +323,23 @@ def test_pipeline_runner_does_not_overwrite_existing_run_dir_by_default(
     existing.mkdir(parents=True)
     (existing / "keep.txt").write_text("keep", encoding="utf-8")
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_interim_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_interim_step",
         lambda config: {"row_count": 1, "artifact": "interim"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         lambda config: {"row_count": 2, "artifact": "panel"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_factors_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_factors_step",
         lambda config: {"row_count": 3, "artifact": "factors"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_evaluate_step",
+        "quant_research_platform.pipelines.a_share.runner._run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
             "artifact": "evaluation/manifest.json",
-            "evaluation_artifact_path": run_dir
-            / "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir / "evaluation/manifest.json",
         },
     )
 
@@ -387,28 +361,23 @@ def test_pipeline_runner_starts_from_panel_and_runs_to_evaluation(
         raise AssertionError("build_interim should be skipped")
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_interim_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_interim_step",
         fail_interim,
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         lambda config: {"row_count": 2, "artifact": "panel"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_factors_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_factors_step",
         lambda config: {"row_count": 3, "artifact": "factors"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_evaluate_step",
+        "quant_research_platform.pipelines.a_share.runner._run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
             "artifact": "evaluation/manifest.json",
-            "evaluation_artifact_path": run_dir
-            / "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir / "evaluation/manifest.json",
         },
     )
 
@@ -442,13 +411,11 @@ def test_pipeline_runner_resolves_evaluable_factor_before_build_steps(
     calls: list[str] = []
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         lambda config: calls.append("build_panel") or {"artifact": "panel"},
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_factors_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_factors_step",
         lambda config: calls.append("build_factors") or {"artifact": "factors"},
     )
 
@@ -471,8 +438,7 @@ def test_pipeline_runner_rejects_unbuilt_factor_window_before_build_steps(
     calls: list[str] = []
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_factors_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_factors_step",
         lambda config: calls.append("build_factors") or {"artifact": "factors"},
     )
 
@@ -494,8 +460,7 @@ def test_pipeline_runner_rejects_unbuilt_label_horizon_before_build_steps(
     calls: list[str] = []
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         lambda config: calls.append("build_panel") or {"artifact": "panel"},
     )
 
@@ -512,8 +477,7 @@ def test_pipeline_runner_records_failed_step_without_private_error_text(
 ) -> None:
     config = _full_config(tmp_path)
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_interim_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_interim_step",
         lambda config: {"row_count": 1, "artifact": "interim"},
     )
 
@@ -521,8 +485,7 @@ def test_pipeline_runner_records_failed_step_without_private_error_text(
         raise FileNotFoundError("missing E:/private/raw/vendor/path.csv")
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         fail_panel,
     )
 
@@ -572,28 +535,23 @@ def test_pipeline_runner_starts_from_existing_factors_with_full_checkpoint_chain
     calls: list[str] = []
 
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_interim_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_interim_step",
         lambda config: calls.append("build_interim"),
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_panel_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
         lambda config: calls.append("build_panel"),
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_build_factors_step",
+        "quant_research_platform.pipelines.a_share.runner._run_build_factors_step",
         lambda config: calls.append("build_factors"),
     )
     monkeypatch.setattr(
-        "quant_research_platform.pipelines.a_share.runner."
-        "_run_evaluate_step",
+        "quant_research_platform.pipelines.a_share.runner._run_evaluate_step",
         lambda config, run_dir: {
             "row_count": 4,
             "artifact": "evaluation/manifest.json",
-            "evaluation_artifact_path": run_dir
-            / "evaluation/manifest.json",
+            "evaluation_artifact_path": run_dir / "evaluation/manifest.json",
         },
     )
 

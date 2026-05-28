@@ -20,7 +20,7 @@ Load this reference when changing or reviewing `docs/code-map/platform-flow.md` 
 
 ## Required Relationships
 
-- A-share main chain: CSMAR raw CSV -> build_interim -> interim CSV -> build_panel -> research panel -> build_factors -> factor table -> A-share evaluation service -> A-share adapter -> EvaluationSpec -> evaluate_to_payload -> write_evaluation_set_artifacts -> schema 0.6 artifacts -> `manifest.display` -> API/download/frontend.
+- A-share main chain: CSMAR raw CSV -> build_interim -> interim CSV -> build_panel -> research panel -> build_factors -> factor table -> A-share evaluation service -> A-share adapter -> EvaluationSpec -> evaluate_to_payload -> write_evaluation_set_artifacts -> schema 0.7 artifacts -> `manifest.display` -> API/download/frontend.
 - Keep `run_evaluation` visible only as the generic wrapper path used by `qrp evaluate-parquet` and other non-A-share generic entries; do not present it as the required A-share private evaluation path.
 - `start_from` runner entries are `existing_factors`, `rebuild_factors`, `rebuild_panel`, and `rebuild_interim`; every executable run continues through evaluation.
 - Pipeline runner, A-share evaluation CLI, and Factor Factory should reach the A-share adapter through `markets/implementations/a_share/evaluation/service.py`, not by documenting separate direct adapter paths.
@@ -74,5 +74,5 @@ Before calling a code-map update complete:
 - Verify the default edge paths are Bezier curves.
 - Verify edge edit handles exist for `source`, `target`, `c1`, and `c2`.
 - Verify Markdown includes the current critical terms: `manifest.display`, `source_alias`, `run_id`, `Artifact ZIP package`, `GET /api/factor-templates`, `Factor Factory`, `evaluate-parquet`, and CSV upload compatibility.
-- Run `scripts/verify_code_map_flow.ps1` and `git diff --check`.
+- Run this skill's `scripts/verify_code_map_flow.ps1` or equivalent code-map static checks, plus `git diff --check`. If the helper is unavailable, verify UTF-8 readability, critical terms, HTML node/edge endpoints, directed cycles, static node overlap, and Bezier-only edge routing directly.
 - Use browser acceptance when HTML interaction changed. At minimum, open the file in Chrome or Playwright, check for JavaScript errors, select an edge, drag all four edge handles, and verify reset restores the path.

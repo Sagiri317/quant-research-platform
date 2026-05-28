@@ -16,6 +16,8 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LogRoot = Join-Path $ProjectRoot ".codex\run-logs"
 $PidFile = Join-Path $LogRoot "workbench-pids.json"
+$ViteApiBaseUrl = "http://$ApiHost`:$ApiPort"
+$CorsOrigins = "http://$WebHost`:$WebPort;http://localhost`:$WebPort"
 New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 
 if ((-not $RunRoots) -or (-not $PipelineOutputRoot) -or (-not $FactorFactoryRoot)) {
@@ -102,15 +104,21 @@ function Test-ProjectListener {
 }
 
 function Test-RecordedRunRoots {
-    # 端口已被本项目占用时，还要确认 run roots 与本次启动请求一致。
+    # 端口已被本项目占用时，还要确认 runtime config 与本次启动请求一致。
     if (-not (Test-Path $PidFile)) {
         return $false
     }
     $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
     return $record.projectRoot -eq $ProjectRoot -and
+        $record.apiHost -eq $ApiHost -and
+        $record.apiPort -eq $ApiPort -and
+        $record.webHost -eq $WebHost -and
+        $record.webPort -eq $WebPort -and
         $record.runRoots -eq $RunRoots -and
         $record.pipelineOutputRoot -eq $PipelineOutputRoot -and
-        $record.factorFactoryRoot -eq $FactorFactoryRoot
+        $record.factorFactoryRoot -eq $FactorFactoryRoot -and
+        $record.viteApiBaseUrl -eq $ViteApiBaseUrl -and
+        $record.corsOrigins -eq $CorsOrigins
 }
 
 function Assert-PortAvailableOrOwned {
@@ -127,7 +135,7 @@ function Assert-PortAvailableOrOwned {
             Write-Host "$Name already listening on port $Port for this project"
             return
         }
-        throw "$Name port $Port is already listening for this project, but recorded runtime roots differ. Run scripts\stop_workbench.ps1 first or choose another port."
+        throw "$Name port $Port is already listening for this project, but recorded runtime configuration differs. Run scripts\stop_workbench.ps1 first or choose another port."
     }
     throw "$Name port $Port is already listening, but it is not recorded as this project. Choose another port or stop that process first."
 }
@@ -148,6 +156,7 @@ if (Test-PortListening -Port $ApiPort) {
     $env:QRP_RUN_ROOTS = $RunRoots
     $env:QRP_PIPELINE_OUTPUT_ROOT = $PipelineOutputRoot
     $env:QRP_FACTOR_FACTORY_ROOT = $FactorFactoryRoot
+    $env:QRP_CORS_ORIGINS = $CorsOrigins
     $apiProcess = Start-Process `
         -FilePath "conda" `
         -ArgumentList @(
@@ -169,6 +178,7 @@ if (Test-PortListening -Port $ApiPort) {
 if (Test-PortListening -Port $WebPort) {
     $webPid = Get-ListenerProcessId -Port $WebPort
 } else {
+    $env:VITE_API_BASE_URL = $ViteApiBaseUrl
     $webProcess = Start-Process `
         -FilePath "npm.cmd" `
         -ArgumentList @("run", "dev", "--", "--host", $WebHost, "--port", "$WebPort") `
@@ -215,6 +225,8 @@ Write-Host "Logs: $LogRoot"
     runRoots = $RunRoots
     pipelineOutputRoot = $PipelineOutputRoot
     factorFactoryRoot = $FactorFactoryRoot
+    viteApiBaseUrl = $ViteApiBaseUrl
+    corsOrigins = $CorsOrigins
     startedAt = (Get-Date).ToString("o")
 } | ConvertTo-Json | Set-Content -Path $PidFile -Encoding UTF8
 Write-Host "PID file: $PidFile"

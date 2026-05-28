@@ -7,10 +7,6 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from quant_research_platform.artifacts.artifact_package import (
-    ArtifactPackageError,
-    require_manifest_display_download_item,
-)
 from quant_research_platform.interfaces.api.models import RunRoot
 from quant_research_platform.interfaces.api.services.comparison_service import (
     comparison_index_csv_bytes,
@@ -46,24 +42,7 @@ class ApiContext:
     def comparison_index_records(self, *, required_ref=None):
         """返回可参与 comparison 的 run index records。"""
 
-        records = discover_run_indexes(self.run_roots)
-        exposed_records = []
-        for record in records:
-            try:
-                require_manifest_display_download_item(
-                    record.manifest,
-                    "comparison.csv",
-                )
-            except ArtifactPackageError as exc:
-                if (
-                    required_ref is not None
-                    and record.ref.source_alias == required_ref.source_alias
-                    and record.ref.run_id == required_ref.run_id
-                ):
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-                continue
-            exposed_records.append(record)
-        return exposed_records
+        return discover_run_indexes(self.run_roots)
 
     def comparison_csv_bytes_for_download(self) -> bytes:
         """返回 direct 和 ZIP download 共用的 comparison CSV bytes。"""

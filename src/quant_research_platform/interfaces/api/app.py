@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from quant_research_platform.interfaces.api.errors import register_api_error_handlers
 from quant_research_platform.interfaces.api.routes import (
     artifacts,
     comparison,
@@ -33,6 +34,20 @@ from quant_research_platform.interfaces.api.services.run_repository import (
 DEFAULT_RUN_ROOT_ALIAS = _DEFAULT_RUN_ROOT_ALIAS
 PIPELINE_OUTPUT_ROOT_ENV = "QRP_PIPELINE_OUTPUT_ROOT"
 FACTOR_FACTORY_ROOT_ENV = "QRP_FACTOR_FACTORY_ROOT"
+CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
+DEFAULT_CORS_ORIGINS = (
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+)
+
+
+def _cors_origins_from_env() -> list[str]:
+    origins = list(DEFAULT_CORS_ORIGINS)
+    env_value = os.environ.get(CORS_ORIGINS_ENV, "")
+    for origin in (item.strip() for item in env_value.split(";")):
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
 
 
 def _pipeline_root_from_config(
@@ -80,11 +95,12 @@ def create_app(
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_origins=_cors_origins_from_env(),
         allow_methods=["DELETE", "GET", "POST", "OPTIONS"],
         allow_headers=["*"],
         expose_headers=["Content-Disposition"],
     )
+    register_api_error_handlers(app)
     configured_roots = (
         normalize_run_roots(run_roots)
         if run_roots is not None
@@ -105,9 +121,7 @@ def create_app(
             )
         )
     )
-    if all(
-        root.source_alias != "pipeline" for root in configured_roots
-    ):
+    if all(root.source_alias != "pipeline" for root in configured_roots):
         configured_roots = [*configured_roots, run_root("pipeline", pipeline_root)]
     app.state.qrp_context = ApiContext(
         run_roots=configured_roots,

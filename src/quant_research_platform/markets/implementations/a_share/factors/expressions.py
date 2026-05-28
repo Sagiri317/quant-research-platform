@@ -118,9 +118,7 @@ def _parse_call(node: ast.Call, dependencies: set[str]) -> dict[str, Any]:
 def _validate_function_args(function_name: str, args: list[dict[str, Any]]) -> None:
     if function_name in WINDOW_FUNCTIONS:
         if len(args) != 2:
-            raise FactorExpressionError(
-                f"{function_name} expects exactly 2 arguments"
-            )
+            raise FactorExpressionError(f"{function_name} expects exactly 2 arguments")
         if args[0]["type"] != "field":
             raise FactorExpressionError(
                 f"{function_name} first argument must be a field"
@@ -132,17 +130,13 @@ def _validate_function_args(function_name: str, args: list[dict[str, Any]]) -> N
         return
     if function_name in UNARY_FUNCTIONS:
         if len(args) != 1:
-            raise FactorExpressionError(
-                f"{function_name} expects exactly 1 argument"
-            )
+            raise FactorExpressionError(f"{function_name} expects exactly 1 argument")
         return
     if function_name == "neutralize":
         if len(args) != 2:
             raise FactorExpressionError("neutralize expects exactly 2 arguments")
         if args[1]["type"] != "field":
-            raise FactorExpressionError(
-                "neutralize second argument must be a field"
-            )
+            raise FactorExpressionError("neutralize second argument must be a field")
 
 
 def _is_positive_integer_constant(arg: dict[str, Any]) -> bool:

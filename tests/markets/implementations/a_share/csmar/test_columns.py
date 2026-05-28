@@ -61,6 +61,7 @@ def test_load_or_create_column_overrides_writes_documented_template(tmp_path) ->
 
     assert path.exists()
     assert payload["daily_market"]["keep"] == []
-    assert "return_without_dividend" in payload["daily_market"][
-        "_available_optional_columns"
-    ]
+    assert (
+        "return_without_dividend"
+        in payload["daily_market"]["_available_optional_columns"]
+    )

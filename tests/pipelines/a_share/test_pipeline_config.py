@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from quant_research_platform.pipelines.a_share.config import (
@@ -120,8 +118,7 @@ def test_validation_classifies_market_and_portfolio_issues(tmp_path):
     unsupported_mode_validation = validate_pipeline_config(unsupported_mode)
 
     assert any(
-        issue.code == "missing_market"
-        for issue in missing_market_validation.blocking
+        issue.code == "missing_market" for issue in missing_market_validation.blocking
     )
     assert any(
         issue.code == "unsupported_market"
@@ -224,21 +221,30 @@ def test_validation_rejects_unsafe_processed_factor_column(tmp_path):
     validation = validate_pipeline_config(config)
 
     assert any(
-        issue.code == "unsafe_processed_factor_column"
-        for issue in validation.blocking
+        issue.code == "unsafe_processed_factor_column" for issue in validation.blocking
     )
 
 
-def test_warning_issue_is_recorded(tmp_path):
+def test_validation_rejects_unknown_diagnostics_view(tmp_path):
     config = _valid_config(tmp_path)
     config.diagnostics = ("industry_neutrality",)
 
     validation = validate_pipeline_config(config)
+
+    assert any(issue.code == "unsupported_diagnostics" for issue in validation.blocking)
+
+
+def test_snapshot_serializes_schema_07_diagnostics_views(tmp_path):
+    config = _valid_config(tmp_path)
+    config.diagnostics = ("scenario_metrics",)
+
+    validation = validate_pipeline_config(config)
     snapshot = write_run_snapshot(config)
-    warnings = json.loads((snapshot.run_dir / "warnings.json").read_text("utf-8"))
+    run_config = (snapshot.run_dir / "run_config.yaml").read_text(encoding="utf-8")
 
     assert not validation.has_blocking
-    assert any(issue["code"] == "missing_optional_industry" for issue in warnings)
+    assert "diagnostics:" in run_config
+    assert "  - scenario_metrics" in run_config
 
 
 def test_start_from_and_build_config_fields_are_serialized(tmp_path):

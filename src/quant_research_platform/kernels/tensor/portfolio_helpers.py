@@ -116,15 +116,8 @@ def _apply_array_tradability_constraints(
     if timestamp_input.can_enter is None and timestamp_input.can_exit is None:
         return positions
     if (
-        (
-            timestamp_input.can_enter is None
-            or bool(timestamp_input.can_enter.all())
-        )
-        and (
-            timestamp_input.can_exit is None
-            or bool(timestamp_input.can_exit.all())
-        )
-    ):
+        timestamp_input.can_enter is None or bool(timestamp_input.can_enter.all())
+    ) and (timestamp_input.can_exit is None or bool(timestamp_input.can_exit.all())):
         return positions
     constrained = positions.copy()
     previous = (
@@ -138,9 +131,7 @@ def _apply_array_tradability_constraints(
         and tradability_config.blocked_exit_policy != "force_exit"
     ):
         exit_blocked = (
-            (previous != 0.0)
-            & (constrained != previous)
-            & ~timestamp_input.can_exit
+            (previous != 0.0) & (constrained != previous) & ~timestamp_input.can_exit
         )
         if exit_blocked.any():
             if tradability_config.blocked_exit_policy == "error":
@@ -154,9 +145,7 @@ def _apply_array_tradability_constraints(
             np.sign(previous) == np.sign(constrained)
         )
         entry_blocked = (
-            (constrained != 0.0)
-            & ~same_sign_existing
-            & ~timestamp_input.can_enter
+            (constrained != 0.0) & ~same_sign_existing & ~timestamp_input.can_enter
         )
         constrained[entry_blocked] = np.where(
             previous[entry_blocked] != 0.0,

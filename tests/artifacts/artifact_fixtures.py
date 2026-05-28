@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.artifacts import ARTIFACT_SCHEMA_VERSION
-from quant_research_platform.artifacts.display_manifest import build_display_manifest
+from quant_research_platform.artifacts.artifact_writer import (
+    write_evaluation_set_artifacts as _write_schema_07_artifacts,
+)
 
 
 def write_evaluation_set(
@@ -35,205 +36,204 @@ def write_evaluation_set(
     turnover = [2.0] if turnover is None else turnover
     cost = [0.001] if cost is None else cost
 
-    (output_dir / "dimensions").mkdir(parents=True)
-    (output_dir / "metrics").mkdir(parents=True)
-    (output_dir / "portfolio").mkdir(parents=True)
-    (output_dir / "diagnostics").mkdir(parents=True)
-    (output_dir / "input_quality").mkdir(parents=True)
-    (output_dir / "summaries").mkdir(parents=True)
-    metadata = {
-        "run_id": evaluation_id,
+    _write_schema_07_artifacts(
+        output_dir,
+        summary=_schema_07_summary(
+            run_id=evaluation_id,
+            project=project,
+            kind=kind,
+            domain=domain,
+            data_stage=data_stage,
+            uses_external_data=uses_external_data,
+            n_rows_evaluated=n_rows_evaluated,
+        ),
+        run_context=_schema_07_run_context(run_id=evaluation_id),
+        tables=_schema_07_tables(
+            ic_values=ic_values,
+            rankic_values=rankic_values,
+            net_returns=net_returns,
+            turnover=turnover,
+            cost=cost,
+            n_rows_evaluated=n_rows_evaluated,
+        ),
+        report="# Report\n",
+    )
+    return
+
+
+def _schema_07_summary(
+    *,
+    run_id: str,
+    project: str,
+    kind: str,
+    domain: str,
+    data_stage: str,
+    uses_external_data: bool,
+    n_rows_evaluated: int,
+) -> dict[str, object]:
+    return {
+        "run_id": run_id,
         "project": project,
         "kind": kind,
-        "domain": domain,
         "data_stage": data_stage,
-        "uses_external_data": uses_external_data,
-    }
-    _write_json(output_dir / "manifest.json", _manifest(metadata=metadata))
-    _write_json(
-        output_dir / "config.json",
-        {
-            "metadata": metadata,
-            "n_groups": 2,
+        "n_rows_evaluated": n_rows_evaluated,
+        "n_combinations": 1,
+        "base_evaluation": {
             "kernel": "dataframe",
-            "weight_configs": [
-                {
-                    "method": "equal_weight_quantile",
-                    "portfolio_mode": "long_short",
-                }
-            ],
-            "cost_configs": [{"slippage_bps": 0.0}],
-        },
-    )
-    _write_json(
-        output_dir / "lineage.json",
-        {
-            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
-            "input_reference": "fixture",
-            "input_fingerprint": "sha256:fixture",
-        },
-    )
-    _write_json(
-        output_dir / "summary.json",
-        {
-            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
-            "artifact_type": "evaluation_set",
-            "evaluation_id": evaluation_id,
-            "project": project,
-            "kind": kind,
             "domain": domain,
-            "data_stage": data_stage,
             "uses_external_data": uses_external_data,
-            "n_rows_evaluated": n_rows_evaluated,
-            "n_combinations": 1,
-            "schema": {
-                "timestamp_column": "timestamp",
-                "asset_column": "asset",
-                "feature_columns": ["factor"],
-                "label_columns": ["forward_return"],
-                "return_source_column": "forward_return_1d",
-            },
-            "kernel": "dataframe",
         },
-    )
-    _combinations_frame().to_csv(
-        output_dir / "dimensions" / "combinations.csv",
-        index=False,
-    )
-    _with_dims(_ic_frame(ic_values=ic_values, rankic_values=rankic_values)).to_csv(
-        output_dir / "metrics" / "ic.csv",
-        index=False,
+        "diagnostics": {"enabled": False, "status": "disabled"},
+        "warnings": [],
+    }
+
+
+def _schema_07_run_context(*, run_id: str) -> dict[str, object]:
+    return {
+        "config": {
+            "evaluation_spec": {
+                "weight_configs": [
+                    {
+                        "method": "equal_weight_quantile",
+                        "portfolio_mode": "long_short",
+                    }
+                ],
+                "cost_configs": [{"slippage_bps": 0.0}],
+            },
+            "diagnostics_spec": {"enabled": False},
+            "a_share_assumptions": {"status": "not_applicable"},
+            "config_fingerprint": "sha256:fixture",
+        },
+        "provenance": {
+            "run_id": run_id,
+            "input_panel_fingerprint": "sha256:fixture",
+            "input_data_version": "fixture",
+            "input_artifact_refs": [],
+            "output_artifact_index": {},
+            "diagnostic_policy_fingerprint": "disabled",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "generator": "pytest",
+            "code_version": "fixture",
+            "environment_summary": {"python": "fixture"},
+            "staging_payload_fingerprint": "sha256:fixture",
+            "factor_definition_version": "fixture",
+            "random_seed": "not_applicable",
+        },
+    }
+
+
+def _schema_07_tables(
+    *,
+    ic_values: list[float],
+    rankic_values: list[float],
+    net_returns: list[float],
+    turnover: list[float],
+    cost: list[float],
+    n_rows_evaluated: int,
+) -> dict[str, pd.DataFrame]:
+    combo = _combinations_frame()["combination_id"].iloc[0]
+    returns = _with_dims(
+        _returns_frame(net_returns=net_returns, turnover=turnover, cost=cost)
+    ).rename(columns={"net_portfolio_return": "net_return"})
+    performance = _with_dims(
+        _performance_summary_frame(
+            net_returns=net_returns,
+            turnover=turnover,
+            cost=cost,
+        )
     )
     ic_summary = _with_dims(
         _ic_summary_frame(ic_values=ic_values, rankic_values=rankic_values)
     )
-    ic_summary.to_csv(
-        output_dir / "metrics" / "ic_summary.csv",
-        index=False,
-    )
-    _with_dims(_grouped_returns_frame()).to_csv(
-        output_dir / "metrics" / "grouped_returns.csv",
-        index=False,
-    )
-    _with_dims(_group_spread_summary_frame()).to_csv(
-        output_dir / "metrics" / "group_spread_summary.csv",
-        index=False,
-    )
-    returns = _with_dims(
-        _returns_frame(net_returns=net_returns, turnover=turnover, cost=cost)
-    )
-    returns.to_csv(
-        output_dir / "portfolio" / "returns.csv",
-        index=False,
-    )
-    _with_dims(_cumulative_returns_frame(net_returns=net_returns, cost=cost)).to_csv(
-        output_dir / "portfolio" / "cumulative_returns.csv",
-        index=False,
-    )
-    _with_dims(_weights_frame()).to_parquet(
-        output_dir / "portfolio" / "weights.parquet",
-        index=False,
-    )
-    _with_dims(_performance_summary_frame(
-        net_returns=net_returns,
-        turnover=turnover,
-        cost=cost,
-    )).to_csv(
-        output_dir / "metrics" / "performance_summary.csv",
-        index=False,
-    )
-    _with_dims(_tradability_diagnostics_frame()).to_csv(
-        output_dir / "diagnostics" / "tradability_diagnostics.csv",
-        index=False,
-    )
-    _label_availability_frame().to_csv(
-        output_dir / "input_quality" / "label_availability.csv",
-        index=False,
-    )
-    _factor_coverage_frame().to_csv(
-        output_dir / "input_quality" / "factor_coverage.csv",
-        index=False,
-    )
-    _tradability_coverage_frame().to_csv(
-        output_dir / "input_quality" / "tradability_coverage.csv",
-        index=False,
-    )
-    _evaluation_summary_frame(
-        net_returns=net_returns,
-        turnover=turnover,
-        cost=cost,
-    ).to_csv(
-        output_dir / "summaries" / "evaluation_summary.csv",
-        index=False,
-    )
-    (output_dir / "report.md").write_text("# Report\n", encoding="utf-8")
-
-
-def _manifest(*, metadata: dict[str, object]) -> dict[str, object]:
-    artifacts = {
-        "manifest": "manifest.json",
-        "config": "config.json",
-        "lineage": "lineage.json",
-        "summary": "summary.json",
-        "dimensions": {
-            "combinations": "dimensions/combinations.csv",
-        },
-        "metrics": {
-            "ic": "metrics/ic.csv",
-            "ic_summary": "metrics/ic_summary.csv",
-            "grouped_returns": "metrics/grouped_returns.csv",
-            "group_spread_summary": "metrics/group_spread_summary.csv",
-            "performance_summary": "metrics/performance_summary.csv",
-        },
-        "portfolio": {
-            "returns": "portfolio/returns.csv",
-            "cumulative_returns": "portfolio/cumulative_returns.csv",
-            "weights": "portfolio/weights.parquet",
-        },
-        "diagnostics": {
-            "tradability_diagnostics": (
-                "diagnostics/tradability_diagnostics.csv"
-            ),
-        },
-        "input_quality": {
-            "label_availability": "input_quality/label_availability.csv",
-            "factor_coverage": "input_quality/factor_coverage.csv",
-            "tradability_coverage": "input_quality/tradability_coverage.csv",
-        },
-        "summaries": {
-            "evaluation_summary": "summaries/evaluation_summary.csv",
-        },
-        "report": "report.md",
-    }
     return {
-        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
-        "artifact_type": "evaluation_set",
-        "evaluation_id": metadata["run_id"],
-        "project": metadata["project"],
-        "kind": metadata["kind"],
-        "domain": metadata["domain"],
-        "data_stage": metadata["data_stage"],
-        "uses_external_data": metadata["uses_external_data"],
-        "schema": {
-            "timestamp_column": "timestamp",
-            "asset_column": "asset",
-            "feature_columns": ["factor"],
-            "label_columns": ["forward_return"],
-            "return_source_column": "forward_return_1d",
-        },
-        "kernel": "dataframe",
-        "n_combinations": 1,
-        "segment_columns": [],
-        "artifacts": artifacts,
-        "display": build_display_manifest(
-            artifacts,
-            schema_version=ARTIFACT_SCHEMA_VERSION,
-            default_selection={
-                "feature": "factor",
-                "label": "forward_return",
-                "kernel": "dataframe",
-                "portfolio_mode": "long_short",
-            },
+        "combinations": _combinations_frame(),
+        "ic": _with_dims(_ic_frame(ic_values=ic_values, rankic_values=rankic_values)),
+        "grouped_returns": _with_dims(_grouped_returns_frame()),
+        "evaluation_metrics_summary": pd.DataFrame(
+            {
+                "combination_id": [combo, combo, combo, combo],
+                "metric_family": ["ic", "ic", "portfolio", "portfolio"],
+                "metric_name": [
+                    "mean_ic",
+                    "mean_rankic",
+                    "final_cumulative_net_return",
+                    "mean_turnover",
+                ],
+                "metric_value": [
+                    float(ic_summary["mean_ic"].iloc[0]),
+                    float(ic_summary["mean_rankic"].iloc[0]),
+                    float(performance["final_cumulative_net_return"].iloc[0]),
+                    float(performance["mean_turnover"].iloc[0]),
+                ],
+                "unit": ["ratio", "ratio", "ratio", "ratio"],
+                "n_observations": [
+                    len(ic_values),
+                    len(ic_values),
+                    len(net_returns),
+                    len(net_returns),
+                ],
+                "diagnostic_status": ["ok", "ok", "ok", "ok"],
+                "status_reason": ["", "", "", ""],
+                "warning": ["", "", "", ""],
+            }
+        ),
+        "returns": returns,
+        "coverage_summary": pd.DataFrame(
+            {
+                "input_family": ["label", "factor", "tradability"],
+                "input_name": ["forward_return", "factor", "can_enter"],
+                "available_rows": [
+                    n_rows_evaluated,
+                    n_rows_evaluated,
+                    n_rows_evaluated,
+                ],
+                "missing_rows": [0, 0, 0],
+                "coverage_rate": [1.0, 1.0, 1.0],
+                "diagnostic_status": ["ok", "ok", "ok"],
+                "status_reason": ["", "", ""],
+                "warning": ["", "", ""],
+            }
+        ),
+        "diagnostic_policies": pd.DataFrame(
+            {
+                "policy_id": ["__diagnostics_disabled__"],
+                "policy_family": ["diagnostics_contract"],
+                "enabled": [False],
+                "requested": [False],
+                "materialized": [True],
+                "policy_fingerprint": ["disabled"],
+                "diagnostic_status": ["disabled"],
+                "status_reason": ["diagnostics disabled by request"],
+                "warning": [""],
+            }
+        ),
+        "diagnostic_summary": pd.DataFrame(
+            {
+                "combination_id": [combo],
+                "policy_id": ["__diagnostics_disabled__"],
+                "policy_family": ["diagnostics_contract"],
+                "decision_usable": [False],
+                "materialized_views": [""],
+                "missing_inputs": [""],
+                "diagnostic_status": ["disabled"],
+                "status_reason": ["diagnostics disabled by request"],
+                "warning": [""],
+            }
+        ),
+        "diagnostic_metrics": pd.DataFrame(
+            columns=[
+                "combination_id",
+                "policy_id",
+                "policy_family",
+                "metric_name",
+                "metric_value",
+                "unit",
+                "decision_usable",
+                "required_inputs_met",
+                "diagnostic_status",
+                "status_reason",
+                "warning",
+            ]
         ),
     }
 
@@ -446,9 +446,7 @@ def _performance_summary_frame(
     downside_volatility = float(returns.clip(upper=0).std(ddof=0))
     sharpe_like = float(returns.mean() / volatility) if volatility > 0 else 0.0
     sortino_like = (
-        float(returns.mean() / downside_volatility)
-        if downside_volatility > 0
-        else 0.0
+        float(returns.mean() / downside_volatility) if downside_volatility > 0 else 0.0
     )
     cumulative = _cumulative_returns_frame(net_returns=net_returns, cost=cost)
     max_drawdown = float(cumulative["drawdown"].min())

@@ -54,9 +54,7 @@ def build_research_panel(
         if column in stocks.columns
     ]
     panel = daily.merge(stocks[keep_stock_columns], on="stock_code", how="left")
-    panel["listing_age_days"] = (
-        panel["trade_date"] - panel["listing_date"]
-    ).dt.days
+    panel["listing_age_days"] = (panel["trade_date"] - panel["listing_date"]).dt.days
 
     cap_columns = [
         column
@@ -94,9 +92,8 @@ def build_research_panel(
                 stock_result = stock_result.drop(columns=["stock_code_capchg"])
         merged_groups.append(stock_result)
     panel = pd.concat(merged_groups, ignore_index=True)
-    panel["turnover"] = (
-        pd.to_numeric(panel["volume"], errors="coerce")
-        / pd.to_numeric(panel["a_float_shares"], errors="coerce")
+    panel["turnover"] = pd.to_numeric(panel["volume"], errors="coerce") / pd.to_numeric(
+        panel["a_float_shares"], errors="coerce"
     )
     panel = panel.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
     panel["listing_age_trading_days"] = panel.groupby("stock_code").cumcount() + 1
@@ -122,10 +119,9 @@ def build_research_panel(
         & panel["next_day_is_trading"].astype(bool)
         & panel["next_day_limit_status"].ne(1)
     )
-    panel["can_exit"] = (
-        panel["next_day_is_trading"].astype(bool)
-        & panel["next_day_limit_status"].ne(-1)
-    )
+    panel["can_exit"] = panel["next_day_is_trading"].astype(bool) & panel[
+        "next_day_limit_status"
+    ].ne(-1)
     return panel
 
 
@@ -166,9 +162,7 @@ def build_panel_full_from_interim(
     market_cap = _read_csv(_market_cap_path(interim_root, end_date))
     frames = []
     for year in range(start_year, end_year + 1):
-        daily_path = (
-            interim_root / "daily_market_by_year" / f"daily_market_{year}.csv"
-        )
+        daily_path = interim_root / "daily_market_by_year" / f"daily_market_{year}.csv"
         if not daily_path.exists():
             raise FileNotFoundError(daily_path)
         frames.append(_read_csv(daily_path))

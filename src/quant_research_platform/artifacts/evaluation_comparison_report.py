@@ -91,12 +91,35 @@ def _read_combination_summary(run_dir: Path) -> pd.DataFrame:
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     table_paths = _artifact_table_paths(manifest["artifacts"])
     combinations = pd.read_csv(run_dir / table_paths["combinations"])
-    ic_summary = pd.read_csv(run_dir / table_paths["ic_summary"])
-    performance = pd.read_csv(run_dir / table_paths["performance_summary"])
-    metrics = _merge_fact_table(combinations, ic_summary)
-    metrics = _merge_fact_table(metrics, performance)
-    metrics.insert(0, "evaluation_id", summary["evaluation_id"])
+    metrics_summary = pd.read_csv(run_dir / table_paths["evaluation_metrics_summary"])
+    metrics = _merge_fact_table(
+        combinations,
+        _metrics_summary_wide(metrics_summary),
+    )
+    metrics.insert(0, "run_id", summary["run_id"])
     return metrics
+
+
+def _metrics_summary_wide(metrics_summary: pd.DataFrame) -> pd.DataFrame:
+    required = {"combination_id", "metric_name", "metric_value"}
+    missing = sorted(required.difference(metrics_summary.columns))
+    if missing:
+        raise ValueError(f"evaluation_metrics_summary missing columns: {missing}.")
+    values = metrics_summary.copy()
+    values["metric_value"] = pd.to_numeric(
+        values["metric_value"],
+        errors="coerce",
+    )
+    return (
+        values.pivot_table(
+            index="combination_id",
+            columns="metric_name",
+            values="metric_value",
+            aggfunc="mean",
+        )
+        .reset_index()
+        .rename_axis(columns=None)
+    )
 
 
 def _merge_fact_table(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
@@ -134,7 +157,7 @@ def _artifact_table_paths(artifacts: dict[str, object]) -> dict[str, str]:
 
 def _kernel_parity(combinations: pd.DataFrame) -> pd.DataFrame:
     columns = [
-        "evaluation_id",
+        "run_id",
         "feature",
         "label",
         "portfolio_mode",
@@ -157,7 +180,7 @@ def _kernel_parity(combinations: pd.DataFrame) -> pd.DataFrame:
         if metric in combinations.columns
     ]
     rows: list[dict[str, object]] = []
-    grouping = ["evaluation_id", "feature", "label", "portfolio_mode"]
+    grouping = ["run_id", "feature", "label", "portfolio_mode"]
     for key, group in combinations.groupby(grouping, dropna=False, sort=False):
         by_kernel = {
             str(row["kernel"]): row
@@ -177,7 +200,7 @@ def _kernel_parity(combinations: pd.DataFrame) -> pd.DataFrame:
             ).iloc[0]
             rows.append(
                 {
-                    "evaluation_id": key[0],
+                    "run_id": key[0],
                     "feature": key[1],
                     "label": key[2],
                     "portfolio_mode": key[3],
@@ -208,7 +231,7 @@ def _markdown_report(
     columns = [
         column
         for column in (
-            "evaluation_id",
+            "run_id",
             "mean_ic",
             "mean_rankic",
             "mean_final_return",

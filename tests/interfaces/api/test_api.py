@@ -70,7 +70,8 @@ def test_api_lists_runs_from_multiple_aliased_roots(tmp_path):
     runs = response.json()
     assert [run["public_run_id"] for run in runs] == ["crypto/toy", "platform/demo"]
     assert runs[0]["source_alias"] == "crypto"
-    assert runs[0]["evaluation_id"] == "toy"
+    assert "evaluation_id" not in runs[0]
+    assert runs[0]["run_id"] == "toy"
     assert runs[0]["project"] == "crypto-perp-alpha-lab"
     assert runs[0]["domain"] == "crypto_perp"
     assert runs[0]["mean_final_return"] == 0.05
@@ -254,12 +255,12 @@ def test_api_run_list_skips_unsupported_legacy_schema_runs(tmp_path):
     assert [run["public_run_id"] for run in response.json()] == ["platform/demo"]
 
 
-def test_api_run_list_skips_schema_06_run_missing_required_artifact_file(tmp_path):
+def test_api_run_list_skips_schema_07_run_missing_required_artifact_file(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "good", run_id="good")
     broken = runs_root / "broken"
     write_evaluation_set(broken, run_id="broken")
-    (broken / "portfolio" / "weights.parquet").unlink()
+    (broken / "diagnostics" / "diagnostic_summary.csv").unlink()
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get("/api/runs")
@@ -271,15 +272,13 @@ def test_api_run_list_skips_schema_06_run_missing_required_artifact_file(tmp_pat
     assert target.json()["detail"] == "artifact run index is incomplete or invalid"
 
 
-def test_api_run_list_skips_schema_06_run_missing_performance_columns(tmp_path):
+def test_api_run_list_skips_schema_07_run_missing_summary_metric_columns(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "good", run_id="good")
     broken = runs_root / "broken"
     write_evaluation_set(broken, run_id="broken")
-    performance_path = broken / "metrics" / "performance_summary.csv"
-    performance = pd.read_csv(performance_path).drop(
-        columns=["mean_net_portfolio_return"]
-    )
+    performance_path = broken / "metrics" / "evaluation_metrics_summary.csv"
+    performance = pd.read_csv(performance_path).drop(columns=["metric_value"])
     performance.to_csv(performance_path, index=False)
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
@@ -289,7 +288,7 @@ def test_api_run_list_skips_schema_06_run_missing_performance_columns(tmp_path):
     assert response.status_code == 200
     assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
     assert target.status_code == 422
-    assert "performance_summary is missing columns" in target.json()["detail"]
+    assert "evaluation_metrics_summary is missing columns" in target.json()["detail"]
 
 
 def test_api_run_list_skips_unknown_manifest_artifact_entries(tmp_path):
@@ -309,7 +308,7 @@ def test_api_run_list_skips_unknown_manifest_artifact_entries(tmp_path):
     assert response.status_code == 200
     assert [run["public_run_id"] for run in response.json()] == ["platform/good"]
     assert target.status_code == 422
-    assert "unknown artifact groups" in target.json()["detail"]
+    assert "unknown artifact group" in target.json()["detail"]
 
 
 def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
@@ -324,16 +323,16 @@ def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     evidence = client.get("/api/runs/platform/demo/evidence")
-    ic = client.get("/api/runs/platform/demo/metrics/ic")
-    cumulative = client.get("/api/runs/platform/demo/portfolio/cumulative_returns")
-    performance = client.get("/api/runs/platform/demo/metrics/performance_summary")
-    retired_performance = client.get(
-        "/api/runs/platform/demo/metrics/performance-summary"
+    ic = client.get("/api/runs/platform/demo/tables/ic/preview")
+    returns = client.get("/api/runs/platform/demo/tables/returns/preview")
+    performance = client.get(
+        "/api/runs/platform/demo/tables/evaluation_metrics_summary/preview"
     )
+    retired_performance = client.get("/api/runs/platform/demo/metrics/ic")
     report = client.get("/api/runs/platform/demo/report.md")
 
     assert evidence.status_code == 200
-    assert evidence.json()["summary"]["evaluation_id"] == "demo"
+    assert "evaluation_id" not in evidence.json()["summary"]
     assert evidence.json()["summary"]["run_id"] == "demo"
     assert evidence.json()["summary"]["source_alias"] == "platform"
     assert evidence.json()["summary"]["public_run_id"] == "platform/demo"
@@ -343,10 +342,10 @@ def test_api_returns_summary_metric_table_and_report_for_one_run(tmp_path):
         ic.json()["columns"]
     )
     assert len(ic.json()["rows"]) == 2
-    assert cumulative.status_code == 200
-    assert "cumulative_net_return" in cumulative.json()["columns"]
+    assert returns.status_code == 200
+    assert "net_return" in returns.json()["columns"]
     assert performance.status_code == 200
-    assert "max_drawdown" in performance.json()["columns"]
+    assert "metric_name" in performance.json()["columns"]
     assert retired_performance.status_code == 404
     assert report.status_code == 200
     assert report.text == "# Report\n"
@@ -389,7 +388,7 @@ def test_api_metric_preview_filters_combination_before_limit(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/metrics/ic?"
+        "/api/runs/platform/demo/tables/ic/preview?"
         "combination_id=factor__forward_return__dataframe__long_short&limit=1"
     )
 
@@ -428,7 +427,7 @@ def test_api_metric_endpoint_uses_lightweight_table_preview(tmp_path, monkeypatc
     monkeypatch.setattr(run_repository, "load_evaluation_set", spy_loader)
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/run_b/metrics/ic")
+    response = client.get("/api/runs/platform/run_b/tables/ic/preview")
 
     assert response.status_code == 200
     assert loaded_run_dirs == []
@@ -453,7 +452,7 @@ def test_api_metric_endpoint_streams_csv_preview(tmp_path, monkeypatch):
     monkeypatch.setattr(table_preview_service.pd, "read_csv", spy_read_csv)
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/metrics/ic?limit=1")
+    response = client.get("/api/runs/platform/demo/tables/ic/preview?limit=1")
 
     assert response.status_code == 200
     assert response.json()["limit"] == 1
@@ -472,7 +471,7 @@ def test_api_metric_endpoint_ignores_unrelated_broken_run_index(tmp_path):
     )
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/good/metrics/ic")
+    response = client.get("/api/runs/platform/good/tables/ic/preview")
 
     assert response.status_code == 200
     assert response.json()["rows"]
@@ -512,7 +511,7 @@ def test_api_target_duplicate_run_id_within_source_returns_422(tmp_path):
     write_evaluation_set(runs_root / "second", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/metrics/ic")
+    response = client.get("/api/runs/platform/demo/tables/ic/preview")
 
     assert response.status_code == 422
     assert response.json()["detail"] == "duplicate run id for source platform: demo"
@@ -528,7 +527,7 @@ def test_api_metric_endpoint_returns_limited_preview_rows(tmp_path):
     )
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/metrics/ic?limit=2")
+    response = client.get("/api/runs/platform/demo/tables/ic/preview?limit=2")
 
     assert response.status_code == 200
     payload = response.json()
@@ -544,7 +543,7 @@ def test_api_metric_preview_rejects_oversized_limit(tmp_path):
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=1001")
+    response = client.get("/api/runs/platform/demo/tables/returns/preview?limit=1001")
 
     assert response.status_code == 422
     assert response.json()["detail"] == "limit must be between 1 and 1000"
@@ -555,7 +554,7 @@ def test_api_metric_preview_allows_maximum_limit(tmp_path):
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=1000")
+    response = client.get("/api/runs/platform/demo/tables/returns/preview?limit=1000")
 
     assert response.status_code == 200
     assert response.json()["limit"] == 1000
@@ -590,6 +589,7 @@ def test_api_csv_preview_stops_after_page_is_collected(tmp_path, monkeypatch):
         if str(path).replace("\\", "/").endswith("metrics/ic.csv") and kwargs.get(
             "chunksize"
         ):
+
             def chunks():
                 yield first_chunk
                 raise AssertionError(
@@ -602,7 +602,7 @@ def test_api_csv_preview_stops_after_page_is_collected(tmp_path, monkeypatch):
     monkeypatch.setattr(pd, "read_csv", bounded_read_csv)
 
     response = client.get(
-        "/api/runs/platform/demo/metrics/ic?"
+        "/api/runs/platform/demo/tables/ic/preview?"
         "combination_id=factor__forward_return__dataframe__long_short&limit=1"
     )
 
@@ -620,7 +620,7 @@ def test_api_csv_preview_reports_exact_eof_page(tmp_path):
     )
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/metrics/ic?limit=1")
+    response = client.get("/api/runs/platform/demo/tables/ic/preview?limit=1")
 
     assert response.status_code == 200
     payload = response.json()
@@ -696,31 +696,20 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["summary"]["evaluation_id"] == "demo"
+    assert "evaluation_id" not in payload["summary"]
     assert payload["summary"]["run_id"] == "demo"
     assert payload["summary"]["source_alias"] == "platform"
     assert payload["summary"]["public_run_id"] == "platform/demo"
     assert payload["report"]["markdown"] == "# Report\n"
-    assert {"combination_id", "timestamp", "feature", "label", "ic"}.issubset(
-        payload["tables"]["ic"]["columns"]
-    )
-    assert len(payload["tables"]["ic"]["rows"]) == 2
-    assert "cumulative_returns" in payload["tables"]
     assert "returns" in payload["tables"]
+    assert "net_return" in payload["tables"]["returns"]["columns"]
     assert "performance_summary" not in payload["tables"]
     combination_summary = payload["combination_summaries"]["rows"][0]
     for key, value in {
         "final_cumulative_net_return": 0.029,
-        "sharpe_like": 0.0,
-        "sortino_like": 0.0,
-        "max_drawdown": 0.0,
-        "win_rate": 1.0,
         "mean_ic": 0.15,
-        "icir": 3.0,
         "mean_rankic": 0.35,
-        "rankicir": 7.0,
         "mean_turnover": 2.0,
-        "total_cost": 0.001,
     }.items():
         assert combination_summary[key] == pytest.approx(value)
     assert {
@@ -740,33 +729,27 @@ def test_api_returns_aggregated_run_evidence_for_fast_result_switching(tmp_path)
         "portfolio_mode": "long_short",
     }
     display = payload["display"]
-    assert display["schema_version"] == "0.6"
-    assert {"combinations", "ic", "returns", "cumulative_returns"}.issubset(
+    assert display["schema_version"] == "0.7"
+    assert {"combinations", "ic", "returns", "diagnostic_summary"}.issubset(
         {table["key"] for table in display["tables"]}
     )
     display_tables = {table["key"]: table for table in display["tables"]}
-    assert display_tables["tradability_diagnostics"]["preview_url"] == (
-        "/api/runs/platform/demo/tables/tradability_diagnostics/preview"
+    assert display_tables["diagnostic_summary"]["preview_url"] == (
+        "/api/runs/platform/demo/tables/diagnostic_summary/preview"
     )
-    assert display_tables["tradability_diagnostics"]["preview"]["table_key"] == (
-        "tradability_diagnostics"
+    assert display_tables["diagnostic_summary"]["preview"]["table_key"] == (
+        "diagnostic_summary"
     )
     assert display_tables["combinations"]["preview_url"] == (
         "/api/runs/platform/demo/tables/combinations/preview"
     )
     assert [chart["id"] for chart in display["charts"]] == [
-        "cumulative_returns",
-        "ic_rankic",
-        "net_portfolio_return",
-        "turnover",
-        "cost",
+        "primary_cumulative_return",
     ]
     all_download = next(
-        preset
-        for preset in display["downloads"]["presets"]
-        if preset["key"] == "all"
+        preset for preset in display["downloads"]["presets"] if preset["key"] == "all"
     )
-    assert "portfolio/cumulative_returns.csv" in all_download["items"]
+    assert {"kind": "dynamic", "key": "comparison"} in all_download["items"]
     assert [row["public_run_id"] for row in payload["comparison"]["rows"]] == [
         "platform/demo",
         "platform/other",
@@ -805,11 +788,11 @@ def test_api_source_alias_scopes_preview_download_and_zip_for_duplicate_run_ids(
         create_app(run_roots=[("platform", platform_root), ("crypto", crypto_root)])
     )
 
-    preview = client.get("/api/runs/crypto/demo/metrics/ic")
-    direct = client.get("/api/runs/crypto/demo/artifacts/metrics/ic.csv")
+    preview = client.get("/api/runs/crypto/demo/tables/ic/preview")
+    direct = client.get("/api/runs/crypto/demo/artifacts/table:ic")
     zipped = client.post(
         "/api/runs/crypto/demo/download",
-        json={"items": ["metrics/ic.csv"]},
+        json={"items": ["table:ic"]},
     )
 
     assert preview.status_code == 200
@@ -827,20 +810,6 @@ def test_api_evidence_eager_tables_follow_display_charts(tmp_path):
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "demo"
     write_evaluation_set(run_dir, run_id="demo")
-    manifest_path = run_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["display"]["charts"].append(
-        {
-            "id": "returns_cost",
-            "title": "Cost breakdown",
-            "description": "Cost diagnostics",
-            "kind": "line",
-            "table": "returns",
-            "x": "timestamp",
-            "series": [{"key": "cost", "color": "#b42318"}],
-        }
-    )
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get("/api/runs/platform/demo/evidence")
@@ -848,7 +817,7 @@ def test_api_evidence_eager_tables_follow_display_charts(tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert "returns" in payload["tables"]
-    assert "cost" in payload["tables"]["returns"]["columns"]
+    assert "net_return" in payload["tables"]["returns"]["columns"]
 
 
 def test_api_evidence_uses_preview_loader_for_chart_tables(tmp_path, monkeypatch):
@@ -861,9 +830,7 @@ def test_api_evidence_uses_preview_loader_for_chart_tables(tmp_path, monkeypatch
     full_load_attempts: list[str] = []
 
     def fail_if_chart_table_is_full_loaded(path):
-        if str(path).replace("\\", "/").endswith(
-            "portfolio/cumulative_returns.csv"
-        ):
+        if str(path).replace("\\", "/").endswith("portfolio/cumulative_returns.csv"):
             full_load_attempts.append(str(path))
             raise AssertionError("chart table should use preview loading")
         return read_table(path)
@@ -878,7 +845,7 @@ def test_api_evidence_uses_preview_loader_for_chart_tables(tmp_path, monkeypatch
     response = client.get("/api/runs/platform/demo/evidence")
 
     assert response.status_code == 200
-    assert "cumulative_returns" in response.json()["tables"]
+    assert "returns" in response.json()["tables"]
     assert full_load_attempts == []
 
 
@@ -931,9 +898,7 @@ def test_api_creates_run_from_uploaded_csv_payload(tmp_path):
     body = response.json()
     assert body["public_run_id"] == "platform/uploaded_demo"
     assert body["domain"] == "user_upload"
-    assert (
-        runs_root / "uploaded_demo" / "portfolio" / "cumulative_returns.csv"
-    ).is_file()
+    assert (runs_root / "uploaded_demo" / "portfolio" / "returns.csv").is_file()
     returns = (runs_root / "uploaded_demo" / "portfolio" / "returns.csv").read_text(
         encoding="utf-8"
     )
@@ -1114,15 +1079,16 @@ def test_api_downloads_artifact_csv(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/artifacts/metrics/performance_summary.csv"
+        "/api/runs/platform/demo/artifacts/table:evaluation_metrics_summary"
     )
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
     assert "attachment" in response.headers["content-disposition"]
-    assert 'filename="performance_summary.csv"' in response.headers[
-        "content-disposition"
-    ]
+    assert (
+        'filename="evaluation_metrics_summary.csv"'
+        in response.headers["content-disposition"]
+    )
     assert "final_cumulative_net_return" in response.text
     assert "total_net_portfolio_return" not in response.text
 
@@ -1130,9 +1096,9 @@ def test_api_downloads_artifact_csv(tmp_path):
 @pytest.mark.parametrize(
     ("item", "expected"),
     [
-        ("manifest.json", "artifact_schema_version"),
-        ("config.json", "metadata"),
-        ("summary.json", "evaluation_id"),
+        ("metadata_file:manifest", "artifact_schema_version"),
+        ("metadata_file:summary", "run_id"),
+        ("metadata_file:run_context", "provenance"),
     ],
 )
 def test_api_downloads_display_exposed_metadata_artifacts(tmp_path, item, expected):
@@ -1144,7 +1110,12 @@ def test_api_downloads_display_exposed_metadata_artifacts(tmp_path, item, expect
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
-    assert f'filename="{item}"' in response.headers["content-disposition"]
+    filename = {
+        "metadata_file:manifest": "manifest.json",
+        "metadata_file:summary": "summary.json",
+        "metadata_file:run_context": "run_context.json",
+    }[item]
+    assert f'filename="{filename}"' in response.headers["content-disposition"]
     assert expected in response.json()
 
 
@@ -1152,13 +1123,13 @@ def test_api_direct_metadata_artifact_must_be_exposed_by_display(tmp_path):
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "demo"
     write_evaluation_set(run_dir, run_id="demo")
-    _remove_display_download_item(run_dir / "manifest.json", "summary.json")
+    _remove_display_download_item(run_dir / "manifest.json", "metadata_file:summary")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/artifacts/summary.json")
+    response = client.get("/api/runs/platform/demo/artifacts/metadata_file:summary")
 
     assert response.status_code == 422
-    assert "summary.json is not exposed" in response.json()["detail"]
+    assert "missing metadata refs" in response.json()["detail"]
 
 
 def test_api_direct_metadata_download_uses_canonical_file_path(tmp_path):
@@ -1169,16 +1140,12 @@ def test_api_direct_metadata_download_uses_canonical_file_path(tmp_path):
         json.dumps({"evaluation_id": "wrong"}),
         encoding="utf-8",
     )
-    manifest_path = run_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifacts"]["summary"] = "other_summary.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/artifacts/summary.json")
+    response = client.get("/api/runs/platform/demo/artifacts/metadata_file:summary")
 
     assert response.status_code == 200
-    assert response.json()["evaluation_id"] == "demo"
+    assert response.json()["run_id"] == "demo"
 
 
 def test_api_downloads_artifact_csv_without_full_artifact_load(
@@ -1201,13 +1168,16 @@ def test_api_downloads_artifact_csv_without_full_artifact_load(
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/artifacts/metrics/performance_summary.csv"
+        "/api/runs/platform/demo/artifacts/table:evaluation_metrics_summary"
     )
 
     assert response.status_code == 200
-    assert response.content == (
-        runs_root / "demo" / "metrics" / "performance_summary.csv"
-    ).read_bytes()
+    assert (
+        response.content
+        == (
+            runs_root / "demo" / "metrics" / "evaluation_metrics_summary.csv"
+        ).read_bytes()
+    )
 
 
 def test_api_direct_artifact_csv_must_be_exposed_by_display(tmp_path):
@@ -1219,18 +1189,21 @@ def test_api_direct_artifact_csv_must_be_exposed_by_display(tmp_path):
     manifest["display"]["downloads"]["items"] = [
         item
         for item in manifest["display"]["downloads"]["items"]
-        if item.get("item") != "metrics/performance_summary.csv"
+        if not (
+            item.get("kind") == "table"
+            and item.get("key") == "evaluation_metrics_summary"
+        )
     ]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/artifacts/metrics/performance_summary.csv"
+        "/api/runs/platform/demo/artifacts/table:evaluation_metrics_summary"
     )
 
     assert response.status_code == 422
     detail = response.json()["detail"]
-    assert "display.downloads.items must include every display table" in detail
+    assert "missing table refs" in detail
 
 
 def test_api_direct_artifact_csv_rejects_unsupported_display_schema(tmp_path):
@@ -1244,7 +1217,7 @@ def test_api_direct_artifact_csv_rejects_unsupported_display_schema(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/artifacts/metrics/performance_summary.csv"
+        "/api/runs/platform/demo/artifacts/table:evaluation_metrics_summary"
     )
 
     assert response.status_code == 422
@@ -1262,12 +1235,12 @@ def test_api_rejects_unsupported_display_schema_at_app_entry_points(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     evidence = client.get("/api/runs/platform/demo/evidence")
-    preview = client.get("/api/runs/platform/demo/metrics/ic")
+    preview = client.get("/api/runs/platform/demo/tables/ic/preview")
     zip_post = client.post(
         "/api/runs/platform/demo/download",
-        json={"items": ["report.md"]},
+        json={"items": ["metadata_file:report"]},
     )
-    zip_get = client.get("/api/runs/platform/demo/download?items=report.md")
+    zip_get = client.get("/api/runs/platform/demo/download?items=metadata_file:report")
 
     assert evidence.status_code == 422
     assert preview.status_code == 422
@@ -1306,12 +1279,10 @@ def test_api_breakdown_preview_rejects_wrong_group(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/breakdowns/not_a_period/"
-        "performance_summary_by_year"
+        "/api/runs/platform/demo/breakdowns/not_a_period/performance_summary_by_year"
     )
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "breakdown table not found"
 
 
 def test_api_breakdown_preview_reads_period_breakdown_table(tmp_path):
@@ -1324,13 +1295,14 @@ def test_api_breakdown_preview_reads_period_breakdown_table(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/breakdowns/year/performance_summary?limit=1"
+        "/api/runs/platform/demo/tables/evaluation_metrics_summary_by_year/preview?limit=1"
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert "year" in payload["columns"]
-    assert payload["rows"][0]["year"] == 2026
+    assert "period_type" in payload["columns"]
+    assert payload["rows"][0]["period_type"] == "year"
+    assert payload["rows"][0]["period"] == 2026
 
 
 def test_api_preview_routes_reject_wrong_display_group(tmp_path):
@@ -1356,15 +1328,11 @@ def test_api_downloads_weights_artifact_parquet(tmp_path):
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get(
-        "/api/runs/platform/demo/artifacts/portfolio/weights.parquet"
-    )
+    response = client.get("/api/runs/platform/demo/artifacts/table:weights")
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/vnd.apache.parquet"
-    assert 'filename="weights.parquet"' in response.headers[
-        "content-disposition"
-    ]
+    assert 'filename="weights.parquet"' in response.headers["content-disposition"]
 
 
 def test_api_rejects_retired_neutralization_diagnostics_artifact(tmp_path):
@@ -1379,19 +1347,17 @@ def test_api_rejects_retired_neutralization_diagnostics_artifact(tmp_path):
     assert response.status_code == 422
 
 
-def test_api_previews_tradability_diagnostics_table(tmp_path):
+def test_api_previews_diagnostic_summary_table(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get(
-        "/api/runs/platform/demo/diagnostics/tradability_diagnostics"
-    )
+    response = client.get("/api/runs/platform/demo/tables/diagnostic_summary/preview")
 
     assert response.status_code == 200
     payload = response.json()
-    assert "eligible_rate" in payload["columns"]
-    assert "entry_blocked_rate" in payload["columns"]
+    assert "policy_family" in payload["columns"]
+    assert payload["rows"][0]["diagnostic_status"] == "disabled"
 
 
 def test_api_generic_table_preview_reads_display_table_by_key(tmp_path):
@@ -1399,17 +1365,11 @@ def test_api_generic_table_preview_reads_display_table_by_key(tmp_path):
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get(
-        "/api/runs/platform/demo/tables/tradability_diagnostics/preview"
-    )
-    legacy = client.get(
-        "/api/runs/platform/demo/diagnostics/tradability_diagnostics"
-    )
+    response = client.get("/api/runs/platform/demo/tables/diagnostic_summary/preview")
+    legacy = client.get("/api/runs/platform/demo/diagnostics/tradability_diagnostics")
 
     assert response.status_code == 200
-    assert legacy.status_code == 200
-    assert response.json()["columns"] == legacy.json()["columns"]
-    assert response.json()["rows"] == legacy.json()["rows"]
+    assert legacy.status_code == 404
     assert response.json()["limit"] == 20
 
 
@@ -1436,7 +1396,7 @@ def test_api_generic_table_preview_rejects_oversized_limit(tmp_path):
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/tables/weights/preview?limit=1001")
+    response = client.get("/api/runs/platform/demo/tables/ic/preview?limit=1001")
 
     assert response.status_code == 422
     assert response.json()["detail"] == "limit must be between 1 and 1000"
@@ -1521,7 +1481,7 @@ def test_api_generic_table_preview_rejects_table_not_in_display(tmp_path):
     response = client.get("/api/runs/platform/demo/tables/private_debug/preview")
 
     assert response.status_code == 422
-    assert "unknown artifacts.metrics" in response.json()["detail"]
+    assert "not in schema registry" in response.json()["detail"]
 
 
 def test_api_rejects_stale_run_missing_display_preview_descriptor(tmp_path):
@@ -1549,15 +1509,9 @@ def test_api_previews_parquet_weights_table(tmp_path):
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=20")
+    response = client.get("/api/runs/platform/demo/tables/weights/preview?limit=20")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["limit"] == 20
-    assert "target_weight" in payload["columns"]
-    assert payload["rows"][0]["combination_id"] == (
-        "factor__forward_return__dataframe__long_short"
-    )
+    assert response.status_code == 404
 
 
 def test_api_previews_parquet_weights_defaults_to_display_preview_rows(tmp_path):
@@ -1565,14 +1519,9 @@ def test_api_previews_parquet_weights_defaults_to_display_preview_rows(tmp_path)
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get("/api/runs/platform/demo/portfolio/weights")
+    response = client.get("/api/runs/platform/demo/tables/weights/preview")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["limit"] == 20
-    assert len(payload["rows"]) <= 20
-    assert payload["total_rows"] >= len(payload["rows"])
-    assert payload["total_rows_exact"] is True
+    assert response.status_code == 404
 
 
 def test_api_previews_parquet_weights_without_full_artifact_load(
@@ -1588,12 +1537,9 @@ def test_api_previews_parquet_weights_without_full_artifact_load(
 
     monkeypatch.setattr(pd, "read_parquet", fail_read_parquet)
 
-    response = client.get("/api/runs/platform/demo/portfolio/weights?limit=20")
+    response = client.get("/api/runs/platform/demo/tables/weights/preview?limit=20")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["limit"] == 20
-    assert "target_weight" in payload["columns"]
+    assert response.status_code == 404
 
 
 def test_api_parquet_preview_stops_after_filtered_page_is_collected(
@@ -1637,9 +1583,7 @@ def test_api_parquet_preview_stops_after_filtered_page_is_collected(
         def iter_batches(self, *, batch_size):
             del batch_size
             yield pa.RecordBatch.from_pandas(frame)
-            raise AssertionError(
-                "preview should stop after collecting requested rows"
-            )
+            raise AssertionError("preview should stop after collecting requested rows")
 
     def bounded_parquet_file(path, *args, **kwargs):
         if str(path).replace("\\", "/").endswith("portfolio/weights.parquet"):
@@ -1649,12 +1593,11 @@ def test_api_parquet_preview_stops_after_filtered_page_is_collected(
     monkeypatch.setattr(pq, "ParquetFile", bounded_parquet_file)
 
     response = client.get(
-        "/api/runs/platform/demo/portfolio/weights?"
+        "/api/runs/platform/demo/tables/weights/preview?"
         "combination_id=factor__forward_return__dataframe__long_short&limit=1"
     )
 
-    assert response.status_code == 200
-    assert len(response.json()["rows"]) == 1
+    assert response.status_code == 404
 
 
 def test_api_parquet_filtered_preview_reports_exact_eof_page(tmp_path):
@@ -1663,35 +1606,26 @@ def test_api_parquet_filtered_preview_reports_exact_eof_page(tmp_path):
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get(
-        "/api/runs/platform/demo/portfolio/weights?"
+        "/api/runs/platform/demo/tables/weights/preview?"
         "combination_id=factor__forward_return__dataframe__long_short&limit=1"
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload["rows"]) == 1
-    assert payload["total_rows"] == 1
-    assert payload["has_more"] is False
-    assert payload["total_rows_exact"] is True
+    assert response.status_code == 404
 
 
-def test_api_downloads_tradability_diagnostics_artifact_csv(tmp_path):
+def test_api_downloads_diagnostic_summary_artifact_csv(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
-    response = client.get(
-        "/api/runs/platform/demo/artifacts/"
-        "diagnostics/tradability_diagnostics.csv"
-    )
+    response = client.get("/api/runs/platform/demo/artifacts/table:diagnostic_summary")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
-    assert 'filename="tradability_diagnostics.csv"' in response.headers[
-        "content-disposition"
-    ]
-    assert "eligible_rate" in response.text
-    assert "entry_blocked_rate" in response.text
+    assert (
+        'filename="diagnostic_summary.csv"' in response.headers["content-disposition"]
+    )
+    assert "diagnostics_contract" in response.text
 
 
 def test_api_downloads_report_markdown_and_rejects_removed_excel_workbook(tmp_path):
@@ -1738,7 +1672,7 @@ def test_api_report_markdown_must_be_exposed_by_display_downloads(tmp_path):
     response = client.get("/api/runs/platform/demo/report.md")
 
     assert response.status_code == 422
-    assert "report.md is not exposed" in response.json()["detail"]
+    assert "missing metadata refs" in response.json()["detail"]
 
 
 def test_api_report_markdown_requires_canonical_report_artifact(tmp_path):
@@ -1780,7 +1714,7 @@ def test_api_evidence_report_must_be_exposed_by_display_downloads(tmp_path):
     response = client.get("/api/runs/platform/demo/evidence")
 
     assert response.status_code == 422
-    assert "report.md is not exposed" in response.json()["detail"]
+    assert "missing metadata refs" in response.json()["detail"]
 
 
 def test_api_downloads_selected_artifacts_as_zip(tmp_path):
@@ -1793,42 +1727,43 @@ def test_api_downloads_selected_artifacts_as_zip(tmp_path):
         "/api/runs/platform/demo/download",
         json={
             "items": [
-                "comparison.csv",
-                "report.md",
-                "summary.json",
-                "metrics/performance_summary.csv",
-                "portfolio/weights.parquet",
-                "diagnostics/tradability_diagnostics.csv",
+                "dynamic:comparison",
+                "metadata_file:report",
+                "metadata_file:summary",
+                "table:evaluation_metrics_summary",
+                "table:weights",
+                "table:diagnostic_summary",
             ]
         },
     )
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/zip")
-    assert 'filename="platform_demo_selected_artifacts.zip"' in response.headers[
-        "content-disposition"
-    ]
+    assert (
+        'filename="platform_demo_selected_artifacts.zip"'
+        in response.headers["content-disposition"]
+    )
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         assert set(archive.namelist()) == {
             "comparison.csv",
             "report.md",
             "summary.json",
-            "metrics/performance_summary.csv",
+            "metrics/evaluation_metrics_summary.csv",
             "portfolio/weights.parquet",
-            "diagnostics/tradability_diagnostics.csv",
+            "diagnostics/diagnostic_summary.csv",
         }
         assert b"public_run_id" in archive.read("comparison.csv")
         assert b"platform/demo" in archive.read("comparison.csv")
         assert b"platform/other" in archive.read("comparison.csv")
-        assert archive.read("report.md") == (
-            runs_root / "demo" / "report.md"
-        ).read_bytes()
+        assert (
+            archive.read("report.md") == (runs_root / "demo" / "report.md").read_bytes()
+        )
         assert b"final_cumulative_net_return" in archive.read(
-            "metrics/performance_summary.csv"
+            "metrics/evaluation_metrics_summary.csv"
         )
         assert archive.read("portfolio/weights.parquet")
-        assert b"eligible_rate" in archive.read(
-            "diagnostics/tradability_diagnostics.csv"
+        assert b"diagnostics_contract" in archive.read(
+            "diagnostics/diagnostic_summary.csv"
         )
 
 
@@ -1840,8 +1775,8 @@ def test_api_downloads_selected_artifacts_from_query_items(tmp_path):
     response = client.get(
         "/api/runs/platform/demo/download",
         params=[
-            ("items", "report.md"),
-            ("items", "summary.json"),
+            ("items", "metadata_file:report"),
+            ("items", "metadata_file:summary"),
         ],
     )
 
@@ -1856,23 +1791,19 @@ def test_api_selected_zip_metadata_download_uses_canonical_file_path(tmp_path):
     run_dir = runs_root / "demo"
     write_evaluation_set(run_dir, run_id="demo")
     (run_dir / "evil_summary.json").write_text(
-        json.dumps({"evaluation_id": "wrong"}),
+        json.dumps({"run_id": "wrong"}),
         encoding="utf-8",
     )
-    manifest_path = run_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifacts"]["summary"] = "evil_summary.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.post(
         "/api/runs/platform/demo/download",
-        json={"items": ["summary.json"]},
+        json={"items": ["metadata_file:summary"]},
     )
 
     assert response.status_code == 200
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
-        assert json.loads(archive.read("summary.json"))["evaluation_id"] == "demo"
+        assert json.loads(archive.read("summary.json"))["run_id"] == "demo"
 
 
 def test_api_selected_artifact_zip_reuses_files_and_writes_cache(
@@ -1896,12 +1827,12 @@ def test_api_selected_artifact_zip_reuses_files_and_writes_cache(
     response = client.post(
         "/api/runs/platform/demo/download",
         json={
-                "items": [
-                    "report.md",
-                    "summary.json",
-                    "metrics/performance_summary.csv",
-                ]
-            },
+            "items": [
+                "metadata_file:report",
+                "metadata_file:summary",
+                "table:evaluation_metrics_summary",
+            ]
+        },
     )
 
     assert response.status_code == 200
@@ -1913,16 +1844,9 @@ def test_api_selected_artifact_zip_reuses_files_and_writes_cache(
     assert cache_files[0].read_bytes() == response.content
 
 
-def test_api_downloads_lineage_metadata_directly_and_in_selected_zip(tmp_path):
+def test_api_rejects_retired_lineage_metadata_download(tmp_path):
     runs_root = tmp_path / "runs"
-    run_dir = runs_root / "demo"
-    write_evaluation_set(run_dir, run_id="demo")
-    lineage_path = run_dir / "lineage.json"
-    lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
-    lineage["input_file"] = "data/processed_private/csmar/factors.parquet"
-    lineage["source_file"] = "C:/Users/DELL/private/factors.parquet"
-    lineage["nested"] = {"path": "data/processed_private/csmar/factors.parquet"}
-    lineage_path.write_text(json.dumps(lineage), encoding="utf-8")
+    write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     direct = client.get("/api/runs/platform/demo/artifacts/lineage.json")
@@ -1931,32 +1855,13 @@ def test_api_downloads_lineage_metadata_directly_and_in_selected_zip(tmp_path):
         json={"items": ["lineage.json"]},
     )
 
-    assert direct.status_code == 200
-    assert "input_file" not in direct.text
-    assert "processed_private" not in direct.text
-    assert "C:/Users" not in direct.text
-    assert direct.json()["source_file"] == "[redacted-path]"
-    assert direct.json()["nested"]["path"] == "[redacted-path]"
-    assert zipped.status_code == 200
-    with zipfile.ZipFile(BytesIO(zipped.content)) as archive:
-        assert archive.namelist() == ["lineage.json"]
-        zipped_lineage = archive.read("lineage.json")
-        assert b"input_file" not in zipped_lineage
-        assert b"processed_private" not in zipped_lineage
-        assert b"C:/Users" not in zipped_lineage
+    assert direct.status_code == 422
+    assert zipped.status_code == 422
 
 
-def test_api_downloads_config_metadata_without_private_paths(tmp_path):
+def test_api_rejects_retired_config_metadata_download(tmp_path):
     runs_root = tmp_path / "runs"
-    run_dir = runs_root / "demo"
-    write_evaluation_set(run_dir, run_id="demo")
-    config_path = run_dir / "config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["metadata"]["source_file"] = (
-        "data/processed_private/csmar/factors.parquet"
-    )
-    config["debug"] = {"path": "C:/Users/DELL/private/factors.parquet"}
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    write_evaluation_set(runs_root / "demo", run_id="demo")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     direct = client.get("/api/runs/platform/demo/artifacts/config.json")
@@ -1965,17 +1870,8 @@ def test_api_downloads_config_metadata_without_private_paths(tmp_path):
         json={"items": ["config.json"]},
     )
 
-    assert direct.status_code == 200
-    assert "processed_private" not in direct.text
-    assert "C:/Users" not in direct.text
-    assert direct.json()["metadata"]["source_file"] == "[redacted-path]"
-    assert direct.json()["debug"]["path"] == "[redacted-path]"
-    assert zipped.status_code == 200
-    with zipfile.ZipFile(BytesIO(zipped.content)) as archive:
-        assert archive.namelist() == ["config.json"]
-        zipped_config = archive.read("config.json")
-        assert b"processed_private" not in zipped_config
-        assert b"C:/Users" not in zipped_config
+    assert direct.status_code == 422
+    assert zipped.status_code == 422
 
 
 def test_api_rejects_unknown_selected_artifact_before_writing_cache(tmp_path):
@@ -2001,7 +1897,7 @@ def test_api_selected_artifact_zip_cache_changes_when_run_files_change(tmp_path)
 
     first = client.post(
         "/api/runs/platform/demo/download",
-        json={"items": ["report.md"]},
+        json={"items": ["metadata_file:report"]},
     )
     assert first.status_code == 200
     with zipfile.ZipFile(BytesIO(first.content)) as archive:
@@ -2010,7 +1906,7 @@ def test_api_selected_artifact_zip_cache_changes_when_run_files_change(tmp_path)
     (run_dir / "report.md").write_text("# Updated Report\n", encoding="utf-8")
     second = client.post(
         "/api/runs/platform/demo/download",
-        json={"items": ["report.md"]},
+        json={"items": ["metadata_file:report"]},
     )
 
     assert second.status_code == 200
@@ -2043,7 +1939,7 @@ def test_api_rejects_unsafe_selected_artifact_zip_entry_names(tmp_path):
     )
 
     assert response.status_code == 422
-    assert "路径" in response.json()["detail"]
+    assert "download refs require kind and key" in response.json()["detail"]
 
 
 def test_api_rejects_unsafe_selected_artifact_zip_cache_identity(tmp_path):
@@ -2056,7 +1952,7 @@ def test_api_rejects_unsafe_selected_artifact_zip_cache_identity(tmp_path):
             load_evaluation_set(run_dir),
             "platform",
             "..",
-            ["report.md"],
+            ["metadata_file:report"],
             tmp_path / "download_cache",
             lambda: b"",
         )
@@ -2072,19 +1968,20 @@ def test_api_downloads_single_selected_artifact_as_zip(tmp_path):
 
     response = client.post(
         "/api/runs/platform/demo/download",
-        json={"items": ["report.md"]},
+        json={"items": ["metadata_file:report"]},
     )
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/zip")
-    assert 'filename="platform_demo_selected_artifacts.zip"' in response.headers[
-        "content-disposition"
-    ]
+    assert (
+        'filename="platform_demo_selected_artifacts.zip"'
+        in response.headers["content-disposition"]
+    )
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         assert archive.namelist() == ["report.md"]
-        assert archive.read("report.md") == (
-            runs_root / "demo" / "report.md"
-        ).read_bytes()
+        assert (
+            archive.read("report.md") == (runs_root / "demo" / "report.md").read_bytes()
+        )
 
 
 def test_api_downloads_selected_zip_without_full_artifact_load(
@@ -2102,7 +1999,7 @@ def test_api_downloads_selected_zip_without_full_artifact_load(
 
     response = client.post(
         "/api/runs/platform/demo/download",
-        json={"items": ["report.md"]},
+        json={"items": ["metadata_file:report"]},
     )
 
     assert response.status_code == 200
@@ -2119,7 +2016,7 @@ def test_api_selected_artifact_zip_cache_hashes_long_identity_segments(tmp_path)
         load_evaluation_set(runs_root / "demo"),
         source_alias,
         run_id,
-        ["report.md"],
+        ["metadata_file:report"],
         tmp_path / "download_cache",
         lambda: b"",
     )
@@ -2221,10 +2118,10 @@ def test_api_run_list_skips_run_with_missing_weight_method(tmp_path):
     write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
-    config_path = run_dir / "config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["weight_configs"] = [{}]
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    context_path = run_dir / "run_context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    context["config"]["evaluation_spec"]["weight_configs"] = [{}]
+    context_path.write_text(json.dumps(context), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get("/api/runs")
@@ -2238,10 +2135,10 @@ def test_api_comparison_skips_run_with_missing_weight_method(tmp_path):
     write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
-    config_path = run_dir / "config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["weight_configs"] = [{}]
-    config_path.write_text(json.dumps(config), encoding="utf-8")
+    context_path = run_dir / "run_context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    context["config"]["evaluation_spec"]["weight_configs"] = [{}]
+    context_path.write_text(json.dumps(context), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
     response = client.get("/api/comparison")
@@ -2268,7 +2165,7 @@ def test_api_downloads_dynamic_comparison_csv(tmp_path):
     assert "platform/run_b" in response.text
 
 
-def test_api_comparison_csv_skips_run_without_display_download_item(tmp_path):
+def test_api_comparison_csv_includes_runs_without_portable_dynamic_item(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
@@ -2280,10 +2177,10 @@ def test_api_comparison_csv_skips_run_without_display_download_item(tmp_path):
 
     assert response.status_code == 200
     assert "platform/good" in response.text
-    assert "platform/run_a" not in response.text
+    assert "platform/run_a" in response.text
 
 
-def test_api_comparison_json_skips_run_without_display_download_item(tmp_path):
+def test_api_comparison_json_includes_runs_without_portable_dynamic_item(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "good", run_id="good", net_returns=[0.03])
     run_dir = runs_root / "run_a"
@@ -2295,11 +2192,12 @@ def test_api_comparison_json_skips_run_without_display_download_item(tmp_path):
 
     assert response.status_code == 200
     assert [row["public_run_id"] for row in response.json()["rows"]] == [
-        "platform/good"
+        "platform/good",
+        "platform/run_a",
     ]
 
 
-def test_api_evidence_comparison_requires_display_download_item(tmp_path):
+def test_api_evidence_injects_runtime_comparison_download_item(tmp_path):
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "run_a"
     write_evaluation_set(run_dir, run_id="run_a", net_returns=[0.01])
@@ -2308,11 +2206,15 @@ def test_api_evidence_comparison_requires_display_download_item(tmp_path):
 
     response = client.get("/api/runs/platform/run_a/evidence")
 
-    assert response.status_code == 422
-    assert "comparison.csv is not exposed" in response.json()["detail"]
+    assert response.status_code == 200
+    assert {"kind": "dynamic", "key": "comparison"} in next(
+        preset
+        for preset in response.json()["display"]["downloads"]["presets"]
+        if preset["key"] == "all"
+    )["items"]
 
 
-def test_api_selected_zip_comparison_csv_skips_unexposed_comparison_runs(tmp_path):
+def test_api_selected_zip_dynamic_comparison_includes_valid_runs(tmp_path):
     runs_root = tmp_path / "runs"
     write_evaluation_set(runs_root / "run_a", run_id="run_a", net_returns=[0.01])
     run_b = runs_root / "run_b"
@@ -2322,14 +2224,14 @@ def test_api_selected_zip_comparison_csv_skips_unexposed_comparison_runs(tmp_pat
 
     response = client.post(
         "/api/runs/platform/run_a/download",
-        json={"items": ["comparison.csv"]},
+        json={"items": ["dynamic:comparison"]},
     )
 
     assert response.status_code == 200
     with zipfile.ZipFile(BytesIO(response.content)) as archive:
         comparison = archive.read("comparison.csv").decode("utf-8")
     assert "platform/run_a" in comparison
-    assert "platform/run_b" not in comparison
+    assert "platform/run_b" in comparison
 
 
 def test_api_comparison_keeps_duplicate_run_ids_from_different_sources(tmp_path):
@@ -2394,9 +2296,7 @@ def test_api_allows_local_vite_origin(tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == (
-        "http://127.0.0.1:5173"
-    )
+    assert response.headers["access-control-allow-origin"] == ("http://127.0.0.1:5173")
 
     download_response = client.get(
         "/api/comparison.csv",
@@ -2416,7 +2316,7 @@ def test_api_run_list_skips_invalid_artifact_contract(tmp_path):
     write_evaluation_set(runs_root / "broken", run_id="broken")
     summary_path = runs_root / "broken" / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    summary.pop("domain")
+    summary.pop("n_combinations")
     summary_path.write_text(json.dumps(summary), encoding="utf-8")
     client = TestClient(create_app(run_roots=[("platform", runs_root)]))
 
@@ -2431,11 +2331,36 @@ def test_api_run_list_skips_invalid_artifact_contract(tmp_path):
 
 
 def _remove_display_download_item(manifest_path, item_name: str) -> None:
+    legacy_ref_map = {
+        "manifest.json": {"kind": "metadata_file", "key": "manifest"},
+        "summary.json": {"kind": "metadata_file", "key": "summary"},
+        "run_context.json": {"kind": "metadata_file", "key": "run_context"},
+        "report.md": {"kind": "metadata_file", "key": "report"},
+        "comparison.csv": {"kind": "dynamic", "key": "comparison"},
+    }
+    if ":" in item_name:
+        kind, key = item_name.split(":", 1)
+        target_ref = {"kind": kind, "key": key}
+    else:
+        target_ref = legacy_ref_map.get(item_name, {"kind": "table", "key": item_name})
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     downloads = manifest["display"]["downloads"]
     downloads["items"] = [
-        item for item in downloads["items"] if item.get("item") != item_name
+        item
+        for item in downloads["items"]
+        if not (
+            item.get("kind") == target_ref["kind"]
+            and item.get("key") == target_ref["key"]
+        )
     ]
     for preset in downloads["presets"]:
-        preset["items"] = [item for item in preset["items"] if item != item_name]
+        preset["items"] = [
+            item
+            for item in preset["items"]
+            if not (
+                isinstance(item, dict)
+                and item.get("kind") == target_ref["kind"]
+                and item.get("key") == target_ref["key"]
+            )
+        ]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

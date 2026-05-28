@@ -131,11 +131,9 @@ def ohlc_issue(frame: pd.DataFrame, dataset: str) -> QualityIssue | None:
         return None
     price_frame = frame[required].apply(pd.to_numeric, errors="coerce")
     invalid = (
-        price_frame["high"] < price_frame[["open", "close"]].max(axis=1)
-    ) | (
-        price_frame["low"] > price_frame[["open", "close"]].min(axis=1)
-    ) | (
-        price_frame["high"] < price_frame["low"]
+        (price_frame["high"] < price_frame[["open", "close"]].max(axis=1))
+        | (price_frame["low"] > price_frame[["open", "close"]].min(axis=1))
+        | (price_frame["high"] < price_frame["low"])
     )
     count = int(invalid.sum())
     if count == 0:

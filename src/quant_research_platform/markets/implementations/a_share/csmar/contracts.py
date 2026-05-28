@@ -509,10 +509,7 @@ def normalize_stock_code(series: pd.Series) -> pd.Series:
     """把 CSMAR stock codes 规范化为六位字符串。"""
 
     return (
-        series.astype(str)
-        .str.strip()
-        .str.replace(r"\.0$", "", regex=True)
-        .str.zfill(6)
+        series.astype(str).str.strip().str.replace(r"\.0$", "", regex=True).str.zfill(6)
     )
 
 
@@ -662,15 +659,12 @@ def build_raw_export_metadata(
             "bjse": "excluded_in_first_version",
         },
         "fields_zh": {
-            column: contract.chinese_meanings.get(column, "")
-            for column in columns
+            column: contract.chinese_meanings.get(column, "") for column in columns
         },
         "fields_raw": list(columns),
         "row_count": row_count,
         "file_sha256": _file_sha256(export_path),
-        "license_boundary": (
-            "private research only; do not commit raw vendor data"
-        ),
+        "license_boundary": ("private research only; do not commit raw vendor data"),
         "notes": notes
         or "No credentials, cookies, tokens, or school account information stored.",
     }

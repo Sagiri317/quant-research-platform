@@ -46,11 +46,7 @@ def _cost_components(
         "slippage_cost": slippage_cost,
         "spread_cost": spread_cost,
         "impact_cost": impact_cost,
-        "total_cost": buy_cost
-        + sell_cost
-        + slippage_cost
-        + spread_cost
-        + impact_cost,
+        "total_cost": buy_cost + sell_cost + slippage_cost + spread_cost + impact_cost,
         "cost_model": cost_config.impact_model or "detailed_bps",
     }
 
@@ -127,8 +123,10 @@ def _filter_new_entry_blocked_assets(
     if tradability_config.can_enter_column is None:
         return ranked
     can_enter = ranked[tradability_config.can_enter_column]
-    has_previous = ranked[spec.asset_column].astype(str).map(
-        lambda asset: previous_positions.get(asset, 0.0) != 0.0
+    has_previous = (
+        ranked[spec.asset_column]
+        .astype(str)
+        .map(lambda asset: previous_positions.get(asset, 0.0) != 0.0)
     )
     return ranked[can_enter | has_previous].copy()
 
@@ -262,8 +260,8 @@ def _build_tradability_context(
         timestamp_frame,
         tradability_config.can_exit_column,
     )
-    entry_checks_required = (
-        can_enter_values is not None and not bool(can_enter_values.all())
+    entry_checks_required = can_enter_values is not None and not bool(
+        can_enter_values.all()
     )
     exit_checks_required = (
         can_exit_values is not None

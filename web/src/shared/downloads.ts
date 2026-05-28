@@ -1,4 +1,8 @@
-import type { RunDisplayDownloadPreset, RunDisplayDownloads } from './api/api'
+import {
+  displayRefKey,
+  type RunDisplayDownloadPreset,
+  type RunDisplayDownloads,
+} from './api/api'
 
 export type DownloadOption = {
   label: string
@@ -11,7 +15,7 @@ export function buildDownloadOptions(displayDownloads?: RunDisplayDownloads): Do
   }
   return displayDownloads.items.map((option) => ({
     label: option.label,
-    item: option.item,
+    item: option.item ?? displayRefKey({ kind: option.kind, key: option.key ?? option.item ?? '' }),
   }))
 }
 
@@ -22,8 +26,10 @@ export function defaultDownloadItems(
     return []
   }
   return (
-    displayDownloads.presets.find((preset) => preset.key === 'report')?.items ??
-    displayDownloads.presets[0]?.items ??
+    compactPresetItems(
+      displayDownloads.presets.find((preset) => preset.key === 'report')?.items ??
+        displayDownloads.presets[0]?.items,
+    ) ??
     []
   )
 }
@@ -32,7 +38,9 @@ export function presetDownloadItems(
   displayDownloads: RunDisplayDownloads | undefined,
   presetKey: string,
 ): string[] {
-  return displayDownloads?.presets.find((preset) => preset.key === presetKey)?.items ?? []
+  return compactPresetItems(
+    displayDownloads?.presets.find((preset) => preset.key === presetKey)?.items,
+  ) ?? []
 }
 
 export function buildDownloadPresets(
@@ -48,4 +56,10 @@ export function triggerBrowserDownloadUrl(url: string) {
   document.body.appendChild(link)
   link.click()
   link.remove()
+}
+
+function compactPresetItems(
+  items: RunDisplayDownloadPreset['items'] | undefined,
+): string[] | undefined {
+  return items?.map(displayRefKey)
 }

@@ -7,7 +7,7 @@ from tests.interfaces.api.artifact_run_fixtures import write_evaluation_set
 def test_index_evaluation_sets_returns_future_api_run_list(tmp_path):
     write_evaluation_set(
         tmp_path / "run_b",
-        evaluation_id="run_b",
+        run_id="run_b",
         project="quant-research-platform",
         domain="a_share",
         net_returns=[0.02, 0.03],
@@ -17,7 +17,7 @@ def test_index_evaluation_sets_returns_future_api_run_list(tmp_path):
     )
     write_evaluation_set(
         tmp_path / "run_a",
-        evaluation_id="run_a",
+        run_id="run_a",
         project="crypto-perp-alpha-lab",
         domain="crypto_perp",
         net_returns=[0.01, 0.02],
@@ -29,7 +29,8 @@ def test_index_evaluation_sets_returns_future_api_run_list(tmp_path):
 
     index = index_evaluation_sets(tmp_path)
 
-    assert index["evaluation_id"].tolist() == ["run_a", "run_b"]
+    assert index["run_id"].tolist() == ["run_a", "run_b"]
+    assert "evaluation_id" not in index.columns
     assert index["project"].tolist() == [
         "crypto-perp-alpha-lab",
         "quant-research-platform",

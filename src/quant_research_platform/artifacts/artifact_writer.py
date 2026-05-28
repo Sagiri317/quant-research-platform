@@ -11,14 +11,8 @@ from pydantic import BaseModel, ConfigDict
 
 from quant_research_platform.artifacts.artifact_schema import (
     ARTIFACT_SCHEMA_VERSION,
-    BREAKDOWN_PERIODS,
     EVALUATION_SET_ARTIFACT_TYPE,
-    EVALUATION_SET_DIAGNOSTIC_TABLES,
-    EVALUATION_SET_INPUT_QUALITY_TABLES,
-    EVALUATION_SET_METRIC_TABLES,
-    EVALUATION_SET_PORTFOLIO_TABLES,
     EVALUATION_SET_REQUIRED_TABLES,
-    EVALUATION_SET_SUMMARY_TABLES,
     build_evaluation_set_artifact_paths,
 )
 from quant_research_platform.artifacts.display_manifest import build_display_manifest
@@ -27,8 +21,11 @@ from quant_research_platform.artifacts.manifest_validation import (
     validate_display_chart_columns,
     validate_display_manifest,
     validate_evaluation_set_table_columns,
+    validate_run_context_payload,
+    validate_summary_payload,
 )
 from quant_research_platform.artifacts.public_metadata import sanitize_public_metadata
+from quant_research_platform.artifacts.schema_registry import get_table_spec
 from quant_research_platform.runtime.profiling import measure_stage
 
 
@@ -44,6 +41,7 @@ class ArtifactOutputs(BaseModel):
     manifest_path: Path | None = None
     config_path: Path | None = None
     lineage_path: Path | None = None
+    run_context_path: Path | None = None
 
 
 def write_evaluation_set_artifacts(
@@ -51,20 +49,26 @@ def write_evaluation_set_artifacts(
     *,
     artifact_paths: dict[str, object] | None = None,
     manifest: dict[str, object] | None = None,
-    config: dict[str, object],
+    config: dict[str, object] | None = None,
+    run_context: dict[str, object] | None = None,
     lineage: dict[str, object] | None = None,
     summary: dict[str, object],
     tables: dict[str, pd.DataFrame],
-    report: str,
+    report: str | None,
 ) -> ArtifactOutputs:
     """写入 batch-native evaluation-set artifact contract。"""
 
     persisted_summary = _summary_with_artifact_contract(summary)
+    persisted_run_context = _run_context_payload(
+        run_context, config, lineage, persisted_summary
+    )
     if manifest is None:
         if artifact_paths is None:
             artifact_paths = build_evaluation_set_artifact_paths(
                 summary=persisted_summary,
                 output_dir=output_dir,
+                include_report=report is not None,
+                materialized_tables=set(tables),
             )
         manifest = build_evaluation_set_manifest(
             summary=persisted_summary,
@@ -74,6 +78,8 @@ def write_evaluation_set_artifacts(
     elif artifact_paths is not None:
         raise ValueError("provide either manifest or artifact_paths, not both.")
 
+    validate_summary_payload(persisted_summary)
+    validate_run_context_payload(persisted_run_context, summary=persisted_summary)
     _validate_required_evaluation_set_tables(tables)
     validate_evaluation_set_table_columns(tables)
     validate_display_manifest(manifest)
@@ -87,7 +93,6 @@ def write_evaluation_set_artifacts(
     portfolio_dir = destination / "portfolio"
     diagnostics_dir = destination / "diagnostics"
     input_quality_dir = destination / "input_quality"
-    summaries_dir = destination / "summaries"
     for directory in (
         destination,
         dimensions_dir,
@@ -95,7 +100,6 @@ def write_evaluation_set_artifacts(
         portfolio_dir,
         diagnostics_dir,
         input_quality_dir,
-        summaries_dir,
     ):
         _timed_artifact_operation(
             "directory_creation",
@@ -103,18 +107,13 @@ def write_evaluation_set_artifacts(
         )
 
     manifest_path = destination / "manifest.json"
-    config_path = destination / "config.json"
-    lineage_path = destination / "lineage.json"
+    run_context_path = destination / "run_context.json"
     summary_path = destination / "summary.json"
     report_path = destination / "report.md"
 
-    persisted_config = _public_metadata(config)
-    persisted_lineage = _public_lineage(lineage)
-    persisted_lineage.setdefault("artifact_schema_version", ARTIFACT_SCHEMA_VERSION)
     for path, payload in (
         (manifest_path, manifest),
-        (config_path, persisted_config),
-        (lineage_path, persisted_lineage),
+        (run_context_path, persisted_run_context),
         (summary_path, persisted_summary),
     ):
         _timed_artifact_operation(
@@ -137,7 +136,6 @@ def write_evaluation_set_artifacts(
             portfolio_dir=portfolio_dir,
             diagnostics_dir=diagnostics_dir,
             input_quality_dir=input_quality_dir,
-            summaries_dir=summaries_dir,
         )
         _timed_artifact_operation(
             "directory_creation",
@@ -149,18 +147,20 @@ def write_evaluation_set_artifacts(
         )
         metric_paths[name] = path
 
-    _timed_artifact_operation(
-        "report_writing",
-        lambda: report_path.write_text(report, encoding="utf-8"),
-    )
+    if report is not None:
+        _timed_artifact_operation(
+            "report_writing",
+            lambda: report_path.write_text(report, encoding="utf-8"),
+        )
     return ArtifactOutputs(
         output_dir=destination,
         summary_path=summary_path,
         report_path=report_path,
         metric_paths=metric_paths,
         manifest_path=manifest_path,
-        config_path=config_path,
-        lineage_path=lineage_path,
+        config_path=None,
+        lineage_path=None,
+        run_context_path=run_context_path,
     )
 
 
@@ -173,26 +173,9 @@ def _evaluation_set_table_path(
     portfolio_dir: Path,
     diagnostics_dir: Path,
     input_quality_dir: Path,
-    summaries_dir: Path,
 ) -> Path:
-    if name == "combinations":
-        return dimensions_dir / "combinations.csv"
-    if name in EVALUATION_SET_METRIC_TABLES:
-        return metrics_dir / f"{name}.csv"
-    if name in EVALUATION_SET_PORTFOLIO_TABLES:
-        suffix = ".parquet" if name == "weights" else ".csv"
-        return portfolio_dir / f"{name}{suffix}"
-    if name in EVALUATION_SET_DIAGNOSTIC_TABLES:
-        return diagnostics_dir / f"{name}.csv"
-    if name in EVALUATION_SET_INPUT_QUALITY_TABLES:
-        return input_quality_dir / f"{name}.csv"
-    if name in EVALUATION_SET_SUMMARY_TABLES:
-        return summaries_dir / f"{name}.csv"
-    for period in BREAKDOWN_PERIODS:
-        if name.endswith(f"_by_{period}"):
-            table_name = name.removesuffix(f"_by_{period}")
-            return output_dir / "breakdowns" / period / f"{table_name}.csv"
-    return metrics_dir / f"{name}.csv"
+    del dimensions_dir, metrics_dir, portfolio_dir, diagnostics_dir, input_quality_dir
+    return output_dir / get_table_spec(name).path
 
 
 def _validate_required_evaluation_set_tables(tables: dict[str, pd.DataFrame]) -> None:
@@ -237,19 +220,13 @@ def build_evaluation_set_manifest(
     return {
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "artifact_type": EVALUATION_SET_ARTIFACT_TYPE,
-        "evaluation_id": summary["evaluation_id"],
+        "run_id": summary["run_id"],
         "project": summary["project"],
         "kind": summary["kind"],
-        "domain": summary["domain"],
         "data_stage": summary["data_stage"],
-        "uses_external_data": summary["uses_external_data"],
-        "schema": summary["schema"],
+        "base_evaluation": summary["base_evaluation"],
+        "diagnostics": summary["diagnostics"],
         "n_combinations": summary["n_combinations"],
-        "segment_columns": summary["segment_columns"],
-        "breakdown_enabled": summary["breakdown_enabled"],
-        "breakdown_columns": summary["breakdown_columns"],
-        "period_breakdown_policy": summary["period_breakdown_policy"],
-        "kernel": summary.get("kernel"),
         "artifacts": artifact_paths,
         "display": build_display_manifest(
             artifact_paths,
@@ -264,6 +241,54 @@ def _summary_with_artifact_contract(summary: dict[str, object]) -> dict[str, obj
     result["artifact_schema_version"] = ARTIFACT_SCHEMA_VERSION
     result["artifact_type"] = EVALUATION_SET_ARTIFACT_TYPE
     return result
+
+
+def _run_context_payload(
+    run_context: dict[str, object] | None,
+    config: dict[str, object] | None,
+    lineage: dict[str, object] | None,
+    summary: dict[str, object],
+) -> dict[str, object]:
+    if run_context is not None:
+        payload = run_context
+    else:
+        payload = {
+            "config": {
+                "evaluation_spec": config or {},
+                "diagnostics_spec": summary.get("diagnostics", {"enabled": False}),
+                "a_share_assumptions": {"status": "not_applicable"},
+                "config_fingerprint": "unavailable",
+            },
+            "provenance": {
+                "run_id": summary.get("run_id"),
+                "input_panel_fingerprint": None,
+                "input_data_version": "unavailable",
+                "input_artifact_refs": [],
+                "output_artifact_index": {},
+                "diagnostic_policy_fingerprint": _diagnostic_policy_fingerprint(
+                    summary
+                ),
+                "generated_at": "unavailable",
+                "generator": "quant_research_platform",
+                "code_version": "unavailable",
+                "environment_summary": {},
+                "staging_payload_fingerprint": None,
+                "factor_definition_version": "unavailable",
+                "random_seed": "not_applicable",
+                **(lineage or {}),
+            },
+        }
+    sanitized = sanitize_public_metadata(payload)
+    if not isinstance(sanitized, dict):
+        return {}
+    return sanitized
+
+
+def _diagnostic_policy_fingerprint(summary: dict[str, object]) -> str:
+    diagnostics = summary.get("diagnostics")
+    if isinstance(diagnostics, dict) and diagnostics.get("enabled") is True:
+        return "n5_v1_descriptive_proxy"
+    return "disabled"
 
 
 def _public_lineage(lineage: dict[str, object] | None) -> dict[str, object]:

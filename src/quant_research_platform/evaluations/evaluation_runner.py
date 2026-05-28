@@ -10,6 +10,10 @@ import pandas as pd
 from quant_research_platform.artifacts.artifact_writer import (
     write_evaluation_set_artifacts,
 )
+from quant_research_platform.evaluations.diagnostics import (
+    DiagnosticRunner,
+)
+from quant_research_platform.evaluations.diagnostics.inputs import DiagnosticInputBundle
 from quant_research_platform.evaluations.evaluation_payload import EvaluationRunPayload
 from quant_research_platform.evaluations.evaluation_result import EvaluationSetResult
 from quant_research_platform.evaluations.evaluation_spec import EvaluationSpec
@@ -77,8 +81,7 @@ def run_evaluation(spec: EvaluationSpec) -> EvaluationSetResult:
     payload = evaluate_to_payload(spec)
     artifacts = write_evaluation_set_artifacts(
         spec.output_dir,
-        config=payload.config,
-        lineage=payload.config.get("lineage", {}),
+        run_context=payload.run_context,
         summary=payload.summary,
         tables=payload.tables,
         report=payload.report,
@@ -180,7 +183,7 @@ def evaluate_to_payload(spec: EvaluationSpec) -> EvaluationRunPayload:
     }
     combinations = pd.DataFrame.from_records(combination_records)
     raw_tables["combinations"] = combinations
-    tables = _to_schema_06_tables(
+    tables = _to_schema_07_tables(
         raw_tables,
         spec=spec,
         return_source_column=return_source_column,
@@ -192,13 +195,15 @@ def evaluate_to_payload(spec: EvaluationSpec) -> EvaluationRunPayload:
         tables=tables,
         combinations=combinations,
     )
-    config = _build_evaluation_set_config(
+    run_context = _build_evaluation_set_run_context(
         spec=spec,
         return_source_column=return_source_column,
+        summary=summary,
     )
     return EvaluationRunPayload(
         summary=summary,
-        config=config,
+        config=run_context["config"],
+        run_context=run_context,
         tables=tables,
         report=_render_evaluation_set_report(summary, tables),
     )
@@ -442,9 +447,7 @@ def _metrics_for_feature(
 ) -> dict[str, pd.DataFrame]:
     return {
         name: (
-            frame[frame["feature"] == feature]
-            if "feature" in frame.columns
-            else frame
+            frame[frame["feature"] == feature] if "feature" in frame.columns else frame
         )
         for name, frame in metrics.items()
     }
@@ -503,7 +506,7 @@ def _evaluation_set_profile_metadata(spec: EvaluationSpec) -> dict[str, object]:
             * len(spec.weight_configs)
             * len(spec.cost_configs)
         ),
-        "evaluation_id": str(spec.metadata.get("run_id", Path(spec.output_dir).name)),
+        "run_id": str(spec.metadata.get("run_id", Path(spec.output_dir).name)),
     }
 
 
@@ -640,9 +643,7 @@ def _combination_id(
     kernel: str,
     portfolio_mode: str,
 ) -> str:
-    return "__".join(
-        _slug(value) for value in (feature, label, kernel, portfolio_mode)
-    )
+    return "__".join(_slug(value) for value in (feature, label, kernel, portfolio_mode))
 
 
 def _slug(value: str) -> str:
@@ -666,7 +667,7 @@ def _combination_record(
     }
 
 
-def _to_schema_06_tables(
+def _to_schema_07_tables(
     tables: dict[str, pd.DataFrame],
     *,
     spec: EvaluationSpec,
@@ -677,7 +678,7 @@ def _to_schema_06_tables(
     if "portfolio_mode" not in combinations.columns and spec.weight_configs:
         combinations["portfolio_mode"] = spec.weight_configs[0].portfolio_mode
     id_remap = {
-        str(row["combination_id"]): _combination_id_06(
+        str(row["combination_id"]): _combination_id(
             feature=str(row["feature"]),
             label=str(row["label"]),
             kernel=str(row["kernel"]),
@@ -686,47 +687,81 @@ def _to_schema_06_tables(
         for _, row in combinations.iterrows()
     }
     combinations["combination_id"] = combinations["combination_id"].map(id_remap)
-    schema_06: dict[str, pd.DataFrame] = {
+    schema_07: dict[str, pd.DataFrame] = {
         "combinations": combinations[
             ["combination_id", "feature", "label", "kernel", "portfolio_mode"]
         ].copy()
     }
-    for name in (
-        "ic",
-        "ic_summary",
-        "grouped_returns",
-        "group_spread_summary",
-        "performance_summary",
-        "tradability_diagnostics",
-    ):
-        schema_06[name] = _remap_fact_table(tables[name], id_remap)
-    schema_06["returns"] = _remap_fact_table(
+    schema_07["ic"] = _remap_fact_table(tables["ic"], id_remap)
+    schema_07["grouped_returns"] = _remap_fact_table(
+        tables["grouped_returns"],
+        id_remap,
+    )
+    returns = _remap_fact_table(
         tables["returns"],
         id_remap,
         keep_columns=("portfolio_mode",),
     )
-    if "return_source_column" not in schema_06["returns"].columns:
-        schema_06["returns"]["return_source_column"] = return_source_column
-    schema_06["cumulative_returns"] = _schema_06_cumulative_returns(
-        tables["cumulative_returns"],
+    if "return_source_column" not in returns.columns:
+        returns["return_source_column"] = return_source_column
+    returns = returns.rename(columns={"net_portfolio_return": "net_return"})
+    schema_07["returns"] = returns[
+        [
+            column
+            for column in (
+                "combination_id",
+                "timestamp",
+                "portfolio_mode",
+                "long_return",
+                "short_return",
+                "gross_portfolio_return",
+                "turnover",
+                "cost",
+                "net_return",
+                "long_count",
+                "short_count",
+                "return_source_column",
+                *spec.segment_columns,
+            )
+            if column in returns.columns
+        ]
+    ].copy()
+    ic_summary = _remap_fact_table(tables["ic_summary"], id_remap)
+    group_spread_summary = _remap_fact_table(
+        tables["group_spread_summary"],
         id_remap,
     )
-    schema_06["weights"] = _schema_06_weights(tables["positions"], id_remap)
-    schema_06["label_availability"] = _label_availability_table(spec)
-    schema_06["factor_coverage"] = _factor_coverage_table(spec)
-    schema_06["tradability_coverage"] = _tradability_coverage_table(spec)
-    schema_06["evaluation_summary"] = _evaluation_summary_table(
-        combinations=schema_06["combinations"],
-        ic_summary=schema_06["ic_summary"],
-        performance_summary=schema_06["performance_summary"],
+    performance_summary = _remap_fact_table(tables["performance_summary"], id_remap)
+    schema_07["evaluation_metrics_summary"] = _evaluation_metrics_summary_table(
+        ic_summary=ic_summary,
+        group_spread_summary=group_spread_summary,
+        performance_summary=performance_summary,
     )
-    for name, frame in tables.items():
-        if any(
-            name.endswith(f"_by_{period}")
-            for period in ("year", "quarter", "month")
-        ):
-            schema_06[name] = _remap_fact_table(frame, id_remap)
-    return schema_06
+    schema_07["coverage_summary"] = _coverage_summary_table(spec)
+    schema_07.update(
+        DiagnosticRunner(spec.diagnostics_spec).run(
+            DiagnosticInputBundle(
+                base_tables={
+                    **schema_07,
+                    "positions": _schema_07_weights(tables["positions"], id_remap),
+                    "weight_diagnostics": _remap_fact_table(
+                        tables["weight_diagnostics"],
+                        id_remap,
+                    ),
+                    "cost_breakdown": _remap_fact_table(
+                        tables["cost_breakdown"],
+                        id_remap,
+                    ),
+                },
+                metadata={
+                    "a_share_assumptions": _a_share_assumptions_from_metadata(spec),
+                    "domain": spec.metadata.get("domain", "evaluation"),
+                },
+            )
+        )
+    )
+    schema_07.update(_schema_07_breakdown_tables(tables, id_remap))
+    return schema_07
 
 
 def _remap_fact_table(
@@ -744,7 +779,7 @@ def _remap_fact_table(
     return result.drop(columns=retired_columns)
 
 
-def _schema_06_weights(
+def _schema_07_weights(
     positions: pd.DataFrame,
     id_remap: dict[str, str],
 ) -> pd.DataFrame:
@@ -752,32 +787,6 @@ def _schema_06_weights(
     weights = weights.rename(columns={"position": "target_weight"})
     required = ["combination_id", "timestamp", "asset", "target_weight"]
     return weights[[column for column in required if column in weights.columns]]
-
-
-def _schema_06_cumulative_returns(
-    cumulative_returns: pd.DataFrame,
-    id_remap: dict[str, str],
-) -> pd.DataFrame:
-    cumulative = _remap_fact_table(cumulative_returns, id_remap)
-    cumulative = cumulative.rename(
-        columns={
-            "gross_portfolio_return": "gross_return",
-            "net_portfolio_return": "net_return",
-        }
-    )
-    required = [
-        "combination_id",
-        "timestamp",
-        "gross_return",
-        "net_return",
-        "cost",
-        "cumulative_gross_return",
-        "cumulative_net_return",
-        "cumulative_cost",
-        "high_water_mark",
-        "drawdown",
-    ]
-    return cumulative[[column for column in required if column in cumulative.columns]]
 
 
 def _label_availability_table(spec: EvaluationSpec) -> pd.DataFrame:
@@ -873,6 +882,274 @@ def _evaluation_summary_table(
     )
 
 
+def _evaluation_metrics_summary_table(
+    *,
+    ic_summary: pd.DataFrame,
+    group_spread_summary: pd.DataFrame,
+    performance_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    metric_sources = [
+        (
+            "ic",
+            ic_summary,
+            (
+                "mean_ic",
+                "std_ic",
+                "icir",
+                "positive_ic_rate",
+                "mean_rankic",
+                "std_rankic",
+                "rankicir",
+                "positive_rankic_rate",
+            ),
+        ),
+        (
+            "group_spread",
+            group_spread_summary,
+            (
+                "top_group_mean_return",
+                "bottom_group_mean_return",
+                "top_bottom_spread_mean",
+                "top_bottom_spread_hit_rate",
+                "group_monotonicity_score",
+            ),
+        ),
+        (
+            "portfolio",
+            performance_summary,
+            (
+                "periods",
+                "final_cumulative_gross_return",
+                "final_cumulative_net_return",
+                "mean_net_portfolio_return",
+                "mean_turnover",
+                "max_drawdown",
+                "sharpe_like",
+                "sortino_like",
+                "total_cost",
+                "win_rate",
+            ),
+        ),
+    ]
+    for family, frame, columns in metric_sources:
+        for _, row in frame.iterrows():
+            combination_id = str(row["combination_id"])
+            for column in columns:
+                if column not in frame.columns:
+                    continue
+                records.append(
+                    {
+                        "combination_id": combination_id,
+                        "metric_family": family,
+                        "metric_name": column,
+                        "metric_value": row.get(column),
+                        "unit": "ratio",
+                        "n_observations": row.get("periods", row.get("n_obs", "")),
+                        "diagnostic_status": "ok",
+                        "status_reason": "",
+                        "warning": "",
+                    }
+                )
+    result = pd.DataFrame.from_records(
+        records,
+        columns=[
+            "combination_id",
+            "metric_family",
+            "metric_name",
+            "metric_value",
+            "unit",
+            "n_observations",
+            "diagnostic_status",
+            "status_reason",
+            "warning",
+        ],
+    )
+    if result.empty:
+        return result
+    grouped = result.groupby(
+        ["combination_id", "metric_family", "metric_name"],
+        as_index=False,
+        dropna=False,
+    ).agg(
+        metric_value=("metric_value", "mean"),
+        unit=("unit", "first"),
+        n_observations=("n_observations", "sum"),
+        diagnostic_status=("diagnostic_status", "first"),
+        status_reason=("status_reason", "first"),
+        warning=("warning", "first"),
+    )
+    return grouped[
+        [
+            "combination_id",
+            "metric_family",
+            "metric_name",
+            "metric_value",
+            "unit",
+            "n_observations",
+            "diagnostic_status",
+            "status_reason",
+            "warning",
+        ]
+    ]
+
+
+def _coverage_summary_table(spec: EvaluationSpec) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for row in _label_availability_table(spec).to_dict(orient="records"):
+        records.append(_coverage_record("label", str(row["label"]), row))
+    for row in _factor_coverage_table(spec).to_dict(orient="records"):
+        records.append(_coverage_record("factor", str(row["feature"]), row))
+    for row in _tradability_coverage_table(spec).to_dict(orient="records"):
+        records.append(_coverage_record("tradability", str(row["field"]), row))
+    return pd.DataFrame.from_records(records)
+
+
+def _coverage_record(
+    input_family: str,
+    input_name: str,
+    row: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "input_family": input_family,
+        "input_name": input_name,
+        "available_rows": row["available_rows"],
+        "missing_rows": row["missing_rows"],
+        "coverage_rate": row["coverage_rate"],
+        "diagnostic_status": "ok",
+        "status_reason": "",
+        "warning": "",
+    }
+
+
+def _schema_07_breakdown_table(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "metric_name" not in result.columns:
+        value_columns = [
+            column
+            for column in result.columns
+            if column
+            not in {
+                "combination_id",
+                "period_type",
+                "period",
+                "period_start",
+                "period_end",
+            }
+        ]
+        records = []
+        for _, row in result.iterrows():
+            for column in value_columns:
+                records.append(
+                    {
+                        "combination_id": row.get("combination_id"),
+                        "period_type": row.get("period_type"),
+                        "period": row.get("period"),
+                        "period_start": row.get("period_start"),
+                        "period_end": row.get("period_end"),
+                        "metric_family": "evaluation",
+                        "metric_name": column,
+                        "metric_value": row.get(column),
+                        "unit": "ratio",
+                        "n_observations": row.get("periods", ""),
+                        "diagnostic_status": "ok",
+                        "status_reason": "",
+                        "warning": "",
+                    }
+                )
+        result = pd.DataFrame.from_records(records)
+    return result
+
+
+def _schema_07_breakdown_tables(
+    tables: dict[str, pd.DataFrame],
+    id_remap: dict[str, str],
+) -> dict[str, pd.DataFrame]:
+    result: dict[str, pd.DataFrame] = {}
+    for period in ("year", "quarter", "month"):
+        ic = tables.get(f"ic_summary_by_{period}", pd.DataFrame())
+        spread = tables.get(f"group_spread_summary_by_{period}", pd.DataFrame())
+        performance = tables.get(f"performance_summary_by_{period}", pd.DataFrame())
+        if ic.empty and spread.empty and performance.empty:
+            continue
+        result[f"evaluation_metrics_summary_by_{period}"] = _schema_07_period_metrics(
+            period=period,
+            ic_summary=_remap_fact_table(ic, id_remap),
+            group_spread_summary=_remap_fact_table(spread, id_remap),
+            performance_summary=_remap_fact_table(performance, id_remap),
+        )
+    return result
+
+
+def _schema_07_period_metrics(
+    *,
+    period: str,
+    ic_summary: pd.DataFrame,
+    group_spread_summary: pd.DataFrame,
+    performance_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    frames = []
+    for family, frame in (
+        ("ic", ic_summary),
+        ("group_spread", group_spread_summary),
+        ("portfolio", performance_summary),
+    ):
+        if frame.empty:
+            continue
+        normalized = frame.copy()
+        if "period" not in normalized.columns and period in normalized.columns:
+            normalized["period"] = normalized[period].astype(str)
+        if "period_start" not in normalized.columns:
+            normalized["period_start"] = normalized["period"]
+        if "period_end" not in normalized.columns:
+            normalized["period_end"] = normalized["period"]
+        converted = _schema_07_breakdown_table(
+            normalized.drop(columns=[period], errors="ignore")
+        )
+        converted["metric_family"] = converted["metric_family"].where(
+            converted["metric_family"].ne("evaluation"),
+            family,
+        )
+        frames.append(converted)
+    if not frames:
+        return pd.DataFrame(
+            columns=[
+                "combination_id",
+                "period_type",
+                "period",
+                "period_start",
+                "period_end",
+                "metric_family",
+                "metric_name",
+                "metric_value",
+                "unit",
+                "n_observations",
+                "diagnostic_status",
+                "status_reason",
+                "warning",
+            ]
+        )
+    combined = pd.concat(frames, ignore_index=True)
+    combined["period_type"] = period
+    return combined[
+        [
+            "combination_id",
+            "period_type",
+            "period",
+            "period_start",
+            "period_end",
+            "metric_family",
+            "metric_name",
+            "metric_value",
+            "unit",
+            "n_observations",
+            "diagnostic_status",
+            "status_reason",
+            "warning",
+        ]
+    ]
+
+
 def _actual_date_coverage(spec: EvaluationSpec) -> dict[str, object]:
     timestamps = pd.to_datetime(spec.panel[spec.timestamp_column], errors="coerce")
     timestamps = timestamps.dropna()
@@ -885,16 +1162,27 @@ def _actual_date_coverage(spec: EvaluationSpec) -> dict[str, object]:
     }
 
 
-def _combination_id_06(
+def _a_share_assumptions_from_metadata(spec: EvaluationSpec) -> dict[str, object]:
+    if spec.metadata.get("domain") != "a_share":
+        return {"status": "not_applicable"}
+    return {
+        "status": "recorded",
+        "limit_up_down": "handled by tradability inputs when supplied",
+        "suspension": "handled by tradability inputs when supplied",
+        "t_plus_one": True,
+        "short_sale": "not simulated",
+        "cost_model": "configured modeled cost only",
+    }
+
+
+def _combination_id(
     *,
     feature: str,
     label: str,
     kernel: str,
     portfolio_mode: str,
 ) -> str:
-    return "__".join(
-        _slug(value) for value in (feature, label, kernel, portfolio_mode)
-    )
+    return "__".join(_slug(value) for value in (feature, label, kernel, portfolio_mode))
 
 
 def _build_evaluation_set_summary(
@@ -904,30 +1192,35 @@ def _build_evaluation_set_summary(
     tables: dict[str, pd.DataFrame],
     combinations: pd.DataFrame,
 ) -> dict[str, object]:
-    evaluation_id = str(spec.metadata.get("run_id", Path(spec.output_dir).name))
+    run_id = str(spec.metadata.get("run_id", Path(spec.output_dir).name))
     return {
-        "evaluation_id": evaluation_id,
+        "run_id": run_id,
         "project": spec.metadata["project"],
         "kind": spec.metadata["kind"],
-        "domain": spec.metadata["domain"],
         "data_stage": spec.metadata["data_stage"],
-        "uses_external_data": spec.metadata["uses_external_data"],
-        "schema": {
+        "base_evaluation": {
             "timestamp_column": spec.timestamp_column,
             "asset_column": spec.asset_column,
             "feature_columns": list(spec.feature_columns),
             "label_columns": list(spec.label_columns),
             "return_source_column": return_source_column,
+            "kernel": spec.kernel,
+            "n_groups": int(spec.n_groups),
+            "segment_columns": list(spec.segment_columns),
+            "breakdown_enabled": bool(spec.time_breakdowns),
+            "breakdown_columns": list(spec.time_breakdowns),
+            "period_breakdown_policy": PERIOD_BREAKDOWN_POLICY,
+            "domain": spec.metadata.get("domain", "evaluation"),
+            "uses_external_data": bool(spec.metadata.get("uses_external_data", False)),
+        },
+        "diagnostics": {
+            **spec.diagnostics_spec.to_public_dict(),
+            "status": "enabled" if spec.diagnostics_spec.enabled else "disabled",
         },
         "n_rows_evaluated": int(len(spec.panel)),
         "n_combinations": int(len(combinations)),
-        "n_groups": int(spec.n_groups),
-        "segment_columns": list(spec.segment_columns),
-        "breakdown_enabled": bool(spec.time_breakdowns),
-        "breakdown_columns": list(spec.time_breakdowns),
-        "period_breakdown_policy": PERIOD_BREAKDOWN_POLICY,
-        "kernel": spec.kernel,
         "tables": {name: int(len(frame)) for name, frame in tables.items()},
+        "warnings": [],
         "boundary": spec.domain_notes.get(
             "boundary",
             "No real data, API connection, credentials, paper trading, live trading, "
@@ -936,12 +1229,13 @@ def _build_evaluation_set_summary(
     }
 
 
-def _build_evaluation_set_config(
+def _build_evaluation_set_run_context(
     *,
     spec: EvaluationSpec,
     return_source_column: str,
+    summary: dict[str, object],
 ) -> dict[str, object]:
-    return {
+    evaluation_spec = {
         "metadata": spec.metadata,
         "domain_notes": spec.domain_notes,
         "schema": {
@@ -962,26 +1256,48 @@ def _build_evaluation_set_config(
         "neutralization_config": asdict(spec.neutralization_config),
         "time_semantics_config": asdict(spec.time_semantics_config),
         "tensor_config": asdict(spec.tensor_config),
-        "cost_config": asdict(spec.cost_configs[0]) if spec.cost_configs else {},
-        "weight_config": (
-            asdict(spec.weight_configs[0]) if spec.weight_configs else {}
-        ),
-        "benchmark_profiles": [],
-        "universe_policy": "not_configured",
-        "eligibility_policy": "not_configured",
-        "tradability_policy": asdict(spec.tradability_config),
-        "lineage": {
-            "artifact_schema_version": "0.6",
+    }
+    return {
+        "config": {
+            "evaluation_spec": evaluation_spec,
+            "diagnostics_spec": spec.diagnostics_spec.to_public_dict(),
+            "a_share_assumptions": _a_share_assumptions_from_metadata(spec),
+            "config_fingerprint": "unavailable",
+        },
+        "provenance": {
+            "run_id": summary["run_id"],
+            "input_panel_fingerprint": None,
+            "input_data_version": "unavailable",
+            "input_artifact_refs": [],
+            "output_artifact_index": {},
+            "diagnostic_policy_fingerprint": _diagnostic_policy_fingerprint(spec),
+            "generated_at": "unavailable",
+            "generator": "quant_research_platform",
+            "code_version": "unavailable",
+            "environment_summary": {},
+            "staging_payload_fingerprint": None,
+            "factor_definition_version": "unavailable",
+            "random_seed": "not_applicable",
             "input_fingerprint": None,
             "actual_date_coverage": _actual_date_coverage(spec),
         },
     }
 
 
+def _diagnostic_policy_fingerprint(spec: EvaluationSpec) -> str:
+    if not spec.diagnostics_spec.enabled:
+        return "disabled"
+    return "n5_v1_descriptive_proxy"
+
+
 def _render_evaluation_set_report(
     summary: dict[str, object],
     tables: dict[str, pd.DataFrame],
 ) -> str:
+    base_evaluation = summary.get("base_evaluation")
+    kernel = (
+        base_evaluation.get("kernel") if isinstance(base_evaluation, dict) else ""
+    )
     lines = [
         "# Evaluation Set Report",
         "",
@@ -989,9 +1305,9 @@ def _render_evaluation_set_report(
         "",
         "## Summary",
         "",
-        f"- evaluation_id: {summary['evaluation_id']}",
+        f"- run_id: {summary['run_id']}",
         f"- n_combinations: {summary['n_combinations']}",
-        f"- kernel: {summary['kernel']}",
+        f"- kernel: {kernel}",
         "",
         "## Tables",
         "",

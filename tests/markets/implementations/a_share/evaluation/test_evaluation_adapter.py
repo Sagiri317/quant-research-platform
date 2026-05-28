@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 from quant_research_platform.markets.implementations.a_share.evaluation import (
     evaluation_adapter as evaluation,
 )
@@ -87,9 +88,7 @@ def test_date_filtered_evaluation_frame_keeps_only_requested_trade_dates(
     pd.DataFrame(
         {
             "stock_code": ["000001", "000001", "000001"],
-            "trade_date": pd.to_datetime(
-                ["2024-09-23", "2024-09-24", "2024-09-25"]
-            ),
+            "trade_date": pd.to_datetime(["2024-09-23", "2024-09-24", "2024-09-25"]),
             "eligible": [True, True, True],
             "can_enter": [True, True, True],
             "can_exit": [True, True, True],
@@ -256,6 +255,12 @@ def test_evaluation_spec_exposes_evaluation_runtime_options(tmp_path) -> None:
         neutralization_method="cross_sectional_ols",
         neutralization_group_columns=(),
         neutralization_exposure_columns=("size_exposure",),
+        diagnostics_spec=DiagnosticsSpec.from_request(
+            {
+                "enabled": True,
+                "materialized_views": ["scenario_metrics"],
+            }
+        ),
     )
 
     assert spec.return_source_column == "forward_return_5d"
@@ -267,6 +272,8 @@ def test_evaluation_spec_exposes_evaluation_runtime_options(tmp_path) -> None:
     assert spec.segment_columns == ("industry",)
     assert spec.neutralization_config.method == "cross_sectional_ols"
     assert spec.neutralization_config.exposure_columns == ("size_exposure",)
+    assert spec.diagnostics_spec.enabled is True
+    assert spec.diagnostics_spec.materialized_views == ("scenario_metrics",)
 
 
 def test_label_availability_frame_applies_date_filter(tmp_path) -> None:
@@ -348,14 +355,20 @@ def test_processed_factor_evaluation_reads_full_factor_file_once(
         "portfolio_mode",
     ]
     manifest_text = json.dumps(manifest)
-    config_text = (report_root / "config.json").read_text(encoding="utf-8")
-    lineage = json.loads((report_root / "lineage.json").read_text(encoding="utf-8"))
+    assert not (report_root / "config.json").exists()
+    assert not (report_root / "lineage.json").exists()
+    run_context = json.loads(
+        (report_root / "run_context.json").read_text(encoding="utf-8")
+    )
+    run_context_text = json.dumps(run_context)
     assert "data/processed_private" not in manifest_text
     assert factor_path.as_posix() not in manifest_text
-    assert factor_path.as_posix() not in config_text
-    assert lineage["source_file"] == factor_path.name
+    assert factor_path.as_posix() not in run_context_text
+    assert "source_alias" not in run_context_text
+    assert "evaluation_id" not in run_context_text
+    assert run_context["provenance"]["source_file"] == factor_path.name
     assert not (report_root / "label_availability.csv").exists()
-    assert (report_root / "input_quality" / "label_availability.csv").is_file()
+    assert (report_root / "input_quality" / "coverage_summary.csv").is_file()
 
 
 def test_processed_factor_evaluation_combined_summary_counts_all_payload_tables(
@@ -395,14 +408,15 @@ def test_processed_factor_evaluation_combined_summary_counts_all_payload_tables(
     )
 
     summary = json.loads((manifest_path.parent / "summary.json").read_text())
-    config = json.loads((manifest_path.parent / "config.json").read_text())
+    run_context = json.loads((manifest_path.parent / "run_context.json").read_text())
+    config = run_context["config"]["evaluation_spec"]
     assert summary["n_combinations"] == 2
     assert summary["tables"]["combinations"] == 2
-    assert summary["tables"]["weights"] == len(
-        pd.read_parquet(report_root / "portfolio" / "weights.parquet")
-    )
     assert summary["tables"]["returns"] == len(
         pd.read_csv(report_root / "portfolio" / "returns.csv")
+    )
+    assert summary["tables"]["evaluation_metrics_summary"] == len(
+        pd.read_csv(report_root / "metrics" / "evaluation_metrics_summary.csv")
     )
     assert config["portfolio_modes"] == ["long_short", "long_only"]
     assert "portfolio_mode" not in config["metadata"]
@@ -443,10 +457,13 @@ def test_processed_factor_evaluation_artifact_uses_full_report_identity(
     )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["evaluation_id"] == "full_2024_2024"
-    lineage = json.loads((manifest_path.parent / "lineage.json").read_text())
-    assert lineage["source_alias"] == "a_share"
-    assert lineage["evaluation_id"] == "full_2024_2024"
+    assert manifest["run_id"] == "full_2024_2024"
+    assert "evaluation_id" not in manifest
+    run_context = json.loads((manifest_path.parent / "run_context.json").read_text())
+    run_context_text = json.dumps(run_context)
+    assert run_context["provenance"]["run_id"] == "full_2024_2024"
+    assert "source_alias" not in run_context_text
+    assert "evaluation_id" not in run_context_text
 
 
 def test_processed_factor_evaluation_artifact_preserves_pipeline_identity(
@@ -484,12 +501,13 @@ def test_processed_factor_evaluation_artifact_preserves_pipeline_identity(
     )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["evaluation_id"] == "pipeline_run"
-    lineage = json.loads((manifest_path.parent / "lineage.json").read_text())
-    assert lineage["source_alias"] == "pipeline"
-    assert lineage["evaluation_id"] == "pipeline_run"
-
-
+    assert manifest["run_id"] == "pipeline_run"
+    assert "evaluation_id" not in manifest
+    run_context = json.loads((manifest_path.parent / "run_context.json").read_text())
+    run_context_text = json.dumps(run_context)
+    assert run_context["provenance"]["run_id"] == "pipeline_run"
+    assert "source_alias" not in run_context_text
+    assert "evaluation_id" not in run_context_text
 
 
 def test_run_factor_evaluation_cli_passes_evaluation_runtime_options(

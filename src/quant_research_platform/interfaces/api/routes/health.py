@@ -17,8 +17,7 @@ def health(request: Request) -> dict[str, object]:
     return {
         "status": "ok",
         "run_roots": [
-            {"source_alias": root.source_alias}
-            for root in context.run_roots
+            {"source_alias": root.source_alias} for root in context.run_roots
         ],
     }
 

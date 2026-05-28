@@ -106,7 +106,7 @@ snapshot/run routes。批量评估入口：
 quant_research_platform.research.factor_factory.batch_runner.evaluate_existing_factor_candidates
 ```
 
-它为每个 candidate 构造 `PipelineConfig(start_from="existing_factors")`，通过统一 A 股 runner 和 A-share evaluation service 评估已经存在的 factor table 列，并写出 Factor Factory artifact `0.1`。成功候选会读取 N7 `dimensions/combinations.csv` 和 `summaries/evaluation_summary.csv`，在 `candidate_summary.csv` 中按 `candidate_id + combination_id` 展开表现；失败候选继续写入 sanitized failure record。
+它为每个 candidate 构造 `PipelineConfig(start_from="existing_factors")`，通过统一 A 股 runner 和 A-share evaluation service 评估已经存在的 factor table 列，并写出 Factor Factory artifact `0.1`。成功候选会读取 schema `0.7` 的 `dimensions/combinations.csv` 和 `metrics/evaluation_metrics_summary.csv`，在 `candidate_summary.csv` 中按 `candidate_id + combination_id` 展开表现；失败候选继续写入 sanitized failure record。
 
 ## 验证入口
 

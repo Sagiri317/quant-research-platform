@@ -6,16 +6,11 @@ from dataclasses import dataclass
 
 from quant_research_platform.artifacts.artifact_schema import (
     ARTIFACT_SCHEMA_VERSION,
-    BREAKDOWN_PERIODS,
     DISPLAY_METADATA_DOWNLOAD_ITEMS,
     EVALUATION_SET_ARTIFACT_TYPE,
-    EVALUATION_SET_DIAGNOSTIC_TABLES,
-    EVALUATION_SET_INPUT_QUALITY_TABLES,
-    EVALUATION_SET_METRIC_TABLES,
-    EVALUATION_SET_PORTFOLIO_TABLES,
     EVALUATION_SET_REQUIRED_TABLES,
-    EVALUATION_SET_SUMMARY_TABLES,
 )
+from quant_research_platform.artifacts.schema_registry import table_specs
 
 
 @dataclass(frozen=True)
@@ -31,46 +26,19 @@ class ArtifactTypeContract:
     capabilities: tuple[str, ...]
 
 
-BREAKDOWN_DOWNLOAD_ITEMS = tuple(
-    f"breakdowns/{period}/{table}.csv"
-    for period in BREAKDOWN_PERIODS
-    for table in (
-        "ic_summary",
-        "group_spread_summary",
-        "performance_summary",
-    )
-)
-
-
 EVALUATION_SET_CONTRACT = ArtifactTypeContract(
     name=EVALUATION_SET_ARTIFACT_TYPE,
     version=ARTIFACT_SCHEMA_VERSION,
     inputs=("EvaluationRunPayload",),
     outputs=(
         "manifest.json",
-        "config.json",
-        "lineage.json",
         "summary.json",
-        "report.md",
+        "run_context.json",
     ),
     tables=EVALUATION_SET_REQUIRED_TABLES,
     downloads=(
         *tuple(sorted(DISPLAY_METADATA_DOWNLOAD_ITEMS)),
-        "dimensions/combinations.csv",
-        *(f"metrics/{table}.csv" for table in EVALUATION_SET_METRIC_TABLES),
-        *BREAKDOWN_DOWNLOAD_ITEMS,
-        *(
-            f"portfolio/{table}.parquet"
-            if table == "weights"
-            else f"portfolio/{table}.csv"
-            for table in EVALUATION_SET_PORTFOLIO_TABLES
-        ),
-        *(f"diagnostics/{table}.csv" for table in EVALUATION_SET_DIAGNOSTIC_TABLES),
-        *(
-            f"input_quality/{table}.csv"
-            for table in EVALUATION_SET_INPUT_QUALITY_TABLES
-        ),
-        *(f"summaries/{table}.csv" for table in EVALUATION_SET_SUMMARY_TABLES),
+        *(spec.path for spec in table_specs()),
     ),
     capabilities=("load", "display", "download", "compare"),
 )

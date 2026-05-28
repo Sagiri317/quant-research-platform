@@ -20,19 +20,13 @@ def validate_run_metadata(
 ) -> None:
     """校验 artifact consumers 需要的 provenance fields。"""
 
-    missing = [
-        field for field in MINIMUM_RUN_METADATA_FIELDS if field not in metadata
-    ]
+    missing = [field for field in MINIMUM_RUN_METADATA_FIELDS if field not in metadata]
     if missing:
-        raise ValueError(
-            f"{source} is missing required fields: {', '.join(missing)}."
-        )
+        raise ValueError(f"{source} is missing required fields: {', '.join(missing)}.")
     for metadata_field in ("project", "kind", "domain", "data_stage"):
         value = metadata[metadata_field]
         if not isinstance(value, str) or not value:
-            raise ValueError(
-                f"{source} {metadata_field} must be a non-empty string."
-            )
+            raise ValueError(f"{source} {metadata_field} must be a non-empty string.")
     if not isinstance(metadata["uses_external_data"], bool):
         raise TypeError(f"{source} uses_external_data must be bool.")
 

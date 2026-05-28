@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from 'vitest'
+﻿import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   fetchRuns,
   fetchTablePreview,
@@ -395,12 +395,12 @@ describe('api client', () => {
         total_cost: 0,
       },
       {
-        schema_version: '0.6',
+        schema_version: '0.7',
         charts: [],
         downloads: { items: [], presets: [] },
         tables: [
           {
-            download_item: 'dimensions/combinations.csv',
+            download_ref: { kind: 'table', key: 'combinations' },
             group: 'setup',
             key: 'combinations',
             label: '组合配置',
@@ -427,6 +427,7 @@ describe('api client', () => {
     )
     expect(specs[0].previewRows).toBe(20)
     expect(specs[0].previewMaxRows).toBe(1000)
+    expect(specs[0].downloadItem).toBe('table:combinations')
     expect(specs[0].supportsCombinationFilter).toBe(false)
   })
 
@@ -447,16 +448,16 @@ describe('api client', () => {
         total_cost: 0,
       },
       {
-        schema_version: '0.6',
+        schema_version: '0.7',
         charts: [],
         downloads: { items: [], presets: [] },
         tables: [
           {
-            download_item: 'breakdowns/year/performance_summary.csv',
+            download_ref: { kind: 'table', key: 'performance_by_year' },
             group: 'breakdown',
             key: 'performance_by_year',
             label: '按年绩效',
-            path: 'breakdowns/year/performance_summary.csv',
+            path: 'breakdowns/year/evaluation_metrics_summary.csv',
             preview: {
               kind: 'table',
               table_key: 'performance_by_year',
@@ -471,6 +472,49 @@ describe('api client', () => {
         ],
       },
     )).toThrow('missing preview_url')
+  })
+
+  test('runTableSpecsFromDisplay rejects missing display download ref', () => {
+    expect(() => runTableSpecsFromDisplay(
+      {
+        source_alias: 'core',
+        run_id: 'demo',
+        public_run_id: 'core/demo',
+        project: 'quant-research-platform',
+        kind: 'factor',
+        domain: 'core_synthetic',
+        data_stage: 'synthetic_only',
+        uses_external_data: false,
+        n_rows_evaluated: 600,
+        weight_method: 'equal_weight_quantile',
+        mean_turnover: 1,
+        total_cost: 0,
+      },
+      {
+        schema_version: '0.7',
+        charts: [],
+        downloads: { items: [], presets: [] },
+        tables: [
+          {
+            group: 'setup',
+            key: 'combinations',
+            label: '组合配置',
+            path: 'dimensions/combinations.csv',
+            preview: {
+              kind: 'table',
+              table_key: 'combinations',
+              default_limit: 20,
+              max_limit: 1000,
+              supports_offset: true,
+              supports_combination_filter: false,
+              filter_parameter: null,
+            },
+            preview_url: '/api/runs/core/demo/tables/combinations/preview',
+            supports_combination_filter: false,
+          },
+        ],
+      },
+    )).toThrow('missing download_ref')
   })
 
   test('runTableSpecsFromDisplay rejects stale preview metadata', () => {
@@ -491,12 +535,12 @@ describe('api client', () => {
           total_cost: 0,
         },
         {
-          schema_version: '0.6',
+          schema_version: '0.7',
           charts: [],
           downloads: { items: [], presets: [] },
           tables: [
             {
-              download_item: 'custom/alpha.csv',
+              download_ref: { kind: 'table', key: 'custom_alpha' },
               group: 'custom',
               key: 'custom_alpha',
               label: '自定义 Alpha',
@@ -567,11 +611,11 @@ describe('api client', () => {
         mean_turnover: 1,
         total_cost: 0,
       },
-      ['report.md', 'metrics/ic.csv'],
+      ['metadata_file:report', 'table:ic'],
     )
 
     expect(url).toBe(
-      'http://127.0.0.1:8000/api/runs/core/demo/download?items=report.md&items=metrics%2Fic.csv',
+      'http://127.0.0.1:8000/api/runs/core/demo/download?items=metadata_file%3Areport&items=table%3Aic',
     )
   })
 })

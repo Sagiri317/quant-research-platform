@@ -128,9 +128,9 @@ def normalize_private_export_frame(frame: pd.DataFrame, dataset: str) -> pd.Data
     if dataset == "market_cap":
         result = mapped.copy()
         result["share_change_date"] = pd.to_datetime(result["share_change_date"])
-        return result.sort_values(
-            ["stock_code", "share_change_date"]
-        ).reset_index(drop=True)
+        return result.sort_values(["stock_code", "share_change_date"]).reset_index(
+            drop=True
+        )
 
     if dataset == "stock_master":
         result = mapped.copy()
@@ -376,8 +376,10 @@ def _output_single_path(output_root: Path, dataset: str, start: str, end: str) -
     if dataset == "market_cap":
         return output_root / "market_cap" / f"market_cap_to_{compact_end}.csv"
     if dataset == "adjustment":
-        return output_root / "adjustment" / (
-            f"adjustment_{compact_start}_{compact_end}.csv"
+        return (
+            output_root
+            / "adjustment"
+            / (f"adjustment_{compact_start}_{compact_end}.csv")
         )
     raise ValueError(f"Unsupported single-file dataset: {dataset}")
 

@@ -16,7 +16,7 @@ from quant_research_platform.markets.implementations.a_share.evaluation.build_fa
 from tests.interfaces.api.artifact_run_fixtures import write_evaluation_set
 
 
-def test_build_factor_summary_reads_schema_06_direct_run_root(tmp_path) -> None:
+def test_build_factor_summary_reads_schema_07_direct_run_root(tmp_path) -> None:
     report_root = tmp_path / "n7_eval"
     write_evaluation_set(
         report_root,
@@ -38,7 +38,7 @@ def test_build_factor_summary_reads_schema_06_direct_run_root(tmp_path) -> None:
     assert row["n_rows_evaluated"] == 1234
 
 
-def test_build_factor_summary_discovers_schema_06_child_runs(tmp_path) -> None:
+def test_build_factor_summary_discovers_schema_07_child_runs(tmp_path) -> None:
     report_root = tmp_path / "factor_evaluation"
     write_evaluation_set(report_root / "run_a", run_id="run_a")
     write_evaluation_set(report_root / "run_b", run_id="run_b")
@@ -54,11 +54,7 @@ def test_build_factor_summary_cli_defaults_to_full_report_root(
     monkeypatch,
 ) -> None:
     report_root = (
-        tmp_path
-        / "reports"
-        / "private_real"
-        / "factor_evaluation"
-        / "full_2024_2025"
+        tmp_path / "reports" / "private_real" / "factor_evaluation" / "full_2024_2025"
     )
     write_evaluation_set(report_root, run_id="full_2024_2025")
     monkeypatch.chdir(tmp_path)
@@ -164,11 +160,7 @@ def test_compare_factor_summaries_cli_defaults_to_current_diagnostic(
         / "full_vs_yearly_current_2024_2025"
     )
     full_dir = (
-        tmp_path
-        / "reports"
-        / "private_real"
-        / "factor_evaluation"
-        / "full_2024_2025"
+        tmp_path / "reports" / "private_real" / "factor_evaluation" / "full_2024_2025"
     )
     comparison_dir.mkdir(parents=True)
     full_dir.mkdir(parents=True)

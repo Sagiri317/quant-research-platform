@@ -18,7 +18,7 @@ def test_compare_evaluation_sets_summarizes_multiple_output_directories(tmp_path
     run_b = tmp_path / "run_b"
     write_evaluation_set(
         run_a,
-        evaluation_id="run_a",
+        run_id="run_a",
         ic_values=[0.2, 0.2],
         rankic_values=[0.3, 0.3],
         net_returns=[0.01, 0.02],
@@ -28,7 +28,7 @@ def test_compare_evaluation_sets_summarizes_multiple_output_directories(tmp_path
     )
     write_evaluation_set(
         run_b,
-        evaluation_id="run_b",
+        run_id="run_b",
         ic_values=[0.4, 0.4],
         rankic_values=[0.5, 0.5],
         net_returns=[0.03, 0.04],
@@ -39,17 +39,18 @@ def test_compare_evaluation_sets_summarizes_multiple_output_directories(tmp_path
 
     comparison = compare_evaluation_sets([run_a, run_b])
 
-    assert comparison["evaluation_id"].tolist() == ["run_a", "run_b"]
+    assert comparison["run_id"].tolist() == ["run_a", "run_b"]
+    assert "evaluation_id" not in comparison.columns
     assert comparison["mean_ic"].round(6).tolist() == [0.2, 0.4]
     assert comparison["mean_rankic"].round(6).tolist() == [0.3, 0.5]
     assert comparison["mean_final_return"].round(6).tolist() == [0.03, 0.07]
     assert comparison["mean_turnover"].round(6).tolist() == [3.0, 2.0]
-    assert comparison["total_cost"].round(6).tolist() == [0.003, 0.001]
+    assert comparison["total_cost"].round(6).tolist() == [0.0, 0.0]
     assert comparison["rank_mean_ic"].tolist() == [2, 1]
     assert comparison["rank_mean_rankic"].tolist() == [2, 1]
     assert comparison["rank_mean_final_return"].tolist() == [2, 1]
     assert comparison["rank_mean_turnover"].tolist() == [2, 1]
-    assert comparison["rank_total_cost"].tolist() == [2, 1]
+    assert comparison["rank_total_cost"].tolist() == [1, 1]
     assert "overall_score" not in comparison.columns
 
 
@@ -60,7 +61,7 @@ def test_compare_evaluation_sets_requires_at_least_one_run_directory():
 
 def test_compare_evaluation_sets_uses_low_memory_file_summary(tmp_path, monkeypatch):
     run_dir = tmp_path / "run_low_memory"
-    write_evaluation_set(run_dir, evaluation_id="run_low_memory")
+    write_evaluation_set(run_dir, run_id="run_low_memory")
 
     def fail_load(*_args, **_kwargs):
         raise AssertionError("compare_evaluation_sets must not summarize loaded runs")
@@ -69,15 +70,15 @@ def test_compare_evaluation_sets_uses_low_memory_file_summary(tmp_path, monkeypa
 
     comparison = compare_evaluation_sets([run_dir])
 
-    assert comparison["evaluation_id"].tolist() == ["run_low_memory"]
+    assert comparison["run_id"].tolist() == ["run_low_memory"]
 
 
 def test_write_evaluation_comparison_report_outputs_file_only_formats(tmp_path):
     run_a = tmp_path / "run_a"
     run_b = tmp_path / "run_b"
     report_dir = tmp_path / "comparison_report"
-    write_evaluation_set(run_a, evaluation_id="run_a")
-    write_evaluation_set(run_b, evaluation_id="run_b")
+    write_evaluation_set(run_a, run_id="run_a")
+    write_evaluation_set(run_b, run_id="run_b")
 
     outputs = write_evaluation_comparison_report([run_a, run_b], report_dir)
 
@@ -96,9 +97,7 @@ def test_write_evaluation_comparison_report_outputs_file_only_formats(tmp_path):
     assert "factor__forward_return__dataframe__long_short" in outputs[
         "combination_csv"
     ].read_text(encoding="utf-8-sig")
-    markdown = outputs["markdown"].read_text(
-        encoding="utf-8"
-    )
+    markdown = outputs["markdown"].read_text(encoding="utf-8")
     assert "# Evaluation Comparison Report" in markdown
     assert "## Combination Comparison" in markdown
     assert "## Kernel Parity" in markdown
@@ -113,8 +112,8 @@ def test_write_evaluation_comparison_report_rejects_unsafe_report_name(
     run_a = tmp_path / "run_a"
     run_b = tmp_path / "run_b"
     report_dir = tmp_path / "comparison_report"
-    write_evaluation_set(run_a, evaluation_id="run_a")
-    write_evaluation_set(run_b, evaluation_id="run_b")
+    write_evaluation_set(run_a, run_id="run_a")
+    write_evaluation_set(run_b, run_id="run_b")
 
     with pytest.raises(ValueError, match="report_name"):
         write_evaluation_comparison_report(
@@ -127,13 +126,13 @@ def test_write_evaluation_comparison_report_rejects_unsafe_report_name(
     assert not (report_dir / "nested").exists()
 
 
-def test_compare_evaluation_sets_requires_schema_evaluation_id(tmp_path):
+def test_compare_evaluation_sets_requires_schema_run_id(tmp_path):
     run_dir = tmp_path / "run_without_id"
-    write_evaluation_set(run_dir, evaluation_id="run_without_id")
+    write_evaluation_set(run_dir, run_id="run_without_id")
     loaded = load_evaluation_set(run_dir)
-    loaded.summary.pop("evaluation_id")
+    loaded.summary.pop("run_id")
 
-    with pytest.raises(ValueError, match="evaluation_id"):
+    with pytest.raises(ValueError, match="run_id"):
         comparison_module._summarize_run(loaded)
 
 
@@ -143,7 +142,7 @@ def test_compare_evaluation_sets_requires_schema_evaluation_id(tmp_path):
 )
 def test_compare_evaluation_sets_requires_current_summary_fields(tmp_path, field):
     run_dir = tmp_path / f"run_without_{field}"
-    write_evaluation_set(run_dir, evaluation_id="run_without_field")
+    write_evaluation_set(run_dir, run_id="run_without_field")
     loaded = load_evaluation_set(run_dir)
     loaded.summary.pop(field)
 
@@ -153,7 +152,7 @@ def test_compare_evaluation_sets_requires_current_summary_fields(tmp_path, field
 
 def test_compare_evaluation_sets_requires_weight_method(tmp_path):
     run_dir = tmp_path / "run_without_weight_method"
-    write_evaluation_set(run_dir, evaluation_id="run_without_weight_method")
+    write_evaluation_set(run_dir, run_id="run_without_weight_method")
     loaded = load_evaluation_set(run_dir)
     loaded.config["weight_configs"] = [{}]
 
@@ -163,7 +162,7 @@ def test_compare_evaluation_sets_requires_weight_method(tmp_path):
 
 def test_compare_evaluation_sets_reports_scalar_weight_cost_bps(tmp_path):
     run_dir = tmp_path / "run_with_scalar_weight_cost_bps"
-    write_evaluation_set(run_dir, evaluation_id="run_with_scalar_weight_cost_bps")
+    write_evaluation_set(run_dir, run_id="run_with_scalar_weight_cost_bps")
     loaded = load_evaluation_set(run_dir)
     loaded.config["cost_configs"] = [{}]
     loaded.config["weight_configs"] = [
@@ -180,12 +179,12 @@ def test_compare_evaluation_sets_rejects_legacy_schema_without_full_load(
     monkeypatch,
 ):
     run_dir = tmp_path / "legacy_schema"
-    write_evaluation_set(run_dir, evaluation_id="legacy_schema")
+    write_evaluation_set(run_dir, run_id="legacy_schema")
     for filename in ("manifest.json", "summary.json"):
         path = run_dir / filename
         payload = path.read_text(encoding="utf-8").replace(
+            '"artifact_schema_version": "0.7"',
             '"artifact_schema_version": "0.6"',
-            '"artifact_schema_version": "0.5"',
         )
         path.write_text(payload, encoding="utf-8")
 

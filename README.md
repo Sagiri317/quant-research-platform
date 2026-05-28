@@ -21,7 +21,7 @@ local approved data
 -> market module
 -> research panel / factor table
 -> evaluation layer
--> schema 0.6 artifacts
+-> schema 0.7 artifacts
 -> API / downloads / evidence workbench
 -> report and research evidence
 ```
@@ -29,7 +29,7 @@ local approved data
 当前能力：
 
 - A 股是 enabled market module，数据源边界是用户手工导出的本地 CSMAR 文件。
-- Evaluation layer、artifact writer/loader、schema `0.6`、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
+- Evaluation layer、artifact writer/loader、schema `0.7`、diagnostics framework、`manifest.display`、API、下载和 workbench 已内置到 `quant_research_platform`。
 - Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为 legacy/dev uploaded-panel smoke / compatibility 入口保留。
 - Pipeline Builder 前端默认生成配置快照，调用 `POST /api/pipeline-snapshots`；也可切换到执行模式，调用 `POST /api/pipeline-runs`。
 - 可执行 pipeline 调用的公开控制参数是 `kernel` 和 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并且一定运行到 evaluation。
@@ -41,10 +41,10 @@ local approved data
 
 | 发现 | 证据 | 状态 |
 |---|---|---|
-| 平台合同已迁入 `quant_research_platform` 命名空间 | schema `0.6` artifacts、`manifest.display`、FastAPI evidence API、download contract 和 React evidence workbench | 已验证 |
+| 平台合同已迁入 `quant_research_platform` 命名空间 | schema `0.7` artifacts、diagnostics registry、`manifest.display`、FastAPI evidence API、download contract 和 React evidence workbench | 已验证 |
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 只保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | N1/N2/N3/N4/N7/N8 已合入 `main` | Pipeline runner、tradability diagnostics、ZIP packaging、frontend feature split、run identity、contract consumer convergence | 已验证 |
-| 当前 2023-2025 evidence 可作为回归入口 | `n7_eval_2023_2025_v1`、`n7_eval_2023_2025_rev120_v1`、Factor Factory `rev_120d` smoke 和低内存 comparison | 已验证 |
+| 当前 2023-2025 evidence 可作为回归入口 | `schema07_eval_2023_2025_v1`、`schema07_eval_2023_2025_rev120_v1` 和 Factor Factory `rev_120d` smoke | 已验证 |
 | 下一阶段研究合同仍需单独设计 | N5 risk/regime/cost/capacity 与 N6 ML prediction handoff | 待推进 |
 
 ## 复现方式
@@ -82,7 +82,7 @@ scripts\stop_workbench.ps1
 src/quant_research_platform/
   evaluations/           EvaluationSpec, run_evaluation, panel contract
   kernels/               DataFrame / tensor evaluation helpers
-  artifacts/             schema 0.6 writer, loader, display contract
+  artifacts/             schema 0.7 writer, loader, registry, display contract
   interfaces/api/        local FastAPI evidence API, downloads, run repository
   interfaces/cli/        qrp command entry
   datasets/              generic CSV / Parquet readers
@@ -93,7 +93,7 @@ src/quant_research_platform/
 
 web/                     React/Vite evidence workbench
 config/a_share/          A-share factor templates and pipeline configs
-scripts/                 local launch, acceptance, and check scripts
+scripts/                 local workbench launch/stop scripts and private run roots
 data/                    local private data boundary
 reports/private_real/    local private real-data outputs
 docs/code-map/           source reading map
@@ -173,18 +173,18 @@ conda run -n analysis python -m quant_research_platform.markets.implementations.
 
 ## Artifact 和 Workbench 合同
 
-当前新生成的 evaluation artifacts 使用 schema `0.6`。一个 API-visible evaluation run 可以包含多个 `combination_id`，组合维度由 `dimensions/combinations.csv` 管理；第一阶段 required columns 仅为 `combination_id, feature, label, kernel, portfolio_mode`。
+当前新生成的 evaluation artifacts 使用 schema `0.7`。一个 API-visible evaluation run 可以包含多个 `combination_id`，组合维度由 `dimensions/combinations.csv` 管理；diagnostics policy 维度由 `dimensions/diagnostic_policies.csv` 管理。
 
-成本、权重方法、benchmark、universe、eligibility 和 tradability 等 run-level constant 配置写入 `config.json` / `lineage.json`，不写入 combinations 维度表。这两个 public-downloadable metadata 文件在写入、direct download 和 selected ZIP 打包路径上统一脱敏，不暴露 private data path 或本机绝对路径。
+成本、权重方法、benchmark、universe、eligibility、tradability、生成环境和输入 lineage 等 run-level 配置写入 `run_context.json`，不进入 combinations 维度表；portable artifacts 不再写出 `config.json` 或 `lineage.json`。
 
-Schema `0.6` 的核心输出包括 `portfolio/weights.parquet`、`portfolio/cumulative_returns.csv`、`metrics/performance_summary.csv`、`diagnostics/tradability_diagnostics.csv`、`input_quality/*.csv` 和 `summaries/evaluation_summary.csv`。公开合同使用 `kernel` 和 `return_source_column`；不再使用旧的 external `engine` / `pnl_return_column` 命名。
+Schema `0.7` 的核心输出包括 `metrics/ic.csv`、`metrics/grouped_returns.csv`、`metrics/evaluation_metrics_summary.csv`、`portfolio/returns.csv`、`portfolio/weights.parquet`、`input_quality/coverage_summary.csv`、`diagnostics/diagnostic_summary.csv` 和 `diagnostics/diagnostic_metrics.csv`。公开合同使用 `kernel` 和 `return_source_column`；diagnostics 中的 risk/regime/cost/capacity 是 descriptive proxy diagnostics，不代表 alpha proof、真实 capacity、validated risk model、paper/live trading 或 investment advice。
 
-Evaluation run 使用 artifact schema `0.6`。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
+Evaluation run 使用 artifact schema `0.7`。`src/quant_research_platform/artifacts/schema_registry.py` 与 tests 是字段数、grain、unique key、required_if / nullable_if、sentinel、generated files、display/download eligibility 的 source of truth。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
 
 当前保留的 2023-2025 private canonical 样例：
 
-- `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` 覆盖 `mom_20d, vol_20d, avg_amount_20d, rev_120d x 2 labels x dataframe x long_only = 8` 个 combinations。
-- `reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1` 覆盖 `rev_120d x 2 labels x 2 kernels x 2 portfolio modes = 8` 个 combinations，用于 120 日反转的 kernel / portfolio mode parity smoke。
+- `reports/private_real/factor_evaluation/schema07_eval_2023_2025_v1` 覆盖 `mom_20d, vol_20d, avg_amount_20d, rev_120d x 2 labels x dataframe x long_only = 8` 个 combinations。
+- `reports/private_real/factor_evaluation/schema07_eval_2023_2025_rev120_v1` 覆盖 `rev_120d x 2 labels x 2 kernels x 2 portfolio modes = 8` 个 combinations，用于 120 日反转的 kernel / portfolio mode parity smoke。
 - `reports/private_real/ff/20260527_rev120_factory_smoke_v1` 是当前 Factor Factory `rev_120d` smoke 样例。
 
 新增或修改 artifacts 时必须同时检查：

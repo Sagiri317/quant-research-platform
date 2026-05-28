@@ -17,8 +17,10 @@ from quant_research_platform.artifacts.manifest_validation import (
     validate_display_manifest,
     validate_evaluation_set_payload,
     validate_evaluation_set_table_columns,
+    validate_portable_run_identity,
+    validate_run_context_payload,
+    validate_summary_payload,
 )
-from quant_research_platform.runtime.run_metadata import validate_run_metadata
 
 
 class LoadedEvaluationSet(BaseModel):
@@ -29,9 +31,10 @@ class LoadedEvaluationSet(BaseModel):
     output_dir: Path
     manifest: dict[str, object]
     config: dict[str, object]
+    run_context: dict[str, object]
     summary: dict[str, object]
     tables: dict[str, pd.DataFrame]
-    report: str
+    report: str | None
 
 
 def load_evaluation_set(
@@ -43,23 +46,19 @@ def load_evaluation_set(
 
     destination = Path(output_dir)
     manifest_path = destination / "manifest.json"
-    config_path = destination / "config.json"
-    lineage_path = destination / "lineage.json"
+    run_context_path = destination / "run_context.json"
     summary_path = destination / "summary.json"
-    for path in (manifest_path, config_path, lineage_path, summary_path):
+    for path in (manifest_path, run_context_path, summary_path):
         _require_file(path, base=destination)
 
     manifest = _read_json(manifest_path)
-    config = _read_json(config_path)
+    run_context = _read_json(run_context_path)
     summary = _read_json(summary_path)
     validate_artifact_schema_version(manifest, source="manifest.json")
-    validate_artifact_schema_version(summary, source="summary.json")
     validate_evaluation_set_payload(manifest, source="manifest.json")
-    validate_evaluation_set_payload(summary, source="summary.json")
-    config_metadata = config.get("metadata")
-    if not isinstance(config_metadata, dict):
-        raise ValueError("config.json must contain a metadata object.")
-    validate_run_metadata(config_metadata, source="config.json metadata")
+    validate_summary_payload(summary)
+    validate_run_context_payload(run_context, summary=summary)
+    validate_portable_run_identity(manifest, summary, run_context)
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -76,27 +75,31 @@ def load_evaluation_set(
             if name in table_names
         }
     tables = {
-        name: _read_table(
-            _require_file(destination / relative_path, base=destination)
-        )
+        name: _read_table(_require_file(destination / relative_path, base=destination))
         for name, relative_path in table_paths.items()
     }
     validate_evaluation_set_table_columns(tables)
     if display_chart_table_names(manifest).issubset(tables):
         validate_display_chart_columns(manifest, tables)
 
+    report: str | None = None
     report_relative = artifacts.get("report")
-    if not isinstance(report_relative, str) or not report_relative:
-        raise ValueError("manifest artifacts must include report.")
-    validate_artifact_relative_path(report_relative, source="artifacts.report")
-    report_path = _require_file(destination / report_relative, base=destination)
+    if report_relative is not None:
+        if not isinstance(report_relative, str) or not report_relative:
+            raise ValueError("manifest artifacts.report must be a non-empty string.")
+        validate_artifact_relative_path(report_relative, source="artifacts.report")
+        report_path = _require_file(destination / report_relative, base=destination)
+        report = report_path.read_text(encoding="utf-8")
     return LoadedEvaluationSet(
         output_dir=destination,
         manifest=manifest,
-        config=config,
+        config=run_context.get("config", {})
+        if isinstance(run_context.get("config"), dict)
+        else {},
+        run_context=run_context,
         summary=summary,
         tables=tables,
-        report=report_path.read_text(encoding="utf-8"),
+        report=report,
     )
 
 

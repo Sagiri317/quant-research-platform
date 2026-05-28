@@ -41,9 +41,7 @@ def build_display_table_preview_descriptor(
         "max_limit": max_limit,
         "supports_offset": True,
         "supports_combination_filter": supports_combination_filter,
-        "filter_parameter": (
-            "combination_id" if supports_combination_filter else None
-        ),
+        "filter_parameter": ("combination_id" if supports_combination_filter else None),
     }
 
 
@@ -104,7 +102,7 @@ def display_table_preview_limits(
 
 
 def display_download_items(manifest: dict[str, object]) -> set[str]:
-    """Return item names exposed by manifest.display.downloads.items."""
+    """Return compact download refs exposed by manifest.display.downloads.items."""
 
     display = _require_supported_display(manifest)
     downloads = display.get("downloads")
@@ -116,11 +114,11 @@ def display_download_items(manifest: dict[str, object]) -> set[str]:
             raise ValueError(
                 "manifest display.downloads.items entries must be objects."
             )
-        item = option.get("item")
-        if not isinstance(item, str) or not item:
-            raise ValueError("manifest display download item must be non-empty.")
-        validate_display_contract_path(item, source=f"display download item {item}")
-        result.add(item)
+        kind = option.get("kind")
+        key = option.get("key")
+        if not isinstance(kind, str) or not isinstance(key, str) or not key:
+            raise ValueError("manifest display download item must include kind/key.")
+        result.add(f"{kind}:{key}")
     return result
 
 
@@ -130,7 +128,6 @@ def display_download_table_key(
 ) -> str | None:
     """Return the display table key for a download item, when it is a table."""
 
-    validate_display_contract_path(item, source=f"display download item {item}")
     display = _require_supported_display(manifest)
     downloads = display.get("downloads")
     if not isinstance(downloads, dict):
@@ -139,9 +136,13 @@ def display_download_table_key(
     if not isinstance(items, list):
         return None
     for option in items:
-        if not isinstance(option, dict) or option.get("item") != item:
+        if not isinstance(option, dict):
             continue
-        table_key = option.get("table")
+        if f"{option.get('kind')}:{option.get('key')}" != item:
+            continue
+        if option.get("kind") != "table":
+            return None
+        table_key = option.get("table") or option.get("key")
         return table_key if isinstance(table_key, str) else None
     return None
 

@@ -10,6 +10,39 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ApiErrorPayload(BaseModel):
+    """Common API error payload."""
+
+    error_code: str
+    message: str
+    field: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApiErrorEnvelope(BaseModel):
+    """Common FastAPI error envelope."""
+
+    error: ApiErrorPayload
+
+    @classmethod
+    def from_error(
+        cls,
+        *,
+        error_code: str,
+        message: str,
+        field: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> ApiErrorEnvelope:
+        return cls(
+            error=ApiErrorPayload(
+                error_code=error_code,
+                message=message,
+                field=field,
+                details=details or {},
+            )
+        )
+
+
 class CreateRunPayload(BaseModel):
     """用户上传 panel 生成本地 evaluation set 的请求。"""
 
@@ -87,6 +120,6 @@ class RunIndexRecord:
     ref: RunRef
     manifest: dict[str, object]
     config: dict[str, object]
+    run_context: dict[str, object]
     summary: dict[str, object]
-    ic_summary: pd.DataFrame
-    performance_summary: pd.DataFrame
+    evaluation_metrics_summary: pd.DataFrame

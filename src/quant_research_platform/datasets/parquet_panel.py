@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel
 
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 from quant_research_platform.evaluations.evaluation_spec import (
     DEFAULT_RETURN_SOURCE_COLUMN,
     CostConfig,
@@ -62,9 +63,7 @@ def read_factor_panel_parquet(
         key_columns=(timestamp_column, asset_column),
     )
     if panel.duplicated([timestamp_column, asset_column]).any():
-        raise ValueError(
-            "merged Parquet panel must have unique timestamp-asset keys."
-        )
+        raise ValueError("merged Parquet panel must have unique timestamp-asset keys.")
     panel[asset_column] = panel[asset_column].astype(str)
     return panel
 
@@ -120,9 +119,7 @@ def validate_parquet_evaluation_columns(
     )
     available_columns = tuple(
         dict.fromkeys(
-            column
-            for inspection in inspections
-            for column in inspection.columns
+            column for inspection in inspections for column in inspection.columns
         )
     )
     missing = [column for column in required if column not in available_columns]
@@ -159,6 +156,7 @@ def make_parquet_evaluation_spec(
     return_source_column: str | None = None,
     domain_notes: dict[str, Any] | None = None,
     extra_columns: tuple[str, ...] = (),
+    diagnostics_spec: DiagnosticsSpec | None = None,
 ) -> EvaluationSpec:
     """从一个或多个 Parquet panel 文件构造 EvaluationSpec。"""
 
@@ -206,6 +204,7 @@ def make_parquet_evaluation_spec(
         return_source_column=return_source_column,
         segment_columns=segment_columns,
         time_breakdowns=time_breakdowns,
+        diagnostics_spec=diagnostics_spec or DiagnosticsSpec.disabled(),
         domain_notes={} if domain_notes is None else domain_notes,
     )
 

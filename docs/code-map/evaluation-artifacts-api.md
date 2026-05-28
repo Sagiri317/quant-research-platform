@@ -1,15 +1,15 @@
 # Evaluation / Artifacts / API 地图
 
-## N7 当前合同快照（schema 0.6）
+## N7 当前合同快照（schema 0.7）
 
-当前新生成的 evaluation-set artifact 使用 schema `0.6`：
+当前新生成的 evaluation-set artifact 使用 schema `0.7`：
 
 ```text
 market adapter / upload / parquet helper
 -> EvaluationSpec(kernel=..., return_source_column=...)
 -> evaluate_to_payload / run_evaluation
 -> write_evaluation_set_artifacts
--> schema 0.6 evaluation_set artifact
+-> schema 0.7 evaluation_set artifact
 -> manifest.display
 -> API evidence/download/preview/comparison
 -> React evidence workbench
@@ -20,21 +20,21 @@ market adapter / upload / parquet helper
 - `dimensions/combinations.csv` 是动态维度表；第一阶段 required columns 仅为
   `combination_id, feature, label, kernel, portfolio_mode`。
 - fact tables 通过 `combination_id` join 维度表；run-level constant 配置写入
-  `config.json` / `lineage.json`。
+  `run_context.json`。
 - required portfolio outputs 包括 `portfolio/weights.parquet` 和
-  `portfolio/cumulative_returns.csv`；不再写 schema `0.6` 的 `pnl.csv`。
+  `API-derived primary_cumulative_return chart from portfolio/returns.csv`；不再写 schema `0.7` 的 `pnl.csv`。
 - API/frontend 合同使用 `kernel` 和 `return_source_column`。
 - `compare_evaluation_sets` 是低内存 summary comparison；更详细的
   `write_evaluation_comparison_report()` 只输出 CSV/JSON/Markdown，不进入主网页。
 - Table preview 由 evidence API 提供 bounded preview 能力，frontend 通过
   API evidence payload 中的 `manifest.display.tables[].preview_url` 和
   portable preview descriptor 消费，不从 artifact path 重新推导 route。
-- Public-downloadable metadata files, currently `config.json` and `lineage.json`,
+- Public-downloadable metadata files, currently `run_context.json`,
   are sanitized consistently when written, directly downloaded, and packaged in
   selected ZIPs; selected ZIP cache fingerprints hash the sanitized dynamic
   metadata bytes.
 
-本文记录当前 evaluation layer、artifact schema `0.6`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
+本文记录当前 evaluation layer、artifact schema `0.7`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
 
 ## 总链路
 
@@ -45,7 +45,7 @@ market module or local adapter
 -> evaluate_to_payload
 -> DataFrame/Tensor kernels
 -> write_evaluation_set_artifacts
--> schema 0.6 evaluation-set run
+-> schema 0.7 evaluation-set run
 -> load_evaluation_set / run_repository
 -> FastAPI evidence/download/comparison APIs
 -> React evidence workbench
@@ -107,31 +107,31 @@ Evaluation runs 必须是：
 
 ```text
 artifact_type = "evaluation_set"
-artifact_schema_version = "0.6"
+artifact_schema_version = "0.7"
 ```
 
 核心文件：
 
 ```text
 manifest.json
-config.json
+run_context.json
 summary.json
-lineage.json
+run_context.json
 dimensions/combinations.csv
 report.md
 metrics/ic.csv
-metrics/ic_summary.csv
+metrics/evaluation_metrics_summary.csv
 metrics/grouped_returns.csv
-metrics/group_spread_summary.csv
-metrics/performance_summary.csv
+metrics/evaluation_metrics_summary.csv
+metrics/evaluation_metrics_summary.csv
 portfolio/weights.parquet
 portfolio/returns.csv
-portfolio/cumulative_returns.csv
+API-derived primary_cumulative_return chart from portfolio/returns.csv
 diagnostics/tradability_diagnostics.csv
-input_quality/label_availability.csv
-input_quality/factor_coverage.csv
-input_quality/tradability_coverage.csv
-summaries/evaluation_summary.csv
+input_quality/coverage_summary.csv
+input_quality/coverage_summary.csv
+input_quality/coverage_summary.csv
+summary.json plus metrics/evaluation_metrics_summary.csv
 ```
 
 启用 `time_breakdowns` 后会按配置出现可选目录：
@@ -190,12 +190,12 @@ Evidence workbench 的诊断卡片展示当前组合最后一行时，应使用�
 前端才可请求 `limit=1&offset=total_rows-1&combination_id=...`。如果 row
 count 非精确，卡片不得把 preview 页里的末行声明为最新诊断；CSV 明细预览仍保持
 display preview row limit，不为了卡片拉完整 diagnostics 表。
-新生成的 schema `0.6` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
+新生成的 schema `0.7` evaluation-set 必须包含该表；缺少该表的旧 run 不再兼容，
 需要重新生成后才能由当前 loader/API 加载。
 
 校验要求：
 
-- `display.schema_version == "0.6"`。
+- `display.schema_version == "0.7"`。
 - `display.tables` 必须覆盖 artifact CSV tables。
 - 每个 display table 必须有 matching download item。
 - 每个 display table 必须有 portable `preview` descriptor；`preview.table_key` 必须等于 table key，`default_limit` 必须等于合同 preview row limit，`supports_combination_filter` 与 `filter_parameter` 必须一致。
@@ -232,7 +232,7 @@ RunRef = (source_alias, run_id, path)
 | `routes/markets.py` | `/markets`, `/api/markets` | 市场能力；A 股 enabled，其他 planned/disabled。 |
 | `routes/factor_templates.py` | `/api/factor-templates` | factor template catalog。 |
 | `routes/pipeline.py` | `/api/pipeline-snapshots`, `/api/pipeline-runs` | snapshot 状态、`start_from` runner 状态。 |
-| `routes/runs.py` | `/api/runs`, evidence, table previews | run list、删除 uploaded run、evidence、generic `/tables/{table_key}/preview` 和兼容 metrics/portfolio/diagnostics/breakdowns preview。 |
+| `routes/runs.py` | `/api/runs`, evidence, table previews | run list、删除 uploaded run、evidence、generic `/tables/{table_key}/preview` 和兼容 generic table preview。 |
 | `routes/artifacts.py` | `/api/runs/{source_alias}/{run_id}/artifacts/{artifact_item:path}` | display-exposed artifact direct download。 |
 | `routes/downloads.py` | `/report.md`, `/download` | report 和 selected ZIP download。 |
 | `routes/comparison.py` | `/api/comparison`, `/api/comparison.csv` | API-visible runs comparison。 |
@@ -247,7 +247,7 @@ Direct download 和 ZIP download 必须满足：
 - path resolves inside run directory。
 - item path is safe relative path。
 - ZIP cache identity includes `source_alias` and `run_id`。
-- `config.json` and `lineage.json` direct downloads and selected ZIP entries use
+- `run_context.json` direct downloads and selected ZIP entries use
   sanitized public metadata bytes, not raw private/local path payloads。
 - selected ZIP cache identity for dynamic metadata includes the sanitized content
   digest, so metadata changes do not reuse stale ZIP files。

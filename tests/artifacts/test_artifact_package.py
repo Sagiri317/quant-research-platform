@@ -34,7 +34,7 @@ def test_require_manifest_display_download_item_requires_supported_display_schem
     manifest["display"]["schema_version"] = "0.4"
 
     try:
-        require_manifest_display_download_item(manifest, "report.md")
+        require_manifest_display_download_item(manifest, "metadata_file:report")
     except ArtifactPackageError as exc:
         assert "display schema_version" in str(exc)
     else:
@@ -45,10 +45,11 @@ def test_require_manifest_display_download_item_uses_manifest_display(tmp_path) 
     write_evaluation_set(tmp_path)
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
 
-    require_manifest_display_download_item(manifest, "report.md")
+    require_manifest_display_download_item(manifest, "metadata_file:report")
+    require_manifest_display_download_item(manifest, "table:evaluation_metrics_summary")
 
     try:
-        require_manifest_display_download_item(manifest, "metrics/not_exposed.csv")
+        require_manifest_display_download_item(manifest, "table:not_exposed")
     except ArtifactPackageError as exc:
         assert "not exposed by manifest display downloads" in str(exc)
     else:
@@ -64,34 +65,27 @@ def test_resolve_manifest_display_artifact_path_resolves_inside_run_dir(
     path = resolve_manifest_display_artifact_path(
         manifest,
         tmp_path,
-        "metrics/performance_summary.csv",
+        "table:evaluation_metrics_summary",
     )
 
-    assert path == tmp_path / "metrics" / "performance_summary.csv"
+    assert path == tmp_path / "metrics" / "evaluation_metrics_summary.csv"
 
 
 def test_selected_zip_uses_canonical_metadata_files(tmp_path) -> None:
     write_evaluation_set(tmp_path)
-    (tmp_path / "evil_summary.json").write_text(
-        json.dumps({"evaluation_id": "wrong"}),
-        encoding="utf-8",
-    )
-    manifest_path = tmp_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifacts"]["summary"] = "evil_summary.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     run = load_evaluation_set(tmp_path)
 
     zip_path = build_selected_artifact_zip(
         run,
         source_alias="platform",
         run_id="demo",
-        items=["summary.json"],
+        items=["metadata_file:summary"],
         cache_root=tmp_path / "download_cache",
     )
 
     with zipfile.ZipFile(zip_path) as archive:
-        assert json.loads(archive.read("summary.json"))["evaluation_id"] != "wrong"
+        assert json.loads(archive.read("summary.json"))["run_id"] == "run_a"
+        assert "evaluation_id" not in json.loads(archive.read("summary.json"))
 
 
 def test_resolve_manifest_display_artifact_path_uses_display_table_mapping(
@@ -103,10 +97,10 @@ def test_resolve_manifest_display_artifact_path_uses_display_table_mapping(
     path = resolve_manifest_display_artifact_path(
         manifest,
         tmp_path,
-        "metrics/performance_summary.csv",
+        "metadata_file:summary",
     )
 
-    assert path == tmp_path / "metrics" / "performance_summary.csv"
+    assert path == tmp_path / "summary.json"
 
 
 def test_build_selected_artifact_zip_writes_cache_with_source_and_run_id(
@@ -119,7 +113,7 @@ def test_build_selected_artifact_zip_writes_cache_with_source_and_run_id(
         run,
         source_alias="platform",
         run_id="demo",
-        items=["report.md", "summary.json"],
+        items=["metadata_file:report", "metadata_file:summary"],
         cache_root=tmp_path / "download_cache",
     )
 
@@ -143,9 +137,10 @@ def test_build_selected_artifact_zip_supports_dynamic_comparison_csv(tmp_path) -
         run,
         source_alias="platform",
         run_id="demo",
-        items=["comparison.csv"],
+        items=["dynamic:comparison"],
         cache_root=tmp_path / "download_cache",
-        dynamic_items={"comparison.csv": comparison_csv},
+        dynamic_items={"dynamic:comparison": comparison_csv},
+        runtime_display_item_refs={"dynamic:comparison"},
     )
 
     assert calls == ["called"]
@@ -168,9 +163,10 @@ def test_build_selected_artifact_zip_reuses_dynamic_item_for_fingerprint_and_wri
         run,
         source_alias="platform",
         run_id="demo",
-        items=["comparison.csv", "comparison.csv"],
+        items=["dynamic:comparison", "dynamic:comparison"],
         cache_root=tmp_path / "download_cache",
-        dynamic_items={"comparison.csv": comparison_csv},
+        dynamic_items={"dynamic:comparison": comparison_csv},
+        runtime_display_item_refs={"dynamic:comparison"},
     )
 
     assert calls == ["called"]
@@ -188,25 +184,28 @@ def test_build_selected_artifact_zip_cache_changes_when_lineage_changes(
         run,
         source_alias="platform",
         run_id="demo",
-        items=["lineage.json"],
+        items=["metadata_file:run_context"],
         cache_root=tmp_path / "download_cache",
     )
-    lineage_path = tmp_path / "run" / "lineage.json"
-    lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
-    lineage["public_note"] = "updated"
-    lineage_path.write_text(json.dumps(lineage), encoding="utf-8")
+    run_context_path = tmp_path / "run" / "run_context.json"
+    run_context = json.loads(run_context_path.read_text(encoding="utf-8"))
+    run_context["provenance"]["generated_at"] = "2026-01-02T00:00:00Z"
+    run_context_path.write_text(json.dumps(run_context), encoding="utf-8")
 
     second_zip_path = build_selected_artifact_zip(
         run,
         source_alias="platform",
         run_id="demo",
-        items=["lineage.json"],
+        items=["metadata_file:run_context"],
         cache_root=tmp_path / "download_cache",
     )
 
     assert second_zip_path != first_zip_path
     with zipfile.ZipFile(second_zip_path) as archive:
-        assert json.loads(archive.read("lineage.json"))["public_note"] == "updated"
+        assert (
+            json.loads(archive.read("run_context.json"))["provenance"]["generated_at"]
+            == "2026-01-02T00:00:00Z"
+        )
 
 
 def test_build_selected_artifact_zip_rejects_unknown_item_before_cache(
@@ -220,7 +219,7 @@ def test_build_selected_artifact_zip_rejects_unknown_item_before_cache(
             run,
             source_alias="platform",
             run_id="demo",
-            items=["metrics/not_exposed.csv"],
+            items=["table:not_exposed"],
             cache_root=tmp_path / "download_cache",
         )
     except ArtifactPackageError as exc:
@@ -239,7 +238,7 @@ def test_build_selected_artifact_zip_rejects_unsafe_cache_identity(tmp_path) -> 
             run,
             source_alias="platform",
             run_id="..",
-            items=["report.md"],
+            items=["metadata_file:report"],
             cache_root=tmp_path / "download_cache",
         )
     except ArtifactPackageError as exc:

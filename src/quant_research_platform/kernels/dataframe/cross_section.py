@@ -241,9 +241,7 @@ def summarize_ic(
                 "std_rankic": std_rankic,
                 "rankicir": _safe_ratio(mean_rankic, std_rankic),
                 "positive_rankic_rate": (
-                    float((rankic_values > 0).mean())
-                    if len(rankic_values)
-                    else 0.0
+                    float((rankic_values > 0).mean()) if len(rankic_values) else 0.0
                 ),
             }
         )

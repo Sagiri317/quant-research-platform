@@ -70,9 +70,7 @@ def require_unique_source_aliases(roots: list[RunRoot]) -> list[RunRoot]:
     """在 run discovery 前拒绝歧义 root 配置。"""
 
     aliases = [root.source_alias for root in roots]
-    duplicates = sorted(
-        alias for alias in set(aliases) if aliases.count(alias) > 1
-    )
+    duplicates = sorted(alias for alias in set(aliases) if aliases.count(alias) > 1)
     if duplicates:
         raise ValueError(f"duplicate run root source aliases: {duplicates}")
     return roots
@@ -91,7 +89,7 @@ def discover_runs(run_roots: list[RunRoot]) -> list[RunRecord]:
                 run = load_artifacts_or_422(run_dir)
             except HTTPException:
                 continue
-            run_id = str(run.summary["evaluation_id"])
+            run_id = str(run.summary["run_id"])
             key = (root.source_alias, run_id)
             if key in seen:
                 raise HTTPException(

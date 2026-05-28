@@ -20,8 +20,7 @@ def make_mock_bar_panel() -> pd.DataFrame:
             rows.append(
                 {
                     "stock_code": stock_code,
-                    "trade_date": pd.Timestamp("2026-01-01")
-                    + pd.offsets.BDay(offset),
+                    "trade_date": pd.Timestamp("2026-01-01") + pd.offsets.BDay(offset),
                     "adj_open": price + 0.1,
                     "adj_close": price + 0.5,
                     "return_1d": 0.01 * offset,

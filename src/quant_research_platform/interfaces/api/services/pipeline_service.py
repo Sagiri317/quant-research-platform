@@ -56,6 +56,7 @@ class PipelineSnapshotRequestPayload(BaseModel):
     label_columns: list[str] = Field(default_factory=lambda: ["forward_return_1d"])
     processed_factor_column: str | None = None
     kernel: str = "dataframe"
+    diagnostics: list[str] = Field(default_factory=list)
 
 
 class PipelineRunRequestPayload(PipelineSnapshotRequestPayload):
@@ -397,10 +398,12 @@ def _pipeline_config_from_payload(
         return_source_column=payload.return_source_column,
         label_columns=tuple(payload.label_columns),
         processed_factor_column=payload.processed_factor_column,
+        diagnostics=tuple(payload.diagnostics),
         start_from=getattr(payload, "start_from", "existing_factors"),
         kernel=payload.kernel,
         output_root=output_root,
     )
+
 
 def _remember_pipeline_summary(
     pipeline_runs: dict[str, PipelineRunSummaryPayload],

@@ -27,7 +27,7 @@ Current structure:
 - `src/quant_research_platform/markets/implementations/a_share/`: CSMAR-backed A-share market implementation, including data fields, factors, labels, validation, runtime helpers, and evaluation adapter.
 - `src/quant_research_platform/pipelines/a_share/`: A-share workflow orchestration, runner, checkpoint, snapshots, and step registry.
 - `web/`: React/Vite local evidence workbench.
-- `scripts/`: local-only PowerShell launch scripts, build checks, and acceptance helpers.
+- `scripts/`: local-only workbench launch/stop scripts and private run-root defaults.
 - `docs/architecture/`: target architecture and capabilities, engineering and quant research standards, Phase 1 acceptance record, and next-stage roadmap.
 - `docs/code-map/`: current source reading map, including platform flow, A-share data/pipeline, and evaluation/artifact/API/frontend contracts.
 
@@ -44,7 +44,19 @@ Hard boundaries:
 - Do not claim factor validity, benchmark performance, universe coverage, or market alpha from preliminary diagnostics.
 - Do not edit sibling projects or workspace-root files unless explicitly asked.
 
-## 2. Editable Area
+## 2. AI Development Guardrails
+
+Codex may improve implementation efficiency, reduce repetitive work, and make local implementation improvements. Codex must not proactively change QRP system topology, core architecture, market scope, data scope, execution scope, or deployment scope.
+
+Default to one research semantic layer per task: data, factor, signal, portfolio, evaluation-backtest, or execution. Avoid cross-layer rewrites unless the user has approved that scope.
+
+Public interfaces, artifact schemas, data schemas, factor output formats, evaluation/backtest semantics, module boundaries, new dependencies, new abstractions, and data storage structures require approval before implementation.
+
+Small local edits such as typing improvements, logging cleanup, parser cleanup, lint/format fixes, focused test additions, and local duplicate-code reduction may proceed when they do not change contracts, schemas, public interfaces, or research semantics.
+
+If an approved artifact/API/frontend/evaluation contract change has already happened, keep the linked surfaces synchronized: producer, writer, loader, API payloads/routes, download packaging, frontend consumers, tests, docs, and code maps must not be left half-updated.
+
+## 3. Editable Area
 
 Project-level Codex may edit:
 
@@ -64,7 +76,6 @@ tests/
 web/
 config/
 scripts/
-notebooks/
 reports/
 pyproject.toml
 .gitignore
@@ -83,16 +94,16 @@ Do not delete files or directories unless the user explicitly approves the exact
 
 Product-side exception: the local workbench may expose `DELETE /api/runs/{source_alias}/{run_id}` only for user-created evaluation artifacts whose `summary.data_stage` is exactly `uploaded_panel`. The backend must resolve the run through configured run roots, require the run directory to be an immediate child of that root, require `manifest.json` to exist inside that directory, and reject all non-uploaded or out-of-root paths. This exception is limited to local uploaded run cleanup and does not authorize broad filesystem deletion, private data deletion, recursive cleanup scripts, or deletion outside configured run roots.
 
-## 3. Paths and Portability
+## 4. Paths and Portability
 
-- Use project-relative paths in reusable documentation, code, scripts, notebooks, and reports.
+- Use project-relative paths in reusable documentation, code, scripts, and reports.
 - Do not hardcode drive letters, home directories, user names, machine-specific absolute paths, interpreter paths, absolute symlinks, or shortcuts.
 - Prefer forward slashes in documentation and config examples.
 - In Python, build paths with `pathlib.Path` from the project root or current file location.
 - Use `conda run -n analysis ...` in examples.
 - If a command is OS-specific, label it clearly.
 
-## 4. Environment and Commands
+## 5. Environment and Commands
 
 Approved default Conda environment:
 
@@ -126,7 +137,7 @@ npm run build
 
 On Windows, `conda run` can emit OpenCL vendor noise even when the script succeeds. Use exit codes and test summaries, not the noise line alone, to judge success.
 
-## 5. Data Responsibilities
+## 6. Data Responsibilities
 
 CSMAR data layers:
 
@@ -148,15 +159,12 @@ Platform evaluation contract:
 - Market modules produce explicit DataFrames or Parquet inputs.
 - Evaluation layer receives `EvaluationSpec` and runs `run_evaluation(spec)`.
 - Evaluation diagnostics belong under `evaluations/diagnostics/` as post-run explanation logic, not as a top-level platform `diagnostics/` domain.
-- A-share full/private evaluation runs should use the current A-share private evaluation entry point documented in the project maintenance reference, not the generic `evaluate-parquet` CLI.
-- Use generic `evaluate-parquet` only for external/local Parquet adapter checks or non-A-share inputs. Do not treat a temporary sliced Parquet plus `evaluate-parquet` as proof that the A-share adapter pipeline works.
-- API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` in run lists, evidence routes, CSV preview, direct downloads, ZIP cache paths, comparison payloads, and frontend routing. Portable artifacts must not serialize local API routing aliases unless a current schema contract explicitly allows it.
+- A-share full/private evaluation runs use the current A-share private evaluation entry point documented in the project maintenance reference; generic `evaluate-parquet` is only for external/local Parquet adapter checks or non-A-share inputs.
+- API-visible run identity is `(source_alias, run_id)`. Preserve `source_alias` across API, downloads, cache, comparison, and frontend routing, while keeping portable artifacts free of local API aliases unless the current schema explicitly allows them.
 - `manifest.display` is the source of truth for API evidence, CSV preview, direct downloads, ZIP downloads, frontend tables, frontend charts, and download presets.
-- Direct and ZIP download identities should use display-approved item references, not frontend-invented raw paths.
-- Chart surfaces should use API/display-declared chart payloads, not frontend inference from truncated preview rows.
 - Factor Factory has its own artifact contract; do not conflate it with evaluation-run artifact contracts.
 - Do not create frontend-only or backend-only artifact shortcuts that bypass `manifest.display`.
-- When artifact, API, or frontend contracts change, update the producer, writer, loader, lightweight index, API payloads/routes, download packaging, frontend consumers, tests, docs, and code maps in the same round. Do not weaken validation to keep stale generated runs visible; regenerate stale runs instead.
+- When artifact, API, or frontend contracts change, update the linked producer/API/frontend/test/doc surfaces in the same round. Use the project maintenance skill for detailed review and verification sequencing. Do not weaken validation to keep stale generated runs visible; regenerate stale runs instead.
 
 Frontend workbench structure:
 
@@ -168,30 +176,19 @@ Frontend workbench structure:
 - Cross-feature imports should stay rare; prefer shell composition or moving genuinely shared helpers into `shared/`.
 - Do not add broad barrel exports unless a feature has a stable public surface and the exports are intentionally curated.
 
-## 6. Testing
+## 7. Testing
 
 Run the narrowest relevant tests first.
-
-Important test surfaces:
-
-- CSMAR field contracts, filename parsing, metadata, and field mapping.
-- raw/interim quality checks.
-- processed panel construction.
-- price-volume factor and forward label logic.
-- A-share pipeline config snapshots and factor expression parsing.
-- evaluation layer contract, current artifact schemas, retired-schema rejection coverage, and `manifest.display`.
-- API evidence, CSV preview, direct download, ZIP download, and comparison endpoints.
-- React evidence workbench state, run switching, combination switching, and download picker parity.
 
 Contract rules that can be mechanically checked should live in pytest or Vitest rather than only in agent instructions. Use the project maintenance skill for detailed review surfaces and verification sequencing.
 
 Artifact/API/frontend/A-share/Factor Factory contract work must use the project maintenance skill and cross-check the referenced engineering and quant research standards before changing public contracts, diagnostics semantics, generated outputs, or trading-adjacent wording.
 
-For frontend Playwright acceptance of API-backed workbench flows, start both the local FastAPI API service and the Vite frontend service before testing. Do not count an API-offline `Failed to fetch` state as acceptance evidence unless the task is explicitly UI-only.
+For frontend Playwright acceptance of API-backed workbench flows, follow the project maintenance skill: start both local services, record ownership, stop only recorded processes, and do not count an API-offline `Failed to fetch` state as acceptance evidence unless the task is explicitly UI-only.
 
 Do not run slow, network-heavy, destructive, or environment-changing commands without explicit approval.
 
-## 7. Documentation Roles
+## 8. Documentation Roles
 
 - [README.md](README.md): current platform entry.
 - [ARCHITECTURE.md](ARCHITECTURE.md): platform architecture and module boundaries.
@@ -219,7 +216,7 @@ Use the workspace learning-day convention for project status, task summaries, re
 - Morning updates after 08:00 belong to the current calendar day.
 - If date ownership is ambiguous, ask before creating or updating dated project records.
 
-## 8. Forbidden Operations
+## 9. Forbidden Operations
 
 Do not:
 

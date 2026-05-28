@@ -18,6 +18,7 @@ from quant_research_platform.evaluations import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 from quant_research_platform.evaluations.evaluation_payload import EvaluationRunPayload
 from quant_research_platform.evaluations.evaluation_runner import evaluate_to_payload
 from quant_research_platform.evaluations.evaluation_spec import PORTFOLIO_MODES
@@ -73,9 +74,7 @@ def discover_label_columns(path: Path) -> tuple[str, ...]:
 
     return tuple(
         sorted(
-            column
-            for column in schema_columns(path)
-            if column.startswith(LABEL_PREFIX)
+            column for column in schema_columns(path) if column.startswith(LABEL_PREFIX)
         )
     )
 
@@ -299,6 +298,7 @@ def make_a_share_evaluation_spec(
     neutralization_method: str = "none",
     neutralization_group_columns: tuple[str, ...] = (),
     neutralization_exposure_columns: tuple[str, ...] = (),
+    diagnostics_spec: DiagnosticsSpec | None = None,
 ) -> EvaluationSpec:
     """Build an A-share evaluation-set spec from a filtered DataFrame."""
 
@@ -373,6 +373,7 @@ def make_a_share_evaluation_spec(
         return_source_column=return_source_column,
         time_breakdowns=("year",),
         output_dir=output_dir,
+        diagnostics_spec=diagnostics_spec or DiagnosticsSpec.disabled(),
         domain_notes={
             "boundary": (
                 "Processed DataFrame adapter only; evaluation layer does not generate "
@@ -406,6 +407,7 @@ def evaluate_a_share_matrix_payload(
     neutralization_method: str = "none",
     neutralization_group_columns: tuple[str, ...] = (),
     neutralization_exposure_columns: tuple[str, ...] = (),
+    diagnostics_spec: DiagnosticsSpec | None = None,
 ) -> EvaluationRunPayload:
     """Compute one kernel and portfolio-mode payload from a filtered frame."""
 
@@ -430,6 +432,7 @@ def evaluate_a_share_matrix_payload(
         neutralization_method=neutralization_method,
         neutralization_group_columns=neutralization_group_columns,
         neutralization_exposure_columns=neutralization_exposure_columns,
+        diagnostics_spec=diagnostics_spec,
     )
     return evaluate_to_payload(spec)
 
@@ -468,8 +471,9 @@ def run_processed_factor_evaluation(
     neutralization_exposure_columns: tuple[str, ...] = (),
     source_alias: str = DEFAULT_A_SHARE_SOURCE_ALIAS,
     manifest_run_id: str | None = None,
+    diagnostics_spec: DiagnosticsSpec | None = None,
 ) -> tuple[pd.DataFrame, Path, list[dict[str, object]]]:
-    """Write one schema 0.6 evaluation_set from a slim factor Parquet file."""
+    """Write one schema 0.7 evaluation_set from a slim factor Parquet file."""
 
     _validate_run_processed_options(
         start_year=start_year,
@@ -482,6 +486,7 @@ def run_processed_factor_evaluation(
         end_date=end_date,
         cost_bps=cost_bps,
     )
+    diagnostics_spec = diagnostics_spec or DiagnosticsSpec.disabled()
     label_summaries = []
     parquet_path = (
         input_file
@@ -575,6 +580,7 @@ def run_processed_factor_evaluation(
                     neutralization_method=neutralization_method,
                     neutralization_group_columns=neutralization_group_columns,
                     neutralization_exposure_columns=neutralization_exposure_columns,
+                    diagnostics_spec=diagnostics_spec,
                 )
             )
     combined_tables = _combine_payload_tables(payloads)
@@ -586,7 +592,7 @@ def run_processed_factor_evaluation(
         kernels=kernels,
         portfolio_modes=portfolio_modes,
     )
-    combined_config = _combined_config(
+    combined_run_context = _combined_run_context(
         payloads,
         run_id=run_id,
         labels=labels,
@@ -611,8 +617,7 @@ def run_processed_factor_evaluation(
     )
     artifacts = write_evaluation_set_artifacts(
         report_root,
-        config=combined_config,
-        lineage=combined_config["lineage"],
+        run_context=combined_run_context,
         summary=combined_summary,
         tables=combined_tables,
         report=_combined_report(combined_summary, combined_tables),
@@ -663,18 +668,83 @@ def _combine_payload_tables(
     table_names = sorted({name for payload in payloads for name in payload.tables})
     combined: dict[str, pd.DataFrame] = {}
     for name in table_names:
+        if _is_retired_breakdown_table(name):
+            continue
         frames = [
             payload.tables[name]
             for payload in payloads
             if name in payload.tables and not payload.tables[name].empty
         ]
-        frame = (
-            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        )
-        if name in {"label_availability", "factor_coverage", "tradability_coverage"}:
+        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if frame.empty:
+            template = next(
+                (
+                    payload.tables[name]
+                    for payload in payloads
+                    if name in payload.tables
+                ),
+                None,
+            )
+            if template is not None:
+                frame = template.head(0).copy()
+        if name in {"coverage_summary", "diagnostic_policies"}:
             frame = frame.drop_duplicates(ignore_index=True)
+        if name.startswith("evaluation_metrics_summary_by_"):
+            frame = _normalize_schema_07_breakdown_table(
+                frame,
+                period=name.rsplit("_by_", maxsplit=1)[1],
+            )
         combined[name] = frame
     return combined
+
+
+def _is_retired_breakdown_table(name: str) -> bool:
+    return any(
+        name.startswith(prefix) and "_by_" in name
+        for prefix in ("ic_summary", "group_spread_summary", "performance_summary")
+    )
+
+
+def _normalize_schema_07_breakdown_table(
+    frame: pd.DataFrame,
+    *,
+    period: str,
+) -> pd.DataFrame:
+    if frame.empty or "metric_name" not in frame.columns:
+        return frame
+    normalized = frame.copy()
+    if "period" in normalized.columns and normalized["period"].notna().any():
+        return normalized
+    records: list[dict[str, object]] = []
+    current_period: dict[str, object] = {}
+    for row in normalized.to_dict(orient="records"):
+        combination_id = str(row.get("combination_id", ""))
+        metric_name = row.get("metric_name")
+        if metric_name == period:
+            current_period[combination_id] = row.get("metric_value")
+            continue
+        if metric_name in {"period_type", "period_start", "period_end"}:
+            continue
+        period_value = current_period.get(combination_id)
+        record = dict(row)
+        record["period_type"] = period
+        record["period"] = period_value
+        record["period_start"] = _period_start(period, period_value)
+        record["period_end"] = _period_end(period, period_value)
+        records.append(record)
+    return pd.DataFrame.from_records(records, columns=list(frame.columns))
+
+
+def _period_start(period: str, value: object) -> str:
+    if period == "year" and pd.notna(value):
+        return f"{int(value)}-01-01"
+    return ""
+
+
+def _period_end(period: str, value: object) -> str:
+    if period == "year" and pd.notna(value):
+        return f"{int(value)}-12-31"
+    return ""
 
 
 def _combined_summary(
@@ -687,20 +757,21 @@ def _combined_summary(
     portfolio_modes: tuple[str, ...],
 ) -> dict[str, object]:
     summary = dict(payloads[0].summary)
-    summary["evaluation_id"] = run_id
+    summary["run_id"] = run_id
     summary["n_combinations"] = int(len(tables["combinations"]))
-    summary["kernel"] = kernels[0] if len(kernels) == 1 else "multiple"
     summary["kernels"] = list(kernels)
     summary["portfolio_modes"] = list(portfolio_modes)
-    schema = dict(summary.get("schema", {}))
-    schema["label_columns"] = list(labels)
-    schema["return_source_column"] = schema.get("return_source_column")
-    summary["schema"] = schema
+    base_evaluation = dict(summary.get("base_evaluation", {}))
+    base_evaluation["label_columns"] = list(labels)
+    base_evaluation["kernel"] = kernels[0] if len(kernels) == 1 else "multiple"
+    base_evaluation["kernels"] = list(kernels)
+    base_evaluation["portfolio_modes"] = list(portfolio_modes)
+    summary["base_evaluation"] = base_evaluation
     summary["tables"] = {name: int(len(frame)) for name, frame in tables.items()}
     return summary
 
 
-def _combined_config(
+def _combined_run_context(
     payloads: list[EvaluationRunPayload],
     *,
     run_id: str,
@@ -724,10 +795,16 @@ def _combined_config(
     source_file: str,
     date_id: str | None,
 ) -> dict[str, object]:
-    config = dict(payloads[0].config)
+    del source_alias
+    run_context = {
+        key: dict(value) if isinstance(value, dict) else value
+        for key, value in payloads[0].run_context.items()
+    }
+    config = dict(run_context.get("config", {}))
+    evaluation_spec = dict(config.get("evaluation_spec", {}))
     kernel_value = kernels[0] if len(kernels) == 1 else "multiple"
-    config["metadata"] = dict(config.get("metadata", {}))
-    config["metadata"].update(
+    metadata = dict(evaluation_spec.get("metadata", {}))
+    metadata.update(
         {
             "run_id": run_id,
             "label_columns": list(labels),
@@ -736,38 +813,48 @@ def _combined_config(
             "portfolio_modes": list(portfolio_modes),
         }
     )
-    config["metadata"].pop("portfolio_mode", None)
-    config["kernel"] = kernel_value
-    config["kernels"] = list(kernels)
-    config["portfolio_modes"] = list(portfolio_modes)
-    _remove_dynamic_portfolio_mode_config(config)
-    config["matrix"] = {
+    metadata.pop("portfolio_mode", None)
+    evaluation_spec["metadata"] = metadata
+    evaluation_spec["kernel"] = kernel_value
+    evaluation_spec["kernels"] = list(kernels)
+    evaluation_spec["portfolio_modes"] = list(portfolio_modes)
+    _remove_dynamic_portfolio_mode_config(evaluation_spec)
+    schema = dict(evaluation_spec.get("schema", {}))
+    schema["label_columns"] = list(labels)
+    schema["return_source_column"] = return_source_column
+    evaluation_spec["schema"] = schema
+    evaluation_spec["matrix"] = {
         "features": list(feature_columns),
         "labels": list(labels),
         "kernels": list(kernels),
         "portfolio_modes": list(portfolio_modes),
     }
-    config["lineage"] = {
-        "source_alias": source_alias,
-        "evaluation_id": run_id,
-        "start_year": start_year,
-        "end_year": end_year,
-        "start_date": start_date,
-        "end_date": end_date,
-        "date_id": date_id,
-        "source_file": source_file,
-        "return_source_column": return_source_column,
-        "cost_config": {"cost_bps": cost_bps},
-        "segment_columns": list(segment_columns),
-        "risk_column": risk_column,
-        "neutralization": {
-            "method": neutralization_method,
-            "group_columns": list(neutralization_group_columns),
-            "exposure_columns": list(neutralization_exposure_columns),
-        },
-        **input_reference,
-    }
-    return config
+    config["evaluation_spec"] = evaluation_spec
+    run_context["config"] = config
+    provenance = dict(run_context.get("provenance", {}))
+    provenance.update(
+        {
+            "run_id": run_id,
+            "start_year": start_year,
+            "end_year": end_year,
+            "start_date": start_date,
+            "end_date": end_date,
+            "date_id": date_id,
+            "source_file": source_file,
+            "return_source_column": return_source_column,
+            "cost_config": {"cost_bps": cost_bps},
+            "segment_columns": list(segment_columns),
+            "risk_column": risk_column,
+            "neutralization": {
+                "method": neutralization_method,
+                "group_columns": list(neutralization_group_columns),
+                "exposure_columns": list(neutralization_exposure_columns),
+            },
+            **input_reference,
+        }
+    )
+    run_context["provenance"] = provenance
+    return run_context
 
 
 def _remove_dynamic_portfolio_mode_config(config: dict[str, object]) -> None:
@@ -799,7 +886,7 @@ def _combined_report(
         [
             "# Evaluation Set Report",
             "",
-            f"- Evaluation ID: {summary['evaluation_id']}",
+            f"- run_id: {summary['run_id']}",
             f"- Combinations: {len(combinations)}",
             f"- Kernels: {', '.join(summary.get('kernels', []))}",
             f"- Portfolio modes: {', '.join(summary.get('portfolio_modes', []))}",

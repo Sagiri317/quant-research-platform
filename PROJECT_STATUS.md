@@ -1,11 +1,47 @@
 # Quant Research Platform 项目状态
+## 2026-05-28 schema 0.7 diagnostics implementation open signal
+
+Schema `0.7` / N5 v1 diagnostics implementation is now the active branch topic on
+`codex/schema-07-diagnostics-implementation`. This replaces schema `0.6` at runtime:
+new evaluation-set artifacts use `run_id`, `summary.json`, `run_context.json`,
+registry-backed required tables, `manifest.display` compact download refs, generic
+`/tables/{table_key}/preview`, and post-run diagnostics under
+`src/quant_research_platform/evaluations/diagnostics/`.
+
+N5 v1 risk/regime/cost/capacity outputs remain descriptive proxy diagnostics only.
+They are not alpha proof, a validated risk model, real capacity analysis, paper/live
+trading, order routing, deployment, or investment advice. Private CSMAR data and
+`reports/private_real/` remain local/private and are not copied into portable
+metadata.
+
+Root handoff status: open. Workspace-root planning/status sync is needed after this
+project branch is accepted or merged; this project-local update does not edit root
+planning files.
+
+## 2026-05-28 maintenance surface cleanup signal
+
+The branch also narrows the project-maintenance surface before commit:
+
+- `scripts/` is now reserved for user-facing local workbench controls and private
+  run-root defaults.
+- Agent-only verification helpers live under the project maintenance skill.
+- Historical `docs/superpowers/` plans/specs are explicitly marked as historical
+  execution records; current reusable procedures live in the maintenance skill.
+- The old synthetic demo notebook entry point has been retired.
+- `AGENTS.md` now includes QRP AI development guardrails: Codex should not
+  proactively change system topology, core architecture, market/data/execution/
+  deployment scope, or cross research semantic layers without approval.
+
+Current user-facing workbench scripts are `scripts/start_private_workbench.ps1`,
+`scripts/stop_workbench.ps1`, and `scripts/private_run_roots.ps1`.
+
 
 ## 2026-05-28 schema 0.7 diagnostics spec closeout signal
 
 N5 / schema `0.7` diagnostics framework spec 已完成规划收口，当前重点转为下一对话编写
 implementation plan。spec 决策包括：schema `0.7` 完全不兼容 schema `0.6`；新 run
-生成完整 evaluation_set artifact；`run_context.json` 合并原 `config.json` /
-`lineage.json`；required diagnostics 合同包含 `dimensions/diagnostic_policies.csv`、
+生成完整 evaluation_set artifact；`run_context.json` 合并并替代旧分散元数据文件；
+required diagnostics 合同包含 `dimensions/diagnostic_policies.csv`、
 `diagnostics/diagnostic_summary.csv`、`diagnostics/diagnostic_metrics.csv` 和
 `input_quality/coverage_summary.csv`；conditional materialized views 由
 `DiagnosticPolicy.output_tables[]` 与 `DiagnosticsSpec.materialized_views[]` 共同触发；
@@ -37,7 +73,7 @@ tradability。
 可自然生成 `reversal_20d__window_120@1` / `rev_120d` 候选。artifact schema
 仍为 `0.6`，Factor Factory artifact 仍为 `0.1`，未引入 N5/N6 合同。
 
-本轮生成物：
+本轮生成物（历史 schema `0.6` evidence，已由 2026-05-28 schema `0.7` 样例替代）：
 
 - `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`：2023-2025
   canonical evaluation sample，覆盖
@@ -91,24 +127,23 @@ artifact inspection 展开，pipeline run 执行完成后会刷新 run list、�
 
 ## 2026-05-26 N7 main integration closeout signal
 
-N7 A 股 evaluation run identity 已完成本轮实现闭环：新 evaluation artifacts 使用
-schema `0.6`，一个 API-visible run 内含多个 `combination_id`；第一阶段
+N7 A 股 evaluation run identity 已完成本轮历史实现闭环：当时新 evaluation artifacts 使用
+历史 schema `0.6`，一个 API-visible run 内含多个 `combination_id`；第一阶段
 `dimensions/combinations.csv` required columns 为
 `combination_id, feature, label, kernel, portfolio_mode`。A 股 CLI 支持显式
 `--features` 和一行多值 `--labels / --kernels / --portfolio-modes`，保留
 CLI/backend-only `--input-file` 与不写 artifact 的 `--dry-run`。
 
-曾生成并验证 2023H1 private smoke，覆盖 24 个 combinations。验证包括
-schema 0.6 artifact load、低内存 comparison、CSV/JSON/Markdown
+曾生成并验证 2023H1 private smoke，覆盖 24 个 combinations。历史验证包括
+历史 schema 0.6 artifact load、低内存 comparison、CSV/JSON/Markdown
 Evaluation Comparison Report、dataframe/tensor parity、API evidence 和 Parquet
 weights 20 行 preview。该历史 smoke run 目录已在 2023-2025 样例验收后清理；
-当前保留的
-`reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` canonical regeneration
-已在 2026-05-27 按 8-combination canonical run 生成。
+后续 schema `0.7` regeneration 已替代
+`reports/private_real/factor_evaluation/n7_eval_2023_2025_v1` 作为当前有效样例。
 
 2026-05-26 最终 review 修复已合入当前 `main`：`config.json` / `lineage.json` 等
 public-downloadable metadata 在 writer、direct download、selected ZIP 和 ZIP
-cache fingerprint 路径上统一脱敏；schema `0.6` manifest metadata artifact
+cache fingerprint 路径上统一脱敏；历史 schema `0.6` manifest metadata artifact
 keys 已强制校验；Factor Factory batch runner 已适配 N7 evaluation artifact
 目录；roadmap、worktree plan 和 CLI 多值参数示例已同步。最终复核未发现确认的
 P0/P1/P2 blocker。验证包括后端全量 pytest、ruff、前端 test/lint/build、
@@ -123,7 +158,7 @@ React evidence workbench 通过 `manifest.display` 暴露的
 Eligibility / Tradability 诊断；前端只消费 artifact/API 结果，不重新计算
 eligibility、tradability、IC、returns、weights 或 turnover。
 
-实现遵守 schema `0.6`、`combination_id` 和 `(source_alias, run_id)` 合同。
+该历史实现遵守 schema `0.6`、`combination_id` 和 `(source_alias, run_id)` 合同。
 CSV 明细预览仍按 display preview row limit 拉取；诊断卡片为了展示当前组合最后一行，
 额外使用 diagnostics preview API 的 `limit=1&offset=total_rows-1` 读取单行，
 避免把前 20 行 preview 的末行误当作最新诊断，也不拉大表。验证包括前端
@@ -136,11 +171,11 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 | 项目 | 当前事实 |
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
-| 当前分支 | `main`；N8 contract consumer convergence 已合入，后续 N5/N6 仍需单独分支 |
+| 当前分支 | `codex/schema-07-diagnostics-implementation`；schema `0.7` diagnostics framework 正在实现和验收 |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 数据范围 | 本地私有 CSMAR 2014-2025 raw/interim/processed 历史产物仍遵守私有边界 |
-| 平台合同 | evaluation contract、artifact schema `0.6`、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；public-downloadable `config.json` / `lineage.json` metadata 统一脱敏 |
+| 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
 | 前端状态 | 本地 workbench 已中文化；Factor Studio 可把表达式/模板传给 Pipeline Builder；Pipeline Builder 默认写配置快照，也可切换执行模式调用 `POST /api/pipeline-runs` |
 | A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation |
 | Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner，并用 `candidate_id + combination_id` 汇总 N7 evaluation results |
@@ -155,7 +190,7 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 当前阶段已完成可提交的迁移、核心合同闭环、Factor Factory 前端浏览入口和 P4/P5 小样本示例。2026-05-23 已完成 Phase 1 代码功能复核；2026-05-24 已同步 `docs/code-map/`、`docs/architecture/` 和项目根目录文档的当前架构表述。验收结论见 `docs/architecture/phase-1-acceptance-record.md`；下一阶段任务见 `docs/architecture/next-stage-roadmap.md`。Phase 1 功能已实现并通过测试：
 
 - 用户入口文档改为 Chinese-first 的平台说明。
-- `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、artifact schema `0.6`、`manifest.display`、API/download/frontend 边界。
+- `ARCHITECTURE.md` 和 `EVALUATION_INTERFACE.md` 记录平台架构、evaluation contract、当前 artifact schema `0.7`、`manifest.display`、API/download/frontend 边界。
 - `docs/architecture/target-architecture-and-capabilities.md` 合并最终目录结构与未来能力池，保留 A 股、ML prediction、风险、regime、workbench、未来模拟盘和商业化平台边界，但不把未来能力写成当前已实现范围。
 - `docs/architecture/phase-1-acceptance-record.md` 记录 Phase 1 已实现范围、冻结合同、测试证据和后续架构债。
 - `docs/architecture/next-stage-roadmap.md` 把 Phase 1 后的架构债提上日程，按任务列出目标、非目标、验收口径和测试边界。
@@ -165,7 +200,7 @@ Vitest、lint、build、FastAPI + Vite 真实浏览器检查、console/network �
 - React workbench 已补上 Factor Factory run browser 和 N2 Eligibility / Tradability 诊断展示；前端只展示 API / artifact 结果，不重新计算 IC、returns、weights、turnover、eligibility 或 tradability。
 - 本地 API 与前端服务已用小范围 smoke 验证；2023-2025 私有 smoke 已覆盖 tensor / dataframe 与 long-only / long-short；2026-05-23 又复跑 2024 acceptance 小样本并生成 old/new 比较，提交前仍以完整 Python 和 frontend 检查作为准入。
 - A 股真实私有 runs 必须走 A 股专用 adapter：`python -m quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation`。通用 `evaluate-parquet` 只作为平台 evaluation / 外部 Parquet adapter 验收，不替代 A 股 adapter 验收。
-- P4/P5 本地示例入口为 `scripts/phase1_acceptance.py`：`run` 复跑 2024 A 股 adapter acceptance runs，`compare` 低内存比较 old/new，`factory-smoke` 生成 Factor Factory candidate summary。
+- 历史 P4/P5 本地示例脚本已退役；当前私有 A 股 evaluation 直接使用 A 股专用 module entry，agent-only 验证流程沉淀在项目维护 skill。
 
 Phase 1 验收口径下已补齐：
 
@@ -177,10 +212,10 @@ Phase 1 之后下一阶段进展：
 
 1. N3 Artifact ZIP packaging 已合入 `main`：selected ZIP item validation、cache identity、file collection 和 dynamic item handling 已移入 `artifacts/artifact_package.py`。
 2. N1 A 股 pipeline start-from runner 已合入 `main`：外部接口为 snapshot/run split 和 `start_from` 模型，`POST /api/pipeline-snapshots` 只保存配置，`POST /api/pipeline-runs` 执行统一 runner 并固定运行到 evaluation。
-3. N2 tradability diagnostics 已合入 `main`：后端新增 `diagnostics/tradability_diagnostics.csv`，该诊断最初在 schema `0.5` 期间落地，当前 schema `0.6` evaluation-set 合同继续通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它；frontend evidence workbench 已消费 diagnostics preview API 并完成 eligibility / tradability 诊断展示。
+3. N2 tradability diagnostics 已合入 `main`：后端新增 `diagnostics/tradability_diagnostics.csv`，该诊断最初在 schema `0.5` 期间落地，历史 schema `0.6` evaluation-set 合同曾通过 `manifest.display`、API preview、direct download 和 ZIP download 暴露它；frontend evidence workbench 已消费 diagnostics preview API 并完成 eligibility / tradability 诊断展示。
 4. N4 前端 feature split 已合入 `main`：`web/src` 已拆为 `shell/`、`features/` 和 `shared/`，未新增 diagnostics UI，未改变 API contract。
 5. 退休 API 字段和双 runner 命名已从源码入口移除，并仅在负向测试中保留拒绝用例。
-6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；schema `0.6` 按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。
+6. N7 A 股 evaluation run identity 已合入 `main`：一个 API-visible run 对应一个 evaluation run；结果层用 `combination_id` 管理 feature / label / portfolio mode / kernel 切片；历史 schema `0.6` 曾按 `dimensions/combinations.csv` star schema 重构；`weights` 第一阶段直接写 Parquet；Pipeline Builder 支持 snapshot/run 与 kernel/start_from；Factor Factory 按 `candidate_id + combination_id` 汇总候选表现，并从 N7 evaluation artifact 目录读取 summaries；public-downloadable metadata 统一脱敏；tensor 是长期主路径，dataframe 是 reference / fallback。
 7. N8 架构简化与合同消费收敛已合入 `main`：已收敛 `manifest.display` preview/download helper、拆出 factor-template route/service、减少前端 preview route 推导，统一 display table preview metadata，把 A-share evaluation 沉成 service entry，把 Pipeline Builder run 完成后自动挂载到 evidence workbench，并把 CSV upload 标记为 legacy/dev uploaded-panel smoke 路径。
 
 ## 当前研究资产
@@ -191,8 +226,9 @@ Phase 1 之后下一阶段进展：
 - `data/interim_private/csmar/`：规范化、裁剪、可人工审计的 interim 层。
 - `data/processed_private/csmar/panel_full/research_panel_2014_2025.parquet`：full research panel。
 - `data/processed_private/csmar/price_volume_factors_full/price_volume_factors_2014_2025.parquet`：slim factor and label table。
-- `reports/private_real/factor_evaluation/n7_eval_2023_2025_v1`：当前 2023-2025 schema `0.6` canonical sample，含 `rev_120d`。
-- `reports/private_real/factor_evaluation/n7_eval_2023_2025_rev120_v1`：当前 2023-2025 `rev_120d` kernel / portfolio mode parity shard。
+- `reports/private_real/schema_07_acceptance/a_share_eval_2023h1_rev120_df_long_only`：schema `0.7` diagnostics acceptance run，规模不超过记录的 generated-run baseline；用于历史 acceptance 复核，不作为日常用户入口。
+- `reports/private_real/factor_evaluation/schema07_eval_2023_2025_v1`：当前 2023-2025 schema `0.7` canonical sample，含 `rev_120d`。
+- `reports/private_real/factor_evaluation/schema07_eval_2023_2025_rev120_v1`：当前 2023-2025 schema `0.7` `rev_120d` kernel / portfolio mode parity shard。
 - `reports/private_real/ff/20260527_rev120_factory_smoke_v1`：当前 Factor Factory `rev_120d` smoke 样例。
 - `reports/private_real/factor_evaluation/full_2024_2025/`：历史 2024-2025 long-only full-sample factor evaluation；旧 schema run 已退出当前有效 run 口径。
 

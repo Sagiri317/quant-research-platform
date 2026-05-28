@@ -1,4 +1,4 @@
-"""校验 artifact manifest 和 display 的 helper。"""
+"""Artifact manifest and display validation helpers."""
 
 from __future__ import annotations
 
@@ -8,336 +8,94 @@ import pandas as pd
 
 from quant_research_platform.artifacts.artifact_schema import (
     ARTIFACT_SCHEMA_VERSION,
-    BREAKDOWN_PERIODS,
-    DISPLAY_METADATA_DOWNLOAD_ITEMS,
-    EVALUATION_SET_DIAGNOSTIC_TABLES,
-    EVALUATION_SET_INPUT_QUALITY_TABLES,
-    EVALUATION_SET_METRIC_TABLES,
-    EVALUATION_SET_PORTFOLIO_TABLES,
-    EVALUATION_SET_SUMMARY_TABLES,
-    OPTIONAL_ARTIFACT_GROUPS,
+    EVALUATION_SET_ARTIFACT_TYPE,
 )
 from quant_research_platform.artifacts.display_tables import (
     DISPLAY_PREVIEW_ROWS_MAX,
     display_table_preview_limits,
 )
-from quant_research_platform.runtime.run_metadata import validate_run_metadata
-
-TRADABILITY_DIAGNOSTIC_COLUMNS = frozenset(
-    {
-        "timestamp",
-        "method",
-        "direction",
-        "universe_count",
-        "eligible_count",
-        "can_enter_count",
-        "can_exit_count",
-        "entry_blocked_count",
-        "exit_blocked_count",
-        "eligible_rate",
-        "can_enter_rate",
-        "can_exit_rate",
-        "entry_blocked_rate",
-        "exit_blocked_rate",
-        "fallback_reason",
-    }
+from quant_research_platform.artifacts.schema_registry import (
+    RETIRED_SCHEMA_06_IDENTITIES,
+    ChartSpec,
+    chart_specs,
+    get_chart_spec,
+    get_table_spec,
+    required_metadata_files,
+    required_table_keys,
+    table_specs,
+    validate_table_contract,
 )
 
 
 def evaluation_set_csv_paths(artifacts: dict[object, object]) -> dict[str, str]:
-    """返回 evaluation-set manifest 声明并通过校验的 table paths."""
+    """Return declared schema 0.7 table paths."""
 
-    _validate_known_artifact_entries(artifacts)
+    _validate_metadata_artifacts(artifacts)
     paths: dict[str, str] = {}
-    dimensions = artifacts.get("dimensions")
-    combinations = (
-        dimensions.get("combinations") if isinstance(dimensions, dict) else None
-    )
-    if not isinstance(combinations, str) or not combinations:
-        raise ValueError("manifest artifacts must include dimensions.combinations.")
-    validate_artifact_relative_path(
-        combinations,
-        source="artifacts.dimensions.combinations",
-    )
-    paths["combinations"] = combinations
-
-    for group, names in {
-        "metrics": EVALUATION_SET_METRIC_TABLES,
-        "portfolio": EVALUATION_SET_PORTFOLIO_TABLES,
-        "diagnostics": EVALUATION_SET_DIAGNOSTIC_TABLES,
-        "input_quality": EVALUATION_SET_INPUT_QUALITY_TABLES,
-        "summaries": EVALUATION_SET_SUMMARY_TABLES,
-    }.items():
-        section = artifacts.get(group)
-        if not isinstance(section, dict):
-            raise ValueError(f"manifest artifacts must include {group}.")
-        for name in names:
-            relative_path = section.get(name)
-            if not isinstance(relative_path, str) or not relative_path:
-                raise ValueError(f"manifest artifacts must include {group}.{name}.")
-            validate_artifact_relative_path(
-                relative_path,
-                source=f"artifacts.{group}.{name}",
-            )
-            paths[name] = relative_path
-    for period in BREAKDOWN_PERIODS:
-        group = f"breakdowns/{period}"
-        section = artifacts.get(group)
-        if section is None:
+    specs_by_path = {spec.path: spec for spec in table_specs()}
+    specs_by_key = {spec.key: spec for spec in table_specs()}
+    for group, section in artifacts.items():
+        if group in {"manifest", "summary", "run_context", "report"}:
             continue
-        if not isinstance(section, dict):
-            raise ValueError(f"manifest artifacts {group} must be an object.")
-        for name in (
-            f"ic_summary_by_{period}",
-            f"group_spread_summary_by_{period}",
-            f"performance_summary_by_{period}",
-        ):
-            relative_path = section.get(name)
-            if not isinstance(relative_path, str) or not relative_path:
-                raise ValueError(f"manifest artifacts must include {group}.{name}.")
+        if not isinstance(group, str) or not isinstance(section, dict):
+            raise ValueError(
+                f"manifest artifacts contains unknown artifact group: {group}."
+            )
+        for key, relative_path in section.items():
+            if not isinstance(key, str) or not isinstance(relative_path, str):
+                raise ValueError(f"manifest artifacts.{group} entries must be strings.")
             validate_artifact_relative_path(
                 relative_path,
-                source=f"artifacts.{group}.{name}",
+                source=f"artifacts.{group}.{key}",
             )
-            paths[name] = relative_path
+            if (
+                key in RETIRED_SCHEMA_06_IDENTITIES
+                or relative_path in RETIRED_SCHEMA_06_IDENTITIES
+            ):
+                raise ValueError(
+                    f"schema 0.7 manifest exposes retired identity: {key}."
+                )
+            spec = specs_by_key.get(key)
+            if spec is None or specs_by_path.get(relative_path) != spec:
+                raise ValueError(
+                    f"manifest artifacts.{group}.{key} is not in schema registry."
+                )
+            paths[key] = relative_path
+    missing = sorted(set(required_table_keys()).difference(paths))
+    if missing:
+        raise ValueError(f"manifest artifacts missing required tables: {missing}.")
     return paths
 
 
-def _validate_known_artifact_entries(artifacts: dict[object, object]) -> None:
-    required_top_level = {
-        "manifest",
-        "config",
-        "lineage",
-        "summary",
-        "dimensions",
-        "metrics",
-        "portfolio",
-        "diagnostics",
-        "input_quality",
-        "summaries",
-        "report",
-    }
-    allowed_top_level = {*required_top_level, *OPTIONAL_ARTIFACT_GROUPS}
-    top_level_keys = {key for key in artifacts if isinstance(key, str)}
-    missing_groups = sorted(required_top_level.difference(top_level_keys))
-    if missing_groups:
-        raise ValueError(
-            "manifest artifacts missing required artifact groups: "
-            f"{missing_groups}."
-        )
-    unknown_groups = sorted(top_level_keys.difference(allowed_top_level))
-    if unknown_groups:
-        raise ValueError(
-            "manifest artifacts contain unknown artifact groups: "
-            f"{unknown_groups}."
-        )
-    for key in ("manifest", "config", "lineage", "summary", "report"):
-        relative_path = artifacts.get(key)
-        if not isinstance(relative_path, str) or not relative_path:
+def _validate_metadata_artifacts(artifacts: dict[object, object]) -> None:
+    for file_name in required_metadata_files():
+        key = file_name.removesuffix(".json")
+        value = artifacts.get(key)
+        if value != file_name:
             raise ValueError(f"manifest artifacts must include {key}.")
-        validate_artifact_relative_path(relative_path, source=f"artifacts.{key}")
-
-    _require_no_unknown_section_keys(artifacts, "dimensions", {"combinations"})
-    _require_no_unknown_section_keys(
-        artifacts,
-        "metrics",
-        set(EVALUATION_SET_METRIC_TABLES),
-    )
-    _require_no_unknown_section_keys(
-        artifacts,
-        "portfolio",
-        set(EVALUATION_SET_PORTFOLIO_TABLES),
-    )
-    _require_no_unknown_section_keys(
-        artifacts,
-        "diagnostics",
-        set(EVALUATION_SET_DIAGNOSTIC_TABLES),
-    )
-    _require_no_unknown_section_keys(
-        artifacts,
-        "input_quality",
-        set(EVALUATION_SET_INPUT_QUALITY_TABLES),
-    )
-    _require_no_unknown_section_keys(
-        artifacts,
-        "summaries",
-        set(EVALUATION_SET_SUMMARY_TABLES),
-    )
-    for period in BREAKDOWN_PERIODS:
-        group = f"breakdowns/{period}"
-        if group not in artifacts:
-            continue
-        _require_no_unknown_section_keys(
-            artifacts,
-            group,
-            {
-                f"ic_summary_by_{period}",
-                f"group_spread_summary_by_{period}",
-                f"performance_summary_by_{period}",
-            },
-        )
-
-
-def _require_no_unknown_section_keys(
-    artifacts: dict[object, object],
-    group: str,
-    allowed_keys: set[str],
-) -> None:
-    section = artifacts.get(group)
-    if not isinstance(section, dict):
-        return
-    keys = {key for key in section if isinstance(key, str)}
-    unknown = sorted(keys.difference(allowed_keys))
-    if unknown:
-        raise ValueError(f"manifest contains unknown artifacts.{group}: {unknown}.")
+    for key in ("config", "lineage"):
+        if key in artifacts:
+            raise ValueError(f"schema 0.7 manifest must not include {key}.")
+    report = artifacts.get("report")
+    if report is not None and report != "report.md":
+        raise ValueError("manifest artifacts.report must be report.md when present.")
 
 
 def validate_evaluation_set_table_columns(tables: dict[str, pd.DataFrame]) -> None:
-    """校验当前 evaluation-set table columns，并拒绝 retired fields。"""
+    """Validate table columns and unique keys through schema registry."""
 
-    combination_columns = {
-        "combination_id",
-        "feature",
-        "label",
-        "kernel",
-        "portfolio_mode",
-    }
-    fact_key = {"combination_id"}
-    retired_columns = {
-        "total_gross_portfolio_return",
-        "total_net_portfolio_return",
-        "weight_id",
-        "cost_id",
-        "position",
-        "pnl_return_column",
-    }
     for name, frame in tables.items():
-        stale = sorted(retired_columns.intersection(frame.columns))
-        if stale:
-            raise ValueError(f"{name} contains retired columns: {stale}.")
-        if name == "combinations":
-            required = combination_columns
-            extra_profiles = {
-                column
-                for column in frame.columns
-                if column.endswith("_profile_id") or column.endswith("_policy_id")
-            }
-            if extra_profiles:
-                raise ValueError(
-                    "combinations contains first-stage run-level profile/policy "
-                    f"columns: {sorted(extra_profiles)}."
-                )
-            if set(frame.columns) != combination_columns:
-                extras = sorted(set(frame.columns).difference(combination_columns))
-                raise ValueError(
-                    "combinations must contain only first-stage dynamic dimensions; "
-                    f"extra={extras}."
-                )
-        elif name == "performance_summary":
-            required = {
-                *fact_key,
-                "periods",
-                "final_cumulative_gross_return",
-                "final_cumulative_net_return",
-                "mean_net_portfolio_return",
-                "mean_turnover",
-                "max_drawdown",
-                "sharpe_like",
-                "sortino_like",
-                "total_cost",
-                "win_rate",
-            }
-        elif name == "tradability_diagnostics":
-            required = {*fact_key, *TRADABILITY_DIAGNOSTIC_COLUMNS}
-        elif name == "ic":
-            required = {*fact_key, "timestamp", "ic", "rankic", "n_obs"}
-        elif name == "ic_summary":
-            required = {
-                *fact_key,
-                "mean_ic",
-                "std_ic",
-                "icir",
-                "positive_ic_rate",
-                "mean_rankic",
-                "std_rankic",
-                "rankicir",
-                "positive_rankic_rate",
-            }
-        elif name == "grouped_returns":
-            required = {
-                *fact_key,
-                "timestamp",
-                "group",
-                "mean_forward_return",
-                "n_obs",
-            }
-        elif name == "group_spread_summary":
-            required = {
-                *fact_key,
-                "top_group_mean_return",
-                "bottom_group_mean_return",
-                "top_bottom_spread_mean",
-                "top_bottom_spread_hit_rate",
-                "group_monotonicity_score",
-            }
-        elif name == "returns":
-            required = {
-                *fact_key,
-                "timestamp",
-                "portfolio_mode",
-                "long_return",
-                "short_return",
-                "gross_portfolio_return",
-                "turnover",
-                "cost",
-                "net_portfolio_return",
-                "long_count",
-                "short_count",
-                "return_source_column",
-            }
-        elif name == "cumulative_returns":
-            required = {
-                *fact_key,
-                "timestamp",
-                "gross_return",
-                "net_return",
-                "cost",
-                "cumulative_gross_return",
-                "cumulative_net_return",
-                "cumulative_cost",
-                "high_water_mark",
-                "drawdown",
-            }
-        elif name == "weights":
-            required = {*fact_key, "timestamp", "asset", "target_weight"}
-        elif name == "label_availability":
-            required = {"label", "available_rows", "missing_rows", "coverage_rate"}
-        elif name == "factor_coverage":
-            required = {"feature", "available_rows", "missing_rows", "coverage_rate"}
-        elif name == "tradability_coverage":
-            required = {"field", "available_rows", "missing_rows", "coverage_rate"}
-        elif name == "evaluation_summary":
-            required = {
-                *combination_columns,
-                "mean_ic",
-                "final_cumulative_net_return",
-                "mean_turnover",
-                "total_cost",
-            }
-        else:
-            required = set()
-        missing = sorted(required.difference(frame.columns))
-        if missing:
-            raise ValueError(f"{name} is missing columns: {missing}.")
+        spec = get_table_spec(name)
+        validate_table_contract(
+            spec,
+            rows=frame.to_dict(orient="records"),
+            columns=tuple(str(column) for column in frame.columns),
+        )
 
 
 def validate_artifact_schema_version(
-    payload: dict[str, object],
-    *,
-    source: str,
+    payload: dict[str, object], *, source: str
 ) -> None:
-    """要求使用当前 artifact schema version。"""
-
     version = payload.get("artifact_schema_version")
     if version != ARTIFACT_SCHEMA_VERSION:
         raise ValueError(
@@ -346,25 +104,104 @@ def validate_artifact_schema_version(
         )
 
 
-def validate_evaluation_set_payload(
-    payload: dict[str, object],
-    *,
-    source: str,
-) -> None:
-    """要求使用当前 evaluation-set metadata。"""
-
+def validate_evaluation_set_payload(payload: dict[str, object], *, source: str) -> None:
     artifact_type = payload.get("artifact_type")
-    if artifact_type != "evaluation_set":
+    if artifact_type != EVALUATION_SET_ARTIFACT_TYPE:
         raise ValueError(
             f"{source} has unsupported artifact_type {artifact_type!r}; "
-            "expected 'evaluation_set'."
+            f"expected {EVALUATION_SET_ARTIFACT_TYPE!r}."
         )
-    validate_run_metadata(payload, source=source)
+    if "evaluation_id" in payload:
+        raise ValueError(f"{source} must not serialize evaluation_id.")
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError(f"{source} must contain a non-empty run_id.")
+
+
+def validate_summary_payload(payload: dict[str, object]) -> None:
+    required = {
+        "run_id",
+        "project",
+        "kind",
+        "data_stage",
+        "n_rows_evaluated",
+        "n_combinations",
+        "base_evaluation",
+        "diagnostics",
+        "artifact_schema_version",
+        "warnings",
+    }
+    missing = sorted(required.difference(payload))
+    if missing:
+        raise ValueError(f"summary.json is missing required fields: {missing}.")
+    validate_artifact_schema_version(payload, source="summary.json")
+    validate_evaluation_set_payload(payload, source="summary.json")
+
+
+def validate_run_context_payload(
+    payload: dict[str, object], *, summary: dict[str, object]
+) -> None:
+    config = payload.get("config")
+    provenance = payload.get("provenance")
+    if not isinstance(config, dict):
+        raise ValueError("run_context.json must contain config object.")
+    if not isinstance(provenance, dict):
+        raise ValueError("run_context.json must contain provenance object.")
+    required_config = {
+        "evaluation_spec",
+        "diagnostics_spec",
+        "a_share_assumptions",
+        "config_fingerprint",
+    }
+    required_provenance = {
+        "run_id",
+        "input_panel_fingerprint",
+        "input_data_version",
+        "input_artifact_refs",
+        "output_artifact_index",
+        "diagnostic_policy_fingerprint",
+        "generated_at",
+        "generator",
+        "code_version",
+        "environment_summary",
+        "staging_payload_fingerprint",
+        "factor_definition_version",
+        "random_seed",
+    }
+    missing_config = sorted(required_config.difference(config))
+    missing_provenance = sorted(required_provenance.difference(provenance))
+    if missing_config or missing_provenance:
+        raise ValueError(
+            "run_context.json is missing required fields: "
+            f"config={missing_config}, provenance={missing_provenance}."
+        )
+    if provenance.get("run_id") != summary.get("run_id"):
+        raise ValueError(
+            "summary.json run_id must match run_context provenance.run_id."
+        )
+
+
+def validate_portable_run_identity(
+    manifest: dict[str, object],
+    summary: dict[str, object],
+    run_context: dict[str, object],
+) -> None:
+    """Require schema 0.7 portable run identity to match across metadata."""
+
+    provenance = run_context.get("provenance")
+    provenance_run_id = (
+        provenance.get("run_id") if isinstance(provenance, dict) else None
+    )
+    run_ids = {
+        "manifest.json": manifest.get("run_id"),
+        "summary.json": summary.get("run_id"),
+        "run_context.json": provenance_run_id,
+    }
+    if len(set(run_ids.values())) != 1:
+        raise ValueError(f"portable run_id mismatch: {run_ids}.")
 
 
 def validate_display_manifest(manifest: dict[str, object]) -> None:
-    """按 artifact paths 和 display schema 校验 manifest.display。"""
-
     display = manifest.get("display")
     if not isinstance(display, dict):
         raise ValueError("manifest.json must contain a display object.")
@@ -374,59 +211,43 @@ def validate_display_manifest(manifest: dict[str, object]) -> None:
     if not isinstance(artifacts, dict):
         raise ValueError("manifest.json must contain an artifacts object.")
     artifact_paths = evaluation_set_csv_paths(artifacts)
+    display_artifact_paths = {
+        key: path
+        for key, path in artifact_paths.items()
+        if get_table_spec(key).display.eligible
+    }
+    download_artifact_paths = {
+        key: path
+        for key, path in artifact_paths.items()
+        if get_table_spec(key).display.download_eligible
+    }
 
     tables = display.get("tables")
     if not isinstance(tables, list):
         raise ValueError("manifest display.tables must be a list.")
+    seen: set[str] = set()
     table_paths: dict[str, str] = {}
-    table_downloads: dict[str, str] = {}
-    table_keys: set[str] = set()
     for table in tables:
         if not isinstance(table, dict):
             raise ValueError("manifest display.tables entries must be objects.")
         key = table.get("key")
         path = table.get("path")
-        download_item = table.get("download_item")
-        table_format = table.get("format")
-        role = table.get("role")
-        if not isinstance(key, str) or not key:
-            raise ValueError("manifest display table key must be a non-empty string.")
-        if key in table_keys:
-            raise ValueError(f"manifest display duplicate display table key: {key!r}.")
-        table_keys.add(key)
-        if key not in artifact_paths:
-            raise ValueError(f"manifest display table {key!r} is not an artifact.")
-        if path != artifact_paths[key]:
-            raise ValueError(f"manifest display table {key!r} path is inconsistent.")
-        if download_item != artifact_paths[key]:
+        if not isinstance(key, str) or key in seen:
             raise ValueError(
-                f"manifest display table {key!r} download_item is inconsistent."
+                f"manifest display duplicate or invalid table key: {key!r}."
             )
-        if table_format not in {"csv", "parquet", "json", "markdown"}:
-            raise ValueError(f"manifest display table {key!r} format is unsupported.")
-        if key == "weights" and table_format != "parquet":
-            raise ValueError("manifest display weights table must be parquet.")
-        if not isinstance(role, str) or not role:
-            raise ValueError(f"manifest display table {key!r} role is required.")
-        if key == "combinations" or key in EVALUATION_SET_INPUT_QUALITY_TABLES:
-            if table.get("join_key") is not None:
-                raise ValueError(
-                    f"manifest display table {key!r} join_key must be absent."
-                )
-            if table.get("supports_combination_filter") is not False:
-                raise ValueError(
-                    f"manifest display table {key!r} must not support "
-                    "combination filter."
-                )
-        else:
-            if table.get("join_key") != "combination_id":
-                raise ValueError(
-                    f"manifest display table {key!r} join_key must be combination_id."
-                )
-            if table.get("supports_combination_filter") is not True:
-                raise ValueError(
-                    f"manifest display table {key!r} must support combination filter."
-                )
+        seen.add(key)
+        if display_artifact_paths.get(key) != path:
+            raise ValueError(f"manifest display table {key!r} path is inconsistent.")
+        if table.get("download_ref") != {"kind": "table", "key": key}:
+            raise ValueError(f"manifest display table {key!r} download_ref invalid.")
+        spec = get_table_spec(key)
+        supports_filter = spec.display.supports_combination_filter
+        if table.get("supports_combination_filter") is not supports_filter:
+            raise ValueError(f"manifest display table {key!r} filter support mismatch.")
+        expected_join = "combination_id" if supports_filter else None
+        if table.get("join_key") != expected_join:
+            raise ValueError(f"manifest display table {key!r} join_key mismatch.")
         preview_rows = table.get("preview_rows")
         if (
             not isinstance(preview_rows, int)
@@ -436,168 +257,224 @@ def validate_display_manifest(manifest: dict[str, object]) -> None:
             raise ValueError(f"manifest display table {key!r} preview_rows invalid.")
         preview = display_table_preview_limits(manifest, key)
         if preview.default_limit != preview_rows:
-            raise ValueError(
-                f"manifest display table {key!r} preview default_limit must "
-                "match preview_rows."
-            )
-        if preview.supports_combination_filter != table.get(
-            "supports_combination_filter"
-        ):
-            raise ValueError(
-                f"manifest display table {key!r} preview filter support mismatch."
-            )
-        expected_filter = (
-            "combination_id"
-            if table.get("supports_combination_filter") is True
-            else None
-        )
-        if preview.filter_parameter != expected_filter:
-            raise ValueError(
-                f"manifest display table {key!r} preview filter_parameter mismatch."
-            )
-        validate_display_path(path, source=f"display table {key}")
-        table_paths[key] = path
-        table_downloads[key] = download_item
-    if table_paths != artifact_paths:
-        missing = sorted(set(artifact_paths).difference(table_paths))
-        extra = sorted(set(table_paths).difference(artifact_paths))
+            raise ValueError(f"manifest display table {key!r} preview mismatch.")
+        validate_display_path(str(path), source=f"display table {key}")
+        table_paths[key] = str(path)
+    if table_paths != display_artifact_paths:
+        missing = sorted(set(display_artifact_paths).difference(table_paths))
+        extra = sorted(set(table_paths).difference(display_artifact_paths))
         raise ValueError(
-            "manifest display.tables must cover artifact CSV tables; "
+            "manifest display.tables must cover artifact tables; "
             f"missing={missing}, extra={extra}."
         )
 
     downloads = display.get("downloads")
     if not isinstance(downloads, dict) or not isinstance(downloads.get("items"), list):
         raise ValueError("manifest display.downloads.items must be a list.")
-    download_items: set[str] = set()
-    for option in downloads["items"]:
-        if not isinstance(option, dict):
+    refs = set()
+    for item in downloads["items"]:
+        if not isinstance(item, dict):
             raise ValueError(
                 "manifest display.downloads.items entries must be objects."
             )
-        item = option.get("item")
-        if not isinstance(item, str) or not item:
-            raise ValueError("manifest display download item must be non-empty.")
-        validate_display_path(item, source=f"display download item {item}")
-        table_key = option.get("table")
-        if table_key is not None:
-            if not isinstance(table_key, str) or table_key not in table_paths:
-                raise ValueError(
-                    f"manifest display download item {item!r} references "
-                    "an unknown table."
-                )
-            if item != table_downloads[table_key]:
-                raise ValueError(
-                    f"manifest display download item {item!r} is inconsistent "
-                    f"with table {table_key!r}."
-                )
-        elif item not in DISPLAY_METADATA_DOWNLOAD_ITEMS:
-            raise ValueError(
-                f"manifest display download item {item!r} is not a known "
-                "metadata item or table artifact."
-            )
-        download_items.add(item)
-    missing_downloads = sorted(set(table_downloads.values()).difference(download_items))
-    if missing_downloads:
+        kind = item.get("kind")
+        key = item.get("key")
+        path = item.get("path")
+        if not isinstance(kind, str) or not isinstance(key, str):
+            raise ValueError("manifest display download refs require kind and key.")
+        refs.add((kind, key))
+        if kind == "table":
+            if download_artifact_paths.get(key) != path:
+                raise ValueError(f"download ref table {key!r} path mismatch.")
+        elif kind == "metadata_file":
+            metadata_paths = {
+                "manifest": "manifest.json",
+                "summary": "summary.json",
+                "run_context": "run_context.json",
+            }
+            if artifacts.get("report") == "report.md":
+                metadata_paths["report"] = "report.md"
+            expected_path = metadata_paths.get(key)
+            if expected_path is None:
+                raise ValueError(f"unsupported metadata download ref: {key!r}.")
+            if path != expected_path:
+                raise ValueError(f"download metadata ref {key!r} path mismatch.")
+        else:
+            raise ValueError(f"unsupported display download kind: {kind!r}.")
+    missing_refs = sorted(
+        ("table", key)
+        for key in download_artifact_paths
+        if ("table", key) not in refs
+    )
+    if missing_refs:
         raise ValueError(
-            "manifest display.downloads.items must include every display table; "
-            f"missing={missing_downloads}."
+            f"manifest display.downloads missing table refs: {missing_refs}."
         )
-
+    required_metadata_refs = {
+        ("metadata_file", "manifest"),
+        ("metadata_file", "summary"),
+        ("metadata_file", "run_context"),
+    }
+    if artifacts.get("report") == "report.md":
+        required_metadata_refs.add(("metadata_file", "report"))
+    missing_metadata_refs = sorted(required_metadata_refs.difference(refs))
+    if missing_metadata_refs:
+        raise ValueError(
+            "manifest display.downloads missing metadata refs: "
+            f"{missing_metadata_refs}."
+        )
     presets = downloads.get("presets")
-    if presets is not None:
-        if not isinstance(presets, list):
-            raise ValueError("manifest display.downloads.presets must be a list.")
-        for preset in presets:
-            if not isinstance(preset, dict):
+    if not isinstance(presets, list):
+        raise ValueError("manifest display.downloads.presets must be a list.")
+    for preset in presets:
+        if not isinstance(preset, dict):
+            raise ValueError("manifest display.downloads.presets entries invalid.")
+        if not isinstance(preset.get("key"), str) or not isinstance(
+            preset.get("label"), str
+        ):
+            raise ValueError("manifest display download presets require key/label.")
+        items = preset.get("items")
+        if not isinstance(items, list):
+            raise ValueError("manifest display download preset items must be a list.")
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("manifest display download preset refs invalid.")
+            kind = item.get("kind")
+            key = item.get("key")
+            if not isinstance(kind, str) or not isinstance(key, str):
+                raise ValueError("manifest display download preset refs invalid.")
+            if (kind, key) not in refs:
                 raise ValueError(
-                    "manifest display.downloads.presets entries must be objects."
+                    "manifest display download preset references unexposed item: "
+                    f"{kind}:{key}."
                 )
-            preset_items = preset.get("items")
-            if not isinstance(preset_items, list):
-                raise ValueError(
-                    "manifest display download preset items must be a list."
-                )
-            for item in preset_items:
-                if not isinstance(item, str) or item not in download_items:
-                    raise ValueError(
-                        f"manifest display download preset references "
-                        f"unknown item {item!r}."
-                    )
+    validate_display_chart_metadata(manifest)
 
+
+def validate_display_chart_metadata(manifest: dict[str, object]) -> None:
+    display = manifest.get("display")
+    if not isinstance(display, dict):
+        raise ValueError("manifest.json must contain a display object.")
     charts = display.get("charts")
     if not isinstance(charts, list):
         raise ValueError("manifest display.charts must be a list.")
+    expected_ids = {spec.key for spec in chart_specs()}
+    seen: set[str] = set()
     for chart in charts:
         if not isinstance(chart, dict):
             raise ValueError("manifest display.charts entries must be objects.")
-        kind = chart.get("kind")
-        if kind not in {"line", "bar"}:
+        chart_id = chart.get("id")
+        if not isinstance(chart_id, str) or chart_id in seen:
             raise ValueError(
-                f"manifest display chart {chart.get('id')!r} has unsupported kind."
+                f"manifest display duplicate or invalid chart id: {chart_id!r}."
             )
-        table_key = chart.get("table")
-        if not isinstance(table_key, str) or table_key not in table_paths:
+        seen.add(chart_id)
+        if "table" in chart:
             raise ValueError(
-                f"manifest display chart {chart.get('id')!r} references "
-                "an unknown table."
+                f"manifest display chart {chart_id!r} must not include table."
             )
-        if not isinstance(chart.get("x"), str) or not chart["x"]:
-            raise ValueError("manifest display chart x must be a non-empty string.")
-        series = chart.get("series")
-        if not isinstance(series, list) or not series:
-            raise ValueError("manifest display chart series must be a non-empty list.")
-        for entry in series:
-            if not isinstance(entry, dict) or not isinstance(entry.get("key"), str):
+        try:
+            chart_spec = get_chart_spec(chart_id)
+        except KeyError as exc:
+            raise ValueError(f"unknown display chart: {chart_id}.") from exc
+        for field, expected in _expected_chart_values(chart_spec).items():
+            if chart.get(field) != expected:
+                if field == "source_table_key":
+                    raise ValueError(
+                        f"manifest display chart {chart_id!r} source table mismatch."
+                    )
                 raise ValueError(
-                    "manifest display chart series entries must include key."
+                    f"manifest display chart {chart_id!r} {field} mismatch."
                 )
+        validate_display_path(
+            str(chart_spec.source_path),
+            source=f"display chart {chart_id} source_path",
+        )
+    if seen != expected_ids:
+        missing = sorted(expected_ids.difference(seen))
+        extra = sorted(seen.difference(expected_ids))
+        raise ValueError(
+            "manifest display.charts must cover registry charts; "
+            f"missing={missing}, extra={extra}."
+        )
 
 
 def validate_display_chart_columns(
     manifest: dict[str, object],
     tables: dict[str, pd.DataFrame],
 ) -> None:
-    """校验 display chart 引用的 columns 存在于已加载 tables。"""
-
     display = manifest.get("display")
     if not isinstance(display, dict):
-        return
+        raise ValueError("manifest.json must contain a display object.")
     charts = display.get("charts")
     if not isinstance(charts, list):
-        return
+        raise ValueError("manifest display.charts must be a list.")
     for chart in charts:
         if not isinstance(chart, dict):
-            continue
-        table_key = chart.get("table")
+            raise ValueError("manifest display.charts entries must be objects.")
+        if "table" in chart:
+            raise ValueError(
+                f"manifest display chart {chart.get('id')!r} must not include table."
+            )
+        table_key = chart.get("source_table_key")
         if not isinstance(table_key, str):
-            continue
+            raise ValueError(
+                f"manifest display chart {chart.get('id')!r} missing source table."
+            )
+        chart_id = chart.get("id")
+        if not isinstance(chart_id, str):
+            raise ValueError("manifest display chart id is required.")
+        try:
+            chart_spec = get_chart_spec(chart_id)
+        except KeyError as exc:
+            raise ValueError(f"unknown display chart: {chart_id}.") from exc
+        for field, expected in _expected_chart_values(chart_spec).items():
+            if chart.get(field) != expected:
+                if field == "source_table_key":
+                    raise ValueError(
+                        f"manifest display chart {chart_id!r} source table mismatch."
+                    )
+                raise ValueError(
+                    f"manifest display chart {chart_id!r} {field} mismatch."
+                )
+        validate_display_path(
+            str(chart_spec.source_path),
+            source=f"display chart {chart_id} source_path",
+        )
+        if chart_spec.source_table_key != table_key:
+            raise ValueError(
+                f"manifest display chart {chart_id!r} source table mismatch."
+            )
         frame = tables.get(table_key)
         if frame is None:
-            continue
-        x_key = chart.get("x")
-        if not isinstance(x_key, str) or x_key not in frame.columns:
             raise ValueError(
-                f"manifest display chart {chart.get('id')!r} references "
-                f"missing x column {x_key!r}."
+                f"manifest display chart {chart_id!r} references missing table "
+                f"{table_key!r}."
             )
-        series = chart.get("series")
-        if not isinstance(series, list):
-            continue
-        for entry in series:
-            if not isinstance(entry, dict):
-                continue
-            series_key = entry.get("key")
-            if not isinstance(series_key, str) or series_key not in frame.columns:
+        for column_key in ("x", "input_series"):
+            column = chart.get(column_key)
+            if isinstance(column, str) and column not in frame.columns:
                 raise ValueError(
                     f"manifest display chart {chart.get('id')!r} references "
-                    f"missing series column {series_key!r}."
+                    f"missing column {column!r}."
                 )
 
 
-def display_chart_table_names(manifest: dict[str, object]) -> set[str]:
-    """返回 display charts 引用的 table names。"""
+def _expected_chart_values(chart_spec: ChartSpec) -> dict[str, object]:
+    return {
+        "kind": chart_spec.kind,
+        "source_table_key": chart_spec.source_table_key,
+        "source_path": chart_spec.source_path,
+        "x": chart_spec.x_column,
+        "grouping_column": chart_spec.grouping_column,
+        "input_series": chart_spec.input_series,
+        "transform": chart_spec.transform,
+        "output_series": chart_spec.output_series,
+        "supports_combination_filter": chart_spec.supports_combination_filter,
+    }
 
+
+def display_chart_table_names(manifest: dict[str, object]) -> set[str]:
     display = manifest.get("display")
     if not isinstance(display, dict):
         return set()
@@ -606,11 +483,10 @@ def display_chart_table_names(manifest: dict[str, object]) -> set[str]:
         return set()
     names: set[str] = set()
     for chart in charts:
-        if not isinstance(chart, dict):
-            continue
-        table_key = chart.get("table")
-        if isinstance(table_key, str):
-            names.add(table_key)
+        if isinstance(chart, dict):
+            table_key = chart.get("source_table_key")
+            if isinstance(table_key, str):
+                names.add(table_key)
     return names
 
 
@@ -623,15 +499,13 @@ def validate_display_path(path: str, *, source: str) -> None:
 
 
 def validate_relative_posix_path(path: str, *, source: str) -> None:
-    """拒绝绝对路径、父级跳转、空路径或平台专属路径。"""
-
     parsed = PurePosixPath(path)
     if (
         "\\" in path
         or parsed.is_absolute()
         or any(part in {"", ".", ".."} for part in parsed.parts)
     ):
-        raise ValueError(f"manifest {source} 路径不安全 / unsafe path: {path!r}.")
+        raise ValueError(f"manifest {source} unsafe path: {path!r}.")
 
 
 __all__ = [
@@ -640,9 +514,12 @@ __all__ = [
     "validate_artifact_relative_path",
     "validate_artifact_schema_version",
     "validate_display_chart_columns",
+    "validate_display_chart_metadata",
     "validate_display_manifest",
     "validate_display_path",
     "validate_evaluation_set_payload",
     "validate_evaluation_set_table_columns",
     "validate_relative_posix_path",
+    "validate_run_context_payload",
+    "validate_summary_payload",
 ]

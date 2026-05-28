@@ -13,6 +13,7 @@ from quant_research_platform.datasets.parquet_panel import (
     make_parquet_evaluation_spec,
     validate_parquet_evaluation_columns,
 )
+from quant_research_platform.evaluations.diagnostics import DiagnosticsSpec
 from quant_research_platform.evaluations.evaluation_runner import run_evaluation
 from quant_research_platform.evaluations.evaluation_spec import (
     DEFAULT_RETURN_SOURCE_COLUMN,
@@ -125,10 +126,10 @@ TIME_BREAKDOWN_OPTION = typer.Option(
     "--time-breakdown",
     help="Time breakdown to write: year, quarter, or month. Repeat if needed.",
 )
-EVALUATION_ID_OPTION = typer.Option(
+RUN_ID_OPTION = typer.Option(
     None,
-    "--evaluation-id",
-    help="Evaluation id. Defaults to the output directory name.",
+    "--run-id",
+    help="Run id. Defaults to the output directory name.",
 )
 PROJECT_OPTION = typer.Option(
     "quant-research-platform",
@@ -177,6 +178,16 @@ KERNEL_OPTION = typer.Option(
     "--kernel",
     help="Evaluation kernel: dataframe or tensor. Default uses dataframe reference.",
 )
+DIAGNOSTICS_ENABLED_OPTION = typer.Option(
+    False,
+    "--diagnostics-enabled",
+    help="Enable schema 0.7 descriptive diagnostics policies.",
+)
+DIAGNOSTIC_VIEW_OPTION = typer.Option(
+    None,
+    "--diagnostic-view",
+    help="Materialized diagnostics view to write. Repeat if needed.",
+)
 
 
 @a_share_app.command("build-interim")
@@ -222,6 +233,7 @@ def a_share_evaluate_help() -> None:
         "run_factor_evaluation --help"
     )
 
+
 @app.command("compare")
 def compare_runs(
     run_dirs: list[Path] = COMPARE_RUN_DIRS_ARGUMENT,
@@ -244,7 +256,7 @@ def run_parquet_evaluation(
     segment_column: list[str] | None = SEGMENT_COLUMN_OPTION,
     time_breakdown: list[str] | None = TIME_BREAKDOWN_OPTION,
     output: Path = EVALUATION_OUTPUT_OPTION,
-    evaluation_id: str | None = EVALUATION_ID_OPTION,
+    run_id: str | None = RUN_ID_OPTION,
     project: str = PROJECT_OPTION,
     kind: str = KIND_OPTION,
     domain: str = DOMAIN_OPTION,
@@ -263,6 +275,8 @@ def run_parquet_evaluation(
     can_exit_column: str | None = CAN_EXIT_COLUMN_OPTION,
     kernel: str = KERNEL_OPTION,
     dry_run: bool = DRY_RUN_OPTION,
+    diagnostics_enabled: bool = DIAGNOSTICS_ENABLED_OPTION,
+    diagnostic_view: list[str] | None = DIAGNOSTIC_VIEW_OPTION,
 ) -> None:
     """从 long-format Parquet panel 运行 evaluation set。"""
 
@@ -292,7 +306,7 @@ def run_parquet_evaluation(
     if len(cost_values) != 1:
         _raise_parquet_input_error(
             ValueError(
-                "schema 0.6 evaluate-parquet supports exactly one run-level "
+                "schema 0.7 evaluate-parquet supports exactly one run-level "
                 "--cost-bps value."
             )
         )
@@ -316,6 +330,15 @@ def run_parquet_evaluation(
         can_enter_column=can_enter_column,
         can_exit_column=can_exit_column,
     )
+    try:
+        diagnostics_spec = DiagnosticsSpec.from_request(
+            {
+                "enabled": diagnostics_enabled,
+                "materialized_views": diagnostic_view or [],
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        _raise_parquet_input_error(exc)
     if dry_run:
         try:
             inspection = validate_parquet_evaluation_columns(
@@ -348,7 +371,8 @@ def run_parquet_evaluation(
             f"required_columns={required_count} "
             f"features={len(features)} labels={len(labels)} "
             f"cost_bps={cost_values[0]} "
-            f"portfolio_mode={portfolio_mode}"
+            f"portfolio_mode={portfolio_mode} "
+            f"diagnostics_enabled={diagnostics_enabled}"
         )
         return
     try:
@@ -360,7 +384,7 @@ def run_parquet_evaluation(
             label_columns=labels,
             return_source_column=return_source_column,
             metadata={
-                "run_id": evaluation_id or output.name,
+                "run_id": run_id or output.name,
                 "project": project,
                 "kind": kind,
                 "domain": domain,
@@ -379,6 +403,7 @@ def run_parquet_evaluation(
             segment_columns=tuple(segment_column or ()),
             time_breakdowns=_time_breakdown_values(time_breakdown),
             kernel=kernel,
+            diagnostics_spec=diagnostics_spec,
         )
         result = run_evaluation(spec)
     except (RuntimeError, TypeError, ValueError) as exc:
