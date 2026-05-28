@@ -159,8 +159,130 @@ def test_enabled_diagnostics_emit_descriptive_proxy_metrics_and_views() -> None:
         .str.contains("no real capacity claim")
         .any()
     )
-    assert frames["scenario_metrics"]["decision_usable"].tolist() == [False]
+    assert frames["scenario_metrics"]["decision_usable"].eq(False).all()
     assert frames["portfolio_assumptions"]["assumption_name"].tolist() == ["t_plus_one"]
+
+
+def test_enabled_diagnostics_emit_optional_context_and_cost_grid() -> None:
+    combinations = pd.DataFrame(
+        {
+            "combination_id": ["combo_a"],
+            "feature": ["factor"],
+            "label": ["forward_return"],
+            "kernel": ["dataframe"],
+            "portfolio_mode": ["long_only"],
+        }
+    )
+    returns = pd.DataFrame(
+        {
+            "combination_id": ["combo_a", "combo_a"],
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "gross_portfolio_return": [0.02, -0.01],
+            "net_return": [0.019, -0.011],
+            "turnover": [0.5, 0.25],
+            "cost": [0.001, 0.001],
+        }
+    )
+    optional_context = pd.DataFrame(
+        {
+            "amount": [100.0, 200.0, None],
+            "turnover": [0.01, 0.02, 0.03],
+            "avg_amount_20d": [90.0, 110.0, 120.0],
+            "amihud_20d": [0.1, 0.2, 0.3],
+            "amplitude_20d": [0.04, 0.05, 0.06],
+            "total_market_cap": [1000.0, 2000.0, 3000.0],
+            "float_market_cap": [800.0, 1600.0, None],
+            "market_type": ["main", "main", "sme"],
+        }
+    )
+
+    frames = DiagnosticRunner(
+        DiagnosticsSpec.from_request(
+            {
+                "enabled": True,
+                "materialized_views": [
+                    "scenario_metrics",
+                    "exposure_capacity_summary",
+                ],
+            }
+        )
+    ).run(
+        DiagnosticInputBundle(
+            base_tables={
+                "combinations": combinations,
+                "returns": returns,
+                "optional_context": optional_context,
+            },
+            metadata={},
+        )
+    )
+
+    metrics = frames["diagnostic_metrics"].set_index("metric_name")
+    assert (
+        metrics.loc["flat_bps_cost_sensitivity_span_proxy", "diagnostic_status"]
+        == "ok"
+    )
+    assert metrics.loc["liquidity_context_coverage_proxy", "metric_value"] > 0
+    assert metrics.loc["median_amount_proxy", "metric_value"] == pytest.approx(150.0)
+    assert metrics.loc["market_cap_context_coverage_proxy", "metric_value"] > 0
+    assert metrics.loc[
+        "median_float_market_cap_proxy",
+        "metric_value",
+    ] == pytest.approx(1200.0)
+
+    scenario = frames["scenario_metrics"]
+    assert "flat_cost_bps_10" in set(scenario["scenario_id"])
+    assert "final_cumulative_net_return_after_flat_cost_proxy" in set(
+        scenario["metric_name"]
+    )
+    assert scenario["decision_usable"].eq(False).all()
+    assert scenario["warning"].str.contains("flat bps proxy").any()
+
+    exposure = frames["exposure_capacity_summary"]
+    assert {"capacity_proxy", "liquidity_proxy", "size_proxy"}.issubset(
+        set(exposure["exposure_family"])
+    )
+
+
+def test_enabled_diagnostics_mark_missing_optional_context_in_summary() -> None:
+    combinations = pd.DataFrame(
+        {
+            "combination_id": ["combo_a"],
+            "feature": ["factor"],
+            "label": ["forward_return"],
+            "kernel": ["dataframe"],
+            "portfolio_mode": ["long_only"],
+        }
+    )
+    returns = pd.DataFrame(
+        {
+            "combination_id": ["combo_a"],
+            "timestamp": pd.to_datetime(["2026-01-01"]),
+            "gross_portfolio_return": [0.01],
+            "net_return": [0.01],
+            "turnover": [0.2],
+            "cost": [0.0],
+        }
+    )
+
+    frames = DiagnosticRunner(DiagnosticsSpec.from_request({"enabled": True})).run(
+        DiagnosticInputBundle(
+            base_tables={"combinations": combinations, "returns": returns},
+            metadata={},
+        )
+    )
+
+    summary = frames["diagnostic_summary"].set_index("policy_id")
+    assert summary.loc["capacity_proxy_v1", "diagnostic_status"] == "partial"
+    assert "optional_context.liquidity_columns" in summary.loc[
+        "capacity_proxy_v1",
+        "missing_inputs",
+    ]
+    assert summary.loc["size_proxy_v1", "diagnostic_status"] == "unavailable"
+    assert "optional_context.market_cap_columns" in summary.loc[
+        "size_proxy_v1",
+        "missing_inputs",
+    ]
 
 
 def test_risk_proxy_drawdown_uses_wealth_peak_and_expected_shortfall_formula() -> None:

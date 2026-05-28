@@ -115,6 +115,83 @@ def test_date_filtered_evaluation_frame_keeps_only_requested_trade_dates(
     assert "forward_return_1d" in filtered.columns
 
 
+def test_diagnostics_enabled_evaluation_frame_reads_only_allowed_optional_context(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_read_factor_frame(path, *, columns=None, start_date=None, end_date=None):
+        captured["path"] = path
+        captured["columns"] = columns
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
+        return pd.DataFrame(
+            {
+                "stock_code": ["000001"],
+                "trade_date": pd.to_datetime(["2024-01-02"]),
+                "eligible": [True],
+                "can_enter": [True],
+                "can_exit": [True],
+                "rev_20d": [0.1],
+                "forward_return_1d": [0.001],
+                "forward_return_20d": [0.01],
+            }
+        )
+
+    monkeypatch.setattr(evaluation, "schema_columns", lambda path: (
+        "stock_code",
+        "trade_date",
+        "eligible",
+        "can_enter",
+        "can_exit",
+        "rev_20d",
+        "forward_return_1d",
+        "forward_return_20d",
+        "amount",
+        "turnover",
+        "avg_amount_20d",
+        "amihud_20d",
+        "amplitude_20d",
+        "total_market_cap",
+        "float_market_cap",
+        "market_type",
+        "industry",
+        "sector",
+        "stock_name",
+        "listing_date",
+        "open",
+        "close",
+    ))
+    monkeypatch.setattr(evaluation, "read_factor_frame", fake_read_factor_frame)
+
+    evaluation.read_evaluation_frame(
+        Path("factors.parquet"),
+        feature_columns=("rev_20d",),
+        label_columns=("forward_return_20d",),
+        diagnostics_spec=DiagnosticsSpec.from_request({"enabled": True}),
+    )
+
+    columns = set(captured["columns"])
+    assert {
+        "amount",
+        "turnover",
+        "avg_amount_20d",
+        "amihud_20d",
+        "amplitude_20d",
+        "total_market_cap",
+        "float_market_cap",
+        "market_type",
+    }.issubset(columns)
+    assert {
+        "industry",
+        "sector",
+        "stock_name",
+        "listing_date",
+        "open",
+        "close",
+    }.isdisjoint(columns)
+
+
 def test_read_factor_frame_pushes_trade_date_filters_to_parquet(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -188,6 +265,48 @@ def test_evaluation_spec_uses_filtered_panel_without_input_parquet(tmp_path) -> 
     assert spec.time_semantics_config.decision_time_column == "trade_date"
     assert spec.metadata["time_semantics"]["decision_time_column"] == "trade_date"
     assert spec.metadata["time_semantics"]["timezone"] == "Asia/Shanghai"
+
+
+def test_a_share_diagnostics_enabled_adds_month_time_breakdown(tmp_path) -> None:
+    panel = pd.DataFrame(
+        {
+            "stock_code": ["000001"],
+            "trade_date": pd.to_datetime(["2024-09-24"]),
+            "eligible": [True],
+            "can_enter": [True],
+            "can_exit": [True],
+            "rev_20d": [0.2],
+            "forward_return_1d": [0.002],
+            "forward_return_20d": [0.02],
+        }
+    )
+
+    disabled = evaluation.make_a_share_evaluation_spec(
+        panel=panel,
+        start_year=2024,
+        end_year=2024,
+        label_columns=("forward_return_20d",),
+        feature_columns=("rev_20d",),
+        output_dir=tmp_path / "reports" / "disabled",
+        run_id="disabled",
+        n_groups=5,
+        source_file="data/processed_private/csmar/example.parquet",
+    )
+    enabled = evaluation.make_a_share_evaluation_spec(
+        panel=panel,
+        start_year=2024,
+        end_year=2024,
+        label_columns=("forward_return_20d",),
+        feature_columns=("rev_20d",),
+        output_dir=tmp_path / "reports" / "enabled",
+        run_id="enabled",
+        n_groups=5,
+        source_file="data/processed_private/csmar/example.parquet",
+        diagnostics_spec=DiagnosticsSpec.from_request({"enabled": True}),
+    )
+
+    assert disabled.time_breakdowns == ("year",)
+    assert enabled.time_breakdowns == ("year", "month")
 
 
 def test_evaluation_spec_rejects_non_forward_return_label_name(tmp_path) -> None:

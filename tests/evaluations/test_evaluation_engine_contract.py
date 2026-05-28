@@ -3,6 +3,7 @@ import json
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts import load_evaluation_set
 from quant_research_platform.evaluations.evaluation_runner import run_evaluation
 from quant_research_platform.evaluations.evaluation_spec import (
     CostConfig,
@@ -444,6 +445,48 @@ def test_inverse_vol_scaled_weights_use_risk_column(tmp_path):
         run_context["provenance"]["diagnostic_policy_fingerprint"]
         == "n5_v1_descriptive_proxy"
     )
+
+
+def test_missing_optional_context_diagnostic_metrics_validate_schema_07(tmp_path):
+    spec = EvaluationSpec(
+        panel=_factor_panel(),
+        feature_columns=("factor",),
+        label_columns=("forward_return",),
+        metadata=_metadata("missing_optional_context_diagnostics"),
+        n_groups=2,
+        output_dir=tmp_path,
+        diagnostics_spec=DiagnosticsSpec.from_request(
+            {
+                "enabled": True,
+                "materialized_views": ["exposure_capacity_summary"],
+            }
+        ),
+    )
+
+    result = run_evaluation(spec)
+    loaded = load_evaluation_set(tmp_path)
+
+    metrics = result.metrics["diagnostic_metrics"]
+    invalid = metrics[
+        metrics["diagnostic_status"].eq("partial")
+        & metrics["metric_value"].isna()
+    ]
+    assert invalid.empty
+    missing_optional = metrics[
+        metrics["metric_name"].isin(
+            {
+                "liquidity_context_coverage_proxy",
+                "median_amount_proxy",
+                "median_turnover_liquidity_proxy",
+                "market_cap_context_coverage_proxy",
+                "median_total_market_cap_proxy",
+                "median_float_market_cap_proxy",
+            }
+        )
+    ]
+    assert set(missing_optional["diagnostic_status"]) == {"unavailable"}
+    assert "diagnostic_metrics" in loaded.tables
+    assert "exposure_capacity_summary" in loaded.tables
 
 
 def test_explicit_execution_tradability_and_cost_configs_are_recorded(tmp_path):

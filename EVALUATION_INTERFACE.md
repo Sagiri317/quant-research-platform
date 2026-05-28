@@ -297,6 +297,17 @@ diagnostics/diagnostic_metrics.csv
 Conditional / materialized-on-request 输出包括 `portfolio/weights.parquet`；
 只有请求并生成后才通过 `manifest.display` 暴露为可预览或可下载表。
 
+N5 diagnostics MVS 仍复用现有 schema `0.7` diagnostics 表，不新增 artifact
+table。Return path risk proxy 写入 `diagnostic_metrics` 和按需的
+`portfolio_risk_summary`；flat bps cost sensitivity grid 写入按需的
+`scenario_metrics`，`diagnostic_metrics` 只保留 sensitivity span 摘要；liquidity /
+capacity 和 market-cap / size 只使用 evaluation input 中已安全保留的 aggregate
+optional context，写入 `diagnostic_metrics` 和按需的
+`exposure_capacity_summary`。这些输出全部是 post-run descriptive proxy，不是
+真实风控、Barra exposure、真实容量模型、交易模拟或投资建议。缺少 weights /
+positions / optional context 时应写出 `partial` / `unavailable` 和
+`missing_inputs`，不得为 diagnostics 强行物化大 `weights` 表。
+
 启用 `time_breakdowns` 后，会按实际配置出现 `breakdowns/year/`、`breakdowns/quarter/` 或 `breakdowns/month/`。启用 year / month breakdown 时，`breakdowns/year/ic.csv` 和 `breakdowns/month/ic.csv` 会分别作为 `ic_breakdown_by_year` 和 `ic_breakdown_by_month` 写出 IC / RankIC breakdown。整体 time breakdown 是从完整 overall run path 中按 period 切片统计，不重新运行年度 / 季度 / 月度回测，不清仓，也不重新生成 weights 或 portfolio returns path。
 
 `manifest.json` 和 `summary.json` 包含 `artifact_schema_version: "0.7"` 和 `artifact_type: "evaluation_set"`。Loader 会拒绝缺失或不支持 schema version 的 artifacts。`manifest.display` 同步声明前端可用的表格、下载项、下载 preset 和图表。

@@ -8,19 +8,20 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 
 ## Current Open Signal / 当前 open 信号
 
-Schema `0.7` / N5 v1 diagnostics implementation 已作为当前 Local Research
-Platform groundwork 落地。当前新 evaluation-set artifacts 使用 `run_id`、
+Schema `0.7` / N5 diagnostics MVS 主体已作为当前 Local Research Platform
+groundwork 落地。当前新 evaluation-set artifacts 使用 `run_id`、
 `summary.json`、`run_context.json`、registry-backed required tables、
 `manifest.display` compact download refs、generic `/tables/{table_key}/preview`
 和 `src/quant_research_platform/evaluations/diagnostics/` 下的 post-run diagnostics。
 
-N5 v1 risk/regime/cost/capacity 输出仍只是 descriptive proxy diagnostics。它们
-不是 alpha proof、validated risk model、real capacity analysis、paper/live trading、
-order routing、deployment 或 investment advice。Private CSMAR data 和
-`reports/private_real/` 继续保持本地私有，不进入 portable metadata。
+N5 MVS risk/cost/liquidity/capacity/size/stability 输出仍只是 descriptive proxy
+diagnostics。它们不是 alpha proof、validated risk model、Barra exposure、real
+capacity analysis、simulation、paper/live trading、order routing、deployment 或
+investment advice。Private CSMAR data 和 `reports/private_real/` 继续保持本地私有，
+不进入 portable metadata。
 
-Root handoff status: closed 2026-05-28. Workspace-root planning/status 已同步当前
-N5 capability classification；后续 full N5 capability 和 N6 仍需单独设计。
+Root handoff status: open. Workspace-root planning/status 需要同步当前 N5 diagnostics
+MVS 主体状态；后续 full N5 capability 和 N6 仍需单独设计。
 
 ## 当前状态
 
@@ -28,10 +29,10 @@ N5 capability classification；后续 full N5 capability 和 N6 仍需单独设�
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
 | 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
-| 当前分支 | `main`；schema `0.7` / N5 v1 diagnostics groundwork 已落地，full N5 capability 仍需单独设计和验证 |
+| 当前分支 | `main`；schema `0.7` / N5 diagnostics MVS 主体已落地，full N5 capability 仍需单独设计和验证 |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
-| 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、N5 v1 descriptive proxy diagnostics、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
+| 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、N5 MVS descriptive proxy diagnostics、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
 | A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation |
 | Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner，并用 `candidate_id + combination_id` 汇总 evaluation results |
 | 市场范围 | A 股 enabled；crypto / other markets planned / disabled，不代表真实支持，也不保留空实现包 |
@@ -60,8 +61,8 @@ evidence only; they are not current valid run-contract examples.
 
 ## 当前 blocker / 风险
 
-1. Full N5 risk/regime/cost/capacity capability 尚未设计完成；当前 N5 v1 只能作为
-   descriptive proxy diagnostics groundwork。
+1. Full N5 risk/regime/cost/capacity capability 尚未设计完成；当前 N5 MVS 只能作为
+   descriptive proxy diagnostics groundwork，不代表真实风险模型或容量模型。
 2. N6 ML prediction handoff 尚未设计；不要混入 N5 full diagnostics 分支。
 3. 单个 32-combination 2023-2025 full run 仍受 weights/remap memory path 约束；扩展前
    应先设计低内存写出路径，或继续按 shard 作为正式回归输入。
@@ -91,5 +92,6 @@ evidence only; they are not current valid run-contract examples.
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
+| 2026-05-28 | capability | N5 diagnostics MVS 主体已落地：return path risk、flat bps cost sensitivity、liquidity/capacity proxy、market-cap/size proxy、year/month stability 和 missing-input aware status 均保持 descriptive proxy 边界；无 schema/public API/frontend/shared contract 或交易语义扩展。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
 | 2026-05-28 | capability | Schema `0.7` / N5 v1 diagnostics implementation 已落地；full N5 capability 和 N6 仍需单独设计。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-28 |
 | 2026-05-27 | milestone | 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-27 |

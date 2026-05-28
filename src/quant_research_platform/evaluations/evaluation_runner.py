@@ -743,6 +743,7 @@ def _to_schema_07_tables(
             DiagnosticInputBundle(
                 base_tables={
                     **schema_07,
+                    "optional_context": _diagnostic_optional_context(spec),
                     "positions": _schema_07_weights(tables["positions"], id_remap),
                     "weight_diagnostics": _remap_fact_table(
                         tables["weight_diagnostics"],
@@ -777,6 +778,35 @@ def _remap_fact_table(
     retired_columns = [column for column in retired if column in result.columns]
     retired_columns = [column for column in retired_columns if column not in keep]
     return result.drop(columns=retired_columns)
+
+
+N5_DIAGNOSTIC_CONTEXT_EXACT_COLUMNS = (
+    "amount",
+    "turnover",
+    "total_market_cap",
+    "float_market_cap",
+    "market_type",
+)
+N5_DIAGNOSTIC_CONTEXT_PREFIXES = (
+    "avg_amount_",
+    "turnover_",
+    "amihud_",
+    "amplitude_",
+)
+
+
+def _diagnostic_optional_context(spec: EvaluationSpec) -> pd.DataFrame:
+    if not spec.diagnostics_spec.enabled:
+        return pd.DataFrame()
+    columns = [
+        column
+        for column in spec.panel.columns
+        if column in N5_DIAGNOSTIC_CONTEXT_EXACT_COLUMNS
+        or column.startswith(N5_DIAGNOSTIC_CONTEXT_PREFIXES)
+    ]
+    if not columns:
+        return pd.DataFrame()
+    return spec.panel.loc[:, list(dict.fromkeys(columns))].copy()
 
 
 def _schema_07_weights(

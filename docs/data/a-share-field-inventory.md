@@ -107,7 +107,7 @@ The A 股 evaluation adapter reads only the columns needed for a requested run:
 - optional `risk_column`
 - optional neutralization group/exposure columns
 
-This means a field can be present in the slim factor table but not enter a specific evaluation run. For example, `amount`, `turnover`, `total_market_cap`, and `float_market_cap` are available in the slim table, but they are evaluation inputs only if the request explicitly uses them through an approved column role.
+This means a field can be present in the slim factor table but not enter a specific evaluation run. For diagnostics-enabled A-share runs, the adapter may preserve only the approved N5 optional context whitelist: `amount`, `turnover`, `total_market_cap`, `float_market_cap`, `avg_amount_*`, `turnover_*`, `amihud_*`, `amplitude_*`, and `market_type`. Industry, sector, stock name, listing-date, raw OHLC, private audit, and full-panel lifecycle fields remain excluded from the current evaluation input.
 
 ## N5 Diagnostics Readiness
 
@@ -116,9 +116,9 @@ N5 v1 is partial implementation and contract groundwork. The current diagnostics
 | Diagnostic area | Required current input | Current readiness | Limitation | Future input needed |
 |---|---|---|---|---|
 | Risk path proxy | `portfolio/returns.net_return` | `available` descriptive proxy | Uses realized return path only; not factor exposure or risk model | Formal exposures, covariance/risk model, PIT benchmark/regime context |
-| Cost proxy | `portfolio/returns.cost`, `portfolio/returns.gross_portfolio_return` | `available` descriptive proxy | Uses configured modeled cost in evaluation output; not a market-impact model | Approved cost grid, tax/fee layers, slippage/impact assumptions |
-| Capacity proxy | `portfolio/returns.turnover` | `partial` descriptive proxy | Turnover proxy only; no ADV participation or real capacity claim | ADV, liquidity buckets, participation caps, capacity curve design |
-| Market cap / liquidity context | `amount`, `turnover`, `total_market_cap`, `float_market_cap` in slim table | `partial` descriptive proxy ready if explicitly passed into an approved diagnostic or exposure role | Present in slim factor table, but not automatically part of evaluation artifacts | Explicit evaluation input preservation and approved N5 full diagnostic tables |
+| Cost proxy | `portfolio/returns.cost`, `portfolio/returns.gross_portfolio_return`, `portfolio/returns.turnover` | `available` descriptive proxy | Flat bps sensitivity is a scenario proxy only; not tax, slippage, fill, or impact modeling | Approved cost grid, tax/fee layers, slippage/impact assumptions |
+| Capacity proxy | `portfolio/returns.turnover`; optional `amount`, `turnover`, `avg_amount_*`, `turnover_*`, `amihud_*`, `amplitude_*` | `partial` descriptive proxy | Uses aggregate optional context only; no row-level private output, ADV participation, or real capacity claim | ADV, liquidity buckets, participation caps, capacity curve design |
+| Market cap / liquidity context | `amount`, `turnover`, `total_market_cap`, `float_market_cap`, `market_type` and approved liquidity factor families in slim table | `partial` descriptive proxy in diagnostics-enabled A-share runs | Optional context is preserved only by whitelist and summarized as aggregate proxy; it is not a Barra exposure or formal risk model | Approved full N5 diagnostic design if richer exposure tables are needed |
 | Tradability summary | aggregate `eligible`, `can_enter`, `can_exit` derived diagnostics | `partial` descriptive proxy | Current materialized views use aggregate diagnostics, not row-level private observations | Approved table design if full-period tradability diagnostics are needed |
 | A-share assumptions | run metadata such as T+1 and no short-sale simulation | `partial` descriptive metadata | Assumption recorded only; no execution simulation | Separate approved simulation/execution design if ever needed |
 | Regime proxy | `portfolio/returns` row count | `partial` descriptive proxy | No PIT regime input; ex-post observation count only | PIT regime labels or market-state inputs |

@@ -9,6 +9,7 @@ N5_V1_POLICY_IDS = (
     "risk_path_proxy_v1",
     "cost_proxy_v1",
     "capacity_proxy_v1",
+    "size_proxy_v1",
     "regime_proxy_v1",
     "a_share_assumption_v1",
 )

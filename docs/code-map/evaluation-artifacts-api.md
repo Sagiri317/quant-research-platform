@@ -37,7 +37,8 @@ market adapter / upload / parquet helper
   downloaded, and packaged in selected ZIPs through the artifact package
   metadata output helper.
 - `diagnostic_policies`、`diagnostic_summary`、`diagnostic_metrics` 是 schema `0.7` required diagnostics tables。
-- risk/regime/cost/capacity 相关 materialized views 是 conditional descriptive proxy outputs；只有 materialized 后才进入 `manifest.display` 暴露面。
+- risk/regime/cost/capacity/size 相关 materialized views 是 conditional descriptive proxy outputs；只有 materialized 后才进入 `manifest.display` 暴露面。
+- N5 MVS flat bps cost sensitivity grid 写入现有 `diagnostics/scenario_metrics.csv`；`diagnostic_metrics` 只保留聚合 sensitivity span。Liquidity / capacity 和 market-cap / size 只消费 evaluation input 中的 approved optional context aggregate，不强行物化 weights，不输出 row-level private details。
 
 本文记录当前 evaluation layer、artifact schema `0.7`、`manifest.display`、FastAPI evidence API、downloads 和 React workbench 的接口事实。
 
@@ -134,7 +135,7 @@ diagnostics/diagnostic_metrics.csv
 API-derived primary_cumulative_return chart from portfolio/returns.csv
 ```
 
-Conditional materialized tables can include `portfolio/weights.parquet`, `diagnostics/tradability_diagnostics.csv`, `diagnostics/tradability_summary.csv`, `diagnostics/scenario_metrics.csv`, `diagnostics/exposure_capacity_summary.csv`, and `diagnostics/portfolio_risk_summary.csv` when requested and available.
+Conditional materialized tables can include `portfolio/weights.parquet`, `diagnostics/tradability_diagnostics.csv`, `diagnostics/tradability_summary.csv`, `diagnostics/scenario_metrics.csv`, `diagnostics/exposure_capacity_summary.csv`, and `diagnostics/portfolio_risk_summary.csv` when requested and available. N5 MVS uses those existing conditional tables only; it does not add a new artifact table or enable `diagnostic_observations`.
 
 启用 `time_breakdowns` 后会按配置出现可选目录：
 

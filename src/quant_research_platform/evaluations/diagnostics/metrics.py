@@ -69,6 +69,16 @@ N5_V1_DIAGNOSTIC_METRICS: tuple[DiagnosticMetricSpec, ...] = (
         required_inputs=("returns.cost", "returns.gross_portfolio_return"),
     ),
     DiagnosticMetricSpec(
+        policy_family="cost_proxy",
+        metric_name="flat_bps_cost_sensitivity_span_proxy",
+        formula_ref=(
+            "range(final_cumulative_return(gross_portfolio_return - "
+            "turnover * flat_bps / 10000) for flat_bps in diagnostic grid)"
+        ),
+        unit="ratio",
+        required_inputs=("returns.gross_portfolio_return", "returns.turnover"),
+    ),
+    DiagnosticMetricSpec(
         policy_family="capacity_proxy",
         metric_name="turnover_proxy",
         formula_ref="mean(portfolio/returns.turnover)",
@@ -76,6 +86,57 @@ N5_V1_DIAGNOSTIC_METRICS: tuple[DiagnosticMetricSpec, ...] = (
         required_inputs=("returns.turnover",),
         optional_inputs=("adv", "amount", "float_market_cap", "market_cap"),
         missing_behavior="emit_partial",
+    ),
+    DiagnosticMetricSpec(
+        policy_family="capacity_proxy",
+        metric_name="liquidity_context_coverage_proxy",
+        formula_ref=(
+            "non_null_cells(optional_context liquidity columns) / "
+            "total_cells(optional_context liquidity columns)"
+        ),
+        unit="ratio",
+        required_inputs=("optional_context.liquidity_columns",),
+        missing_behavior="emit_partial",
+    ),
+    DiagnosticMetricSpec(
+        policy_family="capacity_proxy",
+        metric_name="median_amount_proxy",
+        formula_ref="median(optional_context.amount)",
+        unit="currency",
+        required_inputs=("optional_context.amount",),
+        missing_behavior="emit_partial",
+    ),
+    DiagnosticMetricSpec(
+        policy_family="capacity_proxy",
+        metric_name="median_turnover_liquidity_proxy",
+        formula_ref="median(optional_context.turnover)",
+        unit="ratio",
+        required_inputs=("optional_context.turnover",),
+        missing_behavior="emit_partial",
+    ),
+    DiagnosticMetricSpec(
+        policy_family="size_proxy",
+        metric_name="market_cap_context_coverage_proxy",
+        formula_ref=(
+            "non_null_cells(optional_context market-cap columns) / "
+            "total_cells(optional_context market-cap columns)"
+        ),
+        unit="ratio",
+        required_inputs=("optional_context.market_cap_columns",),
+    ),
+    DiagnosticMetricSpec(
+        policy_family="size_proxy",
+        metric_name="median_total_market_cap_proxy",
+        formula_ref="median(optional_context.total_market_cap)",
+        unit="currency",
+        required_inputs=("optional_context.total_market_cap",),
+    ),
+    DiagnosticMetricSpec(
+        policy_family="size_proxy",
+        metric_name="median_float_market_cap_proxy",
+        formula_ref="median(optional_context.float_market_cap)",
+        unit="currency",
+        required_inputs=("optional_context.float_market_cap",),
     ),
     DiagnosticMetricSpec(
         policy_family="regime_proxy",

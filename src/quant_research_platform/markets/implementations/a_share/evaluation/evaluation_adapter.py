@@ -40,6 +40,19 @@ FACTOR_PREFIXES = (
 LABEL_PREFIX = "forward_return_"
 DEFAULT_RETURN_SOURCE_COLUMN = "forward_return_1d"
 DATE_COLUMN = "trade_date"
+N5_DIAGNOSTIC_CONTEXT_EXACT_COLUMNS = (
+    "amount",
+    "turnover",
+    "total_market_cap",
+    "float_market_cap",
+    "market_type",
+)
+N5_DIAGNOSTIC_CONTEXT_PREFIXES = (
+    "avg_amount_",
+    "turnover_",
+    "amihud_",
+    "amplitude_",
+)
 DEFAULT_REPRESENTATIVE_FACTORS = ("mom_20d", "vol_20d", "amihud_20d")
 LABEL_AVAILABILITY_COLUMNS = (
     "eligible",
@@ -88,6 +101,17 @@ def choose_default_factor_columns(factor_columns: tuple[str, ...]) -> tuple[str,
     if selected:
         return tuple(selected)
     return factor_columns[:3]
+
+
+def n5_diagnostic_optional_context_columns(path: Path) -> tuple[str, ...]:
+    """Return allowed optional context columns for N5 proxy diagnostics."""
+
+    return tuple(
+        column
+        for column in schema_columns(path)
+        if column in N5_DIAGNOSTIC_CONTEXT_EXACT_COLUMNS
+        or column.startswith(N5_DIAGNOSTIC_CONTEXT_PREFIXES)
+    )
 
 
 def parse_columns(value: str) -> tuple[str, ...]:
@@ -240,11 +264,18 @@ def read_evaluation_frame(
     risk_column: str | None = None,
     neutralization_group_columns: tuple[str, ...] = (),
     neutralization_exposure_columns: tuple[str, ...] = (),
+    diagnostics_spec: DiagnosticsSpec | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
     """Read the filtered DataFrame needed for one evaluation request."""
 
+    diagnostics_spec = diagnostics_spec or DiagnosticsSpec.disabled()
+    optional_context_columns = (
+        n5_diagnostic_optional_context_columns(path)
+        if diagnostics_spec.enabled
+        else ()
+    )
     columns = tuple(
         dict.fromkeys(
             (
@@ -257,6 +288,7 @@ def read_evaluation_frame(
                 *(column for column in (risk_column,) if column),
                 *neutralization_group_columns,
                 *neutralization_exposure_columns,
+                *optional_context_columns,
                 *LABEL_AVAILABILITY_COLUMNS,
             )
         )
@@ -302,6 +334,7 @@ def make_a_share_evaluation_spec(
 ) -> EvaluationSpec:
     """Build an A-share evaluation-set spec from a filtered DataFrame."""
 
+    diagnostics_spec = diagnostics_spec or DiagnosticsSpec.disabled()
     for label_column in label_columns:
         validate_forward_return_label(label_column)
     metadata = {
@@ -371,9 +404,9 @@ def make_a_share_evaluation_spec(
         segment_columns=segment_columns,
         kernel=normalize_kernel_name(kernel),
         return_source_column=return_source_column,
-        time_breakdowns=("year",),
+        time_breakdowns=("year", "month") if diagnostics_spec.enabled else ("year",),
         output_dir=output_dir,
-        diagnostics_spec=diagnostics_spec or DiagnosticsSpec.disabled(),
+        diagnostics_spec=diagnostics_spec,
         domain_notes={
             "boundary": (
                 "Processed DataFrame adapter only; evaluation layer does not generate "
@@ -548,6 +581,7 @@ def run_processed_factor_evaluation(
         risk_column=risk_column,
         neutralization_group_columns=neutralization_group_columns,
         neutralization_exposure_columns=neutralization_exposure_columns,
+        diagnostics_spec=diagnostics_spec,
         start_date=range_start,
         end_date=range_end,
     )
