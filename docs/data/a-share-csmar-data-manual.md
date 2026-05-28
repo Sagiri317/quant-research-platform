@@ -19,6 +19,8 @@ data/processed_private/csmar/
 
 ## 必要 CSMAR 表
 
+本项目当前 A 股股票交易 raw contract 对齐 CSMAR《股票市场交易（升级测试）》说明书，使用 `TRDNEW_*` 表族；`TRD_AdjustFactor` 和市场指数库 `IDX_*` 表保持各自 CSMAR 原表名。
+
 | 项目数据集 | CSMAR 表 | 中文含义 | raw 放置目录 |
 |---|---|---|---|
 | `stock_master` | `TRDNEW_Co` | 公司文件 | `data/raw_private/csmar/stock_master/` |
