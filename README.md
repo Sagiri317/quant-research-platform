@@ -46,7 +46,7 @@ local approved data
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 只保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | N1/N2/N3/N4/N7/N8 已合入 `main` | Pipeline runner、tradability diagnostics、ZIP packaging、frontend feature split、run identity、contract consumer convergence | 已验证 |
 | 当前 2023-2025 evidence 可作为回归入口 | `schema07_eval_2023_2025_v1`、`schema07_eval_2023_2025_rev120_v1` 和 Factor Factory `rev_120d` smoke | 已验证 |
-| N5 v1 diagnostics groundwork 已落地，full capability 仍需单独设计 | schema `0.7` diagnostics registry、diagnostic artifacts、`manifest.display` / API / frontend evidence flow 已有描述性 proxy diagnostics；true risk / regime / capacity / simulation 仍是未来工作 | partial implementation / contract groundwork |
+| N5 MVS descriptive proxy diagnostics 已合入 `main`，下一步为 N5 private real-data smoke, then pipeline reliability | schema `0.7` diagnostics registry、diagnostic artifacts、`scenario_metrics` flat bps cost sensitivity、missing-input-aware status、diagnostics-enabled A-share month breakdown 和 `manifest.display` / API / frontend evidence flow 已落地；true risk / regime / capacity / simulation 仍是未来工作 | merged to `main` |
 
 ## 复现方式
 
