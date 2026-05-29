@@ -28,6 +28,52 @@ Use PowerShell `Select-String` if `rg` is unavailable or denied.
 
 For medium+ tasks, stop before implementation with a task brief, implementation plan, scope declaration, and explicit human approval. Use the current final report format: Changed, Not Changed, Contracts Touched, Context Loaded, Subagents Used, Tests Run, Residual Risks, Scope Check.
 
+## Execution Settings
+
+Default response language:
+
+- Default: 默认中文回答.
+- Answer in Chinese by default.
+- Code, file names, field names, commands, test names, error messages, schema/table/metric names, and section labels such as Changed, Not Changed, Tests Run, and Scope Check may remain in English.
+- This language rule applies to Codex conversation output only. It does not force code comments, user-facing docs, or project documents to use Chinese.
+
+Recommended reasoning effort:
+
+- Low: typo fixes, single-file docs cleanup, and formatting.
+- Medium: small docs/rules batches, local bugfixes, and single-module implementation.
+- High: cross-layer code, diagnostics, artifact/API/frontend work, pipeline work, memory/performance work, and contract-adjacent work.
+- Highest / max available: architecture decisions, schema migrations, major refactors, and future capability boundaries.
+- Use the closest available Codex reasoning-effort setting.
+
+Branch / Worktree policy:
+
+- Small docs-only, typo, and single-file rules cleanup may run on a clean `main`.
+- Medium+ docs/rules batches should use a semantic branch.
+- Code implementation, tests, diagnostics, pipeline, Factor Factory, API, and artifact work must use a semantic branch instead of implementing directly on `main`.
+- Contract-adjacent, schema-adjacent, and cross-layer work must use a semantic branch.
+- Use a worktree only when multiple tasks run in parallel, the current workspace has uncommitted changes that must not be interrupted, a long-running goal needs isolation, or the current `main` / workspace state must be preserved.
+- Do not create a worktree by default.
+- Every task brief should state the branch plan and `Worktree needed: yes/no + reason`.
+
+Challenge / Objection mechanism:
+
+If Codex believes a prompt constraint is wrong, too narrow, or conflicts with code/docs/tests, it must not silently obey and must not silently violate it. Before implementing the alternative, output:
+
+```text
+Proposed Challenge / Objection
+```
+
+Each objection must include:
+
+- challenged constraint
+- evidence from code/docs/tests
+- why constraint may be wrong
+- affected surfaces: schema, `manifest.display`, API/frontend shared contract, data handoff, private-data boundary, memory/performance
+- recommended alternative
+- whether human approval is required
+
+Do not implement a challenged alternative until the user approves it.
+
 ## Stability Model
 
 Keep this `SKILL.md` as the stable workflow layer. Put change-prone project facts in [references/contracts-and-verification.md](references/contracts-and-verification.md), including schema versions, source-file maps, script names, API route names, browser acceptance inputs, and current verification commands.
@@ -73,10 +119,13 @@ Use this workflow only after the user has approved the bounded execution envelop
 
 ## Subagent Coordination Workflow
 
+- Codex may use multiple subagents inside an approved envelope.
 - Give each subagent a narrow context packet and disjoint write scope.
+- Review-only subagents must not modify files.
 - Reviewer subagents should not edit implementation unless explicitly assigned that role.
 - Do not let multiple subagents modify schema, API payloads, frontend shared types, `manifest.display`, generated-file indexes, or other shared contracts in parallel.
 - The main agent integrates subagent output, checks scope, and verifies that assigned files stayed within the approved envelope.
+- Final reports must include `Subagents Used`.
 
 ## Documentation Sync Gate
 
@@ -125,6 +174,16 @@ Archive Candidates:
 ```
 
 If none, write `Archive Candidates: none`.
+
+## Commit Message Recommendation
+
+For medium+ tasks, the final report should recommend a commit message.
+
+- Match project style, usually Conventional Commit where appropriate: `feat(scope): ...`, `fix(scope): ...`, `docs(scope): ...`, `refactor(scope): ...`, or `test(scope): ...`.
+- Do not imply unimplemented capability.
+- For proxy or descriptive diagnostics, do not imply true risk, capacity, simulation, or validated alpha.
+- Include whether the commit should be a normal commit or amend.
+- Include whether push should be feature branch only or `main`.
 
 ## Rule Placement
 

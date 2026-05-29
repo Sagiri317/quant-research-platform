@@ -71,6 +71,8 @@ Do not autonomously expand market scope, execution scope, deployment scope, runt
 
 Medium+ tasks must start from a task brief, implementation plan, scope declaration, stop conditions, and verification plan. The brief should identify task mode, context loaded, context routing, allowed scope, forbidden scope, relevant contracts, files to inspect, expected changes, required tests, definition of done, and risks.
 
+Every task brief must declare execution settings: response language, recommended reasoning effort, branch plan, whether a worktree is needed with reason, whether subagents are allowed, planned subagent roles, whether challenge / objection is allowed, and whether a commit message recommendation is required.
+
 Medium+ tasks must stop and wait for explicit human approval after producing the task brief, implementation plan, and scope declaration, and before implementation begins.
 
 Decision Tasks must plan only and wait for approval before implementation.
@@ -80,6 +82,8 @@ Governed Batches may execute without per-step approval only after the user appro
 Goal / Overnight Runs may execute autonomously only after the user approves a bounded execution envelope containing: goal, task mode, allowed scope, forbidden scope, files/directories in scope, contracts that must not change, permitted subagent roles, verification commands, stop conditions, and final report format.
 
 Within an approved envelope, Codex may split work, use permitted subagents, read relevant files, edit in-scope files, run approved checks, and fix confirmed in-scope P0/P1/P2 issues without asking for each small step. Codex must stop and request confirmation when a stop condition is reached.
+
+Small docs-only, typo, and single-file rules cleanup may run on a clean `main` when the user allows it. Code implementation, tests, diagnostics, pipeline, Factor Factory, API, artifact, contract-adjacent, schema-adjacent, and cross-layer work must use a semantic branch instead of implementing directly on `main`.
 
 ### Subagent Protocol
 

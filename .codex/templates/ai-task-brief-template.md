@@ -20,6 +20,17 @@ List why each context file was loaded. Do not load future architecture docs by d
 
 Local Research Platform
 
+## Execution Settings
+
+- Response language: 默认中文回答
+- Recommended reasoning effort:
+- Branch plan:
+- Worktree needed: yes/no + reason
+- Subagents allowed: yes/no
+- Planned subagent roles:
+- Challenge / Objection allowed: yes/no
+- Commit message recommendation required: yes/no
+
 ## Execution Envelope
 
 - Approved autonomous execution: yes/no
@@ -40,7 +51,12 @@ Local Research Platform
 - Subagent role:
 - Assigned scope:
 - Context packet:
+- Write scope disjoint from other subagents: yes/no
+- Review-only subagent modifies files: no
+- Shared contract owner:
 - Expected output:
+
+Codex may use multiple subagents inside an approved envelope. Each subagent must receive a narrow context packet, subagents should have disjoint write scope, review-only subagents must not modify files, and shared contracts must be owned by the main agent or one explicit contract integrator.
 
 ## Documentation Sync Plan
 
@@ -80,6 +96,23 @@ Local Research Platform
 
 Stop for human confirmation if contract meaning, schema semantics, public interfaces, directory moves, phase boundary, or multi-layer scope is unclear.
 
+## Challenge / Objection
+
+If a prompt constraint appears wrong, too narrow, or in conflict with code/docs/tests, output `Proposed Challenge / Objection` before implementing any alternative.
+
+- Challenged constraint:
+- Evidence from code/docs/tests:
+- Why constraint may be wrong:
+- Affected surfaces:
+  - schema:
+  - `manifest.display`:
+  - API/frontend shared contract:
+  - data handoff:
+  - private-data boundary:
+  - memory/performance:
+- Recommended alternative:
+- Human approval required: yes/no
+
 ## Final Report Format
 
 - Changed
@@ -90,6 +123,9 @@ Stop for human confirmation if contract meaning, schema semantics, public interf
 - Tests Run
 - Documentation Sync
 - Archive Candidates
+- Recommended commit message
+- Commit type: normal commit/amend
+- Push target: feature branch only/main
 - Residual Risks
 - Scope Check
 
