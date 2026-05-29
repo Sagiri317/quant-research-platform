@@ -159,9 +159,9 @@ Capacity proxy、ADV participation、liquidity bucket、turnover cost、benchmar
 
 Ex-post 输入或缺少 timing metadata 的输入必须标记为不可用于决策。
 
-N5 schema diagnostics 可以基于已有项目内本地输入暴露 v1 描述性 proxy diagnostics，但这不代表 C3 已完成。
+N5 schema diagnostics 可以基于已有项目内本地输入暴露 v1 描述性 proxy diagnostics，但这不代表 full N5 risk/regime/cost/capacity capability 已完成。
 
-C3 仍然是正式 risk model、regime system、cost grid、capacity curve、stress/scenario analysis 和仿真级假设的完整研究能力。
+Full N5 risk/regime/cost/capacity capability 仍然是正式 risk model、regime system、cost grid、capacity curve、stress/scenario analysis 和仿真级假设的完整研究能力。
 
 ## 9. 风险、场景和 Regime
 

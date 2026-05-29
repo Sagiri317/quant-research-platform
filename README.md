@@ -82,6 +82,8 @@ scripts\stop_workbench.ps1
 
 Codex 开始新任务时，应先读 [AGENTS.md](AGENTS.md)，判断任务模式，并按任务表面加载最小必要上下文。普通 coding task 不默认加载未来架构目标；只有 Decision Task、architecture planning 或 future capability boundary task 才默认读取 `docs/architecture/target-architecture-and-capabilities.md`。
 
+普通 QRP 任务可先读 `.codex/briefs/current-qrp-status.md` 作为短 current-context primer，再决定是否需要加载 [PROJECT_STATUS.md](PROJECT_STATUS.md)、本 README 或 roadmap；它不是 `PROJECT_STATUS.md` 替代品，改变 topic / blocker / milestone / next step / handoff 时仍需查 `PROJECT_STATUS.md`。
+
 Medium+ task 先输出 task brief、implementation plan、scope declaration、stop conditions 和 verification plan，等用户批准后再实现。涉及 artifact schema、`manifest.display`、API/download、frontend evidence、A 股 pipeline、Factor Factory 或 generated runs 时，按 `.codex/skills/quant-research-platform-maintenance/` 的 context routing 和 contracts reference 加载当前合同。
 
 常用 Codex 任务模板见 `.codex/templates/`；普通任务优先选 fast-path / focused 模板，`/goal`、overnight 和 review-and-fix-loop 使用 `goal-overnight.md`。

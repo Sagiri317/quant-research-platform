@@ -16,6 +16,7 @@ Use this reference to decide which files to read for a QRP task. Keep loading na
 | Task | Load |
 | --- | --- |
 | Any medium+ task | `AGENTS.md`, task brief or user request, and only the linked files below that match the task surface. |
+| Ordinary QRP current-context primer | `.codex/briefs/current-qrp-status.md` before broad-loading `PROJECT_STATUS.md`, `README.md`, or the roadmap; this primer is not a `PROJECT_STATUS.md` replacement. |
 | Goal / Overnight Run | `AGENTS.md`, `.codex/skills/quant-research-platform-maintenance/SKILL.md`, this context routing file, task-specific code map, task-specific contract reference, and relevant tests. |
 | Subagent | Parent-approved envelope, assigned files/directories only, task-specific contract docs, and relevant tests/checks only. |
 | Documentation Sync Gate | `AGENTS.md`, `.codex/skills/quant-research-platform-maintenance/SKILL.md`, changed-file-specific code map, and relevant active docs only. |

@@ -1,7 +1,13 @@
 # Current QRP Status
 
-This is a short current task context brief for Codex. It is not a Git log,
-latest HEAD tracker, changelog, or replacement for `PROJECT_STATUS.md`.
+This is a short current task context primer for ordinary QRP Codex tasks. It is
+not a Git log, latest HEAD tracker, changelog, or replacement for
+`PROJECT_STATUS.md`.
+
+Read this brief before broad-loading `PROJECT_STATUS.md`, `README.md`, or the
+roadmap when a task only needs current project orientation. Re-check
+`PROJECT_STATUS.md` before changing current topic, blocker, milestone, next
+step, public readiness, data/API/Git/Conda/privacy boundary, or handoff state.
 
 Ordinary commits, docs wording edits, pushes, and merges do not require an
 update here unless they change future Codex task context, safety boundaries, or
@@ -19,7 +25,7 @@ the active next-step decision.
 - Pipeline failed-run reliability MVS merged.
 - Task-mode templates and context budget workflow merged.
 - These facts are status pointers, not full evidence records.
-- Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, or handoff state.
+- Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, next step, or handoff state.
 
 ## Milestone Context
 

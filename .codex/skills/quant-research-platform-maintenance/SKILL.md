@@ -16,13 +16,14 @@ The principles behind this workflow are described in `docs/architecture/ai-nativ
 ## Start Here
 
 1. Read project `AGENTS.md`.
-2. Inspect only the requested surface and its linked contract files.
-3. If the change touches schema, API payloads, downloads, frontend evidence state, A-share runs, Factor Factory runs, or generated evidence, read [references/contracts-and-verification.md](references/contracts-and-verification.md).
-4. If the change touches schema/artifact contracts, `manifest.display`, API/download/frontend exposure, module boundaries, dependency direction, testing layers, generated outputs, scale, or security boundaries, read `docs/architecture/engineering-standards.md`.
-5. If the change touches schema `0.7` diagnostics, diagnostic tables, diagnostic UI/report wording, factor evaluation semantics, diagnostics interpretation, tradability, costs, liquidity, capacity, benchmarks, risk, lineage, or paper/live trading wording, read `docs/architecture/quant-research-standards.md`.
-6. If the change touches `docs/code-map/platform-flow.md` or `docs/code-map/platform-flow-interactive.html`, read [references/code-map-flow.md](references/code-map-flow.md).
-7. For task-specific context selection, use [references/context-routing.md](references/context-routing.md). Keep it as routing guidance, not an additional approval layer.
-8. Keep `PROJECT_STATUS.md` and workspace-root handoff rules as defined by `AGENTS.md`; do not edit root workspace files unless explicitly asked.
+2. Ordinary QRP tasks may read `.codex/briefs/current-qrp-status.md` as a short current-context primer before broad-loading `PROJECT_STATUS.md`, `README.md`, or the roadmap.
+3. Inspect only the requested surface and its linked contract files.
+4. If the change touches schema, API payloads, downloads, frontend evidence state, A-share runs, Factor Factory runs, or generated evidence, read [references/contracts-and-verification.md](references/contracts-and-verification.md).
+5. If the change touches schema/artifact contracts, `manifest.display`, API/download/frontend exposure, module boundaries, dependency direction, testing layers, generated outputs, scale, or security boundaries, read `docs/architecture/engineering-standards.md`.
+6. If the change touches schema `0.7` diagnostics, diagnostic tables, diagnostic UI/report wording, factor evaluation semantics, diagnostics interpretation, tradability, costs, liquidity, capacity, benchmarks, risk, lineage, or paper/live trading wording, read `docs/architecture/quant-research-standards.md`.
+7. If the change touches `docs/code-map/platform-flow.md` or `docs/code-map/platform-flow-interactive.html`, read [references/code-map-flow.md](references/code-map-flow.md).
+8. For task-specific context selection, use [references/context-routing.md](references/context-routing.md). Keep it as routing guidance, not an additional approval layer.
+9. Keep `PROJECT_STATUS.md` and workspace-root handoff rules as defined by `AGENTS.md`; the current brief is not a replacement for `PROJECT_STATUS.md`, and changes to current topic, blocker, milestone, next step, public readiness, data/API/Git/Conda/privacy boundary, or handoff still require checking `PROJECT_STATUS.md`.
 
 Use PowerShell `Select-String` if `rg` is unavailable or denied.
 

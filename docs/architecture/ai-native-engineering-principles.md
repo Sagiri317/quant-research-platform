@@ -1,8 +1,8 @@
 # AI-Native Engineering Principles / AI 原生工程原则
 
-> 本文是 `quant-research-platform` 的长期工程原则文档。它沉淀本项目在 AI-assisted / vibe coding 实践中形成的稳定经验，用来指导人类、Codex 和其他 AI agent 共同维护一个可长期演化的量化研究平台。
+> 本文是 `quant-research-platform` 的 AI-native engineering compressed mental model / short principles。它沉淀本项目在 AI-assisted / vibe coding 实践中形成的稳定经验，用来指导人类、Codex 和其他 AI agent 共同维护一个可长期演化的量化研究平台。
 >
-> 本文不是任务清单，不是路线图，不是当前实现状态，也不是 Codex 的逐条执行说明。具体执行边界以 `AGENTS.md`、`.codex/skills/quant-research-platform-maintenance/SKILL.md`、`EVALUATION_INTERFACE.md`、`ARCHITECTURE.md`、`docs/code-map/` 和代码/测试为准。
+> 本文不是任务清单，不是路线图，不是当前实现状态，也不是 Codex 的逐条 task execution 说明。具体 task-mode、recommended reasoning effort、context budget、subagent、commit/push/merge、Goal / Overnight 执行规则以 `AGENTS.md`、`.codex/skills/quant-research-platform-maintenance/SKILL.md`、`.codex/skills/quant-research-platform-maintenance/references/context-routing.md`、`.codex/templates/` 和 `.codex/briefs/current-qrp-status.md` 为准；工程合同仍以 `EVALUATION_INTERFACE.md`、`ARCHITECTURE.md`、`docs/code-map/` 和代码/测试为准。
 
 ---
 
@@ -357,88 +357,33 @@ AI 很容易制造看起来合理但实际增加长期维护成本的抽象，�
 
 ---
 
-## 11. Task Modes
+## 11. Task Mode Principles
 
-本项目的 AI / Codex 工作应分为几种稳定模式。
+本项目的 AI / Codex 工作应区分任务类型，但本文只保留原则。具体 task-mode templates、recommended reasoning effort、context budget 和执行步骤由 `AGENTS.md`、maintenance skill、context-routing、`.codex/templates/` 和 current brief 维护。
 
-### 11.1 Goal Template
+### 11.1 Goal Clarity
 
-所有 medium+ 工作先明确 goal：
-
-```text
-Goal:
-Current Phase:
-Why This Matters:
-Allowed Scope:
-Forbidden Scope:
-Success Condition:
-Non-Goals:
-Relevant Contracts:
-Relevant Docs:
-Relevant Code Areas:
-Expected Blast Radius:
-```
+所有 medium+ 工作都应先明确 goal、current phase、allowed scope、forbidden scope、success condition、non-goals、relevant contracts 和 expected blast radius。
 
 很多 drift 来自 goal 不清晰，而不是实现能力不足。
 
-### 11.2 Decision Task
+### 11.2 Decision Before Implementation
 
-用于新 contract、新 schema、新架构、重大 refactor、future capability。
+新 contract、新 schema、新架构、重大 refactor 和 future capability 必须先完成 decision / planning，再进入 implementation。AI 不应把需要人类判断的设计问题伪装成普通改代码任务。
 
-规则：
+### 11.3 Governed Execution
 
-```text
-先输出 task brief / implementation plan / scope declaration。
-不要实现。
-等待人工批准。
-```
+边界清楚、无需逐步决策的一组任务可以用 governed execution 推进，但必须受明确 envelope、stop conditions 和 verification plan 约束。遇到 contract ambiguity、schema semantics change、new abstraction / framework、architecture expansion、future capability implementation、unclear blast radius 或 execution / simulation semantics 时必须停止。
 
-### 11.3 Governed Batch
+### 11.4 Audit / Assessment Boundaries
 
-用于一组边界清楚、无需逐步决策的任务。
-
-规则：
-
-```text
-按顺序执行。
-默认 autonomous execution。
-遇到 stop conditions 必须停止。
-```
-
-Stop conditions 包括：
-
-- contract ambiguity
-- schema semantics change
-- new abstraction / framework
-- architecture expansion
-- future capability implementation
-- unclear blast radius
-- execution / simulation semantics
-
-### 11.4 Audit / Assessment
-
-用于文档、治理、路线图、合同、架构审计。
-
-规则：
-
-```text
-只做 audit / assessment。
-不要修改文件。
-输出 current state / problems / risks / suggested minimal fix。
-```
+文档、治理、路线图、合同和架构审计应先区分 discovery-only、assessment、docs-sync 和 implementation。审计结论不应自动升级为跨层实现，除非任务 envelope 已批准该范围。
 
 ---
 
 ## 12. Approval Gate
 
-Medium+ tasks 必须在实现前完成：
-
-- task brief
-- implementation plan
-- scope declaration
-- explicit human approval
-
-然后才能开始实现。
+需要人类判断的 medium+ tasks 必须在实现前完成 task brief、implementation plan、scope declaration 和 explicit human approval。具体 approval gate 的格式和何时等待，以 `AGENTS.md`、maintenance skill 和 `.codex/templates/` 为准。
 
 但 approval gate 不应卡住所有小任务。小范围、低风险、无 contract 变化、无跨层影响的任务，可以按 governed batch 执行。
 
@@ -455,12 +400,13 @@ Medium+ tasks 必须在实现前完成：
 - future capability contamination
 - scope expansion
 
-推荐读取层级：
+推荐原则：
 
-- project invariant：AGENTS、README、ARCHITECTURE、EVALUATION_INTERFACE
-- task contracts：相关 schema、tests、code-map
-- implementation：当前模块和直接依赖
-- future roadmap：只有 architecture / planning task 才读
+- start narrow from the task surface
+- use current brief for short current orientation
+- load task contracts before broad architecture
+- load implementation files and direct dependencies before speculative future docs
+- load future roadmap only for architecture / planning / future capability tasks
 
 默认不要让 AI “看完整项目后自由发挥”。
 

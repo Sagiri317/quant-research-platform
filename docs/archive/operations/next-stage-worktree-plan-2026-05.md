@@ -125,5 +125,5 @@ scripts\stop_workbench.ps1
 
 ## 相关路线图
 
-- Active roadmap: [next-stage-roadmap.md](next-stage-roadmap.md)
-- Current status and valid samples: [../../PROJECT_STATUS.md](../../PROJECT_STATUS.md)
+- Active roadmap: [next-stage-roadmap.md](../../architecture/next-stage-roadmap.md)
+- Current status and valid samples: [../../PROJECT_STATUS.md](../../../PROJECT_STATUS.md)
