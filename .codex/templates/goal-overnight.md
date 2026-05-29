@@ -1,0 +1,135 @@
+# Goal Overnight
+
+## Task Mode
+
+`goal-overnight`
+
+Covers `/goal`, overnight runs, and review-and-fix-loop work.
+
+## Recommended Reasoning Effort
+
+High / Highest available
+
+Goal mode can use high token budgets when the approved envelope justifies them. High-token mode is for maximizing closed engineering loops under Pro limits, not for unconstrained context loading.
+
+## Approved Execution Envelope
+
+- Approved autonomous execution: yes/no
+- Goal and why it matters:
+- Task mode: `/goal` / overnight / review-and-fix-loop
+- Files/directories in scope:
+- Allowed scope:
+- Forbidden scope:
+- Contracts that must not change:
+- Permitted subagent roles:
+- Verification commands:
+- Stop conditions:
+- Final report format:
+
+## Context Budget
+
+- Context loading plan:
+- Start with `AGENTS.md`, this template, the maintenance skill, context routing, and task-specific current docs.
+- Use `rg` before opening additional files.
+- Read assigned files, relevant diffs, and task-specific contracts before broader docs.
+- Broader context is allowed only inside this approved envelope.
+- Report candidate expansion before loading architecture, archive, generated evidence, private data, or unrelated modules not named in the envelope.
+
+## Goal And Why It Matters
+
+- Goal:
+- User impact:
+- Engineering closure target:
+- Non-goals:
+
+## Allowed Scope
+
+- Files/directories:
+- Fix classes allowed:
+- P0/P1/P2 handling: confirmed P0/P1/P2 issues inside the approved envelope may be fixed without per-fix approval.
+- P3 handling: report P3 cleanup, or fix only when small, clearly in scope, and low risk.
+
+## Forbidden Scope
+
+- Do not remove private data boundaries.
+- Do not change schemas, `manifest.display`, API/frontend shared contracts, deployment/trading scope, market/frequency/simulation scope, dependencies, directory structure, archive placement, or unclear blast-radius surfaces unless the envelope explicitly approves that exact change.
+- Do not delete files, generate private artifacts, expose private data, install dependencies, or run full tests unless approved.
+
+## Phase Plan
+
+- Phase 0: Confirm envelope, branch/worktree state, and stop conditions.
+- Phase 1: Load narrow context through context routing.
+- Phase 2: Audit or implement the first bounded slice.
+- Phase 3: Run narrow checks and fix confirmed in-scope P0/P1/P2.
+- Phase 4: Repeat review-and-fix loop until no confirmed blocker remains or a stop condition is hit.
+- Phase 5: Run final approved verification and produce final report.
+
+## Subagent Plan
+
+- Subagents allowed: yes/no
+- Roles:
+- Assigned files/directories or diff slices:
+- Context packet per subagent:
+- Write scopes are disjoint: yes/no
+- Shared contract owner: main agent / named integrator
+- Review-only subagents modify files: no
+
+## Review-And-Fix Loop
+
+- Review lens:
+- Severity standard:
+- Fix threshold: P0/P1/P2 inside approved scope.
+- P3 policy: report or fix only if small and in scope.
+- Re-check command after each slice:
+- Stop when repeated findings require a new test/static check or exceed approved scope.
+
+## Verification Cadence
+
+- After each slice:
+- Before commit:
+- Before push:
+- Before merge:
+- Full-suite approval required: yes/no
+
+## Checkpoint Report Cadence
+
+- Report after each phase or every:
+- Include: completed slice, files changed, checks run, next slice, stop-condition status.
+
+## Commit / Push / Merge Policy
+
+- Commit and merge are not bound together.
+- After a commit, push the committed branch unless the envelope says not to.
+- After a merge, push the merged target branch.
+- No amend, rebase, squash, merge commit, branch deletion, or force push unless explicitly approved.
+- For fast-forward to `main`, use `ff-merge-and-push.md`.
+
+## Stop Conditions
+
+- Stop for schema change, `manifest.display` change, public API/frontend shared contract change, directory restructuring, new dependency, new abstraction/framework, market/frequency/simulation/trading scope expansion, private/generated data edits, file deletion, archive or historical-doc physical moves, and unclear blast radius.
+- Stop for secrets, credentials, external API/vendor/broker/exchange connections, deployment exposure, or private data leakage risk.
+- Stop if verification failures point outside the approved envelope.
+
+## Checks
+
+- Envelope-approved checks:
+- Narrow checks after each slice:
+- `git status --short --branch`
+- `git diff --check`
+- `git diff --name-only`
+
+## Output Format
+
+- Changed
+- Not Changed
+- Contracts Touched
+- Context Loaded
+- Subagents Used
+- Checks Run
+- Review-And-Fix Loop Summary
+- Documentation Sync
+- Archive Candidates
+- Stop Conditions
+- Residual Risks
+- Scope Check
+- Recommended commit message

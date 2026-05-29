@@ -45,6 +45,29 @@ Recommended reasoning effort:
 - Highest / max available: architecture decisions, schema migrations, major refactors, and future capability boundaries.
 - Use the closest available Codex reasoning-effort setting.
 
+Task modes and template selection:
+
+| Class | Task mode | Template | Recommended reasoning effort | Default context posture |
+| --- | --- | --- | --- | --- |
+| Fast Path | `discovery-only` | `.codex/templates/discovery-only.md` | Low | Inspect only; no edits. |
+| Fast Path | `docs-sync` | `.codex/templates/docs-sync.md` | Low | Changed docs and direct active links only. |
+| Fast Path | `commit-and-push` | `.codex/templates/commit-and-push.md` | Low | Current branch status and staged/unstaged diff only. |
+| Fast Path | `branch-push` | `.codex/templates/branch-push.md` | Low | Current branch and local commits only. |
+| Fast Path | `ff-merge-and-push` | `.codex/templates/ff-merge-and-push.md` | Low | Approved feature branch, `main`, and merge status only. |
+| Standard | `focused-audit` | `.codex/templates/focused-audit.md` | Medium / High | Target surface, relevant diff, and linked contracts only. |
+| Standard | `focused-implementation` | `.codex/templates/focused-implementation.md` | Medium / Medium-High | Target files and narrow tests first. |
+| Standard | `pre-commit-review` | `.codex/templates/pre-commit-review.md` | Medium | Diff-only by default. |
+| Goal / Overnight | `goal-overnight` | `.codex/templates/goal-overnight.md` | High / Highest available | Broader context only inside an approved envelope. |
+
+Use Fast Path modes for bounded routine work so ordinary tasks do not accidentally become broad audits. Use Standard modes when edits or review need focused reasoning over a task surface. Use Goal / Overnight only when the user has approved the full execution envelope required by `AGENTS.md`.
+
+Preserved workflow controls:
+
+- Default conversation language remains Chinese unless the user asks otherwise.
+- Every task template must recommend a reasoning effort instead of asking the user to switch models frequently.
+- Challenge / Objection, commit message recommendation, subagent policy, Scope Check, Stop Conditions, Documentation Sync Gate, and Archive Candidate Gate remain active.
+- Goal / Overnight mode may use high token budgets when approved, but it does not weaken private data, schema, `manifest.display`, API/frontend, deployment/trading, file deletion, archive movement, or unclear blast-radius stop conditions.
+
 Branch / Worktree policy:
 
 - Small docs-only, typo, and single-file rules cleanup may run on a clean `main`.

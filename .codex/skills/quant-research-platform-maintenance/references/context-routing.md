@@ -2,6 +2,17 @@
 
 Use this reference to decide which files to read for a QRP task. Keep loading narrow and task-shaped; this file is not an approval layer.
 
+## Context Budget Rules
+
+- Ordinary tasks do not broad-load the repository. Start with `rg` over the requested surface, then read only the matching files.
+- Prefer line ranges or focused snippets before full files when the file is large and the relevant section is known.
+- Load future architecture, roadmap, archive, generated evidence, private data, or broad code maps only when the task mode or approved envelope requires them.
+- `pre-commit-review` is diff-only by default: read `git status`, `git diff`, and only the files needed to understand changed lines.
+- Subagents read only their assigned files, assigned directories, or assigned diff slices. They do not independently expand to full-repo context.
+- If the likely file budget needs to expand beyond the task-specific set, report the candidate expansion first with the reason and wait when expansion would touch a stop condition.
+- Goal / Overnight mode may use broader context only inside an approved envelope with a context loading plan, phase plan, subagent plan, verification cadence, and stop conditions.
+- Prefer checked-in routing and templates under `.codex/templates/` over ad hoc context packs.
+
 | Task | Load |
 | --- | --- |
 | Any medium+ task | `AGENTS.md`, task brief or user request, and only the linked files below that match the task surface. |

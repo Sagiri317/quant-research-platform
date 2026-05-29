@@ -1,10 +1,29 @@
-# AI Task Brief Template
+# Task Brief Full
+
+Use this full template for medium+, large, complex, contract-adjacent, or cross-surface work. For small bounded tasks, prefer the fast-path templates in `.codex/templates/`; for `/goal`, overnight, or review-and-fix-loop work, use `goal-overnight.md`.
 
 ## Goal
 
 ## Task Mode
 
 Examples: Implementation Task, Docs Task, Decision Task, Review Task, Archive/Context-Routing Task.
+
+Recommended template alternatives:
+
+- `discovery-only.md` for inspect-only work.
+- `docs-sync.md` for narrow active-doc synchronization.
+- `focused-audit.md` or `focused-implementation.md` for standard bounded work.
+- `pre-commit-review.md` for branch review before commit.
+- `commit-and-push.md`, `branch-push.md`, or `ff-merge-and-push.md` for Git operations.
+- `goal-overnight.md` for approved high-token long-run work.
+
+## Context Budget
+
+- Default file budget:
+- `rg` searches planned:
+- Files to read as snippets:
+- Files to read in full:
+- Candidate expansion that needs reporting first:
 
 ## Context Loaded
 
@@ -30,6 +49,11 @@ Local Research Platform
 - Planned subagent roles:
 - Challenge / Objection allowed: yes/no
 - Commit message recommendation required: yes/no
+
+## Recommended Reasoning Effort
+
+- Selected effort:
+- Reason:
 
 ## Execution Envelope
 
@@ -88,6 +112,12 @@ Codex may use multiple subagents inside an approved envelope. Each subagent must
 
 ## Expected Changes
 
+## Checks
+
+- Pre-edit checks:
+- Narrow verification:
+- Final verification:
+
 ## Tests Required
 
 ## Definition Of Done
@@ -113,7 +143,7 @@ If a prompt constraint appears wrong, too narrow, or in conflict with code/docs/
 - Recommended alternative:
 - Human approval required: yes/no
 
-## Final Report Format
+## Output Format
 
 - Changed
 - Not Changed

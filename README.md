@@ -84,6 +84,8 @@ Codex 开始新任务时，应先读 [AGENTS.md](AGENTS.md)，判断任务模式
 
 Medium+ task 先输出 task brief、implementation plan、scope declaration、stop conditions 和 verification plan，等用户批准后再实现。涉及 artifact schema、`manifest.display`、API/download、frontend evidence、A 股 pipeline、Factor Factory 或 generated runs 时，按 `.codex/skills/quant-research-platform-maintenance/` 的 context routing 和 contracts reference 加载当前合同。
 
+常用 Codex 任务模板见 `.codex/templates/`；普通任务优先选 fast-path / focused 模板，`/goal`、overnight 和 review-and-fix-loop 使用 `goal-overnight.md`。
+
 本项目的 historical plans/specs 已归档到 `docs/archive/superpowers/`；它们可用于追溯历史决策，但不是当前合同真相源。当前合同以源码、测试、`manifest.display`、根目录文档、`docs/architecture/`、`docs/code-map/` 和项目维护 skill 为准。
 
 ## 当前结构
