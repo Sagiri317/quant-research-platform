@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quant_research_platform.interfaces.api.app import create_app
+from tests.interfaces.api.artifact_run_fixtures import write_evaluation_set
 
 
 def test_api_markets_endpoint_matches_web_contract() -> None:
@@ -389,6 +390,133 @@ def test_pipeline_checkpoints_can_be_read_from_disk_after_restart(tmp_path) -> N
     assert checkpoints.json()[0]["key"] == "evaluate"
     assert checkpoints.json()[0]["row_count"] == 7
     assert str(tmp_path) not in checkpoints.text
+
+
+def test_pipeline_run_status_can_be_read_from_runtime_summary_after_restart(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "disk_failed_run"
+    run_dir.mkdir()
+    (run_dir / "runtime_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "disk_failed_run",
+                "requested_run_id": "disk_failed_run",
+                "status": "failed",
+                "start_from": "existing_factors",
+                "warnings": [
+                    {
+                        "code": "local_detail",
+                        "message": "loaded C:/Users/DELL/private/factors.parquet",
+                    }
+                ],
+                "failed_step": "evaluate",
+                "failure_code": "missing_existing_factors",
+                "checkpoints": [
+                    {"key": "snapshot", "label": "snapshot", "status": "ready"},
+                    {
+                        "key": "evaluate",
+                        "label": "evaluation",
+                        "status": "failed",
+                        "message": "failed at data/processed_private/csmar/factors.parquet",
+                        "failure_code": "missing_existing_factors",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "checkpoints.json").write_text(
+        json.dumps(
+            [
+                {"key": "snapshot", "label": "snapshot", "status": "ready"},
+                {
+                    "key": "evaluate",
+                    "label": "evaluation",
+                    "status": "failed",
+                    "failure_code": "missing_existing_factors",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
+
+    status = client.get("/api/pipeline-runs/disk_failed_run")
+    checkpoints = client.get("/api/pipeline-runs/disk_failed_run/checkpoints")
+
+    assert status.status_code == 200
+    assert status.json() == {
+        "kind": "run",
+        "run_id": "disk_failed_run",
+        "status": "failed",
+        "message": "pipeline execution failed: missing_existing_factors",
+        "run_ref": "disk_failed_run",
+        "warnings": [{"code": "local_detail"}],
+        "start_from": "existing_factors",
+        "failed_step": "evaluate",
+        "failure_code": "missing_existing_factors",
+    }
+    assert checkpoints.status_code == 200
+    assert "processed_private" not in status.text
+    assert "C:/Users" not in status.text
+    assert "processed_private" not in checkpoints.text
+
+
+def test_failed_pipeline_partial_evaluation_is_not_api_visible_run(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "partial_failed_run"
+    evaluation_dir = run_dir / "evaluation"
+    evaluation_dir.mkdir(parents=True)
+    (run_dir / "runtime_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "partial_failed_run",
+                "requested_run_id": "partial_failed_run",
+                "status": "failed",
+                "start_from": "existing_factors",
+                "failed_step": "evaluate",
+                "failure_code": "evaluation_failed",
+                "warnings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "checkpoints.json").write_text(
+        json.dumps(
+            [
+                {"key": "snapshot", "label": "snapshot", "status": "completed"},
+                {
+                    "key": "evaluate",
+                    "label": "evaluation",
+                    "status": "failed",
+                    "failure_code": "evaluation_failed",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    write_evaluation_set(evaluation_dir, run_id="partial_failed_run")
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
+
+    runs = client.get("/api/runs")
+    status = client.get("/api/pipeline-runs/partial_failed_run")
+
+    assert runs.status_code == 200
+    assert all(run["run_id"] != "partial_failed_run" for run in runs.json())
+    assert status.status_code == 200
+    assert status.json()["status"] == "failed"
 
 
 def test_pipeline_checkpoints_sanitize_private_artifacts_after_restart(

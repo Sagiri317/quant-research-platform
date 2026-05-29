@@ -77,6 +77,9 @@ class PipelineRunSummaryPayload(BaseModel):
     message: str | None = None
     run_ref: str | None = None
     warnings: list[dict[str, Any]] = Field(default_factory=list)
+    start_from: str | None = None
+    failed_step: str | None = None
+    failure_code: str | None = None
 
 
 class PipelineCheckpointPayload(BaseModel):
@@ -115,7 +118,7 @@ def create_pipeline_snapshot_payload(
         ) from exc
     summary = _summary_from_snapshot(config, snapshot)
     _remember_pipeline_summary(pipeline_runs, payload.run_id, summary)
-    return summary.model_dump()
+    return _summary_dump(summary)
 
 
 def create_pipeline_run_payload(
@@ -149,9 +152,12 @@ def create_pipeline_run_payload(
             message=_pipeline_failure_message(exc),
             run_ref=run_dir.name,
             warnings=[],
+            start_from=config.start_from,
+            failed_step=_failed_step_from_runtime_summary(run_dir),
+            failure_code=getattr(exc, "failure_code", None),
         )
         _remember_pipeline_summary(pipeline_runs, payload.run_id, summary)
-        return summary.model_dump()
+        return _summary_dump(summary)
     summary = PipelineRunSummaryPayload(
         kind="run",
         run_id=config.run_id,
@@ -159,9 +165,10 @@ def create_pipeline_run_payload(
         message=f"pipeline run completed from {config.start_from}",
         run_ref=result.run_dir.name,
         warnings=result.warnings,
+        start_from=config.start_from,
     )
     _remember_pipeline_summary(pipeline_runs, payload.run_id, summary)
-    return summary.model_dump()
+    return _summary_dump(summary)
 
 
 def pipeline_run_status_payload(
@@ -169,11 +176,20 @@ def pipeline_run_status_payload(
     pipeline_runs: dict[str, PipelineRunSummaryPayload],
     *,
     kind: PipelineResourceKind,
+    output_root: Path = DEFAULT_OUTPUT_ROOT,
 ) -> dict[str, Any]:
     """Return in-memory pipeline run or snapshot status for the requested kind."""
 
+    summary = pipeline_runs.get(_pipeline_summary_key(kind, run_id))
+    if summary is None and kind == "run":
+        run_dir = _pipeline_run_dir(output_root, run_id)
+        runtime_summary_path = run_dir / "runtime_summary.json"
+        if runtime_summary_path.is_file():
+            return _summary_dump(
+                _summary_from_runtime_summary(run_id, run_dir, runtime_summary_path)
+            )
     summary = _pipeline_summary_for_kind(run_id, pipeline_runs, kind)
-    return summary.model_dump()
+    return _summary_dump(summary)
 
 
 def pipeline_checkpoint_payloads(
@@ -253,6 +269,66 @@ def _pipeline_failure_message(exc: PipelineRunnerError) -> str:
     if isinstance(failure_code, str) and failure_code:
         return f"pipeline execution failed: {failure_code}"
     return "pipeline execution failed"
+
+
+def _summary_dump(summary: PipelineRunSummaryPayload) -> dict[str, Any]:
+    return summary.model_dump(exclude_none=True)
+
+
+def _failed_step_from_runtime_summary(run_dir: Path) -> str | None:
+    path = run_dir / "runtime_summary.json"
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return _sanitize_checkpoint_string(value.get("failed_step"))
+
+
+def _summary_from_runtime_summary(
+    requested_run_id: str,
+    run_dir: Path,
+    path: Path,
+) -> PipelineRunSummaryPayload:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="pipeline runtime summary invalid",
+        ) from exc
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=422, detail="pipeline runtime summary invalid")
+    status = _sanitize_checkpoint_string(value.get("status"))
+    if status not in {"ready", "failed", "completed"}:
+        raise HTTPException(status_code=422, detail="pipeline runtime summary invalid")
+    failure_code = _sanitize_checkpoint_string(value.get("failure_code"))
+    failed_step = _sanitize_checkpoint_string(value.get("failed_step"))
+    start_from = _sanitize_checkpoint_string(value.get("start_from"))
+    message = None
+    if status == "failed":
+        message = (
+            f"pipeline execution failed: {failure_code}"
+            if failure_code
+            else "pipeline execution failed"
+        )
+    elif start_from:
+        message = f"pipeline run completed from {start_from}"
+    warnings = _sanitize_checkpoint_records(value.get("warnings", []))
+    return PipelineRunSummaryPayload(
+        kind="run",
+        run_id=requested_run_id,
+        status=status,
+        message=message,
+        run_ref=run_dir.name,
+        warnings=warnings,
+        start_from=start_from,
+        failed_step=failed_step,
+        failure_code=failure_code,
+    )
 
 
 def _pipeline_run_dir(output_root: Path, run_ref: str) -> Path:

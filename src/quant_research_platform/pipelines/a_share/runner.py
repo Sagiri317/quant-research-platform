@@ -115,7 +115,10 @@ def run_a_share_pipeline(
         allow_processed_factor_expression=True,
     )
     if validation.has_blocking:
-        raise PipelineRunnerError(_blocking_issue_message(validation.blocking))
+        raise PipelineRunnerError(
+            _blocking_issue_message(validation.blocking),
+            failure_code="invalid_config",
+        )
     try:
         requested_factors = resolve_processed_factor_columns(config)
     except PipelineRunnerError as exc:
@@ -169,12 +172,17 @@ def run_a_share_pipeline(
             else:
                 payload = step.function(config)  # type: ignore[misc]
         except Exception as exc:
-            failure_code = _failure_code_from_exception(exc)
+            failure_code = _failure_code_from_exception(
+                exc,
+                step_key=step.key,
+                start_from=config.start_from,
+            )
             message = (
                 "pipeline evaluation failed"
                 if step.key == "evaluate"
                 else f"{step.key} failed"
             )
+            checkpoints = _completed_checkpoints(checkpoints)
             checkpoints.append(
                 PipelineCheckpoint(
                     key=step.key,
@@ -532,8 +540,29 @@ def _elapsed(started: float) -> float:
     return round(time.perf_counter() - started, 6)
 
 
-def _failure_code_from_exception(exc: Exception) -> str:
+def _failure_code_from_exception(
+    exc: Exception,
+    *,
+    step_key: str,
+    start_from: str,
+) -> str:
+    if isinstance(exc, PipelineRunnerError) and exc.failure_code:
+        return exc.failure_code
     message = str(exc).lower()
+    normalized = message.replace("\\", "/")
+    if isinstance(exc, FileNotFoundError):
+        if step_key == "evaluate" and start_from == "existing_factors":
+            return "missing_existing_factors"
+        return "missing_pipeline_input"
+    if step_key != "evaluate" and (
+        "missing" in message
+        or "not found" in message
+        or "no such file" in message
+        or "raw_private" in normalized
+        or "interim_private" in normalized
+        or "processed_private" in normalized
+    ):
+        return "missing_pipeline_input"
     if (
         "missing" in message
         or "required column" in message
@@ -542,7 +571,31 @@ def _failure_code_from_exception(exc: Exception) -> str:
         return "missing_processed_field"
     if "empty" in message or "insufficient" in message or "no rows" in message:
         return "insufficient_sample"
-    return "cannot_compute"
+    if "cannot compute" in message or "could not compute" in message:
+        return "cannot_compute"
+    if step_key == "evaluate":
+        return "evaluation_failed"
+    return "unknown"
+
+
+def _completed_checkpoints(
+    checkpoints: list[PipelineCheckpoint],
+) -> list[PipelineCheckpoint]:
+    return [
+        PipelineCheckpoint(
+            key=checkpoint.key,
+            label=checkpoint.label,
+            status="completed" if checkpoint.status == "ready" else checkpoint.status,
+            artifact=checkpoint.artifact,
+            message=checkpoint.message,
+            duration_seconds=checkpoint.duration_seconds,
+            row_count=checkpoint.row_count,
+            failure_code=checkpoint.failure_code,
+            warnings=checkpoint.warnings,
+            blocking_issues=checkpoint.blocking_issues,
+        )
+        for checkpoint in checkpoints
+    ]
 
 
 __all__ = [

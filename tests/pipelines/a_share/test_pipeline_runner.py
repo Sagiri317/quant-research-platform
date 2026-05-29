@@ -222,7 +222,7 @@ def test_existing_factors_runner_records_failed_step(tmp_path, monkeypatch) -> N
     assert summary["status"] == "failed"
     assert summary["failed_step"] == "evaluate"
     assert [checkpoint["status"] for checkpoint in summary["checkpoints"]] == [
-        "ready",
+        "completed",
         "skipped",
         "skipped",
         "skipped",
@@ -267,6 +267,40 @@ def test_existing_factors_runner_records_sanitized_failure_code(
     assert checkpoints[-1]["failure_code"] == "missing_processed_field"
     assert "private table" not in json.dumps(summary)
     assert "private table" not in json.dumps(checkpoints)
+
+
+def test_existing_factors_runner_classifies_missing_factor_input(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import quant_research_platform.pipelines.a_share.runner as runner_module
+
+    def fail_run_a_share_evaluation(_request):
+        raise FileNotFoundError("missing data/processed_private/csmar/factors.parquet")
+
+    monkeypatch.setattr(
+        runner_module,
+        "run_a_share_evaluation",
+        fail_run_a_share_evaluation,
+    )
+    config = _valid_config(tmp_path)
+    config.start_from = "existing_factors"
+
+    with pytest.raises(PipelineRunnerError, match="missing_existing_factors"):
+        run_a_share_pipeline(config)
+
+    summary = json.loads(
+        (tmp_path / "sample_run" / "runtime_summary.json").read_text(encoding="utf-8")
+    )
+    checkpoints = json.loads(
+        (tmp_path / "sample_run" / "checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert summary["status"] == "failed"
+    assert summary["failed_step"] == "evaluate"
+    assert summary["failure_code"] == "missing_existing_factors"
+    assert checkpoints[-1]["failure_code"] == "missing_existing_factors"
+    assert "processed_private" not in json.dumps(summary)
+    assert "processed_private" not in json.dumps(checkpoints)
 
 
 def test_existing_factors_runner_smoke_writes_schema_artifacts_and_index(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -145,8 +146,22 @@ def _iter_evaluation_run_dirs(root: Path):
         if (child / "manifest.json").is_file():
             yield child
         pipeline_evaluation = child / "evaluation"
-        if (pipeline_evaluation / "manifest.json").is_file():
+        if (
+            (pipeline_evaluation / "manifest.json").is_file()
+            and not _is_failed_pipeline_run(child)
+        ):
             yield pipeline_evaluation
+
+
+def _is_failed_pipeline_run(run_dir: Path) -> bool:
+    runtime_summary_path = run_dir / "runtime_summary.json"
+    if not runtime_summary_path.is_file():
+        return False
+    try:
+        value = json.loads(runtime_summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(value, dict) and value.get("status") == "failed"
 
 
 def discover_run_refs(run_roots: list[RunRoot]) -> list[RunRef]:

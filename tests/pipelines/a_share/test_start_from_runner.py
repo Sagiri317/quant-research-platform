@@ -516,14 +516,52 @@ def test_pipeline_runner_records_failed_step_without_private_error_text(
         "evaluate",
     ]
     assert [checkpoint["status"] for checkpoint in checkpoints] == [
-        "ready",
-        "ready",
+        "completed",
+        "completed",
         "failed",
         "skipped",
         "skipped",
     ]
     assert "E:/private" not in json.dumps(summary)
     assert "vendor/path" not in json.dumps(checkpoints)
+
+
+def test_rebuild_failure_classifies_missing_pipeline_input(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = _full_config(tmp_path)
+    monkeypatch.setattr(
+        "quant_research_platform.pipelines.a_share.runner._run_build_interim_step",
+        lambda config: {"row_count": 1, "artifact": "interim"},
+    )
+
+    def fail_panel(config):
+        raise FileNotFoundError("missing data/interim_private/csmar/panel-input.csv")
+
+    monkeypatch.setattr(
+        "quant_research_platform.pipelines.a_share.runner._run_build_panel_step",
+        fail_panel,
+    )
+
+    with pytest.raises(PipelineRunnerError, match="missing_pipeline_input"):
+        run_a_share_pipeline(config)
+
+    summary = json.loads(
+        (config.output_root / "full_run" / "runtime_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    checkpoints = json.loads(
+        (config.output_root / "full_run" / "checkpoints.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["failure_code"] == "missing_pipeline_input"
+    assert checkpoints[2]["failure_code"] == "missing_pipeline_input"
+    assert checkpoints[3]["status"] == "skipped"
+    assert "interim_private" not in json.dumps(summary)
+    assert "interim_private" not in json.dumps(checkpoints)
 
 
 def test_pipeline_runner_starts_from_existing_factors_with_full_checkpoint_chain(

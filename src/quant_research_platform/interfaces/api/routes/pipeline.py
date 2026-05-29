@@ -78,10 +78,12 @@ def pipeline_snapshot_checkpoints(
 def pipeline_run_status(run_id: str, request: Request) -> dict[str, object]:
     """Return in-memory pipeline run status."""
 
+    context = api_context(request)
     return pipeline_run_status_payload(
         run_id,
-        api_context(request).pipeline_runs,
+        context.pipeline_runs,
         kind="run",
+        output_root=context.pipeline_output_root,
     )
 
 
