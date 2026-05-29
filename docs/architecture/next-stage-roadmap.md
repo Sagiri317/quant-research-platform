@@ -10,14 +10,14 @@
 
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
-| N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged to `main`; next N5 private real-data smoke, then pipeline reliability | N5 MVS descriptive proxy diagnostics 已落地；full capability 仍需单独设计和验证 |
+| N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged to `main`; N5 private real-data smoke passed; next pipeline reliability | N5 MVS descriptive proxy diagnostics 已落地并完成 2025H2 aggregate smoke；full capability 仍需单独设计和验证 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
 | Pipeline history UI | Pipeline run history / visibility | P3 | planned | 在不改变 pipeline 语义的前提下改善本地 workbench 对 run history 的读取和展示 |
 
 当前推荐顺序：
 
 ```text
-1. N5 private real-data smoke, then pipeline reliability
+1. pipeline reliability
 2. N6 ML prediction handoff
 3. Pipeline history UI
 ```
@@ -27,8 +27,10 @@
 - N1/N2/N3/N4/N7/N8 已合入 `main`，后续扩展应基于 schema `0.7`、
   `combination_id`、portable display preview metadata 和 artifact/API/frontend 合同。
 - N5 当前不再是纯 planned：schema `0.7` 已落地 N5 MVS descriptive proxy diagnostics
-  并 merge to `main`；下一步是 N5 private real-data smoke, then pipeline reliability。本文中的
-  full N5 capability 仍指后续 full risk/regime/cost/capacity capability。
+  并 merge to `main`；N5 private real-data smoke 已通过，run id
+  `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate
+  smoke；下一步是 pipeline reliability。本文中的 full N5 capability 仍指后续
+  full risk/regime/cost/capacity capability。
 - 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和
   frontend acceptance 已生成；后续不要直接扩大一次性 full run。
 
@@ -60,6 +62,12 @@
   `scenario_metrics`、liquidity/capacity descriptive proxy、market-cap/size
   descriptive proxy、missing-input-aware diagnostic status 和 diagnostics-enabled
   A-share month breakdown；full backend pytest 和 ruff 已通过。
+- N5 private real-data smoke 已通过：schema `0.7` validation passed；
+  `diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、
+  `exposure_capacity_summary` 和 `portfolio_risk_summary` 已检查；
+  `manifest.display`、API preview 和 selected ZIP smoke passed。Workbench browser
+  acceptance 未运行；API/display evidence 足以证明 generic diagnostics table
+  visibility。
 - 下方目标保留为 full N5 capability 的 unfinished work，不升级当前 phase，也不扩大当前实现范围。
 
 目标：

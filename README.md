@@ -46,7 +46,7 @@ local approved data
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 只保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | N1/N2/N3/N4/N7/N8 已合入 `main` | Pipeline runner、tradability diagnostics、ZIP packaging、frontend feature split、run identity、contract consumer convergence | 已验证 |
 | 当前 2023-2025 evidence 可作为回归入口 | `schema07_eval_2023_2025_v1`、`schema07_eval_2023_2025_rev120_v1` 和 Factor Factory `rev_120d` smoke | 已验证 |
-| N5 MVS descriptive proxy diagnostics 已合入 `main`，下一步为 N5 private real-data smoke, then pipeline reliability | schema `0.7` diagnostics registry、diagnostic artifacts、`scenario_metrics` flat bps cost sensitivity、missing-input-aware status、diagnostics-enabled A-share month breakdown 和 `manifest.display` / API / frontend evidence flow 已落地；true risk / regime / capacity / simulation 仍是未来工作 | merged to `main` |
+| N5 MVS descriptive proxy diagnostics 已合入 `main`，N5 private real-data smoke 已通过，下一步为 pipeline reliability | run id `n5_private_smoke_2025h2_rev120_v1`；2025H2 aggregate smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API preview 和 selected ZIP smoke 已通过；workbench browser acceptance 未运行；true risk / regime / capacity / simulation 仍是未来工作 | smoke passed |
 
 ## 复现方式
 
@@ -192,6 +192,8 @@ Schema `0.7` 的 required 输出包括 `metrics/ic.csv`、`metrics/grouped_retur
 Evaluation run 使用 artifact schema `0.7`。`src/quant_research_platform/artifacts/schema_registry.py` 与 tests 是字段数、grain、unique key、required_if / nullable_if、sentinel、generated files、display/download eligibility 的 source of truth。`manifest.display` 是 API、下载、CSV preview、React 表格、图表和“全选下载”的共同展示合同。本地 API 支持多个 run root；前端和下载接口中的 run 身份是 `(source_alias, run_id)`，不能只按 `run_id` 折叠或缓存。
 
 N5 v1 当前状态是 partial implementation + contract groundwork：已通过 schema registry、required diagnostics tables 和 conditional materialized views 承载 post-run descriptive proxy diagnostics。risk/regime/cost/capacity 仍只是不用于决策的 proxy diagnostics，不是正式 risk model、capacity model、regime engine、backtest 或 simulation system。
+
+N5 private real-data smoke 已通过：run id `n5_private_smoke_2025h2_rev120_v1`，数据范围只记录为 2025H2 aggregate smoke。Schema `0.7` validation passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、`exposure_capacity_summary`、`portfolio_risk_summary`、`manifest.display`、API preview 和 selected ZIP smoke 已检查通过。Workbench browser acceptance 本轮未运行；API/display evidence 足以证明 generic diagnostics table visibility。
 
 当前保留的 2023-2025 private canonical 样例：
 

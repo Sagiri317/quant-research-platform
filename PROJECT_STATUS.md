@@ -8,11 +8,14 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 
 ## Current Open Signal / 当前 open 信号
 
-Schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`。当前
-evaluation-set artifacts 使用 `run_id`、
-`summary.json`、`run_context.json`、registry-backed required tables、
-`manifest.display` compact download refs、generic `/tables/{table_key}/preview`
-和 `src/quant_research_platform/evaluations/diagnostics/` 下的 post-run diagnostics。
+Schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`，并已完成
+N5 private real-data smoke。Smoke run id 为
+`n5_private_smoke_2025h2_rev120_v1`；数据范围只记录为 2025H2 aggregate
+smoke，不记录 row-level private data、股票样本或完整 private paths。当前
+evaluation-set artifacts 使用 `run_id`、`summary.json`、`run_context.json`、
+registry-backed required tables、`manifest.display` compact download refs、
+generic `/tables/{table_key}/preview` 和
+`src/quant_research_platform/evaluations/diagnostics/` 下的 post-run diagnostics。
 
 已落地范围包括 return-path risk proxy、flat bps cost sensitivity via
 `scenario_metrics`、liquidity/capacity descriptive proxy、market-cap/size
@@ -21,10 +24,16 @@ A-share month breakdown。它们仍只是 descriptive proxy diagnostics，不是
 proof、validated risk model、Barra exposure、real capacity analysis、simulation、
 paper/live trading、order routing、deployment 或 investment advice。Full backend
 pytest 和 ruff 已通过。Private CSMAR data 和 `reports/private_real/` 继续保持本地私有，
-不进入 portable metadata。
+不进入 portable metadata。N5 private smoke 已验证 schema `0.7` validation
+passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、
+`exposure_capacity_summary` 和 `portfolio_risk_summary` 已检查；
+`manifest.display`、API preview 和 selected ZIP smoke passed。Workbench browser
+acceptance 本轮未运行；API/display evidence 足以证明 generic diagnostics table
+visibility。
 
 Root handoff status: open. Workspace-root planning/status 需要同步 N5 MVS
-merge-to-main 状态；下一步切到先 N5 private real-data smoke，然后 pipeline reliability。
+merge-to-main 与 N5 private real-data smoke passed 状态；下一步切到 pipeline
+reliability。
 
 ## 当前状态
 
@@ -32,7 +41,7 @@ merge-to-main 状态；下一步切到先 N5 private real-data smoke，然后 pi
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
 | 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
-| 当前分支 | `main`；schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`，下一步为先 N5 private real-data smoke，然后 pipeline reliability |
+| 当前分支 | `main`；schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`；N5 private real-data smoke passed；下一步为 pipeline reliability |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、N5 MVS descriptive proxy diagnostics、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
@@ -53,6 +62,10 @@ real-data outputs，不提交、不公开、不复制到聊天或公共材料中
   当前 2023-2025 schema `0.7` `rev_120d` kernel / portfolio mode parity shard。
 - `reports/private_real/ff/20260527_rev120_factory_smoke_v1`：当前 Factor
   Factory `rev_120d` smoke 样例。
+- N5 private real-data smoke 已通过：run id
+  `n5_private_smoke_2025h2_rev120_v1`，数据范围只记录为 2025H2 aggregate
+  smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API
+  preview 和 selected ZIP smoke 均通过。
 - `data/processed_private/csmar/panel_full/research_panel_2014_2025.parquet`：
   full research panel。
 - `data/processed_private/csmar/price_volume_factors_full/price_volume_factors_2014_2025.parquet`：
@@ -74,7 +87,7 @@ evidence only; they are not current valid run-contract examples.
 
 ## 下一步
 
-1. 推进 N5 private real-data smoke，然后 pipeline reliability；先用私有真实数据做安全 smoke 与管线可靠性检查，再决定 full N5 capability 的后续设计。
+1. 推进 pipeline reliability；N5 private real-data smoke 已通过，后续先检查管线可靠性，再决定 full N5 capability 的后续设计。
 2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor
    evaluation contract 分离。
 3. 基于当前 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison、图表分页预览和浏览器验收作为后续回归门槛。
@@ -95,6 +108,6 @@ evidence only; they are not current valid run-contract examples.
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
-| 2026-05-29 | capability | N5 MVS descriptive proxy diagnostics 已 merge to `main`：return-path risk proxy、flat bps cost sensitivity via `scenario_metrics`、liquidity/capacity descriptive proxy、market-cap/size descriptive proxy、missing-input-aware diagnostic status 和 diagnostics-enabled A-share month breakdown 均保持 descriptive proxy 边界；full backend pytest 和 ruff 已通过；下一步为先 N5 private real-data smoke，然后 pipeline reliability。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
+| 2026-05-29 | capability | N5 MVS descriptive proxy diagnostics 已 merge to `main`，且 N5 private real-data smoke passed：run id `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate smoke；schema `0.7` validation passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、`exposure_capacity_summary`、`portfolio_risk_summary`、`manifest.display`、API preview 和 selected ZIP smoke 已检查通过；workbench browser acceptance 未运行，API/display evidence 足以证明 generic diagnostics table visibility；下一步为 pipeline reliability。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
 | 2026-05-28 | capability | Schema `0.7` / N5 v1 diagnostics implementation 已落地；full N5 capability 和 N6 仍需单独设计。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-28 |
 | 2026-05-27 | milestone | 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-27 |
