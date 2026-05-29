@@ -26,11 +26,14 @@ Use this reference to decide which files to read for a QRP task. Keep loading na
 | Code map edits | `.codex/skills/quant-research-platform-maintenance/references/code-map-flow.md` and the specific `docs/code-map/` files being changed. |
 | README, architecture index, project-facing docs | The target doc, `AGENTS.md`, and only directly linked current docs needed to verify wording. |
 | Decision task, architecture planning, or future capability boundary | `docs/architecture/target-architecture-and-capabilities.md`, `docs/architecture/next-stage-roadmap.md`, and the relevant standards. Ordinary coding tasks should not load target architecture by default. |
+| Governance, architecture, standards, AI-native engineering standard update, Codex workflow redesign, task-mode policy, or documentation topology task | Load `docs/architecture/ai-native-engineering-standard.md` as the full governance reference. Ordinary coding tasks do not load `docs/architecture/ai-native-engineering-standard.md` by default. |
 | Branch, commit, push, or fast-forward merge task | Use `.codex/templates/commit-and-push.md`, `.codex/templates/branch-push.md`, or `.codex/templates/ff-merge-and-push.md` as the current execution template. Do not load archived worktree plans by default. |
 | Goal / overnight execution planning | Use `.codex/templates/goal-overnight.md` plus the approved envelope. Preserve the context budget rules above. |
 | Historical worktree or operations planning | Load `docs/archive/operations/next-stage-worktree-plan-2026-05.md` only when tracing historical branch/worktree decisions. It is not current Codex task-rule truth. |
 | Historical plans/specs under `docs/archive/superpowers/` | Load only when tracing prior decisions, negative/rejection coverage, or explicitly cited historical context. Do not treat these files as current contract truth without confirmation from current docs, code, or tests. |
 
 Ordinary coding tasks do not load `docs/architecture/target-architecture-and-capabilities.md` by default. Load target architecture only for future capability, architecture planning, or phase-boundary tasks.
+
+Ordinary coding tasks do not load `docs/architecture/ai-native-engineering-standard.md` by default. Load the full standard only for governance, architecture, standards, AI-native engineering standard updates, Codex workflow redesign, task-mode policy, or documentation topology tasks.
 
 Subagents do not read the full project by default. They read only the narrow context packet specified by the parent-approved envelope.

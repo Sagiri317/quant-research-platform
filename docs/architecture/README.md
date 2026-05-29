@@ -7,11 +7,12 @@ Phase 1 已完成代码功能复核和文档收口；验收结论已沉淀到 [p
 Human reading order:
 
 1. [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)：最终功能和架构目标；合并原目标目录结构和未来能力池，保留目标细节，同时标明当前已落地边界。
-2. [ai-native-engineering-principles.md](ai-native-engineering-principles.md)：AI-native engineering mental model 和长期工程原则；不是当前实现状态、roadmap 或 Codex 执行规则。
-3. [engineering-standards.md](engineering-standards.md)：模块依赖、合同、版本、错误、配置、测试、扩展和生成物规则。
-4. [quant-research-standards.md](quant-research-standards.md)：point-in-time、universe、tradability、成本、容量、统计验证和复现规则。
-5. [phase-1-acceptance-record.md](phase-1-acceptance-record.md)：Phase 1 已实现功能、验收证据、冻结合同和遗留架构债。
-6. [next-stage-roadmap.md](next-stage-roadmap.md)：Phase 1 之后的下一阶段任务、验收口径和测试边界。
+2. [ai-native-engineering-principles.md](ai-native-engineering-principles.md)：AI-native engineering short mental model / compressed principles；不是当前实现状态、roadmap 或 Codex 执行规则。
+3. [ai-native-engineering-standard.md](ai-native-engineering-standard.md)：AI-native engineering full governance reference / complete standard；低频阅读，只在 governance、architecture、standards、Codex workflow redesign、task-mode policy 或 documentation topology tasks 中加载。
+4. [engineering-standards.md](engineering-standards.md)：模块依赖、合同、版本、错误、配置、测试、扩展和生成物规则。
+5. [quant-research-standards.md](quant-research-standards.md)：point-in-time、universe、tradability、成本、容量、统计验证和复现规则。
+6. [phase-1-acceptance-record.md](phase-1-acceptance-record.md)：Phase 1 已实现功能、验收证据、冻结合同和遗留架构债。
+7. [next-stage-roadmap.md](next-stage-roadmap.md)：Phase 1 之后的下一阶段任务、验收口径和测试边界。
 
 Codex execution templates are not maintained in architecture docs. Current
 task-mode, branch, commit, push, fast-forward merge, and Goal / Overnight
@@ -25,7 +26,8 @@ Codex context loading order:
 3. 诊断语义、tradability、cost、capacity、risk、benchmark 或 trading-adjacent wording 任务再读 [quant-research-standards.md](quant-research-standards.md)。
 4. 模块边界、合同版本、测试、生成物、API/frontend 边界或安全规则任务再读 [engineering-standards.md](engineering-standards.md)。
 5. Decision Task、architecture planning 或 future capability boundary task 才默认读取 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)；普通 coding task 不默认加载它。
-6. Branch / commit / push / merge / fast-forward merge tasks should use `.codex/templates/commit-and-push.md`, `.codex/templates/branch-push.md`, and `.codex/templates/ff-merge-and-push.md` instead of architecture docs.
+6. 普通 coding task 不默认读取 [ai-native-engineering-standard.md](ai-native-engineering-standard.md)；只有 governance、architecture、standards、Codex workflow redesign、task-mode policy 或 documentation topology tasks 才加载 full standard。
+7. Branch / commit / push / merge / fast-forward merge tasks should use `.codex/templates/commit-and-push.md`, `.codex/templates/branch-push.md`, and `.codex/templates/ff-merge-and-push.md` instead of architecture docs.
 
 Archive candidates:
 
