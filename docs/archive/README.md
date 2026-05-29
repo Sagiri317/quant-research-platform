@@ -12,4 +12,7 @@ Current QRP truth sources are:
 - `docs/code-map/`;
 - `.codex/skills/quant-research-platform-maintenance/` references.
 
+`operations/` contains historical branch/worktree/execution planning records,
+not current Codex task rules.
+
 Do not update archived records to match current state unless a task explicitly asks for archive maintenance. Prefer updating active docs and leaving historical records frozen.

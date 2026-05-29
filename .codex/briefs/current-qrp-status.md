@@ -1,24 +1,31 @@
 # Current QRP Status
 
+This is a short current task context brief for Codex. It is not a Git log,
+latest HEAD tracker, changelog, or replacement for `PROJECT_STATUS.md`.
+
+Ordinary commits, docs wording edits, pushes, and merges do not require an
+update here unless they change future Codex task context, safety boundaries, or
+the active next-step decision.
+
 ## Current Phase
 
 - Local Research Platform.
 - Current architecture style: Stable Core + High-Velocity Research Edge.
 - Current work stays centered on factor research, evaluations, artifact generation, local evidence workflow, and A-share research reliability.
 
-## Latest Main Status
+## Status-Relevant Milestones
 
-- Latest docs sync pushed: `06ca1597000ed7ef96e4641b115fef3a9d0e2cd0`.
-- Pipeline failed-run reliability MVS merged: `67f363b550f6c3ce04be68fb30a47ed3088eb32d`.
 - N5 private real-data smoke passed: `n5_private_smoke_2025h2_rev120_v1`.
+- Pipeline failed-run reliability MVS merged.
+- Task-mode templates and context budget workflow merged.
 - These facts are status pointers, not full evidence records.
 - Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, or handoff state.
 
-## Latest Merged Milestones
+## Milestone Context
 
 - N5 v1 private smoke demonstrates the current descriptive proxy diagnostics path on private A-share data.
 - Pipeline failed-run reliability MVS improved failed-run handling around the local research workflow.
-- Current docs sync aligned active documentation with the latest known `main` state.
+- Task-mode templates moved common Codex execution flows into `.codex/templates/`.
 
 ## Current Next Step
 

@@ -1,5 +1,10 @@
 # Next Stage Worktree Plan / 下一阶段分支与工作树计划
 
+Historical boundary: this file is a frozen operations planning record from
+2026-05. Current Git/worktree/task-mode execution rules are maintained in
+`.codex/templates/*`, the quant research platform maintenance skill, and its
+context-routing reference. Do not update this archived plan into current truth.
+
 本文只记录当前 active branches、future branch suggestions 和 current worktree strategy。
 已完成分支历史、旧 smoke run stories 和 implementation-heavy notes 不在本文展开。
 功能验收仍以后续各分支的测试和 code review 为准。
