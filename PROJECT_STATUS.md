@@ -31,9 +31,18 @@ passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、
 acceptance 本轮未运行；API/display evidence 足以证明 generic diagnostics table
 visibility。
 
+Pipeline failed-run reliability MVS 已 fast-forward merge to `main`，commit
+`67f363b550f6c3ce04be68fb30a47ed3088eb32d`。已完成范围包括 persisted
+`runtime_summary.json` status fallback、failed-state checkpoints consistency、
+pipeline-local stable `failure_code`、sanitized failed status/checkpoints payload，
+以及 failed pipeline partial evaluation 不暴露为 completed evidence run。
+该 MVS 不包含 retry/resume/overwrite、global API error envelope migration、
+warnings system expansion、schema change、`manifest.display` change、frontend
+change、N5/N6 expansion 或 scheduler/worker/deployment。
+
 Root handoff status: open. Workspace-root planning/status 需要同步 N5 MVS
-merge-to-main 与 N5 private real-data smoke passed 状态；下一步切到 pipeline
-reliability。
+merge-to-main、N5 private real-data smoke passed，以及 pipeline failed-run
+reliability MVS merged-to-main 状态；下一步先判断 pipeline reliability 第二片是否需要继续，否则进入 N6 prediction handoff audit。
 
 ## 当前状态
 
@@ -41,11 +50,11 @@ reliability。
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
 | 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
-| 当前分支 | `main`；schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`；N5 private real-data smoke passed；下一步为 pipeline reliability |
+| 当前分支 | `main`；schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`；N5 private real-data smoke passed；pipeline failed-run reliability MVS 已 merge to `main`；下一步先判断 pipeline reliability 第二片，否则进入 N6 prediction handoff audit |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、N5 MVS descriptive proxy diagnostics、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
-| A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation |
+| A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation；failed-run reliability MVS 已补齐 persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard |
 | Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner，并用 `candidate_id + combination_id` 汇总 evaluation results |
 | 市场范围 | A 股 enabled；crypto / other markets planned / disabled，不代表真实支持，也不保留空实现包 |
 | 私有边界 | CSMAR raw/interim/processed 和 `reports/private_real/` 不提交、不公开 |
@@ -80,14 +89,15 @@ evidence only; they are not current valid run-contract examples.
 1. Full N5 risk/regime/cost/capacity capability 尚未设计完成；当前 N5 MVS 只能作为
    descriptive proxy diagnostics groundwork，不代表真实风险模型或容量模型。
 2. N6 ML prediction handoff 尚未设计；不要混入 N5 full diagnostics 分支。
-3. 单个 32-combination 2023-2025 full run 仍受 weights/remap memory path 约束；扩展前
+3. Pipeline retry/resume/overwrite 仍未实现；global API error envelope 也仍未迁移。
+4. 单个 32-combination 2023-2025 full run 仍受 weights/remap memory path 约束；扩展前
    应先设计低内存写出路径，或继续按 shard 作为正式回归输入。
-4. `tradability_diagnostics_summary` 暂缓；若需要全交易日平均诊断，应新增
+5. `tradability_diagnostics_summary` 暂缓；若需要全交易日平均诊断，应新增
    artifact/API summary，而不是从 preview 前几行临时计算。
 
 ## 下一步
 
-1. 推进 pipeline reliability；N5 private real-data smoke 已通过，后续先检查管线可靠性，再决定 full N5 capability 的后续设计。
+1. 先判断 pipeline reliability 是否需要第二个 minimal vertical slice；若不继续，则进入 N6 prediction handoff audit。
 2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor
    evaluation contract 分离。
 3. 基于当前 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison、图表分页预览和浏览器验收作为后续回归门槛。
@@ -108,6 +118,6 @@ evidence only; they are not current valid run-contract examples.
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
-| 2026-05-29 | capability | N5 MVS descriptive proxy diagnostics 已 merge to `main`，且 N5 private real-data smoke passed：run id `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate smoke；schema `0.7` validation passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、`exposure_capacity_summary`、`portfolio_risk_summary`、`manifest.display`、API preview 和 selected ZIP smoke 已检查通过；workbench browser acceptance 未运行，API/display evidence 足以证明 generic diagnostics table visibility；下一步为 pipeline reliability。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
+| 2026-05-29 | capability | N5 MVS descriptive proxy diagnostics 已 merge to `main`，且 N5 private real-data smoke passed：run id `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate smoke；schema `0.7` validation passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、`exposure_capacity_summary`、`portfolio_risk_summary`、`manifest.display`、API preview 和 selected ZIP smoke 已检查通过；workbench browser acceptance 未运行，API/display evidence 足以证明 generic diagnostics table visibility。Pipeline failed-run reliability MVS 也已 fast-forward merge to `main`，commit `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；已完成 status fallback、failed-state consistency、stable `failure_code`、sanitization 和 partial failed evaluation guard；retry/resume/overwrite 与 global API error envelope migration 仍未实现。下一步先判断 pipeline reliability 第二片是否需要继续，否则进入 N6 prediction handoff audit。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
 | 2026-05-28 | capability | Schema `0.7` / N5 v1 diagnostics implementation 已落地；full N5 capability 和 N6 仍需单独设计。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-28 |
 | 2026-05-27 | milestone | 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-27 |

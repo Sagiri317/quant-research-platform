@@ -34,6 +34,7 @@ local approved data
 - Factor Studio / Pipeline Builder / Data Checkpoints 是平台主流程；CSV upload 只作为 legacy/dev uploaded-panel smoke / compatibility 入口保留。
 - Pipeline Builder 前端默认生成配置快照，调用 `POST /api/pipeline-snapshots`；也可切换到执行模式，调用 `POST /api/pipeline-runs`。
 - 可执行 pipeline 调用的公开控制参数是 `kernel` 和 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并且一定运行到 evaluation。
+- Pipeline failed-run reliability MVS 已合入 `main`：persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard 已完成；retry/resume/overwrite 仍未实现。
 - Factor Factory 已有后端 registry、批量评估、API 浏览入口和本地 workbench 浏览入口；candidate summary 按 `candidate_id + combination_id` 展开 N7 evaluation results。
 - Evidence workbench 只展示 artifact/API 结果，不重新计算 eligibility、tradability、IC、returns、weights 或 turnover；图表通过 bounded preview pagination 拼接当前组合时间轴，CSV 明细仍保持 preview row limit。
 - Crypto 和其他市场只显示为 planned / disabled，不代表真实数据、交易或空实现包。
@@ -46,7 +47,7 @@ local approved data
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 只保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | N1/N2/N3/N4/N7/N8 已合入 `main` | Pipeline runner、tradability diagnostics、ZIP packaging、frontend feature split、run identity、contract consumer convergence | 已验证 |
 | 当前 2023-2025 evidence 可作为回归入口 | `schema07_eval_2023_2025_v1`、`schema07_eval_2023_2025_rev120_v1` 和 Factor Factory `rev_120d` smoke | 已验证 |
-| N5 MVS descriptive proxy diagnostics 已合入 `main`，N5 private real-data smoke 已通过，下一步为 pipeline reliability | run id `n5_private_smoke_2025h2_rev120_v1`；2025H2 aggregate smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API preview 和 selected ZIP smoke 已通过；workbench browser acceptance 未运行；true risk / regime / capacity / simulation 仍是未来工作 | smoke passed |
+| N5 MVS descriptive proxy diagnostics 已合入 `main`，N5 private real-data smoke 已通过；pipeline failed-run reliability MVS 已合入 `main` | run id `n5_private_smoke_2025h2_rev120_v1`；2025H2 aggregate smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API preview 和 selected ZIP smoke 已通过；pipeline failed-run commit `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；true risk / regime / capacity / simulation、retry/resume/overwrite 和 global API error envelope migration 仍是未来工作 | smoke passed / MVS merged |
 
 ## 复现方式
 

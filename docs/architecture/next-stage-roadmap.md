@@ -10,15 +10,16 @@
 
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
-| N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged to `main`; N5 private real-data smoke passed; next pipeline reliability | N5 MVS descriptive proxy diagnostics 已落地并完成 2025H2 aggregate smoke；full capability 仍需单独设计和验证 |
+| N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged to `main`; N5 private real-data smoke passed; failed-run reliability MVS merged | N5 MVS descriptive proxy diagnostics 已落地并完成 2025H2 aggregate smoke；full capability 仍需单独设计和验证 |
 | N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
+| Pipeline reliability second slice | Pipeline reliability | P2 | decide next | failed-run reliability MVS 已合入；先判断是否继续第二个 minimal vertical slice |
 | Pipeline history UI | Pipeline run history / visibility | P3 | planned | 在不改变 pipeline 语义的前提下改善本地 workbench 对 run history 的读取和展示 |
 
 当前推荐顺序：
 
 ```text
-1. pipeline reliability
-2. N6 ML prediction handoff
+1. decide whether pipeline reliability needs a second MVS
+2. N6 ML prediction handoff audit
 3. Pipeline history UI
 ```
 
@@ -29,8 +30,11 @@
 - N5 当前不再是纯 planned：schema `0.7` 已落地 N5 MVS descriptive proxy diagnostics
   并 merge to `main`；N5 private real-data smoke 已通过，run id
   `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate
-  smoke；下一步是 pipeline reliability。本文中的 full N5 capability 仍指后续
-  full risk/regime/cost/capacity capability。
+  smoke。Pipeline failed-run reliability MVS 已 fast-forward merge to `main`，commit
+  `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；已完成 status fallback、
+  failed-state consistency、stable `failure_code`、sanitization 和 partial failed
+  evaluation guard。retry/resume/overwrite 与 global API error envelope migration
+  仍未实现。本文中的 full N5 capability 仍指后续 full risk/regime/cost/capacity capability。
 - 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和
   frontend acceptance 已生成；后续不要直接扩大一次性 full run。
 
@@ -44,6 +48,7 @@
 | N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/` |
 | N7 A 股 evaluation run identity 与 2023-2025 样例生成 | merged to `main` | 当前 API-visible run 使用 `combination_id` 管理 result slices；当前有效样例见 `PROJECT_STATUS.md` |
 | N8 架构简化与合同消费收敛 | merged to `main` | display preview/download helper、factor-template API、A-share service entry 和 legacy/dev upload 边界已收敛 |
+| Pipeline failed-run reliability MVS | merged to `main` | A-share failed runs 已具备 persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard；不代表 retry/resume/overwrite 或 production reliability |
 
 完成任务的详细 implementation notes 和历史验收记录应查 Git history、
 `docs/archive/superpowers/` historical execution records、`PROJECT_STATUS.md` 的短摘要和
