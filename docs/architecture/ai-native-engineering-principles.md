@@ -1,6 +1,6 @@
 # AI-Native Engineering Principles / AI 原生工程原则
 
-> 本文是 `quant-research-platform` 的 AI-native engineering compressed mental model / short principles。它沉淀本项目在 AI-assisted / vibe coding 实践中形成的稳定经验，用来指导人类、Codex 和其他 AI agent 共同维护一个可长期演化的量化研究平台。
+> 本文是 `quant-research-platform` 的 AI-native engineering compressed mental model / short principles。它沉淀本项目在 AI-assisted engineering 实践中形成的稳定经验，用来指导人类、Codex 和其他 AI agent 共同维护一个可长期演化的量化研究平台。
 >
 > 本文不是任务清单，不是路线图，不是当前实现状态，也不是 Codex 的逐条 task execution 说明。具体 task-mode、recommended reasoning effort、context budget、subagent、commit/push/merge、Goal / Overnight 执行规则以 `AGENTS.md`、`.codex/skills/quant-research-platform-maintenance/SKILL.md`、`.codex/skills/quant-research-platform-maintenance/references/context-routing.md`、`.codex/templates/` 和 `.codex/briefs/current-qrp-status.md` 为准；工程合同仍以 `EVALUATION_INTERFACE.md`、`ARCHITECTURE.md`、`docs/code-map/` 和代码/测试为准。
 
