@@ -6,7 +6,7 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 `docs/architecture/phase-1-acceptance-record.md`，下一阶段任务见
 `docs/architecture/next-stage-roadmap.md`，实现流向见 `docs/code-map/`。
 
-## Current Open Signal / 当前 open 信号
+## Current Root-Synced Signal / 当前已同步信号
 
 Schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`，并已完成
 N5 private real-data smoke。Smoke run id 为
@@ -40,9 +40,10 @@ pipeline-local stable `failure_code`、sanitized failed status/checkpoints paylo
 warnings system expansion、schema change、`manifest.display` change、frontend
 change、N5/N6 expansion 或 scheduler/worker/deployment。
 
-Root handoff status: open. Workspace-root planning/status 需要同步 N5 MVS
-merge-to-main、N5 private real-data smoke passed，以及 pipeline failed-run
-reliability MVS merged-to-main 状态；下一步先判断 pipeline reliability 第二片是否需要继续，否则进入 N6 prediction handoff audit。
+Root handoff status: closed 2026-05-30. Workspace-root planning/status 已同步
+N5 MVS merge-to-main、N5 private real-data smoke passed，以及 pipeline
+failed-run reliability MVS merged-to-main 状态；下一步先判断 pipeline reliability
+第二片是否需要继续，否则进入 N6 prediction handoff audit。
 
 ## 当前状态
 
@@ -118,6 +119,6 @@ evidence only; they are not current valid run-contract examples.
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
-| 2026-05-29 | capability | N5 MVS descriptive proxy diagnostics 已 merge to `main`，且 N5 private real-data smoke passed：run id `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate smoke；schema `0.7` validation passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、`exposure_capacity_summary`、`portfolio_risk_summary`、`manifest.display`、API preview 和 selected ZIP smoke 已检查通过；workbench browser acceptance 未运行，API/display evidence 足以证明 generic diagnostics table visibility。Pipeline failed-run reliability MVS 也已 fast-forward merge to `main`，commit `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；已完成 status fallback、failed-state consistency、stable `failure_code`、sanitization 和 partial failed evaluation guard；retry/resume/overwrite 与 global API error envelope migration 仍未实现。下一步先判断 pipeline reliability 第二片是否需要继续，否则进入 N6 prediction handoff audit。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
+| 2026-05-29 | capability | N5 MVS descriptive proxy diagnostics 已 merge to `main`，且 N5 private real-data smoke passed：run id `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate smoke；schema `0.7` validation passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、`exposure_capacity_summary`、`portfolio_risk_summary`、`manifest.display`、API preview 和 selected ZIP smoke 已检查通过；workbench browser acceptance 未运行，API/display evidence 足以证明 generic diagnostics table visibility。Pipeline failed-run reliability MVS 也已 fast-forward merge to `main`，commit `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；已完成 status fallback、failed-state consistency、stable `failure_code`、sanitization 和 partial failed evaluation guard；retry/resume/overwrite 与 global API error envelope migration 仍未实现。下一步先判断 pipeline reliability 第二片是否需要继续，否则进入 N6 prediction handoff audit。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-30 |
 | 2026-05-28 | capability | Schema `0.7` / N5 v1 diagnostics implementation 已落地；full N5 capability 和 N6 仍需单独设计。当前 `main` 仍保持无外部 API、部署、paper/live trading、实盘交易或空未来目录。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-28 |
 | 2026-05-27 | milestone | 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison、frontend chart pagination 和 workbench acceptance 证据已补齐；后续分别推进 N5/N6。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | closed 2026-05-27 |

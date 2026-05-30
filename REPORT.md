@@ -13,7 +13,7 @@
 | 第一市场模块 | A 股 |
 | 数据源 | CSMAR，用户手工导出 |
 | 数据范围 | 2014-2025 interim / panel / factor 已有历史产物 |
-| 评估范围 | 历史 2024-2025 long-only full-sample evaluation；当前有效证据包括 2023-2025 schema `0.7` canonical sample、`rev_120d` kernel / portfolio parity shard 和 Factor Factory smoke |
+| 评估范围 | 历史 2024-2025 long-only full-sample evaluation；当前有效证据包括 2023-2025 schema `0.7` canonical sample、`rev_120d` kernel / portfolio parity shard、Factor Factory smoke 和 N5 private aggregate smoke |
 | universe | 第一版 A 股范围，排除 B 股和北交所 |
 | 私有边界 | raw/interim/processed 和 private reports 不公开、不提交 |
 
@@ -51,9 +51,12 @@ reports/private_real/factor_evaluation/
 
 reports/private_real/ff/
   20260527_rev120_factory_smoke_v1/
+
+N5 private aggregate smoke:
+  run_id = n5_private_smoke_2025h2_rev120_v1
 ```
 
-当前研究引用以 schema `0.7` evaluation artifacts 为主；公开或演示时只引用 aggregate tables、manifest metadata、图表配置和下载索引，不引用 CSMAR 明细或可还原 vendor 数据。
+当前研究引用以 schema `0.7` evaluation artifacts 为主；公开或演示时只引用 aggregate tables、manifest metadata、图表配置、下载索引和 public-safe aggregate smoke 口径，不引用 CSMAR 明细、股票样本、row-level private data、完整 private paths 或可还原 vendor 数据。
 
 ## Evaluation 口径
 
@@ -69,7 +72,9 @@ reports/private_real/ff/
 
 迁移前历史 long-only 年度结果里，`rev_20d`、`rev_60d`、`rev_120d` 是第一版最主要的候选信号。2024 年 `rev_120d` 的 `mean_rankic` 约 0.114，`mean_net_portfolio_return` 约 0.003086；2025 年 `rev_60d` 的 `mean_rankic` 约 0.095，`mean_net_portfolio_return` 约 0.001717。
 
-这些数字只作为历史统计诊断，不是最终投资结论。当前 2023-2025 canonical sample 已包含 `mom_20d`、`vol_20d`、`avg_amount_20d` 和 `rev_120d` 的 8-combination dataframe long-only 样例；`rev_120d` parity shard 覆盖 2 labels、2 kernels 和 2 portfolio modes；Factor Factory smoke 已能从受控模板生成 `rev_120d` 候选并汇总到 evaluation results。
+这些数字只作为历史统计诊断，不是最终投资结论。当前 2023-2025 canonical sample 已包含 `mom_20d`、`vol_20d`、`avg_amount_20d` 和 `rev_120d` 的 8-combination dataframe long-only 样例；`rev_120d` parity shard 覆盖 2 labels、2 kernels 和 2 portfolio modes；Factor Factory smoke 已能从受控模板生成 `rev_120d` 候选并汇总到 evaluation results。N5 MVS descriptive proxy diagnostics 已通过 private aggregate smoke，覆盖 schema `0.7` validation、diagnostics tables、`manifest.display`、API preview 和 selected ZIP smoke；它仍不是完整风险模型、容量模型或 alpha proof。
+
+Pipeline failed-run reliability MVS 已完成 persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard。它不包含 retry/resume/overwrite、global API error envelope migration、N5/N6 expansion 或部署能力。
 
 当前研究 framing 是：A 股 price-volume 因子中，反转类信号在历史诊断里值得继续跟踪，但还不能视为可交易 alpha。后续研究判断必须补充成本敏感性、regime、中性化、风险暴露和 ML prediction handoff 分析。
 
@@ -78,5 +83,6 @@ reports/private_real/ff/
 - 当前完整 market module 只有 A 股；crypto 和其他市场只是 planned / disabled 能力表述，不保留空实现包。
 - 当前只覆盖第一批 price-volume factors。
 - ML prediction、风险暴露、regime、factor mining 和组合优化仍需单独设计和验证。
+- Pipeline retry/resume/overwrite 和 global API error envelope migration 尚未实现。
 - 模拟盘不属于当前范围；未来如果做，必须保持与真实交易接口隔离，并单独审批。
 - CSMAR 明细数据和可还原 vendor 数据的报告不公开。
