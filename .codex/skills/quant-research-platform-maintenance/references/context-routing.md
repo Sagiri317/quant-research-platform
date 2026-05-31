@@ -26,6 +26,8 @@ Use this reference to decide which files to read for a QRP task. Keep loading na
 | Subagent | Parent-approved envelope, assigned files/directories only, task-specific contract docs, and relevant tests/checks only. |
 | Documentation Impact Gate | `.codex/templates/documentation-impact-gate.md`, changed-file-specific candidates, and relevant active docs only. |
 | Documentation Sync Gate | `AGENTS.md`, `.codex/skills/quant-research-platform-maintenance/SKILL.md`, changed-file-specific code map, and relevant active docs only. |
+| Post-merge documentation sync | `.codex/templates/post-merge-documentation-sync.md`, `.codex/templates/documentation-impact-gate.md`, merge changed-file list, and candidate active docs only. |
+| Dependency or contract approval | `.codex/templates/dependency-contract-approval.md` plus only the directly affected config, contract, template, or code references needed to classify approval. |
 | Archive Candidate Check | `docs/archive/README.md`, current active doc containing the candidate, and `PROJECT_STATUS.md` only if status/handoff changes. |
 | Artifact schema, `manifest.display`, API/download, frontend evidence, generated runs | `.codex/skills/quant-research-platform-maintenance/references/contracts-and-verification.md`; add `docs/architecture/engineering-standards.md` when module boundaries, validation, generated outputs, API/frontend behavior, or security boundaries are part of the task. |
 | Diagnostics semantics, factor evaluation meaning, tradability, costs, liquidity, capacity, benchmarks, risk, lineage, or trading-adjacent wording | `docs/architecture/quant-research-standards.md` plus the contracts reference when artifacts/API/frontend are touched. |

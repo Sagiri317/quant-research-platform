@@ -54,6 +54,7 @@ Task modes and template selection:
 | Fast Path | `discovery-only` | `.codex/templates/discovery-only.md` | Low | Inspect only; no edits. |
 | Fast Path | `docs-sync` | `.codex/templates/docs-sync.md` | Low | Changed docs and direct active links only. |
 | Fast Path | `direct-main-docs-only` | `.codex/templates/direct-main-docs-only.md` | Low | Only explicitly approved low-risk docs-only work on `main`. |
+| Fast Path | `post-merge-documentation-sync` | `.codex/templates/post-merge-documentation-sync.md` | Low | Candidate-based active-doc sync after an approved merge. |
 | Fast Path | `commit-and-push` | `.codex/templates/commit-and-push.md` | Low | Current branch status and staged/unstaged diff only. |
 | Fast Path | `branch-push` | `.codex/templates/branch-push.md` | Low | Current branch and local commits only. |
 | Fast Path | `ff-merge-and-push` | `.codex/templates/ff-merge-and-push.md` | Low | Approved feature branch, `main`, and merge status only. |
@@ -62,6 +63,7 @@ Task modes and template selection:
 | Standard | `focused-implementation` | `.codex/templates/focused-implementation.md` | Medium / Medium-High | Target files and narrow tests first. |
 | Standard | `pre-commit-review` | `.codex/templates/pre-commit-review.md` | Medium | Diff-only by default. |
 | Standard | `documentation-impact-gate` | `.codex/templates/documentation-impact-gate.md` | Medium | Candidate docs only; no exhaustive docs scan by default. |
+| Standard | `dependency-contract-approval` | `.codex/templates/dependency-contract-approval.md` | Medium | Approval packet before dependency, contract, schema, display, API/frontend, or runtime boundary changes. |
 | Goal / Overnight | `pre-goal-blocker-discovery` | `.codex/templates/pre-goal-blocker-discovery.md` | High | Decide whether long-run implementation can proceed before editing. |
 | Goal / Overnight | `goal-overnight` | `.codex/templates/goal-overnight.md` | High / Highest available | Broader context only inside an approved envelope. |
 

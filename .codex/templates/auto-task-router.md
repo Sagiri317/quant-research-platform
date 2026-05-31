@@ -17,6 +17,9 @@ Use this only in Repo Router Mode: the user gives a short task intent and has no
 - Inspect-only: use `discovery-only.md`.
 - Narrow active-doc sync: use `docs-sync.md`.
 - Explicit direct-main docs-only task: use `direct-main-docs-only.md`.
+- Post-merge doc or handoff sync: use `post-merge-documentation-sync.md`.
+- Candidate-based docs impact check: use `documentation-impact-gate.md`.
+- Dependency, schema, `manifest.display`, public API, frontend shared contract, runtime boundary, or other contract approval: use `dependency-contract-approval.md`.
 - Standard implementation: use `focused-implementation.md`.
 - Focused review/audit: use `focused-audit.md` or `pre-commit-review.md`.
 - Goal, overnight, or review-and-fix loop: use `goal-overnight.md`; run `pre-goal-blocker-discovery.md` before implementation.

@@ -12,6 +12,8 @@ Low
 
 - Read changed docs, directly linked active docs, and the relevant routing note only.
 - Use `rg` to find stale names, links, or duplicated claims before opening more files.
+- Use `documentation-impact-gate.md` with candidate docs only.
+- Do not run an exhaustive Markdown scan unless full docs sync or docs topology cleanup is explicitly requested.
 - Do not read archive docs unless the sync explicitly concerns archive references.
 - Report candidate expansion before touching code maps, status docs, or architecture docs outside scope.
 
@@ -41,6 +43,12 @@ Low
 
 - Changed
 - Not Changed
+- Candidate docs
+- Docs checked
+- Docs updated
+- Docs deferred
+- Docs not checked
+- Exhaustive docs scan status
 - Context Loaded
 - Checks Run
 - Scope Check
