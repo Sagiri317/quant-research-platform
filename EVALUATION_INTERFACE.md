@@ -286,6 +286,26 @@ conda run -n analysis python -m quant_research_platform.interfaces.cli evaluate-
 
 去掉 `--dry-run` 后正式生成 artifacts。
 
+### Synthetic prediction handoff smoke
+
+N6 prediction handoff 的 developer smoke 使用 synthetic Parquet，只验证 QRP
+可以接收 upstream / external prediction columns 并进入统一 evaluation artifact
+flow。它不是 ML training backend，不训练模型，不接入 A-share prediction adapter，
+不新增 artifact type、required artifact file、schema version、`manifest.display`、
+API field 或 frontend display。
+
+```powershell
+$env:PYTHONUTF8="1"
+$env:PYTHONPATH="src"
+conda run -n analysis python -m pytest -q tests/interfaces/cli/test_commands.py::test_evaluate_parquet_writes_prediction_handoff_metadata
+```
+
+该 smoke 在 pytest `tmp_path` 中生成 synthetic prediction parquet 和输出目录，
+断言 `evaluate-parquet --kind prediction` 写出 schema `0.7` / `evaluation_set`
+的 `summary.json`、`run_context.json` 和 `manifest.json`，并持久化
+private-safe prediction handoff metadata。它不得写入 private path、row-level
+private data、股票样本或 generated smoke artifacts。
+
 ## 8. 输出 Artifacts
 
 一个 evaluation set 输出一个目录：

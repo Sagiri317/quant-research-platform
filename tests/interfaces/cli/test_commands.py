@@ -123,12 +123,42 @@ def test_evaluate_parquet_writes_prediction_handoff_metadata(tmp_path) -> None:
     )
 
     assert result.exit_code == 0, result.output
+    assert (output_dir / "summary.json").is_file()
+    assert (output_dir / "run_context.json").is_file()
+    assert (output_dir / "manifest.json").is_file()
     summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     run_context = json.loads(
         (output_dir / "run_context.json").read_text(encoding="utf-8")
     )
     persisted = run_context["config"]["evaluation_spec"]["metadata"]
+    assert summary["artifact_schema_version"] == "0.7"
+    assert summary["artifact_type"] == "evaluation_set"
+    assert manifest["artifact_schema_version"] == "0.7"
+    assert manifest["artifact_type"] == "evaluation_set"
     assert summary["kind"] == "prediction"
+    assert persisted["prediction_handoff_version"] == "n6_mvs_v1"
     assert persisted["prediction_columns"] == ["prediction_score"]
+    assert persisted["label_columns"] == ["forward_return"]
+    assert persisted["prediction_time_semantics"] == {
+        "decision_time_column": "timestamp",
+        "as_of_time_columns": {"prediction_score": "timestamp"},
+    }
     assert persisted["source_ref"] == "synthetic_prediction_panel_v1"
     assert persisted["model_ref"] == "opaque_model_ref_v1"
+    assert persisted["training_scope"] == "external_or_upstream_not_run_by_qrp"
+    assert "not trading" in persisted["prediction_boundary"]
+    assert "paper trading" in persisted["prediction_boundary"]
+    assert "live trading" in persisted["prediction_boundary"]
+    persisted_text = json.dumps(persisted)
+    for forbidden in (
+        str(tmp_path),
+        "raw_private",
+        "interim_private",
+        "processed_private",
+        "private_real",
+        "stock_sample",
+        "row_sample",
+        "sample_stocks",
+    ):
+        assert forbidden not in persisted_text
