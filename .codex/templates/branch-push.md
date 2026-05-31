@@ -23,6 +23,7 @@ Low
 
 - No merge, rebase, amend, force push, squash, branch deletion, or dependency changes unless explicitly approved.
 - Do not push `main` through this template.
+- Do not merge `main`.
 
 ## Stop Conditions
 

@@ -50,17 +50,28 @@ Task modes and template selection:
 
 | Class | Task mode | Template | Recommended reasoning effort | Default context posture |
 | --- | --- | --- | --- | --- |
+| Router | `auto-task-router` | `.codex/templates/auto-task-router.md` | Low | Use only when the user gives a short task intent instead of an expanded prompt. |
 | Fast Path | `discovery-only` | `.codex/templates/discovery-only.md` | Low | Inspect only; no edits. |
 | Fast Path | `docs-sync` | `.codex/templates/docs-sync.md` | Low | Changed docs and direct active links only. |
+| Fast Path | `direct-main-docs-only` | `.codex/templates/direct-main-docs-only.md` | Low | Only explicitly approved low-risk docs-only work on `main`. |
 | Fast Path | `commit-and-push` | `.codex/templates/commit-and-push.md` | Low | Current branch status and staged/unstaged diff only. |
 | Fast Path | `branch-push` | `.codex/templates/branch-push.md` | Low | Current branch and local commits only. |
 | Fast Path | `ff-merge-and-push` | `.codex/templates/ff-merge-and-push.md` | Low | Approved feature branch, `main`, and merge status only. |
+| Fast Path | `branch-cleanup` | `.codex/templates/branch-cleanup.md` | Low | Explicitly approved single branch only. |
 | Standard | `focused-audit` | `.codex/templates/focused-audit.md` | Medium / High | Target surface, relevant diff, and linked contracts only. |
 | Standard | `focused-implementation` | `.codex/templates/focused-implementation.md` | Medium / Medium-High | Target files and narrow tests first. |
 | Standard | `pre-commit-review` | `.codex/templates/pre-commit-review.md` | Medium | Diff-only by default. |
+| Standard | `documentation-impact-gate` | `.codex/templates/documentation-impact-gate.md` | Medium | Candidate docs only; no exhaustive docs scan by default. |
+| Goal / Overnight | `pre-goal-blocker-discovery` | `.codex/templates/pre-goal-blocker-discovery.md` | High | Decide whether long-run implementation can proceed before editing. |
 | Goal / Overnight | `goal-overnight` | `.codex/templates/goal-overnight.md` | High / Highest available | Broader context only inside an approved envelope. |
 
 Use Fast Path modes for bounded routine work so ordinary tasks do not accidentally become broad audits. Use Standard modes when edits or review need focused reasoning over a task surface. Use Goal / Overnight only when the user has approved the full execution envelope required by `AGENTS.md`.
+
+Template loading modes:
+
+- Expanded Prompt Mode: if the user provides a complete task brief or approved envelope, follow it and load only named or directly relevant files.
+- Repo Router Mode: if the user gives only a short task intent, start from `.codex/templates/auto-task-router.md`, then load the smallest selected template set.
+- Do not full-load all templates, all docs, generated outputs, private data, or archives by default.
 
 Preserved workflow controls:
 
@@ -72,12 +83,21 @@ Preserved workflow controls:
 Branch / Worktree policy:
 
 - Small docs-only, typo, and single-file rules cleanup may run on a clean `main`.
-- Medium+ docs/rules batches should use a semantic branch.
-- Code implementation, tests, diagnostics, pipeline, Factor Factory, API, and artifact work must use a semantic branch instead of implementing directly on `main`.
-- Contract-adjacent, schema-adjacent, and cross-layer work must use a semantic branch.
+- Branch tasks use `feature/<task-name>`.
+- Do not default to `codex/`, `docs/`, or `chore/` branch prefixes.
+- Medium+ docs/rules batches should use `feature/<task-name>`.
+- Code implementation, tests, diagnostics, pipeline, Factor Factory, API, and artifact work must use `feature/<task-name>` instead of implementing directly on `main`.
+- Contract-adjacent, schema-adjacent, and cross-layer work must use `feature/<task-name>`.
+- Direct `main` docs-only execution is allowed only when explicitly approved and low risk; high-impact workflow, governance, template, skill, context-routing, architecture standard, roadmap priority, or contract wording changes still require a branch.
 - Use a worktree only when multiple tasks run in parallel, the current workspace has uncommitted changes that must not be interrupted, a long-running goal needs isolation, or the current `main` / workspace state must be preserved.
 - Do not create a worktree by default.
 - Every task brief should state the branch plan and `Worktree needed: yes/no + reason`.
+
+Closed-loop execution:
+
+- When the user approves a bounded envelope, Codex may run plan, implementation, review/fix, verification, commit, and feature-branch push without repeated confirmation.
+- Stop only for blocker or escalation items: new dependency/framework, schema or `manifest.display`, public API/frontend shared contract, new artifact type or required artifact file, new top-level package, A-share adapter capability expansion, model registry, feature store, scheduler, worker, deployment, external API/vendor/broker/exchange connector, paper/live trading, private path or row-level data risk, roadmap priority change, dirty working tree or unclear base branch, repeated unclear test failure, or unclear blast radius.
+- Do not automatically merge `main` unless the approved envelope explicitly allows it.
 
 Challenge / Objection mechanism:
 

@@ -59,10 +59,22 @@ Goal mode can use high token budgets when the approved envelope justifies them. 
 
 - Phase 0: Confirm envelope, branch/worktree state, and stop conditions.
 - Phase 1: Load narrow context through context routing.
-- Phase 2: Audit or implement the first bounded slice.
-- Phase 3: Run narrow checks and fix confirmed in-scope P0/P1/P2.
-- Phase 4: Repeat review-and-fix loop until no confirmed blocker remains or a stop condition is hit.
-- Phase 5: Run final approved verification and produce final report.
+- Phase 2: Run `pre-goal-blocker-discovery.md`.
+- Phase 3: If `Can proceed` is yes, audit or implement the first bounded slice.
+- Phase 4: Run narrow checks and fix confirmed in-scope P0/P1/P2.
+- Phase 5: Repeat review-and-fix loop until no confirmed blocker remains or a stop condition is hit.
+- Phase 6: Run final approved verification and produce final report.
+
+## Pre-Goal Blocker Discovery
+
+- Can proceed: yes/no
+- Blockers:
+- Escalations:
+- Safe implementation slice:
+- Files likely to change:
+- Tests likely to run:
+
+If `Can proceed` is no, do not edit files.
 
 ## Subagent Plan
 
@@ -98,11 +110,13 @@ Goal mode can use high token budgets when the approved envelope justifies them. 
 
 ## Commit / Push / Merge Policy
 
+- Branch tasks use `feature/<task-name>`.
 - Commit and merge are not bound together.
 - After a commit, push the committed branch unless the envelope says not to.
 - After a merge, push the merged target branch.
 - No amend, rebase, squash, merge commit, branch deletion, or force push unless explicitly approved.
 - For fast-forward to `main`, use `ff-merge-and-push.md`.
+- Do not merge `main` automatically unless the envelope explicitly allows it.
 
 ## Stop Conditions
 
@@ -115,6 +129,7 @@ Goal mode can use high token budgets when the approved envelope justifies them. 
 - Envelope-approved checks:
 - Narrow checks after each slice:
 - `git status --short --branch`
+- `documentation-impact-gate.md` result before final report
 - `git diff --check`
 - `git diff --name-only`
 
@@ -128,6 +143,7 @@ Goal mode can use high token budgets when the approved envelope justifies them. 
 - Checks Run
 - Review-And-Fix Loop Summary
 - Documentation Sync
+- Documentation Impact
 - Archive Candidates
 - Stop Conditions
 - Residual Risks

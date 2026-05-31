@@ -10,15 +10,23 @@ Examples: Implementation Task, Docs Task, Decision Task, Review Task, Archive/Co
 
 Recommended template alternatives:
 
+- `auto-task-router.md` for short task intents that need template routing.
 - `discovery-only.md` for inspect-only work.
 - `docs-sync.md` for narrow active-doc synchronization.
+- `direct-main-docs-only.md` for explicitly approved low-risk docs-only work on `main`.
 - `focused-audit.md` or `focused-implementation.md` for standard bounded work.
+- `documentation-impact-gate.md` before final reporting for medium+ or workflow/contract docs changes.
+- `pre-goal-blocker-discovery.md` before implementation in long goal work.
 - `pre-commit-review.md` for branch review before commit.
 - `commit-and-push.md`, `branch-push.md`, or `ff-merge-and-push.md` for Git operations.
+- `branch-cleanup.md` for explicitly approved single-branch cleanup.
 - `goal-overnight.md` for approved high-token long-run work.
 
 ## Context Budget
 
+- Template loading mode:
+  - Expanded Prompt Mode: if the user provided a complete task brief or approved envelope, use it directly and load only named or relevant files.
+  - Repo Router Mode: if the user gave only a short intent, read `auto-task-router.md` first and then the smallest selected template set.
 - Default file budget:
 - `rg` searches planned:
 - Files to read as snippets:
@@ -91,6 +99,16 @@ Codex may use multiple subagents inside an approved envelope. Each subagent must
 - README update needed: yes/no
 - Out-of-scope docs follow-up:
 
+## Documentation Impact Gate
+
+- Changed surface:
+- Candidate docs:
+- Docs checked:
+- Docs updated:
+- Docs deferred:
+- Docs not checked:
+- Exhaustive docs scan status:
+
 ## Archive Candidate Check
 
 - New or completed docs created:
@@ -126,6 +144,8 @@ Codex may use multiple subagents inside an approved envelope. Each subagent must
 
 Stop for human confirmation if contract meaning, schema semantics, public interfaces, directory moves, phase boundary, or multi-layer scope is unclear.
 
+Also stop for new dependency/framework, schema or `manifest.display` changes, public API/frontend shared contract changes, new artifact type or required artifact file, new top-level package, A-share adapter capability expansion, model registry, feature store, scheduler, worker, deployment, external API/vendor/broker/exchange connector, paper/live trading, private path or row-level data risk, roadmap priority change, dirty working tree or unclear base branch, repeated unclear test failure, or unclear blast radius.
+
 ## Challenge / Objection
 
 If a prompt constraint appears wrong, too narrow, or in conflict with code/docs/tests, output `Proposed Challenge / Objection` before implementing any alternative.
@@ -152,6 +172,7 @@ If a prompt constraint appears wrong, too narrow, or in conflict with code/docs/
 - Subagents Used
 - Tests Run
 - Documentation Sync
+- Documentation Impact
 - Archive Candidates
 - Recommended commit message
 - Commit type: normal commit/amend

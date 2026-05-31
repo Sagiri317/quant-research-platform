@@ -31,14 +31,21 @@ Low
 - Stop if fast-forward is impossible.
 - Stop if local or remote `main` status is unclear.
 - Stop if checks required before merge are missing or failed.
+- Stop if the expected feature head SHA or base / merge-base was provided and does not match.
 
 ## Checks
 
 - `git status --short --branch`
-- `git fetch` only if approved or expected by the task.
+- `git fetch origin`
+- Verify feature head if expected SHA is provided.
+- Verify base / merge-base if provided.
+- Verify `main` equals `origin/main` before merge.
 - `git merge --ff-only <feature-branch>`
+- Push `main`.
 - `git log -1 --format=%H`
+- Verify `HEAD` equals `origin/main` after push.
 - `git status --short --branch` after push.
+- Do not delete the feature branch unless explicitly approved.
 
 ## Output Format
 
