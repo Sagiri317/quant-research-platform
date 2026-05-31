@@ -170,6 +170,18 @@ result = run_evaluation(spec)
 | `data_stage` | 数据阶段，例如 `synthetic`、`local_offline_panel` |
 | `uses_external_data` | 是否使用外部或真实数据 |
 
+当 `kind="prediction"` 时，N6 MVS 仍复用 schema `0.7` /
+`evaluation_set`，但必须额外提供 private-safe handoff metadata：
+`prediction_handoff_version`、`prediction_columns`、`label_columns`、
+`prediction_time_semantics`、`source_ref`、`model_ref`、`training_scope` 和
+`prediction_boundary`。`source_ref` 和 `model_ref` 必须是 portable alias /
+opaque id，不得写入 private path、机器绝对路径、row-level private data 或股票样本。
+`training_scope` 固定为 `external_or_upstream_not_run_by_qrp`；boundary 必须明确
+prediction evidence 不是 trading、risk、capacity、execution simulation、paper
+trading 或 live trading evidence。该 MVS 不新增 artifact type、required
+artifact file、schema version、`manifest.display` entry、API field 或 frontend
+display。
+
 `output_dir` 应使用 repo-relative path，不写机器绝对路径。
 
 `run_id` 是单个 evaluation set 内的稳定 ID。通过本地 API 暴露多个 run root 时，前端、下载、comparison 和缓存使用 `(source_alias, run_id)` 作为完整身份；不要只按 `run_id` 判断同一个 run。

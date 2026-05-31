@@ -633,10 +633,7 @@ def test_segmented_prediction_turnover_resets_between_splits(tmp_path):
         panel=prediction_panel,
         feature_columns=("prediction",),
         label_columns=("forward_return",),
-        metadata={
-            **_metadata("prediction_segment_run"),
-            "kind": "prediction",
-        },
+        metadata=_prediction_metadata("prediction_segment_run"),
         n_groups=2,
         weight_configs=(
             WeightConfig(
@@ -691,10 +688,7 @@ def test_segmented_combinations_use_aggregate_summary_metrics(tmp_path):
         panel=prediction_panel,
         feature_columns=("prediction",),
         label_columns=("forward_return",),
-        metadata={
-            **_metadata("prediction_segment_summary_run"),
-            "kind": "prediction",
-        },
+        metadata=_prediction_metadata("prediction_segment_summary_run"),
         n_groups=2,
         weight_configs=(
             WeightConfig(
@@ -745,6 +739,28 @@ def _metadata(run_id: str) -> dict[str, object]:
         "domain": "evaluation_synthetic",
         "data_stage": "synthetic_only",
         "uses_external_data": False,
+    }
+
+
+def _prediction_metadata(run_id: str) -> dict[str, object]:
+    return {
+        **_metadata(run_id),
+        "kind": "prediction",
+        "prediction_handoff_version": "n6_mvs_v1",
+        "prediction_columns": ["prediction"],
+        "label_columns": ["forward_return"],
+        "prediction_time_semantics": {
+            "decision_time_column": "timestamp",
+            "as_of_time_columns": {"prediction": "timestamp"},
+        },
+        "source_ref": "synthetic_prediction_panel_v1",
+        "model_ref": "opaque_model_ref_v1",
+        "training_scope": "external_or_upstream_not_run_by_qrp",
+        "prediction_boundary": (
+            "prediction evidence is not trading, not risk, not capacity, "
+            "not execution simulation, not paper trading, and not live trading "
+            "evidence"
+        ),
     }
 
 

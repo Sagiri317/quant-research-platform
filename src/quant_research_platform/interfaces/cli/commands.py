@@ -24,6 +24,7 @@ from quant_research_platform.evaluations.evaluation_spec import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
 
 app = typer.Typer(add_completion=False)
 a_share_app = typer.Typer(
@@ -148,6 +149,25 @@ USES_EXTERNAL_DATA_OPTION = typer.Option(
     "--uses-external-data/--no-uses-external-data",
     help="Whether the run uses external data.",
 )
+PREDICTION_HANDOFF_VERSION_OPTION = typer.Option(
+    None,
+    "--prediction-handoff-version",
+    help="Prediction handoff contract version for --kind prediction runs.",
+)
+PREDICTION_SOURCE_REF_OPTION = typer.Option(
+    None,
+    "--prediction-source-ref",
+    help="Portable upstream prediction panel alias for --kind prediction runs.",
+)
+PREDICTION_MODEL_REF_OPTION = typer.Option(
+    None,
+    "--prediction-model-ref",
+    help="Opaque non-path model reference for --kind prediction runs.",
+)
+PREDICTION_BOUNDARY = (
+    "prediction evidence is not trading, not risk, not capacity, "
+    "not execution simulation, not paper trading, and not live trading evidence"
+)
 BATCH_COST_BPS_OPTION = typer.Option(
     None,
     "--cost-bps",
@@ -262,6 +282,9 @@ def run_parquet_evaluation(
     domain: str = DOMAIN_OPTION,
     data_stage: str = DATA_STAGE_OPTION,
     uses_external_data: bool = USES_EXTERNAL_DATA_OPTION,
+    prediction_handoff_version: str | None = PREDICTION_HANDOFF_VERSION_OPTION,
+    prediction_source_ref: str | None = PREDICTION_SOURCE_REF_OPTION,
+    prediction_model_ref: str | None = PREDICTION_MODEL_REF_OPTION,
     n_groups: int = N_GROUPS_OPTION,
     weight_method: str = WEIGHT_METHOD_OPTION,
     direction: str = DIRECTION_OPTION,
@@ -375,6 +398,35 @@ def run_parquet_evaluation(
             f"diagnostics_enabled={diagnostics_enabled}"
         )
         return
+    metadata = {
+        "run_id": run_id or output.name,
+        "project": project,
+        "kind": kind,
+        "domain": domain,
+        "data_stage": data_stage,
+        "uses_external_data": uses_external_data,
+    }
+    domain_notes: dict[str, object] = {}
+    if kind == "prediction":
+        metadata.update(
+            {
+                "prediction_handoff_version": prediction_handoff_version,
+                "prediction_columns": list(features),
+                "label_columns": list(labels),
+                "prediction_time_semantics": {
+                    "decision_time_column": timestamp_column,
+                    "as_of_time_columns": {
+                        feature_column: timestamp_column
+                        for feature_column in features
+                    },
+                },
+                "source_ref": prediction_source_ref,
+                "model_ref": prediction_model_ref,
+                "training_scope": PREDICTION_TRAINING_SCOPE,
+                "prediction_boundary": PREDICTION_BOUNDARY,
+            }
+        )
+        domain_notes["boundary"] = PREDICTION_BOUNDARY
     try:
         spec = make_parquet_evaluation_spec(
             parquet_path,
@@ -383,14 +435,7 @@ def run_parquet_evaluation(
             feature_columns=features,
             label_columns=labels,
             return_source_column=return_source_column,
-            metadata={
-                "run_id": run_id or output.name,
-                "project": project,
-                "kind": kind,
-                "domain": domain,
-                "data_stage": data_stage,
-                "uses_external_data": uses_external_data,
-            },
+            metadata=metadata,
             output_dir=output,
             n_groups=n_groups,
             weight_configs=(weight_config,),
@@ -404,6 +449,7 @@ def run_parquet_evaluation(
             time_breakdowns=_time_breakdown_values(time_breakdown),
             kernel=kernel,
             diagnostics_spec=diagnostics_spec,
+            domain_notes=domain_notes,
         )
         result = run_evaluation(spec)
     except (RuntimeError, TypeError, ValueError) as exc:

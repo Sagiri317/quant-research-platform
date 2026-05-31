@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+import pandas as pd
 from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.cli.commands import app
@@ -67,3 +70,65 @@ def test_evaluate_parquet_rejects_unknown_diagnostic_view() -> None:
 
     assert result.exit_code == 2
     assert "unknown diagnostics materialized views" in result.output
+
+
+def test_evaluate_parquet_writes_prediction_handoff_metadata(tmp_path) -> None:
+    panel_path = tmp_path / "prediction_panel.parquet"
+    output_dir = tmp_path / "prediction_run"
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2026-01-01", "2026-01-01", "2026-01-02", "2026-01-02"]
+            ),
+            "asset": ["A", "B", "A", "B"],
+            "prediction_score": [0.1, 0.2, 0.3, 0.1],
+            "forward_return": [0.01, -0.02, 0.03, -0.01],
+            "forward_return_1d": [0.01, -0.02, 0.03, -0.01],
+        }
+    ).to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-parquet",
+            "--parquet-path",
+            str(panel_path),
+            "--feature",
+            "prediction_score",
+            "--label",
+            "forward_return",
+            "--return-source-column",
+            "forward_return_1d",
+            "--output",
+            str(output_dir),
+            "--run-id",
+            "prediction_cli_run",
+            "--kind",
+            "prediction",
+            "--domain",
+            "prediction_handoff",
+            "--data-stage",
+            "synthetic_only",
+            "--no-uses-external-data",
+            "--n-groups",
+            "2",
+            "--prediction-handoff-version",
+            "n6_mvs_v1",
+            "--prediction-source-ref",
+            "synthetic_prediction_panel_v1",
+            "--prediction-model-ref",
+            "opaque_model_ref_v1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    run_context = json.loads(
+        (output_dir / "run_context.json").read_text(encoding="utf-8")
+    )
+    persisted = run_context["config"]["evaluation_spec"]["metadata"]
+    assert summary["kind"] == "prediction"
+    assert persisted["prediction_columns"] == ["prediction_score"]
+    assert persisted["source_ref"] == "synthetic_prediction_panel_v1"
+    assert persisted["model_ref"] == "opaque_model_ref_v1"
