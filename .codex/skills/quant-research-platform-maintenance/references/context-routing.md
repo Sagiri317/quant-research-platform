@@ -8,6 +8,7 @@ Use this reference to decide which files to read for a QRP task. Keep loading na
 - Prefer line ranges or focused snippets before full files when the file is large and the relevant section is known.
 - Load future architecture, roadmap, archive, generated evidence, private data, or broad code maps only when the task mode or approved envelope requires them.
 - `pre-commit-review` is diff-only by default: read `git status`, `git diff`, and only the files needed to understand changed lines.
+- `pre-commit-review` uses `documentation-impact-gate.md` for medium+ changes, workflow/template changes, contract-adjacent changes, or active-doc changes.
 - Subagents read only their assigned files, assigned directories, or assigned diff slices. They do not independently expand to full-repo context.
 - If the likely file budget needs to expand beyond the task-specific set, report the candidate expansion first with the reason and wait when expansion would touch a stop condition.
 - Goal / Overnight mode may use broader context only inside an approved envelope with a context loading plan, phase plan, subagent plan, verification cadence, and stop conditions.
@@ -25,7 +26,7 @@ Use this reference to decide which files to read for a QRP task. Keep loading na
 | Goal / Overnight Run | `AGENTS.md`, `.codex/skills/quant-research-platform-maintenance/SKILL.md`, this context routing file, task-specific code map, task-specific contract reference, and relevant tests. |
 | Subagent | Parent-approved envelope, assigned files/directories only, task-specific contract docs, and relevant tests/checks only. |
 | Documentation Impact Gate | `.codex/templates/documentation-impact-gate.md`, changed-file-specific candidates, and relevant active docs only. |
-| Documentation Sync Gate | `AGENTS.md`, `.codex/skills/quant-research-platform-maintenance/SKILL.md`, changed-file-specific code map, and relevant active docs only. |
+| Candidate docs sync check | `documentation-impact-gate.md`, changed-file-specific code map, and relevant active docs only; use candidate docs and `rg` first. |
 | Post-merge documentation sync | `.codex/templates/post-merge-documentation-sync.md`, `.codex/templates/documentation-impact-gate.md`, merge changed-file list, and candidate active docs only. |
 | Dependency or contract approval | `.codex/templates/dependency-contract-approval.md` plus only the directly affected config, contract, template, or code references needed to classify approval. |
 | Archive Candidate Check | `docs/archive/README.md`, current active doc containing the candidate, and `PROJECT_STATUS.md` only if status/handoff changes. |
@@ -35,7 +36,7 @@ Use this reference to decide which files to read for a QRP task. Keep loading na
 | README, architecture index, project-facing docs | The target doc, `AGENTS.md`, and only directly linked current docs needed to verify wording. |
 | Decision task, architecture planning, or future capability boundary | `docs/architecture/target-architecture-and-capabilities.md`, `docs/architecture/next-stage-roadmap.md`, and the relevant standards. Ordinary coding tasks should not load target architecture by default. |
 | Governance, architecture, standards, AI-native engineering standard update, Codex workflow redesign, task-mode policy, or documentation topology task | Load `docs/architecture/ai-native-engineering-standard.md` as the full governance reference. Ordinary coding tasks do not load `docs/architecture/ai-native-engineering-standard.md` by default. |
-| Branch, commit, push, fast-forward merge, or branch cleanup task | Use `.codex/templates/commit-and-push.md`, `.codex/templates/branch-push.md`, `.codex/templates/ff-merge-and-push.md`, or `.codex/templates/branch-cleanup.md` as the current execution template. Do not load archived worktree plans by default. |
+| Branch, commit, push, fast-forward merge, or branch cleanup task | Use `.codex/templates/commit-and-push.md`, `.codex/templates/branch-push.md`, `.codex/templates/ff-merge-and-push.md`, or `.codex/templates/branch-cleanup.md` as the current execution template. Branch cleanup is single-branch only and must confirm merge-base containment before deletion. Do not load archived worktree plans by default. |
 | Goal / overnight execution planning | Use `.codex/templates/goal-overnight.md` plus `.codex/templates/pre-goal-blocker-discovery.md` and the approved envelope. Preserve the context budget rules above. |
 | Historical worktree or operations planning | Load `docs/archive/operations/next-stage-worktree-plan-2026-05.md` only when tracing historical branch/worktree decisions. It is not current Codex task-rule truth. |
 | Historical plans/specs under `docs/archive/superpowers/` | Load only when tracing prior decisions, negative/rejection coverage, or explicitly cited historical context. Do not treat these files as current contract truth without confirmation from current docs, code, or tests. |

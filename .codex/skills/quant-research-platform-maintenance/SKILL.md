@@ -79,7 +79,7 @@ Preserved workflow controls:
 
 - Default conversation language remains Chinese unless the user asks otherwise.
 - Every task template must recommend a reasoning effort instead of asking the user to switch models frequently.
-- Challenge / Objection, commit message recommendation, subagent policy, Scope Check, Stop Conditions, Documentation Sync Gate, and Archive Candidate Gate remain active.
+- Challenge / Objection, commit message recommendation, subagent policy, Scope Check, Stop Conditions, candidate-based Documentation Impact Gate, and Archive Candidate Gate remain active.
 - Goal / Overnight mode may use high token budgets when approved, but it does not weaken private data, schema, `manifest.display`, API/frontend, deployment/trading, file deletion, archive movement, or unclear blast-radius stop conditions.
 
 Branch / Worktree policy:
@@ -173,7 +173,7 @@ Use this workflow only after the user has approved the bounded execution envelop
 - The main agent integrates subagent output, checks scope, and verifies that assigned files stayed within the approved envelope.
 - Final reports must include `Subagents Used`.
 
-## Documentation Sync Gate
+## Documentation Impact Gate
 
 Run this end-of-task checklist before final reporting for medium+ tasks, goals, and overnight runs:
 
@@ -183,6 +183,8 @@ Run this end-of-task checklist before final reporting for medium+ tasks, goals, 
 4. Update linked active docs only when they are inside the approved scope.
 5. If needed doc sync is outside scope, report it as follow-up / residual risk.
 6. Do not update archived docs to current truth unless explicitly requested.
+
+This gate selects candidate docs from the changed surface and uses `rg` first. It is not an exhaustive all-Markdown scan unless full docs sync or docs topology cleanup is explicitly requested.
 
 Surface-to-doc map:
 

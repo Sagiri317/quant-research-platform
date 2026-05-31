@@ -11,7 +11,8 @@ Use only when the user explicitly approves low-risk docs-only work directly on `
 - Typo fixes.
 - Formatting-only cleanup.
 - Broken link repair.
-- Small docs/status synchronization that does not change roadmap priority, governance, workflow rules, public contracts, schema, phase, data/API/Git/Conda/privacy boundaries, or project capability state.
+- Low-risk docs clarification.
+- Small docs/status synchronization that records already-merged operational truth is allowed when explicitly approved, as long as it does not change roadmap priority, governance rules, public contracts, schema, phase boundary, private-data boundary, or runtime behavior.
 
 ## Forbidden Scope
 

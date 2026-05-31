@@ -14,6 +14,8 @@ Medium
 - Read changed files only around changed line ranges when needed.
 - Use `rg` only for changed symbols or references that affect the diff.
 - Report candidate expansion before reading unrelated files, architecture docs, archive docs, generated outputs, or private data.
+- For medium+ changes, workflow/template changes, contract-adjacent changes, or active-doc changes, run `documentation-impact-gate.md`.
+- Documentation Impact Gate is candidate-based, not a full docs scan.
 
 ## Allowed Scope
 
@@ -37,6 +39,7 @@ Medium
 - `git status --short --branch`
 - `git diff --name-only`
 - `git diff --check`
+- Documentation Impact Gate when required.
 - Narrow tests only if the diff requires them and they are approved.
 
 ## Output Format
@@ -44,6 +47,13 @@ Medium
 - Findings
 - Open Questions
 - Not Changed
+- Documentation Impact
+- Candidate docs
+- Docs checked
+- Docs updated
+- Docs deferred
+- Docs not checked
+- Exhaustive docs scan status
 - Checks Run
 - Scope Check
-- Commit Readiness
+- Commit Readiness: docs sync not needed because ... / docs sync included / docs sync deferred until after merge / docs sync required before commit

@@ -14,8 +14,10 @@ Recommended template alternatives:
 - `discovery-only.md` for inspect-only work.
 - `docs-sync.md` for narrow active-doc synchronization.
 - `direct-main-docs-only.md` for explicitly approved low-risk docs-only work on `main`.
+- `post-merge-documentation-sync.md` for candidate-based active-doc sync after an approved merge.
 - `focused-audit.md` or `focused-implementation.md` for standard bounded work.
 - `documentation-impact-gate.md` before final reporting for medium+ or workflow/contract docs changes.
+- `dependency-contract-approval.md` before dependency, contract, schema, display, API/frontend, or runtime boundary changes.
 - `pre-goal-blocker-discovery.md` before implementation in long goal work.
 - `pre-commit-review.md` for branch review before commit.
 - `commit-and-push.md`, `branch-push.md`, or `ff-merge-and-push.md` for Git operations.
@@ -45,7 +47,7 @@ List why each context file was loaded. Do not load future architecture docs by d
 
 ## Current Phase
 
-Local Research Platform
+Current phase: read from current brief / AGENTS.md / user-provided current context.
 
 ## Execution Settings
 
@@ -175,7 +177,7 @@ If a prompt constraint appears wrong, too narrow, or in conflict with code/docs/
 - Documentation Impact
 - Archive Candidates
 - Recommended commit message
-- Commit type: normal commit/amend
+- Commit type: normal commit by default; amend only if explicitly approved.
 - Push target: feature branch only/main
 - Residual Risks
 - Scope Check

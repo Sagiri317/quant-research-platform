@@ -37,9 +37,10 @@ Use this only in Repo Router Mode: the user gives a short task intent and has no
 
 ## Closed-loop Eligibility
 
-Closed-loop is allowed only when the user approved an envelope that defines goal, allowed scope, forbidden scope, stop conditions, verification, commit/push policy, and final report format.
+- Expanded Prompt Mode: if the user provides a complete approved envelope, follow that envelope.
+- Repo Router Mode: if the user gives a short intent and explicitly says closed-loop approved, Codex may construct the smallest safe envelope from the selected template.
 
-If closed-loop is approved, proceed through plan, implementation, review/fix, verification, commit, and feature-branch push. Stop only for blocker or escalation items.
+If closed-loop is approved, proceed only when the task stays inside that bounded envelope and no blocker or escalation item appears. Then continue through plan, implementation, review/fix, verification, commit, and feature-branch push as applicable.
 
 ## Stop Conditions
 
