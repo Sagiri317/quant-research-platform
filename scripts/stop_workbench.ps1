@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 if (-not $ProjectRoot) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
-$LogRoot = Join-Path $ProjectRoot ".codex\run-logs"
+$LogRoot = Join-Path $ProjectRoot ".run\workbench"
 $PidFile = Join-Path $LogRoot "workbench-pids.json"
 $ProjectRootSlash = $ProjectRoot.Replace("\", "/")
 

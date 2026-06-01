@@ -12,7 +12,7 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
 | 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
-| 当前分支 | `main`；N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、pipeline failed-run status/checkpoint sanitization hardening、N6 prediction handoff guardrails / synthetic smoke / local baseline、N6 prediction handoff MVS、prompt-template sync / polish 已进入 `main` |
+| 当前分支 | `main`；N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、pipeline failed-run status/checkpoint sanitization hardening、N6 prediction handoff guardrails / synthetic smoke / local baseline、N6 prediction handoff MVS、agent workflow `.agents` migration / SHA reporting boundary clarification 已进入 `main` |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
@@ -56,7 +56,7 @@ Historical schema `0.5` / `0.6` runs、old 2023H1 smoke、N7 `n7_eval_*` runs
 
 - Phase 1 已完成并由 `docs/architecture/phase-1-acceptance-record.md` 作为历史验收记录保存。
 - N1/N2/N3/N4/N7/N8 已合入 `main`；详细实现和旧 schema 验收故事不再作为当前状态展开，必要时查 Git history、`docs/archive/superpowers/` historical execution records 和相关 code-map。
-- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、pipeline failed-run status/checkpoint sanitization hardening、N6 initial handoff / smoke / local baseline、N6 prediction handoff MVS，以及 prompt-template sync / polish 已进入 `main`；N6 MVS 补齐 local baseline OOS / embargo / fold metadata、`ml baseline train` CLI、private-output boundary guard 和 synthetic evaluation handoff tests；当前有效 private smoke run id 为 `n5_private_smoke_2025h2_rev120_v1`。
+- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、pipeline failed-run status/checkpoint sanitization hardening、N6 initial handoff / smoke / local baseline、N6 prediction handoff MVS，以及 agent workflow `.agents` migration / SHA reporting boundary clarification 已进入 `main`；QRP maintenance skill 位于 `.agents/skills/quant-research-platform-maintenance/`，task templates 位于 `.agents/skills/quant-research-platform-maintenance/references/templates/`，current brief 位于 `.agents/briefs/current-qrp-status.md`；N6 MVS 补齐 local baseline OOS / embargo / fold metadata、`ml baseline train` CLI、private-output boundary guard 和 synthetic evaluation handoff tests；当前有效 private smoke run id 为 `n5_private_smoke_2025h2_rev120_v1`。
 - Retry/resume/overwrite、global API error envelope migration、full N5 capability 和 N6 next-slice design 仍是未来工作。
 
 ## Root Handoff / 根目录回传信号
@@ -69,5 +69,6 @@ Historical schema `0.5` / `0.6` runs、old 2023H1 smoke、N7 `n7_eval_*` runs
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
 | 2026-06-01 | status | N6 prediction handoff guardrails、synthetic handoff smoke、local numpy/pandas ML baseline trainer、N6 prediction handoff MVS 已进入 `main`；prompt-template sync / polish 已进入 `main`。当前仍不是完整 ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。下一步改为单独决定 N6 next slice 或 pipeline reliability second slice；不要直接进入 broad implementation。 | WORKSPACE_STATUS, PLAN_INDEX | closed 2026-06-01 |
+| 2026-06-01 | status | QRP agent workflow 已迁移到 `.agents`：maintenance skill、task templates、current brief 均使用 `.agents` 路径；runtime workbench logs 后续应使用 `.run/workbench`，`.agents` 只承载 agent workflow/skills。 | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-01 | status | N6 prediction handoff MVS 已进入 `main`：完成 local baseline OOS / embargo / fold metadata、`ml baseline train` CLI、private-output boundary guard、synthetic `evaluate-parquet --kind prediction` handoff tests；evaluation 只消费 prediction，training 保持在 `research/ml_baseline.py` 外围 research utility；仍不是 alpha proof、完整 ML pipeline、A-share prediction adapter、paper/live trading、deployment、scheduler、worker、model registry、feature store 或 external connector。 | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-01 | status | Pipeline reliability second-slice hardening 已进入 `main`：failed-run disk recovery now sanitizes `runtime_summary.json` / `checkpoints.json` replay through shared private-marker helpers；private-marker helper centralization and `ml baseline train` CLI pre-read private-output validation also landed. Retry/resume/overwrite and global API error envelope remain future work. | WORKSPACE_STATUS, PLAN_INDEX | open |

@@ -1447,7 +1447,7 @@ Current brief 负责短状态：
 基本原则：
 
 - code / tests / contract-adjacent work 使用 semantic branch
-- small docs-only cleanup 可在 clean main 上运行
+- small docs-only cleanup may run on clean main only when explicitly approved as low-risk direct-main docs-only work
 - commit 后应 push 对应 branch
 - merge 后应 push main
 - no force push / rebase / amend / squash / merge commit unless explicitly approved

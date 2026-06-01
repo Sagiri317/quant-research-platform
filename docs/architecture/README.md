@@ -8,7 +8,7 @@ Human reading order:
 
 1. [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)：最终功能和架构目标；合并原目标目录结构和未来能力池，保留目标细节，同时标明当前已落地边界。
 2. [ai-native-engineering-principles.md](ai-native-engineering-principles.md)：AI-native engineering short mental model / compressed principles；不是当前实现状态、roadmap 或 Codex 执行规则。
-3. [ai-native-engineering-standard.md](ai-native-engineering-standard.md)：AI-native engineering full governance reference / complete standard；低频阅读，只在 governance、architecture、standards、Codex workflow redesign、task-mode policy 或 documentation topology tasks 中加载。
+3. [ai-native-engineering-standard.md](ai-native-engineering-standard.md)：AI-native engineering full governance reference / complete standard；低频阅读，普通任务不要默认加载全文，优先用 `rg` 定位小片段。
 4. [engineering-standards.md](engineering-standards.md)：模块依赖、合同、版本、错误、配置、测试、扩展和生成物规则。
 5. [quant-research-standards.md](quant-research-standards.md)：point-in-time、universe、tradability、成本、容量、统计验证和复现规则。
 6. [phase-1-acceptance-record.md](phase-1-acceptance-record.md)：Phase 1 已实现功能、验收证据、冻结合同和遗留架构债。
@@ -26,7 +26,7 @@ Codex context loading order:
 3. 诊断语义、tradability、cost、capacity、risk、benchmark 或 trading-adjacent wording 任务再读 [quant-research-standards.md](quant-research-standards.md)。
 4. 模块边界、合同版本、测试、生成物、API/frontend 边界或安全规则任务再读 [engineering-standards.md](engineering-standards.md)。
 5. Decision Task、architecture planning 或 future capability boundary task 才默认读取 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)；普通 coding task 不默认加载它。
-6. 普通 coding task 不默认读取 [ai-native-engineering-standard.md](ai-native-engineering-standard.md)；只有 governance、architecture、standards、Codex workflow redesign、task-mode policy 或 documentation topology tasks 才加载 full standard。
+6. 普通 coding task 不默认读取 [ai-native-engineering-standard.md](ai-native-engineering-standard.md)；governance、architecture、standards、Codex workflow redesign、task-mode policy 或 documentation topology tasks 也应先用 `rg` 定位小片段，只有用户明确要求 review/rewrite full standard 或窄读无法解决治理冲突时才加载全文。
 7. Branch / commit / push / merge / fast-forward merge tasks should use `.agents/skills/quant-research-platform-maintenance/references/templates/commit-and-push.md`, `.agents/skills/quant-research-platform-maintenance/references/templates/branch-push.md`, and `.agents/skills/quant-research-platform-maintenance/references/templates/ff-merge-and-push.md` instead of architecture docs.
 
 Archive candidates:

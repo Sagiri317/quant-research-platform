@@ -1,5 +1,5 @@
 ﻿# 用途：同时启动本地 evidence API 和 React/Vite workbench。
-# 行为：记录 API/Web 进程快照到 .codex/run-logs/workbench-pids.json，便于 stop_workbench.ps1 精准停止。
+# 行为：记录 API/Web 进程快照到 .run/workbench/workbench-pids.json，便于 stop_workbench.ps1 精准停止。
 # 注意：不会安装依赖；若端口已被非本项目进程占用，会直接报错。
 param(
     [string]$ApiHost = "127.0.0.1",
@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$LogRoot = Join-Path $ProjectRoot ".codex\run-logs"
+$LogRoot = Join-Path $ProjectRoot ".run\workbench"
 $PidFile = Join-Path $LogRoot "workbench-pids.json"
 $ViteApiBaseUrl = "http://$ApiHost`:$ApiPort"
 $CorsOrigins = "http://$WebHost`:$WebPort;http://localhost`:$WebPort"

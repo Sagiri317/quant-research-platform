@@ -1,7 +1,7 @@
 interface:
   display_name: "Quant Research Platform Maintenance"
-  short_description: "Maintain manifest.display, artifact, API, download, Factor Factory, and evidence UI contracts"
-  default_prompt: "Use $quant-research-platform-maintenance before changing quant-research-platform artifact contracts, manifest.display, evidence API, downloads, frontend evidence UI, A-share pipeline runs, Factor Factory runs, generated runs, or docs/code-map surfaces that describe those contracts."
+  short_description: "Maintain QRP workflow routing, docs/status sync, branch operations, contracts, artifacts, API, downloads, Factor Factory, and evidence UI"
+  default_prompt: "Use $quant-research-platform-maintenance for QRP maintenance workflow, including artifact contracts, manifest.display, evidence API, downloads, frontend evidence UI, A-share pipeline runs, Factor Factory runs, generated runs, docs/status sync, task routing templates, one-line prompt routing, branch/commit/push/fast-forward merge workflows, pre-commit review, private artifact writer boundary checks, contract-surface stop gates, and docs/code-map surfaces that describe those contracts."
 
 policy:
   allow_implicit_invocation: true

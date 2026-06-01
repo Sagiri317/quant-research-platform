@@ -1,15 +1,15 @@
 ---
 name: quant-research-platform-maintenance
-description: Use when changing quant-research-platform artifact schemas, manifest.display, evidence API, download packaging, React evidence UI, A-share pipeline runs, Factor Factory runs, generated runs, or docs that describe those contracts.
+description: Use for QRP maintenance workflow, including artifact contracts, manifest.display, evidence API, download packaging, React evidence UI, A-share pipeline runs, Factor Factory runs, generated runs, docs/status sync, task routing templates, one-line prompt routing, branch/commit/push/fast-forward merge workflows, pre-commit review, private artifact writer boundary checks, contract-surface stop gates, and docs that describe those contracts.
 ---
 
 # Quant Research Platform Maintenance
 
 ## Purpose
 
-Keep generated artifacts as the source of truth, `manifest.display` as the API/UI/download contract, and the React workbench as a consumer of those contracts. Do not restore hidden frontend business logic, schema fallbacks, broad filesystem cleanup, or private-data exposure.
+Keep generated artifacts as the source of truth, `manifest.display` as the API/UI/download contract, the React workbench as a consumer of those contracts, and the QRP task-routing workflow under `.agents`. Do not restore hidden frontend business logic, schema fallbacks, broad filesystem cleanup, or private-data exposure.
 
-Project `AGENTS.md` owns hard safety boundaries: local-only scope, approved Conda environment, data/API/secrets limits, forbidden operations, private CSMAR boundaries, and editable areas. This skill owns the operational workflow for artifact/API/frontend/A-share/Factor Factory contract changes and the docs that describe them.
+Project `AGENTS.md` owns hard safety boundaries: local-only scope, approved Conda environment, data/API/secrets limits, forbidden operations, private CSMAR boundaries, and editable areas. This skill owns QRP task routing, docs/status sync, branch/commit/push/merge templates, pre-commit review gates, artifact/API/frontend/A-share/Factor Factory contract workflows, and the docs that describe them.
 
 The principles behind this workflow are described in `docs/architecture/ai-native-engineering-principles.md`, but actual execution remains governed by this skill and project `AGENTS.md`.
 
@@ -96,7 +96,7 @@ Preserved workflow controls:
 
 Branch / Worktree policy:
 
-- Small docs-only, typo, and single-file rules cleanup may run on a clean `main`.
+- Small docs-only, typo, and single-file rules cleanup may run on a clean `main` only when explicitly approved as low-risk direct-main docs-only work.
 - Branch tasks use `feature/<task-name>`.
 - Do not default to `codex/`, `docs/`, or `chore/` branch prefixes.
 - Medium+ docs/rules batches should use `feature/<task-name>`.

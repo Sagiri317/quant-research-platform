@@ -83,7 +83,7 @@ Goal / Overnight Runs may execute autonomously only after the user approves a bo
 
 Within an approved envelope, Codex may split work, use permitted subagents, read relevant files, edit in-scope files, run approved checks, and fix confirmed in-scope P0/P1/P2 issues without asking for each small step. Codex must stop and request confirmation when a stop condition is reached.
 
-Small docs-only, typo, and single-file rules cleanup may run on a clean `main` when the user allows it. Code implementation, tests, diagnostics, pipeline, Factor Factory, API, artifact, contract-adjacent, schema-adjacent, and cross-layer work must use a semantic branch instead of implementing directly on `main`.
+Small docs-only, typo, and single-file rules cleanup may run on a clean `main` only when explicitly approved as low-risk direct-main docs-only work. Code implementation, tests, diagnostics, pipeline, Factor Factory, API, artifact, contract-adjacent, schema-adjacent, and cross-layer work must use a semantic branch instead of implementing directly on `main`.
 
 ### Subagent Protocol
 
@@ -237,6 +237,8 @@ QRP workflow entry points:
 - Context routing: `.agents/skills/quant-research-platform-maintenance/references/context-routing.md`
 - Task templates: `.agents/skills/quant-research-platform-maintenance/references/templates/*`
 - Current brief: `.agents/briefs/current-qrp-status.md`
+
+For one-line or underspecified QRP prompts, start from `.agents/skills/quant-research-platform-maintenance/references/templates/auto-task-router.md` before editing files, committing, pushing, merging, or changing contracts.
 
 If GPT Pro or other external tools are used, they must receive an explicit context packet or public link. Context packets are managed by the root workflow; do not create a project-local packet cache unless approved.
 
