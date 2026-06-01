@@ -125,7 +125,7 @@ def test_pipeline_snapshot_writes_config_and_checkpoints(tmp_path) -> None:
     )
 
 
-def test_pipeline_snapshot_returns_effective_run_ref_after_name_collision(
+def test_pipeline_snapshot_rejects_duplicate_run_id_before_writing(
     tmp_path,
 ) -> None:
     client = TestClient(
@@ -151,12 +151,15 @@ def test_pipeline_snapshot_returns_effective_run_ref_after_name_collision(
     second = client.post("/api/pipeline-snapshots", json=payload)
 
     assert first.status_code == 201
-    assert second.status_code == 201
+    assert second.status_code == 409
     assert first.json()["run_ref"] == "api_snapshot_collision"
-    second_ref = second.json()["run_ref"]
-    assert second_ref.startswith("api_snapshot_collision_")
+    assert "api_snapshot_collision" in second.json()["detail"]
+    assert str(tmp_path) not in json.dumps(second.json())
+    assert "raw_private" not in json.dumps(second.json())
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "api_snapshot_collision"
+    ]
     assert (tmp_path / "api_snapshot_collision" / "run_config.yaml").is_file()
-    assert (tmp_path / second_ref / "run_config.yaml").is_file()
 
     status = client.get("/api/pipeline-snapshots/api_snapshot_collision")
     checkpoints = client.get(
@@ -164,7 +167,7 @@ def test_pipeline_snapshot_returns_effective_run_ref_after_name_collision(
     )
 
     assert status.status_code == 200
-    assert status.json()["run_ref"] == second_ref
+    assert status.json()["run_ref"] == "api_snapshot_collision"
     assert checkpoints.status_code == 200
     assert str(tmp_path) not in json.dumps(checkpoints.json())
 
@@ -271,13 +274,16 @@ def test_pipeline_run_executes_from_existing_factors(
     )
 
 
-def test_pipeline_snapshot_and_run_status_are_separated_for_same_run_id(
+def test_pipeline_snapshot_blocks_later_run_with_same_run_id(
     tmp_path,
     monkeypatch,
 ) -> None:
     from quant_research_platform.interfaces.api.services import pipeline_service
 
+    calls = []
+
     def fake_run_a_share_pipeline(config):
+        calls.append(config)
         return SimpleNamespace(
             status="ready",
             run_dir=tmp_path / config.run_id,
@@ -315,16 +321,18 @@ def test_pipeline_snapshot_and_run_status_are_separated_for_same_run_id(
     )
 
     assert snapshot.status_code == 201
-    assert run.status_code == 201
+    assert run.status_code == 409
+    assert calls == []
+    assert "shared_pipeline_id" in run.json()["detail"]
+    assert str(tmp_path) not in json.dumps(run.json())
     snapshot_status = client.get("/api/pipeline-snapshots/shared_pipeline_id")
     run_status = client.get("/api/pipeline-runs/shared_pipeline_id")
     assert snapshot_status.status_code == 200
     assert snapshot_status.json()["kind"] == "snapshot"
-    assert run_status.status_code == 200
-    assert run_status.json()["kind"] == "run"
+    assert run_status.status_code == 404
 
 
-def test_pipeline_snapshot_status_can_be_read_by_effective_run_ref_after_collision(
+def test_pipeline_snapshot_duplicate_does_not_replace_existing_status(
     tmp_path,
 ) -> None:
     client = TestClient(
@@ -350,14 +358,13 @@ def test_pipeline_snapshot_status_can_be_read_by_effective_run_ref_after_collisi
     second = client.post("/api/pipeline-snapshots", json=payload)
 
     assert first.status_code == 201
-    assert second.status_code == 201
-    second_ref = second.json()["run_ref"]
+    assert second.status_code == 409
 
-    status = client.get(f"/api/pipeline-snapshots/{second_ref}")
-    checkpoints = client.get(f"/api/pipeline-snapshots/{second_ref}/checkpoints")
+    status = client.get("/api/pipeline-snapshots/status_collision")
+    checkpoints = client.get("/api/pipeline-snapshots/status_collision/checkpoints")
 
     assert status.status_code == 200
-    assert status.json()["run_ref"] == second_ref
+    assert status.json()["run_ref"] == "status_collision"
     assert checkpoints.status_code == 200
 
 

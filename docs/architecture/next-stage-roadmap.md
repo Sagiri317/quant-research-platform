@@ -13,14 +13,14 @@ schema 验收故事不在本文展开。
 |---|---|---:|---|---|
 | N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged; full capability unfinished | 将 descriptive proxy diagnostics 之后的 full risk/regime/cost/capacity capability 单独设计和验证 |
 | N6 | ML prediction handoff | P2 | local MVS merged; adapter / full ML pipeline unfinished | 建立 prediction output 到 evaluation 的可复现接口 |
-| Pipeline reliability follow-up | Pipeline reliability | P2 | failed-run MVS and disk-recovery sanitization hardening merged; retry / resume / overwrite / global error envelope unfinished | 如需继续，重新限定一个小 MVS，不和 N6 扩展混在同一批 |
+| Pipeline reliability follow-up | Pipeline reliability | P2 | failed-run MVS and disk-recovery sanitization hardening merged; API duplicate `run_id` guard implemented; retry / resume / destructive overwrite / global error envelope unfinished | 如需继续，重新限定一个小 MVS，不和 N6 扩展混在同一批 |
 | Pipeline history UI | Pipeline run history / visibility | P3 | planned | 在不改变 pipeline 语义的前提下改善本地 workbench 对 run history 的读取和展示 |
 
 当前推荐顺序：
 
 ```text
 1. Decide the next N6 slice: multi-fold / walk-forward extension or A-share prediction adapter design
-2. Or choose one new Pipeline reliability follow-up MVS: retry, resume, overwrite/rerun guard, or global API error envelope
+2. Or choose one new Pipeline reliability follow-up MVS: retry, resume, destructive overwrite, or global API error envelope
 3. Pipeline history UI
 ```
 

@@ -177,6 +177,9 @@ GET /api/pipeline-runs/{run_id}
 GET /api/pipeline-runs/{run_id}/checkpoints
 ```
 
+两个 `POST` 入口都会在写出前拒绝已存在于 pipeline output root 下的重复 `run_id`，
+不会为 API-created duplicate run 静默创建带时间戳的 alternative directory。
+
 当前支持的 `start_from`：
 
 ```text

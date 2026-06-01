@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from quant_research_platform.interfaces.api.services.factor_template_service import (
@@ -104,6 +104,11 @@ def create_pipeline_snapshot_payload(
     validation = validate_pipeline_config(config)
     if validation.has_blocking:
         _raise_validation_error(validation)
+    _ensure_pipeline_run_id_available(
+        output_root,
+        payload.run_id,
+        kind="snapshot",
+    )
     try:
         snapshot = write_run_snapshot(config)
     except PipelineSnapshotError as exc:
@@ -131,6 +136,7 @@ def create_pipeline_run_payload(
     )
     if validation.has_blocking:
         _raise_validation_error(validation)
+    _ensure_pipeline_run_id_available(output_root, payload.run_id, kind="run")
     try:
         result = run_a_share_pipeline(config)
     except PipelineRunnerError as exc:
@@ -249,6 +255,20 @@ def _pipeline_summary_for_kind(
 
 def _not_found_detail(kind: PipelineResourceKind) -> str:
     return f"pipeline {kind} not found"
+
+
+def _ensure_pipeline_run_id_available(
+    output_root: Path,
+    run_id: str,
+    *,
+    kind: PipelineResourceKind,
+) -> None:
+    run_dir = _pipeline_run_dir(output_root, run_id)
+    if run_dir.exists():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"pipeline {kind} run_id already exists: {run_id}",
+        )
 
 
 def _raise_validation_error(validation) -> None:

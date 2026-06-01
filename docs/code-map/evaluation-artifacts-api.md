@@ -216,7 +216,7 @@ display preview row limit，不为了卡片拉完整 diagnostics 表。
 | `download_service.py` | `interfaces/api/services/download_service.py` | direct download、report download 和 selected ZIP 的 HTTP response adapter。 |
 | `comparison_service.py` | `interfaces/api/services/comparison_service.py` | API-visible comparison JSON/CSV。 |
 | `factor_template_service.py` | `interfaces/api/services/factor_template_service.py` | controlled factor template catalog 和 template source metadata。 |
-| `pipeline_service.py` | `interfaces/api/services/pipeline_service.py` | pipeline snapshots、`start_from` pipeline run dispatch。 |
+| `pipeline_service.py` | `interfaces/api/services/pipeline_service.py` | pipeline snapshots、`start_from` pipeline run dispatch，以及 API-created duplicate `run_id` pre-write guard。 |
 | `table_preview_service.py` | `interfaces/api/services/table_preview_service.py` | `manifest.display.tables` gated CSV/Parquet preview、limit/offset/combination filter。 |
 | `upload_service.py` | `interfaces/api/services/upload_service.py` | legacy/dev uploaded-panel CSV smoke -> `EvaluationSpec` -> evaluation run。 |
 
