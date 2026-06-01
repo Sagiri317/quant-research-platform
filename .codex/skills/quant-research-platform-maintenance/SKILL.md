@@ -230,7 +230,7 @@ For medium+ tasks, the final report should recommend a commit message.
 - Match project style, usually Conventional Commit where appropriate: `feat(scope): ...`, `fix(scope): ...`, `docs(scope): ...`, `refactor(scope): ...`, or `test(scope): ...`.
 - Do not imply unimplemented capability.
 - For proxy or descriptive diagnostics, do not imply true risk, capacity, simulation, or validated alpha.
-- Include whether the commit should be a normal commit or amend.
+- Include whether the commit should be a normal commit by default; amend only if explicitly approved.
 - Include whether push should be feature branch only or `main`.
 
 ## Rule Placement
