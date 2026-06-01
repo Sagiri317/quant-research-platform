@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.markets.implementations.a_share.factor_rebuild import (
     FactorRebuildConfig,
@@ -56,10 +57,76 @@ def test_factor_rebuild_overwrite_processed_with_optional_backup(tmp_path) -> No
     manifest = json.loads(
         (output_root / "overwrite_run" / "overwrite_manifest.json").read_text("utf-8")
     )
+    feature_manifest = json.loads(
+        (output_root / "overwrite_run" / "feature_set_manifest.json").read_text(
+            "utf-8"
+        )
+    )
     assert manifest["overwrite_processed"] is True
     assert manifest["backup_existing"] is True
     assert manifest["backup_file_name"] == backup_path.name
+    assert feature_manifest["feature_set_id"] == (
+        "a_share_literature_price_volume_preset_v1"
+    )
+    assert feature_manifest["unsupported_factor_count"] == 0
+    assert (output_root / "overwrite_run" / "eda" / "eda_manifest.json").is_file()
     assert str(tmp_path) not in json.dumps(manifest)
+
+
+def test_factor_rebuild_date_filter_degraded_smoke(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel_with_dates().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+
+    result = run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="filtered_run",
+            memory_budget_gb=1,
+            start_date="2024-02-01",
+            end_date="2024-02-29",
+        )
+    )
+
+    output = pd.read_parquet(output_root / "filtered_run" / "factor_rebuild.parquet")
+    assert result.status == "ready"
+    assert output["trade_date"].min() >= pd.Timestamp("2024-02-01")
+    assert output["trade_date"].max() <= pd.Timestamp("2024-02-29")
+    preflight = json.loads(
+        (output_root / "filtered_run" / "memory_preflight.json").read_text("utf-8")
+    )
+    assert preflight["date_filter"] == {
+        "start_date": "2024-02-01",
+        "end_date": "2024-02-29",
+    }
+
+
+def test_factor_rebuild_rejects_private_input_to_public_output_before_run_dir(
+    tmp_path,
+) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    public_output = tmp_path / "reports" / "public_runs"
+
+    with pytest.raises(ValueError, match="private_output_policy_violation"):
+        run_factor_rebuild(
+            FactorRebuildConfig(
+                panel_parquet=panel_path,
+                output_root=public_output,
+                run_id="public_output_blocked",
+                dry_run=True,
+            )
+        )
+
+    assert not public_output.exists()
 
 
 def _panel() -> pd.DataFrame:
@@ -82,6 +149,35 @@ def _panel() -> pd.DataFrame:
                     "return_1d": 0.01 * offset,
                     "amount": 100.0 + offset,
                     "turnover": 0.1 + offset / 100.0,
+                    "high": close + 1.0,
+                    "low": close - 1.0,
+                    "prev_close": close - 0.5,
+                    "float_market_cap": 1000.0 + offset,
+                    "total_market_cap": 2000.0 + offset,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _panel_with_dates() -> pd.DataFrame:
+    rows = []
+    for stock_code, base in (("000001", 10.0), ("000002", 20.0)):
+        for offset, date in enumerate(pd.bdate_range("2024-01-01", periods=60)):
+            close = base + offset / 10.0
+            rows.append(
+                {
+                    "stock_code": stock_code,
+                    "trade_date": date,
+                    "market_type": "A",
+                    "is_a_share_scope": True,
+                    "eligible": True,
+                    "can_enter": True,
+                    "can_exit": True,
+                    "adj_open": close - 0.1,
+                    "adj_close": close,
+                    "return_1d": 0.001 * offset,
+                    "amount": 100.0 + offset,
+                    "turnover": 0.1 + offset / 1000.0,
                     "high": close + 1.0,
                     "low": close - 1.0,
                     "prev_close": close - 0.5,

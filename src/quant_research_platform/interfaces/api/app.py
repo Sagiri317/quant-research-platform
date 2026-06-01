@@ -148,7 +148,9 @@ def create_app(
     if all(root.source_alias != "pipeline" for root in configured_roots):
         configured_roots = [*configured_roots, run_root("pipeline", pipeline_root)]
     should_register_prediction_root = (
-        prediction_handoff_root is not None or prediction_handoff_env is not None
+        run_roots is None
+        or prediction_handoff_root is not None
+        or prediction_handoff_env is not None
     )
     if should_register_prediction_root and all(
         root.source_alias != "a_share_prediction" for root in configured_roots

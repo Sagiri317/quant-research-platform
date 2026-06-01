@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 from fastapi.testclient import TestClient
 
@@ -51,6 +53,10 @@ def test_a_share_factor_rebuild_api_dry_run_and_status(tmp_path) -> None:
     assert [item["key"] for item in checkpoints.json()] == [
         "schema_inventory",
         "memory_preflight",
+        "factor_rebuild",
+        "feature_set_manifest",
+        "overwrite_manifest",
+        "eda",
         "runtime_summary",
     ]
 
@@ -117,7 +123,7 @@ def test_a_share_prediction_handoff_api_creates_discoverable_evaluation(
             "timestamp_column": "timestamp",
             "entity_column": "asset",
             "feature_columns": ["feature_a", "feature_b"],
-            "label_column": "forward_return_20d",
+            "label_column": "forward_return_2d",
             "return_source_column": "forward_return_1d",
             "label_horizon_days": 2,
             "model_ids": ["ridge"],
@@ -164,6 +170,172 @@ def test_a_share_prediction_handoff_api_creates_discoverable_evaluation(
     }
 
 
+def test_default_app_discovers_default_prediction_handoff_root(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QRP_RUN_ROOTS", raising=False)
+    monkeypatch.delenv("QRP_PREDICTION_HANDOFF_ROOT", raising=False)
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "default_prediction_api_run",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    runs = client.get("/api/runs")
+    assert runs.status_code == 200
+    assert "a_share_prediction/default_prediction_api_run" in {
+        row["public_run_id"] for row in runs.json()
+    }
+
+
+def test_a_share_prediction_handoff_api_rejects_horizon_mismatch(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_bad_horizon",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "label_column": "forward_return_20d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == "invalid_prediction_config"
+    status = client.get("/api/a-share/prediction-handoffs/prediction_bad_horizon")
+    assert status.status_code == 200
+    assert status.json()["failure_code"] == "invalid_prediction_config"
+
+
+def test_a_share_status_endpoints_sanitize_disk_loaded_strings(tmp_path) -> None:
+    factor_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    factor_run = factor_root / "bad_factor_status"
+    factor_run.mkdir(parents=True)
+    (factor_run / "runtime_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "credential_token=abc123",
+                "factor_pack": "credential_token=abc123",
+                "failure_code": "ValueError: raw unstable exception",
+                "row_count": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    prediction_run = prediction_root / "bad_prediction_status"
+    prediction_run.mkdir(parents=True)
+    (prediction_run / "runtime_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "../reports/private_real/failed",
+                "model_suite_id": "api_key=abc123",
+                "failure_code": "Traceback RuntimeError raw exception text",
+                "row_count": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_rebuild_root=factor_root,
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    factor_status = client.get(
+        "/api/a-share/factor-rebuild-runs/bad_factor_status"
+    )
+    prediction_status = client.get(
+        "/api/a-share/prediction-handoffs/bad_prediction_status"
+    )
+
+    assert factor_status.status_code == 200
+    assert prediction_status.status_code == 200
+    assert factor_status.json() == {
+        "run_id": "bad_factor_status",
+        "status": "unknown",
+        "factor_pack": "a_share_literature_price_volume_rebuild_v1",
+        "row_count": 3,
+    }
+    assert prediction_status.json() == {
+        "run_id": "bad_prediction_status",
+        "status": "unknown",
+        "row_count": 5,
+        "model_suite_id": "n6_a_share_sklearn_boosting_suite_v1",
+    }
+    assert str(tmp_path) not in factor_status.text
+    assert str(tmp_path) not in prediction_status.text
+    assert "credential_token" not in factor_status.text
+    assert "ValueError" not in factor_status.text
+    assert "api_key" not in prediction_status.text
+    assert "Traceback" not in prediction_status.text
+    assert "private_real" not in prediction_status.text
+
+
 def _panel() -> pd.DataFrame:
     rows = []
     for stock_code, base in (("000001", 10.0), ("000002", 20.0)):
@@ -205,7 +377,8 @@ def _prediction_panel() -> pd.DataFrame:
                     "asset": asset,
                     "feature_a": float(idx) + offset,
                     "feature_b": float(idx % 3) - offset,
-                    "forward_return_20d": 0.01 * idx + offset / 100.0,
+                    "forward_return_2d": 0.01 * idx + offset / 100.0,
+                    "forward_return_20d": 0.02 * idx + offset / 100.0,
                     "forward_return_1d": 0.001 * idx,
                 }
             )

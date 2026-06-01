@@ -176,6 +176,7 @@ def test_create_app_appends_default_pipeline_root_when_run_roots_env_is_unset(
     assert configured_roots == [
         ("platform", "reports/runs"),
         ("pipeline", "reports/private_real/pipeline_runs"),
+        ("a_share_prediction", "reports/private_real/a_share_prediction_handoffs"),
     ]
 
 

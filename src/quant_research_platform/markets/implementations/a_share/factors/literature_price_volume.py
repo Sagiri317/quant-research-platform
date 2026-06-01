@@ -66,6 +66,29 @@ LITERATURE_FEATURE_EXCLUDE_COLUMNS: frozenset[str] = frozenset(
         "filling_flag",
     }
 )
+BASE_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "rev_1d": ("return_1d",),
+    "mom": ("adj_close",),
+    "rev": ("adj_close",),
+    "vol": ("return_1d",),
+    "downside_vol": ("return_1d",),
+    "upside_vol": ("return_1d",),
+    "max_return": ("return_1d",),
+    "min_return": ("return_1d",),
+    "drawdown": ("adj_close",),
+    "skew": ("return_1d",),
+    "kurt": ("return_1d",),
+    "avg_amount": ("amount",),
+    "turnover": ("turnover",),
+    "turnover_chg": ("turnover",),
+    "turnover_vol": ("turnover",),
+    "amihud": ("return_1d", "amount"),
+    "zero_volume_ratio": ("amount",),
+    "amplitude": ("high", "low", "prev_close"),
+    "intraday_range": ("high", "low", "adj_close"),
+    "log_float_market_cap": ("float_market_cap",),
+    "log_total_market_cap": ("total_market_cap",),
+}
 
 
 def expected_literature_price_volume_factor_columns(
@@ -105,6 +128,31 @@ def expected_literature_price_volume_factor_columns(
         columns.append(f"intraday_range_{window}d")
     columns.extend(("log_float_market_cap", "log_total_market_cap"))
     return tuple(dict.fromkeys(columns))
+
+
+def unsupported_literature_price_volume_factors(
+    available_columns: tuple[str, ...] | list[str] | set[str],
+    *,
+    expected_columns: tuple[str, ...] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Return unsupported requested factors with missing field reasons."""
+
+    available = set(available_columns)
+    expected = expected_columns or expected_literature_price_volume_factor_columns()
+    unsupported: list[dict[str, object]] = []
+    for factor in expected:
+        required = _required_fields_for_factor(factor)
+        missing = [column for column in required if column not in available]
+        if missing:
+            unsupported.append(
+                {
+                    "factor": factor,
+                    "required_fields": list(required),
+                    "reason": "missing_required_fields",
+                    "missing_fields": missing,
+                }
+            )
+    return tuple(unsupported)
 
 
 def calculate_literature_price_volume_factors(
@@ -309,6 +357,15 @@ def _is_excluded_feature(column: str) -> bool:
     )
 
 
+def _required_fields_for_factor(factor: str) -> tuple[str, ...]:
+    if factor in BASE_FACTOR_REQUIREMENTS:
+        return BASE_FACTOR_REQUIREMENTS[factor]
+    for prefix, required in BASE_FACTOR_REQUIREMENTS.items():
+        if factor.startswith(f"{prefix}_"):
+            return required
+    return ()
+
+
 __all__ = [
     "DEFAULT_LITERATURE_WINDOWS",
     "LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID",
@@ -316,5 +373,6 @@ __all__ = [
     "calculate_literature_price_volume_factors",
     "expected_literature_price_volume_factor_columns",
     "select_literature_price_volume_features",
+    "unsupported_literature_price_volume_factors",
     "warn_for_missing_literature_features",
 ]

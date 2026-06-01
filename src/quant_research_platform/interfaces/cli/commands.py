@@ -39,6 +39,7 @@ from quant_research_platform.research.ml_baseline import (
     run_baseline_training,
     validate_baseline_output_policy,
 )
+from quant_research_platform.research.ml_model_suite import DEFAULT_NON_DL_MODEL_IDS
 from quant_research_platform.research.prediction_handoff import (
     PredictionHandoffConfig,
     run_prediction_handoff,
@@ -375,6 +376,16 @@ A_SHARE_MODEL_ID_OPTION = typer.Option(
     "--model-id",
     help="Model id in the local non-DL suite. Repeat for multiple models.",
 )
+A_SHARE_START_DATE_OPTION = typer.Option(
+    None,
+    "--start-date",
+    help="Optional inclusive date filter for degraded/private smoke execution.",
+)
+A_SHARE_END_DATE_OPTION = typer.Option(
+    None,
+    "--end-date",
+    help="Optional inclusive date filter for degraded/private smoke execution.",
+)
 
 
 @a_share_app.command("build-interim")
@@ -442,6 +453,8 @@ def a_share_factor_rebuild(
     dry_run: bool = DRY_RUN_OPTION,
     overwrite_processed: bool = A_SHARE_OVERWRITE_PROCESSED_OPTION,
     backup_existing: bool = A_SHARE_BACKUP_EXISTING_OPTION,
+    start_date: str | None = A_SHARE_START_DATE_OPTION,
+    end_date: str | None = A_SHARE_END_DATE_OPTION,
 ) -> None:
     """Dry-run or run a local A-share literature factor rebuild."""
 
@@ -457,6 +470,8 @@ def a_share_factor_rebuild(
                 factor_parquet=factor_parquet,
                 overwrite_processed=overwrite_processed,
                 backup_existing=backup_existing,
+                start_date=start_date,
+                end_date=end_date,
             )
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
@@ -501,7 +516,7 @@ def a_share_prediction_handoff(
                 return_source_column=return_source_column,
                 label_horizon_days=label_horizon_days,
                 folds=_prediction_handoff_folds(walk_forward_fold),
-                model_ids=tuple(model_id or ("ridge", "elastic_net")),
+                model_ids=tuple(model_id or DEFAULT_NON_DL_MODEL_IDS),
                 memory_budget_gb=memory_budget_gb,
                 dry_run=dry_run,
             )

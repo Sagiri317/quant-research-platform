@@ -24,6 +24,7 @@ from quant_research_platform.markets.implementations.a_share.research_batch_safe
 )
 from quant_research_platform.research.ml_model_suite import (
     A_SHARE_MODEL_SUITE_ID,
+    DEFAULT_NON_DL_MODEL_IDS,
     MODEL_BOUNDARY,
     PREDICTION_HANDOFF_VERSION,
     ModelSuiteConfig,
@@ -50,7 +51,7 @@ class PredictionHandoffConfig:
     return_source_column: str = "forward_return_1d"
     label_horizon_days: int = 20
     folds: tuple[dict[str, str | None], ...] = ()
-    model_ids: tuple[str, ...] = ("ridge", "elastic_net", "hist_gradient_boosting")
+    model_ids: tuple[str, ...] = DEFAULT_NON_DL_MODEL_IDS
     memory_budget_gb: float = 10.0
     dry_run: bool = False
     n_groups: int = 2
@@ -73,67 +74,87 @@ def run_prediction_handoff(
 
     _validate_config(config)
     run_dir = _new_run_dir(config.output_root, config.run_id)
-    _write_preflight_files(config, run_dir)
-    if config.dry_run:
+    try:
+        _write_preflight_files(config, run_dir)
+        if config.dry_run:
+            write_json_sanitized(
+                run_dir / "runtime_summary.json",
+                _summary(config, "dry_run"),
+            )
+            _write_checkpoints(run_dir)
+            return PredictionHandoffResult(
+                run_dir=run_dir,
+                status="dry_run",
+                row_count=0,
+            )
+
+        prediction_path = run_dir / "predictions.parquet"
+        prediction_long_path = run_dir / "prediction_records.parquet"
+        metadata_path = run_dir / "model_metadata.json"
+        model_result = run_model_suite(
+            ModelSuiteConfig(
+                input_path=config.input_path,
+                output_prediction_path=prediction_path,
+                output_metadata_path=metadata_path,
+                output_prediction_long_path=prediction_long_path,
+                timestamp_column=config.timestamp_column,
+                entity_column=config.entity_column,
+                feature_columns=config.feature_columns,
+                label_column=config.label_column,
+                label_horizon_days=config.label_horizon_days,
+                folds=_suite_folds(config.folds),
+                model_ids=config.model_ids or DEFAULT_NON_DL_MODEL_IDS,
+            )
+        )
+        prediction_frame = _add_return_source_column(config, prediction_path)
+        prediction_frame.to_parquet(
+            prediction_path,
+            engine="pyarrow",
+            compression="zstd",
+            index=False,
+        )
+        _run_prediction_evaluation(
+            config,
+            prediction_path,
+            model_result.prediction_columns,
+        )
+        _write_comparison_outputs(
+            config,
+            run_dir,
+            prediction_frame,
+            model_result.prediction_columns,
+        )
+        _write_eda_outputs(
+            config,
+            run_dir,
+            prediction_frame,
+            model_result.prediction_columns,
+        )
         write_json_sanitized(
             run_dir / "runtime_summary.json",
-            _summary(config, "dry_run"),
+            {
+                **_summary(config, "ready"),
+                "row_count": int(len(prediction_frame)),
+                "prediction_columns": list(model_result.prediction_columns),
+                "model_suite_id": A_SHARE_MODEL_SUITE_ID,
+                "prediction_record_format": "wide_plus_long",
+            },
         )
         _write_checkpoints(run_dir)
-        return PredictionHandoffResult(run_dir=run_dir, status="dry_run", row_count=0)
-
-    prediction_path = run_dir / "predictions.parquet"
-    metadata_path = run_dir / "model_metadata.json"
-    model_result = run_model_suite(
-        ModelSuiteConfig(
-            input_path=config.input_path,
-            output_prediction_path=prediction_path,
-            output_metadata_path=metadata_path,
-            timestamp_column=config.timestamp_column,
-            entity_column=config.entity_column,
-            feature_columns=config.feature_columns,
-            label_column=config.label_column,
-            label_horizon_days=config.label_horizon_days,
-            folds=_suite_folds(config.folds),
-            model_ids=config.model_ids,
+        return PredictionHandoffResult(
+            run_dir=run_dir,
+            status="ready",
+            row_count=len(prediction_frame),
+            prediction_columns=model_result.prediction_columns,
         )
-    )
-    prediction_frame = _add_return_source_column(config, prediction_path)
-    prediction_frame.to_parquet(
-        prediction_path,
-        engine="pyarrow",
-        compression="zstd",
-        index=False,
-    )
-    _run_prediction_evaluation(config, prediction_path, model_result.prediction_columns)
-    _write_comparison_outputs(
-        config,
-        run_dir,
-        prediction_frame,
-        model_result.prediction_columns,
-    )
-    _write_eda_outputs(
-        config,
-        run_dir,
-        prediction_frame,
-        model_result.prediction_columns,
-    )
-    write_json_sanitized(
-        run_dir / "runtime_summary.json",
-        {
-            **_summary(config, "ready"),
-            "row_count": int(len(prediction_frame)),
-            "prediction_columns": list(model_result.prediction_columns),
-            "model_suite_id": A_SHARE_MODEL_SUITE_ID,
-        },
-    )
-    _write_checkpoints(run_dir)
-    return PredictionHandoffResult(
-        run_dir=run_dir,
-        status="ready",
-        row_count=len(prediction_frame),
-        prediction_columns=model_result.prediction_columns,
-    )
+    except Exception as exc:
+        if not (run_dir / "runtime_summary.json").is_file():
+            write_json_sanitized(
+                run_dir / "runtime_summary.json",
+                _summary(config, "failed", failure_code=_failure_code(exc)),
+            )
+        _write_checkpoints(run_dir)
+        raise
 
 
 def _validate_config(config: PredictionHandoffConfig) -> None:
@@ -291,19 +312,25 @@ def _write_comparison_outputs(
             frame,
             signal_column=column,
             label_column=config.label_column,
-            model_id=column.removeprefix("prediction_score_").removesuffix("_20d"),
+            timestamp_column=config.timestamp_column,
+            model_id=_model_id_from_prediction_column(column, config.label_column),
             target_horizon=config.label_column.removeprefix("forward_return_"),
             feature_set_id=LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
         )
         for column in prediction_columns
     ]
+    existing_model_ids = {str(row["model_id"]) for row in rows}
     for feature in config.feature_columns:
+        model_id = f"single_factor_{feature}"
+        if model_id in existing_model_ids:
+            continue
         rows.append(
             _metric_row(
                 frame=_merge_feature_for_comparison(config, frame, feature),
                 signal_column=feature,
                 label_column=config.label_column,
-                model_id=f"single_factor_{feature}",
+                timestamp_column=config.timestamp_column,
+                model_id=model_id,
                 target_horizon=config.label_column.removeprefix("forward_return_"),
                 feature_set_id=LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
             )
@@ -349,30 +376,72 @@ def _metric_row(
     *,
     signal_column: str,
     label_column: str,
+    timestamp_column: str,
     model_id: str,
     target_horizon: str,
     feature_set_id: str,
 ) -> dict[str, object]:
-    valid = frame[[signal_column, label_column]].dropna()
-    mean_ic = (
-        float(valid[signal_column].corr(valid[label_column]))
-        if len(valid) > 1
-        else None
+    valid = frame[[timestamp_column, signal_column, label_column]].dropna()
+    grouped_ic = _datewise_correlations(
+        valid,
+        timestamp_column=timestamp_column,
+        signal_column=signal_column,
+        label_column=label_column,
+        rank=False,
     )
-    rank_ic = (
-        float(valid[signal_column].rank().corr(valid[label_column].rank()))
-        if len(valid) > 1
-        else None
+    grouped_rank_ic = _datewise_correlations(
+        valid,
+        timestamp_column=timestamp_column,
+        signal_column=signal_column,
+        label_column=label_column,
+        rank=True,
     )
     return {
         "model_id": model_id,
         "target_horizon": target_horizon,
         "feature_set_id": feature_set_id,
-        "mean_ic": mean_ic,
-        "mean_rankic": rank_ic,
+        "mean_ic": _finite_mean(grouped_ic),
+        "mean_rankic": _finite_mean(grouped_rank_ic),
         "coverage": float(len(valid) / len(frame)) if len(frame) else 0.0,
         "n_oos_rows": int(len(valid)),
     }
+
+
+def _finite_mean(values: pd.Series) -> float | None:
+    finite = pd.to_numeric(values, errors="coerce").replace(
+        [float("inf"), float("-inf")],
+        pd.NA,
+    )
+    finite = finite.dropna()
+    return None if finite.empty else float(finite.mean())
+
+
+def _datewise_correlations(
+    frame: pd.DataFrame,
+    *,
+    timestamp_column: str,
+    signal_column: str,
+    label_column: str,
+    rank: bool,
+) -> pd.Series:
+    values = []
+    for _, group in frame.groupby(timestamp_column):
+        if len(group) <= 1:
+            values.append(None)
+            continue
+        signal = group[signal_column].rank() if rank else group[signal_column]
+        label = group[label_column].rank() if rank else group[label_column]
+        values.append(signal.corr(label))
+    return pd.Series(values, dtype="float64")
+
+
+def _model_id_from_prediction_column(column: str, label_column: str) -> str:
+    horizon = label_column.removeprefix("forward_return_")
+    suffix = f"_{horizon}"
+    value = column.removeprefix("prediction_score_")
+    if value.endswith(suffix):
+        value = value[: -len(suffix)]
+    return value
 
 
 def _write_eda_outputs(
@@ -391,6 +460,18 @@ def _write_eda_outputs(
         .rename(columns={"size": "row_count"})
     )
     coverage.to_csv(eda_dir / "data_coverage_by_year.csv", index=False)
+    months = (
+        pd.to_datetime(frame[config.timestamp_column])
+        .dt.to_period("M")
+        .astype(str)
+    )
+    monthly = (
+        frame.assign(month=months)
+        .groupby("month", as_index=False)
+        .size()
+        .rename(columns={"size": "row_count"})
+    )
+    monthly.to_csv(eda_dir / "data_coverage_by_month.csv", index=False)
     missingness = (
         frame[list(prediction_columns)]
         .isna()
@@ -400,12 +481,14 @@ def _write_eda_outputs(
         .rename(columns={"index": "feature"})
     )
     missingness.to_csv(eda_dir / "missingness_by_feature.csv", index=False)
+    chart_count = _write_optional_charts(eda_dir, coverage, missingness)
     write_json_sanitized(
         eda_dir / "eda_manifest.json",
         {
             "status": "ready",
             "eda_status": "experimental_non_contract",
-            "artifact_count": 2,
+            "artifact_count": 3 + chart_count,
+            "chart_count": chart_count,
         },
     )
     (eda_dir / "eda_report.md").write_text(
@@ -433,11 +516,30 @@ def _summary(
     return payload
 
 
+def _failure_code(exc: BaseException) -> str:
+    detail = str(exc)
+    known = {
+        "memory_preflight_failed",
+        "insufficient_sample",
+        "invalid_prediction_config",
+        "invalid_feature_preset",
+        "private_output_policy_violation",
+        "dependency_unavailable",
+        "duplicate_run_id",
+    }
+    if detail in known:
+        return detail
+    if isinstance(exc, FileNotFoundError):
+        return "missing_prediction_input"
+    return "prediction_handoff_failed"
+
+
 def _write_checkpoints(run_dir: Path) -> None:
     checkpoints = [
         ("schema_inventory", "schema_inventory.json"),
         ("memory_preflight", "memory_preflight.json"),
         ("predictions", "predictions.parquet"),
+        ("prediction_records", "prediction_records.parquet"),
         ("model_metadata", "model_metadata.json"),
         ("evaluation", "evaluation_manifest"),
         ("comparison", "model_leaderboard"),
@@ -460,6 +562,7 @@ def _checkpoint_ready(run_dir: Path, key: str) -> bool:
         "schema_inventory": run_dir / "schema_inventory.json",
         "memory_preflight": run_dir / "memory_preflight.json",
         "predictions": run_dir / "predictions.parquet",
+        "prediction_records": run_dir / "prediction_records.parquet",
         "model_metadata": run_dir / "model_metadata.json",
         "evaluation": run_dir / "evaluation" / "manifest.json",
         "comparison": run_dir / "comparison" / "model_leaderboard.csv",
@@ -467,6 +570,42 @@ def _checkpoint_ready(run_dir: Path, key: str) -> bool:
         "runtime_summary": run_dir / "runtime_summary.json",
     }
     return paths[key].is_file()
+
+
+def _write_optional_charts(
+    eda_dir: Path,
+    coverage: pd.DataFrame,
+    missingness: pd.DataFrame,
+) -> int:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return 0
+    chart_count = 0
+    if not coverage.empty:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        coverage.plot.bar(x="year", y="row_count", ax=ax, legend=False)
+        ax.set_xlabel("year")
+        ax.set_ylabel("row_count")
+        fig.tight_layout()
+        fig.savefig(eda_dir / "coverage_by_year.png", dpi=120)
+        plt.close(fig)
+        chart_count += 1
+    if not missingness.empty:
+        fig, ax = plt.subplots(figsize=(7, 3))
+        missingness.head(20).plot.bar(
+            x="feature",
+            y="missing_fraction",
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("feature")
+        ax.set_ylabel("missing_fraction")
+        fig.tight_layout()
+        fig.savefig(eda_dir / "missingness_top20.png", dpi=120)
+        plt.close(fig)
+        chart_count += 1
+    return chart_count
 
 
 __all__ = [

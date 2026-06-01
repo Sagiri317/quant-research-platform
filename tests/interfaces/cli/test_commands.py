@@ -275,7 +275,7 @@ def test_a_share_prediction_handoff_cli_writes_evaluation_outputs(tmp_path) -> N
             "--feature-column",
             "feature_b",
             "--target-column",
-            "forward_return_20d",
+            "forward_return_2d",
             "--return-source-column",
             "forward_return_1d",
             "--label-horizon-days",
@@ -907,7 +907,8 @@ def _prediction_handoff_panel() -> pd.DataFrame:
                     "asset": asset,
                     "feature_a": float(idx) + offset,
                     "feature_b": float(idx % 3) - offset,
-                    "forward_return_20d": 0.01 * idx + offset / 100.0,
+                    "forward_return_2d": 0.01 * idx + offset / 100.0,
+                    "forward_return_20d": 0.02 * idx + offset / 100.0,
                     "forward_return_1d": 0.001 * idx,
                 }
             )

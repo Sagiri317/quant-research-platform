@@ -62,8 +62,10 @@ GET /api/a-share/prediction-handoffs/{run_id}/eda
 
 Prediction handoff evaluations are ordinary schema `0.7` `evaluation_set`
 artifacts under each handoff run's `evaluation/` child. They are discoverable as
-`a_share_prediction/{run_id}` only when the API is explicitly configured with a
-prediction handoff root; this keeps the default health/run-root contract stable.
+`a_share_prediction/{run_id}` from the default local app root or from an
+explicitly configured prediction handoff root. If callers pass fully custom
+`run_roots`, they must also pass or configure the prediction handoff root to
+make those runs visible in `/api/runs`.
 
 `start_from` 控制开始层：
 

@@ -10,6 +10,7 @@ from quant_research_platform.markets.implementations.a_share.factors.literature_
     calculate_literature_price_volume_factors,
     expected_literature_price_volume_factor_columns,
     select_literature_price_volume_features,
+    unsupported_literature_price_volume_factors,
 )
 
 
@@ -99,3 +100,17 @@ def test_feature_preset_excludes_labels_filters_and_raw_identifiers() -> None:
     assert "stock_code" not in features
     assert "eligible" not in features
     assert warnings
+
+
+def test_unsupported_factor_list_records_missing_required_fields() -> None:
+    unsupported = unsupported_literature_price_volume_factors(
+        {"stock_code", "trade_date", "adj_close"},
+        expected_columns=("amihud_20d", "log_float_market_cap", "mom_20d"),
+    )
+
+    assert {
+        (item["factor"], tuple(item["missing_fields"])) for item in unsupported
+    } == {
+        ("amihud_20d", ("return_1d", "amount")),
+        ("log_float_market_cap", ("float_market_cap",)),
+    }
