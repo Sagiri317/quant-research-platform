@@ -289,6 +289,141 @@ def test_ml_baseline_train_cli_writes_predictions_and_metadata(tmp_path) -> None
     assert summary["kind"] == "prediction"
 
 
+def test_ml_baseline_train_cli_writes_walk_forward_predictions(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    evaluation_output = tmp_path / "evaluation"
+    _baseline_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(prediction_path),
+            "--output-metadata",
+            str(metadata_path),
+            "--target-column",
+            "forward_return",
+            "--feature-column",
+            "feature_a",
+            "--walk-forward-fold",
+            "fold_001,2026-01-01,2026-01-02,2026-01-02,walk_forward",
+            "--walk-forward-fold",
+            "fold_002,2026-01-02,2026-01-03,2026-01-03,walk_forward",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    predictions = pd.read_parquet(prediction_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert predictions["fold_id"].tolist() == [
+        "fold_001",
+        "fold_001",
+        "fold_002",
+        "fold_002",
+    ]
+    assert set(predictions["split_name"]) == {"walk_forward"}
+    assert metadata["fold_count"] == 2
+    assert metadata["folds"][0]["test_start"] == "2026-01-02"
+    assert metadata["folds"][1]["test_start"] == "2026-01-03"
+    metadata_text = metadata_path.read_text(encoding="utf-8")
+    for forbidden in (
+        str(tmp_path),
+        str(tmp_path).replace("\\", "/"),
+        "vendor_private",
+        "row_sample",
+        "stock_sample",
+    ):
+        assert forbidden not in metadata_text
+
+    handoff = runner.invoke(
+        app,
+        [
+            "evaluate-parquet",
+            "--parquet-path",
+            str(prediction_path),
+            "--feature",
+            "prediction_score",
+            "--label",
+            "forward_return",
+            "--return-source-column",
+            "forward_return_1d",
+            "--segment-column",
+            "fold_id",
+            "--output",
+            str(evaluation_output),
+            "--run-id",
+            "cli_walk_forward_prediction_handoff",
+            "--kind",
+            "prediction",
+            "--domain",
+            "prediction_handoff",
+            "--data-stage",
+            "synthetic_only",
+            "--no-uses-external-data",
+            "--n-groups",
+            "2",
+            "--prediction-handoff-version",
+            "n6_mvs_v1",
+            "--prediction-source-ref",
+            "synthetic_baseline_prediction_panel_v1",
+            "--prediction-model-ref",
+            "numpy_linear_ridge_baseline_v1",
+        ],
+    )
+
+    assert handoff.exit_code == 0, handoff.output
+    summary = json.loads((evaluation_output / "summary.json").read_text("utf-8"))
+    assert summary["kind"] == "prediction"
+
+
+def test_ml_baseline_train_cli_fails_cleanly_for_invalid_walk_forward_fold(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _baseline_panel().to_parquet(input_path, engine="pyarrow", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(tmp_path / "predictions.parquet"),
+            "--output-metadata",
+            str(tmp_path / "metadata.json"),
+            "--target-column",
+            "forward_return",
+            "--feature-column",
+            "feature_a",
+            "--walk-forward-fold",
+            "fold_001,2026-01-02,2026-01-02",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "ML baseline input error" in result.output
+    assert "train_end must be before test_start" in result.output
+    assert str(tmp_path) not in result.output
+    assert str(tmp_path).replace("\\", "/") not in result.output
+
+
 def test_ml_baseline_train_cli_fails_cleanly_for_embargo_overlap(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     pd.DataFrame(

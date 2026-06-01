@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 from quant_research_platform.interfaces.cli import commands as commands_module
 from quant_research_platform.interfaces.cli.commands import app
 from quant_research_platform.research.ml_baseline import (
+    BaselineFoldConfig,
     BaselineTrainingConfig,
     run_baseline_training,
 )
@@ -112,6 +113,151 @@ def test_baseline_training_records_oos_split_embargo_and_fold(tmp_path) -> None:
         "count": 2,
     }
     assert metadata["target_column"] == "forward_return"
+
+
+def test_baseline_training_writes_walk_forward_predictions_and_metadata(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    result = run_baseline_training(
+        BaselineTrainingConfig(
+            input_path=input_path,
+            output_prediction_path=prediction_path,
+            output_metadata_path=metadata_path,
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return",
+            folds=(
+                BaselineFoldConfig(
+                    fold_id="fold_001",
+                    train_end="2026-01-01",
+                    test_start="2026-01-02",
+                    test_end="2026-01-02",
+                    split_name="walk_forward",
+                ),
+                BaselineFoldConfig(
+                    fold_id="fold_002",
+                    train_end="2026-01-02",
+                    test_start="2026-01-03",
+                    test_end="2026-01-03",
+                    split_name="walk_forward",
+                ),
+            ),
+        )
+    )
+
+    predictions = pd.read_parquet(prediction_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert result.train_row_count == 6
+    assert result.test_row_count == 4
+    assert predictions["timestamp"].tolist() == [
+        pd.Timestamp("2026-01-02"),
+        pd.Timestamp("2026-01-02"),
+        pd.Timestamp("2026-01-03"),
+        pd.Timestamp("2026-01-03"),
+    ]
+    assert predictions["fold_id"].tolist() == [
+        "fold_001",
+        "fold_001",
+        "fold_002",
+        "fold_002",
+    ]
+    assert set(predictions["split_name"]) == {"walk_forward"}
+    assert predictions["prediction_score"].notna().all()
+    assert metadata["fold_count"] == 2
+    assert metadata["test_row_count"] == 4
+    assert metadata["folds"] == [
+        {
+            "fold_id": "fold_001",
+            "split_name": "walk_forward",
+            "train_end": "2026-01-01",
+            "test_start": "2026-01-02",
+            "test_end": "2026-01-02",
+            "train_row_count": 2,
+            "test_row_count": 2,
+        },
+        {
+            "fold_id": "fold_002",
+            "split_name": "walk_forward",
+            "train_end": "2026-01-02",
+            "test_start": "2026-01-03",
+            "test_end": "2026-01-03",
+            "train_row_count": 4,
+            "test_row_count": 2,
+        },
+    ]
+    assert metadata["training_time"]["folds"] == metadata["folds"]
+    assert metadata["prediction_time"]["folds"] == metadata["folds"]
+
+
+def test_baseline_training_rejects_overlapping_walk_forward_test_windows(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(ValueError, match="walk-forward test windows must not overlap"):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return",
+                folds=(
+                    BaselineFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2026-01-01",
+                        test_start="2026-01-02",
+                        test_end="2026-01-03",
+                    ),
+                    BaselineFoldConfig(
+                        fold_id="fold_002",
+                        train_end="2026-01-02",
+                        test_start="2026-01-03",
+                        test_end="2026-01-04",
+                    ),
+                ),
+            )
+        )
+
+
+def test_baseline_training_rejects_duplicate_walk_forward_fold_ids(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(ValueError, match="walk-forward fold_id values must be unique"):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return",
+                folds=(
+                    BaselineFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2026-01-01",
+                        test_start="2026-01-02",
+                    ),
+                    BaselineFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2026-01-02",
+                        test_start="2026-01-03",
+                    ),
+                ),
+            )
+        )
 
 
 def test_baseline_training_rejects_overlapping_split(tmp_path) -> None:
@@ -300,6 +446,38 @@ def test_baseline_training_rejects_private_input_with_ordinary_outputs(
                 label_column="forward_return",
                 train_end="2026-01-02",
                 test_start="2026-01-03",
+            )
+        )
+
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+
+
+def test_walk_forward_rejects_private_input_with_ordinary_outputs(tmp_path) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = tmp_path / "public_outputs" / "predictions.parquet"
+    metadata_path = tmp_path / "public_outputs" / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(ValueError, match="private input policy"):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=prediction_path,
+                output_metadata_path=metadata_path,
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return",
+                folds=(
+                    BaselineFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2026-01-01",
+                        test_start="2026-01-02",
+                    ),
+                ),
             )
         )
 

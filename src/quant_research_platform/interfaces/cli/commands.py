@@ -28,6 +28,7 @@ from quant_research_platform.evaluations.evaluation_spec import (
     WeightConfig,
 )
 from quant_research_platform.research.ml_baseline import (
+    BaselineFoldConfig,
     BaselineTrainingConfig,
     is_private_baseline_path,
     run_baseline_training,
@@ -253,14 +254,22 @@ BASELINE_FEATURE_COLUMN_OPTION = typer.Option(
     ),
 )
 BASELINE_TRAIN_END_OPTION = typer.Option(
-    ...,
+    None,
     "--train-end",
     help="Inclusive training split end date.",
 )
 BASELINE_TEST_START_OPTION = typer.Option(
-    ...,
+    None,
     "--test-start",
     help="Inclusive OOS test split start date.",
+)
+BASELINE_WALK_FORWARD_FOLD_OPTION = typer.Option(
+    None,
+    "--walk-forward-fold",
+    help=(
+        "Walk-forward fold as fold_id,train_end,test_start[,test_end[,split_name]]. "
+        "Repeat for multiple folds."
+    ),
 )
 BASELINE_TEST_END_OPTION = typer.Option(
     None,
@@ -357,8 +366,9 @@ def train_ml_baseline(
     feature_column: list[str] | None = BASELINE_FEATURE_COLUMN_OPTION,
     timestamp_column: str = TIMESTAMP_COLUMN_OPTION,
     asset_column: str = ASSET_COLUMN_OPTION,
-    train_end: str = BASELINE_TRAIN_END_OPTION,
-    test_start: str = BASELINE_TEST_START_OPTION,
+    train_end: str | None = BASELINE_TRAIN_END_OPTION,
+    test_start: str | None = BASELINE_TEST_START_OPTION,
+    walk_forward_fold: list[str] | None = BASELINE_WALK_FORWARD_FOLD_OPTION,
     test_end: str | None = BASELINE_TEST_END_OPTION,
     embargo_days: int = BASELINE_EMBARGO_DAYS_OPTION,
     fold_id: str | None = BASELINE_FOLD_ID_OPTION,
@@ -384,6 +394,7 @@ def train_ml_baseline(
             asset_column=asset_column,
             target_column=target_column,
         )
+        folds = _baseline_walk_forward_folds(walk_forward_fold)
         run_baseline_training(
             BaselineTrainingConfig(
                 input_path=input_parquet,
@@ -403,6 +414,7 @@ def train_ml_baseline(
                 ridge_alpha=ridge_alpha,
                 source_ref=source_ref,
                 model_ref=model_ref,
+                folds=folds,
             )
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
@@ -675,6 +687,34 @@ def _time_breakdown_values(values: list[str] | None) -> tuple[str, ...]:
     if len(set(normalized)) != len(normalized):
         raise typer.BadParameter("--time-breakdown must not contain duplicates.")
     return normalized
+
+
+def _baseline_walk_forward_folds(
+    values: list[str] | None,
+) -> tuple[BaselineFoldConfig, ...]:
+    folds: list[BaselineFoldConfig] = []
+    for raw_value in values or ():
+        value = raw_value.strip()
+        if not value:
+            continue
+        parts = [part.strip() for part in value.split(",")]
+        if len(parts) not in {3, 4, 5} or any(not part for part in parts[:3]):
+            raise ValueError(
+                "walk_forward_fold must use "
+                "fold_id,train_end,test_start[,test_end[,split_name]]."
+            )
+        test_end = parts[3] if len(parts) >= 4 and parts[3] else None
+        split_name = parts[4] if len(parts) == 5 and parts[4] else None
+        folds.append(
+            BaselineFoldConfig(
+                fold_id=parts[0],
+                train_end=parts[1],
+                test_start=parts[2],
+                test_end=test_end,
+                split_name=split_name,
+            )
+        )
+    return tuple(folds)
 
 
 def _baseline_feature_columns(

@@ -27,6 +27,17 @@ BOUNDARY_STATEMENT = (
 
 
 @dataclass(frozen=True)
+class BaselineFoldConfig:
+    """One local walk-forward fold for the baseline trainer."""
+
+    fold_id: str
+    train_end: str
+    test_start: str
+    test_end: str | None = None
+    split_name: str | None = None
+
+
+@dataclass(frozen=True)
 class BaselineTrainingConfig:
     """Input/output contract for the standalone local baseline trainer."""
 
@@ -37,8 +48,8 @@ class BaselineTrainingConfig:
     entity_column: str
     feature_columns: tuple[str, ...]
     label_column: str
-    train_end: str
-    test_start: str
+    train_end: str | None = None
+    test_start: str | None = None
     test_end: str | None = None
     embargo_days: int = 0
     fold_id: str | None = None
@@ -47,6 +58,7 @@ class BaselineTrainingConfig:
     ridge_alpha: float = 1e-6
     source_ref: str = "synthetic_or_local_feature_panel"
     model_ref: str = "numpy_linear_ridge_baseline_v1"
+    folds: tuple[BaselineFoldConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,13 @@ class _ResolvedSplit:
     test_end: pd.Timestamp | None
 
 
+@dataclass(frozen=True)
+class _ResolvedFold:
+    fold_id: str | None
+    split_name: str | None
+    split: _ResolvedSplit
+
+
 def run_baseline_training(config: BaselineTrainingConfig) -> BaselineTrainingResult:
     """Train a deterministic numpy ridge baseline and write test predictions."""
 
@@ -81,39 +100,65 @@ def run_baseline_training(config: BaselineTrainingConfig) -> BaselineTrainingRes
     timestamps = pd.to_datetime(frame[config.timestamp_column], errors="coerce")
     if timestamps.isna().any():
         raise ValueError(f"{config.timestamp_column} must contain valid datetimes.")
-    split = _resolve_split(config)
+    resolved_folds = _resolve_training_folds(config)
 
-    train_mask = timestamps <= split.train_end
-    test_mask = timestamps >= split.test_start
-    if split.test_end is not None:
-        test_mask &= timestamps <= split.test_end
-    train = frame.loc[train_mask].copy()
-    test = frame.loc[test_mask].copy()
-    if train.empty:
-        raise ValueError("train split must contain at least one row.")
-    if test.empty:
-        raise ValueError("test split must contain at least one row.")
+    prediction_frames: list[pd.DataFrame] = []
+    fold_metadata: list[dict[str, Any]] = []
+    fold_models: list[dict[str, Any]] = []
+    total_train_rows = 0
+    total_test_rows = 0
+    last_coefficients: np.ndarray | None = None
+    last_intercept: float | None = None
+    for fold in resolved_folds:
+        train, test = _split_frame_for_fold(frame, timestamps, fold.split)
+        _validate_non_nulls(
+            train,
+            (*config.feature_columns, config.label_column),
+            "train",
+        )
+        _validate_non_nulls(test, config.feature_columns, "test")
 
-    _validate_non_nulls(train, (*config.feature_columns, config.label_column), "train")
-    _validate_non_nulls(test, config.feature_columns, "test")
+        coefficients, intercept = _fit_ridge(
+            train,
+            feature_columns=config.feature_columns,
+            label_column=config.label_column,
+            ridge_alpha=float(config.ridge_alpha),
+        )
+        prediction_values = _predict(
+            test,
+            feature_columns=config.feature_columns,
+            coefficients=coefficients,
+            intercept=intercept,
+        )
+        prediction_frames.append(
+            _prediction_frame(
+                test,
+                config=config,
+                prediction_values=prediction_values,
+                fold_id=fold.fold_id,
+                split_name=fold.split_name,
+            )
+        )
+        total_train_rows += len(train)
+        total_test_rows += len(test)
+        fold_summary = _fold_summary(
+            fold=fold,
+            train_row_count=len(train),
+            test_row_count=len(test),
+        )
+        fold_metadata.append(fold_summary)
+        if fold.fold_id is not None:
+            fold_models.append(
+                {
+                    "fold_id": fold.fold_id,
+                    "coefficients": [float(value) for value in coefficients],
+                    "intercept": float(intercept),
+                }
+            )
+        last_coefficients = coefficients
+        last_intercept = intercept
 
-    coefficients, intercept = _fit_ridge(
-        train,
-        feature_columns=config.feature_columns,
-        label_column=config.label_column,
-        ridge_alpha=float(config.ridge_alpha),
-    )
-    prediction_values = _predict(
-        test,
-        feature_columns=config.feature_columns,
-        coefficients=coefficients,
-        intercept=intercept,
-    )
-    prediction_frame = _prediction_frame(
-        test,
-        config=config,
-        prediction_values=prediction_values,
-    )
+    prediction_frame = pd.concat(prediction_frames, ignore_index=True)
 
     config.output_prediction_path.parent.mkdir(parents=True, exist_ok=True)
     config.output_metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,17 +170,19 @@ def run_baseline_training(config: BaselineTrainingConfig) -> BaselineTrainingRes
     )
     _write_metadata(
         config,
-        coefficients=coefficients,
-        intercept=intercept,
-        train_row_count=len(train),
-        test_row_count=len(test),
+        coefficients=last_coefficients,
+        intercept=last_intercept,
+        train_row_count=total_train_rows,
+        test_row_count=total_test_rows,
+        folds=fold_metadata if config.folds else None,
+        fold_models=fold_models if config.folds else None,
     )
     return BaselineTrainingResult(
         prediction_path=config.output_prediction_path,
         metadata_path=config.output_metadata_path,
         prediction_column=config.prediction_column,
-        train_row_count=len(train),
-        test_row_count=len(test),
+        train_row_count=total_train_rows,
+        test_row_count=total_test_rows,
         source_ref=config.source_ref,
         model_ref=config.model_ref,
     )
@@ -177,12 +224,26 @@ def _validate_config(config: BaselineTrainingConfig) -> None:
         raise ValueError("embargo_days must be nonnegative.")
     _validate_optional_identifier(config.fold_id, "fold_id")
     _validate_optional_identifier(config.split_name, "split_name")
+    _validate_walk_forward_folds(config)
     _validate_portable_ref(config.source_ref, "source_ref")
     _validate_portable_ref(config.model_ref, "model_ref")
     _validate_output_policy(config)
     if config.output_prediction_path == config.output_metadata_path:
         raise ValueError("prediction and metadata output paths must differ.")
-    _resolve_split(config)
+    _resolve_training_folds(config)
+
+
+def _validate_walk_forward_folds(config: BaselineTrainingConfig) -> None:
+    if not config.folds:
+        return
+    if config.fold_id is not None:
+        raise ValueError("fold_id must not be provided with walk-forward folds.")
+    fold_ids = [fold.fold_id for fold in config.folds]
+    if len(set(fold_ids)) != len(fold_ids):
+        raise ValueError("walk-forward fold_id values must be unique.")
+    for fold in config.folds:
+        _validate_optional_identifier(fold.fold_id, "fold_id")
+        _validate_optional_identifier(fold.split_name, "split_name")
 
 
 def _validate_output_policy(config: BaselineTrainingConfig) -> None:
@@ -211,24 +272,90 @@ def validate_baseline_output_policy(
     )
 
 
-def _resolve_split(config: BaselineTrainingConfig) -> _ResolvedSplit:
-    train_end = _parse_timestamp(config.train_end, "train_end")
-    test_start = _parse_timestamp(config.test_start, "test_start")
+def _resolve_training_folds(
+    config: BaselineTrainingConfig,
+) -> tuple[_ResolvedFold, ...]:
+    if not config.folds:
+        return (
+            _ResolvedFold(
+                fold_id=config.fold_id,
+                split_name=config.split_name,
+                split=_resolve_single_split(config),
+            ),
+        )
+
+    resolved = tuple(
+        _ResolvedFold(
+            fold_id=fold.fold_id,
+            split_name=(
+                fold.split_name
+                if fold.split_name is not None
+                else config.split_name
+            ),
+            split=_resolve_split_values(
+                train_end=fold.train_end,
+                test_start=fold.test_start,
+                test_end=fold.test_end,
+                embargo_days=config.embargo_days,
+            ),
+        )
+        for fold in config.folds
+    )
+    _validate_walk_forward_order(resolved)
+    return resolved
+
+
+def _resolve_single_split(config: BaselineTrainingConfig) -> _ResolvedSplit:
+    if config.train_end is None or config.test_start is None:
+        raise ValueError(
+            "train_end and test_start are required unless walk-forward folds "
+            "are provided."
+        )
+    return _resolve_split_values(
+        train_end=config.train_end,
+        test_start=config.test_start,
+        test_end=config.test_end,
+        embargo_days=config.embargo_days,
+    )
+
+
+def _resolve_split_values(
+    *,
+    train_end: str,
+    test_start: str,
+    test_end: str | None,
+    embargo_days: int,
+) -> _ResolvedSplit:
+    train_end_timestamp = _parse_timestamp(train_end, "train_end")
+    test_start_timestamp = _parse_timestamp(test_start, "test_start")
     test_end = (
-        _parse_timestamp(config.test_end, "test_end")
-        if config.test_end is not None
+        _parse_timestamp(test_end, "test_end")
+        if test_end is not None
         else None
     )
-    if train_end >= test_start:
+    if train_end_timestamp >= test_start_timestamp:
         raise ValueError("train_end must be before test_start.")
-    if test_end is not None and test_end < test_start:
+    if test_end is not None and test_end < test_start_timestamp:
         raise ValueError("test_end must be on or after test_start.")
-    embargo_end = train_end + pd.Timedelta(days=config.embargo_days)
-    if embargo_end > test_start:
+    embargo_end = train_end_timestamp + pd.Timedelta(days=embargo_days)
+    if embargo_end > test_start_timestamp:
         raise ValueError(
             "train_end plus embargo_days must be on or before test_start."
         )
-    return _ResolvedSplit(train_end=train_end, test_start=test_start, test_end=test_end)
+    return _ResolvedSplit(
+        train_end=train_end_timestamp,
+        test_start=test_start_timestamp,
+        test_end=test_end,
+    )
+
+
+def _validate_walk_forward_order(folds: tuple[_ResolvedFold, ...]) -> None:
+    previous_test_end: pd.Timestamp | None = None
+    for fold in folds:
+        test_end = fold.split.test_end or fold.split.test_start
+        if previous_test_end is not None and fold.split.test_start <= previous_test_end:
+            raise ValueError("walk-forward test windows must not overlap.")
+        previous_test_end = test_end
 
 
 def _parse_timestamp(value: str, name: str) -> pd.Timestamp:
@@ -344,11 +471,31 @@ def _predict(
     return x @ coefficients + intercept
 
 
+def _split_frame_for_fold(
+    frame: pd.DataFrame,
+    timestamps: pd.Series,
+    split: _ResolvedSplit,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    train_mask = timestamps <= split.train_end
+    test_mask = timestamps >= split.test_start
+    if split.test_end is not None:
+        test_mask &= timestamps <= split.test_end
+    train = frame.loc[train_mask].copy()
+    test = frame.loc[test_mask].copy()
+    if train.empty:
+        raise ValueError("train split must contain at least one row.")
+    if test.empty:
+        raise ValueError("test split must contain at least one row.")
+    return train, test
+
+
 def _prediction_frame(
     frame: pd.DataFrame,
     *,
     config: BaselineTrainingConfig,
     prediction_values: np.ndarray,
+    fold_id: str | None,
+    split_name: str | None,
 ) -> pd.DataFrame:
     output_columns = [
         config.timestamp_column,
@@ -362,21 +509,63 @@ def _prediction_frame(
         output_columns.append("forward_return_1d")
     result = frame.loc[:, output_columns].copy()
     result.insert(2, config.prediction_column, prediction_values)
-    if config.split_name is not None:
-        result["split_name"] = config.split_name
-    if config.fold_id is not None:
-        result["fold_id"] = config.fold_id
+    if split_name is not None:
+        result["split_name"] = split_name
+    if fold_id is not None:
+        result["fold_id"] = fold_id
     return result
+
+
+def _fold_summary(
+    *,
+    fold: _ResolvedFold,
+    train_row_count: int,
+    test_row_count: int,
+) -> dict[str, Any]:
+    return {
+        "fold_id": fold.fold_id,
+        "split_name": fold.split_name,
+        "train_end": _date_string(fold.split.train_end),
+        "test_start": _date_string(fold.split.test_start),
+        "test_end": (
+            _date_string(fold.split.test_end)
+            if fold.split.test_end is not None
+            else None
+        ),
+        "train_row_count": train_row_count,
+        "test_row_count": test_row_count,
+    }
 
 
 def _write_metadata(
     config: BaselineTrainingConfig,
     *,
-    coefficients: np.ndarray,
-    intercept: float,
+    coefficients: np.ndarray | None,
+    intercept: float | None,
     train_row_count: int,
     test_row_count: int,
+    folds: list[dict[str, Any]] | None,
+    fold_models: list[dict[str, Any]] | None,
 ) -> None:
+    is_walk_forward = folds is not None
+    training_time: dict[str, Any]
+    prediction_time: dict[str, Any]
+    if is_walk_forward:
+        training_time = {"folds": folds}
+        prediction_time = {"folds": folds}
+    else:
+        training_time = {
+            "train_end": _date_string(pd.Timestamp(config.train_end)),
+            "embargo_days": config.embargo_days,
+        }
+        prediction_time = {
+            "test_start": _date_string(pd.Timestamp(config.test_start)),
+            "test_end": (
+                _date_string(pd.Timestamp(config.test_end))
+                if config.test_end is not None
+                else None
+            ),
+        }
     metadata: dict[str, Any] = {
         "model_type": "numpy_linear_ridge_baseline",
         "model_ref": config.model_ref,
@@ -391,40 +580,56 @@ def _write_metadata(
         "timestamp_column": config.timestamp_column,
         "entity_column": config.entity_column,
         "prediction_column": config.prediction_column,
-        "train_end": str(pd.Timestamp(config.train_end).date()),
-        "test_start": str(pd.Timestamp(config.test_start).date()),
+        "train_end": (
+            _date_string(pd.Timestamp(config.train_end))
+            if config.train_end is not None
+            else None
+        ),
+        "test_start": (
+            _date_string(pd.Timestamp(config.test_start))
+            if config.test_start is not None
+            else None
+        ),
         "test_end": (
-            str(pd.Timestamp(config.test_end).date())
+            _date_string(pd.Timestamp(config.test_end))
             if config.test_end is not None
             else None
         ),
         "embargo_days": config.embargo_days,
         "fold_id": config.fold_id,
         "split_name": config.split_name,
-        "training_time": {
-            "train_end": str(pd.Timestamp(config.train_end).date()),
-            "embargo_days": config.embargo_days,
-        },
-        "prediction_time": {
-            "test_start": str(pd.Timestamp(config.test_start).date()),
-            "test_end": (
-                str(pd.Timestamp(config.test_end).date())
-                if config.test_end is not None
-                else None
-            ),
-        },
+        "training_time": training_time,
+        "prediction_time": prediction_time,
         "train_row_count": train_row_count,
         "test_row_count": test_row_count,
-        "coefficients": [float(value) for value in coefficients],
-        "intercept": float(intercept),
         "ridge_alpha": float(config.ridge_alpha),
         "boundary": BOUNDARY_STATEMENT,
     }
+    if is_walk_forward:
+        metadata.update(
+            {
+                "fold_count": len(folds),
+                "folds": folds,
+                "fold_models": fold_models,
+            }
+        )
+    else:
+        coefficient_values = [] if coefficients is None else coefficients
+        metadata.update(
+            {
+                "coefficients": [float(value) for value in coefficient_values],
+                "intercept": float(intercept) if intercept is not None else None,
+            }
+        )
     _validate_metadata_private_safe(metadata)
     config.output_metadata_path.write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _date_string(timestamp: pd.Timestamp) -> str:
+    return str(timestamp.date())
 
 
 def _validate_portable_ref(value: str, name: str) -> None:
@@ -490,6 +695,7 @@ def is_private_baseline_path(path: Path) -> bool:
 
 
 __all__ = [
+    "BaselineFoldConfig",
     "BaselineTrainingConfig",
     "BaselineTrainingResult",
     "is_private_baseline_path",
