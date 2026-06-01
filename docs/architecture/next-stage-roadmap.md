@@ -30,10 +30,9 @@
 - N5 当前不再是纯 planned：schema `0.7` 已落地 N5 MVS descriptive proxy diagnostics
   并 merge to `main`；N5 private real-data smoke 已通过，run id
   `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate
-  smoke。Pipeline failed-run reliability MVS 已 fast-forward merge to `main`，commit
-  `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；已完成 status fallback、
+  smoke。Pipeline failed-run reliability MVS 已进入 `main`，覆盖 status fallback、
   failed-state consistency、stable `failure_code`、sanitization 和 partial failed
-  evaluation guard。retry/resume/overwrite 与 global API error envelope migration
+  evaluation guard；retry/resume/overwrite 与 global API error envelope migration
   仍未实现。本文中的 full N5 capability 仍指后续 full risk/regime/cost/capacity capability。
 - N6 prediction handoff guardrails、synthetic handoff smoke 和 local numpy/pandas
   ML baseline trainer 已进入 `main`。这不是完整 ML pipeline、deep learning backend、

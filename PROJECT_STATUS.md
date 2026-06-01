@@ -31,8 +31,7 @@ passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、
 acceptance 本轮未运行；API/display evidence 足以证明 generic diagnostics table
 visibility。
 
-Pipeline failed-run reliability MVS 已 fast-forward merge to `main`，commit
-`67f363b550f6c3ce04be68fb30a47ed3088eb32d`。已完成范围包括 persisted
+Pipeline failed-run reliability MVS 已进入 `main`。已完成范围包括 persisted
 `runtime_summary.json` status fallback、failed-state checkpoints consistency、
 pipeline-local stable `failure_code`、sanitized failed status/checkpoints payload，
 以及 failed pipeline partial evaluation 不暴露为 completed evidence run。
@@ -52,11 +51,11 @@ blocker / escalation gate、candidate-based Documentation Impact Gate、
 direct-main docs-only、single-branch cleanup、post-merge documentation sync 和
 dependency / contract approval。
 
-Root handoff status: open 2026-06-01. Workspace-root planning/status 已同步
-N5 MVS merge-to-main、N5 private real-data smoke passed，以及 pipeline
-failed-run reliability MVS merged-to-main 状态；下一步转为 N6 walk-forward / OOS /
-embargo contract focused audit，或先做 N6 ML baseline interface / CLI decision
-audit。不要直接进入 broad implementation。
+Root handoff status: closed 2026-06-01. Workspace-root planning/status 已同步
+N5 MVS、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial
+handoff / smoke / local baseline，以及 prompt-template sync / polish 状态；下一步
+转为 N6 walk-forward / OOS / embargo contract focused audit，或先做 N6 ML baseline
+interface / CLI decision audit。不要直接进入 broad implementation。
 
 ## 当前状态
 
@@ -132,4 +131,4 @@ evidence only; they are not current valid run-contract examples.
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
-| 2026-06-01 | status | N6 prediction handoff guardrails、synthetic handoff smoke、local numpy/pandas ML baseline trainer 已进入 `main`；prompt-template sync / polish 已进入 `main`。当前仍不是完整 ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。下一步改为 N6 walk-forward / OOS / embargo contract focused audit，或先做 N6 ML baseline interface / CLI decision audit；不要直接进入 broad implementation。 | WORKSPACE_STATUS, PROJECT_REGISTRY, PLAN_INDEX, daily/weekly plan | open |
+| 2026-06-01 | status | N6 prediction handoff guardrails、synthetic handoff smoke、local numpy/pandas ML baseline trainer 已进入 `main`；prompt-template sync / polish 已进入 `main`。当前仍不是完整 ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。下一步改为 N6 walk-forward / OOS / embargo contract focused audit，或先做 N6 ML baseline interface / CLI decision audit；不要直接进入 broad implementation。 | WORKSPACE_STATUS, PLAN_INDEX | closed 2026-06-01 |
