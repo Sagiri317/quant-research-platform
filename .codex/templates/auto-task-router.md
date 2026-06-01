@@ -28,6 +28,28 @@ Use this only in Repo Router Mode: the user gives a short task intent and has no
 - Fast-forward merge to `main`: use `ff-merge-and-push.md`.
 - Delete one approved branch: use `branch-cleanup.md`.
 
+## One-line Prompt Routing Gate
+
+Short prompts route through `auto-task-router` first unless the user provides a complete approved envelope.
+
+For any one-line, vague, or underspecified user prompt, Codex must classify the task before editing files, committing, pushing, merging, or changing contracts.
+
+Classify as one of: docs-only, docs/rules, review-only, implementation, commit/push, merge/push, test/verification-only, artifact/export/download/package/report generation, contract-surface change, or ambiguous / needs clarification.
+
+Then select the minimal relevant template:
+
+- docs sync -> `docs-sync.md` or `post-merge-documentation-sync.md`.
+- implementation -> `focused-implementation.md`.
+- review -> `focused-audit.md` or `pre-commit-review.md`.
+- commit/push -> `commit-and-push.md` or `branch-push.md`.
+- fast-forward merge -> `ff-merge-and-push.md`.
+- test-only -> verification path without file edits.
+- artifact/export/API/schema/report tasks -> route through the relevant implementation template and required safety gates, including the maintenance skill `Private Artifact Writer Checklist` when persisted artifacts, downloads, packages, reports, metadata, or row-level outputs are involved.
+
+Do not treat a one-line task approval as approval to commit directly to `main`, push `main`, merge branches, change schema/API/frontend/contracts, write private-derived artifacts to ordinary/public output, or convert review-only into implementation.
+
+If routing is ambiguous, stop and ask or choose the safer non-main branch path.
+
 ## Branch Decision
 
 - Use `feature/<task-name>` for tasks that need a branch.

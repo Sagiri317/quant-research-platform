@@ -29,6 +29,16 @@ Medium
 - Do not edit files unless fixes are explicitly in scope.
 - Do not change schema, `manifest.display`, API/frontend behavior, private artifacts, dependencies, roadmap priority, or docs/archive.
 
+## Safety Gates
+
+- Treat review-only prompts as review-only; do not modify files unless the user explicitly approves fixes.
+- If the diff touches a CLI writer, artifact writer, exporter, downloader, ZIP/package writer, metadata writer, API/download payload builder, report generator, or persisted row-level output, verify that the maintenance skill `Private Artifact Writer Checklist` was applied or report it as a finding.
+- If the diff touches schema, `manifest.display`, public API, frontend shared contracts, `EVALUATION_INTERFACE`, or generated artifacts, report the contract-surface stop/approval status before commit readiness.
+
+## Verification Honesty
+
+- Do not imply tests passed when they were not run; list skipped pytest/ruff with the reason.
+
 ## Stop Conditions
 
 - Stop if the diff implies a public contract change, unclear blast radius, private-data exposure, deployment/trading expansion, or missing approval for fixes.

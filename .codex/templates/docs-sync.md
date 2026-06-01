@@ -17,6 +17,17 @@ Low
 - Do not read archive docs unless the sync explicitly concerns archive references.
 - Report candidate expansion before touching code maps, status docs, or architecture docs outside scope.
 
+## Branch Decision
+
+- Use `feature/<task-name>` unless all are true:
+  - current branch is clean `main`;
+  - user explicitly approved direct-main docs-only execution;
+  - the sync is low-risk;
+  - it does not touch roadmap priority, governance/workflow rules, contract wording, architecture standards, context routing, skills/templates, or multi-doc current-status surfaces.
+- If touching 2+ active docs, `PROJECT_STATUS.md`, roadmap, code-map, current brief, or root handoff signals, treat as a medium+ docs batch and use `feature/<task-name>` unless the user explicitly says direct-main is approved.
+- If the user only says "do docs sync", "sync docs", or "post-merge docs checkpoint", that approves the docs task, not direct-main execution.
+- If branch choice is ambiguous, stop and ask or create a feature/docs branch; do not commit directly to `main`.
+
 ## Allowed Scope
 
 - Docs in scope:
@@ -33,12 +44,18 @@ Low
 - Stop if the docs disagree with current code/contracts and the correct source of truth is unclear.
 - Stop if a sync would change public contract meaning, roadmap priority, current phase, or private-data boundary.
 
+## Verification Honesty
+
+- Do not imply pytest, ruff, or other executable checks passed when they were not run.
+- Report pytest/ruff as `not run; docs/rules-only` unless executable code changed.
+
 ## Checks
 
 - `rg "<old|new term>" <docs in scope>`
 - For touched active docs, report before/after line count. If a touched active doc grows by more than 20 lines or more than 15%, compact an older section in the same commit or justify the growth in the final report.
 - `git diff --check`
 - `git diff --name-only`
+- `git status --short --branch`
 
 ## Output Format
 
