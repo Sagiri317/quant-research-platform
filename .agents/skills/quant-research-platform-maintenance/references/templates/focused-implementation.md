@@ -66,6 +66,7 @@ Use Medium for a single module or docs/rules batch. Use Medium-High when the cha
 
 - `git status --short --branch`
 - Narrow tests or static checks:
+- For optional/default values, omitted values, time windows, folds, splits, ranges, intervals, pagination, limits, fallback behavior, overwrite/resume semantics, or similar boundary logic, include at least one adversarial omitted/default-value test proving validator behavior matches actual runtime behavior.
 - `git diff --check`
 - `git diff --name-only`
 

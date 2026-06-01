@@ -34,6 +34,7 @@ Medium
 - Treat review-only prompts as review-only; do not modify files unless the user explicitly approves fixes.
 - If the diff touches a CLI writer, artifact writer, exporter, downloader, ZIP/package writer, metadata writer, API/download payload builder, report generator, or persisted row-level output, verify that the maintenance skill `Private Artifact Writer Checklist` was applied or report it as a finding.
 - If the diff touches schema, `manifest.display`, public API, frontend shared contracts, `EVALUATION_INTERFACE`, or generated artifacts, report the contract-surface stop/approval status before commit readiness.
+- Optional/default value semantic alignment: If the diff touches optional/default values, omitted values, time windows, folds, splits, ranges, intervals, pagination, limits, fallback behavior, overwrite/resume semantics, or similar boundary logic, compare parser/config/validator/runtime consumer/metadata/tests together. For each omitted/default value, construct at least one adversarial counterexample and verify validator behavior matches actual runtime behavior. Do not treat validation coverage as sufficient unless the validator and the actual consumer interpret omitted/default values identically.
 
 ## Verification Honesty
 

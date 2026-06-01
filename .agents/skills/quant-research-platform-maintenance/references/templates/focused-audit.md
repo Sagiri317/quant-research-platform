@@ -37,6 +37,10 @@ Use Medium for a narrow diff or single surface. Use High for contract-adjacent, 
 - Stop if fixing would require public contract, schema, dependency, directory, archive, private-data, or generated-output changes.
 - Stop for new dependency/framework, schema or `manifest.display` change, public API/frontend shared contract change, private path/row-level risk, roadmap priority change, trading/deployment scope, or repeated unclear test failure.
 
+## Boundary Logic Gate
+
+- Optional/default value semantic alignment: If the diff touches optional/default values, omitted values, time windows, folds, splits, ranges, intervals, pagination, limits, fallback behavior, overwrite/resume semantics, or similar boundary logic, compare parser/config/validator/runtime consumer/metadata/tests together. For each omitted/default value, construct at least one adversarial counterexample and verify validator behavior matches actual runtime behavior. Do not treat validation coverage as sufficient unless the validator and the actual consumer interpret omitted/default values identically.
+
 ## Decision Classification
 
 - No-user-decision items: local findings or fixes fully inside the approved audit/fix envelope.
