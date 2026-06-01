@@ -21,6 +21,9 @@ def test_cli_exposes_a_share_group() -> None:
 
     assert result.exit_code == 0
     assert "build-factors" in result.output
+    assert "schema-inventory" in result.output
+    assert "factor-rebuild" in result.output
+    assert "prediction-handoff" in result.output
     assert "evaluate" in result.output
 
 
@@ -79,6 +82,217 @@ def test_evaluate_parquet_rejects_unknown_diagnostic_view() -> None:
 
     assert result.exit_code == 2
     assert "unknown diagnostics materialized views" in result.output
+
+
+def test_a_share_schema_inventory_cli_writes_aggregate_outputs(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _a_share_rebuild_panel().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "schema-inventory",
+            "--input-parquet",
+            str(panel_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "schema_inventory_run",
+            "--memory-budget-gb",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    run_dir = output_root / "schema_inventory_run"
+    assert (run_dir / "schema_inventory.json").is_file()
+    assert (run_dir / "memory_preflight.json").is_file()
+    payload = json.loads((run_dir / "schema_inventory.json").read_text("utf-8"))
+    payload_text = json.dumps(payload)
+    assert payload["row_count"] == 6
+    assert "000001" not in payload_text
+    assert str(tmp_path) not in payload_text
+
+
+def test_a_share_factor_rebuild_dry_run_writes_no_row_level_artifact(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _a_share_rebuild_panel().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "factor-rebuild",
+            "--panel-parquet",
+            str(panel_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "dry_run_rebuild",
+            "--dry-run",
+            "--memory-budget-gb",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    run_dir = output_root / "dry_run_rebuild"
+    assert (run_dir / "schema_inventory.json").is_file()
+    assert (run_dir / "memory_preflight.json").is_file()
+    assert (run_dir / "runtime_summary.json").is_file()
+    assert (run_dir / "checkpoints.json").is_file()
+    assert not (run_dir / "factor_rebuild.parquet").exists()
+    assert json.loads((run_dir / "runtime_summary.json").read_text("utf-8"))[
+        "status"
+    ] == "dry_run"
+
+
+def test_a_share_factor_rebuild_rejects_private_input_public_output(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _a_share_rebuild_panel().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "runs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "factor-rebuild",
+            "--panel-parquet",
+            str(panel_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "public_rejected",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "private_output_policy_violation" in result.output
+    assert not (output_root / "public_rejected").exists()
+
+
+def test_a_share_factor_rebuild_requires_explicit_overwrite_processed(
+    tmp_path,
+) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _a_share_rebuild_panel().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    target = (
+        tmp_path
+        / "data"
+        / "processed_private"
+        / "csmar"
+        / "price_volume_factors_full"
+        / "price_volume_factors_2024_2024.parquet"
+    )
+    target.parent.mkdir(parents=True)
+    pd.DataFrame({"sentinel": [1]}).to_parquet(
+        target,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "factor-rebuild",
+            "--panel-parquet",
+            str(panel_path),
+            "--factor-parquet",
+            str(target),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "overwrite_rejected",
+            "--memory-budget-gb",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--overwrite-processed is required" in result.output
+    assert pd.read_parquet(target).columns.tolist() == ["sentinel"]
+
+
+def test_a_share_prediction_handoff_cli_writes_evaluation_outputs(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_handoff_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_handoff",
+            "--feature-column",
+            "feature_a",
+            "--feature-column",
+            "feature_b",
+            "--target-column",
+            "forward_return_20d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    run_dir = output_root / "prediction_cli_handoff"
+    assert (run_dir / "predictions.parquet").is_file()
+    assert (run_dir / "evaluation" / "manifest.json").is_file()
+    assert (run_dir / "comparison" / "model_leaderboard.csv").is_file()
+    assert (run_dir / "eda" / "eda_manifest.json").is_file()
 
 
 def test_evaluate_parquet_writes_prediction_handoff_metadata(tmp_path) -> None:
@@ -650,6 +864,54 @@ def test_ml_baseline_train_cli_can_infer_feature_columns(tmp_path) -> None:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["feature_columns"] == ["feature_a", "feature_b"]
     assert metadata["target_column"] == "forward_return"
+
+
+def _a_share_rebuild_panel() -> pd.DataFrame:
+    rows = []
+    for stock_code, base in (("000001", 10.0), ("000002", 20.0)):
+        for offset in range(3):
+            close = base + offset
+            rows.append(
+                {
+                    "stock_code": stock_code,
+                    "trade_date": pd.Timestamp("2024-01-01")
+                    + pd.offsets.BDay(offset),
+                    "market_type": "A",
+                    "is_a_share_scope": True,
+                    "eligible": True,
+                    "can_enter": True,
+                    "can_exit": True,
+                    "adj_open": close - 0.1,
+                    "adj_close": close,
+                    "return_1d": 0.01 * offset,
+                    "amount": 100.0 + offset,
+                    "turnover": 0.1 + offset / 100.0,
+                    "high": close + 1.0,
+                    "low": close - 1.0,
+                    "prev_close": close - 0.5,
+                    "float_market_cap": 1000.0 + offset,
+                    "total_market_cap": 2000.0 + offset,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _prediction_handoff_panel() -> pd.DataFrame:
+    rows = []
+    dates = pd.bdate_range("2024-01-01", periods=8)
+    for asset, offset in (("A", 0.0), ("B", 0.5), ("C", 1.0)):
+        for idx, date in enumerate(dates):
+            rows.append(
+                {
+                    "timestamp": date,
+                    "asset": asset,
+                    "feature_a": float(idx) + offset,
+                    "feature_b": float(idx % 3) - offset,
+                    "forward_return_20d": 0.01 * idx + offset / 100.0,
+                    "forward_return_1d": 0.001 * idx,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def _baseline_panel() -> pd.DataFrame:

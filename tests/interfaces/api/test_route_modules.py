@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from quant_research_platform.interfaces.api.routes import (
+    a_share_research,
     artifacts,
     comparison,
     downloads,
@@ -18,6 +19,7 @@ from quant_research_platform.interfaces.api.routes import (
 
 def test_api_route_modules_expose_domain_routers() -> None:
     for module in (
+        a_share_research,
         artifacts,
         comparison,
         downloads,

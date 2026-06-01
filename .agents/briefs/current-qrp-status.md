@@ -23,7 +23,7 @@ the active next-step decision.
 
 - N5 private real-data smoke passed: `n5_private_smoke_2025h2_rev120_v1`.
 - Pipeline failed-run reliability MVS and failed-run disk-recovery sanitization hardening have merged to `main`; API duplicate `run_id` / rerun guard is implemented in current code.
-- N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, N6 prediction handoff MVS, local walk-forward / multi-fold handoff MVS, private marker helper centralization, and `ml baseline train` CLI pre-read private-output validation have merged to `main`.
+- N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, N6 prediction handoff MVS, local walk-forward / multi-fold handoff MVS, private marker helper centralization, `ml baseline train` CLI pre-read private-output validation, and the feature-branch A-share literature-prior factor rebuild / non-DL prediction handoff backend batch are current implementation context.
 - Agent workflow layout has moved to `.agents`: the maintenance skill lives under `.agents/skills/quant-research-platform-maintenance/`, task templates live under `.agents/skills/quant-research-platform-maintenance/references/templates/`, and this brief lives under `.agents/briefs/current-qrp-status.md`.
 - These facts are status pointers, not full evidence records.
 - Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, next step, or handoff state.
@@ -32,21 +32,20 @@ the active next-step decision.
 
 - N5 v1 private smoke demonstrates the current descriptive proxy diagnostics path on private A-share data.
 - Pipeline failed-run reliability now includes the original failed-run MVS, disk-loaded `runtime_summary.json` / `checkpoints.json` shared private-marker sanitization, and API-created duplicate `run_id` rejection before writing new pipeline outputs.
-- N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, repeatable walk-forward folds, `ml baseline train` CLI handoff, private-output boundary guard, shared private-marker helper, and CLI pre-read private-output validation. Prediction output remains compatible with `evaluate-parquet --kind prediction`, single-fold behavior is preserved, and training remains outside evaluation. This is not a complete ML pipeline, deep learning backend, model registry, feature store, A-share prediction adapter, paper/live trading system, deployment, scheduler, worker, or external connector.
+- N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, repeatable walk-forward folds, `ml baseline train` CLI handoff, private-output boundary guard, shared private-marker helper, CLI pre-read private-output validation, and feature-branch backend support for an A-share literature-prior price-volume factor pack, schema inventory, memory preflight, explicit overwrite guard, non-DL sklearn model suite, prediction handoff evaluation, aggregate comparison/EDA outputs, backend API status routes, and `a_share_prediction` run discovery when explicitly configured. Prediction output remains compatible with schema `0.7` evaluation artifacts, and training remains outside evaluation. This is not a complete ML pipeline, deep learning backend, model registry, feature store, frontend implementation, paper/live trading system, deployment, scheduler, worker, or external connector.
 - Task-mode template details live in `.agents/skills/quant-research-platform-maintenance/references/templates/`, not in this brief; one-line or underspecified QRP prompts route through `auto-task-router.md`.
 
 ## Current Next Step
 
-- Run a decision-only audit for the next small implementation batch: N6 post-walk-forward handoff follow-up, A-share prediction adapter design, Factor Factory improvement, memory/performance path, or one tightly scoped Pipeline Reliability lifecycle item.
-- If continuing pipeline reliability, pick one new small MVS such as retry, resume, destructive overwrite, or global API error envelope; do not reopen the completed failed-run sanitization hardening or duplicate `run_id` guard.
-- Keep this as an audit/decision point; do not jump directly into broad implementation.
+- Continue the active feature-branch `/goal` batch only inside its approved envelope: harden the new factor rebuild / prediction handoff surfaces, decide whether a private smoke run is safe through memory preflight, complete minimal docs sync, then commit and push the feature branch without merging.
+- After this batch, return to a decision-only audit before expanding into frontend, Factor Factory LLM/agent work, retry/resume/global API envelope, model registry, feature store, scheduler, worker, or external connectors.
 
 ## Known Limitations
 
 - Retry, resume, destructive overwrite, and global API error envelope remain unimplemented.
 - N5 v1 is descriptive proxy diagnostics only.
 - N5 v1 is not full risk modeling, capacity modeling, simulation, trading, validated alpha, or investment advice.
-- N6 baseline work is not a complete ML platform, alpha proof, real risk/capacity model, trading simulation, paper/live trading evidence, deployment, model registry, feature store, or external connector.
+- N6 baseline and feature-branch prediction handoff work are not a complete ML platform, alpha proof, real risk/capacity model, trading simulation, paper/live trading evidence, deployment, model registry, feature store, frontend workbench implementation, or external connector.
 - Generated/private evidence remains local and should not be copied into public docs.
 - This brief is a short context primer, not a replacement for active project docs.
 

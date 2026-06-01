@@ -27,6 +27,8 @@ class ApiContext:
     pipeline_runs: dict[str, PipelineRunSummaryPayload]
     pipeline_output_root: Path
     factor_factory_root: Path
+    factor_rebuild_root: Path
+    prediction_handoff_root: Path
 
     def download_cache_root(self, source_alias: str) -> Path:
         """解析指定 run source 的本地 ZIP download cache root。"""

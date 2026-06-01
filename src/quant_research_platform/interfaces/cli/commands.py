@@ -27,12 +27,21 @@ from quant_research_platform.evaluations.evaluation_spec import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.markets.implementations.a_share.factor_rebuild import (
+    FactorRebuildConfig,
+    run_factor_rebuild,
+    write_schema_inventory_run,
+)
 from quant_research_platform.research.ml_baseline import (
     BaselineFoldConfig,
     BaselineTrainingConfig,
     is_private_baseline_path,
     run_baseline_training,
     validate_baseline_output_policy,
+)
+from quant_research_platform.research.prediction_handoff import (
+    PredictionHandoffConfig,
+    run_prediction_handoff,
 )
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
 
@@ -311,6 +320,61 @@ BASELINE_RIDGE_ALPHA_OPTION = typer.Option(
     "--ridge-alpha",
     help="Nonnegative ridge penalty for the deterministic numpy baseline.",
 )
+A_SHARE_SCHEMA_INPUT_OPTION = typer.Option(
+    ...,
+    "--input-parquet",
+    help="A-share local panel/factor Parquet to inspect with aggregate-only output.",
+)
+A_SHARE_PANEL_PARQUET_OPTION = typer.Option(
+    ...,
+    "--panel-parquet",
+    help="A-share processed panel Parquet for literature factor rebuild.",
+)
+A_SHARE_FACTOR_PARQUET_OPTION = typer.Option(
+    None,
+    "--factor-parquet",
+    help="Optional processed slim factor Parquet target for explicit overwrite.",
+)
+A_SHARE_OUTPUT_ROOT_OPTION = typer.Option(
+    Path("reports/private_real/a_share_factor_rebuilds"),
+    "--output-root",
+    help="Private output root for aggregate diagnostics and factor rebuild runs.",
+)
+A_SHARE_FACTOR_PACK_OPTION = typer.Option(
+    "a_share_literature_price_volume_rebuild_v1",
+    "--factor-pack",
+    help="A-share factor pack id.",
+)
+A_SHARE_MEMORY_BUDGET_OPTION = typer.Option(
+    10.0,
+    "--memory-budget-gb",
+    help="Conservative memory budget in GiB for preflight.",
+)
+A_SHARE_OVERWRITE_PROCESSED_OPTION = typer.Option(
+    False,
+    "--overwrite-processed",
+    help="Allow replacing the processed slim factor Parquet target.",
+)
+A_SHARE_BACKUP_EXISTING_OPTION = typer.Option(
+    False,
+    "--backup-existing",
+    help="Copy the old processed target before replacement. Defaults false.",
+)
+A_SHARE_PREDICTION_ROOT_OPTION = typer.Option(
+    Path("reports/private_real/a_share_prediction_handoffs"),
+    "--output-root",
+    help="Private output root for A-share prediction handoff runs.",
+)
+A_SHARE_LABEL_HORIZON_OPTION = typer.Option(
+    20,
+    "--label-horizon-days",
+    help="Business-day label horizon used for purging training labels.",
+)
+A_SHARE_MODEL_ID_OPTION = typer.Option(
+    None,
+    "--model-id",
+    help="Model id in the local non-DL suite. Repeat for multiple models.",
+)
 
 
 @a_share_app.command("build-interim")
@@ -343,6 +407,111 @@ def a_share_build_factors_help() -> None:
         "Run with: python -m "
         "quant_research_platform.markets.implementations.a_share."
         "factors.build_factors --help"
+    )
+
+
+@a_share_app.command("schema-inventory")
+def a_share_schema_inventory(
+    input_parquet: Path = A_SHARE_SCHEMA_INPUT_OPTION,
+    output_root: Path = A_SHARE_OUTPUT_ROOT_OPTION,
+    run_id: str | None = RUN_ID_OPTION,
+    memory_budget_gb: float = A_SHARE_MEMORY_BUDGET_OPTION,
+) -> None:
+    """Write aggregate-only schema inventory and memory preflight JSON."""
+
+    try:
+        run_dir = write_schema_inventory_run(
+            input_parquet=input_parquet,
+            output_root=output_root,
+            run_id=run_id or "schema_inventory",
+            memory_budget_gb=memory_budget_gb,
+        )
+    except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
+        _raise_a_share_batch_error(exc)
+    typer.echo(f"Wrote A-share schema inventory to {run_dir.name}")
+
+
+@a_share_app.command("factor-rebuild")
+def a_share_factor_rebuild(
+    panel_parquet: Path = A_SHARE_PANEL_PARQUET_OPTION,
+    output_root: Path = A_SHARE_OUTPUT_ROOT_OPTION,
+    run_id: str | None = RUN_ID_OPTION,
+    factor_pack: str = A_SHARE_FACTOR_PACK_OPTION,
+    factor_parquet: Path | None = A_SHARE_FACTOR_PARQUET_OPTION,
+    memory_budget_gb: float = A_SHARE_MEMORY_BUDGET_OPTION,
+    dry_run: bool = DRY_RUN_OPTION,
+    overwrite_processed: bool = A_SHARE_OVERWRITE_PROCESSED_OPTION,
+    backup_existing: bool = A_SHARE_BACKUP_EXISTING_OPTION,
+) -> None:
+    """Dry-run or run a local A-share literature factor rebuild."""
+
+    try:
+        result = run_factor_rebuild(
+            FactorRebuildConfig(
+                panel_parquet=panel_parquet,
+                output_root=output_root,
+                run_id=run_id or "factor_rebuild",
+                factor_pack=factor_pack,
+                memory_budget_gb=memory_budget_gb,
+                dry_run=dry_run,
+                factor_parquet=factor_parquet,
+                overwrite_processed=overwrite_processed,
+                backup_existing=backup_existing,
+            )
+        )
+    except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
+        _raise_a_share_batch_error(exc)
+    typer.echo(
+        "A-share factor rebuild "
+        f"{result.status}: run_id={run_id or 'factor_rebuild'} rows={result.row_count}"
+    )
+
+
+@a_share_app.command("prediction-handoff")
+def a_share_prediction_handoff(
+    input_parquet: Path = BASELINE_INPUT_OPTION,
+    output_root: Path = A_SHARE_PREDICTION_ROOT_OPTION,
+    run_id: str | None = RUN_ID_OPTION,
+    feature_column: list[str] | None = BASELINE_FEATURE_COLUMN_OPTION,
+    target_column: str = BASELINE_TARGET_COLUMN_OPTION,
+    return_source_column: str = RETURN_SOURCE_COLUMN_OPTION,
+    timestamp_column: str = TIMESTAMP_COLUMN_OPTION,
+    asset_column: str = ASSET_COLUMN_OPTION,
+    walk_forward_fold: list[str] | None = BASELINE_WALK_FORWARD_FOLD_OPTION,
+    label_horizon_days: int = A_SHARE_LABEL_HORIZON_OPTION,
+    model_id: list[str] | None = A_SHARE_MODEL_ID_OPTION,
+    memory_budget_gb: float = A_SHARE_MEMORY_BUDGET_OPTION,
+    dry_run: bool = DRY_RUN_OPTION,
+) -> None:
+    """Run the local N6 A-share prediction handoff suite."""
+
+    try:
+        result = run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_parquet,
+                output_root=output_root,
+                run_id=run_id or "prediction_handoff",
+                timestamp_column=timestamp_column,
+                entity_column=asset_column,
+                feature_columns=_required_cli_values(
+                    feature_column,
+                    "--feature-column",
+                ),
+                label_column=target_column,
+                return_source_column=return_source_column,
+                label_horizon_days=label_horizon_days,
+                folds=_prediction_handoff_folds(walk_forward_fold),
+                model_ids=tuple(model_id or ("ridge", "elastic_net")),
+                memory_budget_gb=memory_budget_gb,
+                dry_run=dry_run,
+            )
+        )
+    except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
+        _raise_a_share_batch_error(exc)
+    typer.echo(
+        "A-share prediction handoff "
+        f"{result.status}: run_id={run_id or 'prediction_handoff'} "
+        f"rows={result.row_count}"
     )
 
 
@@ -717,6 +886,31 @@ def _baseline_walk_forward_folds(
     return tuple(folds)
 
 
+def _prediction_handoff_folds(
+    values: list[str] | None,
+) -> tuple[dict[str, str | None], ...]:
+    if not values:
+        raise typer.BadParameter("--walk-forward-fold must be provided.")
+    folds: list[dict[str, str | None]] = []
+    for value in values:
+        parts = [part.strip() for part in value.split(",")]
+        if len(parts) not in {3, 4, 5}:
+            raise typer.BadParameter(
+                "--walk-forward-fold must use "
+                "fold_id,train_end,test_start[,test_end[,split_name]]."
+            )
+        folds.append(
+            {
+                "fold_id": parts[0],
+                "train_end": parts[1],
+                "test_start": parts[2],
+                "test_end": parts[3] if len(parts) >= 4 and parts[3] else None,
+                "split_name": parts[4] if len(parts) == 5 and parts[4] else None,
+            }
+        )
+    return tuple(folds)
+
+
 def _baseline_feature_columns(
     input_path: Path,
     *,
@@ -760,6 +954,11 @@ def _looks_like_label_or_forward_return(column: str) -> bool:
 
 def _raise_ml_baseline_input_error(exc: BaseException) -> None:
     typer.echo(f"ML baseline input error: {_safe_cli_error_detail(exc)}", err=True)
+    raise typer.Exit(code=2) from exc
+
+
+def _raise_a_share_batch_error(exc: BaseException) -> None:
+    typer.echo(f"A-share batch input error: {_safe_cli_error_detail(exc)}", err=True)
     raise typer.Exit(code=2) from exc
 
 

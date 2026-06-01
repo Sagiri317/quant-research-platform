@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from quant_research_platform.interfaces.api.errors import register_api_error_handlers
 from quant_research_platform.interfaces.api.routes import (
+    a_share_research,
     artifacts,
     comparison,
     downloads,
@@ -34,6 +35,8 @@ from quant_research_platform.interfaces.api.services.run_repository import (
 DEFAULT_RUN_ROOT_ALIAS = _DEFAULT_RUN_ROOT_ALIAS
 PIPELINE_OUTPUT_ROOT_ENV = "QRP_PIPELINE_OUTPUT_ROOT"
 FACTOR_FACTORY_ROOT_ENV = "QRP_FACTOR_FACTORY_ROOT"
+FACTOR_REBUILD_ROOT_ENV = "QRP_FACTOR_REBUILD_ROOT"
+PREDICTION_HANDOFF_ROOT_ENV = "QRP_PREDICTION_HANDOFF_ROOT"
 CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
 DEFAULT_CORS_ORIGINS = (
     "http://127.0.0.1:5173",
@@ -82,6 +85,8 @@ def create_app(
     *,
     pipeline_output_root: str | Path | None = None,
     factor_factory_root: str | Path | None = None,
+    factor_rebuild_root: str | Path | None = None,
+    prediction_handoff_root: str | Path | None = None,
 ) -> FastAPI:
     """基于配置的 artifact run roots 创建本地 API app。"""
 
@@ -121,17 +126,49 @@ def create_app(
             )
         )
     )
+    factor_rebuild_output_root = (
+        Path(factor_rebuild_root)
+        if factor_rebuild_root is not None
+        else Path(
+            os.environ.get(
+                FACTOR_REBUILD_ROOT_ENV,
+                "reports/private_real/a_share_factor_rebuilds",
+            )
+        )
+    )
+    prediction_handoff_env = os.environ.get(PREDICTION_HANDOFF_ROOT_ENV)
+    prediction_handoff_output_root = (
+        Path(prediction_handoff_root)
+        if prediction_handoff_root is not None
+        else Path(
+            prediction_handoff_env
+            or "reports/private_real/a_share_prediction_handoffs"
+        )
+    )
     if all(root.source_alias != "pipeline" for root in configured_roots):
         configured_roots = [*configured_roots, run_root("pipeline", pipeline_root)]
+    should_register_prediction_root = (
+        prediction_handoff_root is not None or prediction_handoff_env is not None
+    )
+    if should_register_prediction_root and all(
+        root.source_alias != "a_share_prediction" for root in configured_roots
+    ):
+        configured_roots = [
+            *configured_roots,
+            run_root("a_share_prediction", prediction_handoff_output_root),
+        ]
     app.state.qrp_context = ApiContext(
         run_roots=configured_roots,
         pipeline_runs={},
         pipeline_output_root=pipeline_root,
         factor_factory_root=factor_factory_output_root,
+        factor_rebuild_root=factor_rebuild_output_root,
+        prediction_handoff_root=prediction_handoff_output_root,
     )
     for router in (
         health.router,
         markets.router,
+        a_share_research.router,
         factor_templates.router,
         pipeline.router,
         runs.router,

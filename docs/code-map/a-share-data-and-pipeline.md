@@ -25,6 +25,8 @@ data/raw_private/csmar/
 | raw -> interim | `quant_research_platform.markets.implementations.a_share.csmar.build_interim` | 标准化 CSMAR raw CSV |
 | interim -> panel | `quant_research_platform.markets.implementations.a_share.datasets.build_panel` | 生成 full research panel |
 | panel -> factors | `quant_research_platform.markets.implementations.a_share.factors.build_factors` | 生成 slim factor and label table |
+| panel -> literature-prior factor rebuild | `quant_research_platform.markets.implementations.a_share.factor_rebuild` | Feature-branch service for schema inventory, memory preflight, dry-run, explicit overwrite, optional backup, and private-output policy checks |
+| features -> prediction handoff | `quant_research_platform.research.prediction_handoff` | Feature-branch backend service that trains local non-DL prediction signals, writes prediction parquet, evaluates through schema `0.7`, and emits aggregate comparison / EDA outputs |
 | factors -> evaluation service | `quant_research_platform.markets.implementations.a_share.evaluation.service` | A 股 evaluation request/result service；CLI、pipeline runner 和 Factor Factory 的共享入口 |
 | evaluation service -> CLI | `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation` | A 股专用 evaluation CLI 薄包装 |
 | orchestrated run | `quant_research_platform.pipelines.a_share.runner.run_a_share_pipeline` | 按 `start_from` 执行到 evaluation |
@@ -42,6 +44,26 @@ POST /api/pipeline-snapshots
 ```http
 POST /api/pipeline-runs
 ```
+
+Feature-branch A-share research batch API additions:
+
+```http
+POST /api/a-share/factor-rebuild-runs
+GET /api/a-share/factor-rebuild-runs/{run_id}
+GET /api/a-share/factor-rebuild-runs/{run_id}/checkpoints
+GET /api/a-share/factor-rebuild-runs/{run_id}/eda
+POST /api/a-share/prediction-handoffs
+GET /api/a-share/prediction-handoffs/{run_id}
+GET /api/a-share/prediction-handoffs/{run_id}/checkpoints
+GET /api/a-share/prediction-handoffs/{run_id}/schema
+GET /api/a-share/prediction-handoffs/{run_id}/comparison
+GET /api/a-share/prediction-handoffs/{run_id}/eda
+```
+
+Prediction handoff evaluations are ordinary schema `0.7` `evaluation_set`
+artifacts under each handoff run's `evaluation/` child. They are discoverable as
+`a_share_prediction/{run_id}` only when the API is explicitly configured with a
+prediction handoff root; this keeps the default health/run-root contract stable.
 
 `start_from` 控制开始层：
 
