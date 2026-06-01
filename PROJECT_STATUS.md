@@ -12,12 +12,12 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
 | 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
-| 当前分支 | `main`；schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`；N5 private real-data smoke passed；pipeline failed-run reliability MVS 已 merge to `main`；N6 prediction handoff guardrails / synthetic smoke / local ML baseline trainer 已进入 `main`；prompt-template sync / polish 已进入 `main`；下一步是 N6 walk-forward / OOS / embargo contract focused audit，或先做 N6 ML baseline interface / CLI decision audit |
+| 当前分支 | `main`；N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 prediction handoff guardrails / synthetic smoke / local baseline、prompt-template sync / polish 已进入 `main` |
 | Conda 环境 | `analysis` |
-| 代码结构 | 主包为 `src/quant_research_platform/`；当前核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
-| 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、N5 MVS descriptive proxy diagnostics、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
-| A 股 Pipeline | 执行入口为 `POST /api/pipeline-runs`；公开参数是 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并固定运行到 evaluation；failed-run reliability MVS 已补齐 persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard |
-| Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner，并用 `candidate_id + combination_id` 汇总 evaluation results |
+| 代码结构 | 主包为 `src/quant_research_platform/`；核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
+| 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
+| A 股 Pipeline | `POST /api/pipeline-runs` 使用 `start_from` 执行到 evaluation；failed-run reliability MVS 覆盖 persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard |
+| Factor Factory | 已有 registry、批量评估、artifact `0.1`、API 和 workbench 浏览入口；候选评估通过 existing-factors start layer 调用统一 runner |
 | 市场范围 | A 股 enabled；crypto / other markets planned / disabled，不代表真实支持，也不保留空实现包 |
 | 私有边界 | CSMAR raw/interim/processed 和 `reports/private_real/` 不提交、不公开 |
 | 交易边界 | 不做投资建议、paper trading、live trading、券商/交易所/API 连接或部署服务 |
@@ -27,24 +27,14 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 以下样例是当前可用的本地私有 evidence / regression anchors，仍属于 private
 real-data outputs，不提交、不公开、不复制到聊天或公共材料中：
 
-- `reports/private_real/factor_evaluation/schema07_eval_2023_2025_v1`：当前
-  2023-2025 schema `0.7` canonical sample，含 `rev_120d`。
-- `reports/private_real/factor_evaluation/schema07_eval_2023_2025_rev120_v1`：
-  当前 2023-2025 schema `0.7` `rev_120d` kernel / portfolio mode parity shard。
-- `reports/private_real/ff/20260527_rev120_factory_smoke_v1`：当前 Factor
-  Factory `rev_120d` smoke 样例。
-- N5 private real-data smoke 已通过：run id
-  `n5_private_smoke_2025h2_rev120_v1`，数据范围只记录为 2025H2 aggregate
-  smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API
-  preview 和 selected ZIP smoke 均通过。
-- `data/processed_private/csmar/panel_full/research_panel_2014_2025.parquet`：
-  full research panel。
-- `data/processed_private/csmar/price_volume_factors_full/price_volume_factors_2014_2025.parquet`：
-  slim factor and label table。
+- `schema07_eval_2023_2025_v1`：当前 2023-2025 schema `0.7` canonical sample，含 `rev_120d`。
+- `schema07_eval_2023_2025_rev120_v1`：当前 2023-2025 schema `0.7` `rev_120d` kernel / portfolio mode parity shard。
+- `20260527_rev120_factory_smoke_v1`：当前 Factor Factory `rev_120d` smoke 样例。
+- N5 private real-data smoke passed：run id `n5_private_smoke_2025h2_rev120_v1`；数据范围只记录为 2025H2 aggregate smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API preview 和 selected ZIP smoke 均通过。
+- 当前 full research panel 与 slim factor / label table 仍在 private processed boundary 内。
 
-Historical schema `0.5` / `0.6` runs, old 2023H1 smoke, N7 `n7_eval_*` runs,
-and `reports/private_real/factor_evaluation/full_2024_2025/` are historical
-evidence only; they are not current valid run-contract examples.
+Historical schema `0.5` / `0.6` runs、old 2023H1 smoke、N7 `n7_eval_*` runs
+和旧 full-run outputs 只作 historical evidence，不是当前 valid run-contract examples。
 
 ## 当前 blocker / 风险
 
@@ -52,16 +42,13 @@ evidence only; they are not current valid run-contract examples.
    descriptive proxy diagnostics groundwork，不代表真实风险模型或容量模型。
 2. N6 ML prediction handoff 仍需 focused audit / interface decision；当前 baseline 不代表完整 ML pipeline 或 A-share prediction adapter，不要混入 N5 full diagnostics 分支。
 3. Pipeline retry/resume/overwrite 仍未实现；global API error envelope 也仍未迁移。
-4. 单个 32-combination 2023-2025 full run 仍受 weights/remap memory path 约束；扩展前
-   应先设计低内存写出路径，或继续按 shard 作为正式回归输入。
-5. `tradability_diagnostics_summary` 暂缓；若需要全交易日平均诊断，应新增
-   artifact/API summary，而不是从 preview 前几行临时计算。
+4. 单个 32-combination 2023-2025 full run 仍受 weights/remap memory path 约束；扩展前应先设计低内存写出路径，或继续按 shard 作为正式回归输入。
+5. `tradability_diagnostics_summary` 暂缓；若需要全交易日平均诊断，应新增 artifact/API summary，而不是从 preview 前几行临时计算。
 
 ## 下一步
 
 1. 先做 N6 walk-forward / OOS / embargo contract focused audit；或先做 N6 ML baseline interface / CLI decision audit。
-2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor
-   evaluation contract 分离。
+2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor evaluation contract 分离。
 3. 基于当前 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison、图表分页预览和浏览器验收作为后续回归门槛。
 4. 如需单个 32-combination 2023-2025 run，先处理 weights/remap 低内存写出问题。
 
@@ -70,8 +57,7 @@ evidence only; they are not current valid run-contract examples.
 - Phase 1 已完成并由 `docs/architecture/phase-1-acceptance-record.md` 作为历史验收记录保存。
 - N1/N2/N3/N4/N7/N8 已合入 `main`；详细实现和旧 schema 验收故事不再作为当前状态展开，必要时查 Git history、`docs/archive/superpowers/` historical execution records 和相关 code-map。
 - N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial handoff / smoke / local baseline，以及 prompt-template sync / polish 已进入 `main`；当前有效 private smoke run id 为 `n5_private_smoke_2025h2_rev120_v1`。
-- Pipeline failed-run reliability MVS 只覆盖 status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard；retry/resume/overwrite 与 global API error envelope migration 仍是未来工作。
-- 2026-05-28 maintenance surface cleanup 已收敛当前脚本/agent helper 边界：用户可见 workbench scripts 保留在 `scripts/`，agent-only verification helpers 归项目维护 skill，`docs/archive/superpowers/` plans/specs 作为 historical execution records。
+- Retry/resume/overwrite、global API error envelope migration、full N5 capability 和 N6 handoff audit 仍是未来工作。
 
 ## Root Handoff / 根目录回传信号
 

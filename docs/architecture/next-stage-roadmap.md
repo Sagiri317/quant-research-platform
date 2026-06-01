@@ -1,7 +1,8 @@
 # Next Stage Roadmap / 下一阶段路线图
 
-本文只记录当前 active roadmap、unfinished work 和 current priorities。已完成任务
-只保留短状态；历史 implementation details、closeout、旧 schema 验收故事不在本文展开。
+本文只记录当前 active roadmap、unfinished work 和 acceptance boundaries。当前状态、
+有效样例和 root handoff 见 `PROJECT_STATUS.md`；历史 closeout、完成分支细节和旧
+schema 验收故事不在本文展开。
 
 本文不引入部署、外部 API、券商连接、paper trading、live trading 或实盘能力。
 最终能力边界见 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)。
@@ -10,9 +11,9 @@
 
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
-| N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged to `main`; N5 private real-data smoke passed; failed-run reliability MVS merged | N5 MVS descriptive proxy diagnostics 已落地并完成 2025H2 aggregate smoke；full capability 仍需单独设计和验证 |
+| N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged; full capability unfinished | 将 descriptive proxy diagnostics 之后的 full risk/regime/cost/capacity capability 单独设计和验证 |
 | N6 | ML prediction handoff | P2 | initial guardrails / synthetic smoke / local baseline merged; audit next | 建立 prediction output 到 evaluation 的可复现接口 |
-| Pipeline reliability second slice | Pipeline reliability | P2 | deferred behind N6 focused audits | failed-run reliability MVS 已合入；如需继续第二个 minimal vertical slice，先单独做决策审计 |
+| Pipeline reliability second slice | Pipeline reliability | P2 | deferred behind N6 focused audits | 如需继续第二个 minimal vertical slice，先单独做决策审计 |
 | Pipeline history UI | Pipeline run history / visibility | P3 | planned | 在不改变 pipeline 语义的前提下改善本地 workbench 对 run history 的读取和展示 |
 
 当前推荐顺序：
@@ -23,65 +24,14 @@
 3. Pipeline history UI
 ```
 
-当前基线：
+当前基线只保留为范围边界：
 
-- N1/N2/N3/N4/N7/N8 已合入 `main`，后续扩展应基于 schema `0.7`、
-  `combination_id`、portable display preview metadata 和 artifact/API/frontend 合同。
-- N5 当前不再是纯 planned：schema `0.7` 已落地 N5 MVS descriptive proxy diagnostics
-  并 merge to `main`；N5 private real-data smoke 已通过，run id
-  `n5_private_smoke_2025h2_rev120_v1`，数据范围仅记录为 2025H2 aggregate
-  smoke。Pipeline failed-run reliability MVS 已进入 `main`，覆盖 status fallback、
-  failed-state consistency、stable `failure_code`、sanitization 和 partial failed
-  evaluation guard；retry/resume/overwrite 与 global API error envelope migration
-  仍未实现。本文中的 full N5 capability 仍指后续 full risk/regime/cost/capacity capability。
-- N6 prediction handoff guardrails、synthetic handoff smoke 和 local numpy/pandas
-  ML baseline trainer 已进入 `main`。这不是完整 ML pipeline、deep learning backend、
-  model registry、feature store、A-share prediction adapter、paper/live trading、
-  deployment、scheduler、worker 或 external connector。
-- Prompt-template sync / polish 已进入 `main`；repo 内短模板支持 Expanded Prompt Mode、
-  Repo Router Mode、`auto-task-router`、closed-loop execution、blocker / escalation
-  gate、candidate-based Documentation Impact Gate、direct-main docs-only、
-  single-branch cleanup、post-merge documentation sync 和 dependency / contract
-  approval。
-- 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和
-  frontend acceptance 已生成；后续不要直接扩大一次性 full run。
-
-## 已完成任务短状态
-
-| ID | 状态 | 当前意义 |
-|---|---|---|
-| N1 A 股 start-from pipeline runner | merged to `main` | 当前 pipeline API 为 snapshot/run split；executable run 使用 `start_from` 并固定运行到 evaluation |
-| N2 Eligibility / tradability 诊断可视化 | merged to `main` | 当前 diagnostics 通过 artifact/API/display/workbench 消费；如需全期间 summary，应另行设计 `tradability_diagnostics_summary` |
-| N3 Artifact ZIP packaging 下沉 | merged to `main` | ZIP item validation、cache identity 和 file collection 已归 `artifacts/` |
-| N4 前端 feature split | merged to `main` | `web/src` 已拆为 `shell/`、`features/` 和 `shared/` |
-| N7 A 股 evaluation run identity 与 2023-2025 样例生成 | merged to `main` | 当前 API-visible run 使用 `combination_id` 管理 result slices；当前有效样例见 `PROJECT_STATUS.md` |
-| N8 架构简化与合同消费收敛 | merged to `main` | display preview/download helper、factor-template API、A-share service entry 和 legacy/dev upload 边界已收敛 |
-| Pipeline failed-run reliability MVS | merged to `main` | A-share failed runs 已具备 persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard；不代表 retry/resume/overwrite 或 production reliability |
-
-完成任务的详细 implementation notes 和历史验收记录应查 Git history、
-`docs/archive/superpowers/` historical execution records、`PROJECT_STATUS.md` 的短摘要和
-`docs/code-map/` 当前实现图谱；本文不再承载 closeout。
+- 后续扩展应基于 schema `0.7`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同。
+- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial guardrails / smoke / local baseline 已进入 `main`；具体 current status 和 private smoke run id 见 `PROJECT_STATUS.md`。
+- N6 local baseline 不是完整 ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。
+- 后续不要直接扩大一次性 full run；需要先处理 low-memory weights/remap 写出路径或继续按 shard 回归。
 
 ## N5 full 风险、Regime、成本和容量扩展
-
-当前实现状态：
-
-- N5 v1 已是 partial implementation + contract groundwork：schema `0.7` 已包含
-  diagnostics registry、required diagnostics tables、conditional materialized views、
-  `manifest.display`、API preview/download 和 frontend evidence flow。
-- 当前 risk/regime/cost/capacity 输出是 post-run descriptive proxy diagnostics，不是
-  正式 risk model、capacity model、regime engine、backtest、simulation 或 trading system。
-- 已落地 MVS 包括 return-path risk proxy、flat bps cost sensitivity via
-  `scenario_metrics`、liquidity/capacity descriptive proxy、market-cap/size
-  descriptive proxy、missing-input-aware diagnostic status 和 diagnostics-enabled
-  A-share month breakdown；full backend pytest 和 ruff 已通过。
-- N5 private real-data smoke 已通过：schema `0.7` validation passed；
-  `diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、
-  `exposure_capacity_summary` 和 `portfolio_risk_summary` 已检查；
-  `manifest.display`、API preview 和 selected ZIP smoke passed。Workbench browser
-  acceptance 未运行；API/display evidence 足以证明 generic diagnostics table
-  visibility。
-- 下方目标保留为 full N5 capability 的 unfinished work，不升级当前 phase，也不扩大当前实现范围。
 
 目标：
 

@@ -36,6 +36,7 @@ Low
 ## Checks
 
 - `rg "<old|new term>" <docs in scope>`
+- For touched active docs, report before/after line count. If a touched active doc grows by more than 20 lines or more than 15%, compact an older section in the same commit or justify the growth in the final report.
 - `git diff --check`
 - `git diff --name-only`
 
@@ -49,6 +50,7 @@ Low
 - Docs deferred
 - Docs not checked
 - Exhaustive docs scan status
+- Before/after line counts for touched active docs
 - Context Loaded
 - Checks Run
 - Scope Check

@@ -23,9 +23,8 @@ the active next-step decision.
 
 - N5 private real-data smoke passed: `n5_private_smoke_2025h2_rev120_v1`.
 - Pipeline failed-run reliability MVS merged.
-- Task-mode templates and context budget workflow merged.
 - N6 prediction handoff guardrails, synthetic handoff smoke, and local numpy/pandas ML baseline trainer have merged to `main`.
-- Prompt-template sync and polish have merged to `main`; repo templates now cover Expanded Prompt Mode, Repo Router Mode, `auto-task-router`, closed-loop execution, blocker / escalation gate, candidate-based Documentation Impact Gate, direct-main docs-only, single-branch cleanup, post-merge documentation sync, and dependency / contract approval.
+- Prompt-template sync and polish have merged to `main`; use `.codex/templates/` for current task-mode details.
 - These facts are status pointers, not full evidence records.
 - Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, next step, or handoff state.
 
@@ -34,7 +33,7 @@ the active next-step decision.
 - N5 v1 private smoke demonstrates the current descriptive proxy diagnostics path on private A-share data.
 - Pipeline failed-run reliability MVS improved failed-run handling around the local research workflow.
 - N6 now has initial handoff guardrails, a synthetic smoke path, and a local baseline trainer. This is not a complete ML pipeline, deep learning backend, model registry, feature store, A-share prediction adapter, paper/live trading system, deployment, scheduler, worker, or external connector.
-- Task-mode templates moved common Codex execution flows into `.codex/templates/` and now include router, closed-loop, blocker/escalation, documentation-impact, direct-main docs-only, cleanup, post-merge sync, and dependency/contract approval coverage.
+- Task-mode template details live in `.codex/templates/`, not in this brief.
 
 ## Current Next Step
 
