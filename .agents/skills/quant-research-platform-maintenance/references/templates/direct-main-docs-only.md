@@ -42,7 +42,7 @@ Do not amend, rebase, squash, force push, or create merge commits.
 - `git diff --name-only`
 - Targeted doc/search checks for the changed wording.
 - Commit and push `main`.
-- Confirm the commit exists without printing commit SHA values.
+- Capture the commit SHA for the transient final report.
 
 ## Output Format
 
@@ -51,5 +51,5 @@ Do not amend, rebase, squash, force push, or create merge commits.
 - Not Changed
 - Checks Run
 - Scope Check
-- Commit status, if committed
+- Commit SHA, if committed
 - Pushed branch: `main`

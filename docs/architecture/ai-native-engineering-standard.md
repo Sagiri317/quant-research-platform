@@ -1451,7 +1451,8 @@ Current brief 负责短状态：
 - commit 后应 push 对应 branch
 - merge 后应 push main
 - no force push / rebase / amend / squash / merge commit unless explicitly approved
-- report semantic Git status without writing commit SHA values into active docs or final reports
+- do not write real commit SHA values into durable active docs unless explicitly creating an archive/history record
+- transient operational final reports should include relevant commit SHA(s), branch, push/merge status, and final git status
 
 本地 confirmed Git 状态应同步 GitHub，方便后续 GPT / Codex / Pro 分析。
 
@@ -1655,7 +1656,7 @@ Commit / push policy
 规则：
 
 - push confirmed branch/main
-- report semantic Git status without writing commit SHA values
+- report relevant commit SHA(s), branch, push/merge status, and final git status in the transient final report
 - verify remote when needed
 - keep feature branches until user approves deletion
 - do not silently amend or rewrite history

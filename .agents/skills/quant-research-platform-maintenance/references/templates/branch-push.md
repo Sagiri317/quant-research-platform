@@ -41,7 +41,7 @@ Low
 ## Output Format
 
 - Pushed branch
-- Commit status, without printing SHA values
+- Commit SHA(s)
 - Remote
 - Checks Run
 - Scope Check

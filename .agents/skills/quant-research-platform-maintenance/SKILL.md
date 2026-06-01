@@ -81,6 +81,12 @@ Template Dry-Run Self-Test:
 - The dry-run table must include: prompt, classification, selected template, branch decision, approval needed, stop/ask condition, and verification required.
 - Do not execute dry-run prompts; use them only to prove routing and gates still behave as intended.
 
+SHA Handling / SHA 使用边界:
+
+- Durable repo docs and external master templates must not record real commit SHA values unless the task explicitly creates an archive/history document.
+- Operational task reports are different: if a task creates, pushes, reviews, or merges commits, the final chat report must include the relevant commit SHA(s), branch, push/merge status, and final git status for traceability.
+- Templates may include placeholders or field labels such as `commit SHA(s)`; they must not embed real historical SHA values as durable status.
+
 Preserved workflow controls:
 
 - Default conversation language remains Chinese unless the user asks otherwise.
