@@ -16,7 +16,7 @@ The principles behind this workflow are described in `docs/architecture/ai-nativ
 ## Start Here
 
 1. Read project `AGENTS.md`.
-2. Ordinary QRP tasks may read `.codex/briefs/current-qrp-status.md` as a short current-context primer before broad-loading `PROJECT_STATUS.md`, `README.md`, or the roadmap.
+2. Ordinary QRP tasks may read `.agents/briefs/current-qrp-status.md` as a short current-context primer before broad-loading `PROJECT_STATUS.md`, `README.md`, or the roadmap.
 3. Inspect only the requested surface and its linked contract files.
 4. If the change touches schema, API payloads, downloads, frontend evidence state, A-share runs, Factor Factory runs, or generated evidence, read [references/contracts-and-verification.md](references/contracts-and-verification.md).
 5. If the change touches schema/artifact contracts, `manifest.display`, API/download/frontend exposure, module boundaries, dependency direction, testing layers, generated outputs, scale, or security boundaries, read `docs/architecture/engineering-standards.md`.
@@ -50,30 +50,36 @@ Task modes and template selection:
 
 | Class | Task mode | Template | Recommended reasoning effort | Default context posture |
 | --- | --- | --- | --- | --- |
-| Router | `auto-task-router` | `.codex/templates/auto-task-router.md` | Low | Use only when the user gives a short task intent instead of an expanded prompt. |
-| Fast Path | `discovery-only` | `.codex/templates/discovery-only.md` | Low | Inspect only; no edits. |
-| Fast Path | `docs-sync` | `.codex/templates/docs-sync.md` | Low | Changed docs and direct active links only. |
-| Fast Path | `direct-main-docs-only` | `.codex/templates/direct-main-docs-only.md` | Low | Only explicitly approved low-risk docs-only work on `main`. |
-| Fast Path | `post-merge-documentation-sync` | `.codex/templates/post-merge-documentation-sync.md` | Low | Candidate-based active-doc sync after an approved merge. |
-| Fast Path | `commit-and-push` | `.codex/templates/commit-and-push.md` | Low | Current branch status and staged/unstaged diff only. |
-| Fast Path | `branch-push` | `.codex/templates/branch-push.md` | Low | Current branch and local commits only. |
-| Fast Path | `ff-merge-and-push` | `.codex/templates/ff-merge-and-push.md` | Low | Approved feature branch, `main`, and merge status only. |
-| Fast Path | `branch-cleanup` | `.codex/templates/branch-cleanup.md` | Low | Explicitly approved single branch only. |
-| Standard | `focused-audit` | `.codex/templates/focused-audit.md` | Medium / High | Target surface, relevant diff, and linked contracts only. |
-| Standard | `focused-implementation` | `.codex/templates/focused-implementation.md` | Medium / Medium-High | Target files and narrow tests first. |
-| Standard | `pre-commit-review` | `.codex/templates/pre-commit-review.md` | Medium | Diff-only by default. |
-| Standard | `documentation-impact-gate` | `.codex/templates/documentation-impact-gate.md` | Medium | Candidate docs only; no exhaustive docs scan by default. |
-| Standard | `dependency-contract-approval` | `.codex/templates/dependency-contract-approval.md` | Medium | Approval packet before dependency, contract, schema, display, API/frontend, or runtime boundary changes. |
-| Goal / Overnight | `pre-goal-blocker-discovery` | `.codex/templates/pre-goal-blocker-discovery.md` | High | Decide whether long-run implementation can proceed before editing. |
-| Goal / Overnight | `goal-overnight` | `.codex/templates/goal-overnight.md` | High / Highest available | Broader context only inside an approved envelope. |
+| Router | `auto-task-router` | `.agents/skills/quant-research-platform-maintenance/references/templates/auto-task-router.md` | Low | Use only when the user gives a short task intent instead of an expanded prompt. |
+| Fast Path | `discovery-only` | `.agents/skills/quant-research-platform-maintenance/references/templates/discovery-only.md` | Low | Inspect only; no edits. |
+| Fast Path | `docs-sync` | `.agents/skills/quant-research-platform-maintenance/references/templates/docs-sync.md` | Low | Changed docs and direct active links only. |
+| Fast Path | `direct-main-docs-only` | `.agents/skills/quant-research-platform-maintenance/references/templates/direct-main-docs-only.md` | Low | Only explicitly approved low-risk docs-only work on `main`. |
+| Fast Path | `post-merge-documentation-sync` | `.agents/skills/quant-research-platform-maintenance/references/templates/post-merge-documentation-sync.md` | Low | Candidate-based active-doc sync after an approved merge. |
+| Fast Path | `commit-and-push` | `.agents/skills/quant-research-platform-maintenance/references/templates/commit-and-push.md` | Low | Current branch status and staged/unstaged diff only. |
+| Fast Path | `branch-push` | `.agents/skills/quant-research-platform-maintenance/references/templates/branch-push.md` | Low | Current branch and local commits only. |
+| Fast Path | `ff-merge-and-push` | `.agents/skills/quant-research-platform-maintenance/references/templates/ff-merge-and-push.md` | Low | Approved feature branch, `main`, and merge status only. |
+| Fast Path | `branch-cleanup` | `.agents/skills/quant-research-platform-maintenance/references/templates/branch-cleanup.md` | Low | Explicitly approved single branch only. |
+| Standard | `focused-audit` | `.agents/skills/quant-research-platform-maintenance/references/templates/focused-audit.md` | Medium / High | Target surface, relevant diff, and linked contracts only. |
+| Standard | `focused-implementation` | `.agents/skills/quant-research-platform-maintenance/references/templates/focused-implementation.md` | Medium / Medium-High | Target files and narrow tests first. |
+| Standard | `pre-commit-review` | `.agents/skills/quant-research-platform-maintenance/references/templates/pre-commit-review.md` | Medium | Diff-only by default. |
+| Standard | `documentation-impact-gate` | `.agents/skills/quant-research-platform-maintenance/references/templates/documentation-impact-gate.md` | Medium | Candidate docs only; no exhaustive docs scan by default. |
+| Standard | `dependency-contract-approval` | `.agents/skills/quant-research-platform-maintenance/references/templates/dependency-contract-approval.md` | Medium | Approval packet before dependency, contract, schema, display, API/frontend, or runtime boundary changes. |
+| Goal / Overnight | `pre-goal-blocker-discovery` | `.agents/skills/quant-research-platform-maintenance/references/templates/pre-goal-blocker-discovery.md` | High | Decide whether long-run implementation can proceed before editing. |
+| Goal / Overnight | `goal-overnight` | `.agents/skills/quant-research-platform-maintenance/references/templates/goal-overnight.md` | High / Highest available | Broader context only inside an approved envelope. |
 
 Use Fast Path modes for bounded routine work so ordinary tasks do not accidentally become broad audits. Use Standard modes when edits or review need focused reasoning over a task surface. Use Goal / Overnight only when the user has approved the full execution envelope required by `AGENTS.md`.
 
 Template loading modes:
 
 - Expanded Prompt Mode: if the user provides a complete task brief or approved envelope, follow it and load only named or directly relevant files.
-- Repo Router Mode: if the user gives only a short task intent, start from `.codex/templates/auto-task-router.md`, then load the smallest selected template set.
+- Repo Router Mode: if the user gives only a short task intent, start from `.agents/skills/quant-research-platform-maintenance/references/templates/auto-task-router.md`, then load the smallest selected template set.
 - Do not full-load all templates, all docs, generated outputs, private data, or archives by default.
+
+Template Dry-Run Self-Test:
+
+- If a task modifies task templates, `auto-task-router`, context routing, or skill workflow rules, the final report must include a read-only Template Dry-Run Self-Test over representative one-line prompts.
+- The dry-run table must include: prompt, classification, selected template, branch decision, approval needed, stop/ask condition, and verification required.
+- Do not execute dry-run prompts; use them only to prove routing and gates still behave as intended.
 
 Preserved workflow controls:
 
@@ -215,6 +221,14 @@ Use this workflow only after the user has approved the bounded execution envelop
 - Do not let multiple subagents modify schema, API payloads, frontend shared types, `manifest.display`, generated-file indexes, or other shared contracts in parallel.
 - The main agent integrates subagent output, checks scope, and verifies that assigned files stayed within the approved envelope.
 - Final reports must include `Subagents Used`.
+
+### Subagent Decision Matrix
+
+- Docs/rules-only small changes: no subagent by default.
+- Pre-merge review, private boundary, or contract boundary: at most one review-only subagent.
+- Goal / Overnight: subagents allowed only inside the approved envelope.
+- Review-only subagents must not edit, commit, push, or merge.
+- The main agent owns final decision and verification.
 
 ## Documentation Impact Gate
 

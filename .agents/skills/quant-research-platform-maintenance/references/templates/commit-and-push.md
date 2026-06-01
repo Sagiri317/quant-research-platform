@@ -43,14 +43,14 @@ Low
 - Verify Documentation Impact Gate result exists when required.
 - `git diff --check`
 - Task-specific checks already run:
-- `git log -1 --format=%H` after commit
+- Confirm the commit exists without printing SHA values.
 - Push current branch.
 - `git status --short --branch` after push
 
 ## Output Format
 
 - Changed
-- Commit SHA: full SHA
+- Commit status, without printing SHA values
 - Pushed branch
 - Checks Run
 - Not Changed

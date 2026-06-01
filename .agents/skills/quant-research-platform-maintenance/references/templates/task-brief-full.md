@@ -1,6 +1,6 @@
 # Task Brief Full
 
-Use this full template for medium+, large, complex, contract-adjacent, or cross-surface work. For small bounded tasks, prefer the fast-path templates in `.codex/templates/`; for `/goal`, overnight, or review-and-fix-loop work, use `goal-overnight.md`.
+Use this full template for medium+, large, complex, contract-adjacent, or cross-surface work. For small bounded tasks, prefer the fast-path templates in `.agents/skills/quant-research-platform-maintenance/references/templates/`; for `/goal`, overnight, or review-and-fix-loop work, use `goal-overnight.md`.
 
 ## Goal
 

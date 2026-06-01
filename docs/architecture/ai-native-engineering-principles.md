@@ -2,7 +2,7 @@
 
 > 本文是 `quant-research-platform` 的 AI-native engineering compressed mental model / short principles。它沉淀本项目在 AI-assisted engineering 实践中形成的稳定经验，用来指导人类、Codex 和其他 AI agent 共同维护一个可长期演化的量化研究平台。
 >
-> 本文不是任务清单，不是路线图，不是当前实现状态，也不是 Codex 的逐条 task execution 说明。完整治理标准见 [ai-native-engineering-standard.md](ai-native-engineering-standard.md)，但普通 Codex execution 仍以 `AGENTS.md`、`.codex/skills/quant-research-platform-maintenance/SKILL.md`、`.codex/skills/quant-research-platform-maintenance/references/context-routing.md`、`.codex/templates/` 和 `.codex/briefs/current-qrp-status.md` 为准；工程合同仍以 `EVALUATION_INTERFACE.md`、`ARCHITECTURE.md`、`docs/code-map/` 和代码/测试为准。
+> 本文不是任务清单，不是路线图，不是当前实现状态，也不是 Codex 的逐条 task execution 说明。完整治理标准见 [ai-native-engineering-standard.md](ai-native-engineering-standard.md)，但普通 Codex execution 仍以 `AGENTS.md`、`.agents/skills/quant-research-platform-maintenance/SKILL.md`、`.agents/skills/quant-research-platform-maintenance/references/context-routing.md`、`.agents/skills/quant-research-platform-maintenance/references/templates/` 和 `.agents/briefs/current-qrp-status.md` 为准；工程合同仍以 `EVALUATION_INTERFACE.md`、`ARCHITECTURE.md`、`docs/code-map/` 和代码/测试为准。
 
 ---
 
@@ -359,7 +359,7 @@ AI 很容易制造看起来合理但实际增加长期维护成本的抽象，�
 
 ## 11. Task Mode Principles
 
-本项目的 AI / Codex 工作应区分任务类型，但本文只保留原则。具体 task-mode templates、recommended reasoning effort、context budget 和执行步骤由 `AGENTS.md`、maintenance skill、context-routing、`.codex/templates/` 和 current brief 维护。
+本项目的 AI / Codex 工作应区分任务类型，但本文只保留原则。具体 task-mode templates、recommended reasoning effort、context budget 和执行步骤由 `AGENTS.md`、maintenance skill、context-routing、`.agents/skills/quant-research-platform-maintenance/references/templates/` 和 current brief 维护。
 
 ### 11.1 Goal Clarity
 
@@ -383,7 +383,7 @@ AI 很容易制造看起来合理但实际增加长期维护成本的抽象，�
 
 ## 12. Approval Gate
 
-需要人类判断的 medium+ tasks 必须在实现前完成 task brief、implementation plan、scope declaration 和 explicit human approval。具体 approval gate 的格式和何时等待，以 `AGENTS.md`、maintenance skill 和 `.codex/templates/` 为准。
+需要人类判断的 medium+ tasks 必须在实现前完成 task brief、implementation plan、scope declaration 和 explicit human approval。具体 approval gate 的格式和何时等待，以 `AGENTS.md`、maintenance skill 和 `.agents/skills/quant-research-platform-maintenance/references/templates/` 为准。
 
 但 approval gate 不应卡住所有小任务。小范围、低风险、无 contract 变化、无跨层影响的任务，可以按 governed batch 执行。
 
@@ -436,7 +436,7 @@ Governance docs 记录规则，不记录一次性进度。
 包括：
 
 - `AGENTS.md`
-- `.codex/skills/quant-research-platform-maintenance/SKILL.md`
+- `.agents/skills/quant-research-platform-maintenance/SKILL.md`
 - `engineering-standards.md`
 - `quant-research-standards.md`
 
@@ -530,7 +530,7 @@ Historical docs 保留历史事实，但必须冻结边界。
 
 ## 17. Maintenance Skill 的角色
 
-`.codex/skills/quant-research-platform-maintenance/SKILL.md` 应沉淀已经验证过的稳定 workflow，例如：
+`.agents/skills/quant-research-platform-maintenance/SKILL.md` 应沉淀已经验证过的稳定 workflow，例如：
 
 - medium+ approval gate
 - task brief

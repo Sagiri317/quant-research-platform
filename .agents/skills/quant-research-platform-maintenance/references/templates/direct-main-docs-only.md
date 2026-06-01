@@ -19,9 +19,9 @@ Use only when the user explicitly approves low-risk docs-only work directly on `
 
 Use `feature/<task-name>` instead of direct `main` for high-impact docs/rules, including:
 
-- `.codex/templates/*`
+- `.agents/skills/quant-research-platform-maintenance/references/templates/*`
 - `AGENTS.md`
-- `.codex/skills/*/SKILL.md`
+- `.agents/skills/*/SKILL.md`
 - `context-routing.md`
 - architecture standards
 - roadmap priority
@@ -42,7 +42,7 @@ Do not amend, rebase, squash, force push, or create merge commits.
 - `git diff --name-only`
 - Targeted doc/search checks for the changed wording.
 - Commit and push `main`.
-- Output full commit SHA.
+- Confirm the commit exists without printing commit SHA values.
 
 ## Output Format
 
@@ -51,5 +51,5 @@ Do not amend, rebase, squash, force push, or create merge commits.
 - Not Changed
 - Checks Run
 - Scope Check
-- Commit SHA, if committed
+- Commit status, if committed
 - Pushed branch: `main`

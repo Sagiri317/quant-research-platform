@@ -24,7 +24,7 @@ the active next-step decision.
 - N5 private real-data smoke passed: `n5_private_smoke_2025h2_rev120_v1`.
 - Pipeline failed-run reliability MVS and failed-run disk-recovery sanitization hardening have merged to `main`.
 - N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, N6 prediction handoff MVS, private marker helper centralization, and `ml baseline train` CLI pre-read private-output validation have merged to `main`.
-- Prompt-template sync and polish have merged to `main`; use `.codex/templates/` for current task-mode details.
+- Prompt-template sync and polish have merged to `main`; use `.agents/skills/quant-research-platform-maintenance/references/templates/` for current task-mode details.
 - These facts are status pointers, not full evidence records.
 - Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, next step, or handoff state.
 
@@ -33,7 +33,7 @@ the active next-step decision.
 - N5 v1 private smoke demonstrates the current descriptive proxy diagnostics path on private A-share data.
 - Pipeline failed-run reliability now includes the original failed-run MVS plus disk-loaded `runtime_summary.json` / `checkpoints.json` shared private-marker sanitization.
 - N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, `ml baseline train` CLI handoff, private-output boundary guard, shared private-marker helper, and CLI pre-read private-output validation. This is not a complete ML pipeline, deep learning backend, model registry, feature store, A-share prediction adapter, paper/live trading system, deployment, scheduler, worker, or external connector.
-- Task-mode template details live in `.codex/templates/`, not in this brief.
+- Task-mode template details live in `.agents/skills/quant-research-platform-maintenance/references/templates/`, not in this brief.
 
 ## Current Next Step
 
@@ -65,6 +65,6 @@ the active next-step decision.
 - `AGENTS.md`: execution boundaries, stop conditions, editable area, data/privacy rules.
 - `README.md`: project entry and Codex quick start.
 - `PROJECT_STATUS.md`: current status, handoff, blockers, next steps.
-- `.codex/skills/quant-research-platform-maintenance/SKILL.md`: maintenance workflow.
-- `.codex/skills/quant-research-platform-maintenance/references/context-routing.md`: task-specific context loading.
-- `.codex/templates/`: task-mode templates.
+- `.agents/skills/quant-research-platform-maintenance/SKILL.md`: maintenance workflow.
+- `.agents/skills/quant-research-platform-maintenance/references/context-routing.md`: task-specific context loading.
+- `.agents/skills/quant-research-platform-maintenance/references/templates/`: task-mode templates.

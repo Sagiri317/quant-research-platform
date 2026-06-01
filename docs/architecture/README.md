@@ -16,22 +16,22 @@ Human reading order:
 
 Codex execution templates are not maintained in architecture docs. Current
 task-mode, branch, commit, push, fast-forward merge, and Goal / Overnight
-execution rules live in `.codex/templates/`, the project maintenance skill, and
+execution rules live in `.agents/skills/quant-research-platform-maintenance/references/templates/`, the project maintenance skill, and
 its context-routing reference.
 
 Codex context loading order:
 
 1. 普通实现或修复任务先读根目录 [../../AGENTS.md](../../AGENTS.md)，再按任务表面加载相关当前文件。
-2. artifact schema、`manifest.display`、API/download、frontend evidence、generated runs 任务先读 `.codex/skills/quant-research-platform-maintenance/references/contracts-and-verification.md`。
+2. artifact schema、`manifest.display`、API/download、frontend evidence、generated runs 任务先读 `.agents/skills/quant-research-platform-maintenance/references/contracts-and-verification.md`。
 3. 诊断语义、tradability、cost、capacity、risk、benchmark 或 trading-adjacent wording 任务再读 [quant-research-standards.md](quant-research-standards.md)。
 4. 模块边界、合同版本、测试、生成物、API/frontend 边界或安全规则任务再读 [engineering-standards.md](engineering-standards.md)。
 5. Decision Task、architecture planning 或 future capability boundary task 才默认读取 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md)；普通 coding task 不默认加载它。
 6. 普通 coding task 不默认读取 [ai-native-engineering-standard.md](ai-native-engineering-standard.md)；只有 governance、architecture、standards、Codex workflow redesign、task-mode policy 或 documentation topology tasks 才加载 full standard。
-7. Branch / commit / push / merge / fast-forward merge tasks should use `.codex/templates/commit-and-push.md`, `.codex/templates/branch-push.md`, and `.codex/templates/ff-merge-and-push.md` instead of architecture docs.
+7. Branch / commit / push / merge / fast-forward merge tasks should use `.agents/skills/quant-research-platform-maintenance/references/templates/commit-and-push.md`, `.agents/skills/quant-research-platform-maintenance/references/templates/branch-push.md`, and `.agents/skills/quant-research-platform-maintenance/references/templates/ff-merge-and-push.md` instead of architecture docs.
 
 Archive candidates:
 
 - `docs/archive/superpowers/` 是已归档 historical execution records。引用它时应分类为 historical reference 或仍被当前文档明确继承的 active reference。
-- `docs/archive/operations/next-stage-worktree-plan-2026-05.md` 是 historical operations planning record；当前 Git/worktree/task-mode execution 以 `.codex/templates/*`、maintenance skill 和 context-routing 为准。
+- `docs/archive/operations/next-stage-worktree-plan-2026-05.md` 是 historical operations planning record；当前 Git/worktree/task-mode execution 以 `.agents/skills/quant-research-platform-maintenance/references/templates/*`、maintenance skill 和 context-routing 为准。
 
 本目录中的文档是设计和治理依据，不代表所有目录或能力都已经实现。

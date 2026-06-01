@@ -18,7 +18,7 @@ Project purpose:
 - Code and public-safe aggregate summaries may later be published after review.
 - CSMAR raw/interim/processed data and private real reports remain private.
 
-Current source maps and implementation entry points live in [docs/code-map/](docs/code-map/) and `.codex/skills/quant-research-platform-maintenance/references/contracts-and-verification.md`. Use [context-routing.md](.codex/skills/quant-research-platform-maintenance/references/context-routing.md) to choose task-specific context instead of broad-loading the repository.
+Current source maps and implementation entry points live in [docs/code-map/](docs/code-map/) and `.agents/skills/quant-research-platform-maintenance/references/contracts-and-verification.md`. Use [context-routing.md](.agents/skills/quant-research-platform-maintenance/references/context-routing.md) to choose task-specific context instead of broad-loading the repository.
 
 - Do not create repo-level `apps/api` in the current Local Research Platform phase; it is a future deployable app shell.
 - Do not create empty Future directories or empty market implementations merely as planning markers.
@@ -109,7 +109,7 @@ PROJECT_STATUS.md
 AGENTS.md
 data/README.md
 docs/
-.codex/skills/
+.agents/skills/
 src/
 tests/
 web/
@@ -229,7 +229,14 @@ Do not run slow, network-heavy, destructive, or environment-changing commands wi
 
 ## 8. Documentation and Context Routing
 
-Use [README.md](README.md) as the project entry, [PROJECT_STATUS.md](PROJECT_STATUS.md) for current status and root handoff, [docs/code-map/](docs/code-map/) for implementation maps, and [context-routing.md](.codex/skills/quant-research-platform-maintenance/references/context-routing.md) to choose task-specific docs. Use `.codex/skills/quant-research-platform-maintenance/SKILL.md` for artifact/API/frontend/A-share/Factor Factory maintenance workflow.
+Use [README.md](README.md) as the project entry, [PROJECT_STATUS.md](PROJECT_STATUS.md) for current status and root handoff, [docs/code-map/](docs/code-map/) for implementation maps, and [context-routing.md](.agents/skills/quant-research-platform-maintenance/references/context-routing.md) to choose task-specific docs. Use `.agents/skills/quant-research-platform-maintenance/SKILL.md` for artifact/API/frontend/A-share/Factor Factory maintenance workflow.
+
+QRP workflow entry points:
+
+- Maintenance skill: `.agents/skills/quant-research-platform-maintenance/SKILL.md`
+- Context routing: `.agents/skills/quant-research-platform-maintenance/references/context-routing.md`
+- Task templates: `.agents/skills/quant-research-platform-maintenance/references/templates/*`
+- Current brief: `.agents/briefs/current-qrp-status.md`
 
 If GPT Pro or other external tools are used, they must receive an explicit context packet or public link. Context packets are managed by the root workflow; do not create a project-local packet cache unless approved.
 

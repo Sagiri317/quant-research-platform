@@ -42,7 +42,7 @@ Low
 - Verify `main` equals `origin/main` before merge.
 - `git merge --ff-only <feature-branch>`
 - Push `main`.
-- `git log -1 --format=%H`
+- Confirm pushed `main` points at the merged branch without printing SHA values.
 - Verify `HEAD` equals `origin/main` after push.
 - `git status --short --branch` after push.
 - Do not delete the feature branch unless explicitly approved.
@@ -50,7 +50,7 @@ Low
 ## Output Format
 
 - Merged branch
-- Main SHA: full SHA
+- Main status, without printing SHA values
 - Pushed branch: `main`
 - Main status
 - Checks Run

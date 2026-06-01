@@ -17,9 +17,9 @@ Use before final reporting for medium+ tasks and any change to workflow rules, c
 
 ## Candidate Selection
 
-- `.codex/templates/*`: check related templates, maintenance skill, and context routing.
+- `.agents/skills/quant-research-platform-maintenance/references/templates/*`: check related templates, maintenance skill, and context routing.
 - `AGENTS.md`: check hard safety boundary references only.
-- `.codex/skills/*/SKILL.md`: check directly linked routing/reference files only.
+- `.agents/skills/*/SKILL.md`: check directly linked routing/reference files only.
 - Contract docs: check only the active docs mapped by the maintenance skill.
 - Status docs: check only if the task changes current topic, phase, milestone, blocker, next step, public readiness, or data/API/Git/Conda/privacy boundary.
 

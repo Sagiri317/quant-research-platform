@@ -4,7 +4,7 @@
 > 它定义人类、Codex、GPT Pro 和其他 AI agent 如何协作维护一个长期演化的本地量化研究平台。
 >
 > 本文不是日常任务 prompt，也不是 Codex 每次执行都必须完整读取的上下文。
-> 日常执行边界以项目内 `AGENTS.md`、`.codex/skills/quant-research-platform-maintenance/SKILL.md`、`.codex/templates/*`、`.codex/briefs/current-qrp-status.md`、代码、tests、`EVALUATION_INTERFACE.md` 和 `docs/code-map/` 为准。
+> 日常执行边界以项目内 `AGENTS.md`、`.agents/skills/quant-research-platform-maintenance/SKILL.md`、`.agents/skills/quant-research-platform-maintenance/references/templates/*`、`.agents/briefs/current-qrp-status.md`、代码、tests、`EVALUATION_INTERFACE.md` 和 `docs/code-map/` 为准。
 >
 > 本文保留完整原则、治理模型、task-mode 体系和长期演化规则；短任务应使用 templates，普通任务不应把本文全文塞进 prompt。
 
@@ -58,8 +58,8 @@ research iteration speed
 |---|---|
 | `AGENTS.md` | hard boundaries, private-data safety, phase boundary, forbidden actions |
 | project skill | operational workflow, review gates, task modes, contract maintenance playbooks |
-| `.codex/templates/*` | task execution prompts and context budgets |
-| `.codex/briefs/current-qrp-status.md` | short current status for ordinary Codex tasks |
+| `.agents/skills/quant-research-platform-maintenance/references/templates/*` | task execution prompts and context budgets |
+| `.agents/briefs/current-qrp-status.md` | short current status for ordinary Codex tasks |
 | code/tests/schema registries | enforceable behavior and contracts |
 | docs/code-map | current implementation learning layer |
 | this standard | full philosophy and governance reference |
@@ -1451,7 +1451,7 @@ Current brief 负责短状态：
 - commit 后应 push 对应 branch
 - merge 后应 push main
 - no force push / rebase / amend / squash / merge commit unless explicitly approved
-- output full SHA for confirmed git state
+- report semantic Git status without writing commit SHA values into active docs or final reports
 
 本地 confirmed Git 状态应同步 GitHub，方便后续 GPT / Codex / Pro 分析。
 
@@ -1655,7 +1655,7 @@ Commit / push policy
 规则：
 
 - push confirmed branch/main
-- output full SHA
+- report semantic Git status without writing commit SHA values
 - verify remote when needed
 - keep feature branches until user approves deletion
 - do not silently amend or rewrite history

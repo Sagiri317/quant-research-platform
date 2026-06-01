@@ -2,7 +2,7 @@
 
 本文定义 `quant-research-platform` 的横切工程规则。它回答模块如何依赖、合同如何版本化、错误如何分类、测试如何守边界，以及未来扩展如何接入；目录归属以 [target-architecture-and-capabilities.md](target-architecture-and-capabilities.md) 为准。
 
-本文的工程规则与 [ai-native-engineering-principles.md](ai-native-engineering-principles.md) 的长期原则一致。本文定义横切工程规则；Codex task execution workflow、task-mode templates、context budget、commit/push/merge 操作以 `AGENTS.md`、`.codex/skills/quant-research-platform-maintenance/SKILL.md`、`.codex/skills/quant-research-platform-maintenance/references/context-routing.md` 和 `.codex/templates/` 为准。
+本文的工程规则与 [ai-native-engineering-principles.md](ai-native-engineering-principles.md) 的长期原则一致。本文定义横切工程规则；Codex task execution workflow、task-mode templates、context budget、commit/push/merge 操作以 `AGENTS.md`、`.agents/skills/quant-research-platform-maintenance/SKILL.md`、`.agents/skills/quant-research-platform-maintenance/references/context-routing.md` 和 `.agents/skills/quant-research-platform-maintenance/references/templates/` 为准。
 
 Current phase stop rule: 当前阶段是 Local Research Platform，架构风格是 Stable Core + High-Velocity Research Edge。本文中的 `apps/`、`workers`、`schedulers`、`storage`、`jobs` 等词汇是 long-term boundary vocabulary；除非当前任务已经明确批准并落在当前阶段，否则不得据此创建 speculative infrastructure、future capability scaffolding 或部署/调度/存储/作业系统。
 
