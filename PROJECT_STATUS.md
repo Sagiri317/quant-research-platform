@@ -6,57 +6,6 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 `docs/architecture/phase-1-acceptance-record.md`，下一阶段任务见
 `docs/architecture/next-stage-roadmap.md`，实现流向见 `docs/code-map/`。
 
-## Current Root-Synced Signal / 当前已同步信号
-
-Schema `0.7` / N5 MVS descriptive proxy diagnostics 已 merge to `main`，并已完成
-N5 private real-data smoke。Smoke run id 为
-`n5_private_smoke_2025h2_rev120_v1`；数据范围只记录为 2025H2 aggregate
-smoke，不记录 row-level private data、股票样本或完整 private paths。当前
-evaluation-set artifacts 使用 `run_id`、`summary.json`、`run_context.json`、
-registry-backed required tables、`manifest.display` compact download refs、
-generic `/tables/{table_key}/preview` 和
-`src/quant_research_platform/evaluations/diagnostics/` 下的 post-run diagnostics。
-
-已落地范围包括 return-path risk proxy、flat bps cost sensitivity via
-`scenario_metrics`、liquidity/capacity descriptive proxy、market-cap/size
-descriptive proxy、missing-input-aware diagnostic status，以及 diagnostics-enabled
-A-share month breakdown。它们仍只是 descriptive proxy diagnostics，不是 alpha
-proof、validated risk model、Barra exposure、real capacity analysis、simulation、
-paper/live trading、order routing、deployment 或 investment advice。Full backend
-pytest 和 ruff 已通过。Private CSMAR data 和 `reports/private_real/` 继续保持本地私有，
-不进入 portable metadata。N5 private smoke 已验证 schema `0.7` validation
-passed；`diagnostic_summary`、`diagnostic_metrics`、`scenario_metrics`、
-`exposure_capacity_summary` 和 `portfolio_risk_summary` 已检查；
-`manifest.display`、API preview 和 selected ZIP smoke passed。Workbench browser
-acceptance 本轮未运行；API/display evidence 足以证明 generic diagnostics table
-visibility。
-
-Pipeline failed-run reliability MVS 已进入 `main`。已完成范围包括 persisted
-`runtime_summary.json` status fallback、failed-state checkpoints consistency、
-pipeline-local stable `failure_code`、sanitized failed status/checkpoints payload，
-以及 failed pipeline partial evaluation 不暴露为 completed evidence run。
-该 MVS 不包含 retry/resume/overwrite、global API error envelope migration、
-warnings system expansion、schema change、`manifest.display` change、frontend
-change、N5/N6 expansion 或 scheduler/worker/deployment。
-
-N6 prediction handoff guardrails、synthetic handoff smoke 和 local numpy/pandas
-ML baseline trainer 已进入 `main`。这些工作只建立初始 handoff / smoke / local
-baseline 入口，不代表完整 ML pipeline、deep learning backend、model registry、
-feature store、A-share prediction adapter、真实风险/容量模型、交易仿真、
-paper/live trading、deployment、scheduler、worker 或 external connector。
-
-Prompt-template sync / prompt-template polish 已进入 `main`。repo 内短模板当前支持
-Expanded Prompt Mode、Repo Router Mode、`auto-task-router`、closed-loop execution、
-blocker / escalation gate、candidate-based Documentation Impact Gate、
-direct-main docs-only、single-branch cleanup、post-merge documentation sync 和
-dependency / contract approval。
-
-Root handoff status: closed 2026-06-01. Workspace-root planning/status 已同步
-N5 MVS、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial
-handoff / smoke / local baseline，以及 prompt-template sync / polish 状态；下一步
-转为 N6 walk-forward / OOS / embargo contract focused audit，或先做 N6 ML baseline
-interface / CLI decision audit。不要直接进入 broad implementation。
-
 ## 当前状态
 
 | 项目 | 当前事实 |
@@ -120,6 +69,8 @@ evidence only; they are not current valid run-contract examples.
 
 - Phase 1 已完成并由 `docs/architecture/phase-1-acceptance-record.md` 作为历史验收记录保存。
 - N1/N2/N3/N4/N7/N8 已合入 `main`；详细实现和旧 schema 验收故事不再作为当前状态展开，必要时查 Git history、`docs/archive/superpowers/` historical execution records 和相关 code-map。
+- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial handoff / smoke / local baseline，以及 prompt-template sync / polish 已进入 `main`；当前有效 private smoke run id 为 `n5_private_smoke_2025h2_rev120_v1`。
+- Pipeline failed-run reliability MVS 只覆盖 status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard；retry/resume/overwrite 与 global API error envelope migration 仍是未来工作。
 - 2026-05-28 maintenance surface cleanup 已收敛当前脚本/agent helper 边界：用户可见 workbench scripts 保留在 `scripts/`，agent-only verification helpers 归项目维护 skill，`docs/archive/superpowers/` plans/specs 作为 historical execution records。
 
 ## Root Handoff / 根目录回传信号
