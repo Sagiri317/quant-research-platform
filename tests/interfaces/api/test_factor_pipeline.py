@@ -470,6 +470,43 @@ def test_pipeline_run_status_can_be_read_from_runtime_summary_after_restart(
     assert "processed_private" not in checkpoints.text
 
 
+def test_pipeline_run_status_sanitizes_shared_private_markers_after_restart(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "shared_marker_failed_run"
+    run_dir.mkdir()
+    (run_dir / "runtime_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "shared_marker_failed_run",
+                "requested_run_id": "shared_marker_failed_run",
+                "status": "failed",
+                "start_from": "existing_factors",
+                "warnings": [],
+                "failed_step": "raw_vendor_loader",
+                "failure_code": "missing vendor_private/input.parquet",
+                "checkpoints": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", "reports/runs")],
+            pipeline_output_root=tmp_path,
+        )
+    )
+
+    status = client.get("/api/pipeline-runs/shared_marker_failed_run")
+
+    assert status.status_code == 200
+    assert status.json()["message"] == "pipeline execution failed"
+    assert "failed_step" not in status.json()
+    assert "failure_code" not in status.json()
+    assert "vendor_private" not in status.text
+    assert "raw_vendor" not in status.text
+
+
 def test_failed_pipeline_partial_evaluation_is_not_api_visible_run(
     tmp_path,
 ) -> None:
@@ -548,7 +585,15 @@ def test_pipeline_checkpoints_sanitize_private_artifacts_after_restart(
                             "path": "data/processed_private/csmar/panel.parquet",
                         }
                     ],
-                }
+                },
+                {
+                    "key": "evaluate",
+                    "label": "evaluation",
+                    "status": "failed",
+                    "artifact": "vendor_private/predictions.parquet",
+                    "message": "failed at raw_vendor/source.csv",
+                    "failure_code": "private output path leaked",
+                },
             ]
         ),
         encoding="utf-8",
@@ -566,10 +611,15 @@ def test_pipeline_checkpoints_sanitize_private_artifacts_after_restart(
     assert checkpoints.json()[0]["artifact"] is None
     assert checkpoints.json()[0]["message"] is None
     assert checkpoints.json()[0]["failure_code"] is None
+    assert checkpoints.json()[1]["artifact"] is None
+    assert checkpoints.json()[1]["message"] is None
+    assert checkpoints.json()[1]["failure_code"] is None
     assert "raw_private" not in checkpoints.text
     assert "interim_private" not in checkpoints.text
     assert "processed_private" not in checkpoints.text
     assert "private_real" not in checkpoints.text
+    assert "vendor_private" not in checkpoints.text
+    assert "raw_vendor" not in checkpoints.text
     assert str(tmp_path) not in checkpoints.text
 
 

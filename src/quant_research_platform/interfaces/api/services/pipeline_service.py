@@ -29,14 +29,9 @@ from quant_research_platform.pipelines.a_share.snapshots import (
     PipelineSnapshotError,
     write_run_snapshot,
 )
+from quant_research_platform.runtime.private_paths import text_has_private_marker
 
 PipelineResourceKind = Literal["snapshot", "run"]
-PRIVATE_PATH_MARKERS = (
-    "raw_private",
-    "interim_private",
-    "processed_private",
-    "private_real",
-)
 
 
 class PipelineSnapshotRequestPayload(BaseModel):
@@ -437,8 +432,7 @@ def _sanitize_checkpoint_value(value: object) -> object | None:
 
 
 def _has_private_path_marker(value: str) -> bool:
-    lowered = value.replace("\\", "/").lower()
-    return any(marker in lowered for marker in PRIVATE_PATH_MARKERS)
+    return text_has_private_marker(value)
 
 
 def _has_unsafe_path_text(value: str) -> bool:
