@@ -38,6 +38,10 @@ class BaselineTrainingConfig:
     label_column: str
     train_end: str
     test_start: str
+    test_end: str | None = None
+    embargo_days: int = 0
+    fold_id: str | None = None
+    split_name: str | None = None
     prediction_column: str = "prediction_score"
     ridge_alpha: float = 1e-6
     source_ref: str = "synthetic_or_local_feature_panel"
@@ -57,6 +61,13 @@ class BaselineTrainingResult:
     model_ref: str
 
 
+@dataclass(frozen=True)
+class _ResolvedSplit:
+    train_end: pd.Timestamp
+    test_start: pd.Timestamp
+    test_end: pd.Timestamp | None
+
+
 def run_baseline_training(config: BaselineTrainingConfig) -> BaselineTrainingResult:
     """Train a deterministic numpy ridge baseline and write test predictions."""
 
@@ -69,13 +80,12 @@ def run_baseline_training(config: BaselineTrainingConfig) -> BaselineTrainingRes
     timestamps = pd.to_datetime(frame[config.timestamp_column], errors="coerce")
     if timestamps.isna().any():
         raise ValueError(f"{config.timestamp_column} must contain valid datetimes.")
-    train_end = pd.Timestamp(config.train_end)
-    test_start = pd.Timestamp(config.test_start)
-    if train_end >= test_start:
-        raise ValueError("train_end must be before test_start.")
+    split = _resolve_split(config)
 
-    train_mask = timestamps <= train_end
-    test_mask = timestamps >= test_start
+    train_mask = timestamps <= split.train_end
+    test_mask = timestamps >= split.test_start
+    if split.test_end is not None:
+        test_mask &= timestamps <= split.test_end
     train = frame.loc[train_mask].copy()
     test = frame.loc[test_mask].copy()
     if train.empty:
@@ -140,6 +150,14 @@ def _validate_config(config: BaselineTrainingConfig) -> None:
     _validate_column_names((config.prediction_column,), "prediction_column")
     if config.label_column in config.feature_columns:
         raise ValueError("label_column must not be included in feature_columns.")
+    leakage_columns = [
+        column for column in config.feature_columns if _looks_like_label_leakage(column)
+    ]
+    if leakage_columns:
+        raise ValueError(
+            "feature_columns must not include leakage-prone label or "
+            f"forward-return columns: {leakage_columns}."
+        )
     if config.prediction_column in {
         config.timestamp_column,
         config.entity_column,
@@ -149,12 +167,52 @@ def _validate_config(config: BaselineTrainingConfig) -> None:
         raise ValueError("prediction_column must be distinct from input columns.")
     if float(config.ridge_alpha) < 0:
         raise ValueError("ridge_alpha must be nonnegative.")
+    if not isinstance(config.embargo_days, int) or isinstance(
+        config.embargo_days,
+        bool,
+    ):
+        raise TypeError("embargo_days must be an integer.")
+    if config.embargo_days < 0:
+        raise ValueError("embargo_days must be nonnegative.")
+    _validate_optional_identifier(config.fold_id, "fold_id")
+    _validate_optional_identifier(config.split_name, "split_name")
     _validate_portable_ref(config.source_ref, "source_ref")
     _validate_portable_ref(config.model_ref, "model_ref")
     _validate_output_path(config.output_prediction_path, "output_prediction_path")
     _validate_output_path(config.output_metadata_path, "output_metadata_path")
     if config.output_prediction_path == config.output_metadata_path:
         raise ValueError("prediction and metadata output paths must differ.")
+    _resolve_split(config)
+
+
+def _resolve_split(config: BaselineTrainingConfig) -> _ResolvedSplit:
+    train_end = _parse_timestamp(config.train_end, "train_end")
+    test_start = _parse_timestamp(config.test_start, "test_start")
+    test_end = (
+        _parse_timestamp(config.test_end, "test_end")
+        if config.test_end is not None
+        else None
+    )
+    if train_end >= test_start:
+        raise ValueError("train_end must be before test_start.")
+    if test_end is not None and test_end < test_start:
+        raise ValueError("test_end must be on or after test_start.")
+    embargo_end = train_end + pd.Timedelta(days=config.embargo_days)
+    if embargo_end > test_start:
+        raise ValueError(
+            "train_end plus embargo_days must be on or before test_start."
+        )
+    return _ResolvedSplit(train_end=train_end, test_start=test_start, test_end=test_end)
+
+
+def _parse_timestamp(value: str, name: str) -> pd.Timestamp:
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a valid date or timestamp.") from exc
+    if pd.isna(timestamp):
+        raise ValueError(f"{name} must be a valid date or timestamp.")
+    return timestamp
 
 
 def _input_columns(path: Path) -> tuple[str, ...]:
@@ -205,6 +263,17 @@ def _validate_column_names(values: tuple[str, ...], name: str) -> None:
         raise ValueError(f"{name} must contain non-empty strings.")
     if len(set(values)) != len(values):
         raise ValueError(f"{name} must not contain duplicates.")
+
+
+def _looks_like_label_leakage(column: str) -> bool:
+    normalized = column.casefold()
+    return (
+        normalized == "label"
+        or normalized == "target"
+        or normalized.startswith("label_")
+        or normalized.startswith("target_")
+        or normalized.startswith("forward_return")
+    )
 
 
 def _validate_non_nulls(
@@ -267,6 +336,10 @@ def _prediction_frame(
         output_columns.append("forward_return_1d")
     result = frame.loc[:, output_columns].copy()
     result.insert(2, config.prediction_column, prediction_values)
+    if config.split_name is not None:
+        result["split_name"] = config.split_name
+    if config.fold_id is not None:
+        result["fold_id"] = config.fold_id
     return result
 
 
@@ -283,12 +356,37 @@ def _write_metadata(
         "model_ref": config.model_ref,
         "source_ref": config.source_ref,
         "feature_columns": list(config.feature_columns),
+        "feature_summary": {
+            "columns": list(config.feature_columns),
+            "count": len(config.feature_columns),
+        },
         "label_column": config.label_column,
+        "target_column": config.label_column,
         "timestamp_column": config.timestamp_column,
         "entity_column": config.entity_column,
         "prediction_column": config.prediction_column,
         "train_end": str(pd.Timestamp(config.train_end).date()),
         "test_start": str(pd.Timestamp(config.test_start).date()),
+        "test_end": (
+            str(pd.Timestamp(config.test_end).date())
+            if config.test_end is not None
+            else None
+        ),
+        "embargo_days": config.embargo_days,
+        "fold_id": config.fold_id,
+        "split_name": config.split_name,
+        "training_time": {
+            "train_end": str(pd.Timestamp(config.train_end).date()),
+            "embargo_days": config.embargo_days,
+        },
+        "prediction_time": {
+            "test_start": str(pd.Timestamp(config.test_start).date()),
+            "test_end": (
+                str(pd.Timestamp(config.test_end).date())
+                if config.test_end is not None
+                else None
+            ),
+        },
         "train_row_count": train_row_count,
         "test_row_count": test_row_count,
         "coefficients": [float(value) for value in coefficients],
@@ -308,6 +406,17 @@ def _validate_portable_ref(value: str, name: str) -> None:
         raise ValueError(f"{name} must be a non-empty string.")
     if _looks_like_private_or_local_path(value):
         raise ValueError(f"{name} must be a portable alias, not a path.")
+
+
+def _validate_optional_identifier(value: str | None, name: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a portable identifier.")
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", value):
+        raise ValueError(f"{name} must be a portable identifier.")
+    if _looks_like_private_or_local_path(value):
+        raise ValueError(f"{name} must be a portable identifier.")
 
 
 def _validate_output_path(path: Path, name: str) -> None:
@@ -330,6 +439,24 @@ def _validate_metadata_private_safe(metadata: dict[str, Any]) -> None:
     leaked = [marker for marker in forbidden if marker in lowered]
     if leaked:
         raise ValueError(f"metadata contains private or row-level fields: {leaked}.")
+    _validate_no_private_or_local_payload(metadata, "metadata")
+
+
+def _validate_no_private_or_local_payload(value: Any, path: str) -> None:
+    if isinstance(value, str):
+        if _looks_like_private_or_local_path(value):
+            raise ValueError(f"{path} must not contain private or machine-local paths.")
+        return
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            normalized_key = str(key).casefold()
+            if "sample" in normalized_key:
+                raise ValueError(f"{path} must not include row-level sample fields.")
+            _validate_no_private_or_local_payload(nested_value, f"{path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _validate_no_private_or_local_payload(item, f"{path}[{index}]")
 
 
 def _looks_like_private_or_local_path(value: str) -> bool:

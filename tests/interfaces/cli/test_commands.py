@@ -24,6 +24,15 @@ def test_cli_exposes_a_share_group() -> None:
     assert "evaluate" in result.output
 
 
+def test_cli_exposes_ml_baseline_train() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["ml", "baseline", "--help"])
+
+    assert result.exit_code == 0
+    assert "train" in result.output
+
+
 def test_evaluate_parquet_rejects_multiple_costs_with_schema_07_wording() -> None:
     runner = CliRunner()
 
@@ -162,3 +171,207 @@ def test_evaluate_parquet_writes_prediction_handoff_metadata(tmp_path) -> None:
         "sample_stocks",
     ):
         assert forbidden not in persisted_text
+
+
+def test_ml_baseline_train_cli_writes_predictions_and_metadata(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    evaluation_output = tmp_path / "evaluation"
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-01-01",
+                    "2026-01-01",
+                    "2026-01-02",
+                    "2026-01-02",
+                    "2026-01-03",
+                    "2026-01-03",
+                    "2026-01-04",
+                    "2026-01-04",
+                ]
+            ),
+            "asset": ["A", "B", "A", "B", "A", "B", "A", "B"],
+            "feature_a": [1.0, 2.0, 2.0, 3.0, 3.0, 1.0, 4.0, 0.5],
+            "feature_b": [0.0, 1.0, 0.5, 1.5, 0.25, 2.0, 0.75, 1.25],
+            "forward_return": [0.02, -0.01, 0.03, -0.02, 0.04, -0.03, 0.02, -0.01],
+            "forward_return_1d": [0.02, -0.01, 0.03, -0.02, 0.04, -0.03, 0.02, -0.01],
+        }
+    ).to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(prediction_path),
+            "--output-metadata",
+            str(metadata_path),
+            "--target-column",
+            "forward_return",
+            "--feature-column",
+            "feature_a",
+            "--feature-column",
+            "feature_b",
+            "--train-end",
+            "2026-01-01",
+            "--test-start",
+            "2026-01-03",
+            "--test-end",
+            "2026-01-03",
+            "--embargo-days",
+            "1",
+            "--fold-id",
+            "fold_001",
+            "--split-name",
+            "test",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    predictions = pd.read_parquet(prediction_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert predictions["timestamp"].min() == pd.Timestamp("2026-01-03")
+    assert predictions["timestamp"].max() == pd.Timestamp("2026-01-03")
+    assert set(predictions["split_name"]) == {"test"}
+    assert set(predictions["fold_id"]) == {"fold_001"}
+    assert metadata["embargo_days"] == 1
+    assert metadata["fold_id"] == "fold_001"
+    assert metadata["split_name"] == "test"
+
+    handoff = runner.invoke(
+        app,
+        [
+            "evaluate-parquet",
+            "--parquet-path",
+            str(prediction_path),
+            "--feature",
+            "prediction_score",
+            "--label",
+            "forward_return",
+            "--return-source-column",
+            "forward_return_1d",
+            "--segment-column",
+            "split_name",
+            "--segment-column",
+            "fold_id",
+            "--output",
+            str(evaluation_output),
+            "--run-id",
+            "cli_baseline_prediction_handoff",
+            "--kind",
+            "prediction",
+            "--domain",
+            "prediction_handoff",
+            "--data-stage",
+            "synthetic_only",
+            "--no-uses-external-data",
+            "--n-groups",
+            "2",
+            "--prediction-handoff-version",
+            "n6_mvs_v1",
+            "--prediction-source-ref",
+            "synthetic_baseline_prediction_panel_v1",
+            "--prediction-model-ref",
+            "numpy_linear_ridge_baseline_v1",
+        ],
+    )
+
+    assert handoff.exit_code == 0, handoff.output
+    summary = json.loads((evaluation_output / "summary.json").read_text("utf-8"))
+    assert summary["artifact_schema_version"] == "0.7"
+    assert summary["kind"] == "prediction"
+
+
+def test_ml_baseline_train_cli_fails_cleanly_for_embargo_overlap(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"]),
+            "asset": ["A", "A", "A"],
+            "feature_a": [1.0, 2.0, 3.0],
+            "forward_return": [0.01, 0.02, 0.03],
+            "forward_return_1d": [0.01, 0.02, 0.03],
+        }
+    ).to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(tmp_path / "predictions.parquet"),
+            "--output-metadata",
+            str(tmp_path / "metadata.json"),
+            "--target-column",
+            "forward_return",
+            "--feature-column",
+            "feature_a",
+            "--train-end",
+            "2026-01-02",
+            "--test-start",
+            "2026-01-03",
+            "--embargo-days",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "ML baseline input error" in result.output
+    assert "embargo_days" in result.output
+
+
+def test_ml_baseline_train_cli_can_infer_feature_columns(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2026-01-01", "2026-01-01", "2026-01-03", "2026-01-03"]
+            ),
+            "asset": ["A", "B", "A", "B"],
+            "feature_a": [1.0, 2.0, 3.0, 1.0],
+            "feature_b": [0.0, 1.0, 0.25, 2.0],
+            "forward_return": [0.02, -0.01, 0.04, -0.03],
+            "forward_return_1d": [0.02, -0.01, 0.04, -0.03],
+        }
+    ).to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(prediction_path),
+            "--output-metadata",
+            str(metadata_path),
+            "--target-column",
+            "forward_return",
+            "--train-end",
+            "2026-01-01",
+            "--test-start",
+            "2026-01-03",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["feature_columns"] == ["feature_a", "feature_b"]
+    assert metadata["target_column"] == "forward_return"

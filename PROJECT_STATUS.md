@@ -12,7 +12,7 @@ schema 验收故事不在本文展开；Phase 1 历史验收见
 |---|---|
 | 项目定位 | 本地多市场量化研究平台；A 股是第一版完整 market module |
 | 当前阶段 | Local Research Platform；Stable Core + High-Velocity Research Edge；contract-first / evidence-flow-first |
-| 当前分支 | `main`；N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 prediction handoff guardrails / synthetic smoke / local baseline、prompt-template sync / polish 已进入 `main` |
+| 当前分支 | `main`；N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 prediction handoff guardrails / synthetic smoke / local baseline、prompt-template sync / polish 已进入 `main`；N6 prediction handoff MVS feature branch 正在补齐 local baseline OOS / embargo / fold metadata 和 CLI handoff |
 | Conda 环境 | `analysis` |
 | 代码结构 | 主包为 `src/quant_research_platform/`；核心目录包括 `interfaces/api`、`interfaces/cli`、`datasets`、`markets/implementations/a_share`、`pipelines/a_share`、`research/factor_factory` |
 | 平台合同 | evaluation contract、artifact schema `0.7`、diagnostics registry、`manifest.display`、FastAPI evidence API、下载和 React evidence workbench 已迁入平台命名空间；portable metadata 使用 `run_context.json` |
@@ -40,15 +40,15 @@ Historical schema `0.5` / `0.6` runs、old 2023H1 smoke、N7 `n7_eval_*` runs
 
 1. Full N5 risk/regime/cost/capacity capability 尚未设计完成；当前 N5 MVS 只能作为
    descriptive proxy diagnostics groundwork，不代表真实风险模型或容量模型。
-2. N6 ML prediction handoff 仍需 focused audit / interface decision；当前 baseline 不代表完整 ML pipeline 或 A-share prediction adapter，不要混入 N5 full diagnostics 分支。
+2. N6 ML prediction handoff MVS 仍是 local research baseline / prediction handoff；它记录 OOS / embargo / fold metadata 并可交给 evaluation 消费 prediction，但不代表完整 ML pipeline、alpha proof、A-share prediction adapter、真实风险/容量模型、交易仿真或投资建议。
 3. Pipeline retry/resume/overwrite 仍未实现；global API error envelope 也仍未迁移。
 4. 单个 32-combination 2023-2025 full run 仍受 weights/remap memory path 约束；扩展前应先设计低内存写出路径，或继续按 shard 作为正式回归输入。
 5. `tradability_diagnostics_summary` 暂缓；若需要全交易日平均诊断，应新增 artifact/API summary，而不是从 preview 前几行临时计算。
 
 ## 下一步
 
-1. 先做 N6 walk-forward / OOS / embargo contract focused audit；或先做 N6 ML baseline interface / CLI decision audit。
-2. 单独设计 N6 ML prediction handoff；保持 prediction input contract 与现有 factor evaluation contract 分离。
+1. Review / merge N6 prediction handoff MVS feature branch；确认 local baseline → OOS/embargo prediction → private-safe metadata → `evaluate-parquet --kind prediction` 闭环。
+2. 单独决定下一批 N6 范围：多 fold / walk-forward 扩展、A-share prediction adapter 设计，或继续保持 local synthetic handoff；保持 training outside evaluation，evaluation 只消费 prediction。
 3. 基于当前 2023-2025 canonical / `rev_120d` evidence，保留低内存 comparison、图表分页预览和浏览器验收作为后续回归门槛。
 4. 如需单个 32-combination 2023-2025 run，先处理 weights/remap 低内存写出问题。
 
@@ -56,7 +56,7 @@ Historical schema `0.5` / `0.6` runs、old 2023H1 smoke、N7 `n7_eval_*` runs
 
 - Phase 1 已完成并由 `docs/architecture/phase-1-acceptance-record.md` 作为历史验收记录保存。
 - N1/N2/N3/N4/N7/N8 已合入 `main`；详细实现和旧 schema 验收故事不再作为当前状态展开，必要时查 Git history、`docs/archive/superpowers/` historical execution records 和相关 code-map。
-- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial handoff / smoke / local baseline，以及 prompt-template sync / polish 已进入 `main`；当前有效 private smoke run id 为 `n5_private_smoke_2025h2_rev120_v1`。
+- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial handoff / smoke / local baseline，以及 prompt-template sync / polish 已进入 `main`；N6 prediction handoff MVS feature branch 补齐 local baseline OOS / embargo / fold metadata、`ml baseline train` CLI 和 synthetic evaluation handoff tests；当前有效 private smoke run id 为 `n5_private_smoke_2025h2_rev120_v1`。
 - Retry/resume/overwrite、global API error envelope migration、full N5 capability 和 N6 handoff audit 仍是未来工作。
 
 ## Root Handoff / 根目录回传信号
@@ -69,3 +69,4 @@ Historical schema `0.5` / `0.6` runs、old 2023H1 smoke、N7 `n7_eval_*` runs
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
 | 2026-06-01 | status | N6 prediction handoff guardrails、synthetic handoff smoke、local numpy/pandas ML baseline trainer 已进入 `main`；prompt-template sync / polish 已进入 `main`。当前仍不是完整 ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。下一步改为 N6 walk-forward / OOS / embargo contract focused audit，或先做 N6 ML baseline interface / CLI decision audit；不要直接进入 broad implementation。 | WORKSPACE_STATUS, PLAN_INDEX | closed 2026-06-01 |
+| 2026-06-01 | status | N6 prediction handoff MVS feature branch 完成 local baseline OOS / embargo / fold metadata、`ml baseline train` CLI、synthetic `evaluate-parquet --kind prediction` handoff tests；evaluation 只消费 prediction，training 保持在 `research/ml_baseline.py` 外围 research utility；仍不是 alpha proof、完整 ML pipeline、A-share prediction adapter、paper/live trading、deployment、scheduler、worker、model registry、feature store 或 external connector。 | WORKSPACE_STATUS, PLAN_INDEX | open |

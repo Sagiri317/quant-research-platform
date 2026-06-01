@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pyarrow.parquet as pq
+import pyarrow.types as pa_types
 import typer
 
 from quant_research_platform.artifacts.artifact_comparison import (
@@ -24,6 +26,10 @@ from quant_research_platform.evaluations.evaluation_spec import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.research.ml_baseline import (
+    BaselineTrainingConfig,
+    run_baseline_training,
+)
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
 
 app = typer.Typer(add_completion=False)
@@ -31,7 +37,14 @@ a_share_app = typer.Typer(
     add_completion=False,
     help="A-share local research pipeline commands.",
 )
+ml_app = typer.Typer(add_completion=False, help="Local ML research utilities.")
+ml_baseline_app = typer.Typer(
+    add_completion=False,
+    help="Local baseline prediction handoff utilities.",
+)
 app.add_typer(a_share_app, name="a-share")
+app.add_typer(ml_app, name="ml")
+ml_app.add_typer(ml_baseline_app, name="baseline")
 N_GROUPS_OPTION = typer.Option(5, "--n-groups", help="Number of factor groups.")
 COST_BPS_OPTION = typer.Option(5.0, "--cost-bps", help="Cost in basis points.")
 WEIGHT_METHOD_OPTION = typer.Option(
@@ -208,6 +221,84 @@ DIAGNOSTIC_VIEW_OPTION = typer.Option(
     "--diagnostic-view",
     help="Materialized diagnostics view to write. Repeat if needed.",
 )
+BASELINE_INPUT_OPTION = typer.Option(
+    ...,
+    "--input-parquet",
+    help="Input local feature/label Parquet for the baseline trainer.",
+)
+BASELINE_PREDICTION_OUTPUT_OPTION = typer.Option(
+    ...,
+    "--output-prediction",
+    help="Output prediction Parquet path.",
+)
+BASELINE_METADATA_OUTPUT_OPTION = typer.Option(
+    ...,
+    "--output-metadata",
+    help="Output private-safe baseline metadata JSON path.",
+)
+BASELINE_TARGET_COLUMN_OPTION = typer.Option(
+    ...,
+    "--target-column",
+    help="Target/label column used for local baseline training.",
+)
+BASELINE_FEATURE_COLUMN_OPTION = typer.Option(
+    None,
+    "--feature-column",
+    help=(
+        "Feature column. Repeat for multiple features. If omitted, numeric "
+        "non-target, non-date, non-entity, non-forward-return columns are inferred."
+    ),
+)
+BASELINE_TRAIN_END_OPTION = typer.Option(
+    ...,
+    "--train-end",
+    help="Inclusive training split end date.",
+)
+BASELINE_TEST_START_OPTION = typer.Option(
+    ...,
+    "--test-start",
+    help="Inclusive OOS test split start date.",
+)
+BASELINE_TEST_END_OPTION = typer.Option(
+    None,
+    "--test-end",
+    help="Optional inclusive OOS test split end date.",
+)
+BASELINE_EMBARGO_DAYS_OPTION = typer.Option(
+    0,
+    "--embargo-days",
+    help="Minimum calendar-day embargo between train_end and test_start.",
+)
+BASELINE_FOLD_ID_OPTION = typer.Option(
+    None,
+    "--fold-id",
+    help="Optional portable fold identifier to write to predictions and metadata.",
+)
+BASELINE_SPLIT_NAME_OPTION = typer.Option(
+    None,
+    "--split-name",
+    help="Optional portable split name to write to predictions and metadata.",
+)
+BASELINE_PREDICTION_COLUMN_OPTION = typer.Option(
+    "prediction_score",
+    "--prediction-column",
+    help="Prediction column name in the output Parquet.",
+)
+BASELINE_SOURCE_REF_OPTION = typer.Option(
+    "synthetic_or_local_feature_panel",
+    "--source-ref",
+    help="Portable non-path source alias for metadata.",
+)
+BASELINE_MODEL_REF_OPTION = typer.Option(
+    "numpy_linear_ridge_baseline_v1",
+    "--model-ref",
+    help="Portable non-path model alias for metadata.",
+)
+BASELINE_RIDGE_ALPHA_OPTION = typer.Option(
+    1e-6,
+    "--ridge-alpha",
+    help="Nonnegative ridge penalty for the deterministic numpy baseline.",
+)
 
 
 @a_share_app.command("build-interim")
@@ -251,6 +342,65 @@ def a_share_evaluate_help() -> None:
         "Run with: python -m "
         "quant_research_platform.markets.implementations.a_share.evaluation."
         "run_factor_evaluation --help"
+    )
+
+
+@ml_baseline_app.command("train")
+def train_ml_baseline(
+    input_parquet: Path = BASELINE_INPUT_OPTION,
+    output_prediction: Path = BASELINE_PREDICTION_OUTPUT_OPTION,
+    output_metadata: Path = BASELINE_METADATA_OUTPUT_OPTION,
+    target_column: str = BASELINE_TARGET_COLUMN_OPTION,
+    feature_column: list[str] | None = BASELINE_FEATURE_COLUMN_OPTION,
+    timestamp_column: str = TIMESTAMP_COLUMN_OPTION,
+    asset_column: str = ASSET_COLUMN_OPTION,
+    train_end: str = BASELINE_TRAIN_END_OPTION,
+    test_start: str = BASELINE_TEST_START_OPTION,
+    test_end: str | None = BASELINE_TEST_END_OPTION,
+    embargo_days: int = BASELINE_EMBARGO_DAYS_OPTION,
+    fold_id: str | None = BASELINE_FOLD_ID_OPTION,
+    split_name: str | None = BASELINE_SPLIT_NAME_OPTION,
+    prediction_column: str = BASELINE_PREDICTION_COLUMN_OPTION,
+    source_ref: str = BASELINE_SOURCE_REF_OPTION,
+    model_ref: str = BASELINE_MODEL_REF_OPTION,
+    ridge_alpha: float = BASELINE_RIDGE_ALPHA_OPTION,
+) -> None:
+    """Train a deterministic local baseline and write prediction handoff files."""
+
+    try:
+        feature_columns = _baseline_feature_columns(
+            input_parquet,
+            explicit_columns=tuple(feature_column or ()),
+            timestamp_column=timestamp_column,
+            asset_column=asset_column,
+            target_column=target_column,
+        )
+        result = run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_parquet,
+                output_prediction_path=output_prediction,
+                output_metadata_path=output_metadata,
+                timestamp_column=timestamp_column,
+                entity_column=asset_column,
+                feature_columns=feature_columns,
+                label_column=target_column,
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+                embargo_days=embargo_days,
+                fold_id=fold_id,
+                split_name=split_name,
+                prediction_column=prediction_column,
+                ridge_alpha=ridge_alpha,
+                source_ref=source_ref,
+                model_ref=model_ref,
+            )
+        )
+    except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
+        _raise_ml_baseline_input_error(exc)
+    typer.echo(
+        "Wrote ML baseline predictions to "
+        f"{result.prediction_path} and metadata to {result.metadata_path}"
     )
 
 
@@ -516,6 +666,52 @@ def _time_breakdown_values(values: list[str] | None) -> tuple[str, ...]:
     if len(set(normalized)) != len(normalized):
         raise typer.BadParameter("--time-breakdown must not contain duplicates.")
     return normalized
+
+
+def _baseline_feature_columns(
+    input_path: Path,
+    *,
+    explicit_columns: tuple[str, ...],
+    timestamp_column: str,
+    asset_column: str,
+    target_column: str,
+) -> tuple[str, ...]:
+    if explicit_columns:
+        return tuple(column for column in explicit_columns if column)
+    schema = pq.read_schema(input_path)
+    excluded = {timestamp_column, asset_column, target_column}
+    inferred = [
+        field.name
+        for field in schema
+        if field.name not in excluded
+        and not _looks_like_label_or_forward_return(field.name)
+        and (
+            pa_types.is_integer(field.type)
+            or pa_types.is_floating(field.type)
+            or pa_types.is_decimal(field.type)
+        )
+    ]
+    if not inferred:
+        raise ValueError(
+            "could not infer feature columns; provide --feature-column explicitly."
+        )
+    return tuple(inferred)
+
+
+def _looks_like_label_or_forward_return(column: str) -> bool:
+    normalized = column.casefold()
+    return (
+        normalized == "label"
+        or normalized == "target"
+        or normalized.startswith("label_")
+        or normalized.startswith("target_")
+        or normalized.startswith("forward_return")
+    )
+
+
+def _raise_ml_baseline_input_error(exc: BaseException) -> None:
+    typer.echo(f"ML baseline input error: {exc}", err=True)
+    raise typer.Exit(code=2) from exc
 
 
 def _raise_parquet_input_error(exc: BaseException) -> None:

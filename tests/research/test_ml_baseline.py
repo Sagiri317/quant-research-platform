@@ -67,6 +67,52 @@ def test_baseline_training_writes_test_predictions_and_metadata(tmp_path) -> Non
     assert "not live trading evidence" in metadata["boundary"]
 
 
+def test_baseline_training_records_oos_split_embargo_and_fold(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    run_baseline_training(
+        BaselineTrainingConfig(
+            input_path=input_path,
+            output_prediction_path=prediction_path,
+            output_metadata_path=metadata_path,
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return",
+            train_end="2026-01-01",
+            test_start="2026-01-03",
+            test_end="2026-01-03",
+            embargo_days=1,
+            fold_id="fold_001",
+            split_name="test",
+        )
+    )
+
+    predictions = pd.read_parquet(prediction_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert predictions["timestamp"].min() == pd.Timestamp("2026-01-03")
+    assert predictions["timestamp"].max() == pd.Timestamp("2026-01-03")
+    assert predictions["split_name"].tolist() == ["test", "test"]
+    assert predictions["fold_id"].tolist() == ["fold_001", "fold_001"]
+    assert metadata["train_end"] == "2026-01-01"
+    assert metadata["test_start"] == "2026-01-03"
+    assert metadata["test_end"] == "2026-01-03"
+    assert metadata["embargo_days"] == 1
+    assert metadata["fold_id"] == "fold_001"
+    assert metadata["split_name"] == "test"
+    assert metadata["training_time"]["train_end"] == "2026-01-01"
+    assert metadata["prediction_time"]["test_start"] == "2026-01-03"
+    assert metadata["feature_summary"] == {
+        "columns": ["feature_a", "feature_b"],
+        "count": 2,
+    }
+    assert metadata["target_column"] == "forward_return"
+
+
 def test_baseline_training_rejects_overlapping_split(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
@@ -82,6 +128,92 @@ def test_baseline_training_rejects_overlapping_split(tmp_path) -> None:
                 feature_columns=("feature_a",),
                 label_column="forward_return",
                 train_end="2026-01-03",
+                test_start="2026-01-03",
+            )
+        )
+
+
+def test_baseline_training_rejects_test_end_before_test_start(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(ValueError, match="test_end must be on or after test_start"):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a",),
+                label_column="forward_return",
+                train_end="2026-01-01",
+                test_start="2026-01-03",
+                test_end="2026-01-02",
+            )
+        )
+
+
+def test_baseline_training_rejects_embargo_overlap(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(
+        ValueError,
+        match="train_end plus embargo_days must be on or before test_start",
+    ):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a",),
+                label_column="forward_return",
+                train_end="2026-01-02",
+                test_start="2026-01-03",
+                embargo_days=2,
+            )
+        )
+
+
+def test_baseline_training_rejects_invalid_split_identifiers(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(ValueError, match="fold_id must be a portable identifier"):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a",),
+                label_column="forward_return",
+                train_end="2026-01-01",
+                test_start="2026-01-03",
+                fold_id="../fold",
+            )
+        )
+
+
+def test_baseline_training_rejects_forward_return_feature_leakage(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(ValueError, match="feature_columns must not include"):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "forward_return_1d"),
+                label_column="forward_return",
+                train_end="2026-01-01",
                 test_start="2026-01-03",
             )
         )
@@ -133,6 +265,7 @@ def test_baseline_training_metadata_is_private_safe(tmp_path) -> None:
     metadata_text = metadata_path.read_text(encoding="utf-8")
     for forbidden in (
         str(tmp_path),
+        str(tmp_path).replace("\\", "/"),
         "raw_private",
         "interim_private",
         "processed_private",
@@ -208,6 +341,109 @@ def test_generated_predictions_enter_existing_prediction_handoff(tmp_path) -> No
     assert run_context["config"]["evaluation_spec"]["metadata"][
         "training_scope"
     ] == "external_or_upstream_not_run_by_qrp"
+
+
+def test_generated_predictions_support_split_segment_handoff(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    output_dir = tmp_path / "evaluation"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+    run_baseline_training(
+        BaselineTrainingConfig(
+            input_path=input_path,
+            output_prediction_path=prediction_path,
+            output_metadata_path=tmp_path / "metadata.json",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return",
+            train_end="2026-01-01",
+            test_start="2026-01-03",
+            split_name="oos_test",
+        )
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate-parquet",
+            "--parquet-path",
+            str(prediction_path),
+            "--feature",
+            "prediction_score",
+            "--label",
+            "forward_return",
+            "--return-source-column",
+            "forward_return_1d",
+            "--segment-column",
+            "split_name",
+            "--output",
+            str(output_dir),
+            "--run-id",
+            "baseline_prediction_segment_handoff",
+            "--kind",
+            "prediction",
+            "--domain",
+            "prediction_handoff",
+            "--data-stage",
+            "synthetic_only",
+            "--no-uses-external-data",
+            "--n-groups",
+            "2",
+            "--prediction-handoff-version",
+            "n6_mvs_v1",
+            "--prediction-source-ref",
+            "synthetic_baseline_prediction_panel_v1",
+            "--prediction-model-ref",
+            "numpy_linear_ridge_baseline_v1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    ic = pd.read_csv(output_dir / "metrics" / "ic.csv")
+    assert "split_name" in ic.columns
+    assert set(ic["split_name"]) == {"oos_test"}
+
+
+def test_baseline_training_outputs_are_deterministic(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+    config_kwargs = {
+        "input_path": input_path,
+        "timestamp_column": "timestamp",
+        "entity_column": "asset",
+        "feature_columns": ("feature_a", "feature_b"),
+        "label_column": "forward_return",
+        "train_end": "2026-01-01",
+        "test_start": "2026-01-03",
+        "test_end": "2026-01-04",
+        "embargo_days": 1,
+        "fold_id": "fold_001",
+        "split_name": "test",
+    }
+
+    run_baseline_training(
+        BaselineTrainingConfig(
+            output_prediction_path=tmp_path / "predictions_a.parquet",
+            output_metadata_path=tmp_path / "metadata_a.json",
+            **config_kwargs,
+        )
+    )
+    run_baseline_training(
+        BaselineTrainingConfig(
+            output_prediction_path=tmp_path / "predictions_b.parquet",
+            output_metadata_path=tmp_path / "metadata_b.json",
+            **config_kwargs,
+        )
+    )
+
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(tmp_path / "predictions_a.parquet"),
+        pd.read_parquet(tmp_path / "predictions_b.parquet"),
+    )
+    assert (tmp_path / "metadata_a.json").read_text(encoding="utf-8") == (
+        tmp_path / "metadata_b.json"
+    ).read_text(encoding="utf-8")
 
 
 def _synthetic_panel() -> pd.DataFrame:

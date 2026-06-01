@@ -418,7 +418,9 @@ def test_pipeline_run_status_can_be_read_from_runtime_summary_after_restart(
                         "key": "evaluate",
                         "label": "evaluation",
                         "status": "failed",
-                        "message": "failed at data/processed_private/csmar/factors.parquet",
+                        "message": (
+                            "failed at data/processed_private/csmar/factors.parquet"
+                        ),
                         "failure_code": "missing_existing_factors",
                     },
                 ],
