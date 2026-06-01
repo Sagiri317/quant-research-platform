@@ -12,14 +12,14 @@ schema 验收故事不在本文展开。
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
 | N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged; full capability unfinished | 将 descriptive proxy diagnostics 之后的 full risk/regime/cost/capacity capability 单独设计和验证 |
-| N6 | ML prediction handoff | P2 | local MVS merged; adapter / full ML pipeline unfinished | 建立 prediction output 到 evaluation 的可复现接口 |
+| N6 | ML prediction handoff | P2 | local MVS and walk-forward handoff MVS merged; adapter / full ML pipeline unfinished | 建立 prediction output 到 evaluation 的可复现接口 |
 | Pipeline reliability follow-up | Pipeline reliability | P2 | failed-run MVS and disk-recovery sanitization hardening merged; API duplicate `run_id` guard implemented; retry / resume / destructive overwrite / global error envelope unfinished | 如需继续，重新限定一个小 MVS，不和 N6 扩展混在同一批 |
 | Pipeline history UI | Pipeline run history / visibility | P3 | planned | 在不改变 pipeline 语义的前提下改善本地 workbench 对 run history 的读取和展示 |
 
 当前推荐顺序：
 
 ```text
-1. Decide the next N6 slice: multi-fold / walk-forward extension or A-share prediction adapter design
+1. Run a decision-only audit for the next small batch: N6 post-walk-forward follow-up, A-share prediction adapter design, Factor Factory improvement, memory/performance path, or one tightly scoped Pipeline reliability lifecycle item
 2. Or choose one new Pipeline reliability follow-up MVS: retry, resume, destructive overwrite, or global API error envelope
 3. Pipeline history UI
 ```
@@ -27,8 +27,8 @@ schema 验收故事不在本文展开。
 当前基线只保留为范围边界：
 
 - 后续扩展应基于 schema `0.7`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同。
-- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、pipeline failed-run disk-recovery sanitization hardening、N6 initial guardrails / smoke / local baseline、N6 prediction handoff MVS 已进入 `main`；具体 current status 和 private smoke run id 见 `PROJECT_STATUS.md`。
-- N6 local baseline MVS is a local research baseline / prediction handoff: it records OOS / embargo / fold metadata, writes private-safe metadata, and hands prediction Parquet to evaluation. It is not a complete ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。
+- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、pipeline failed-run disk-recovery sanitization hardening、N6 initial guardrails / smoke / local baseline、N6 prediction handoff MVS、N6 local walk-forward / multi-fold handoff MVS 已进入 `main`；具体 current status 和 private smoke run id 见 `PROJECT_STATUS.md`。
+- N6 local baseline MVS is a local research baseline / prediction handoff: it records OOS / embargo / fold metadata, supports repeatable walk-forward folds, writes private-safe metadata, and hands prediction Parquet to evaluation through `evaluate-parquet --kind prediction`. It is not a complete ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。
 - 后续不要直接扩大一次性 full run；需要先处理 low-memory weights/remap 写出路径或继续按 shard 回归。
 
 ## N5 full 风险、Regime、成本和容量扩展
@@ -74,7 +74,7 @@ schema 验收故事不在本文展开。
 
 - 建立模型输出到 evaluation 的稳定接口。
 - 让 prediction 像 factor 一样成为可评价输入，而不是在 evaluation layer 中训练模型。
-- 当前 MVS 只覆盖 local baseline / prediction handoff：training 在 `research/ml_baseline.py`，evaluation consumes predictions，通过 `evaluate-parquet --kind prediction` 验证闭环。
+- 当前 MVS 覆盖 local baseline / prediction handoff 和 repeatable walk-forward folds：training 在 `research/ml_baseline.py`，evaluation consumes predictions，通过 `evaluate-parquet --kind prediction` 验证闭环；single-fold behavior preserved。
 
 最低字段：
 
@@ -99,9 +99,9 @@ schema 验收故事不在本文展开。
 验收：
 
 - prediction Parquet 可通过 `EvaluationSpec` 或 A 股 adapter-like handoff 进入 evaluation。
-- local baseline metadata 记录 feature / label 摘要、OOS split、embargo、fold / split 标识，且保持 private-safe。
+- local baseline metadata 记录 feature / label 摘要、OOS split、embargo、fold / split 标识和 walk-forward fold summaries，且保持 private-safe。
 - OOS/embargo prediction 可通过 `evaluate-parquet --kind prediction` 进入 evaluation；evaluation 只消费 prediction，不训练模型。
-- 后续如扩展 walk-forward，应继续明确区分 walk-forward folds 和单次 OOS 结果。
+- 后续扩展仍应明确区分 walk-forward folds 和单次 OOS 结果，并保持 training outside evaluation。
 
 ## Pipeline history UI
 

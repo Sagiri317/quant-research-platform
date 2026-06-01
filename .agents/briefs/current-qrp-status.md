@@ -23,7 +23,7 @@ the active next-step decision.
 
 - N5 private real-data smoke passed: `n5_private_smoke_2025h2_rev120_v1`.
 - Pipeline failed-run reliability MVS and failed-run disk-recovery sanitization hardening have merged to `main`; API duplicate `run_id` / rerun guard is implemented in current code.
-- N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, N6 prediction handoff MVS, private marker helper centralization, and `ml baseline train` CLI pre-read private-output validation have merged to `main`.
+- N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, N6 prediction handoff MVS, local walk-forward / multi-fold handoff MVS, private marker helper centralization, and `ml baseline train` CLI pre-read private-output validation have merged to `main`.
 - Agent workflow layout has moved to `.agents`: the maintenance skill lives under `.agents/skills/quant-research-platform-maintenance/`, task templates live under `.agents/skills/quant-research-platform-maintenance/references/templates/`, and this brief lives under `.agents/briefs/current-qrp-status.md`.
 - These facts are status pointers, not full evidence records.
 - Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, next step, or handoff state.
@@ -32,12 +32,12 @@ the active next-step decision.
 
 - N5 v1 private smoke demonstrates the current descriptive proxy diagnostics path on private A-share data.
 - Pipeline failed-run reliability now includes the original failed-run MVS, disk-loaded `runtime_summary.json` / `checkpoints.json` shared private-marker sanitization, and API-created duplicate `run_id` rejection before writing new pipeline outputs.
-- N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, `ml baseline train` CLI handoff, private-output boundary guard, shared private-marker helper, and CLI pre-read private-output validation. This is not a complete ML pipeline, deep learning backend, model registry, feature store, A-share prediction adapter, paper/live trading system, deployment, scheduler, worker, or external connector.
+- N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, repeatable walk-forward folds, `ml baseline train` CLI handoff, private-output boundary guard, shared private-marker helper, and CLI pre-read private-output validation. Prediction output remains compatible with `evaluate-parquet --kind prediction`, single-fold behavior is preserved, and training remains outside evaluation. This is not a complete ML pipeline, deep learning backend, model registry, feature store, A-share prediction adapter, paper/live trading system, deployment, scheduler, worker, or external connector.
 - Task-mode template details live in `.agents/skills/quant-research-platform-maintenance/references/templates/`, not in this brief; one-line or underspecified QRP prompts route through `auto-task-router.md`.
 
 ## Current Next Step
 
-- Decide the next N6 slice: multi-fold / walk-forward extension, A-share prediction adapter design, or continued local synthetic handoff.
+- Run a decision-only audit for the next small implementation batch: N6 post-walk-forward handoff follow-up, A-share prediction adapter design, Factor Factory improvement, memory/performance path, or one tightly scoped Pipeline Reliability lifecycle item.
 - If continuing pipeline reliability, pick one new small MVS such as retry, resume, destructive overwrite, or global API error envelope; do not reopen the completed failed-run sanitization hardening or duplicate `run_id` guard.
 - Keep this as an audit/decision point; do not jump directly into broad implementation.
 
