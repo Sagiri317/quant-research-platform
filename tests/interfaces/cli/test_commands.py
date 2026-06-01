@@ -332,6 +332,107 @@ def test_ml_baseline_train_cli_fails_cleanly_for_embargo_overlap(tmp_path) -> No
     assert "embargo_days" in result.output
 
 
+def test_ml_baseline_train_cli_rejects_private_input_to_ordinary_outputs(
+    tmp_path,
+) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = tmp_path / "public_outputs" / "predictions.parquet"
+    metadata_path = tmp_path / "public_outputs" / "metadata.json"
+    _baseline_panel().to_parquet(input_path, engine="pyarrow", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(prediction_path),
+            "--output-metadata",
+            str(metadata_path),
+            "--target-column",
+            "forward_return",
+            "--feature-column",
+            "feature_a",
+            "--train-end",
+            "2026-01-02",
+            "--test-start",
+            "2026-01-03",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "private input policy" in result.output
+    assert str(tmp_path) not in result.output
+    assert str(tmp_path).replace("\\", "/") not in result.output
+    assert "vendor_private" not in result.output
+    assert "public_outputs" not in result.output
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+
+
+def test_ml_baseline_train_cli_allows_private_input_to_private_outputs(
+    tmp_path,
+) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    output_dir = tmp_path / "private_outputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = output_dir / "predictions.parquet"
+    metadata_path = output_dir / "metadata.json"
+    _baseline_panel().to_parquet(input_path, engine="pyarrow", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(prediction_path),
+            "--output-metadata",
+            str(metadata_path),
+            "--target-column",
+            "forward_return",
+            "--feature-column",
+            "feature_a",
+            "--train-end",
+            "2026-01-02",
+            "--test-start",
+            "2026-01-03",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "private output" in result.output
+    assert str(tmp_path) not in result.output
+    assert str(tmp_path).replace("\\", "/") not in result.output
+    assert "vendor_private" not in result.output
+    assert prediction_path.is_file()
+    assert metadata_path.is_file()
+    metadata_text = metadata_path.read_text(encoding="utf-8")
+    for forbidden in (
+        str(tmp_path),
+        str(tmp_path).replace("\\", "/"),
+        "vendor_private",
+        "private_outputs",
+        "features.parquet",
+        "predictions.parquet",
+        "metadata.json",
+        "row_sample",
+        "stock_sample",
+    ):
+        assert forbidden not in metadata_text
+
+
 def test_ml_baseline_train_cli_can_infer_feature_columns(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     prediction_path = tmp_path / "predictions.parquet"
@@ -375,3 +476,24 @@ def test_ml_baseline_train_cli_can_infer_feature_columns(tmp_path) -> None:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["feature_columns"] == ["feature_a", "feature_b"]
     assert metadata["target_column"] == "forward_return"
+
+
+def _baseline_panel() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-01-01",
+                    "2026-01-01",
+                    "2026-01-02",
+                    "2026-01-02",
+                    "2026-01-03",
+                    "2026-01-03",
+                ]
+            ),
+            "asset": ["A", "B", "A", "B", "A", "B"],
+            "feature_a": [1.0, 2.0, 2.0, 3.0, 3.0, 1.0],
+            "forward_return": [0.02, -0.01, 0.03, -0.02, 0.04, -0.03],
+            "forward_return_1d": [0.02, -0.01, 0.03, -0.02, 0.04, -0.03],
+        }
+    )

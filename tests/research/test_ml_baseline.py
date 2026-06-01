@@ -277,6 +277,75 @@ def test_baseline_training_metadata_is_private_safe(tmp_path) -> None:
         assert forbidden not in metadata_text
 
 
+def test_baseline_training_rejects_private_input_with_ordinary_outputs(
+    tmp_path,
+) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = tmp_path / "public_outputs" / "predictions.parquet"
+    metadata_path = tmp_path / "public_outputs" / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(ValueError, match="private input policy"):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=prediction_path,
+                output_metadata_path=metadata_path,
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return",
+                train_end="2026-01-02",
+                test_start="2026-01-03",
+            )
+        )
+
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+
+
+def test_baseline_training_allows_private_input_with_private_outputs(tmp_path) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    output_dir = tmp_path / "private_outputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = output_dir / "predictions.parquet"
+    metadata_path = output_dir / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    run_baseline_training(
+        BaselineTrainingConfig(
+            input_path=input_path,
+            output_prediction_path=prediction_path,
+            output_metadata_path=metadata_path,
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return",
+            train_end="2026-01-02",
+            test_start="2026-01-03",
+        )
+    )
+
+    assert prediction_path.is_file()
+    assert metadata_path.is_file()
+    metadata_text = metadata_path.read_text(encoding="utf-8")
+    for forbidden in (
+        str(tmp_path),
+        str(tmp_path).replace("\\", "/"),
+        "vendor_private",
+        "private_outputs",
+        "features.parquet",
+        "predictions.parquet",
+        "metadata.json",
+        "row_sample",
+        "stock_sample",
+    ):
+        assert forbidden not in metadata_text
+
+
 def test_generated_predictions_enter_existing_prediction_handoff(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     prediction_path = tmp_path / "predictions.parquet"

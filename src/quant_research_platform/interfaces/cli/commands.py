@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -28,6 +29,7 @@ from quant_research_platform.evaluations.evaluation_spec import (
 )
 from quant_research_platform.research.ml_baseline import (
     BaselineTrainingConfig,
+    is_private_baseline_path,
     run_baseline_training,
 )
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
@@ -367,6 +369,7 @@ def train_ml_baseline(
 ) -> None:
     """Train a deterministic local baseline and write prediction handoff files."""
 
+    private_input = is_private_baseline_path(input_parquet)
     try:
         feature_columns = _baseline_feature_columns(
             input_parquet,
@@ -375,7 +378,7 @@ def train_ml_baseline(
             asset_column=asset_column,
             target_column=target_column,
         )
-        result = run_baseline_training(
+        run_baseline_training(
             BaselineTrainingConfig(
                 input_path=input_parquet,
                 output_prediction_path=output_prediction,
@@ -398,10 +401,10 @@ def train_ml_baseline(
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
         _raise_ml_baseline_input_error(exc)
-    typer.echo(
-        "Wrote ML baseline predictions to "
-        f"{result.prediction_path} and metadata to {result.metadata_path}"
-    )
+    if private_input:
+        typer.echo("Wrote ML baseline private output files.")
+    else:
+        typer.echo("Wrote ML baseline output files.")
 
 
 @app.command("compare")
@@ -710,8 +713,30 @@ def _looks_like_label_or_forward_return(column: str) -> bool:
 
 
 def _raise_ml_baseline_input_error(exc: BaseException) -> None:
-    typer.echo(f"ML baseline input error: {exc}", err=True)
+    typer.echo(f"ML baseline input error: {_safe_cli_error_detail(exc)}", err=True)
     raise typer.Exit(code=2) from exc
+
+
+def _safe_cli_error_detail(exc: BaseException) -> str:
+    detail = str(exc)
+    if isinstance(exc, FileNotFoundError):
+        return "input file was not found."
+    normalized = detail.replace("\\", "/").casefold()
+    if re.search(r"[a-z]:/", normalized) or "/users/" in normalized:
+        return "input failed validation without exposing local paths."
+    if any(
+        marker in normalized
+        for marker in (
+            "raw_private",
+            "interim_private",
+            "processed_private",
+            "private_real",
+            "vendor_private",
+            "raw_vendor",
+        )
+    ):
+        return "input failed validation without exposing private paths."
+    return detail
 
 
 def _raise_parquet_input_error(exc: BaseException) -> None:

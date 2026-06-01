@@ -44,7 +44,7 @@ local approved data
 | 平台合同已迁入 `quant_research_platform` 命名空间 | `EVALUATION_INTERFACE.md`、`docs/code-map/evaluation-artifacts-api.md`、代码和 tests | 已验证 |
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | 当前 2023-2025 evidence 可作为回归入口 | `PROJECT_STATUS.md` 记录当前有效样例；artifact 仍属于 private real-data boundary | 已验证 |
-| N5/N6 和 pipeline reliability 的最新状态 | `PROJECT_STATUS.md`；N5 private smoke run id: `n5_private_smoke_2025h2_rev120_v1` | smoke passed / MVS merged / audit next |
+| N5/N6 和 pipeline reliability 的最新状态 | `PROJECT_STATUS.md`；N5 private smoke run id: `n5_private_smoke_2025h2_rev120_v1` | smoke passed / MVS merged / N6 handoff MVS review |
 
 最新 current status、blocker、next step 和 root handoff 见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。下一阶段 unfinished priorities 见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。
 
@@ -170,8 +170,8 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 
 - 当前完整 market module 只有 A 股；crypto 和其他市场只是 planned / disabled 能力表述，不保留空实现包。
 - 当前只覆盖第一批 price-volume factors。
-- N5 full risk/regime/cost/capacity capability 与 N6 ML prediction handoff 仍需单独设计和验证；当前 N5 v1 只代表 descriptive proxy diagnostics 和 artifact/display contract groundwork。
-- N6 local baseline 只代表初始 handoff / smoke / baseline 入口，下一步应做 walk-forward / OOS / embargo contract focused audit，或先做 ML baseline interface / CLI decision audit。
+- N5 full risk/regime/cost/capacity capability 与 N6 后续扩展仍需单独设计和验证；当前 N5 v1 只代表 descriptive proxy diagnostics 和 artifact/display contract groundwork。
+- N6 local baseline MVS 只代表 local research baseline / prediction handoff：记录 OOS / embargo / fold metadata，并让 evaluation 消费 prediction；它不是 alpha proof、真实风险模型、真实容量模型、实盘或投资建议。
 - 模拟盘不属于当前范围；未来如果做，必须保持与真实交易接口隔离，并单独审批。
 - CSMAR 明细数据和可还原 vendor 数据的报告不公开。
 
