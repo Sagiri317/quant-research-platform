@@ -33,6 +33,9 @@ Use Medium for a single module or docs/rules batch. Use Medium-High when the cha
 - Do not delete files or run full tests without approval.
 - Do not generate smoke/training/evaluation artifacts except under pytest `tmp_path` or an explicitly approved output path.
 - Do not commit generated artifacts, read/modify private generated artifacts, or write row-level private data, sample stocks, or full private paths.
+- For CLI, artifact writer, exporter, download, ZIP/package, metadata writer, or
+  persisted row-level output work, apply the maintenance skill `Private Artifact
+  Writer Checklist`.
 
 ## Stop Conditions
 

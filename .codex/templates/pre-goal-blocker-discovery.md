@@ -20,6 +20,9 @@ Run before implementation for `goal-overnight` or other long closed-loop work.
 - Confirm allowed path scope.
 - Identify likely changed files before editing.
 - Identify likely checks before editing.
+- Flag whether any planned CLI, artifact writer, exporter, download,
+  ZIP/package, metadata writer, or persisted row-level output work must use the
+  maintenance skill `Private Artifact Writer Checklist`.
 - Search for obvious blockers with `rg` over the target surface only.
 - Do not read private data, generated evidence, archive docs, or unrelated modules unless named in the envelope.
 

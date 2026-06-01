@@ -150,6 +150,49 @@ Before using concrete paths, scripts, schema numbers, or route names, load the c
 7. Review the diff by surface: artifact contract, API/downloads, frontend UI, A-share pipeline/runtime, Factor Factory, tests/fixtures, docs/skills, generated outputs, and gitignore.
 8. For docs-only drift, verify against current code paths before preserving command examples or path names.
 
+## Private Artifact Writer Checklist
+
+Use this checklist whenever a task adds or changes a CLI that writes files,
+artifact writer, exporter, downloader, ZIP/package writer, metadata writer,
+report generator that can include generated artifacts, API/download payload
+builder, or any workflow that converts input data into persisted row-level
+output. A recent example class is the N6 baseline CLI private-output guard, but
+the rule is general and not N6-specific.
+
+Boundary policy:
+
+- Public or synthetic input may write ordinary local/public output.
+- Private-marker input creates a private-derived artifact.
+- Private-derived row-level artifacts must not be written to ordinary/public
+  output.
+- Private-marker input may write only to a private-marker path or an approved
+  private output root.
+- If the output policy is unclear, stop and report instead of widening the
+  boundary locally.
+
+Leakage policy:
+
+- Metadata, stdout, stderr, error messages, reports, manifests, ZIPs, and
+  download payloads must not contain local absolute paths, private-marker
+  paths, vendor/source markers, credentials, secrets, row samples, stock
+  samples, vendor-reconstructable data, or private generated artifacts in
+  public outputs.
+- Success and failure messages should use portable labels, generic summaries,
+  or sanitized basenames only when a path-like value is unavoidable.
+
+Regression requirements:
+
+- Public/synthetic input plus ordinary output passes.
+- Private-marker input plus ordinary output fails and creates no files.
+- Private-marker input plus private-marker or approved private output passes.
+- Metadata, stdout, and stderr do not include absolute paths or private-marker paths.
+- Generated private artifacts are not added to public manifest, ZIP, download,
+  or report payloads unless explicitly approved and sanitized.
+
+Stop and report before implementation if the fix requires changing the public
+artifact boundary, schema, `manifest.display`, API/frontend shared contract,
+dependencies, or private output root allowlist.
+
 ## Goal / Long-Run Workflow
 
 Use this workflow only after the user has approved the bounded execution envelope required by `AGENTS.md`.

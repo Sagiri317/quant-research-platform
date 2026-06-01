@@ -54,6 +54,9 @@ Goal mode can use high token budgets when the approved envelope justifies them. 
 - Do not remove private data boundaries.
 - Do not change schemas, `manifest.display`, API/frontend shared contracts, deployment/trading scope, market/frequency/simulation scope, dependencies, directory structure, archive placement, or unclear blast-radius surfaces unless the envelope explicitly approves that exact change.
 - Do not delete files, generate private artifacts, expose private data, install dependencies, or run full tests unless approved.
+- For any approved CLI, artifact writer, exporter, download, ZIP/package,
+  metadata writer, or persisted row-level output slice, apply the maintenance
+  skill `Private Artifact Writer Checklist`.
 
 ## Phase Plan
 
