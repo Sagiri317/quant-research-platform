@@ -12,15 +12,13 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-PRIVATE_PATH_MARKERS = (
-    "private",
-    "raw_private",
-    "interim_private",
-    "processed_private",
-    "private_real",
-    "vendor_private",
-    "raw_vendor",
+from quant_research_platform.runtime.private_paths import (
+    PRIVATE_PATH_MARKERS,
+    looks_like_private_or_local_path,
+    path_has_private_marker,
+    require_private_outputs_for_private_input,
 )
+
 BOUNDARY_STATEMENT = (
     "local research baseline only; not ML platform; not model registry; "
     "not investment advice; not trading, not risk, not capacity, not execution "
@@ -188,16 +186,29 @@ def _validate_config(config: BaselineTrainingConfig) -> None:
 
 
 def _validate_output_policy(config: BaselineTrainingConfig) -> None:
-    if not _path_has_private_marker(config.input_path):
-        return
-    if not (
-        _path_has_private_marker(config.output_prediction_path)
-        and _path_has_private_marker(config.output_metadata_path)
-    ):
-        raise ValueError(
+    validate_baseline_output_policy(
+        input_path=config.input_path,
+        output_prediction_path=config.output_prediction_path,
+        output_metadata_path=config.output_metadata_path,
+    )
+
+
+def validate_baseline_output_policy(
+    *,
+    input_path: Path,
+    output_prediction_path: Path,
+    output_metadata_path: Path,
+) -> None:
+    """Validate baseline private input/output policy without reading input data."""
+
+    require_private_outputs_for_private_input(
+        input_path,
+        (output_prediction_path, output_metadata_path),
+        error_message=(
             "private input policy requires prediction and metadata outputs to "
             "use approved private output paths."
-        )
+        ),
+    )
 
 
 def _resolve_split(config: BaselineTrainingConfig) -> _ResolvedSplit:
@@ -469,27 +480,13 @@ def _validate_no_private_or_local_payload(value: Any, path: str) -> None:
 
 
 def _looks_like_private_or_local_path(value: str) -> bool:
-    normalized = value.replace("\\", "/").casefold()
-    if "/" in normalized:
-        return True
-    if re.match(r"^[a-z]:", normalized):
-        return True
-    return _text_has_private_marker(normalized)
+    return looks_like_private_or_local_path(value)
 
 
 def is_private_baseline_path(path: Path) -> bool:
     """Return whether a baseline input/output path is inside a private boundary."""
 
-    return _path_has_private_marker(path)
-
-
-def _path_has_private_marker(path: Path) -> bool:
-    return _text_has_private_marker(path.as_posix())
-
-
-def _text_has_private_marker(value: str) -> bool:
-    normalized = value.replace("\\", "/").casefold()
-    return any(marker in normalized for marker in PRIVATE_PATH_MARKERS)
+    return path_has_private_marker(path)
 
 
 __all__ = [
@@ -497,4 +494,5 @@ __all__ = [
     "BaselineTrainingResult",
     "is_private_baseline_path",
     "run_baseline_training",
+    "validate_baseline_output_policy",
 ]

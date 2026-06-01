@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
+
+from quant_research_platform.runtime.private_paths import (
+    looks_like_private_or_local_path,
+)
 
 MINIMUM_RUN_METADATA_FIELDS = (
     "project",
@@ -23,12 +26,6 @@ PREDICTION_HANDOFF_METADATA_FIELDS = (
     "prediction_boundary",
 )
 PREDICTION_TRAINING_SCOPE = "external_or_upstream_not_run_by_qrp"
-_PRIVATE_PATH_MARKERS = (
-    "raw_private",
-    "interim_private",
-    "processed_private",
-    "private_real",
-)
 _PREDICTION_BOUNDARY_TERMS = (
     "not",
     "trading",
@@ -157,14 +154,7 @@ def _validate_portable_alias(
 
 
 def _looks_like_private_or_local_path(value: str) -> bool:
-    normalized = value.replace("\\", "/").casefold()
-    if "/" in normalized:
-        return True
-    if re.match(r"^[a-z]:", normalized):
-        return True
-    if ".." in normalized.split():
-        return True
-    return any(marker in normalized for marker in _PRIVATE_PATH_MARKERS)
+    return looks_like_private_or_local_path(value, reject_parent_reference=True)
 
 
 def _validate_no_prediction_private_payload(

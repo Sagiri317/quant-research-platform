@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
+from quant_research_platform.interfaces.cli import commands as commands_module
 from quant_research_platform.interfaces.cli.commands import app
 from quant_research_platform.research.ml_baseline import (
     BaselineTrainingConfig,
@@ -346,6 +347,98 @@ def test_baseline_training_allows_private_input_with_private_outputs(tmp_path) -
         assert forbidden not in metadata_text
 
 
+def test_ml_baseline_cli_rejects_private_input_with_ordinary_outputs_before_schema_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = tmp_path / "public_outputs" / "predictions.parquet"
+    metadata_path = tmp_path / "public_outputs" / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+    read_schema_calls = []
+
+    def fail_read_schema(path):
+        read_schema_calls.append(path)
+        raise AssertionError("schema read should happen after private output policy")
+
+    monkeypatch.setattr(commands_module.pq, "read_schema", fail_read_schema)
+
+    result = CliRunner().invoke(
+        app,
+        _baseline_cli_args(
+            input_path,
+            prediction_path,
+            metadata_path,
+        ),
+    )
+
+    assert result.exit_code == 2
+    assert read_schema_calls == []
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+    assert "private input policy" in result.output
+    for forbidden in (
+        str(input_path),
+        str(input_path).replace("\\", "/"),
+        "vendor_private",
+        "features.parquet",
+    ):
+        assert forbidden not in result.output
+
+
+def test_ml_baseline_cli_rejects_private_input_with_explicit_features(
+    tmp_path,
+) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = tmp_path / "public_outputs" / "predictions.parquet"
+    metadata_path = tmp_path / "public_outputs" / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    result = CliRunner().invoke(
+        app,
+        _baseline_cli_args(
+            input_path,
+            prediction_path,
+            metadata_path,
+            feature_columns=("feature_a", "feature_b"),
+        ),
+    )
+
+    assert result.exit_code == 2
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+    assert "private input policy" in result.output
+    assert "vendor_private" not in result.output
+
+
+def test_ml_baseline_cli_allows_private_input_with_private_outputs(tmp_path) -> None:
+    private_dir = tmp_path / "vendor_private" / "inputs"
+    output_dir = tmp_path / "private_outputs"
+    private_dir.mkdir(parents=True)
+    input_path = private_dir / "features.parquet"
+    prediction_path = output_dir / "predictions.parquet"
+    metadata_path = output_dir / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    result = CliRunner().invoke(
+        app,
+        _baseline_cli_args(
+            input_path,
+            prediction_path,
+            metadata_path,
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert prediction_path.is_file()
+    assert metadata_path.is_file()
+    assert "private output files" in result.output
+
+
 def test_generated_predictions_enter_existing_prediction_handoff(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     prediction_path = tmp_path / "predictions.parquet"
@@ -537,3 +630,32 @@ def _synthetic_panel() -> pd.DataFrame:
             "forward_return_1d": [0.02, -0.01, 0.03, -0.02, 0.04, -0.03, 0.02, -0.01],
         }
     )
+
+
+def _baseline_cli_args(
+    input_path,
+    prediction_path,
+    metadata_path,
+    *,
+    feature_columns=(),
+) -> list[str]:
+    args = [
+        "ml",
+        "baseline",
+        "train",
+        "--input-parquet",
+        str(input_path),
+        "--output-prediction",
+        str(prediction_path),
+        "--output-metadata",
+        str(metadata_path),
+        "--target-column",
+        "forward_return",
+        "--train-end",
+        "2026-01-02",
+        "--test-start",
+        "2026-01-03",
+    ]
+    for column in feature_columns:
+        args.extend(["--feature-column", column])
+    return args

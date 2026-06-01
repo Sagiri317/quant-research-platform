@@ -31,6 +31,7 @@ from quant_research_platform.research.ml_baseline import (
     BaselineTrainingConfig,
     is_private_baseline_path,
     run_baseline_training,
+    validate_baseline_output_policy,
 )
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
 
@@ -371,6 +372,11 @@ def train_ml_baseline(
 
     private_input = is_private_baseline_path(input_parquet)
     try:
+        validate_baseline_output_policy(
+            input_path=input_parquet,
+            output_prediction_path=output_prediction,
+            output_metadata_path=output_metadata,
+        )
         feature_columns = _baseline_feature_columns(
             input_parquet,
             explicit_columns=tuple(feature_column or ()),
