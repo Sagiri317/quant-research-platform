@@ -44,7 +44,7 @@ local approved data
 | 平台合同已迁入 `quant_research_platform` 命名空间 | `EVALUATION_INTERFACE.md`、`docs/code-map/evaluation-artifacts-api.md`、代码和 tests | 已验证 |
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | 当前 2023-2025 evidence 可作为回归入口 | `PROJECT_STATUS.md` 记录当前有效样例；artifact 仍属于 private real-data boundary | 已验证 |
-| N5/N6 和 pipeline reliability 的最新状态 | `PROJECT_STATUS.md`；N5 private smoke run id: `n5_private_smoke_2025h2_rev120_v1` | smoke passed / MVS merged / N6 handoff MVS review |
+| N5/N6 和 pipeline reliability 的最新状态 | `PROJECT_STATUS.md`；N5 private smoke run id: `n5_private_smoke_2025h2_rev120_v1` | smoke passed / MVS merged / N6 handoff MVS merged |
 
 最新 current status、blocker、next step 和 root handoff 见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。下一阶段 unfinished priorities 见 [docs/architecture/next-stage-roadmap.md](docs/architecture/next-stage-roadmap.md)。
 
