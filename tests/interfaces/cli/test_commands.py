@@ -424,6 +424,45 @@ def test_ml_baseline_train_cli_fails_cleanly_for_invalid_walk_forward_fold(
     assert str(tmp_path).replace("\\", "/") not in result.output
 
 
+def test_ml_baseline_train_cli_rejects_non_final_open_ended_fold(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _baseline_panel().to_parquet(input_path, engine="pyarrow", index=False)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "ml",
+            "baseline",
+            "train",
+            "--input-parquet",
+            str(input_path),
+            "--output-prediction",
+            str(prediction_path),
+            "--output-metadata",
+            str(metadata_path),
+            "--target-column",
+            "forward_return",
+            "--feature-column",
+            "feature_a",
+            "--walk-forward-fold",
+            "fold_001,2026-01-01,2026-01-02",
+            "--walk-forward-fold",
+            "fold_002,2026-01-02,2026-01-03",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "ML baseline input error" in result.output
+    assert "open-ended walk-forward test window" in result.output
+    assert str(tmp_path) not in result.output
+    assert str(tmp_path).replace("\\", "/") not in result.output
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+
+
 def test_ml_baseline_train_cli_fails_cleanly_for_embargo_overlap(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     pd.DataFrame(

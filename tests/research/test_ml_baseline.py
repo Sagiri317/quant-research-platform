@@ -230,6 +230,136 @@ def test_baseline_training_rejects_overlapping_walk_forward_test_windows(
         )
 
 
+def test_baseline_training_rejects_non_final_open_ended_walk_forward_fold(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(
+        ValueError,
+        match="open-ended walk-forward test window must be the final fold",
+    ):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=prediction_path,
+                output_metadata_path=metadata_path,
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return",
+                folds=(
+                    BaselineFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2026-01-01",
+                        test_start="2026-01-02",
+                    ),
+                    BaselineFoldConfig(
+                        fold_id="fold_002",
+                        train_end="2026-01-02",
+                        test_start="2026-01-03",
+                    ),
+                ),
+            )
+        )
+
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+
+
+def test_baseline_training_allows_final_open_ended_walk_forward_fold(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    run_baseline_training(
+        BaselineTrainingConfig(
+            input_path=input_path,
+            output_prediction_path=prediction_path,
+            output_metadata_path=metadata_path,
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return",
+            folds=(
+                BaselineFoldConfig(
+                    fold_id="fold_001",
+                    train_end="2026-01-01",
+                    test_start="2026-01-02",
+                    test_end="2026-01-02",
+                ),
+                BaselineFoldConfig(
+                    fold_id="fold_002",
+                    train_end="2026-01-02",
+                    test_start="2026-01-03",
+                ),
+            ),
+        )
+    )
+
+    predictions = pd.read_parquet(prediction_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert predictions["timestamp"].tolist() == [
+        pd.Timestamp("2026-01-02"),
+        pd.Timestamp("2026-01-02"),
+        pd.Timestamp("2026-01-03"),
+        pd.Timestamp("2026-01-03"),
+        pd.Timestamp("2026-01-04"),
+        pd.Timestamp("2026-01-04"),
+    ]
+    assert predictions["fold_id"].tolist() == [
+        "fold_001",
+        "fold_001",
+        "fold_002",
+        "fold_002",
+        "fold_002",
+        "fold_002",
+    ]
+    assert metadata["folds"][1]["test_end"] is None
+    assert metadata["folds"][1]["test_row_count"] == 4
+
+
+def test_baseline_training_rejects_mixed_top_level_split_and_walk_forward_folds(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)
+
+    with pytest.raises(
+        ValueError,
+        match="top-level split parameters must not be provided with walk-forward folds",
+    ):
+        run_baseline_training(
+            BaselineTrainingConfig(
+                input_path=input_path,
+                output_prediction_path=prediction_path,
+                output_metadata_path=metadata_path,
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return",
+                train_end="2026-01-01",
+                test_start="2026-01-02",
+                folds=(
+                    BaselineFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2026-01-01",
+                        test_start="2026-01-02",
+                    ),
+                ),
+            )
+        )
+
+    assert not prediction_path.exists()
+    assert not metadata_path.exists()
+
+
 def test_baseline_training_rejects_duplicate_walk_forward_fold_ids(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     _synthetic_panel().to_parquet(input_path, engine="pyarrow", index=False)

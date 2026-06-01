@@ -236,6 +236,14 @@ def _validate_config(config: BaselineTrainingConfig) -> None:
 def _validate_walk_forward_folds(config: BaselineTrainingConfig) -> None:
     if not config.folds:
         return
+    if (
+        config.train_end is not None
+        or config.test_start is not None
+        or config.test_end is not None
+    ):
+        raise ValueError(
+            "top-level split parameters must not be provided with walk-forward folds."
+        )
     if config.fold_id is not None:
         raise ValueError("fold_id must not be provided with walk-forward folds.")
     fold_ids = [fold.fold_id for fold in config.folds]
@@ -351,7 +359,11 @@ def _resolve_split_values(
 
 def _validate_walk_forward_order(folds: tuple[_ResolvedFold, ...]) -> None:
     previous_test_end: pd.Timestamp | None = None
-    for fold in folds:
+    for index, fold in enumerate(folds):
+        if fold.split.test_end is None and index != len(folds) - 1:
+            raise ValueError(
+                "open-ended walk-forward test window must be the final fold."
+            )
         test_end = fold.split.test_end or fold.split.test_start
         if previous_test_end is not None and fold.split.test_start <= previous_test_end:
             raise ValueError("walk-forward test windows must not overlap.")
