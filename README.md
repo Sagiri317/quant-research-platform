@@ -35,6 +35,7 @@ local approved data
 - Pipeline Builder 前端默认生成配置快照，调用 `POST /api/pipeline-snapshots`；也可切换到执行模式，调用 `POST /api/pipeline-runs`。
 - 可执行 pipeline 调用的公开控制参数是 `kernel` 和 `start_from`，支持 `existing_factors`、`rebuild_factors`、`rebuild_panel`、`rebuild_interim`，并且一定运行到 evaluation。
 - Pipeline failed-run reliability MVS 已合入 `main`：persisted status fallback、failed checkpoints consistency、stable `failure_code`、sanitized failed payload 和 partial failed evaluation guard 已完成；retry/resume/overwrite 仍未实现。
+- N6 prediction handoff guardrails、synthetic handoff smoke 和 local numpy/pandas ML baseline trainer 已进入 `main`；这仍不是完整 ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment 或 external connector。
 - Factor Factory 已有后端 registry、批量评估、API 浏览入口和本地 workbench 浏览入口；candidate summary 按 `candidate_id + combination_id` 展开 N7 evaluation results。
 - Evidence workbench 只展示 artifact/API 结果，不重新计算 eligibility、tradability、IC、returns、weights 或 turnover；图表通过 bounded preview pagination 拼接当前组合时间轴，CSV 明细仍保持 preview row limit。
 - Crypto 和其他市场只显示为 planned / disabled，不代表真实数据、交易或空实现包。
@@ -47,7 +48,7 @@ local approved data
 | A 股 pipeline 已采用 snapshot/run split | `POST /api/pipeline-snapshots` 只保存配置；`POST /api/pipeline-runs` 用 `start_from` 执行到 evaluation | 已验证 |
 | N1/N2/N3/N4/N7/N8 已合入 `main` | Pipeline runner、tradability diagnostics、ZIP packaging、frontend feature split、run identity、contract consumer convergence | 已验证 |
 | 当前 2023-2025 evidence 可作为回归入口 | `schema07_eval_2023_2025_v1`、`schema07_eval_2023_2025_rev120_v1` 和 Factor Factory `rev_120d` smoke | 已验证 |
-| N5 MVS descriptive proxy diagnostics 已合入 `main`，N5 private real-data smoke 已通过；pipeline failed-run reliability MVS 已合入 `main` | run id `n5_private_smoke_2025h2_rev120_v1`；2025H2 aggregate smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API preview 和 selected ZIP smoke 已通过；pipeline failed-run commit `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；true risk / regime / capacity / simulation、retry/resume/overwrite 和 global API error envelope migration 仍是未来工作 | smoke passed / MVS merged |
+| N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 handoff guardrails/smoke/local baseline 和 prompt-template sync/polish 已进入 `main` | run id `n5_private_smoke_2025h2_rev120_v1`；2025H2 aggregate smoke；schema `0.7` validation、diagnostics tables、`manifest.display`、API preview 和 selected ZIP smoke 已通过；pipeline failed-run commit `67f363b550f6c3ce04be68fb30a47ed3088eb32d`；N6 仍需 walk-forward / OOS / embargo contract audit；true risk / regime / capacity / simulation、完整 ML pipeline、model registry、feature store、A-share prediction adapter、retry/resume/overwrite 和 global API error envelope migration 仍是未来工作 | smoke passed / MVS merged / audit next |
 
 ## 复现方式
 
@@ -86,7 +87,7 @@ Codex 开始新任务时，应先读 [AGENTS.md](AGENTS.md)，判断任务模式
 
 Medium+ task 先输出 task brief、implementation plan、scope declaration、stop conditions 和 verification plan，等用户批准后再实现。涉及 artifact schema、`manifest.display`、API/download、frontend evidence、A 股 pipeline、Factor Factory 或 generated runs 时，按 `.codex/skills/quant-research-platform-maintenance/` 的 context routing 和 contracts reference 加载当前合同。
 
-常用 Codex 任务模板见 `.codex/templates/`；普通任务优先选 fast-path / focused 模板，`/goal`、overnight 和 review-and-fix-loop 使用 `goal-overnight.md`。
+常用 Codex 任务模板见 `.codex/templates/`；普通任务优先选 fast-path / focused 模板，`/goal`、overnight 和 review-and-fix-loop 使用 `goal-overnight.md`。短模板当前支持 Expanded Prompt Mode、Repo Router Mode、`auto-task-router`、closed-loop execution、blocker / escalation gate、candidate-based Documentation Impact Gate、direct-main docs-only、single-branch cleanup、post-merge documentation sync 和 dependency / contract approval。
 
 本项目的 historical plans/specs 已归档到 `docs/archive/superpowers/`；它们可用于追溯历史决策，但不是当前合同真相源。当前合同以源码、测试、`manifest.display`、根目录文档、`docs/architecture/`、`docs/code-map/` 和项目维护 skill 为准。
 
@@ -231,7 +232,7 @@ CSMAR raw/interim/processed 数据、可还原 vendor 明细、私有真实报�
 
 - 当前完整 market module 只有 A 股；crypto 和其他市场只是 planned / disabled 能力表述，不保留空实现包。
 - 当前只覆盖第一批 price-volume factors。
-- N5 full risk/regime/cost/capacity capability 与 N6 ML prediction handoff 仍需单独设计和验证；当前 N5 v1 只代表 descriptive proxy diagnostics 和 artifact/display contract groundwork。
+- N5 full risk/regime/cost/capacity capability 与 N6 ML prediction handoff 仍需单独设计和验证；当前 N5 v1 只代表 descriptive proxy diagnostics 和 artifact/display contract groundwork。N6 local baseline 只代表初始 handoff / smoke / baseline 入口，下一步应做 walk-forward / OOS / embargo contract focused audit，或先做 ML baseline interface / CLI decision audit。
 - 模拟盘不属于当前范围；未来如果做，必须保持与真实交易接口隔离，并单独审批。
 - CSMAR 明细数据和可还原 vendor 数据的报告不公开。
 

@@ -11,15 +11,15 @@
 | ID | 任务 | 优先级 | 状态 | 目标 |
 |---|---|---:|---|---|
 | N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged to `main`; N5 private real-data smoke passed; failed-run reliability MVS merged | N5 MVS descriptive proxy diagnostics 已落地并完成 2025H2 aggregate smoke；full capability 仍需单独设计和验证 |
-| N6 | ML prediction handoff | P2 | planned | 建立 prediction output 到 evaluation 的可复现接口 |
-| Pipeline reliability second slice | Pipeline reliability | P2 | decide next | failed-run reliability MVS 已合入；先判断是否继续第二个 minimal vertical slice |
+| N6 | ML prediction handoff | P2 | initial guardrails / synthetic smoke / local baseline merged; audit next | 建立 prediction output 到 evaluation 的可复现接口 |
+| Pipeline reliability second slice | Pipeline reliability | P2 | deferred behind N6 focused audits | failed-run reliability MVS 已合入；如需继续第二个 minimal vertical slice，先单独做决策审计 |
 | Pipeline history UI | Pipeline run history / visibility | P3 | planned | 在不改变 pipeline 语义的前提下改善本地 workbench 对 run history 的读取和展示 |
 
 当前推荐顺序：
 
 ```text
-1. decide whether pipeline reliability needs a second MVS
-2. N6 ML prediction handoff audit
+1. N6 walk-forward / OOS / embargo contract focused audit
+2. N6 ML baseline interface / CLI decision audit if needed
 3. Pipeline history UI
 ```
 
@@ -35,6 +35,15 @@
   failed-state consistency、stable `failure_code`、sanitization 和 partial failed
   evaluation guard。retry/resume/overwrite 与 global API error envelope migration
   仍未实现。本文中的 full N5 capability 仍指后续 full risk/regime/cost/capacity capability。
+- N6 prediction handoff guardrails、synthetic handoff smoke 和 local numpy/pandas
+  ML baseline trainer 已进入 `main`。这不是完整 ML pipeline、deep learning backend、
+  model registry、feature store、A-share prediction adapter、paper/live trading、
+  deployment、scheduler、worker 或 external connector。
+- Prompt-template sync / polish 已进入 `main`；repo 内短模板支持 Expanded Prompt Mode、
+  Repo Router Mode、`auto-task-router`、closed-loop execution、blocker / escalation
+  gate、candidate-based Documentation Impact Gate、direct-main docs-only、
+  single-branch cleanup、post-merge documentation sync 和 dependency / contract
+  approval。
 - 2023-2025 canonical sample、`rev_120d` Factor Factory smoke、低内存 comparison 和
   frontend acceptance 已生成；后续不要直接扩大一次性 full run。
 
@@ -134,6 +143,8 @@
 - 不训练模型。
 - 不把 prediction handoff 混入 N5 diagnostics。
 - 不引入 model registry、feature store、deployment、paper/live trading 或外部服务。
+- 当前 local baseline 不代表 alpha proof、真实风险/容量模型、交易仿真、完整 ML platform
+  或 A-share prediction adapter。
 
 验收：
 

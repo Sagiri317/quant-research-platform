@@ -8,6 +8,7 @@ Use only when the user explicitly approves low-risk docs-only work directly on `
 
 ## Allowed Scope
 
+- User explicitly approved direct-main docs-only execution.
 - Typo fixes.
 - Formatting-only cleanup.
 - Broken link repair.
@@ -27,14 +28,21 @@ Use `feature/<task-name>` instead of direct `main` for high-impact docs/rules, i
 - governance, workflow, or contract wording
 
 Do not change source, tests, schemas, `manifest.display`, API/frontend behavior, dependencies, generated artifacts, private data, or runtime behavior.
+Do not amend, rebase, squash, force push, or create merge commits.
 
 ## Checks
 
+- `git fetch origin`
 - `git status --short --branch`
 - `git branch --show-current`
+- Verify current branch is `main`.
+- Verify `main == origin/main`.
+- Verify working tree clean before edits.
 - `git diff --check`
 - `git diff --name-only`
 - Targeted doc/search checks for the changed wording.
+- Commit and push `main`.
+- Output full commit SHA.
 
 ## Output Format
 
@@ -44,3 +52,4 @@ Do not change source, tests, schemas, `manifest.display`, API/frontend behavior,
 - Checks Run
 - Scope Check
 - Commit SHA, if committed
+- Pushed branch: `main`

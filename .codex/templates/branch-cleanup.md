@@ -10,9 +10,11 @@ Single-branch cleanup only.
 
 - Delete only the explicitly approved `<BRANCH_NAME>`.
 - Verify the branch name exactly before cleanup.
-- Verify current branch is not `<BRANCH_NAME>`.
+- Verify current branch is `main`, not `<BRANCH_NAME>`.
+- Verify `main == origin/main`.
 - Before local deletion, confirm `<BRANCH_NAME>` is already contained in `main`.
 - Before remote deletion, confirm `origin/<BRANCH_NAME>` is already contained in `origin/main`.
+- If the remote branch does not exist, report it and continue without remote deletion.
 
 ## Forbidden Scope
 
@@ -28,8 +30,11 @@ Bulk branch cleanup requires a separate task template, a candidate branch list, 
 
 ## Checks
 
+- `git fetch origin`
 - `git status --short --branch`
 - `git branch --show-current`
+- Verify current branch is `main`.
+- Verify `main == origin/main`.
 - `git branch --list <BRANCH_NAME>`
 - `git merge-base --is-ancestor <BRANCH_NAME> main`
 - Remote check only if remote cleanup is explicitly approved.
