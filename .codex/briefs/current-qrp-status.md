@@ -22,8 +22,8 @@ the active next-step decision.
 ## Status-Relevant Milestones
 
 - N5 private real-data smoke passed: `n5_private_smoke_2025h2_rev120_v1`.
-- Pipeline failed-run reliability MVS merged.
-- N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, and N6 prediction handoff MVS have merged to `main`.
+- Pipeline failed-run reliability MVS and failed-run disk-recovery sanitization hardening have merged to `main`.
+- N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, N6 prediction handoff MVS, private marker helper centralization, and `ml baseline train` CLI pre-read private-output validation have merged to `main`.
 - Prompt-template sync and polish have merged to `main`; use `.codex/templates/` for current task-mode details.
 - These facts are status pointers, not full evidence records.
 - Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, next step, or handoff state.
@@ -31,14 +31,14 @@ the active next-step decision.
 ## Milestone Context
 
 - N5 v1 private smoke demonstrates the current descriptive proxy diagnostics path on private A-share data.
-- Pipeline failed-run reliability MVS improved failed-run handling around the local research workflow.
-- N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, `ml baseline train` CLI handoff, and a private-output boundary guard. This is not a complete ML pipeline, deep learning backend, model registry, feature store, A-share prediction adapter, paper/live trading system, deployment, scheduler, worker, or external connector.
+- Pipeline failed-run reliability now includes the original failed-run MVS plus disk-loaded `runtime_summary.json` / `checkpoints.json` shared private-marker sanitization.
+- N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, `ml baseline train` CLI handoff, private-output boundary guard, shared private-marker helper, and CLI pre-read private-output validation. This is not a complete ML pipeline, deep learning backend, model registry, feature store, A-share prediction adapter, paper/live trading system, deployment, scheduler, worker, or external connector.
 - Task-mode template details live in `.codex/templates/`, not in this brief.
 
 ## Current Next Step
 
 - Decide the next N6 slice: multi-fold / walk-forward extension, A-share prediction adapter design, or continued local synthetic handoff.
-- Alternatively, run a separate Pipeline reliability second-slice decision audit.
+- If continuing pipeline reliability, pick one new small MVS such as retry, resume, overwrite/rerun guard, or global API error envelope; do not reopen the completed failed-run sanitization hardening.
 - Keep this as an audit/decision point; do not jump directly into broad implementation.
 
 ## Known Limitations

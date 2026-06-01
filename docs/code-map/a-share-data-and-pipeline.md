@@ -98,7 +98,7 @@ Diagnostics-enabled A-share evaluation runs may preserve only the N5 MVS optiona
 | `build_factors` | research panel | factor table |
 | `evaluate` | processed factor table / factor table + `PipelineConfig` | 通过 A-share evaluation service 写出 evaluation manifest、label availability 和 evaluation runs |
 
-Runner 会写 `checkpoints.json` 和 `runtime_summary.json`。失败 checkpoint 只写稳定 failure code，不写 private path。Pipeline API 在 in-memory state 丢失后可从磁盘 `runtime_summary.json` / `checkpoints.json` 重放 sanitized failed-run status。
+Runner 会写 `checkpoints.json` 和 `runtime_summary.json`。失败 checkpoint 只写稳定 failure code，不写 private path。Pipeline API 在 in-memory state 丢失后可从磁盘 `runtime_summary.json` / `checkpoints.json` 重放 sanitized failed-run status；disk replay 使用 shared private-marker sanitizer，覆盖 ordinary private layer markers 以及 `vendor_private` / `raw_vendor` 等 research-writer markers。
 
 ## Factor Factory
 

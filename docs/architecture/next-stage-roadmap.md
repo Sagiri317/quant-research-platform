@@ -13,21 +13,21 @@ schema 验收故事不在本文展开。
 |---|---|---:|---|---|
 | N5 | 风险、regime、成本和容量扩展 | P1 | MVS merged; full capability unfinished | 将 descriptive proxy diagnostics 之后的 full risk/regime/cost/capacity capability 单独设计和验证 |
 | N6 | ML prediction handoff | P2 | local MVS merged; adapter / full ML pipeline unfinished | 建立 prediction output 到 evaluation 的可复现接口 |
-| Pipeline reliability second slice | Pipeline reliability | P2 | available as a separate next MVS decision | 如需继续第二个 minimal vertical slice，先单独做决策审计 |
+| Pipeline reliability follow-up | Pipeline reliability | P2 | failed-run MVS and disk-recovery sanitization hardening merged; retry / resume / overwrite / global error envelope unfinished | 如需继续，重新限定一个小 MVS，不和 N6 扩展混在同一批 |
 | Pipeline history UI | Pipeline run history / visibility | P3 | planned | 在不改变 pipeline 语义的前提下改善本地 workbench 对 run history 的读取和展示 |
 
 当前推荐顺序：
 
 ```text
 1. Decide the next N6 slice: multi-fold / walk-forward extension or A-share prediction adapter design
-2. Or run a separate Pipeline reliability second-slice decision audit
+2. Or choose one new Pipeline reliability follow-up MVS: retry, resume, overwrite/rerun guard, or global API error envelope
 3. Pipeline history UI
 ```
 
 当前基线只保留为范围边界：
 
 - 后续扩展应基于 schema `0.7`、`combination_id`、portable display preview metadata 和 artifact/API/frontend 合同。
-- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、N6 initial guardrails / smoke / local baseline、N6 prediction handoff MVS 已进入 `main`；具体 current status 和 private smoke run id 见 `PROJECT_STATUS.md`。
+- N5 MVS descriptive proxy diagnostics、N5 private real-data smoke、pipeline failed-run reliability MVS、pipeline failed-run disk-recovery sanitization hardening、N6 initial guardrails / smoke / local baseline、N6 prediction handoff MVS 已进入 `main`；具体 current status 和 private smoke run id 见 `PROJECT_STATUS.md`。
 - N6 local baseline MVS is a local research baseline / prediction handoff: it records OOS / embargo / fold metadata, writes private-safe metadata, and hands prediction Parquet to evaluation. It is not a complete ML pipeline、deep learning backend、model registry、feature store、A-share prediction adapter、paper/live trading、deployment、scheduler、worker 或 external connector。
 - 后续不要直接扩大一次性 full run；需要先处理 low-memory weights/remap 写出路径或继续按 shard 回归。
 
