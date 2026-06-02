@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,10 @@ FACTOR_PREFIXES = (
     "log_float_market_cap",
     "log_total_market_cap",
 )
+_SENSITIVE_METADATA_PATTERN = re.compile(
+    r"(credential|secret|token|api[_-]?key|apikey|api-key|password)",
+    re.IGNORECASE,
+)
 
 
 def build_schema_inventory(
@@ -90,6 +95,21 @@ def build_schema_inventory(
     parquet_file = pq.ParquetFile(parquet_path)
     schema = parquet_file.schema_arrow
     column_names = schema.names
+    safe_fields = [field for field in schema if _is_safe_schema_column(field.name)]
+    unsafe_column_names = {
+        column for column in column_names if not _is_safe_schema_column(column)
+    }
+    safe_expected_columns = [
+        column for column in expected_columns if _is_safe_schema_column(column)
+    ]
+    unsafe_expected_columns = [
+        column for column in expected_columns if not _is_safe_schema_column(column)
+    ]
+    unexpected_columns = [
+        column
+        for column in column_names
+        if expected_columns and column not in expected_columns
+    ]
     inventory: dict[str, Any] = {
         "schema_inventory_version": "a_share_schema_inventory_v1",
         "row_count": _count_rows(
@@ -106,16 +126,21 @@ def build_schema_inventory(
                 "dtype": str(field.type),
                 "role": detect_column_role(field.name),
             }
-            for field in schema
+            for field in safe_fields
         ],
         "missing_expected_columns": [
-            column for column in expected_columns if column not in column_names
+            column for column in safe_expected_columns if column not in column_names
         ],
         "unexpected_columns": [
             column
-            for column in column_names
-            if expected_columns and column not in expected_columns
+            for column in unexpected_columns
+            if _is_safe_schema_column(column)
         ],
+        "redacted_column_count": len(unsafe_column_names),
+        "redacted_missing_expected_column_count": len(unsafe_expected_columns),
+        "redacted_unexpected_column_count": sum(
+            1 for column in unexpected_columns if not _is_safe_schema_column(column)
+        ),
         "duplicate_key_count": None,
         "date_range": None,
         "market_scope": None,
@@ -334,14 +359,38 @@ def _date_filter_payload(
 
 def _validate_safe_payload(value: Any) -> None:
     if isinstance(value, dict):
-        for item in value.values():
+        for key, item in value.items():
+            _validate_safe_text(str(key))
             _validate_safe_payload(item)
     elif isinstance(value, list | tuple):
         for item in value:
             _validate_safe_payload(item)
     elif isinstance(value, str):
-        if text_has_private_marker(value) or looks_like_private_or_local_path(value):
-            raise ValueError("unsafe private or local path in aggregate output")
+        _validate_safe_text(value)
+
+
+def _validate_safe_text(value: str) -> None:
+    if _SENSITIVE_METADATA_PATTERN.search(value):
+        raise ValueError("sensitive_metadata_policy_violation")
+    if text_has_private_marker(value) or looks_like_private_or_local_path(value):
+        raise ValueError("unsafe private or local path in aggregate output")
+
+
+def _is_safe_schema_column(column: str) -> bool:
+    normalized = column.replace("\\", "/").casefold()
+    if _SENSITIVE_METADATA_PATTERN.search(column):
+        return False
+    if text_has_private_marker(column) or looks_like_private_or_local_path(column):
+        return False
+    if any(marker in normalized for marker in ("vendor", "source")):
+        return False
+    if (
+        normalized.startswith(("raw_", "local_"))
+        or normalized.endswith("_local")
+        or "_local_" in normalized
+    ):
+        return False
+    return True
 
 
 __all__ = [

@@ -65,6 +65,60 @@ def test_schema_inventory_is_aggregate_only_and_role_tagged(tmp_path) -> None:
     assert "stock_sample" not in serialized
 
 
+def test_schema_inventory_redacts_unsafe_column_names(tmp_path) -> None:
+    path = tmp_path / "panel.parquet"
+    pd.DataFrame(
+        {
+            "stock_code": ["000001", "000002"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "amount": [100.0, 200.0],
+            "mom_20d": [0.01, 0.02],
+            "forward_return_20d": [0.02, -0.01],
+            "vendor_internal_flag": [1, 0],
+            "source_download_code": ["x", "y"],
+            "processed_private": ["x", "y"],
+            "credential_token": ["x", "y"],
+            "C:/vendor/path": ["x", "y"],
+            "local_path": ["x", "y"],
+        }
+    ).to_parquet(path, engine="pyarrow", compression="zstd", index=False)
+
+    inventory = build_schema_inventory(
+        path,
+        expected_columns=(
+            "stock_code",
+            "trade_date",
+            "amount",
+            "vendor_expected",
+            "credential_token",
+            "local_expected_path",
+        ),
+    )
+    serialized = json.dumps(inventory, ensure_ascii=False)
+
+    assert {column["name"] for column in inventory["columns"]} == {
+        "stock_code",
+        "trade_date",
+        "amount",
+        "mom_20d",
+        "forward_return_20d",
+    }
+    assert inventory["redacted_column_count"] == 6
+    assert inventory["redacted_missing_expected_column_count"] == 3
+    assert inventory["redacted_unexpected_column_count"] == 5
+    for forbidden in (
+        "vendor_internal_flag",
+        "source_download_code",
+        "processed_private",
+        "credential_token",
+        "C:/vendor/path",
+        "local_path",
+        "vendor_expected",
+        "local_expected_path",
+    ):
+        assert forbidden not in serialized
+
+
 def test_memory_preflight_uses_parquet_metadata_and_budget_gate(tmp_path) -> None:
     path = _panel_path(tmp_path)
 
@@ -97,3 +151,23 @@ def test_write_json_sanitized_rejects_private_or_absolute_path_leaks(tmp_path) -
 
     with pytest.raises(ValueError, match="unsafe private or local path"):
         write_json_sanitized(output, {"path": str(tmp_path / "private_real" / "x")})
+
+
+def test_write_json_sanitized_rejects_sensitive_values_and_keys(tmp_path) -> None:
+    output = tmp_path / "safe.json"
+
+    write_json_sanitized(
+        output,
+        {"status": "passed", "factor_name": "reversal_20d", "model_id": "ridge"},
+    )
+    assert output.is_file()
+
+    with pytest.raises(ValueError, match="sensitive_metadata_policy_violation") as exc:
+        write_json_sanitized(output, {"status": "token=abc123"})
+    assert "abc123" not in str(exc.value)
+    assert "token=abc123" not in str(exc.value)
+
+    with pytest.raises(ValueError, match="sensitive_metadata_policy_violation") as exc:
+        write_json_sanitized(output, {"api_key": "redacted"})
+    assert "api_key" not in str(exc.value)
+    assert "redacted" not in str(exc.value)

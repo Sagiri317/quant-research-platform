@@ -47,6 +47,7 @@ from quant_research_platform.research.ml_baseline import (
 from quant_research_platform.research.ml_model_suite import DEFAULT_NON_DL_MODEL_IDS
 from quant_research_platform.research.prediction_handoff import (
     PredictionHandoffConfig,
+    ensure_prediction_run_id_available,
     refresh_prediction_handoff_eda,
     run_prediction_handoff,
 )
@@ -551,6 +552,8 @@ def a_share_prediction_handoff(
     """Run the local N6 A-share prediction handoff suite."""
 
     try:
+        resolved_run_id = run_id or "prediction_handoff"
+        ensure_prediction_run_id_available(output_root, resolved_run_id)
         explicit_features = tuple(column for column in feature_column or () if column)
         resolved_feature_preset = None if explicit_features else feature_preset
         feature_columns = _a_share_prediction_feature_columns(
@@ -562,7 +565,7 @@ def a_share_prediction_handoff(
             PredictionHandoffConfig(
                 input_path=input_parquet,
                 output_root=output_root,
-                run_id=run_id or "prediction_handoff",
+                run_id=resolved_run_id,
                 timestamp_column=timestamp_column,
                 entity_column=asset_column,
                 feature_columns=feature_columns,

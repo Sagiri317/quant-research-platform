@@ -452,6 +452,46 @@ def test_a_share_prediction_handoff_cli_resolves_feature_preset(tmp_path) -> Non
     assert manifest["feature_columns"] == ["rev_1d", "mom_20d"]
 
 
+def test_a_share_prediction_handoff_cli_rejects_duplicate_run_id_before_input_read(
+    tmp_path,
+) -> None:
+    missing_input = tmp_path / "missing_features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    (output_root / "prediction_cli_duplicate").mkdir(parents=True)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(missing_input),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_duplicate",
+            "--feature-preset",
+            "a_share_literature_price_volume_preset_v1",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "duplicate_run_id" in result.output
+    assert "missing_features.parquet" not in result.output
+    assert str(tmp_path) not in result.output
+
+
 def test_a_share_prediction_handoff_cli_rejects_missing_feature_selection(
     tmp_path,
 ) -> None:

@@ -73,6 +73,29 @@ def _pipeline_root_from_config(
     return Path("reports/private_real/pipeline_runs")
 
 
+def _prediction_handoff_root_from_config(
+    configured_roots,
+    *,
+    prediction_handoff_root: str | Path | None,
+    prediction_handoff_env: str | None,
+    configured_prediction_root: Path | None,
+    run_roots_were_explicit: bool,
+) -> Path:
+    if prediction_handoff_root is not None:
+        return Path(prediction_handoff_root)
+    if prediction_handoff_env:
+        return Path(prediction_handoff_env)
+    if configured_prediction_root is not None:
+        return configured_prediction_root
+    if run_roots_were_explicit:
+        bases = [_run_root_project_base(root.path) for root in configured_roots]
+        if bases and all(base.is_absolute() for base in bases):
+            return Path(os.path.commonpath([str(base) for base in bases])) / (
+                "reports/private_real/a_share_prediction_handoffs"
+            )
+    return Path("reports/private_real/a_share_prediction_handoffs")
+
+
 def _run_root_project_base(path: Path) -> Path:
     parent = path.parent
     if parent.name == "reports":
@@ -148,34 +171,24 @@ def create_app(
         configured_roots,
         "a_share_prediction",
     )
-    prediction_handoff_output_root = (
-        Path(prediction_handoff_root)
-        if prediction_handoff_root is not None
-        else configured_prediction_root
-        if prediction_handoff_env is None and configured_prediction_root is not None
-        else Path(
-            prediction_handoff_env
-            or "reports/private_real/a_share_prediction_handoffs"
-        )
+    prediction_handoff_output_root = _prediction_handoff_root_from_config(
+        configured_roots,
+        prediction_handoff_root=prediction_handoff_root,
+        prediction_handoff_env=prediction_handoff_env,
+        configured_prediction_root=configured_prediction_root,
+        run_roots_were_explicit=run_roots is not None,
     )
     if all(root.source_alias != "pipeline" for root in configured_roots):
         configured_roots = [*configured_roots, run_root("pipeline", pipeline_root)]
-    should_register_prediction_root = (
-        run_roots is None
-        or prediction_handoff_root is not None
-        or prediction_handoff_env is not None
-        or configured_prediction_root is not None
-    )
-    if should_register_prediction_root:
-        configured_roots = [
-            root
-            for root in configured_roots
-            if root.source_alias != "a_share_prediction"
-        ]
-        configured_roots = [
-            *configured_roots,
-            run_root("a_share_prediction", prediction_handoff_output_root),
-        ]
+    configured_roots = [
+        root
+        for root in configured_roots
+        if root.source_alias != "a_share_prediction"
+    ]
+    configured_roots = [
+        *configured_roots,
+        run_root("a_share_prediction", prediction_handoff_output_root),
+    ]
     app.state.qrp_context = ApiContext(
         run_roots=configured_roots,
         pipeline_runs={},

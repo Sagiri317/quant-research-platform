@@ -228,7 +228,7 @@ def _validate_config(config: ModelSuiteConfig) -> None:
         tuple(output_paths),
         error_message="private_output_policy_violation",
     )
-    _validate_fold_ends(config.folds)
+    validate_prediction_folds(config.folds)
 
 
 def _read_columns(config: ModelSuiteConfig) -> list[str]:
@@ -279,10 +279,63 @@ def _validate_non_null(frame: pd.DataFrame, columns: tuple[str, ...]) -> None:
         raise ValueError("insufficient_sample")
 
 
-def _validate_fold_ends(folds: tuple[SuiteFoldConfig, ...]) -> None:
+def validate_prediction_folds(
+    folds: tuple[SuiteFoldConfig, ...],
+) -> tuple[SuiteFoldConfig, ...]:
+    """Validate walk-forward folds before any row-level training or writes."""
+
+    if not folds:
+        raise ValueError("invalid_prediction_config")
+    seen_fold_ids: set[str] = set()
+    seen_windows: set[tuple[pd.Timestamp, pd.Timestamp | None]] = set()
+    previous_start: pd.Timestamp | None = None
+    previous_end: pd.Timestamp | None = None
     for idx, fold in enumerate(folds):
-        if fold.test_end is None and idx != len(folds) - 1:
+        fold_id = _required_fold_text(fold.fold_id)
+        train_end = _parse_fold_timestamp(fold.train_end)
+        test_start = _parse_fold_timestamp(fold.test_start)
+        test_end = (
+            None
+            if fold.test_end is None or str(fold.test_end).strip() == ""
+            else _parse_fold_timestamp(fold.test_end)
+        )
+        if fold_id in seen_fold_ids:
             raise ValueError("invalid_prediction_config")
+        seen_fold_ids.add(fold_id)
+        if train_end >= test_start:
+            raise ValueError("invalid_prediction_config")
+        if test_end is None and idx != len(folds) - 1:
+            raise ValueError("invalid_prediction_config")
+        if test_end is not None and test_start > test_end:
+            raise ValueError("invalid_prediction_config")
+        window = (test_start, test_end)
+        if window in seen_windows:
+            raise ValueError("invalid_prediction_config")
+        seen_windows.add(window)
+        if previous_start is not None and test_start <= previous_start:
+            raise ValueError("invalid_prediction_config")
+        if previous_end is not None and test_start <= previous_end:
+            raise ValueError("invalid_prediction_config")
+        previous_start = test_start
+        previous_end = test_end
+    return folds
+
+
+def _required_fold_text(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("invalid_prediction_config")
+    return value.strip()
+
+
+def _parse_fold_timestamp(value: object) -> pd.Timestamp:
+    text = _required_fold_text(value)
+    try:
+        timestamp = pd.Timestamp(text)
+    except (TypeError, ValueError):
+        raise ValueError("invalid_prediction_config") from None
+    if pd.isna(timestamp):
+        raise ValueError("invalid_prediction_config")
+    return timestamp
 
 
 def _purged_train_end_from_trading_calendar(
@@ -632,6 +685,12 @@ def _looks_like_label_or_forward_return(column: str) -> bool:
     )
 
 
+def feature_name_looks_like_leakage(column: str) -> bool:
+    """Return whether a feature name appears to contain target/label leakage."""
+
+    return _looks_like_label_or_forward_return(column)
+
+
 def feature_name_has_sensitive_identifier(column: str) -> bool:
     """Return whether a feature name looks like private credential metadata."""
 
@@ -648,5 +707,7 @@ __all__ = [
     "PREDICTION_HANDOFF_VERSION",
     "SuiteFoldConfig",
     "feature_name_has_sensitive_identifier",
+    "feature_name_looks_like_leakage",
     "run_model_suite",
+    "validate_prediction_folds",
 ]

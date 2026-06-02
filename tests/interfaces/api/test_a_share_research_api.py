@@ -512,6 +512,198 @@ def test_default_app_discovers_default_prediction_handoff_root(
     }
 
 
+def test_a_share_prediction_handoff_api_discovers_default_root_with_explicit_run_roots(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QRP_PREDICTION_HANDOFF_ROOT", raising=False)
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    client = TestClient(create_app(run_roots=[("platform", tmp_path / "runs")]))
+
+    created = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "default_registered_prediction",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    runs = client.get("/api/runs")
+    assert runs.status_code == 200
+    public_run_ids = [row["public_run_id"] for row in runs.json()]
+    assert public_run_ids.count("a_share_prediction/default_registered_prediction") == 1
+
+
+def test_a_share_prediction_handoff_api_rejects_duplicate_run_id_before_input_read(
+    tmp_path,
+) -> None:
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    (prediction_root / "prediction_duplicate").mkdir(parents=True)
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_duplicate",
+            "input_parquet": str(tmp_path / "missing.parquet"),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_preset": "a_share_literature_price_volume_preset_v1",
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["error_code"] == "duplicate_run_id"
+    assert "missing.parquet" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_a_share_prediction_handoff_api_rejects_malformed_folds_before_run_dir(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_malformed_folds",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "test_start": "2024-01-08",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == "invalid_prediction_config"
+    assert "KeyError" not in response.text
+    assert "train_end" not in response.text
+    assert not (prediction_root / "prediction_malformed_folds").exists()
+
+
+def test_a_share_prediction_handoff_api_rejects_overlapping_folds_without_row_outputs(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_overlap_folds",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                },
+                {
+                    "fold_id": "fold_002",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-09",
+                    "test_end": "2024-01-10",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == "invalid_prediction_config"
+    run_dir = prediction_root / "prediction_overlap_folds"
+    assert not (run_dir / "predictions.parquet").exists()
+    assert not (run_dir / "prediction_records.parquet").exists()
+
+
 def test_a_share_prediction_handoff_api_rejects_horizon_mismatch(
     tmp_path,
 ) -> None:
@@ -631,6 +823,85 @@ def test_a_share_status_endpoints_sanitize_disk_loaded_strings(tmp_path) -> None
     assert "private_real" not in prediction_status.text
 
 
+def test_a_share_status_and_schema_endpoints_reject_malformed_numeric_fields(
+    tmp_path,
+) -> None:
+    factor_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    factor_run = factor_root / "bad_factor_status_numeric"
+    factor_run.mkdir(parents=True)
+    (factor_run / "runtime_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "factor_pack": "a_share_literature_price_volume_rebuild_v1",
+                "row_count": "not_an_int",
+            }
+        ),
+        encoding="utf-8",
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    prediction_status_run = prediction_root / "bad_prediction_status_numeric"
+    prediction_status_run.mkdir(parents=True)
+    (prediction_status_run / "runtime_summary.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "row_count": "not_an_int",
+                "model_suite_id": "n6_a_share_sklearn_boosting_suite_v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    prediction_schema_run = prediction_root / "bad_prediction_schema_numeric"
+    prediction_schema_run.mkdir(parents=True)
+    (prediction_schema_run / "model_metadata.json").write_text(
+        json.dumps(
+            {
+                "prediction_handoff_version": "n6_a_share_prediction_handoff_v1",
+                "model_suite_id": "n6_a_share_sklearn_boosting_suite_v1",
+                "prediction_columns": ["prediction_score_ridge_20d"],
+                "target_column": "forward_return_20d",
+                "label_horizon_days": "not_an_int",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_rebuild_root=factor_root,
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    factor_status = client.get(
+        "/api/a-share/factor-rebuild-runs/bad_factor_status_numeric"
+    )
+    prediction_status = client.get(
+        "/api/a-share/prediction-handoffs/bad_prediction_status_numeric"
+    )
+    prediction_schema = client.get(
+        "/api/a-share/prediction-handoffs/bad_prediction_schema_numeric/schema"
+    )
+
+    assert factor_status.status_code == 422
+    assert prediction_status.status_code == 422
+    assert prediction_schema.status_code == 422
+    assert factor_status.json()["error"]["error_code"] == (
+        "factor_rebuild_status_invalid"
+    )
+    assert prediction_status.json()["error"]["error_code"] == (
+        "prediction_handoff_status_invalid"
+    )
+    assert prediction_schema.json()["error"]["error_code"] == (
+        "prediction_handoff_status_invalid"
+    )
+    combined = factor_status.text + prediction_status.text + prediction_schema.text
+    assert "not_an_int" not in combined
+
+
 def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
     tmp_path,
 ) -> None:
@@ -699,9 +970,20 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
                         "dtype": "string",
                         "role": "credential_token",
                     },
+                    {"name": "vendor_raw_flag", "dtype": "string", "role": "excluded"},
+                    {
+                        "name": "source_download_code",
+                        "dtype": "string",
+                        "role": "excluded",
+                    },
+                    {"name": "local_path", "dtype": "string", "role": "excluded"},
                 ],
-                "missing_expected_columns": ["secret_token"],
-                "unexpected_columns": ["rev_1d"],
+                "missing_expected_columns": [
+                    "secret_token",
+                    "vendor_missing",
+                    "local_missing_path",
+                ],
+                "unexpected_columns": ["rev_1d", "source_download_code", "local_path"],
                 "duplicate_key_count": 0,
                 "date_range": {"min": "2024-01-01", "max": "2024-01-02"},
             }
@@ -768,6 +1050,10 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
     assert "api_key" not in combined
     assert "secret" not in combined
     assert "token" not in combined
+    assert "vendor_raw_flag" not in combined
+    assert "source_download_code" not in combined
+    assert "local_path" not in combined
+    assert "local_missing_path" not in combined
     assert "processed_private" not in combined
     assert "private_real" not in combined
 

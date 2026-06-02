@@ -92,7 +92,11 @@ def test_health_response_does_not_expose_local_run_root_paths(tmp_path):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "run_roots": [{"source_alias": "platform"}, {"source_alias": "pipeline"}],
+        "run_roots": [
+            {"source_alias": "platform"},
+            {"source_alias": "pipeline"},
+            {"source_alias": "a_share_prediction"},
+        ],
     }
     assert str(runs_root) not in response.text
 

@@ -32,7 +32,9 @@ from quant_research_platform.research.ml_model_suite import (
     ModelSuiteConfig,
     SuiteFoldConfig,
     feature_name_has_sensitive_identifier,
+    feature_name_looks_like_leakage,
     run_model_suite,
+    validate_prediction_folds,
 )
 from quant_research_platform.runtime.private_paths import (
     path_is_under_private_output_root,
@@ -171,9 +173,17 @@ def run_prediction_handoff(
 
 
 def _validate_config(config: PredictionHandoffConfig) -> None:
+    ensure_prediction_run_id_available(config.output_root, config.run_id)
     if not config.input_path.is_file():
         raise FileNotFoundError(config.input_path)
     if not config.feature_columns:
+        raise ValueError("invalid_feature_preset")
+    leakage = [
+        column
+        for column in config.feature_columns
+        if feature_name_looks_like_leakage(column)
+    ]
+    if leakage or config.label_column in config.feature_columns:
         raise ValueError("invalid_feature_preset")
     if any(
         feature_name_has_sensitive_identifier(column)
@@ -184,6 +194,7 @@ def _validate_config(config: PredictionHandoffConfig) -> None:
         raise ValueError("invalid_feature_preset")
     if not config.folds:
         raise ValueError("invalid_prediction_config")
+    _suite_folds(config.folds)
     require_private_outputs_for_private_input(
         config.input_path,
         (config.output_root,),
@@ -191,12 +202,19 @@ def _validate_config(config: PredictionHandoffConfig) -> None:
     )
 
 
-def _new_run_dir(output_root: Path, run_id: str) -> Path:
+def ensure_prediction_run_id_available(output_root: Path, run_id: str) -> Path:
+    """Validate that a prediction handoff run directory can be created."""
+
     if Path(run_id).name != run_id or run_id in {"", ".", ".."}:
         raise ValueError("invalid_prediction_config")
     run_dir = output_root / run_id
     if run_dir.exists():
         raise ValueError("duplicate_run_id")
+    return run_dir
+
+
+def _new_run_dir(output_root: Path, run_id: str) -> Path:
+    run_dir = ensure_prediction_run_id_available(output_root, run_id)
     run_dir.mkdir(parents=True)
     return run_dir
 
@@ -264,16 +282,37 @@ def _write_feature_set_manifest(
 def _suite_folds(
     raw_folds: tuple[dict[str, str | None], ...],
 ) -> tuple[SuiteFoldConfig, ...]:
-    return tuple(
-        SuiteFoldConfig(
-            fold_id=str(fold["fold_id"]),
-            train_end=str(fold["train_end"]),
-            test_start=str(fold["test_start"]),
-            test_end=None if fold.get("test_end") is None else str(fold["test_end"]),
-            split_name=str(fold.get("split_name") or "walk_forward"),
+    folds: list[SuiteFoldConfig] = []
+    for raw_fold in raw_folds:
+        if not isinstance(raw_fold, dict):
+            raise ValueError("invalid_prediction_config")
+        if not all(key in raw_fold for key in ("fold_id", "train_end", "test_start")):
+            raise ValueError("invalid_prediction_config")
+        fold_id = _required_fold_field(raw_fold.get("fold_id"))
+        train_end = _required_fold_field(raw_fold.get("train_end"))
+        test_start = _required_fold_field(raw_fold.get("test_start"))
+        test_end_value = raw_fold.get("test_end")
+        test_end = (
+            None
+            if test_end_value is None or str(test_end_value).strip() == ""
+            else _required_fold_field(test_end_value)
         )
-        for fold in raw_folds
-    )
+        folds.append(
+            SuiteFoldConfig(
+                fold_id=fold_id,
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+                split_name=str(raw_fold.get("split_name") or "walk_forward"),
+            )
+        )
+    return validate_prediction_folds(tuple(folds))
+
+
+def _required_fold_field(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("invalid_prediction_config")
+    return value.strip()
 
 
 def _add_return_source_column(

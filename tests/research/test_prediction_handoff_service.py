@@ -323,6 +323,198 @@ def test_prediction_handoff_rejects_sensitive_feature_names_before_artifacts(
     assert not (output_root / "prediction_sensitive_feature").exists()
 
 
+@pytest.mark.parametrize(
+    "feature_columns",
+    [
+        ("feature_a", "forward_return_20d"),
+        ("feature_a", "label_score"),
+        ("feature_a", "target_return"),
+    ],
+)
+def test_prediction_handoff_rejects_leakage_feature_names_before_artifacts(
+    tmp_path,
+    feature_columns,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().assign(label_score=1.0, target_return=1.0).to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="invalid_feature_preset"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_leakage_feature",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=feature_columns,
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("ridge",),
+            )
+        )
+
+    assert not (output_root / "prediction_leakage_feature").exists()
+
+
+@pytest.mark.parametrize(
+    "folds",
+    [
+        ({"fold_id": "fold_001", "test_start": "2024-01-08"},),
+        ({"train_end": "2024-01-05", "test_start": "2024-01-08"},),
+        ({"fold_id": "fold_001", "train_end": "2024-01-05"},),
+        (
+            {
+                "fold_id": "",
+                "train_end": "2024-01-05",
+                "test_start": "2024-01-08",
+                "test_end": "2024-01-09",
+            },
+        ),
+        (
+            {
+                "fold_id": "fold_001",
+                "train_end": "not-a-date",
+                "test_start": "2024-01-08",
+                "test_end": "2024-01-09",
+            },
+        ),
+        (
+            {
+                "fold_id": "fold_001",
+                "train_end": "2024-01-05",
+                "test_start": "2024-01-08",
+            },
+            {
+                "fold_id": "fold_002",
+                "train_end": "2024-01-06",
+                "test_start": "2024-01-09",
+                "test_end": "2024-01-10",
+            },
+        ),
+        (
+            {
+                "fold_id": "fold_001",
+                "train_end": "2024-01-05",
+                "test_start": "2024-01-08",
+                "test_end": "2024-01-09",
+            },
+            {
+                "fold_id": "fold_002",
+                "train_end": "2024-01-05",
+                "test_start": "2024-01-09",
+                "test_end": "2024-01-10",
+            },
+        ),
+        (
+            {
+                "fold_id": "fold_001",
+                "train_end": "2024-01-05",
+                "test_start": "2024-01-08",
+                "test_end": "2024-01-09",
+            },
+            {
+                "fold_id": "fold_001",
+                "train_end": "2024-01-06",
+                "test_start": "2024-01-10",
+                "test_end": "2024-01-10",
+            },
+        ),
+        (
+            {
+                "fold_id": "fold_001",
+                "train_end": "2024-01-05",
+                "test_start": "2024-01-08",
+                "test_end": "2024-01-09",
+            },
+            {
+                "fold_id": "fold_002",
+                "train_end": "2024-01-06",
+                "test_start": "2024-01-08",
+                "test_end": "2024-01-09",
+            },
+        ),
+    ],
+)
+def test_prediction_handoff_rejects_malformed_folds_before_artifacts(
+    tmp_path,
+    folds,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    with pytest.raises(ValueError, match="invalid_prediction_config") as exc:
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_bad_folds",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=folds,
+                model_ids=("ridge",),
+            )
+        )
+
+    assert "fold_id" not in str(exc.value)
+    assert "train_end" not in str(exc.value)
+    assert "test_start" not in str(exc.value)
+    assert not (output_root / "prediction_bad_folds").exists()
+
+
+def test_prediction_handoff_rejects_duplicate_run_id_before_input_read(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "missing_features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    (output_root / "prediction_duplicate").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="duplicate_run_id") as exc:
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_duplicate",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("ridge",),
+            )
+        )
+
+    assert "missing_features.parquet" not in str(exc.value)
+
+
 def test_prediction_handoff_rejects_unsupported_feature_preset(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"

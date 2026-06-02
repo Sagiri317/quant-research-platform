@@ -27,6 +27,7 @@ from quant_research_platform.research.ml_model_suite import (
 from quant_research_platform.research.prediction_handoff import (
     DEFAULT_NON_DL_MODEL_IDS,
     PredictionHandoffConfig,
+    ensure_prediction_run_id_available,
     run_prediction_handoff,
 )
 from quant_research_platform.runtime.private_paths import text_has_private_marker
@@ -61,6 +62,7 @@ _ALLOWED_FAILURE_CODES = {
     "missing_prediction_input",
     "prediction_handoff_failed",
     "private_output_policy_violation",
+    "sensitive_metadata_policy_violation",
     "warmup_insufficient",
 }
 _SENSITIVE_TEXT_PATTERN = re.compile(
@@ -173,6 +175,10 @@ def create_prediction_handoff(
 
     context = api_context(request)
     try:
+        ensure_prediction_run_id_available(
+            context.prediction_handoff_root,
+            payload.run_id,
+        )
         feature_columns = _resolve_prediction_feature_columns(
             payload.input_parquet,
             explicit_columns=payload.feature_columns,
@@ -237,12 +243,19 @@ def factor_rebuild_status(run_id: str, request: Request) -> dict[str, object]:
         summary.get("failure_code"),
         _ALLOWED_FAILURE_CODES,
     )
-    payload = {
-        "run_id": run_id,
-        "status": status_value,
-        "factor_pack": factor_pack,
-        "row_count": int(summary.get("row_count", 0) or 0),
-    }
+    try:
+        payload = {
+            "run_id": run_id,
+            "status": status_value,
+            "factor_pack": factor_pack,
+            "row_count": _required_int(summary.get("row_count", 0)),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            error_code="factor_rebuild_status_invalid",
+            message="factor rebuild status invalid",
+            status_code=422,
+        ) from exc
     if failure_code:
         payload["failure_code"] = failure_code
     return payload
@@ -359,12 +372,19 @@ def prediction_handoff_status(run_id: str, request: Request) -> dict[str, object
         summary.get("failure_code"),
         _ALLOWED_FAILURE_CODES,
     )
-    payload = {
-        "run_id": run_id,
-        "status": status_value,
-        "row_count": int(summary.get("row_count", 0) or 0),
-        "model_suite_id": model_suite_id,
-    }
+    try:
+        payload = {
+            "run_id": run_id,
+            "status": status_value,
+            "row_count": _required_int(summary.get("row_count", 0)),
+            "model_suite_id": model_suite_id,
+        }
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            error_code="prediction_handoff_status_invalid",
+            message="prediction handoff status invalid",
+            status_code=422,
+        ) from exc
     if failure_code:
         payload["failure_code"] = failure_code
     return payload
@@ -418,28 +438,37 @@ def prediction_handoff_schema(run_id: str, request: Request) -> dict[str, object
     target_column = _safe_schema_string(metadata.get("target_column")) or ""
     if target_column and not _SAFE_TARGET_COLUMN_PATTERN.fullmatch(target_column):
         target_column = ""
-    return {
-        "prediction_handoff_version": (
-            _safe_allowed_runtime_string(
-                metadata.get("prediction_handoff_version"),
-                _ALLOWED_PREDICTION_HANDOFF_VERSIONS,
-            )
-            or ""
-        ),
-        "model_suite_id": (
-            _safe_allowed_runtime_string(
-                metadata.get("model_suite_id"),
-                _ALLOWED_MODEL_SUITE_IDS,
-                default=A_SHARE_MODEL_SUITE_ID,
-            )
-            or A_SHARE_MODEL_SUITE_ID
-        ),
-        "prediction_columns": _safe_prediction_columns(
-            metadata.get("prediction_columns", [])
-        ),
-        "target_column": target_column,
-        "label_horizon_days": int(metadata.get("label_horizon_days", 0) or 0),
-    }
+    try:
+        return {
+            "prediction_handoff_version": (
+                _safe_allowed_runtime_string(
+                    metadata.get("prediction_handoff_version"),
+                    _ALLOWED_PREDICTION_HANDOFF_VERSIONS,
+                )
+                or ""
+            ),
+            "model_suite_id": (
+                _safe_allowed_runtime_string(
+                    metadata.get("model_suite_id"),
+                    _ALLOWED_MODEL_SUITE_IDS,
+                    default=A_SHARE_MODEL_SUITE_ID,
+                )
+                or A_SHARE_MODEL_SUITE_ID
+            ),
+            "prediction_columns": _safe_prediction_columns(
+                metadata.get("prediction_columns", [])
+            ),
+            "target_column": target_column,
+            "label_horizon_days": _required_int(
+                metadata.get("label_horizon_days", 0)
+            ),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            error_code="prediction_handoff_status_invalid",
+            message="prediction handoff status invalid",
+            status_code=422,
+        ) from exc
 
 
 @router.get("/api/a-share/prediction-handoffs/{run_id}/schema-inventory")
@@ -700,7 +729,14 @@ def _read_schema_inventory_payload(
 
 
 def _schema_inventory_payload(run_id: str, value: dict[str, Any]) -> dict[str, object]:
-    return {
+    columns, redacted_columns = _safe_schema_columns(value.get("columns"))
+    missing, redacted_missing = _safe_schema_string_list(
+        value.get("missing_expected_columns")
+    )
+    unexpected, redacted_unexpected = _safe_schema_string_list(
+        value.get("unexpected_columns")
+    )
+    payload: dict[str, object] = {
         "run_id": run_id,
         "schema_inventory_version": _safe_schema_string(
             value.get("schema_inventory_version")
@@ -708,24 +744,37 @@ def _schema_inventory_payload(run_id: str, value: dict[str, Any]) -> dict[str, o
         or "",
         "row_count": _required_int(value.get("row_count", 0)),
         "row_group_count": _required_int(value.get("row_group_count", 0)),
-        "columns": _safe_schema_columns(value.get("columns")),
-        "missing_expected_columns": _safe_schema_string_list(
-            value.get("missing_expected_columns")
-        ),
-        "unexpected_columns": _safe_schema_string_list(
-            value.get("unexpected_columns")
-        ),
+        "columns": columns,
+        "missing_expected_columns": missing,
+        "unexpected_columns": unexpected,
         "duplicate_key_count": _optional_int(value.get("duplicate_key_count")),
         "date_range": _safe_date_range(value.get("date_range")),
         "market_scope": _safe_market_scope(value.get("market_scope")),
         "date_filter": _safe_date_range(value.get("date_filter")),
     }
+    redacted_column_count = (
+        _optional_int(value.get("redacted_column_count")) or 0
+    ) + redacted_columns
+    redacted_missing_count = (
+        _optional_int(value.get("redacted_missing_expected_column_count")) or 0
+    ) + redacted_missing
+    redacted_unexpected_count = (
+        _optional_int(value.get("redacted_unexpected_column_count")) or 0
+    ) + redacted_unexpected
+    if redacted_column_count:
+        payload["redacted_column_count"] = redacted_column_count
+    if redacted_missing_count:
+        payload["redacted_missing_expected_column_count"] = redacted_missing_count
+    if redacted_unexpected_count:
+        payload["redacted_unexpected_column_count"] = redacted_unexpected_count
+    return payload
 
 
-def _safe_schema_columns(value: object) -> list[dict[str, str]]:
+def _safe_schema_columns(value: object) -> tuple[list[dict[str, str]], int]:
     if not isinstance(value, list):
-        return []
+        return [], 0
     columns: list[dict[str, str]] = []
+    redacted_count = 0
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -734,17 +783,23 @@ def _safe_schema_columns(value: object) -> list[dict[str, str]]:
         role = _safe_schema_string(item.get("role"))
         if name and dtype and role:
             columns.append({"name": name, "dtype": dtype, "role": role})
-    return columns
+        else:
+            redacted_count += 1
+    return columns, redacted_count
 
 
-def _safe_schema_string_list(value: object) -> list[str]:
+def _safe_schema_string_list(value: object) -> tuple[list[str], int]:
     if not isinstance(value, list):
-        return []
-    return [
-        text
-        for item in value
-        if (text := _safe_schema_string(item)) is not None
-    ]
+        return [], 0
+    values: list[str] = []
+    redacted_count = 0
+    for item in value:
+        text = _safe_schema_string(item)
+        if text is None:
+            redacted_count += 1
+        else:
+            values.append(text)
+    return values, redacted_count
 
 
 def _safe_date_range(value: object) -> dict[str, str | None] | None:
@@ -832,6 +887,7 @@ def _safe_schema_string(value: object) -> str | None:
         _SENSITIVE_TEXT_PATTERN.search(value)
         or text_has_private_marker(value)
         or _has_unsafe_path_text(value)
+        or _has_unsafe_schema_marker(value)
     ):
         return None
     return value
@@ -857,6 +913,16 @@ def _has_unsafe_path_text(value: str) -> bool:
     if re.search(r"(?<![A-Za-z0-9_.])\.\.(?:/|$)", normalized):
         return True
     return any(".." in Path(token).parts for token in normalized.split())
+
+
+def _has_unsafe_schema_marker(value: str) -> bool:
+    normalized = value.replace("\\", "/").casefold()
+    return (
+        any(marker in normalized for marker in ("vendor", "source"))
+        or normalized.startswith("local_")
+        or normalized.endswith("_local")
+        or "_local_" in normalized
+    )
 
 
 def _raise_a_share_api_error(exc: BaseException) -> None:
@@ -903,6 +969,7 @@ def _batch_error_code(exc: BaseException, *, default: str) -> str:
         "dependency_unavailable",
         "factor_validation_failed",
         "missing_factor_field",
+        "sensitive_metadata_policy_violation",
         "warmup_insufficient",
     }
     if detail in known:

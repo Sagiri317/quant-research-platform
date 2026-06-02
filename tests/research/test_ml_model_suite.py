@@ -5,6 +5,7 @@ import json
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.ml_model_suite as ml_model_suite
 from quant_research_platform.research.ml_model_suite import (
     A_SHARE_MODEL_SUITE_ID,
     DEFAULT_RESEARCH_RANDOM_SEED,
@@ -64,6 +65,27 @@ def test_model_suite_writes_oos_prediction_columns_and_metadata(tmp_path) -> Non
         "elastic_net",
         "hist_gradient_boosting",
     }
+    ready_prediction_columns = [
+        "prediction_score_ridge_2d",
+        "prediction_score_elastic_net_2d",
+        "prediction_score_hist_gradient_boosting_2d",
+    ]
+    assert len(prediction_records) == len(predictions) * len(ready_prediction_columns)
+    assert not prediction_records.duplicated(
+        ["timestamp", "asset", "fold_id", "prediction_column"]
+    ).any()
+    reconstructed = prediction_records.pivot(
+        index=["timestamp", "asset", "fold_id"],
+        columns="prediction_column",
+        values="prediction_score",
+    ).reset_index()
+    expected = predictions[
+        ["timestamp", "asset", "fold_id", *ready_prediction_columns]
+    ].sort_values(["timestamp", "asset", "fold_id"], ignore_index=True)
+    actual = reconstructed[
+        ["timestamp", "asset", "fold_id", *ready_prediction_columns]
+    ].sort_values(["timestamp", "asset", "fold_id"], ignore_index=True)
+    pd.testing.assert_frame_equal(actual, expected, check_names=False)
     assert metadata["model_suite_id"] == A_SHARE_MODEL_SUITE_ID
     assert metadata["label_horizon_days"] == 2
     assert metadata["folds"][0]["purged_train_end"] == "2024-01-02"
@@ -203,6 +225,157 @@ def test_model_suite_rejects_non_final_open_ended_fold(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "folds",
+    [
+        (
+            SuiteFoldConfig(
+                fold_id="fold_001",
+                train_end="2024-01-05",
+                test_start="2024-01-08",
+                test_end="2024-01-09",
+            ),
+            SuiteFoldConfig(
+                fold_id="fold_001",
+                train_end="2024-01-08",
+                test_start="2024-01-10",
+                test_end="2024-01-10",
+            ),
+        ),
+        (
+            SuiteFoldConfig(
+                fold_id="fold_001",
+                train_end="2024-01-08",
+                test_start="2024-01-08",
+                test_end="2024-01-09",
+            ),
+        ),
+        (
+            SuiteFoldConfig(
+                fold_id="fold_001",
+                train_end="2024-01-05",
+                test_start="2024-01-09",
+                test_end="2024-01-08",
+            ),
+        ),
+        (
+            SuiteFoldConfig(
+                fold_id="fold_001",
+                train_end="2024-01-05",
+                test_start="2024-01-08",
+                test_end="2024-01-09",
+            ),
+            SuiteFoldConfig(
+                fold_id="fold_002",
+                train_end="2024-01-05",
+                test_start="2024-01-09",
+                test_end="2024-01-10",
+            ),
+        ),
+        (
+            SuiteFoldConfig(
+                fold_id="fold_001",
+                train_end="2024-01-05",
+                test_start="2024-01-10",
+                test_end="2024-01-10",
+            ),
+            SuiteFoldConfig(
+                fold_id="fold_002",
+                train_end="2024-01-05",
+                test_start="2024-01-08",
+                test_end="2024-01-09",
+            ),
+        ),
+        (
+            SuiteFoldConfig(
+                fold_id="fold_001",
+                train_end="2024-01-05",
+                test_start="2024-01-08",
+                test_end="2024-01-09",
+            ),
+            SuiteFoldConfig(
+                fold_id="fold_002",
+                train_end="2024-01-06",
+                test_start="2024-01-08",
+                test_end="2024-01-09",
+            ),
+        ),
+        (
+            SuiteFoldConfig(
+                fold_id="",
+                train_end="2024-01-05",
+                test_start="2024-01-08",
+                test_end="2024-01-09",
+            ),
+        ),
+    ],
+)
+def test_model_suite_rejects_invalid_fold_windows(tmp_path, folds) -> None:
+    input_path = tmp_path / "features.parquet"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    with pytest.raises(ValueError, match="invalid_prediction_config"):
+        run_model_suite(
+            ModelSuiteConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                output_prediction_long_path=tmp_path / "prediction_records.parquet",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                label_horizon_days=2,
+                folds=folds,
+                model_ids=("ridge",),
+            )
+        )
+    assert not (tmp_path / "predictions.parquet").exists()
+    assert not (tmp_path / "metadata.json").exists()
+
+
+def test_model_suite_valid_ordered_folds_do_not_duplicate_oos_entities(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    run_model_suite(
+        ModelSuiteConfig(
+            input_path=input_path,
+            output_prediction_path=prediction_path,
+            output_metadata_path=metadata_path,
+            output_prediction_long_path=tmp_path / "prediction_records.parquet",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            label_horizon_days=2,
+            folds=(
+                SuiteFoldConfig(
+                    fold_id="fold_001",
+                    train_end="2024-01-05",
+                    test_start="2024-01-08",
+                    test_end="2024-01-09",
+                ),
+                SuiteFoldConfig(
+                    fold_id="fold_002",
+                    train_end="2024-01-08",
+                    test_start="2024-01-10",
+                ),
+            ),
+            model_ids=("ridge",),
+        )
+    )
+
+    predictions = pd.read_parquet(prediction_path)
+    assert not predictions.duplicated(["timestamp", "asset", "fold_id"]).any()
+    assert not predictions.duplicated(["timestamp", "asset"]).any()
+    assert set(predictions["fold_id"]) == {"fold_001", "fold_002"}
+
+
 def test_model_suite_rejects_label_horizon_mismatch(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
@@ -259,7 +432,11 @@ def test_model_suite_randomized_models_are_repeatable_with_default_seed(
                         test_end="2024-01-09",
                     ),
                 ),
-                model_ids=("random_forest_lite", "extra_trees_lite"),
+                model_ids=(
+                    "random_forest_lite",
+                    "extra_trees_lite",
+                    "hist_gradient_boosting",
+                ),
             )
         )
         return (
@@ -273,6 +450,7 @@ def test_model_suite_randomized_models_are_repeatable_with_default_seed(
     prediction_columns = [
         "prediction_score_random_forest_lite_2d",
         "prediction_score_extra_trees_lite_2d",
+        "prediction_score_hist_gradient_boosting_2d",
     ]
     pd.testing.assert_frame_equal(
         first_predictions[prediction_columns],
@@ -285,6 +463,108 @@ def test_model_suite_randomized_models_are_repeatable_with_default_seed(
     assert second_metadata["random_seed"] == DEFAULT_RESEARCH_RANDOM_SEED
     assert first_metadata["model_ids"] == second_metadata["model_ids"]
     assert first_metadata["model_statuses"] == second_metadata["model_statuses"]
+
+
+@pytest.mark.parametrize(
+    ("module_name", "model_id"),
+    [
+        ("xgboost", "xgboost_lite"),
+        ("lightgbm", "lightgbm_lite"),
+    ],
+)
+def test_optional_boosting_models_are_repeatable_when_installed(
+    tmp_path,
+    module_name,
+    model_id,
+) -> None:
+    pytest.importorskip(module_name)
+    input_path = tmp_path / "features.parquet"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    outputs = []
+    for name in ("first", "second"):
+        prediction_path = tmp_path / f"{name}_predictions.parquet"
+        metadata_path = tmp_path / f"{name}_metadata.json"
+        run_model_suite(
+            ModelSuiteConfig(
+                input_path=input_path,
+                output_prediction_path=prediction_path,
+                output_metadata_path=metadata_path,
+                output_prediction_long_path=None,
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                label_horizon_days=2,
+                folds=(
+                    SuiteFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2024-01-05",
+                        test_start="2024-01-08",
+                        test_end="2024-01-09",
+                    ),
+                ),
+                model_ids=(model_id,),
+            )
+        )
+        outputs.append(pd.read_parquet(prediction_path).sort_index(axis=1))
+
+    column = f"prediction_score_{model_id}_2d"
+    pd.testing.assert_series_equal(
+        outputs[0][column],
+        outputs[1][column],
+        check_exact=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_optional_boosting_models_record_missing_dependency_status(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    prediction_path = tmp_path / "predictions.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    monkeypatch.setattr(ml_model_suite.importlib_util, "find_spec", lambda _name: None)
+
+    run_model_suite(
+        ModelSuiteConfig(
+            input_path=input_path,
+            output_prediction_path=prediction_path,
+            output_metadata_path=metadata_path,
+            output_prediction_long_path=tmp_path / "prediction_records.parquet",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            label_horizon_days=2,
+            folds=(
+                SuiteFoldConfig(
+                    fold_id="fold_001",
+                    train_end="2024-01-05",
+                    test_start="2024-01-08",
+                    test_end="2024-01-09",
+                ),
+            ),
+            model_ids=("xgboost_lite", "lightgbm_lite"),
+        )
+    )
+
+    predictions = pd.read_parquet(prediction_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["prediction_columns"] == []
+    assert {
+        (status["model_id"], status["status"])
+        for status in metadata["model_statuses"]
+    } == {
+        ("xgboost_lite", "dependency_unavailable"),
+        ("lightgbm_lite", "dependency_unavailable"),
+    }
+    assert "prediction_score_xgboost_lite_2d" not in predictions.columns
+    assert "prediction_score_lightgbm_lite_2d" not in predictions.columns
 
 
 def _panel() -> pd.DataFrame:
