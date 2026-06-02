@@ -17,6 +17,45 @@ LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID = (
 )
 
 DEFAULT_LITERATURE_WINDOWS: tuple[int, ...] = (1, 5, 10, 20, 60, 120, 252)
+LITERATURE_FACTOR_SET_TIERS: tuple[str, ...] = (
+    "full",
+    "core_long_period",
+    "smoke_minimal",
+)
+CORE_LONG_PERIOD_FACTORS: tuple[str, ...] = (
+    "rev_1d",
+    "rev_5d",
+    "rev_10d",
+    "rev_20d",
+    "mom_20d",
+    "mom_60d",
+    "mom_120d",
+    "vol_20d",
+    "vol_60d",
+    "downside_vol_20d",
+    "downside_vol_60d",
+    "avg_amount_20d",
+    "avg_amount_60d",
+    "turnover_20d",
+    "turnover_60d",
+    "amihud_20d",
+    "amihud_60d",
+    "amplitude_20d",
+    "amplitude_60d",
+    "log_float_market_cap",
+    "log_total_market_cap",
+)
+SMOKE_MINIMAL_FACTORS: tuple[str, ...] = (
+    "rev_1d",
+    "mom_20d",
+    "vol_20d",
+    "avg_amount_20d",
+    "turnover_20d",
+    "amihud_20d",
+    "amplitude_20d",
+    "log_float_market_cap",
+    "log_total_market_cap",
+)
 LITERATURE_FEATURE_EXCLUDE_PREFIXES: tuple[str, ...] = (
     "forward_return",
     "target",
@@ -92,9 +131,18 @@ BASE_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 
 
 def expected_literature_price_volume_factor_columns(
-    *, windows: tuple[int, ...] = DEFAULT_LITERATURE_WINDOWS
+    *,
+    windows: tuple[int, ...] = DEFAULT_LITERATURE_WINDOWS,
+    factor_set_tier: str = "full",
 ) -> tuple[str, ...]:
     """Return the explicit v1 literature-prior factor column contract."""
+
+    if factor_set_tier == "core_long_period":
+        return CORE_LONG_PERIOD_FACTORS
+    if factor_set_tier == "smoke_minimal":
+        return SMOKE_MINIMAL_FACTORS
+    if factor_set_tier != "full":
+        raise ValueError("invalid_factor_rebuild_config")
 
     columns: list[str] = ["rev_1d"]
     for window in windows:
@@ -159,6 +207,7 @@ def calculate_literature_price_volume_factors(
     frame: pd.DataFrame,
     *,
     windows: tuple[int, ...] = DEFAULT_LITERATURE_WINDOWS,
+    expected_columns: tuple[str, ...] | None = None,
     asset_column: str = "stock_code",
     date_column: str = "trade_date",
     price_column: str = "adj_close",
@@ -173,8 +222,10 @@ def calculate_literature_price_volume_factors(
 ) -> pd.DataFrame:
     """Add v1 literature-prior price-volume factors without future data."""
 
+    requested = set(expected_columns or _all_literature_factor_columns(windows))
+    required_windows = _windows_from_requested_factors(requested, windows=windows)
     usable_base_windows = tuple(
-        window for window in windows if window in {5, 20, 60, 120}
+        window for window in required_windows if window in {5, 10, 20, 60, 120}
     )
     result = calculate_price_volume_factors(
         frame,
@@ -193,8 +244,9 @@ def calculate_literature_price_volume_factors(
     grouped = result.groupby(asset_column, sort=False)
     returns = pd.to_numeric(result[return_column], errors="coerce")
 
-    result["rev_1d"] = -returns
-    for window in windows:
+    if "rev_1d" in requested:
+        result["rev_1d"] = -returns
+    for window in required_windows:
         if window == 1:
             continue
         shifted_price = grouped[price_column].shift(window)
@@ -204,60 +256,73 @@ def calculate_literature_price_volume_factors(
         if f"rev_{window}d" not in result.columns:
             result[f"rev_{window}d"] = -trailing_return
 
-    for window in windows:
-        result[f"downside_vol_{window}d"] = _rolling_rms(
-            returns.clip(upper=0.0),
-            result[asset_column],
-            window,
-        )
-        result[f"upside_vol_{window}d"] = _rolling_rms(
-            returns.clip(lower=0.0),
-            result[asset_column],
-            window,
-        )
-        result[f"max_return_{window}d"] = grouped[return_column].transform(
-            lambda series, w=window: series.rolling(w, min_periods=w).max()
-        )
-        result[f"min_return_{window}d"] = grouped[return_column].transform(
-            lambda series, w=window: series.rolling(w, min_periods=w).min()
-        )
-        result[f"drawdown_{window}d"] = _rolling_drawdown(
-            pd.to_numeric(result[price_column], errors="coerce"),
-            result[asset_column],
-            window,
-        )
-        result[f"skew_{window}d"] = grouped[return_column].transform(
-            lambda series, w=window: series.rolling(w, min_periods=w).skew()
-        )
-        result[f"kurt_{window}d"] = grouped[return_column].transform(
-            lambda series, w=window: series.rolling(w, min_periods=w).kurt()
-        )
+    for window in required_windows:
+        if f"downside_vol_{window}d" in requested:
+            result[f"downside_vol_{window}d"] = _rolling_rms(
+                returns.clip(upper=0.0),
+                result[asset_column],
+                window,
+            )
+        if f"upside_vol_{window}d" in requested:
+            result[f"upside_vol_{window}d"] = _rolling_rms(
+                returns.clip(lower=0.0),
+                result[asset_column],
+                window,
+            )
+        if f"max_return_{window}d" in requested:
+            result[f"max_return_{window}d"] = grouped[return_column].transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).max()
+            )
+        if f"min_return_{window}d" in requested:
+            result[f"min_return_{window}d"] = grouped[return_column].transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).min()
+            )
+        if f"drawdown_{window}d" in requested:
+            result[f"drawdown_{window}d"] = _rolling_drawdown(
+                pd.to_numeric(result[price_column], errors="coerce"),
+                result[asset_column],
+                window,
+            )
+        if f"skew_{window}d" in requested:
+            result[f"skew_{window}d"] = grouped[return_column].transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).skew()
+            )
+        if f"kurt_{window}d" in requested:
+            result[f"kurt_{window}d"] = grouped[return_column].transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).kurt()
+            )
 
     turnover = pd.to_numeric(result[turnover_column], errors="coerce")
-    for window in windows:
-        shifted_turnover = grouped[turnover_column].shift(window)
-        denominator = shifted_turnover.where(shifted_turnover != 0.0)
-        result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
-        result[f"turnover_vol_{window}d"] = grouped[turnover_column].transform(
-            lambda series, w=window: series.rolling(w, min_periods=w).std()
-        )
-        result[f"zero_volume_ratio_{window}d"] = (
-            (pd.to_numeric(result[amount_column], errors="coerce") <= 0.0)
-            .astype(float)
-            .groupby(result[asset_column], sort=False)
-            .transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+    for window in required_windows:
+        if f"turnover_chg_{window}d" in requested:
+            shifted_turnover = grouped[turnover_column].shift(window)
+            denominator = shifted_turnover.where(shifted_turnover != 0.0)
+            result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
+        if f"turnover_vol_{window}d" in requested:
+            result[f"turnover_vol_{window}d"] = grouped[turnover_column].transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).std()
             )
-        )
+        if f"zero_volume_ratio_{window}d" in requested:
+            result[f"zero_volume_ratio_{window}d"] = (
+                (pd.to_numeric(result[amount_column], errors="coerce") <= 0.0)
+                .astype(float)
+                .groupby(result[asset_column], sort=False)
+                .transform(
+                    lambda series, w=window: series.rolling(w, min_periods=w).mean()
+                )
+            )
 
     intraday_range = (
         pd.to_numeric(result[high_column], errors="coerce")
         - pd.to_numeric(result[low_column], errors="coerce")
     ) / pd.to_numeric(result[price_column], errors="coerce").replace(0.0, np.nan)
-    for window in windows:
-        result[f"intraday_range_{window}d"] = intraday_range.groupby(
-            result[asset_column], sort=False
-        ).transform(lambda series, w=window: series.rolling(w, min_periods=w).mean())
+    for window in required_windows:
+        if f"intraday_range_{window}d" in requested:
+            result[f"intraday_range_{window}d"] = intraday_range.groupby(
+                result[asset_column], sort=False
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
 
     if float_market_cap_column in result.columns:
         result["log_float_market_cap"] = _safe_log(result[float_market_cap_column])
@@ -274,10 +339,14 @@ def select_literature_price_volume_features(
     """Select preset v1 feature columns and exclude labels/filters/leakage."""
 
     expected = expected_columns or expected_literature_price_volume_factor_columns()
-    actual_factor_columns = tuple(
-        column
-        for column in frame.columns
-        if column.casefold().startswith(LITERATURE_FACTOR_PREFIXES)
+    actual_factor_columns = (
+        ()
+        if expected_columns is not None
+        else tuple(
+            column
+            for column in frame.columns
+            if column.casefold().startswith(LITERATURE_FACTOR_PREFIXES)
+        )
     )
     columns = tuple(
         dict.fromkeys(
@@ -366,10 +435,55 @@ def _required_fields_for_factor(factor: str) -> tuple[str, ...]:
     return ()
 
 
+def _windows_from_requested_factors(
+    requested: set[str],
+    *,
+    windows: tuple[int, ...],
+) -> tuple[int, ...]:
+    values = {1} if "rev_1d" in requested else set()
+    for factor in requested:
+        for token in factor.split("_"):
+            if token.endswith("d") and token[:-1].isdigit():
+                values.add(int(token[:-1]))
+    return tuple(window for window in windows if window in values)
+
+
+def _all_literature_factor_columns(windows: tuple[int, ...]) -> tuple[str, ...]:
+    columns: list[str] = ["rev_1d"]
+    for window in windows:
+        if window != 1:
+            columns.extend((f"rev_{window}d", f"mom_{window}d"))
+        columns.extend(
+            (
+                f"vol_{window}d",
+                f"downside_vol_{window}d",
+                f"upside_vol_{window}d",
+                f"max_return_{window}d",
+                f"min_return_{window}d",
+                f"drawdown_{window}d",
+                f"skew_{window}d",
+                f"kurt_{window}d",
+                f"avg_amount_{window}d",
+                f"turnover_{window}d",
+                f"turnover_chg_{window}d",
+                f"turnover_vol_{window}d",
+                f"amihud_{window}d",
+                f"zero_volume_ratio_{window}d",
+                f"amplitude_{window}d",
+                f"intraday_range_{window}d",
+            )
+        )
+    columns.extend(("log_float_market_cap", "log_total_market_cap"))
+    return tuple(dict.fromkeys(columns))
+
+
 __all__ = [
     "DEFAULT_LITERATURE_WINDOWS",
+    "CORE_LONG_PERIOD_FACTORS",
     "LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID",
+    "LITERATURE_FACTOR_SET_TIERS",
     "LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID",
+    "SMOKE_MINIMAL_FACTORS",
     "calculate_literature_price_volume_factors",
     "expected_literature_price_volume_factor_columns",
     "select_literature_price_volume_features",

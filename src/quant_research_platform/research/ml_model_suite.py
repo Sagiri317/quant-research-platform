@@ -442,7 +442,15 @@ def _add_model_predictions(
         ]
     except ValueError as exc:
         return [{"model_id": model_id, "status": "fit_failed", "reason": str(exc)}]
-    return [{"model_id": model_id, "status": "ready", "prediction_column": column}]
+    payload: dict[str, Any] = {
+        "model_id": model_id,
+        "status": "ready",
+        "prediction_column": column,
+    }
+    importances = _feature_importances(model, config.feature_columns)
+    if importances:
+        payload["feature_importances"] = importances
+    return [payload]
 
 
 def _add_single_factor_predictions(
@@ -509,6 +517,22 @@ def _dependency_status(model_id: str) -> dict[str, str]:
     if importlib_util.find_spec(package) is None:
         return {"status": "missing", "reason": f"{package} import not available"}
     return {"status": "available", "reason": f"{package} import available"}
+
+
+def _feature_importances(
+    model: object,
+    feature_columns: tuple[str, ...],
+) -> list[dict[str, object]]:
+    values = getattr(model, "feature_importances_", None)
+    if values is None:
+        return []
+    numeric = np.asarray(values, dtype="float64")
+    if len(numeric) != len(feature_columns):
+        return []
+    return [
+        {"feature": feature, "importance": float(value)}
+        for feature, value in zip(feature_columns, numeric, strict=False)
+    ]
 
 
 def _write_long_predictions(

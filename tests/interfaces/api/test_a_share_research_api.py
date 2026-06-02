@@ -336,6 +336,87 @@ def test_a_share_status_endpoints_sanitize_disk_loaded_strings(tmp_path) -> None
     assert "private_real" not in prediction_status.text
 
 
+def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
+    tmp_path,
+) -> None:
+    factor_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    factor_run = factor_root / "bad_factor_eda"
+    (factor_run / "eda").mkdir(parents=True)
+    (factor_run / "eda" / "eda_manifest.json").write_text(
+        json.dumps({"status": "credential_token=abc123", "artifact_count": 4}),
+        encoding="utf-8",
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    prediction_run = prediction_root / "bad_prediction_schema"
+    (prediction_run / "eda").mkdir(parents=True)
+    (prediction_run / "model_metadata.json").write_text(
+        json.dumps(
+            {
+                "prediction_handoff_version": "credential_token=abc123",
+                "model_suite_id": "api_key=abc123",
+                "prediction_columns": [
+                    "prediction_score_ridge_20d",
+                    "C:/private/path",
+                    "secret_token=abc123",
+                ],
+                "target_column": "../processed_private/forward_return_20d",
+                "label_horizon_days": 20,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (prediction_run / "eda" / "eda_manifest.json").write_text(
+        json.dumps({"status": "reports/private_real/leak", "artifact_count": 6}),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_rebuild_root=factor_root,
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    factor_eda = client.get("/api/a-share/factor-rebuild-runs/bad_factor_eda/eda")
+    schema = client.get(
+        "/api/a-share/prediction-handoffs/bad_prediction_schema/schema"
+    )
+    prediction_eda = client.get(
+        "/api/a-share/prediction-handoffs/bad_prediction_schema/eda"
+    )
+
+    assert factor_eda.status_code == 200
+    assert schema.status_code == 200
+    assert prediction_eda.status_code == 200
+    assert factor_eda.json() == {
+        "run_id": "bad_factor_eda",
+        "status": "unknown",
+        "artifact_count": 4,
+    }
+    assert schema.json() == {
+        "prediction_handoff_version": "",
+        "model_suite_id": "n6_a_share_sklearn_boosting_suite_v1",
+        "prediction_columns": ["prediction_score_ridge_20d"],
+        "target_column": "",
+        "label_horizon_days": 20,
+    }
+    assert prediction_eda.json() == {
+        "run_id": "bad_prediction_schema",
+        "status": "unknown",
+        "artifact_count": 6,
+    }
+    combined = factor_eda.text + schema.text + prediction_eda.text
+    assert str(tmp_path) not in combined
+    assert "credential" not in combined
+    assert "api_key" not in combined
+    assert "secret" not in combined
+    assert "token" not in combined
+    assert "processed_private" not in combined
+    assert "private_real" not in combined
+
+
 def _panel() -> pd.DataFrame:
     rows = []
     for stock_code, base in (("000001", 10.0), ("000002", 20.0)):

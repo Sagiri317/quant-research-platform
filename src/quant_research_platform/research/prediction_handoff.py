@@ -481,14 +481,33 @@ def _write_eda_outputs(
         .rename(columns={"index": "feature"})
     )
     missingness.to_csv(eda_dir / "missingness_by_feature.csv", index=False)
-    chart_count = _write_optional_charts(eda_dir, coverage, missingness)
+    ic_year = _ic_breakdown(
+        frame,
+        prediction_columns=prediction_columns,
+        label_column=config.label_column,
+        timestamp_column=config.timestamp_column,
+        period="year",
+    )
+    ic_month = _ic_breakdown(
+        frame,
+        prediction_columns=prediction_columns,
+        label_column=config.label_column,
+        timestamp_column=config.timestamp_column,
+        period="month",
+    )
+    ic_year.to_csv(eda_dir / "prediction_ic_by_year.csv", index=False)
+    ic_month.to_csv(eda_dir / "prediction_ic_by_month.csv", index=False)
+    importance_count = _write_feature_importance_outputs(run_dir, eda_dir)
+    chart_count, chart_status = _write_optional_charts(eda_dir, coverage, missingness)
     write_json_sanitized(
         eda_dir / "eda_manifest.json",
         {
             "status": "ready",
             "eda_status": "experimental_non_contract",
-            "artifact_count": 3 + chart_count,
+            "artifact_count": 5 + importance_count + chart_count,
             "chart_count": chart_count,
+            "chart_dependency_status": chart_status,
+            "feature_importance_artifact_count": importance_count,
         },
     )
     (eda_dir / "eda_report.md").write_text(
@@ -496,6 +515,81 @@ def _write_eda_outputs(
         "Experimental aggregate-only diagnostics; not schema 0.7 contract.\n",
         encoding="utf-8",
     )
+
+
+def _ic_breakdown(
+    frame: pd.DataFrame,
+    *,
+    prediction_columns: tuple[str, ...],
+    label_column: str,
+    timestamp_column: str,
+    period: str,
+) -> pd.DataFrame:
+    dates = pd.to_datetime(frame[timestamp_column], errors="coerce")
+    if period == "year":
+        labels = dates.dt.year.astype("string")
+    else:
+        labels = dates.dt.to_period("M").astype(str)
+    rows: list[dict[str, object]] = []
+    for column in prediction_columns:
+        valid = frame[[column, label_column]].copy()
+        valid["period"] = labels
+        valid = valid.dropna()
+        for value, group in valid.groupby("period"):
+            if len(group) <= 1:
+                continue
+            rows.append(
+                {
+                    "period": str(value),
+                    "model_id": _model_id_from_prediction_column(
+                        column,
+                        label_column,
+                    ),
+                    "mean_ic": float(group[column].corr(group[label_column])),
+                    "mean_rankic": float(
+                        group[column].rank().corr(group[label_column].rank())
+                    ),
+                    "n_oos_rows": int(len(group)),
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=("period", "model_id", "mean_ic", "mean_rankic", "n_oos_rows"),
+    )
+
+
+def _write_feature_importance_outputs(run_dir: Path, eda_dir: Path) -> int:
+    metadata_path = run_dir / "model_metadata.json"
+    if not metadata_path.is_file():
+        return 0
+    try:
+        import json
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    rows = []
+    for status in metadata.get("model_statuses", []):
+        if not isinstance(status, dict):
+            continue
+        for item in status.get("feature_importances", []):
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                {
+                    "fold_id": status.get("fold_id"),
+                    "model_id": status.get("model_id"),
+                    "feature": item.get("feature"),
+                    "importance": item.get("importance"),
+                }
+            )
+    if not rows:
+        return 0
+    pd.DataFrame(rows).to_csv(
+        eda_dir / "tree_model_feature_importance.csv",
+        index=False,
+    )
+    return 1
 
 
 def _summary(
@@ -576,11 +670,11 @@ def _write_optional_charts(
     eda_dir: Path,
     coverage: pd.DataFrame,
     missingness: pd.DataFrame,
-) -> int:
+) -> tuple[int, str]:
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        return 0
+        return 0, "dependency_unavailable"
     chart_count = 0
     if not coverage.empty:
         fig, ax = plt.subplots(figsize=(6, 3))
@@ -605,7 +699,7 @@ def _write_optional_charts(
         fig.savefig(eda_dir / "missingness_top20.png", dpi=120)
         plt.close(fig)
         chart_count += 1
-    return chart_count
+    return chart_count, "ready" if chart_count else "not_generated"
 
 
 __all__ = [

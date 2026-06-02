@@ -13,13 +13,11 @@ import pyarrow.parquet as pq
 from quant_research_platform.markets.implementations.a_share.csmar.columns import (  # noqa: E501
     SLIM_FACTOR_BASE_COLUMNS,
 )
-from quant_research_platform.markets.implementations.a_share.factors.build_factors import (  # noqa: E501
-    select_slim_factor_columns,
-)
 from quant_research_platform.markets.implementations.a_share.factors.labels import (
     add_forward_return_labels,
 )
 from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
+    LITERATURE_FACTOR_SET_TIERS,
     LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
     LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID,
     calculate_literature_price_volume_factors,
@@ -78,6 +76,9 @@ class FactorRebuildConfig:
     backup_existing: bool = False
     start_date: str | None = None
     end_date: str | None = None
+    calculation_start_date: str | None = None
+    evaluation_start_date: str | None = None
+    factor_set_tier: str = "full"
 
 
 @dataclass(frozen=True)
@@ -141,13 +142,15 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
         inventory = build_schema_inventory(
             config.panel_parquet,
             expected_columns=FACTOR_REBUILD_INPUT_COLUMNS,
-            start_date=config.start_date,
+            start_date=_calculation_start_date(config),
             end_date=config.end_date,
         )
         available_input_columns = tuple(
             pq.ParquetFile(config.panel_parquet).schema.names
         )
-        expected_factors = expected_literature_price_volume_factor_columns()
+        expected_factors = expected_literature_price_volume_factor_columns(
+            factor_set_tier=config.factor_set_tier
+        )
         unsupported = unsupported_literature_price_volume_factors(
             available_input_columns,
             expected_columns=expected_factors,
@@ -163,7 +166,7 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
                 len(SLIM_FACTOR_BASE_COLUMNS) + len(expected_factors) + 6
             ),
             date_column="trade_date",
-            start_date=config.start_date,
+            start_date=_calculation_start_date(config),
             end_date=config.end_date,
             memory_budget_gb=config.memory_budget_gb,
         )
@@ -175,6 +178,7 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
             unsupported_factors=unsupported,
             warnings=(),
             row_count=0,
+            factor_set_tier=config.factor_set_tier,
         )
         if preflight["status"] != "passed":
             raise ValueError("memory_preflight_failed")
@@ -193,15 +197,22 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
         panel = pd.read_parquet(
             config.panel_parquet,
             columns=read_columns,
-            filters=_date_filters(config.start_date, config.end_date),
+            filters=_date_filters(_calculation_start_date(config), config.end_date),
             engine="pyarrow",
         )
         if "stock_code" in panel.columns:
             panel["stock_code"] = panel["stock_code"].astype(str).str.zfill(6)
         labeled = add_forward_return_labels(panel)
-        factored = calculate_literature_price_volume_factors(labeled)
-        feature_columns, warnings = select_literature_price_volume_features(factored)
-        output = select_slim_factor_columns(factored)
+        factored = calculate_literature_price_volume_factors(
+            labeled,
+            expected_columns=expected_factors,
+        )
+        feature_columns, warnings = select_literature_price_volume_features(
+            factored,
+            expected_columns=expected_factors,
+        )
+        output = _project_factor_tier_columns(factored, expected_factors)
+        output = _crop_to_evaluation_window(output, config=config)
         output = output.sort_values(["stock_code", "trade_date"]).reset_index(
             drop=True
         )
@@ -214,6 +225,7 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
             unsupported_factors=unsupported,
             warnings=run_warnings,
             row_count=len(output),
+            factor_set_tier=config.factor_set_tier,
         )
         _write_factor_eda(
             run_dir=run_dir,
@@ -237,17 +249,15 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
                 "warning_count": len(run_warnings),
                 "unsupported_factor_count": len(unsupported),
                 "factor_pack": config.factor_pack,
+                "factor_set_tier": config.factor_set_tier,
                 "date_filter": {
-                    "start_date": config.start_date,
+                    "calculation_start_date": _calculation_start_date(config),
+                    "evaluation_start_date": _evaluation_start_date(config),
                     "end_date": config.end_date,
                 }
-                if config.start_date or config.end_date
+                if _calculation_start_date(config) or config.end_date
                 else None,
-                "degradation": (
-                    "date_filtered_smoke_without_prior_warmup"
-                    if config.start_date or config.end_date
-                    else None
-                ),
+                "warmup_status": _warmup_status(config),
             },
         )
         _write_checkpoints(run_dir)
@@ -269,6 +279,16 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
 
 def _validate_rebuild_config(config: FactorRebuildConfig) -> None:
     if config.factor_pack != LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID:
+        raise ValueError("invalid_factor_rebuild_config")
+    if config.factor_set_tier not in LITERATURE_FACTOR_SET_TIERS:
+        raise ValueError("invalid_factor_rebuild_config")
+    calculation_start = _timestamp_or_none(_calculation_start_date(config))
+    evaluation_start = _timestamp_or_none(_evaluation_start_date(config))
+    if (
+        calculation_start is not None
+        and evaluation_start is not None
+        and calculation_start > evaluation_start
+    ):
         raise ValueError("invalid_factor_rebuild_config")
     if not config.panel_parquet.is_file():
         raise FileNotFoundError(config.panel_parquet)
@@ -311,6 +331,49 @@ def _date_filters(
     if end_date:
         filters.append(("trade_date", "<=", pd.Timestamp(end_date)))
     return filters or None
+
+
+def _calculation_start_date(config: FactorRebuildConfig) -> str | None:
+    return config.calculation_start_date or config.start_date
+
+
+def _evaluation_start_date(config: FactorRebuildConfig) -> str | None:
+    return config.evaluation_start_date or config.start_date
+
+
+def _timestamp_or_none(value: str | None) -> pd.Timestamp | None:
+    return None if value is None else pd.Timestamp(value)
+
+
+def _crop_to_evaluation_window(
+    frame: pd.DataFrame,
+    *,
+    config: FactorRebuildConfig,
+) -> pd.DataFrame:
+    start = _evaluation_start_date(config)
+    end = config.end_date
+    if not (start or end):
+        return frame
+    dates = pd.to_datetime(frame["trade_date"], errors="coerce")
+    mask = pd.Series(True, index=frame.index)
+    if start:
+        mask &= dates >= pd.Timestamp(start)
+    if end:
+        mask &= dates <= pd.Timestamp(end)
+    return frame.loc[mask].copy()
+
+
+def _project_factor_tier_columns(
+    frame: pd.DataFrame,
+    expected_factors: tuple[str, ...],
+) -> pd.DataFrame:
+    allowed = set(SLIM_FACTOR_BASE_COLUMNS).union(expected_factors)
+    columns = [
+        column
+        for column in frame.columns
+        if column in allowed or column.startswith("forward_return_")
+    ]
+    return frame[columns].copy()
 
 
 def _write_factor_table(path: Path, frame: pd.DataFrame) -> None:
@@ -360,13 +423,12 @@ def _validate_factor_table(frame: pd.DataFrame) -> None:
     )
     if not required_any:
         raise ValueError("invalid_feature_preset")
-    leakage = [
+    label_columns = [
         column
         for column in frame.columns
-        if column.startswith("forward_return")
-        and column not in SLIM_FACTOR_BASE_COLUMNS
+        if column.startswith("forward_return_")
     ]
-    if not leakage:
+    if not label_columns:
         raise ValueError("missing_factor_field")
 
 
@@ -377,12 +439,14 @@ def _write_feature_set_manifest(
     unsupported_factors: tuple[dict[str, object], ...],
     warnings: tuple[str, ...],
     row_count: int,
+    factor_set_tier: str,
 ) -> None:
     write_json_sanitized(
         run_dir / "feature_set_manifest.json",
         {
             "feature_set_id": LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
             "factor_pack": LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID,
+            "factor_set_tier": factor_set_tier,
             "status": "ready" if feature_columns else "pending",
             "row_count": int(row_count),
             "feature_columns": list(feature_columns),
@@ -461,9 +525,31 @@ def _degraded_run_warnings(
     warnings: tuple[str, ...],
 ) -> tuple[str, ...]:
     messages = list(warnings)
-    if config.start_date or config.end_date:
+    calculation_start = _calculation_start_date(config)
+    evaluation_start = _evaluation_start_date(config)
+    if (
+        calculation_start
+        and evaluation_start
+        and pd.Timestamp(calculation_start) < pd.Timestamp(evaluation_start)
+    ):
+        messages.append("warmup_aware_date_filtered_run")
+    elif config.start_date or config.end_date:
         messages.append("date_filtered_smoke_without_prior_warmup")
     return tuple(messages)
+
+
+def _warmup_status(config: FactorRebuildConfig) -> str:
+    calculation_start = _calculation_start_date(config)
+    evaluation_start = _evaluation_start_date(config)
+    if (
+        calculation_start
+        and evaluation_start
+        and pd.Timestamp(calculation_start) < pd.Timestamp(evaluation_start)
+    ):
+        return "warmup_aware"
+    if config.start_date or config.end_date:
+        return "date_filtered_smoke_without_prior_warmup"
+    return "full_range"
 
 
 def _write_failed_run_summary(run_dir: Path, run_id: str, failure_code: str) -> None:

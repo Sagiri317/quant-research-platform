@@ -379,12 +379,27 @@ A_SHARE_MODEL_ID_OPTION = typer.Option(
 A_SHARE_START_DATE_OPTION = typer.Option(
     None,
     "--start-date",
-    help="Optional inclusive date filter for degraded/private smoke execution.",
+    help="Optional inclusive output/evaluation start date.",
 )
 A_SHARE_END_DATE_OPTION = typer.Option(
     None,
     "--end-date",
-    help="Optional inclusive date filter for degraded/private smoke execution.",
+    help="Optional inclusive output/evaluation end date.",
+)
+A_SHARE_CALCULATION_START_DATE_OPTION = typer.Option(
+    None,
+    "--calculation-start-date",
+    help="Optional inclusive warmup/read start date used before output cropping.",
+)
+A_SHARE_EVALUATION_START_DATE_OPTION = typer.Option(
+    None,
+    "--evaluation-start-date",
+    help="Optional inclusive output/evaluation start date after warmup calculation.",
+)
+A_SHARE_FACTOR_SET_TIER_OPTION = typer.Option(
+    "full",
+    "--factor-set-tier",
+    help="Factor set tier: full, core_long_period, or smoke_minimal.",
 )
 
 
@@ -455,6 +470,9 @@ def a_share_factor_rebuild(
     backup_existing: bool = A_SHARE_BACKUP_EXISTING_OPTION,
     start_date: str | None = A_SHARE_START_DATE_OPTION,
     end_date: str | None = A_SHARE_END_DATE_OPTION,
+    calculation_start_date: str | None = A_SHARE_CALCULATION_START_DATE_OPTION,
+    evaluation_start_date: str | None = A_SHARE_EVALUATION_START_DATE_OPTION,
+    factor_set_tier: str = A_SHARE_FACTOR_SET_TIER_OPTION,
 ) -> None:
     """Dry-run or run a local A-share literature factor rebuild."""
 
@@ -472,6 +490,9 @@ def a_share_factor_rebuild(
                 backup_existing=backup_existing,
                 start_date=start_date,
                 end_date=end_date,
+                calculation_start_date=calculation_start_date,
+                evaluation_start_date=evaluation_start_date,
+                factor_set_tier=factor_set_tier,
             )
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:

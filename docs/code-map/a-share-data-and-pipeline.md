@@ -25,8 +25,8 @@ data/raw_private/csmar/
 | raw -> interim | `quant_research_platform.markets.implementations.a_share.csmar.build_interim` | 标准化 CSMAR raw CSV |
 | interim -> panel | `quant_research_platform.markets.implementations.a_share.datasets.build_panel` | 生成 full research panel |
 | panel -> factors | `quant_research_platform.markets.implementations.a_share.factors.build_factors` | 生成 slim factor and label table |
-| panel -> literature-prior factor rebuild | `quant_research_platform.markets.implementations.a_share.factor_rebuild` | Feature-branch service for schema inventory, memory preflight, dry-run, explicit overwrite, optional backup, and private-output policy checks |
-| features -> prediction handoff | `quant_research_platform.research.prediction_handoff` | Feature-branch backend service that trains local non-DL prediction signals, writes prediction parquet, evaluates through schema `0.7`, and emits aggregate comparison / EDA outputs |
+| panel -> literature-prior factor rebuild | `quant_research_platform.markets.implementations.a_share.factor_rebuild` | Backend service for schema inventory, memory preflight, dry-run, factor-set tiers, warmup-aware execution windows, explicit overwrite, optional backup, and private-output policy checks |
+| features -> prediction handoff | `quant_research_platform.research.prediction_handoff` | Backend service that trains local non-DL prediction signals, writes prediction parquet, evaluates through schema `0.7`, and emits aggregate comparison / EDA outputs |
 | factors -> evaluation service | `quant_research_platform.markets.implementations.a_share.evaluation.service` | A 股 evaluation request/result service；CLI、pipeline runner 和 Factor Factory 的共享入口 |
 | evaluation service -> CLI | `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation` | A 股专用 evaluation CLI 薄包装 |
 | orchestrated run | `quant_research_platform.pipelines.a_share.runner.run_a_share_pipeline` | 按 `start_from` 执行到 evaluation |
@@ -45,7 +45,7 @@ POST /api/pipeline-snapshots
 POST /api/pipeline-runs
 ```
 
-Feature-branch A-share research batch API additions:
+A-share research batch API additions:
 
 ```http
 POST /api/a-share/factor-rebuild-runs
@@ -66,6 +66,14 @@ artifacts under each handoff run's `evaluation/` child. They are discoverable as
 explicitly configured prediction handoff root. If callers pass fully custom
 `run_roots`, they must also pass or configure the prediction handoff root to
 make those runs visible in `/api/runs`.
+
+The literature-prior factor rebuild CLI supports warmup-aware execution through
+`--calculation-start-date`, `--evaluation-start-date`, and `--factor-set-tier`.
+The current tier names are `full`, `core_long_period`, and `smoke_minimal`.
+Warmup rows are used for rolling factor calculation and then cropped from the
+evaluation/output window. Prediction handoff remains training-outside-evaluation:
+the handoff writes private prediction artifacts and evaluation consumes those
+predictions as schema `0.7` inputs.
 
 `start_from` 控制开始层：
 

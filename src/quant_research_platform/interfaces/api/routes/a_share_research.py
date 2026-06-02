@@ -19,7 +19,10 @@ from quant_research_platform.markets.implementations.a_share.factor_rebuild impo
 from quant_research_platform.markets.implementations.a_share.factors import (
     literature_price_volume,
 )
-from quant_research_platform.research.ml_model_suite import A_SHARE_MODEL_SUITE_ID
+from quant_research_platform.research.ml_model_suite import (
+    A_SHARE_MODEL_SUITE_ID,
+    PREDICTION_HANDOFF_VERSION,
+)
 from quant_research_platform.research.prediction_handoff import (
     DEFAULT_NON_DL_MODEL_IDS,
     PredictionHandoffConfig,
@@ -34,7 +37,9 @@ _LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID = (
 )
 _ALLOWED_FACTOR_PACKS = {_LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID}
 _ALLOWED_MODEL_SUITE_IDS = {A_SHARE_MODEL_SUITE_ID}
+_ALLOWED_PREDICTION_HANDOFF_VERSIONS = {PREDICTION_HANDOFF_VERSION}
 _ALLOWED_RUNTIME_STATUSES = {"ready", "dry_run", "failed"}
+_ALLOWED_EDA_STATUSES = {"ready", "failed"}
 _ALLOWED_FAILURE_CODES = {
     "dependency_unavailable",
     "duplicate_run_id",
@@ -51,6 +56,14 @@ _ALLOWED_FAILURE_CODES = {
     "prediction_handoff_failed",
     "private_output_policy_violation",
 }
+_SENSITIVE_TEXT_PATTERN = re.compile(
+    r"(credential|secret|token|api[_-]?key|password)",
+    re.IGNORECASE,
+)
+_SAFE_PREDICTION_COLUMN_PATTERN = re.compile(
+    r"^prediction_score_[A-Za-z0-9_]+_(?:\d+d|label)$"
+)
+_SAFE_TARGET_COLUMN_PATTERN = re.compile(r"^forward_return_\d+d$")
 
 
 class AShareFactorRebuildRequest(BaseModel):
@@ -68,6 +81,9 @@ class AShareFactorRebuildRequest(BaseModel):
     backup_existing: bool = False
     start_date: str | None = None
     end_date: str | None = None
+    calculation_start_date: str | None = None
+    evaluation_start_date: str | None = None
+    factor_set_tier: str = "full"
 
 
 class AShareRunCheckpoint(BaseModel):
@@ -120,6 +136,9 @@ def create_factor_rebuild_run(
                 backup_existing=payload.backup_existing,
                 start_date=payload.start_date,
                 end_date=payload.end_date,
+                calculation_start_date=payload.calculation_start_date,
+                evaluation_start_date=payload.evaluation_start_date,
+                factor_set_tier=payload.factor_set_tier,
             )
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
@@ -246,9 +265,13 @@ def factor_rebuild_eda(run_id: str, request: Request) -> dict[str, object]:
         invalid_error_code="factor_rebuild_eda_invalid",
         invalid_message="factor rebuild EDA invalid",
     )
+    eda_status = (
+        _safe_allowed_runtime_string(value.get("status"), _ALLOWED_EDA_STATUSES)
+        or "unknown"
+    )
     return {
         "run_id": run_id,
-        "status": str(value.get("status", "ready")),
+        "status": eda_status,
         "artifact_count": int(value.get("artifact_count", 0) or 0),
     }
 
@@ -334,13 +357,29 @@ def prediction_handoff_schema(run_id: str, request: Request) -> dict[str, object
         invalid_error_code="prediction_handoff_status_invalid",
         invalid_message="prediction handoff status invalid",
     )
+    target_column = _safe_schema_string(metadata.get("target_column")) or ""
+    if target_column and not _SAFE_TARGET_COLUMN_PATTERN.fullmatch(target_column):
+        target_column = ""
     return {
-        "prediction_handoff_version": str(
-            metadata.get("prediction_handoff_version", "")
+        "prediction_handoff_version": (
+            _safe_allowed_runtime_string(
+                metadata.get("prediction_handoff_version"),
+                _ALLOWED_PREDICTION_HANDOFF_VERSIONS,
+            )
+            or ""
         ),
-        "model_suite_id": str(metadata.get("model_suite_id", "")),
-        "prediction_columns": list(metadata.get("prediction_columns", [])),
-        "target_column": str(metadata.get("target_column", "")),
+        "model_suite_id": (
+            _safe_allowed_runtime_string(
+                metadata.get("model_suite_id"),
+                _ALLOWED_MODEL_SUITE_IDS,
+                default=A_SHARE_MODEL_SUITE_ID,
+            )
+            or A_SHARE_MODEL_SUITE_ID
+        ),
+        "prediction_columns": _safe_prediction_columns(
+            metadata.get("prediction_columns", [])
+        ),
+        "target_column": target_column,
         "label_horizon_days": int(metadata.get("label_horizon_days", 0) or 0),
     }
 
@@ -389,9 +428,13 @@ def prediction_handoff_eda(run_id: str, request: Request) -> dict[str, object]:
         invalid_error_code="prediction_eda_invalid",
         invalid_message="prediction EDA invalid",
     )
+    eda_status = (
+        _safe_allowed_runtime_string(value.get("status"), _ALLOWED_EDA_STATUSES)
+        or "unknown"
+    )
     return {
         "run_id": run_id,
-        "status": str(value.get("status", "ready")),
+        "status": eda_status,
         "artifact_count": int(value.get("artifact_count", 0) or 0),
     }
 
@@ -509,9 +552,36 @@ def _safe_allowed_runtime_string(
 ) -> str | None:
     if not isinstance(value, str) or not value:
         return default
-    if text_has_private_marker(value) or _has_unsafe_path_text(value):
+    if (
+        _SENSITIVE_TEXT_PATTERN.search(value)
+        or text_has_private_marker(value)
+        or _has_unsafe_path_text(value)
+    ):
         return default
     return value if value in allowed_values else default
+
+
+def _safe_schema_string(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if (
+        _SENSITIVE_TEXT_PATTERN.search(value)
+        or text_has_private_marker(value)
+        or _has_unsafe_path_text(value)
+    ):
+        return None
+    return value
+
+
+def _safe_prediction_columns(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    columns: list[str] = []
+    for item in value:
+        column = _safe_schema_string(item)
+        if column and _SAFE_PREDICTION_COLUMN_PATTERN.fullmatch(column):
+            columns.append(column)
+    return columns
 
 
 def _has_unsafe_path_text(value: str) -> bool:
