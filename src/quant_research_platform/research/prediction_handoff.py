@@ -31,6 +31,7 @@ from quant_research_platform.research.ml_model_suite import (
     PREDICTION_HANDOFF_VERSION,
     ModelSuiteConfig,
     SuiteFoldConfig,
+    feature_name_has_sensitive_identifier,
     run_model_suite,
 )
 from quant_research_platform.runtime.private_paths import (
@@ -113,6 +114,11 @@ def run_prediction_handoff(
                 model_ids=config.model_ids or DEFAULT_NON_DL_MODEL_IDS,
             )
         )
+        _write_handoff_metadata_overlay(
+            config,
+            metadata_path,
+            prediction_columns=model_result.prediction_columns,
+        )
         prediction_frame = _add_return_source_column(config, prediction_path)
         prediction_frame.to_parquet(
             prediction_path,
@@ -168,6 +174,11 @@ def _validate_config(config: PredictionHandoffConfig) -> None:
     if not config.input_path.is_file():
         raise FileNotFoundError(config.input_path)
     if not config.feature_columns:
+        raise ValueError("invalid_feature_preset")
+    if any(
+        feature_name_has_sensitive_identifier(column)
+        for column in config.feature_columns
+    ):
         raise ValueError("invalid_feature_preset")
     if config.feature_preset and config.feature_preset not in SUPPORTED_FEATURE_PRESETS:
         raise ValueError("invalid_feature_preset")
@@ -303,7 +314,7 @@ def _run_prediction_evaluation(
         "uses_external_data": True,
         "prediction_handoff_version": PREDICTION_HANDOFF_VERSION,
         "prediction_columns": list(prediction_columns),
-            "label_columns": [config.label_column],
+        "label_columns": [config.label_column],
         "prediction_time_semantics": {
             "decision_time_column": config.timestamp_column,
             "as_of_time_columns": {
@@ -313,6 +324,8 @@ def _run_prediction_evaluation(
         "source_ref": _feature_set_id(config),
         "model_ref": A_SHARE_MODEL_SUITE_ID,
         "training_scope": PREDICTION_TRAINING_SCOPE,
+        "training_execution_scope": "local_qrp_research_layer",
+        "evaluation_training_boundary": "training_outside_evaluation",
         "prediction_boundary": MODEL_BOUNDARY,
     }
     spec = make_parquet_evaluation_spec(
@@ -444,6 +457,36 @@ def _metric_row(
 
 def _feature_set_id(config: PredictionHandoffConfig) -> str:
     return config.feature_preset or "explicit_feature_columns"
+
+
+def _write_handoff_metadata_overlay(
+    config: PredictionHandoffConfig,
+    metadata_path: Path,
+    *,
+    prediction_columns: tuple[str, ...],
+) -> None:
+    """Add handoff-level portable metadata needed for recovery and APIs."""
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(
+        {
+            "timestamp_column": config.timestamp_column,
+            "entity_column": config.entity_column,
+            "label_column": config.label_column,
+            "target_column": config.label_column,
+            "return_source_column": config.return_source_column,
+            "feature_columns": list(config.feature_columns),
+            "feature_preset": config.feature_preset,
+            "model_ids": list(config.model_ids or DEFAULT_NON_DL_MODEL_IDS),
+            "model_suite_id": A_SHARE_MODEL_SUITE_ID,
+            "prediction_handoff_version": PREDICTION_HANDOFF_VERSION,
+            "prediction_columns": list(prediction_columns),
+            "label_horizon_days": int(config.label_horizon_days),
+            "training_execution_scope": "local_qrp_research_layer",
+            "evaluation_training_boundary": "training_outside_evaluation",
+        }
+    )
+    write_json_sanitized(metadata_path, metadata)
 
 
 def _finite_mean(values: pd.Series) -> float | None:
@@ -649,7 +692,7 @@ def refresh_prediction_handoff_eda(run_dir: Path) -> dict[str, object]:
             run_dir=run_dir,
             frame=frame,
             prediction_columns=tuple(metadata["prediction_columns"]),
-            label_column=str(metadata["target_column"]),
+            label_column=str(metadata.get("label_column") or metadata["target_column"]),
             timestamp_column=str(metadata["timestamp_column"]),
         )
         manifest = json.loads(
@@ -683,10 +726,22 @@ def _read_model_metadata(run_dir: Path) -> dict[str, object]:
     timestamp_column = metadata.get("timestamp_column", "timestamp")
     if not isinstance(timestamp_column, str):
         timestamp_column = "timestamp"
+    entity_column = metadata.get("entity_column", "asset")
+    if not isinstance(entity_column, str):
+        entity_column = "asset"
+    label_column = metadata.get("label_column", target_column)
+    if not isinstance(label_column, str):
+        label_column = target_column
+    return_source_column = metadata.get("return_source_column")
+    if return_source_column is not None and not isinstance(return_source_column, str):
+        return_source_column = None
     return {
         "prediction_columns": tuple(prediction_columns),
         "target_column": target_column,
+        "label_column": label_column,
         "timestamp_column": timestamp_column,
+        "entity_column": entity_column,
+        "return_source_column": return_source_column,
     }
 
 

@@ -810,6 +810,82 @@ def test_a_share_schema_inventory_endpoint_rejects_malformed_numeric_fields(
     assert "not_an_int" not in response.text
 
 
+def test_a_share_eda_endpoints_reject_malformed_numeric_fields(tmp_path) -> None:
+    factor_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    factor_run = factor_root / "bad_factor_eda_numeric"
+    (factor_run / "eda").mkdir(parents=True)
+    (factor_run / "eda" / "eda_manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "artifact_count": "not_an_int",
+                "chart_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    prediction_run = prediction_root / "bad_prediction_eda_numeric"
+    (prediction_run / "eda").mkdir(parents=True)
+    (prediction_run / "eda" / "eda_manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "artifact_count": 1,
+                "chart_count": "not_an_int",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_rebuild_root=factor_root,
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    factor_response = client.get(
+        "/api/a-share/factor-rebuild-runs/bad_factor_eda_numeric/eda"
+    )
+    prediction_response = client.get(
+        "/api/a-share/prediction-handoffs/bad_prediction_eda_numeric/eda"
+    )
+
+    assert factor_response.status_code == 422
+    assert prediction_response.status_code == 422
+    assert factor_response.json()["error"]["error_code"] == "factor_rebuild_eda_invalid"
+    assert prediction_response.json()["error"]["error_code"] == "prediction_eda_invalid"
+    assert "not_an_int" not in factor_response.text
+    assert "not_an_int" not in prediction_response.text
+
+
+def test_a_share_prediction_handoff_status_reports_missing_summary(
+    tmp_path,
+) -> None:
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    (prediction_root / "missing_prediction_status").mkdir(parents=True)
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.get(
+        "/api/a-share/prediction-handoffs/missing_prediction_status"
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["error_code"] == (
+        "missing_prediction_handoff_status"
+    )
+
+
 def _panel() -> pd.DataFrame:
     rows = []
     for stock_code, base in (("000001", 10.0), ("000002", 20.0)):

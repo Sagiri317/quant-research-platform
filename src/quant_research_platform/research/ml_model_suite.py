@@ -26,6 +26,7 @@ from quant_research_platform.runtime.private_paths import (
 
 A_SHARE_MODEL_SUITE_ID = "n6_a_share_sklearn_boosting_suite_v1"
 PREDICTION_HANDOFF_VERSION = "n6_a_share_prediction_handoff_v1"
+DEFAULT_RESEARCH_RANDOM_SEED = 42
 DEFAULT_NON_DL_MODEL_IDS: tuple[str, ...] = (
     "single_factor_baselines",
     "equal_weight_rank_ensemble",
@@ -44,6 +45,10 @@ MODEL_BOUNDARY = (
     "not feature store; not deep learning; not investment advice; not trading, "
     "not risk, not capacity, not execution simulation, not paper trading, "
     "and not live trading evidence"
+)
+_SENSITIVE_IDENTIFIER_PATTERN = re.compile(
+    r"(credential|secret|token|api[_-]?key|password)",
+    re.IGNORECASE,
 )
 
 
@@ -74,7 +79,7 @@ class ModelSuiteConfig:
     folds: tuple[SuiteFoldConfig, ...]
     model_ids: tuple[str, ...] = DEFAULT_NON_DL_MODEL_IDS
     model_suite_id: str = A_SHARE_MODEL_SUITE_ID
-    random_seed: int = 42
+    random_seed: int = DEFAULT_RESEARCH_RANDOM_SEED
 
 
 @dataclass(frozen=True)
@@ -207,6 +212,11 @@ def _validate_config(config: ModelSuiteConfig) -> None:
     ]
     if leakage or config.label_column in config.feature_columns:
         raise ValueError("invalid_feature_preset")
+    if any(
+        feature_name_has_sensitive_identifier(column)
+        for column in config.feature_columns
+    ):
+        raise ValueError("invalid_feature_preset")
     forbidden_models = {"pytorch", "tensorflow", "deep_learning"}
     if any(model_id in forbidden_models for model_id in config.model_ids):
         raise ValueError("dependency_unavailable")
@@ -309,12 +319,14 @@ def _make_model(model_id: str, *, random_seed: int):
             n_estimators=50,
             max_depth=6,
             random_state=random_seed,
+            n_jobs=1,
         )
     if model_id == "extra_trees_lite":
         return ExtraTreesRegressor(
             n_estimators=50,
             max_depth=6,
             random_state=random_seed,
+            n_jobs=1,
         )
     if model_id == "hist_gradient_boosting":
         return HistGradientBoostingRegressor(
@@ -332,8 +344,10 @@ def _make_model(model_id: str, *, random_seed: int):
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=random_seed,
+            seed=random_seed,
             objective="reg:squarederror",
             n_jobs=1,
+            nthread=1,
         )
     if model_id == "lightgbm_lite":
         from lightgbm import LGBMRegressor
@@ -343,6 +357,9 @@ def _make_model(model_id: str, *, random_seed: int):
             max_depth=3,
             learning_rate=0.05,
             random_state=random_seed,
+            seed=random_seed,
+            deterministic=True,
+            force_col_wise=True,
             n_jobs=1,
             verbose=-1,
         )
@@ -597,6 +614,9 @@ def _write_metadata(
         "folds": folds,
         "model_statuses": model_statuses,
         "random_seed": int(config.random_seed),
+        "timestamp_column": config.timestamp_column,
+        "entity_column": config.entity_column,
+        "label_column": config.label_column,
         "boundary": MODEL_BOUNDARY,
     }
     write_json_sanitized(config.output_metadata_path, payload)
@@ -612,13 +632,21 @@ def _looks_like_label_or_forward_return(column: str) -> bool:
     )
 
 
+def feature_name_has_sensitive_identifier(column: str) -> bool:
+    """Return whether a feature name looks like private credential metadata."""
+
+    return bool(_SENSITIVE_IDENTIFIER_PATTERN.search(column))
+
+
 __all__ = [
     "A_SHARE_MODEL_SUITE_ID",
     "DEFAULT_NON_DL_MODEL_IDS",
+    "DEFAULT_RESEARCH_RANDOM_SEED",
     "MODEL_BOUNDARY",
     "ModelSuiteConfig",
     "ModelSuiteResult",
     "PREDICTION_HANDOFF_VERSION",
     "SuiteFoldConfig",
+    "feature_name_has_sensitive_identifier",
     "run_model_suite",
 ]

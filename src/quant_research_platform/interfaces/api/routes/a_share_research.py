@@ -116,7 +116,9 @@ class ASharePredictionHandoffRequest(BaseModel):
     return_source_column: str = "forward_return_1d"
     label_horizon_days: int = 20
     folds: list[dict[str, str | None]]
-    model_ids: list[str] = list(DEFAULT_NON_DL_MODEL_IDS)
+    model_ids: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_NON_DL_MODEL_IDS)
+    )
     memory_budget_gb: float = 10.0
     dry_run: bool = False
 
@@ -309,12 +311,19 @@ def factor_rebuild_eda(run_id: str, request: Request) -> dict[str, object]:
         _safe_allowed_runtime_string(value.get("status"), _ALLOWED_EDA_STATUSES)
         or "unknown"
     )
-    return _eda_manifest_payload(
-        run_id=run_id,
-        status=eda_status,
-        artifact_count=int(value.get("artifact_count", 0) or 0),
-        manifest=value,
-    )
+    try:
+        return _eda_manifest_payload(
+            run_id=run_id,
+            status=eda_status,
+            artifact_count=value.get("artifact_count", 0),
+            manifest=value,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            error_code="factor_rebuild_eda_invalid",
+            message="factor rebuild EDA invalid",
+            status_code=422,
+        ) from exc
 
 
 @router.get("/api/a-share/prediction-handoffs/{run_id}")
@@ -325,8 +334,15 @@ def prediction_handoff_status(run_id: str, request: Request) -> dict[str, object
         api_context(request).prediction_handoff_root,
         run_id,
     )
+    summary_path = run_dir / "runtime_summary.json"
+    if not summary_path.is_file():
+        raise ApiError(
+            error_code="missing_prediction_handoff_status",
+            message="prediction handoff status not found",
+            status_code=404,
+        )
     summary = _read_json(
-        run_dir / "runtime_summary.json",
+        summary_path,
         invalid_error_code="prediction_handoff_status_invalid",
         invalid_message="prediction handoff status invalid",
     )
@@ -495,12 +511,19 @@ def prediction_handoff_eda(run_id: str, request: Request) -> dict[str, object]:
         _safe_allowed_runtime_string(value.get("status"), _ALLOWED_EDA_STATUSES)
         or "unknown"
     )
-    return _eda_manifest_payload(
-        run_id=run_id,
-        status=eda_status,
-        artifact_count=int(value.get("artifact_count", 0) or 0),
-        manifest=value,
-    )
+    try:
+        return _eda_manifest_payload(
+            run_id=run_id,
+            status=eda_status,
+            artifact_count=value.get("artifact_count", 0),
+            manifest=value,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            error_code="prediction_eda_invalid",
+            message="prediction EDA invalid",
+            status_code=422,
+        ) from exc
 
 
 def _factor_rebuild_payload(
@@ -612,13 +635,13 @@ def _eda_manifest_payload(
     *,
     run_id: str,
     status: str,
-    artifact_count: int,
+    artifact_count: object,
     manifest: dict[str, Any],
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "run_id": run_id,
         "status": status,
-        "artifact_count": artifact_count,
+        "artifact_count": _required_int(artifact_count),
     }
     chart_count = _optional_int(manifest.get("chart_count"))
     if chart_count is not None:

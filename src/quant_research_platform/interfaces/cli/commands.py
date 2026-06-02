@@ -987,7 +987,7 @@ def _prediction_handoff_folds(
     folds: list[dict[str, str | None]] = []
     for value in values:
         parts = [part.strip() for part in value.split(",")]
-        if len(parts) not in {3, 4, 5}:
+        if len(parts) not in {3, 4, 5} or any(not part for part in parts[:3]):
             raise typer.BadParameter(
                 "--walk-forward-fold must use "
                 "fold_id,train_end,test_start[,test_end[,split_name]]."

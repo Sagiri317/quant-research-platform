@@ -7,6 +7,7 @@ import pytest
 
 from quant_research_platform.research.ml_model_suite import (
     A_SHARE_MODEL_SUITE_ID,
+    DEFAULT_RESEARCH_RANDOM_SEED,
     ModelSuiteConfig,
     SuiteFoldConfig,
     run_model_suite,
@@ -84,6 +85,38 @@ def test_model_suite_rejects_leakage_features(tmp_path) -> None:
                 timestamp_column="timestamp",
                 entity_column="asset",
                 feature_columns=("feature_a", "forward_return_20d"),
+                label_column="forward_return_2d",
+                label_horizon_days=2,
+                folds=(
+                    SuiteFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2024-01-05",
+                        test_start="2024-01-08",
+                    ),
+                ),
+            )
+        )
+
+
+def test_model_suite_rejects_sensitive_identifier_feature_names(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _panel().assign(api_key_feature=1.0).to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="invalid_feature_preset"):
+        run_model_suite(
+            ModelSuiteConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                output_prediction_long_path=None,
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("api_key_feature",),
                 label_column="forward_return_2d",
                 label_horizon_days=2,
                 folds=(
@@ -196,6 +229,62 @@ def test_model_suite_rejects_label_horizon_mismatch(tmp_path) -> None:
                 ),
             )
         )
+
+
+def test_model_suite_randomized_models_are_repeatable_with_default_seed(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    def run_once(name: str) -> tuple[pd.DataFrame, dict[str, object]]:
+        prediction_path = tmp_path / f"{name}_predictions.parquet"
+        metadata_path = tmp_path / f"{name}_metadata.json"
+        run_model_suite(
+            ModelSuiteConfig(
+                input_path=input_path,
+                output_prediction_path=prediction_path,
+                output_metadata_path=metadata_path,
+                output_prediction_long_path=None,
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                label_horizon_days=2,
+                folds=(
+                    SuiteFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2024-01-05",
+                        test_start="2024-01-08",
+                        test_end="2024-01-09",
+                    ),
+                ),
+                model_ids=("random_forest_lite", "extra_trees_lite"),
+            )
+        )
+        return (
+            pd.read_parquet(prediction_path).sort_index(axis=1),
+            json.loads(metadata_path.read_text(encoding="utf-8")),
+        )
+
+    first_predictions, first_metadata = run_once("first")
+    second_predictions, second_metadata = run_once("second")
+
+    prediction_columns = [
+        "prediction_score_random_forest_lite_2d",
+        "prediction_score_extra_trees_lite_2d",
+    ]
+    pd.testing.assert_frame_equal(
+        first_predictions[prediction_columns],
+        second_predictions[prediction_columns],
+        check_exact=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert first_metadata["random_seed"] == DEFAULT_RESEARCH_RANDOM_SEED
+    assert second_metadata["random_seed"] == DEFAULT_RESEARCH_RANDOM_SEED
+    assert first_metadata["model_ids"] == second_metadata["model_ids"]
+    assert first_metadata["model_statuses"] == second_metadata["model_statuses"]
 
 
 def _panel() -> pd.DataFrame:

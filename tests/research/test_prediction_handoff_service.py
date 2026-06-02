@@ -72,11 +72,30 @@ def test_prediction_handoff_writes_predictions_evaluation_and_comparison(
         (run_dir / "evaluation" / "run_context.json").read_text("utf-8")
     )
     metadata = run_context["config"]["evaluation_spec"]["metadata"]
+    model_metadata = json.loads((run_dir / "model_metadata.json").read_text("utf-8"))
     assert summary["status"] == "ready"
     assert eval_summary["kind"] == "prediction"
     assert metadata["prediction_handoff_version"] == "n6_a_share_prediction_handoff_v1"
     assert metadata["source_ref"] == "explicit_feature_columns"
     assert metadata["model_ref"] == "n6_a_share_sklearn_boosting_suite_v1"
+    assert metadata["training_execution_scope"] == "local_qrp_research_layer"
+    assert metadata["evaluation_training_boundary"] == "training_outside_evaluation"
+    assert model_metadata["timestamp_column"] == "timestamp"
+    assert model_metadata["entity_column"] == "asset"
+    assert model_metadata["label_column"] == "forward_return_2d"
+    assert model_metadata["return_source_column"] == "forward_return_1d"
+    assert model_metadata["feature_columns"] == ["feature_a", "feature_b"]
+    assert model_metadata["feature_preset"] is None
+    assert model_metadata["model_ids"] == ["ridge", "elastic_net"]
+    assert model_metadata["model_suite_id"] == "n6_a_share_sklearn_boosting_suite_v1"
+    assert model_metadata["prediction_handoff_version"] == (
+        "n6_a_share_prediction_handoff_v1"
+    )
+    assert set(model_metadata["prediction_columns"]) == {
+        "prediction_score_ridge_2d",
+        "prediction_score_elastic_net_2d",
+    }
+    assert model_metadata["label_horizon_days"] == 2
     assert set(metadata["prediction_columns"]) == {
         "prediction_score_ridge_2d",
         "prediction_score_elastic_net_2d",
@@ -128,6 +147,67 @@ def test_refresh_prediction_handoff_eda_regenerates_static_charts(tmp_path) -> N
     assert "prediction_ic_by_year.png" in manifest["chart_files"]
     assert "model_leaderboard_top20.png" in manifest["chart_files"]
     assert (run_dir / "eda" / "coverage_by_year.png").is_file()
+
+
+def test_refresh_prediction_handoff_eda_recovers_from_predictions_with_metadata_columns(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    frame = _panel().rename(columns={"timestamp": "trade_date", "asset": "stock_code"})
+    frame.to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    run_prediction_handoff(
+        PredictionHandoffConfig(
+            input_path=input_path,
+            output_root=output_root,
+            run_id="prediction_refresh_trade_date_run",
+            timestamp_column="trade_date",
+            entity_column="stock_code",
+            feature_columns=("feature_a", "feature_b"),
+            feature_preset="a_share_literature_price_volume_preset_v1",
+            label_column="forward_return_2d",
+            return_source_column="forward_return_1d",
+            label_horizon_days=2,
+            folds=(
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                },
+            ),
+            model_ids=("ridge", "random_forest_lite"),
+        )
+    )
+
+    run_dir = output_root / "prediction_refresh_trade_date_run"
+    metadata = json.loads((run_dir / "model_metadata.json").read_text("utf-8"))
+    assert metadata["timestamp_column"] == "trade_date"
+    assert metadata["entity_column"] == "stock_code"
+    assert metadata["label_column"] == "forward_return_2d"
+    assert metadata["return_source_column"] == "forward_return_1d"
+
+    for filename in (
+        "data_coverage_by_year.csv",
+        "data_coverage_by_month.csv",
+        "missingness_by_feature.csv",
+        "prediction_ic_by_year.csv",
+        "prediction_ic_by_month.csv",
+    ):
+        (run_dir / "eda" / filename).unlink()
+
+    result = refresh_prediction_handoff_eda(run_dir)
+    manifest = json.loads((run_dir / "eda" / "eda_manifest.json").read_text("utf-8"))
+
+    assert (run_dir / "eda" / "data_coverage_by_year.csv").is_file()
+    assert (run_dir / "eda" / "prediction_ic_by_year.csv").is_file()
+    assert (run_dir / "eda" / "eda_report.md").is_file()
+    assert result["chart_dependency_status"] in {"ready", "dependency_unavailable"}
+    if result["chart_dependency_status"] == "ready":
+        assert result["chart_count"] > 0
+        assert manifest["chart_files"]
+    else:
+        assert result["chart_count"] == 0
 
 
 def test_refresh_prediction_handoff_eda_rejects_public_run_root(tmp_path) -> None:
@@ -201,6 +281,46 @@ def test_prediction_handoff_dry_run_writes_no_row_level_outputs(tmp_path) -> Non
     assert not (run_dir / "predictions.parquet").exists()
     assert not (run_dir / "prediction_records.parquet").exists()
     assert not (run_dir / "evaluation").exists()
+
+
+def test_prediction_handoff_rejects_sensitive_feature_names_before_artifacts(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().assign(api_key_feature=1.0).to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="invalid_feature_preset"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_sensitive_feature",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("api_key_feature",),
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("ridge",),
+                dry_run=True,
+            )
+        )
+
+    assert not (output_root / "prediction_sensitive_feature").exists()
 
 
 def test_prediction_handoff_rejects_unsupported_feature_preset(tmp_path) -> None:

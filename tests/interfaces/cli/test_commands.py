@@ -494,6 +494,50 @@ def test_a_share_prediction_handoff_cli_rejects_missing_feature_selection(
     assert not (output_root / "prediction_cli_missing_features").exists()
 
 
+def test_a_share_prediction_handoff_cli_rejects_empty_walk_forward_fields(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_handoff_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_empty_fold",
+            "--feature-column",
+            "feature_a",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,,2024-01-08",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "--walk-forward-fold must use" in result.output
+    assert not (output_root / "prediction_cli_empty_fold").exists()
+
+
 def test_a_share_prediction_handoff_cli_explicit_features_override_preset_metadata(
     tmp_path,
 ) -> None:
