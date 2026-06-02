@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,7 @@ from quant_research_platform.markets.implementations.a_share.research_batch_safe
 )
 from quant_research_platform.runtime.private_paths import (
     path_has_private_marker,
+    path_is_under_private_output_root,
     require_private_outputs_for_private_input,
 )
 
@@ -554,12 +557,20 @@ def _write_factor_eda(
         .rename(columns={"size": "row_count"})
     )
     coverage.to_csv(eda_dir / "factor_coverage_by_year.csv", index=False)
+    chart_count, chart_status, chart_files = _write_factor_charts(
+        eda_dir,
+        coverage,
+        missingness,
+    )
     write_json_sanitized(
         eda_dir / "eda_manifest.json",
         {
             "status": "ready",
             "eda_status": "experimental_non_contract",
-            "artifact_count": 3,
+            "artifact_count": 3 + chart_count,
+            "chart_count": chart_count,
+            "chart_dependency_status": chart_status,
+            "chart_files": list(chart_files),
         },
     )
     (eda_dir / "eda_report.md").write_text(
@@ -567,6 +578,154 @@ def _write_factor_eda(
         "Experimental aggregate-only diagnostics; not schema 0.7 contract.\n",
         encoding="utf-8",
     )
+
+
+def refresh_factor_rebuild_eda(run_dir: Path) -> dict[str, object]:
+    """Regenerate aggregate EDA outputs and charts for an existing factor run."""
+
+    if not path_is_under_private_output_root(run_dir, "a_share_factor_rebuilds"):
+        raise ValueError("private_output_policy_violation")
+    factor_path = run_dir / "factor_rebuild.parquet"
+    if not factor_path.is_file():
+        raise FileNotFoundError(factor_path)
+    eda_dir = run_dir / "eda"
+    eda_dir.mkdir(parents=True, exist_ok=True)
+    coverage_path = eda_dir / "factor_coverage_by_year.csv"
+    missingness_path = eda_dir / "factor_missingness_by_feature.csv"
+    if coverage_path.is_file():
+        coverage = pd.read_csv(coverage_path)
+    else:
+        dates = pd.to_datetime(
+            pd.read_parquet(
+                factor_path,
+                columns=("trade_date",),
+                engine="pyarrow",
+            )["trade_date"],
+            errors="coerce",
+        )
+        coverage = (
+            pd.DataFrame({"year": dates.dt.year})
+            .groupby("year", as_index=False)
+            .size()
+            .rename(columns={"size": "row_count"})
+        )
+        coverage.to_csv(coverage_path, index=False)
+    if missingness_path.is_file():
+        missingness = pd.read_csv(missingness_path)
+    else:
+        feature_columns = _feature_columns_from_manifest(run_dir)
+        frame = pd.read_parquet(
+            factor_path,
+            columns=feature_columns,
+            engine="pyarrow",
+        )
+        missingness = (
+            frame[list(feature_columns)]
+            .isna()
+            .mean()
+            .rename("missing_fraction")
+            .reset_index()
+            .rename(columns={"index": "feature"})
+        )
+        missingness.to_csv(missingness_path, index=False)
+    chart_count, chart_status, chart_files = _write_factor_charts(
+        eda_dir,
+        coverage,
+        missingness,
+    )
+    write_json_sanitized(
+        eda_dir / "eda_manifest.json",
+        {
+            "status": "ready",
+            "eda_status": "experimental_non_contract",
+            "artifact_count": 3 + chart_count,
+            "chart_count": chart_count,
+            "chart_dependency_status": chart_status,
+            "chart_files": list(chart_files),
+        },
+    )
+    (eda_dir / "eda_report.md").write_text(
+        "# Factor rebuild EDA\n\n"
+        "Experimental aggregate-only diagnostics; not schema 0.7 contract.\n",
+        encoding="utf-8",
+    )
+    _write_checkpoints(run_dir)
+    return {
+        "status": "ready",
+        "chart_count": chart_count,
+        "chart_dependency_status": chart_status,
+        "chart_files": tuple(chart_files),
+    }
+
+
+def _feature_columns_from_manifest(run_dir: Path) -> tuple[str, ...]:
+    manifest_path = run_dir / "feature_set_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    columns = manifest.get("feature_columns", [])
+    if not isinstance(columns, list) or not all(
+        isinstance(column, str) for column in columns
+    ):
+        raise ValueError("invalid_factor_rebuild_config")
+    return tuple(columns)
+
+
+def _write_factor_charts(
+    eda_dir: Path,
+    coverage: pd.DataFrame,
+    missingness: pd.DataFrame,
+) -> tuple[int, str, tuple[str, ...]]:
+    chart_files: list[str] = []
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except (ImportError, OSError, RuntimeError):
+        return 0, "dependency_unavailable", ()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            if not coverage.empty:
+                fig, ax = plt.subplots(figsize=(6, 3))
+                coverage.plot.bar(x="year", y="row_count", ax=ax, legend=False)
+                ax.set_xlabel("year")
+                ax.set_ylabel("row_count")
+                _safe_tight_layout(fig)
+                filename = "factor_coverage_by_year.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
+            if not missingness.empty:
+                top = missingness.sort_values(
+                    "missing_fraction",
+                    ascending=False,
+                ).head(20)
+                fig, ax = plt.subplots(figsize=(7, 3))
+                top.plot.bar(x="feature", y="missing_fraction", ax=ax, legend=False)
+                ax.set_xlabel("feature")
+                ax.set_ylabel("missing_fraction")
+                _safe_tight_layout(fig)
+                filename = "factor_missingness_top20.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
+    except (ImportError, OSError, RuntimeError):
+        for filename in chart_files:
+            (eda_dir / filename).unlink(missing_ok=True)
+        return 0, "dependency_unavailable", ()
+    return (
+        len(chart_files),
+        "ready" if chart_files else "not_generated",
+        tuple(chart_files),
+    )
+
+
+def _safe_tight_layout(fig: object) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout()
 
 
 def _runtime_summary(
@@ -685,6 +844,7 @@ __all__ = [
     "FactorRebuildConfig",
     "FactorRebuildResult",
     "build_warmup_sufficiency_payload",
+    "refresh_factor_rebuild_eda",
     "run_factor_rebuild",
     "write_schema_inventory_run",
 ]

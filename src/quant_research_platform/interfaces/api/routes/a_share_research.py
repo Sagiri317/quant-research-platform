@@ -41,6 +41,11 @@ _ALLOWED_MODEL_SUITE_IDS = {A_SHARE_MODEL_SUITE_ID}
 _ALLOWED_PREDICTION_HANDOFF_VERSIONS = {PREDICTION_HANDOFF_VERSION}
 _ALLOWED_RUNTIME_STATUSES = {"ready", "dry_run", "failed"}
 _ALLOWED_EDA_STATUSES = {"ready", "failed"}
+_ALLOWED_CHART_DEPENDENCY_STATUSES = {
+    "ready",
+    "not_generated",
+    "dependency_unavailable",
+}
 _ALLOWED_FAILURE_CODES = {
     "dependency_unavailable",
     "duplicate_run_id",
@@ -66,6 +71,7 @@ _SAFE_PREDICTION_COLUMN_PATTERN = re.compile(
     r"^prediction_score_[A-Za-z0-9_]+_(?:\d+d|label)$"
 )
 _SAFE_TARGET_COLUMN_PATTERN = re.compile(r"^forward_return_\d+d$")
+_SAFE_CHART_FILE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+\.png$")
 
 
 class AShareFactorRebuildRequest(BaseModel):
@@ -303,11 +309,12 @@ def factor_rebuild_eda(run_id: str, request: Request) -> dict[str, object]:
         _safe_allowed_runtime_string(value.get("status"), _ALLOWED_EDA_STATUSES)
         or "unknown"
     )
-    return {
-        "run_id": run_id,
-        "status": eda_status,
-        "artifact_count": int(value.get("artifact_count", 0) or 0),
-    }
+    return _eda_manifest_payload(
+        run_id=run_id,
+        status=eda_status,
+        artifact_count=int(value.get("artifact_count", 0) or 0),
+        manifest=value,
+    )
 
 
 @router.get("/api/a-share/prediction-handoffs/{run_id}")
@@ -488,11 +495,12 @@ def prediction_handoff_eda(run_id: str, request: Request) -> dict[str, object]:
         _safe_allowed_runtime_string(value.get("status"), _ALLOWED_EDA_STATUSES)
         or "unknown"
     )
-    return {
-        "run_id": run_id,
-        "status": eda_status,
-        "artifact_count": int(value.get("artifact_count", 0) or 0),
-    }
+    return _eda_manifest_payload(
+        run_id=run_id,
+        status=eda_status,
+        artifact_count=int(value.get("artifact_count", 0) or 0),
+        manifest=value,
+    )
 
 
 def _factor_rebuild_payload(
@@ -598,6 +606,44 @@ def _read_json_list(
             status_code=422,
         )
     return value
+
+
+def _eda_manifest_payload(
+    *,
+    run_id: str,
+    status: str,
+    artifact_count: int,
+    manifest: dict[str, Any],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "run_id": run_id,
+        "status": status,
+        "artifact_count": artifact_count,
+    }
+    chart_count = _optional_int(manifest.get("chart_count"))
+    if chart_count is not None:
+        payload["chart_count"] = chart_count
+    chart_status = _safe_allowed_runtime_string(
+        manifest.get("chart_dependency_status"),
+        _ALLOWED_CHART_DEPENDENCY_STATUSES,
+    )
+    if chart_status:
+        payload["chart_dependency_status"] = chart_status
+    chart_files = _safe_chart_files(manifest.get("chart_files"))
+    if chart_files:
+        payload["chart_files"] = chart_files
+    return payload
+
+
+def _safe_chart_files(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    files: list[str] = []
+    for item in value:
+        text = _safe_schema_string(item)
+        if text and _SAFE_CHART_FILE_PATTERN.fullmatch(text):
+            files.append(text)
+    return files
 
 
 def _read_schema_inventory_payload(

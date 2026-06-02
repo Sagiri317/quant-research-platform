@@ -638,7 +638,19 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
     factor_run = factor_root / "bad_factor_eda"
     (factor_run / "eda").mkdir(parents=True)
     (factor_run / "eda" / "eda_manifest.json").write_text(
-        json.dumps({"status": "credential_token=abc123", "artifact_count": 4}),
+        json.dumps(
+            {
+                "status": "credential_token=abc123",
+                "artifact_count": 4,
+                "chart_count": 2,
+                "chart_dependency_status": "ready",
+                "chart_files": [
+                    "factor_coverage_by_year.png",
+                    "../processed_private/leak.png",
+                    "credential_token.png",
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     prediction_root = (
@@ -663,7 +675,15 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
         encoding="utf-8",
     )
     (prediction_run / "eda" / "eda_manifest.json").write_text(
-        json.dumps({"status": "reports/private_real/leak", "artifact_count": 6}),
+        json.dumps(
+            {
+                "status": "reports/private_real/leak",
+                "artifact_count": 6,
+                "chart_count": 5,
+                "chart_dependency_status": "reports/private_real/leak",
+                "chart_files": ["coverage_by_year.png", "C:/private/path.png"],
+            }
+        ),
         encoding="utf-8",
     )
     (prediction_run / "schema_inventory.json").write_text(
@@ -715,6 +735,9 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
         "run_id": "bad_factor_eda",
         "status": "unknown",
         "artifact_count": 4,
+        "chart_count": 2,
+        "chart_dependency_status": "ready",
+        "chart_files": ["factor_coverage_by_year.png"],
     }
     assert schema.json() == {
         "prediction_handoff_version": "",
@@ -727,6 +750,8 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
         "run_id": "bad_prediction_schema",
         "status": "unknown",
         "artifact_count": 6,
+        "chart_count": 5,
+        "chart_files": ["coverage_by_year.png"],
     }
     assert schema_inventory.json()["columns"] == [
         {"name": "timestamp", "dtype": "timestamp[ns]", "role": "key"}

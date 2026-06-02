@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,7 @@ from quant_research_platform.research.ml_model_suite import (
     run_model_suite,
 )
 from quant_research_platform.runtime.private_paths import (
+    path_is_under_private_output_root,
     require_private_outputs_for_private_input,
 )
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
@@ -486,9 +489,26 @@ def _write_eda_outputs(
     frame: pd.DataFrame,
     prediction_columns: tuple[str, ...],
 ) -> None:
+    _write_prediction_eda_outputs(
+        run_dir=run_dir,
+        frame=frame,
+        prediction_columns=prediction_columns,
+        label_column=config.label_column,
+        timestamp_column=config.timestamp_column,
+    )
+
+
+def _write_prediction_eda_outputs(
+    *,
+    run_dir: Path,
+    frame: pd.DataFrame,
+    prediction_columns: tuple[str, ...],
+    label_column: str,
+    timestamp_column: str,
+) -> None:
     eda_dir = run_dir / "eda"
     eda_dir.mkdir(parents=True, exist_ok=True)
-    years = pd.to_datetime(frame[config.timestamp_column]).dt.year
+    years = pd.to_datetime(frame[timestamp_column]).dt.year
     coverage = (
         frame.assign(year=years)
         .groupby("year", as_index=False)
@@ -497,7 +517,7 @@ def _write_eda_outputs(
     )
     coverage.to_csv(eda_dir / "data_coverage_by_year.csv", index=False)
     months = (
-        pd.to_datetime(frame[config.timestamp_column])
+        pd.to_datetime(frame[timestamp_column])
         .dt.to_period("M")
         .astype(str)
     )
@@ -520,29 +540,40 @@ def _write_eda_outputs(
     ic_year = _ic_breakdown(
         frame,
         prediction_columns=prediction_columns,
-        label_column=config.label_column,
-        timestamp_column=config.timestamp_column,
+        label_column=label_column,
+        timestamp_column=timestamp_column,
         period="year",
     )
     ic_month = _ic_breakdown(
         frame,
         prediction_columns=prediction_columns,
-        label_column=config.label_column,
-        timestamp_column=config.timestamp_column,
+        label_column=label_column,
+        timestamp_column=timestamp_column,
         period="month",
     )
     ic_year.to_csv(eda_dir / "prediction_ic_by_year.csv", index=False)
     ic_month.to_csv(eda_dir / "prediction_ic_by_month.csv", index=False)
     importance_count = _write_feature_importance_outputs(run_dir, eda_dir)
-    chart_count, chart_status = _write_optional_charts(eda_dir, coverage, missingness)
+    importance = _read_optional_csv(eda_dir / "tree_model_feature_importance.csv")
+    leaderboard = _read_optional_csv(run_dir / "comparison" / "model_leaderboard.csv")
+    chart_count, chart_status, chart_files = _write_optional_charts(
+        eda_dir,
+        coverage,
+        missingness,
+        ic_year=ic_year,
+        ic_month=ic_month,
+        leaderboard=leaderboard,
+        feature_importance=importance,
+    )
     write_json_sanitized(
         eda_dir / "eda_manifest.json",
         {
             "status": "ready",
             "eda_status": "experimental_non_contract",
-            "artifact_count": 5 + importance_count + chart_count,
+            "artifact_count": 6 + importance_count + chart_count,
             "chart_count": chart_count,
             "chart_dependency_status": chart_status,
+            "chart_files": list(chart_files),
             "feature_importance_artifact_count": importance_count,
         },
     )
@@ -551,6 +582,121 @@ def _write_eda_outputs(
         "Experimental aggregate-only diagnostics; not schema 0.7 contract.\n",
         encoding="utf-8",
     )
+
+
+def refresh_prediction_handoff_eda(run_dir: Path) -> dict[str, object]:
+    """Regenerate aggregate EDA outputs and charts for an existing handoff run."""
+
+    if not path_is_under_private_output_root(
+        run_dir,
+        "a_share_prediction_handoffs",
+    ):
+        raise ValueError("private_output_policy_violation")
+    eda_dir = run_dir / "eda"
+    eda_dir.mkdir(parents=True, exist_ok=True)
+    required_csvs = (
+        "data_coverage_by_year.csv",
+        "data_coverage_by_month.csv",
+        "missingness_by_feature.csv",
+        "prediction_ic_by_year.csv",
+        "prediction_ic_by_month.csv",
+    )
+    if all((eda_dir / filename).is_file() for filename in required_csvs):
+        coverage = pd.read_csv(eda_dir / "data_coverage_by_year.csv")
+        missingness = pd.read_csv(eda_dir / "missingness_by_feature.csv")
+        ic_year = pd.read_csv(eda_dir / "prediction_ic_by_year.csv")
+        ic_month = pd.read_csv(eda_dir / "prediction_ic_by_month.csv")
+        leaderboard = _read_optional_csv(
+            run_dir / "comparison" / "model_leaderboard.csv"
+        )
+        importance = _read_optional_csv(
+            eda_dir / "tree_model_feature_importance.csv"
+        )
+        importance_count = 0 if importance.empty else 1
+        chart_count, chart_status, chart_files = _write_optional_charts(
+            eda_dir,
+            coverage,
+            missingness,
+            ic_year=ic_year,
+            ic_month=ic_month,
+            leaderboard=leaderboard,
+            feature_importance=importance,
+        )
+        write_json_sanitized(
+            eda_dir / "eda_manifest.json",
+            {
+                "status": "ready",
+                "eda_status": "experimental_non_contract",
+                "artifact_count": 6 + importance_count + chart_count,
+                "chart_count": chart_count,
+                "chart_dependency_status": chart_status,
+                "chart_files": list(chart_files),
+                "feature_importance_artifact_count": importance_count,
+            },
+        )
+        (eda_dir / "eda_report.md").write_text(
+            "# Prediction handoff EDA\n\n"
+            "Experimental aggregate-only diagnostics; not schema 0.7 contract.\n",
+            encoding="utf-8",
+        )
+    else:
+        metadata = _read_model_metadata(run_dir)
+        frame = pd.read_parquet(
+            run_dir / "predictions.parquet",
+            engine="pyarrow",
+        )
+        _write_prediction_eda_outputs(
+            run_dir=run_dir,
+            frame=frame,
+            prediction_columns=tuple(metadata["prediction_columns"]),
+            label_column=str(metadata["target_column"]),
+            timestamp_column=str(metadata["timestamp_column"]),
+        )
+        manifest = json.loads(
+            (eda_dir / "eda_manifest.json").read_text(encoding="utf-8")
+        )
+        chart_count = int(manifest.get("chart_count", 0) or 0)
+        chart_status = str(manifest.get("chart_dependency_status", "unknown"))
+        chart_files = tuple(manifest.get("chart_files", []))
+    _write_checkpoints(run_dir)
+    return {
+        "status": "ready",
+        "chart_count": chart_count,
+        "chart_dependency_status": chart_status,
+        "chart_files": tuple(chart_files),
+    }
+
+
+def _read_model_metadata(run_dir: Path) -> dict[str, object]:
+    metadata_path = run_dir / "model_metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(metadata_path)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    prediction_columns = metadata.get("prediction_columns", [])
+    if not isinstance(prediction_columns, list) or not all(
+        isinstance(column, str) for column in prediction_columns
+    ):
+        raise ValueError("invalid_prediction_config")
+    target_column = metadata.get("target_column")
+    if not isinstance(target_column, str):
+        raise ValueError("invalid_prediction_config")
+    timestamp_column = metadata.get("timestamp_column", "timestamp")
+    if not isinstance(timestamp_column, str):
+        timestamp_column = "timestamp"
+    return {
+        "prediction_columns": tuple(prediction_columns),
+        "target_column": target_column,
+        "timestamp_column": timestamp_column,
+    }
+
+
+def _read_optional_csv(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except (OSError, ValueError):
+        return pd.DataFrame()
 
 
 def _ic_breakdown(
@@ -599,8 +745,6 @@ def _write_feature_importance_outputs(run_dir: Path, eda_dir: Path) -> int:
     if not metadata_path.is_file():
         return 0
     try:
-        import json
-
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return 0
@@ -708,46 +852,155 @@ def _write_optional_charts(
     eda_dir: Path,
     coverage: pd.DataFrame,
     missingness: pd.DataFrame,
-) -> tuple[int, str]:
+    *,
+    ic_year: pd.DataFrame | None = None,
+    ic_month: pd.DataFrame | None = None,
+    leaderboard: pd.DataFrame | None = None,
+    feature_importance: pd.DataFrame | None = None,
+) -> tuple[int, str, tuple[str, ...]]:
+    chart_files: list[str] = []
     try:
         import matplotlib
 
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except (ImportError, OSError, RuntimeError):
-        return 0, "dependency_unavailable"
-    chart_count = 0
+        return 0, "dependency_unavailable", ()
     try:
-        if not coverage.empty:
-            fig, ax = plt.subplots(figsize=(6, 3))
-            coverage.plot.bar(x="year", y="row_count", ax=ax, legend=False)
-            ax.set_xlabel("year")
-            ax.set_ylabel("row_count")
-            fig.tight_layout()
-            fig.savefig(eda_dir / "coverage_by_year.png", dpi=120)
-            plt.close(fig)
-            chart_count += 1
-        if not missingness.empty:
-            fig, ax = plt.subplots(figsize=(7, 3))
-            missingness.head(20).plot.bar(
-                x="feature",
-                y="missing_fraction",
-                ax=ax,
-                legend=False,
-            )
-            ax.set_xlabel("feature")
-            ax.set_ylabel("missing_fraction")
-            fig.tight_layout()
-            fig.savefig(eda_dir / "missingness_top20.png", dpi=120)
-            plt.close(fig)
-            chart_count += 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            if not coverage.empty:
+                fig, ax = plt.subplots(figsize=(6, 3))
+                coverage.plot.bar(x="year", y="row_count", ax=ax, legend=False)
+                ax.set_xlabel("year")
+                ax.set_ylabel("row_count")
+                _safe_tight_layout(fig)
+                filename = "coverage_by_year.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
+            if not missingness.empty:
+                fig, ax = plt.subplots(figsize=(7, 3))
+                top_missing = missingness.sort_values(
+                    "missing_fraction",
+                    ascending=False,
+                ).head(20)
+                top_missing.plot.bar(
+                    x="feature",
+                    y="missing_fraction",
+                    ax=ax,
+                    legend=False,
+                )
+                ax.set_xlabel("feature")
+                ax.set_ylabel("missing_fraction")
+                _safe_tight_layout(fig)
+                filename = "missingness_top20.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
+            if ic_year is not None and not ic_year.empty:
+                fig, ax = plt.subplots(figsize=(8, 3))
+                _top_metric_rows(ic_year).plot.bar(
+                    x="label",
+                    y="mean_rankic",
+                    ax=ax,
+                    legend=False,
+                )
+                ax.set_xlabel("model_year")
+                ax.set_ylabel("mean_rankic")
+                _safe_tight_layout(fig)
+                filename = "prediction_ic_by_year.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
+            if ic_month is not None and not ic_month.empty:
+                fig, ax = plt.subplots(figsize=(8, 3))
+                _top_metric_rows(ic_month).plot.bar(
+                    x="label",
+                    y="mean_rankic",
+                    ax=ax,
+                    legend=False,
+                )
+                ax.set_xlabel("model_month")
+                ax.set_ylabel("mean_rankic")
+                _safe_tight_layout(fig)
+                filename = "prediction_ic_by_month.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
+            if leaderboard is not None and not leaderboard.empty:
+                fig, ax = plt.subplots(figsize=(8, 3))
+                _top_model_rows(leaderboard).plot.bar(
+                    x="model_id",
+                    y="mean_rankic",
+                    ax=ax,
+                    legend=False,
+                )
+                ax.set_xlabel("model_id")
+                ax.set_ylabel("mean_rankic")
+                _safe_tight_layout(fig)
+                filename = "model_leaderboard_top20.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
+            if feature_importance is not None and not feature_importance.empty:
+                fig, ax = plt.subplots(figsize=(8, 3))
+                _top_feature_importance_rows(feature_importance).plot.bar(
+                    x="label",
+                    y="importance",
+                    ax=ax,
+                    legend=False,
+                )
+                ax.set_xlabel("model_feature")
+                ax.set_ylabel("importance")
+                _safe_tight_layout(fig)
+                filename = "feature_importance_top20.png"
+                chart_files.append(filename)
+                fig.savefig(eda_dir / filename, dpi=120)
+                plt.close(fig)
     except (ImportError, OSError, RuntimeError):
-        return 0, "dependency_unavailable"
-    return chart_count, "ready" if chart_count else "not_generated"
+        for filename in chart_files:
+            (eda_dir / filename).unlink(missing_ok=True)
+        return 0, "dependency_unavailable", ()
+    return (
+        len(chart_files),
+        "ready" if chart_files else "not_generated",
+        tuple(chart_files),
+    )
+
+
+def _safe_tight_layout(fig: object) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout()
+
+
+def _top_metric_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    output["label"] = (
+        output["model_id"].astype(str) + "_" + output["period"].astype(str)
+    )
+    output["abs_rankic"] = output["mean_rankic"].abs()
+    return output.sort_values("abs_rankic", ascending=False).head(20)
+
+
+def _top_model_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    output["abs_rankic"] = output["mean_rankic"].abs()
+    return output.sort_values("abs_rankic", ascending=False).head(20)
+
+
+def _top_feature_importance_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    output["label"] = (
+        output["model_id"].astype(str) + "_" + output["feature"].astype(str)
+    )
+    return output.sort_values("importance", ascending=False).head(20)
 
 
 __all__ = [
     "PredictionHandoffConfig",
     "PredictionHandoffResult",
+    "refresh_prediction_handoff_eda",
     "run_prediction_handoff",
 ]

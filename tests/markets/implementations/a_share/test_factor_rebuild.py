@@ -7,6 +7,7 @@ import pytest
 
 from quant_research_platform.markets.implementations.a_share.factor_rebuild import (
     FactorRebuildConfig,
+    refresh_factor_rebuild_eda,
     run_factor_rebuild,
 )
 
@@ -157,6 +158,82 @@ def test_factor_rebuild_uses_warmup_then_crops_output_window(tmp_path) -> None:
         "end_date": "2024-10-31",
         "warmup_sufficient": True,
     }
+    eda_manifest = json.loads(
+        (run_dir / "eda" / "eda_manifest.json").read_text("utf-8")
+    )
+    assert eda_manifest["chart_dependency_status"] == "ready"
+    assert eda_manifest["chart_count"] == 2
+    assert eda_manifest["chart_files"] == [
+        "factor_coverage_by_year.png",
+        "factor_missingness_top20.png",
+    ]
+    assert (run_dir / "eda" / "factor_coverage_by_year.png").is_file()
+    assert (run_dir / "eda" / "factor_missingness_top20.png").is_file()
+
+
+def test_refresh_factor_rebuild_eda_regenerates_static_charts(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+
+    run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="refresh_factor_eda",
+            memory_budget_gb=1,
+            factor_set_tier="smoke_minimal",
+        )
+    )
+
+    run_dir = output_root / "refresh_factor_eda"
+    (run_dir / "eda" / "factor_coverage_by_year.png").unlink()
+    (run_dir / "eda" / "factor_missingness_top20.png").unlink()
+    result = refresh_factor_rebuild_eda(run_dir)
+    manifest = json.loads((run_dir / "eda" / "eda_manifest.json").read_text("utf-8"))
+
+    assert result["chart_dependency_status"] == "ready"
+    assert result["chart_count"] == 2
+    assert manifest["chart_files"] == [
+        "factor_coverage_by_year.png",
+        "factor_missingness_top20.png",
+    ]
+    assert (run_dir / "eda" / "factor_coverage_by_year.png").is_file()
+    assert (run_dir / "eda" / "factor_missingness_top20.png").is_file()
+
+
+def test_refresh_factor_rebuild_eda_rejects_public_run_root(tmp_path) -> None:
+    run_dir = tmp_path / "reports" / "public" / "factor_run"
+    run_dir.mkdir(parents=True)
+    with pytest.raises(ValueError, match="private_output_policy_violation"):
+        refresh_factor_rebuild_eda(run_dir)
+
+
+def test_refresh_factor_rebuild_eda_rejects_unapproved_private_marker_root(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "reports" / "private_tmp" / "factor_run"
+    run_dir.mkdir(parents=True)
+    with pytest.raises(ValueError, match="private_output_policy_violation"):
+        refresh_factor_rebuild_eda(run_dir)
+
+
+def test_refresh_factor_rebuild_eda_rejects_traversal_out_of_private_root(
+    tmp_path,
+) -> None:
+    run_dir = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share_factor_rebuilds"
+        / ".."
+        / ".."
+        / "public"
+        / "factor_run"
+    )
+    with pytest.raises(ValueError, match="private_output_policy_violation"):
+        refresh_factor_rebuild_eda(run_dir)
 
 
 def test_factor_rebuild_full_range_reports_full_range_warmup(tmp_path) -> None:

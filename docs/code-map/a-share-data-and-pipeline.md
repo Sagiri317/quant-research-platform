@@ -87,6 +87,18 @@ Prediction handoff remains training-outside-evaluation: the handoff writes
 private prediction artifacts and evaluation consumes those predictions as schema
 `0.7` inputs.
 
+Existing factor rebuild and prediction handoff runs can refresh experimental
+EDA outputs and static charts without rerunning factor rebuild or model
+training:
+
+```powershell
+conda run -n analysis python -m quant_research_platform.interfaces.cli.commands a-share eda-refresh --run-type factor-rebuild --run-root <factor-run-dir>
+conda run -n analysis python -m quant_research_platform.interfaces.cli.commands a-share eda-refresh --run-type prediction-handoff --run-root <prediction-run-dir>
+```
+
+EDA remains non-contract and outside schema `0.7`; CSV/JSON/MD fallback remains
+available when chart dependencies are unavailable.
+
 `start_from` 控制开始层：
 
 ```text

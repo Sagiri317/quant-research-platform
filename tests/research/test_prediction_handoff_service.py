@@ -8,6 +8,7 @@ import pytest
 from quant_research_platform.research.prediction_handoff import (
     PredictionHandoffConfig,
     _write_optional_charts,
+    refresh_prediction_handoff_eda,
     run_prediction_handoff,
 )
 
@@ -53,6 +54,15 @@ def test_prediction_handoff_writes_predictions_evaluation_and_comparison(
     assert (run_dir / "comparison" / "prediction_vs_single_factors.json").is_file()
     assert (run_dir / "eda" / "eda_manifest.json").is_file()
     assert (run_dir / "eda" / "data_coverage_by_month.csv").is_file()
+    eda_manifest = json.loads(
+        (run_dir / "eda" / "eda_manifest.json").read_text("utf-8")
+    )
+    assert eda_manifest["chart_dependency_status"] == "ready"
+    assert eda_manifest["chart_count"] >= 5
+    assert "coverage_by_year.png" in eda_manifest["chart_files"]
+    assert "model_leaderboard_top20.png" in eda_manifest["chart_files"]
+    assert (run_dir / "eda" / "coverage_by_year.png").is_file()
+    assert (run_dir / "eda" / "model_leaderboard_top20.png").is_file()
 
     summary = json.loads((run_dir / "runtime_summary.json").read_text("utf-8"))
     eval_summary = json.loads(
@@ -78,6 +88,79 @@ def test_prediction_handoff_writes_predictions_evaluation_and_comparison(
     assert str(tmp_path) not in json.dumps(summary)
     assert "row_sample" not in json.dumps(summary)
     assert "stock_sample" not in json.dumps(summary)
+
+
+def test_refresh_prediction_handoff_eda_regenerates_static_charts(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    run_prediction_handoff(
+        PredictionHandoffConfig(
+            input_path=input_path,
+            output_root=output_root,
+            run_id="prediction_refresh_run",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            return_source_column="forward_return_1d",
+            label_horizon_days=2,
+            folds=(
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                },
+            ),
+            model_ids=("ridge", "elastic_net"),
+        )
+    )
+
+    run_dir = output_root / "prediction_refresh_run"
+    (run_dir / "eda" / "coverage_by_year.png").unlink()
+    result = refresh_prediction_handoff_eda(run_dir)
+    manifest = json.loads((run_dir / "eda" / "eda_manifest.json").read_text("utf-8"))
+
+    assert result["chart_dependency_status"] == "ready"
+    assert result["chart_count"] >= 5
+    assert "coverage_by_year.png" in manifest["chart_files"]
+    assert "prediction_ic_by_year.png" in manifest["chart_files"]
+    assert "model_leaderboard_top20.png" in manifest["chart_files"]
+    assert (run_dir / "eda" / "coverage_by_year.png").is_file()
+
+
+def test_refresh_prediction_handoff_eda_rejects_public_run_root(tmp_path) -> None:
+    run_dir = tmp_path / "reports" / "public" / "prediction_run"
+    run_dir.mkdir(parents=True)
+    with pytest.raises(ValueError, match="private_output_policy_violation"):
+        refresh_prediction_handoff_eda(run_dir)
+
+
+def test_refresh_prediction_handoff_eda_rejects_unapproved_private_marker_root(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "reports" / "private_tmp" / "prediction_run"
+    run_dir.mkdir(parents=True)
+    with pytest.raises(ValueError, match="private_output_policy_violation"):
+        refresh_prediction_handoff_eda(run_dir)
+
+
+def test_refresh_prediction_handoff_eda_rejects_traversal_out_of_private_root(
+    tmp_path,
+) -> None:
+    run_dir = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share_prediction_handoffs"
+        / ".."
+        / ".."
+        / "public"
+        / "prediction_run"
+    )
+    with pytest.raises(ValueError, match="private_output_policy_violation"):
+        refresh_prediction_handoff_eda(run_dir)
 
 
 def test_prediction_handoff_dry_run_writes_no_row_level_outputs(tmp_path) -> None:
@@ -202,7 +285,7 @@ def test_prediction_handoff_chart_dependency_failure_does_not_crash(
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    chart_count, status = _write_optional_charts(
+    chart_count, status, chart_files = _write_optional_charts(
         tmp_path,
         pd.DataFrame({"year": [2024], "row_count": [3]}),
         pd.DataFrame({"feature": ["rev_1d"], "missing_fraction": [0.0]}),
@@ -210,6 +293,7 @@ def test_prediction_handoff_chart_dependency_failure_does_not_crash(
 
     assert chart_count == 0
     assert status == "dependency_unavailable"
+    assert chart_files == ()
     assert not (tmp_path / "coverage_by_year.png").exists()
 
 

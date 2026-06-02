@@ -30,6 +30,21 @@ def path_has_private_marker(path: Path) -> bool:
     return text_has_private_marker(path.as_posix())
 
 
+def path_is_under_private_output_root(path: Path, output_root_name: str) -> bool:
+    """Return whether a path is below reports/private_real/<output_root_name>."""
+
+    try:
+        normalized = path.resolve(strict=False)
+    except OSError:
+        normalized = path.absolute()
+    parts = tuple(part.casefold() for part in normalized.parts)
+    expected = ("reports", "private_real", output_root_name.casefold())
+    for index in range(0, max(len(parts) - len(expected) + 1, 0)):
+        if parts[index : index + len(expected)] == expected:
+            return len(parts) > index + len(expected)
+    return False
+
+
 def looks_like_private_or_local_path(
     value: str,
     *,
@@ -65,6 +80,7 @@ __all__ = [
     "PRIVATE_PATH_MARKERS",
     "looks_like_private_or_local_path",
     "path_has_private_marker",
+    "path_is_under_private_output_root",
     "require_private_outputs_for_private_input",
     "text_has_private_marker",
 ]

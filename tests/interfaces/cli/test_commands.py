@@ -196,6 +196,56 @@ def test_a_share_factor_rebuild_rejects_private_input_public_output(tmp_path) ->
     assert not (output_root / "public_rejected").exists()
 
 
+def test_a_share_eda_refresh_cli_regenerates_factor_charts(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _a_share_rebuild_panel().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    runner = CliRunner()
+
+    build = runner.invoke(
+        app,
+        [
+            "a-share",
+            "factor-rebuild",
+            "--panel-parquet",
+            str(panel_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "factor_eda_refresh_cli",
+            "--memory-budget-gb",
+            "1",
+            "--factor-set-tier",
+            "smoke_minimal",
+        ],
+    )
+
+    assert build.exit_code == 0, build.output
+    run_dir = output_root / "factor_eda_refresh_cli"
+    (run_dir / "eda" / "factor_coverage_by_year.png").unlink()
+    refresh = runner.invoke(
+        app,
+        [
+            "a-share",
+            "eda-refresh",
+            "--run-type",
+            "factor-rebuild",
+            "--run-root",
+            str(run_dir),
+        ],
+    )
+
+    assert refresh.exit_code == 0, refresh.output
+    assert "charts=2" in refresh.output
+    assert (run_dir / "eda" / "factor_coverage_by_year.png").is_file()
+
+
 def test_a_share_factor_rebuild_requires_explicit_overwrite_processed(
     tmp_path,
 ) -> None:
@@ -293,6 +343,64 @@ def test_a_share_prediction_handoff_cli_writes_evaluation_outputs(tmp_path) -> N
     assert (run_dir / "evaluation" / "manifest.json").is_file()
     assert (run_dir / "comparison" / "model_leaderboard.csv").is_file()
     assert (run_dir / "eda" / "eda_manifest.json").is_file()
+
+
+def test_a_share_eda_refresh_cli_regenerates_prediction_charts(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_handoff_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+    build = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_eda_refresh_cli",
+            "--feature-column",
+            "feature_a",
+            "--feature-column",
+            "feature_b",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert build.exit_code == 0, build.output
+    run_dir = output_root / "prediction_eda_refresh_cli"
+    (run_dir / "eda" / "coverage_by_year.png").unlink()
+    refresh = runner.invoke(
+        app,
+        [
+            "a-share",
+            "eda-refresh",
+            "--run-type",
+            "prediction-handoff",
+            "--run-root",
+            str(run_dir),
+        ],
+    )
+
+    assert refresh.exit_code == 0, refresh.output
+    assert "chart_status=ready" in refresh.output
+    assert (run_dir / "eda" / "coverage_by_year.png").is_file()
 
 
 def test_a_share_prediction_handoff_cli_resolves_feature_preset(tmp_path) -> None:

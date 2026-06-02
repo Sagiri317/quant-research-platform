@@ -29,6 +29,7 @@ from quant_research_platform.evaluations.evaluation_spec import (
 )
 from quant_research_platform.markets.implementations.a_share.factor_rebuild import (
     FactorRebuildConfig,
+    refresh_factor_rebuild_eda,
     run_factor_rebuild,
     write_schema_inventory_run,
 )
@@ -46,6 +47,7 @@ from quant_research_platform.research.ml_baseline import (
 from quant_research_platform.research.ml_model_suite import DEFAULT_NON_DL_MODEL_IDS
 from quant_research_platform.research.prediction_handoff import (
     PredictionHandoffConfig,
+    refresh_prediction_handoff_eda,
     run_prediction_handoff,
 )
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
@@ -415,6 +417,16 @@ A_SHARE_REQUIRE_SUFFICIENT_WARMUP_OPTION = typer.Option(
     "--require-sufficient-warmup/--no-require-sufficient-warmup",
     help="Reject date-filtered factor rebuilds without sufficient warmup.",
 )
+A_SHARE_EDA_RUN_TYPE_OPTION = typer.Option(
+    ...,
+    "--run-type",
+    help="EDA run type: factor-rebuild or prediction-handoff.",
+)
+A_SHARE_EDA_RUN_ROOT_OPTION = typer.Option(
+    ...,
+    "--run-root",
+    help="Existing private run directory to refresh.",
+)
 
 
 @a_share_app.command("build-interim")
@@ -570,6 +582,29 @@ def a_share_prediction_handoff(
         "A-share prediction handoff "
         f"{result.status}: run_id={run_id or 'prediction_handoff'} "
         f"rows={result.row_count}"
+    )
+
+
+@a_share_app.command("eda-refresh")
+def a_share_eda_refresh(
+    run_type: str = A_SHARE_EDA_RUN_TYPE_OPTION,
+    run_root: Path = A_SHARE_EDA_RUN_ROOT_OPTION,
+) -> None:
+    """Regenerate aggregate EDA outputs and static charts for an existing run."""
+
+    try:
+        if run_type == "factor-rebuild":
+            result = refresh_factor_rebuild_eda(run_root)
+        elif run_type == "prediction-handoff":
+            result = refresh_prediction_handoff_eda(run_root)
+        else:
+            raise ValueError("invalid_eda_run_type")
+    except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
+        _raise_a_share_batch_error(exc)
+    typer.echo(
+        "A-share EDA refresh "
+        f"ready: run_type={run_type} charts={result['chart_count']} "
+        f"chart_status={result['chart_dependency_status']}"
     )
 
 
