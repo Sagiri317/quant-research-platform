@@ -43,6 +43,52 @@ Use Medium for a single module or docs/rules batch. Use Medium-High when the cha
 - Stop if generated/private data, deployment/trading, external API, secrets, or credential handling becomes relevant.
 - Stop for new framework, new top-level package, new artifact type or required artifact file, A-share adapter capability expansion, model registry, feature store, scheduler, worker, roadmap priority change, or repeated unclear test failure.
 
+## Contract / Safety / Artifact Issue-Family Gate
+
+For contract-adjacent, safety-adjacent, artifact-adjacent, metadata writer,
+CLI/API/service, schema inventory, EDA refresh, run discovery, or private-output
+boundary work, list the issue-family checklist before implementation. Do not
+only fix the file where the bug was observed; scan sibling entrypoints for the
+same issue family.
+
+Issue families to consider:
+
+- duplicate-before-input-read / duplicate-before-row-level-write
+- preflight-before-row-read
+- unsafe identifier before metadata/API/CLI echo
+- sensitive text and private-marker handling in metadata keys and values
+- schema inventory redaction for private/vendor/source/local markers
+- stale generated artifact refresh / cleanup
+- disk-loaded metadata numeric/string sanitization
+- CLI/API/service failure-code consistency
+- configured root / run discovery consistency
+- long/wide artifact consistency
+- deterministic seed / optional dependency behavior
+- private input + public output boundary
+- row-level private-derived artifact tracking
+
+Before changing code, include a blast-radius declaration across affected
+surfaces, including service, CLI, API, schema/metadata writer, artifact writer,
+EDA refresh, run discovery, docs/status, tests, and private-output boundary.
+
+For issue-family fixes, write parameter-family RED tests instead of single-case
+smoke tests. Include unsafe identifier variants such as `vendor_factor`,
+`vendorFactor`, `factorVendor`, `sourceAlpha`, `localTimestamp`, `../alpha`,
+`C:/tmp/alpha`, and `..\alpha`; include allowlist regressions such as
+`forward_return_1d`, `walk_forward`, and `random_forest_lite`. Cover duplicate
+keys through service, API, and CLI paths when applicable; cover malformed
+metadata across status, schema inventory, EDA, and comparison surfaces; cover
+optional dependencies in both installed and missing paths.
+
+For high-risk surfaces, assign subagents by issue family rather than generic
+review when subagents are allowed: ordering/preflight/duplicate-key,
+identifier/path/private-marker sanitizer, artifact freshness / generated
+artifact cleanup, API/CLI/service contract, and merge-readiness / test coverage.
+
+Wording constraints: use generic reusable wording. Do not include real commit
+SHAs, private paths, row samples, stock-code samples, alpha/performance/
+investment claims, or a long historical narrative.
+
 ## Branch / Closed-loop Policy
 
 - Branch tasks use `feature/<task-name>`.

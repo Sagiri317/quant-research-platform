@@ -88,6 +88,51 @@ If `Can proceed` is no, do not edit files.
 - Write scopes are disjoint: yes/no
 - Shared contract owner: main agent / named integrator
 - Review-only subagents modify files: no
+- For contract/safety/artifact-adjacent work, assign subagents by issue family
+  instead of generic review: ordering/preflight/duplicate-key,
+  identifier/path/private-marker sanitizer, artifact freshness / generated
+  artifact cleanup, API/CLI/service contract, and merge-readiness / test
+  coverage.
+
+## Issue-Family Checklist
+
+For contract-adjacent, safety-adjacent, artifact-adjacent, metadata writer,
+CLI/API/service, schema inventory, EDA refresh, run discovery, or private-output
+boundary goals, list issue families before implementation or review. Do not
+only fix the file where the bug was observed; scan sibling entrypoints for the
+same issue family.
+
+Issue families to check:
+
+- duplicate-before-input-read / duplicate-before-row-level-write
+- preflight-before-row-read
+- unsafe identifier before metadata/API/CLI echo
+- sensitive text and private-marker handling in metadata keys and values
+- schema inventory redaction for private/vendor/source/local markers
+- stale generated artifact refresh / cleanup
+- disk-loaded metadata numeric/string sanitization
+- CLI/API/service failure-code consistency
+- configured root / run discovery consistency
+- long/wide artifact consistency
+- deterministic seed / optional dependency behavior
+- private input + public output boundary
+- row-level private-derived artifact tracking
+
+Include a blast-radius declaration across service, CLI, API, schema/metadata
+writer, artifact writer, EDA refresh, run discovery, docs/status, tests, and
+private-output boundary before changing code.
+
+Require parameter-family RED tests where implementation changes are allowed:
+unsafe identifier variants (`vendor_factor`, `vendorFactor`, `factorVendor`,
+`sourceAlpha`, `localTimestamp`, `../alpha`, `C:/tmp/alpha`, `..\alpha`),
+allowlist regressions (`forward_return_1d`, `walk_forward`,
+`random_forest_lite`), duplicate keys across service/API/CLI when applicable,
+malformed metadata across status/schema inventory/EDA/comparison, and optional
+dependencies in installed and missing paths.
+
+Wording constraints: use generic reusable wording. Do not include real commit
+SHAs, private paths, row samples, stock-code samples, alpha/performance/
+investment claims, or a long historical narrative.
 
 ## Review-And-Fix Loop
 
@@ -97,6 +142,11 @@ If `Can proceed` is no, do not edit files.
 - P3 policy: report or fix only if small and in scope.
 - Re-check command after each slice:
 - Stop when repeated findings require a new test/static check or exceed approved scope.
+- Final review gate: confirm every issue family was checked across relevant
+  entrypoints; tests are parameterized by variants, not only smoke cases;
+  API/CLI/service error codes are consistent; disk-loaded metadata paths are
+  sanitized; generated artifacts are ignored/untracked; and docs are precise
+  without overclaiming.
 
 ## Verification Cadence
 

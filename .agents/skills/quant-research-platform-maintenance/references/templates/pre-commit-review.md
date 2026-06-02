@@ -36,6 +36,58 @@ Medium
 - If the diff touches schema, `manifest.display`, public API, frontend shared contracts, `EVALUATION_INTERFACE`, or generated artifacts, report the contract-surface stop/approval status before commit readiness.
 - Optional/default value semantic alignment: If the diff touches optional/default values, omitted values, time windows, folds, splits, ranges, intervals, pagination, limits, fallback behavior, overwrite/resume semantics, or similar boundary logic, compare parser/config/validator/runtime consumer/metadata/tests together. For each omitted/default value, construct at least one adversarial counterexample and verify validator behavior matches actual runtime behavior. Do not treat validation coverage as sufficient unless the validator and the actual consumer interpret omitted/default values identically.
 
+## Issue-Family Review Gate
+
+For contract/safety/artifact-adjacent diffs, review by issue family rather than
+only by changed file. Confirm the diff included a blast-radius declaration
+across relevant service, CLI, API, schema/metadata writer, artifact writer, EDA
+refresh, run discovery, docs/status, tests, and private-output boundary
+surfaces. If a bug is fixed in one entrypoint, scan sibling entrypoints for the
+same issue family.
+
+Issue families to check:
+
+- duplicate-before-input-read / duplicate-before-row-level-write
+- preflight-before-row-read
+- unsafe identifier before metadata/API/CLI echo
+- sensitive text and private-marker handling in metadata keys and values
+- schema inventory redaction for private/vendor/source/local markers
+- stale generated artifact refresh / cleanup
+- disk-loaded metadata numeric/string sanitization
+- CLI/API/service failure-code consistency
+- configured root / run discovery consistency
+- long/wide artifact consistency
+- deterministic seed / optional dependency behavior
+- private input + public output boundary
+- row-level private-derived artifact tracking
+
+For tests, verify parameter-family coverage rather than only smoke cases:
+unsafe identifier variants (`vendor_factor`, `vendorFactor`, `factorVendor`,
+`sourceAlpha`, `localTimestamp`, `../alpha`, `C:/tmp/alpha`, `..\alpha`),
+allowlist regressions (`forward_return_1d`, `walk_forward`,
+`random_forest_lite`), duplicate keys across service/API/CLI when applicable,
+malformed metadata across status/schema inventory/EDA/comparison, and optional
+dependencies in installed and missing paths.
+
+If subagents are used for review, assign read-only subagents by issue family:
+ordering/preflight/duplicate-key, identifier/path/private-marker sanitizer,
+artifact freshness / generated artifact cleanup, API/CLI/service contract, and
+merge-readiness / test coverage.
+
+For pre-merge readiness, answer:
+
+- Did every issue family get checked across all relevant entrypoints?
+- Are tests parameterized by variants, not only smoke cases?
+- Are API/CLI/service error codes consistent?
+- Are disk-loaded metadata paths sanitized?
+- Are generated artifacts ignored/untracked?
+- Are docs precise without overclaiming?
+
+Wording constraints: durable docs and review reports should use generic
+reusable wording. Do not include real commit SHAs, private paths, row samples,
+stock-code samples, alpha/performance/investment claims, or a long historical
+narrative.
+
 ## Verification Honesty
 
 - Do not imply tests passed when they were not run; list skipped pytest/ruff with the reason.
