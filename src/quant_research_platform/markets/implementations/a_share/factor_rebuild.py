@@ -22,6 +22,7 @@ from quant_research_platform.markets.implementations.a_share.factors.literature_
     LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID,
     calculate_literature_price_volume_factors,
     expected_literature_price_volume_factor_columns,
+    largest_literature_price_volume_lookback_days,
     select_literature_price_volume_features,
     unsupported_literature_price_volume_factors,
 )
@@ -79,6 +80,7 @@ class FactorRebuildConfig:
     calculation_start_date: str | None = None
     evaluation_start_date: str | None = None
     factor_set_tier: str = "full"
+    require_sufficient_warmup: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,13 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
         expected_factors = expected_literature_price_volume_factor_columns(
             factor_set_tier=config.factor_set_tier
         )
+        warmup = build_warmup_sufficiency_payload(
+            config=config,
+            expected_factors=expected_factors,
+        )
+        write_json_sanitized(run_dir / "warmup_sufficiency.json", warmup)
+        if config.require_sufficient_warmup and not warmup["warmup_sufficient"]:
+            raise ValueError("warmup_insufficient")
         unsupported = unsupported_literature_price_volume_factors(
             available_input_columns,
             expected_columns=expected_factors,
@@ -185,7 +194,11 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
         if config.dry_run:
             write_json_sanitized(
                 run_dir / "runtime_summary.json",
-                _runtime_summary(config.run_id, "dry_run", None),
+                {
+                    **_runtime_summary(config.run_id, "dry_run", None),
+                    "warmup_status": warmup["warmup_status"],
+                    "warmup": warmup,
+                },
             )
             _write_checkpoints(run_dir)
             return FactorRebuildResult(run_dir=run_dir, status="dry_run", row_count=0)
@@ -218,7 +231,7 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
         )
         output_path = run_dir / "factor_rebuild.parquet"
         _write_factor_table(output_path, output)
-        run_warnings = _degraded_run_warnings(config, warnings)
+        run_warnings = _degraded_run_warnings(config, warnings, warmup)
         _write_feature_set_manifest(
             run_dir=run_dir,
             feature_columns=feature_columns,
@@ -257,7 +270,8 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
                 }
                 if _calculation_start_date(config) or config.end_date
                 else None,
-                "warmup_status": _warmup_status(config),
+                "warmup_status": warmup["warmup_status"],
+                "warmup": warmup,
             },
         )
         _write_checkpoints(run_dir)
@@ -361,6 +375,52 @@ def _crop_to_evaluation_window(
     if end:
         mask &= dates <= pd.Timestamp(end)
     return frame.loc[mask].copy()
+
+
+def build_warmup_sufficiency_payload(
+    *,
+    config: FactorRebuildConfig,
+    expected_factors: tuple[str, ...],
+) -> dict[str, object]:
+    """Build aggregate warmup sufficiency metadata from trading dates only."""
+
+    calculation_start = _calculation_start_date(config)
+    evaluation_start = _evaluation_start_date(config)
+    largest_lookback = largest_literature_price_volume_lookback_days(
+        expected_factors
+    )
+    observation_count: int | None = None
+    if (
+        calculation_start
+        and evaluation_start
+        and pd.Timestamp(calculation_start) < pd.Timestamp(evaluation_start)
+    ):
+        dates = pd.read_parquet(
+            config.panel_parquet,
+            columns=("trade_date",),
+            filters=_date_filters(calculation_start, None),
+            engine="pyarrow",
+        )
+        values = pd.to_datetime(dates["trade_date"], errors="coerce")
+        mask = values < pd.Timestamp(evaluation_start)
+        observation_count = int(values.loc[mask].dropna().nunique())
+        warmup_sufficient = observation_count >= largest_lookback
+        status = "warmup_sufficient" if warmup_sufficient else "warmup_insufficient"
+    elif calculation_start or evaluation_start or config.end_date:
+        warmup_sufficient = False
+        status = "date_filtered_without_warmup"
+    else:
+        warmup_sufficient = True
+        status = "full_range"
+    return {
+        "warmup_status": status,
+        "largest_lookback_days": int(largest_lookback),
+        "warmup_observation_count": observation_count,
+        "calculation_start_date": calculation_start,
+        "evaluation_start_date": evaluation_start,
+        "end_date": config.end_date,
+        "warmup_sufficient": bool(warmup_sufficient),
+    }
 
 
 def _project_factor_tier_columns(
@@ -499,8 +559,13 @@ def _write_factor_eda(
         {
             "status": "ready",
             "eda_status": "experimental_non_contract",
-            "artifact_count": 2,
+            "artifact_count": 3,
         },
+    )
+    (eda_dir / "eda_report.md").write_text(
+        "# Factor rebuild EDA\n\n"
+        "Experimental aggregate-only diagnostics; not schema 0.7 contract.\n",
+        encoding="utf-8",
     )
 
 
@@ -523,6 +588,7 @@ def _runtime_summary(
 def _degraded_run_warnings(
     config: FactorRebuildConfig,
     warnings: tuple[str, ...],
+    warmup: dict[str, object],
 ) -> tuple[str, ...]:
     messages = list(warnings)
     calculation_start = _calculation_start_date(config)
@@ -532,9 +598,9 @@ def _degraded_run_warnings(
         and evaluation_start
         and pd.Timestamp(calculation_start) < pd.Timestamp(evaluation_start)
     ):
-        messages.append("warmup_aware_date_filtered_run")
-    elif config.start_date or config.end_date:
-        messages.append("date_filtered_smoke_without_prior_warmup")
+        messages.append(str(warmup["warmup_status"]))
+    elif warmup["warmup_status"] == "date_filtered_without_warmup":
+        messages.append("date_filtered_without_warmup")
     return tuple(messages)
 
 
@@ -546,9 +612,9 @@ def _warmup_status(config: FactorRebuildConfig) -> str:
         and evaluation_start
         and pd.Timestamp(calculation_start) < pd.Timestamp(evaluation_start)
     ):
-        return "warmup_aware"
+        return "warmup_aware_unchecked"
     if config.start_date or config.end_date:
-        return "date_filtered_smoke_without_prior_warmup"
+        return "date_filtered_without_warmup"
     return "full_range"
 
 
@@ -569,6 +635,7 @@ def _failure_code(exc: BaseException) -> str:
         "duplicate_run_id",
         "private_output_policy_violation",
         "invalid_factor_rebuild_config",
+        "warmup_insufficient",
     }
     if detail in known:
         return detail
@@ -581,6 +648,7 @@ def _write_checkpoints(run_dir: Path) -> None:
     checkpoints = [
         ("schema_inventory", "schema_inventory.json"),
         ("memory_preflight", "memory_preflight.json"),
+        ("warmup_sufficiency", "warmup_sufficiency.json"),
         ("factor_rebuild", "factor_rebuild.parquet"),
         ("feature_set_manifest", "feature_set_manifest.json"),
         ("overwrite_manifest", "overwrite_manifest.json"),
@@ -602,6 +670,7 @@ def _checkpoint_ready(run_dir: Path, key: str) -> bool:
     paths = {
         "schema_inventory": run_dir / "schema_inventory.json",
         "memory_preflight": run_dir / "memory_preflight.json",
+        "warmup_sufficiency": run_dir / "warmup_sufficiency.json",
         "factor_rebuild": run_dir / "factor_rebuild.parquet",
         "feature_set_manifest": run_dir / "feature_set_manifest.json",
         "overwrite_manifest": run_dir / "overwrite_manifest.json",
@@ -615,6 +684,7 @@ __all__ = [
     "FACTOR_REBUILD_INPUT_COLUMNS",
     "FactorRebuildConfig",
     "FactorRebuildResult",
+    "build_warmup_sufficiency_payload",
     "run_factor_rebuild",
     "write_schema_inventory_run",
 ]

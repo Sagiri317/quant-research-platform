@@ -25,8 +25,8 @@ data/raw_private/csmar/
 | raw -> interim | `quant_research_platform.markets.implementations.a_share.csmar.build_interim` | 标准化 CSMAR raw CSV |
 | interim -> panel | `quant_research_platform.markets.implementations.a_share.datasets.build_panel` | 生成 full research panel |
 | panel -> factors | `quant_research_platform.markets.implementations.a_share.factors.build_factors` | 生成 slim factor and label table |
-| panel -> literature-prior factor rebuild | `quant_research_platform.markets.implementations.a_share.factor_rebuild` | Backend service for schema inventory, memory preflight, dry-run, factor-set tiers, warmup-aware execution windows, explicit overwrite, optional backup, and private-output policy checks |
-| features -> prediction handoff | `quant_research_platform.research.prediction_handoff` | Backend service that trains local non-DL prediction signals, writes prediction parquet, evaluates through schema `0.7`, and emits aggregate comparison / EDA outputs |
+| panel -> literature-prior factor rebuild | `quant_research_platform.markets.implementations.a_share.factor_rebuild` | Backend service for schema inventory, memory preflight, dry-run, factor-set tiers, warmup-aware execution windows, warmup sufficiency metadata / strict guard, explicit overwrite, optional backup, and private-output policy checks |
+| features -> prediction handoff | `quant_research_platform.research.prediction_handoff` | Backend service that resolves explicit or preset feature columns, trains local non-DL prediction signals, writes prediction parquet, evaluates through schema `0.7`, and emits aggregate comparison / EDA outputs |
 | factors -> evaluation service | `quant_research_platform.markets.implementations.a_share.evaluation.service` | A 股 evaluation request/result service；CLI、pipeline runner 和 Factor Factory 的共享入口 |
 | evaluation service -> CLI | `quant_research_platform.markets.implementations.a_share.evaluation.run_factor_evaluation` | A 股专用 evaluation CLI 薄包装 |
 | orchestrated run | `quant_research_platform.pipelines.a_share.runner.run_a_share_pipeline` | 按 `start_from` 执行到 evaluation |
@@ -51,11 +51,13 @@ A-share research batch API additions:
 POST /api/a-share/factor-rebuild-runs
 GET /api/a-share/factor-rebuild-runs/{run_id}
 GET /api/a-share/factor-rebuild-runs/{run_id}/checkpoints
+GET /api/a-share/factor-rebuild-runs/{run_id}/schema-inventory
 GET /api/a-share/factor-rebuild-runs/{run_id}/eda
 POST /api/a-share/prediction-handoffs
 GET /api/a-share/prediction-handoffs/{run_id}
 GET /api/a-share/prediction-handoffs/{run_id}/checkpoints
 GET /api/a-share/prediction-handoffs/{run_id}/schema
+GET /api/a-share/prediction-handoffs/{run_id}/schema-inventory
 GET /api/a-share/prediction-handoffs/{run_id}/comparison
 GET /api/a-share/prediction-handoffs/{run_id}/eda
 ```
@@ -69,11 +71,21 @@ make those runs visible in `/api/runs`.
 
 The literature-prior factor rebuild CLI supports warmup-aware execution through
 `--calculation-start-date`, `--evaluation-start-date`, and `--factor-set-tier`.
-The current tier names are `full`, `core_long_period`, and `smoke_minimal`.
-Warmup rows are used for rolling factor calculation and then cropped from the
-evaluation/output window. Prediction handoff remains training-outside-evaluation:
-the handoff writes private prediction artifacts and evaluation consumes those
-predictions as schema `0.7` inputs.
+The current tier names are `full`, `core_long_period`, and `smoke_minimal`; final
+evidence runs can add `--require-sufficient-warmup` to reject insufficient
+warmup. Warmup rows are used for rolling factor calculation and then cropped
+from the evaluation/output window.
+
+The A-share prediction handoff CLI/API supports either explicit feature columns
+or `a_share_literature_price_volume_preset_v1`. The CLI form is:
+
+```powershell
+conda run -n analysis python -m quant_research_platform.interfaces.cli.commands a-share prediction-handoff --input-parquet <input> --output-root <private-output-root> --run-id <run-id> --feature-preset a_share_literature_price_volume_preset_v1 --target-column forward_return_20d --return-source-column forward_return_1d --label-horizon-days 20 --walk-forward-fold <fold-id,train-end,test-start,test-end>
+```
+
+Prediction handoff remains training-outside-evaluation: the handoff writes
+private prediction artifacts and evaluation consumes those predictions as schema
+`0.7` inputs.
 
 `start_from` 控制开始层：
 

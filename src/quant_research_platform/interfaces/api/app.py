@@ -80,6 +80,13 @@ def _run_root_project_base(path: Path) -> Path:
     return parent
 
 
+def _configured_root_path(configured_roots, source_alias: str) -> Path | None:
+    for root in configured_roots:
+        if root.source_alias == source_alias:
+            return root.path
+    return None
+
+
 def create_app(
     run_roots: list[tuple[str, str | Path]] | None = None,
     *,
@@ -137,9 +144,15 @@ def create_app(
         )
     )
     prediction_handoff_env = os.environ.get(PREDICTION_HANDOFF_ROOT_ENV)
+    configured_prediction_root = _configured_root_path(
+        configured_roots,
+        "a_share_prediction",
+    )
     prediction_handoff_output_root = (
         Path(prediction_handoff_root)
         if prediction_handoff_root is not None
+        else configured_prediction_root
+        if prediction_handoff_env is None and configured_prediction_root is not None
         else Path(
             prediction_handoff_env
             or "reports/private_real/a_share_prediction_handoffs"
@@ -151,10 +164,14 @@ def create_app(
         run_roots is None
         or prediction_handoff_root is not None
         or prediction_handoff_env is not None
+        or configured_prediction_root is not None
     )
-    if should_register_prediction_root and all(
-        root.source_alias != "a_share_prediction" for root in configured_roots
-    ):
+    if should_register_prediction_root:
+        configured_roots = [
+            root
+            for root in configured_roots
+            if root.source_alias != "a_share_prediction"
+        ]
         configured_roots = [
             *configured_roots,
             run_root("a_share_prediction", prediction_handoff_output_root),

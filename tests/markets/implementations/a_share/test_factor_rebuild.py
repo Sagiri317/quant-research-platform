@@ -70,6 +70,7 @@ def test_factor_rebuild_overwrite_processed_with_optional_backup(tmp_path) -> No
     )
     assert feature_manifest["unsupported_factor_count"] == 0
     assert (output_root / "overwrite_run" / "eda" / "eda_manifest.json").is_file()
+    assert (output_root / "overwrite_run" / "eda" / "eda_report.md").is_file()
     assert str(tmp_path) not in json.dumps(manifest)
 
 
@@ -144,9 +145,162 @@ def test_factor_rebuild_uses_warmup_then_crops_output_window(tmp_path) -> None:
     assert "drawdown_20d" not in output.columns
     assert "forward_return_20d" in output.columns
     assert manifest["factor_set_tier"] == "core_long_period"
-    assert "warmup_aware_date_filtered_run" in manifest["warnings"]
-    assert "date_filtered_smoke_without_prior_warmup" not in manifest["warnings"]
-    assert summary["warmup_status"] == "warmup_aware"
+    assert "warmup_sufficient" in manifest["warnings"]
+    assert "date_filtered_without_warmup" not in manifest["warnings"]
+    assert summary["warmup_status"] == "warmup_sufficient"
+    assert summary["warmup"] == {
+        "warmup_status": "warmup_sufficient",
+        "largest_lookback_days": 120,
+        "warmup_observation_count": 153,
+        "calculation_start_date": "2024-01-01",
+        "evaluation_start_date": "2024-08-01",
+        "end_date": "2024-10-31",
+        "warmup_sufficient": True,
+    }
+
+
+def test_factor_rebuild_full_range_reports_full_range_warmup(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+
+    result = run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="full_range_dry",
+            memory_budget_gb=1,
+            dry_run=True,
+        )
+    )
+
+    summary = json.loads(
+        (output_root / "full_range_dry" / "runtime_summary.json").read_text("utf-8")
+    )
+    warmup = json.loads(
+        (output_root / "full_range_dry" / "warmup_sufficiency.json").read_text(
+            "utf-8"
+        )
+    )
+    assert result.status == "dry_run"
+    assert summary["warmup_status"] == "full_range"
+    assert warmup["warmup_status"] == "full_range"
+    assert warmup["warmup_sufficient"] is True
+
+
+def test_factor_rebuild_warmup_sufficiency_statuses_and_lookbacks(
+    tmp_path,
+) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel_with_long_warmup().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+
+    run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="sufficient_core",
+            memory_budget_gb=1,
+            dry_run=True,
+            calculation_start_date="2024-01-01",
+            evaluation_start_date="2024-08-01",
+            end_date="2024-10-31",
+            factor_set_tier="core_long_period",
+            require_sufficient_warmup=True,
+        )
+    )
+    run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="date_filter_no_warmup",
+            memory_budget_gb=1,
+            dry_run=True,
+            start_date="2024-08-01",
+            end_date="2024-10-31",
+            factor_set_tier="core_long_period",
+        )
+    )
+    run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="full_tier_lookback",
+            memory_budget_gb=1,
+            dry_run=True,
+            calculation_start_date="2024-01-01",
+            evaluation_start_date="2024-08-01",
+            end_date="2024-10-31",
+            factor_set_tier="full",
+        )
+    )
+
+    sufficient = json.loads(
+        (output_root / "sufficient_core" / "warmup_sufficiency.json").read_text(
+            "utf-8"
+        )
+    )
+    no_warmup = json.loads(
+        (output_root / "date_filter_no_warmup" / "warmup_sufficiency.json").read_text(
+            "utf-8"
+        )
+    )
+    full_tier = json.loads(
+        (output_root / "full_tier_lookback" / "warmup_sufficiency.json").read_text(
+            "utf-8"
+        )
+    )
+    assert sufficient["warmup_status"] == "warmup_sufficient"
+    assert sufficient["largest_lookback_days"] == 120
+    assert sufficient["warmup_observation_count"] == 153
+    assert no_warmup["warmup_status"] == "date_filtered_without_warmup"
+    assert no_warmup["warmup_sufficient"] is False
+    assert full_tier["warmup_status"] == "warmup_insufficient"
+    assert full_tier["largest_lookback_days"] == 252
+
+
+def test_factor_rebuild_strict_mode_rejects_insufficient_warmup(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel_with_long_warmup().to_parquet(
+        panel_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+
+    with pytest.raises(ValueError, match="warmup_insufficient"):
+        run_factor_rebuild(
+            FactorRebuildConfig(
+                panel_parquet=panel_path,
+                output_root=output_root,
+                run_id="strict_insufficient_full",
+                memory_budget_gb=1,
+                dry_run=True,
+                calculation_start_date="2024-01-01",
+                evaluation_start_date="2024-08-01",
+                end_date="2024-10-31",
+                factor_set_tier="full",
+                require_sufficient_warmup=True,
+            )
+        )
+
+    summary = json.loads(
+        (
+            output_root
+            / "strict_insufficient_full"
+            / "runtime_summary.json"
+        ).read_text("utf-8")
+    )
+    assert summary["failure_code"] == "warmup_insufficient"
 
 
 def test_factor_rebuild_rejects_private_input_to_public_output_before_run_dir(

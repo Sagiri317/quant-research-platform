@@ -7,8 +7,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 from fastapi import APIRouter, Request, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from quant_research_platform.interfaces.api.errors import ApiError
 from quant_research_platform.interfaces.api.services.context import api_context
@@ -55,6 +56,7 @@ _ALLOWED_FAILURE_CODES = {
     "missing_prediction_input",
     "prediction_handoff_failed",
     "private_output_policy_violation",
+    "warmup_insufficient",
 }
 _SENSITIVE_TEXT_PATTERN = re.compile(
     r"(credential|secret|token|api[_-]?key|password)",
@@ -84,6 +86,7 @@ class AShareFactorRebuildRequest(BaseModel):
     calculation_start_date: str | None = None
     evaluation_start_date: str | None = None
     factor_set_tier: str = "full"
+    require_sufficient_warmup: bool = False
 
 
 class AShareRunCheckpoint(BaseModel):
@@ -101,7 +104,8 @@ class ASharePredictionHandoffRequest(BaseModel):
     input_parquet: Path
     timestamp_column: str = "timestamp"
     entity_column: str = "asset"
-    feature_columns: list[str]
+    feature_columns: list[str] = Field(default_factory=list)
+    feature_preset: str | None = None
     label_column: str = "forward_return_20d"
     return_source_column: str = "forward_return_1d"
     label_horizon_days: int = 20
@@ -139,6 +143,7 @@ def create_factor_rebuild_run(
                 calculation_start_date=payload.calculation_start_date,
                 evaluation_start_date=payload.evaluation_start_date,
                 factor_set_tier=payload.factor_set_tier,
+                require_sufficient_warmup=payload.require_sufficient_warmup,
             )
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
@@ -160,6 +165,15 @@ def create_prediction_handoff(
 
     context = api_context(request)
     try:
+        feature_columns = _resolve_prediction_feature_columns(
+            payload.input_parquet,
+            explicit_columns=payload.feature_columns,
+            feature_preset=payload.feature_preset,
+        )
+        resolved_feature_preset = (
+            None if tuple(column for column in payload.feature_columns if column)
+            else payload.feature_preset
+        )
         result = run_prediction_handoff(
             PredictionHandoffConfig(
                 input_path=payload.input_parquet,
@@ -167,7 +181,8 @@ def create_prediction_handoff(
                 run_id=payload.run_id,
                 timestamp_column=payload.timestamp_column,
                 entity_column=payload.entity_column,
-                feature_columns=tuple(payload.feature_columns),
+                feature_columns=feature_columns,
+                feature_preset=resolved_feature_preset,
                 label_column=payload.label_column,
                 return_source_column=payload.return_source_column,
                 label_horizon_days=payload.label_horizon_days,
@@ -236,6 +251,7 @@ def factor_rebuild_checkpoints(
     checkpoints = (
         ("schema_inventory", "schema_inventory.json"),
         ("memory_preflight", "memory_preflight.json"),
+        ("warmup_sufficiency", "warmup_sufficiency.json"),
         ("factor_rebuild", "factor_rebuild.parquet"),
         ("feature_set_manifest", "feature_set_manifest.json"),
         ("overwrite_manifest", "overwrite_manifest.json"),
@@ -250,6 +266,24 @@ def factor_rebuild_checkpoints(
         ).model_dump()
         for key, file_name in checkpoints
     ]
+
+
+@router.get("/api/a-share/factor-rebuild-runs/{run_id}/schema-inventory")
+def factor_rebuild_schema_inventory(
+    run_id: str,
+    request: Request,
+) -> dict[str, object]:
+    """Return sanitized aggregate schema inventory for a factor rebuild run."""
+
+    run_dir = _resolve_run_dir(api_context(request).factor_rebuild_root, run_id)
+    return _read_schema_inventory_payload(
+        run_dir / "schema_inventory.json",
+        run_id=run_id,
+        invalid_error_code="factor_rebuild_schema_inventory_invalid",
+        invalid_message="factor rebuild schema inventory invalid",
+        not_found_error_code="factor_rebuild_schema_inventory_not_found",
+        not_found_message="factor rebuild schema inventory not found",
+    )
 
 
 @router.get("/api/a-share/factor-rebuild-runs/{run_id}/eda")
@@ -327,6 +361,7 @@ def prediction_handoff_checkpoints(
     checkpoints = (
         ("schema_inventory", "schema_inventory.json"),
         ("memory_preflight", "memory_preflight.json"),
+        ("feature_set_manifest", "feature_set_manifest.json"),
         ("predictions", "predictions.parquet"),
         ("prediction_records", "prediction_records.parquet"),
         ("evaluation", "evaluation/manifest.json"),
@@ -382,6 +417,27 @@ def prediction_handoff_schema(run_id: str, request: Request) -> dict[str, object
         "target_column": target_column,
         "label_horizon_days": int(metadata.get("label_horizon_days", 0) or 0),
     }
+
+
+@router.get("/api/a-share/prediction-handoffs/{run_id}/schema-inventory")
+def prediction_handoff_schema_inventory(
+    run_id: str,
+    request: Request,
+) -> dict[str, object]:
+    """Return sanitized aggregate schema inventory for one prediction handoff."""
+
+    run_dir = _resolve_prediction_dir(
+        api_context(request).prediction_handoff_root,
+        run_id,
+    )
+    return _read_schema_inventory_payload(
+        run_dir / "schema_inventory.json",
+        run_id=run_id,
+        invalid_error_code="prediction_schema_inventory_invalid",
+        invalid_message="prediction schema inventory invalid",
+        not_found_error_code="prediction_schema_inventory_not_found",
+        not_found_message="prediction schema inventory not found",
+    )
 
 
 @router.get("/api/a-share/prediction-handoffs/{run_id}/comparison")
@@ -544,6 +600,145 @@ def _read_json_list(
     return value
 
 
+def _read_schema_inventory_payload(
+    path: Path,
+    *,
+    run_id: str,
+    invalid_error_code: str,
+    invalid_message: str,
+    not_found_error_code: str,
+    not_found_message: str,
+) -> dict[str, object]:
+    if not path.is_file():
+        raise ApiError(
+            error_code=not_found_error_code,
+            message=not_found_message,
+            status_code=404,
+        )
+    value = _read_json(
+        path,
+        invalid_error_code=invalid_error_code,
+        invalid_message=invalid_message,
+    )
+    try:
+        return _schema_inventory_payload(run_id, value)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(
+            error_code=invalid_error_code,
+            message=invalid_message,
+            status_code=422,
+        ) from exc
+
+
+def _schema_inventory_payload(run_id: str, value: dict[str, Any]) -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "schema_inventory_version": _safe_schema_string(
+            value.get("schema_inventory_version")
+        )
+        or "",
+        "row_count": _required_int(value.get("row_count", 0)),
+        "row_group_count": _required_int(value.get("row_group_count", 0)),
+        "columns": _safe_schema_columns(value.get("columns")),
+        "missing_expected_columns": _safe_schema_string_list(
+            value.get("missing_expected_columns")
+        ),
+        "unexpected_columns": _safe_schema_string_list(
+            value.get("unexpected_columns")
+        ),
+        "duplicate_key_count": _optional_int(value.get("duplicate_key_count")),
+        "date_range": _safe_date_range(value.get("date_range")),
+        "market_scope": _safe_market_scope(value.get("market_scope")),
+        "date_filter": _safe_date_range(value.get("date_filter")),
+    }
+
+
+def _safe_schema_columns(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    columns: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = _safe_schema_string(item.get("name"))
+        dtype = _safe_schema_string(item.get("dtype"))
+        role = _safe_schema_string(item.get("role"))
+        if name and dtype and role:
+            columns.append({"name": name, "dtype": dtype, "role": role})
+    return columns
+
+
+def _safe_schema_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        text
+        for item in value
+        if (text := _safe_schema_string(item)) is not None
+    ]
+
+
+def _safe_date_range(value: object) -> dict[str, str | None] | None:
+    if not isinstance(value, dict):
+        return None
+    payload: dict[str, str | None] = {}
+    for key in ("min", "max", "start_date", "end_date"):
+        raw = value.get(key)
+        if raw is None:
+            payload[key] = None
+            continue
+        text = _safe_schema_string(raw)
+        if text is not None and re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            payload[key] = text
+    return payload or None
+
+
+def _safe_market_scope(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    field = _safe_schema_string(value.get("field"))
+    if not field:
+        return None
+    return {
+        "field": field,
+        "true_count": _required_int(value.get("true_count", 0)),
+        "false_count": _required_int(value.get("false_count", 0)),
+        "null_count": _required_int(value.get("null_count", 0)),
+    }
+
+
+def _required_int(value: object) -> int:
+    if value is None:
+        return 0
+    return int(value)
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
+
+
+def _resolve_prediction_feature_columns(
+    input_path: Path,
+    *,
+    explicit_columns: list[str],
+    feature_preset: str | None,
+) -> tuple[str, ...]:
+    explicit = tuple(column for column in explicit_columns if column)
+    if explicit:
+        return explicit
+    if (
+        feature_preset
+        != literature_price_volume.LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID
+    ):
+        raise ValueError("invalid_feature_preset")
+    columns = pq.ParquetFile(input_path).schema.names
+    selected, _ = (
+        literature_price_volume
+        .select_literature_price_volume_feature_columns_from_schema(columns)
+    )
+    return selected
+
+
 def _safe_allowed_runtime_string(
     value: object,
     allowed_values: set[str],
@@ -639,9 +834,12 @@ def _batch_error_code(exc: BaseException, *, default: str) -> str:
         "dependency_unavailable",
         "factor_validation_failed",
         "missing_factor_field",
+        "warmup_insufficient",
     }
     if detail in known:
         return detail
+    if detail.startswith("invalid_feature_preset:"):
+        return "invalid_feature_preset"
     return default
 
 

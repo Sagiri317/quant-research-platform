@@ -7,6 +7,7 @@ import pytest
 
 from quant_research_platform.research.prediction_handoff import (
     PredictionHandoffConfig,
+    _write_optional_charts,
     run_prediction_handoff,
 )
 
@@ -64,7 +65,7 @@ def test_prediction_handoff_writes_predictions_evaluation_and_comparison(
     assert summary["status"] == "ready"
     assert eval_summary["kind"] == "prediction"
     assert metadata["prediction_handoff_version"] == "n6_a_share_prediction_handoff_v1"
-    assert metadata["source_ref"] == "a_share_literature_price_volume_preset_v1"
+    assert metadata["source_ref"] == "explicit_feature_columns"
     assert metadata["model_ref"] == "n6_a_share_sklearn_boosting_suite_v1"
     assert set(metadata["prediction_columns"]) == {
         "prediction_score_ridge_2d",
@@ -119,6 +120,37 @@ def test_prediction_handoff_dry_run_writes_no_row_level_outputs(tmp_path) -> Non
     assert not (run_dir / "evaluation").exists()
 
 
+def test_prediction_handoff_rejects_unsupported_feature_preset(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    with pytest.raises(ValueError, match="invalid_feature_preset"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_invalid_preset",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                feature_preset="not/a/supported/preset",
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("ridge",),
+            )
+        )
+
+
 def test_prediction_handoff_rejects_private_input_to_public_output_before_run_dir(
     tmp_path,
 ) -> None:
@@ -154,6 +186,31 @@ def test_prediction_handoff_rejects_private_input_to_public_output_before_run_di
         )
 
     assert not public_output.exists()
+
+
+def test_prediction_handoff_chart_dependency_failure_does_not_crash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import builtins
+
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "matplotlib" or name.startswith("matplotlib."):
+            raise OSError("DLL load failed while importing _imaging")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    chart_count, status = _write_optional_charts(
+        tmp_path,
+        pd.DataFrame({"year": [2024], "row_count": [3]}),
+        pd.DataFrame({"feature": ["rev_1d"], "missing_fraction": [0.0]}),
+    )
+
+    assert chart_count == 0
+    assert status == "dependency_unavailable"
+    assert not (tmp_path / "coverage_by_year.png").exists()
 
 
 def _panel() -> pd.DataFrame:

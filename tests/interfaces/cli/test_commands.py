@@ -295,6 +295,207 @@ def test_a_share_prediction_handoff_cli_writes_evaluation_outputs(tmp_path) -> N
     assert (run_dir / "eda" / "eda_manifest.json").is_file()
 
 
+def test_a_share_prediction_handoff_cli_resolves_feature_preset(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_handoff_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_preset",
+            "--feature-preset",
+            "a_share_literature_price_volume_preset_v1",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(
+        (
+            output_root
+            / "prediction_cli_preset"
+            / "feature_set_manifest.json"
+        ).read_text("utf-8")
+    )
+    assert manifest["feature_resolution"] == "preset"
+    assert manifest["feature_columns"] == ["rev_1d", "mom_20d"]
+
+
+def test_a_share_prediction_handoff_cli_rejects_missing_feature_selection(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_handoff_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_missing_features",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "invalid_feature_preset" in result.output
+    assert not (output_root / "prediction_cli_missing_features").exists()
+
+
+def test_a_share_prediction_handoff_cli_explicit_features_override_preset_metadata(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_handoff_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_explicit_over_preset",
+            "--feature-column",
+            "feature_a",
+            "--feature-column",
+            "feature_b",
+            "--feature-preset",
+            "unsupported_preset",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(
+        (
+            output_root
+            / "prediction_cli_explicit_over_preset"
+            / "feature_set_manifest.json"
+        ).read_text("utf-8")
+    )
+    assert manifest["feature_resolution"] == "explicit"
+    assert manifest["feature_set_id"] == "explicit_feature_columns"
+    assert manifest["feature_columns"] == ["feature_a", "feature_b"]
+
+
+def test_a_share_prediction_handoff_cli_empty_feature_column_still_uses_preset(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_handoff_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_empty_feature_uses_preset",
+            "--feature-column",
+            "",
+            "--feature-preset",
+            "a_share_literature_price_volume_preset_v1",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads(
+        (
+            output_root
+            / "prediction_cli_empty_feature_uses_preset"
+            / "feature_set_manifest.json"
+        ).read_text("utf-8")
+    )
+    assert manifest["feature_resolution"] == "preset"
+    assert manifest["feature_set_id"] == "a_share_literature_price_volume_preset_v1"
+    assert manifest["feature_columns"] == ["rev_1d", "mom_20d"]
+
+
 def test_evaluate_parquet_writes_prediction_handoff_metadata(tmp_path) -> None:
     panel_path = tmp_path / "prediction_panel.parquet"
     output_dir = tmp_path / "prediction_run"
@@ -907,6 +1108,11 @@ def _prediction_handoff_panel() -> pd.DataFrame:
                     "asset": asset,
                     "feature_a": float(idx) + offset,
                     "feature_b": float(idx % 3) - offset,
+                    "rev_1d": -(0.001 * idx + offset / 1000.0),
+                    "mom_20d": 0.002 * idx + offset / 1000.0,
+                    "eligible": True,
+                    "can_enter": True,
+                    "is_a_share_scope": True,
                     "forward_return_2d": 0.01 * idx + offset / 100.0,
                     "forward_return_20d": 0.02 * idx + offset / 100.0,
                     "forward_return_1d": 0.001 * idx,

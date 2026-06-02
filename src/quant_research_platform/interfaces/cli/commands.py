@@ -32,6 +32,10 @@ from quant_research_platform.markets.implementations.a_share.factor_rebuild impo
     run_factor_rebuild,
     write_schema_inventory_run,
 )
+from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
+    LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
+    select_literature_price_volume_feature_columns_from_schema,
+)
 from quant_research_platform.research.ml_baseline import (
     BaselineFoldConfig,
     BaselineTrainingConfig,
@@ -376,6 +380,11 @@ A_SHARE_MODEL_ID_OPTION = typer.Option(
     "--model-id",
     help="Model id in the local non-DL suite. Repeat for multiple models.",
 )
+A_SHARE_FEATURE_PRESET_OPTION = typer.Option(
+    None,
+    "--feature-preset",
+    help="Feature preset id such as a_share_literature_price_volume_preset_v1.",
+)
 A_SHARE_START_DATE_OPTION = typer.Option(
     None,
     "--start-date",
@@ -400,6 +409,11 @@ A_SHARE_FACTOR_SET_TIER_OPTION = typer.Option(
     "full",
     "--factor-set-tier",
     help="Factor set tier: full, core_long_period, or smoke_minimal.",
+)
+A_SHARE_REQUIRE_SUFFICIENT_WARMUP_OPTION = typer.Option(
+    False,
+    "--require-sufficient-warmup/--no-require-sufficient-warmup",
+    help="Reject date-filtered factor rebuilds without sufficient warmup.",
 )
 
 
@@ -473,6 +487,7 @@ def a_share_factor_rebuild(
     calculation_start_date: str | None = A_SHARE_CALCULATION_START_DATE_OPTION,
     evaluation_start_date: str | None = A_SHARE_EVALUATION_START_DATE_OPTION,
     factor_set_tier: str = A_SHARE_FACTOR_SET_TIER_OPTION,
+    require_sufficient_warmup: bool = A_SHARE_REQUIRE_SUFFICIENT_WARMUP_OPTION,
 ) -> None:
     """Dry-run or run a local A-share literature factor rebuild."""
 
@@ -493,6 +508,7 @@ def a_share_factor_rebuild(
                 calculation_start_date=calculation_start_date,
                 evaluation_start_date=evaluation_start_date,
                 factor_set_tier=factor_set_tier,
+                require_sufficient_warmup=require_sufficient_warmup,
             )
         )
     except (FileNotFoundError, RuntimeError, TypeError, ValueError) as exc:
@@ -509,6 +525,7 @@ def a_share_prediction_handoff(
     output_root: Path = A_SHARE_PREDICTION_ROOT_OPTION,
     run_id: str | None = RUN_ID_OPTION,
     feature_column: list[str] | None = BASELINE_FEATURE_COLUMN_OPTION,
+    feature_preset: str | None = A_SHARE_FEATURE_PRESET_OPTION,
     target_column: str = BASELINE_TARGET_COLUMN_OPTION,
     return_source_column: str = RETURN_SOURCE_COLUMN_OPTION,
     timestamp_column: str = TIMESTAMP_COLUMN_OPTION,
@@ -522,6 +539,13 @@ def a_share_prediction_handoff(
     """Run the local N6 A-share prediction handoff suite."""
 
     try:
+        explicit_features = tuple(column for column in feature_column or () if column)
+        resolved_feature_preset = None if explicit_features else feature_preset
+        feature_columns = _a_share_prediction_feature_columns(
+            input_parquet,
+            explicit_columns=explicit_features,
+            feature_preset=feature_preset,
+        )
         result = run_prediction_handoff(
             PredictionHandoffConfig(
                 input_path=input_parquet,
@@ -529,10 +553,8 @@ def a_share_prediction_handoff(
                 run_id=run_id or "prediction_handoff",
                 timestamp_column=timestamp_column,
                 entity_column=asset_column,
-                feature_columns=_required_cli_values(
-                    feature_column,
-                    "--feature-column",
-                ),
+                feature_columns=feature_columns,
+                feature_preset=resolved_feature_preset,
                 label_column=target_column,
                 return_source_column=return_source_column,
                 label_horizon_days=label_horizon_days,
@@ -975,6 +997,22 @@ def _baseline_feature_columns(
             "could not infer feature columns; provide --feature-column explicitly."
         )
     return tuple(inferred)
+
+
+def _a_share_prediction_feature_columns(
+    input_path: Path,
+    *,
+    explicit_columns: tuple[str, ...],
+    feature_preset: str | None,
+) -> tuple[str, ...]:
+    explicit = tuple(column for column in explicit_columns if column)
+    if explicit:
+        return explicit
+    if feature_preset != LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID:
+        raise ValueError("invalid_feature_preset")
+    schema = pq.ParquetFile(input_path).schema.names
+    selected, _ = select_literature_price_volume_feature_columns_from_schema(schema)
+    return selected
 
 
 def _looks_like_label_or_forward_return(column: str) -> bool:

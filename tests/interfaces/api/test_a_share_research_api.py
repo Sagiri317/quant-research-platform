@@ -53,12 +53,20 @@ def test_a_share_factor_rebuild_api_dry_run_and_status(tmp_path) -> None:
     assert [item["key"] for item in checkpoints.json()] == [
         "schema_inventory",
         "memory_preflight",
+        "warmup_sufficiency",
         "factor_rebuild",
         "feature_set_manifest",
         "overwrite_manifest",
         "eda",
         "runtime_summary",
     ]
+    schema_inventory = client.get(
+        "/api/a-share/factor-rebuild-runs/api_dry_run/schema-inventory"
+    )
+    assert schema_inventory.status_code == 200
+    assert schema_inventory.json()["schema_inventory_version"] == (
+        "a_share_schema_inventory_v1"
+    )
 
     eda = client.get("/api/a-share/factor-rebuild-runs/api_dry_run/eda")
     assert eda.status_code == 200
@@ -151,6 +159,13 @@ def test_a_share_prediction_handoff_api_creates_discoverable_evaluation(
     assert schema.json()["prediction_handoff_version"] == (
         "n6_a_share_prediction_handoff_v1"
     )
+    schema_inventory = client.get(
+        "/api/a-share/prediction-handoffs/prediction_api_run/schema-inventory"
+    )
+    assert schema_inventory.status_code == 200
+    assert schema_inventory.json()["schema_inventory_version"] == (
+        "a_share_schema_inventory_v1"
+    )
 
     comparison = client.get(
         "/api/a-share/prediction-handoffs/prediction_api_run/comparison"
@@ -166,6 +181,286 @@ def test_a_share_prediction_handoff_api_creates_discoverable_evaluation(
     runs = client.get("/api/runs")
     assert runs.status_code == 200
     assert "a_share_prediction/prediction_api_run" in {
+        row["public_run_id"] for row in runs.json()
+    }
+
+
+def test_a_share_prediction_handoff_api_resolves_feature_preset(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_api_preset_run",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_preset": "a_share_literature_price_volume_preset_v1",
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    manifest = json.loads(
+        (
+            prediction_root
+            / "prediction_api_preset_run"
+            / "feature_set_manifest.json"
+        ).read_text("utf-8")
+    )
+    assert manifest["feature_resolution"] == "preset"
+    assert manifest["feature_columns"] == ["rev_1d", "mom_20d"]
+
+
+def test_a_share_prediction_handoff_api_rejects_missing_feature_selection(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_missing_features",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == "invalid_feature_preset"
+    assert not (prediction_root / "prediction_missing_features").exists()
+
+
+def test_a_share_prediction_handoff_api_rejects_preset_with_no_usable_columns(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel_without_literature_features().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_no_preset_columns",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_preset": "a_share_literature_price_volume_preset_v1",
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == "invalid_feature_preset"
+    assert not (prediction_root / "prediction_no_preset_columns").exists()
+
+
+def test_a_share_prediction_handoff_api_explicit_features_override_preset_metadata(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_explicit_over_preset",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "feature_preset": "unsupported_preset",
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    manifest = json.loads(
+        (
+            prediction_root
+            / "prediction_explicit_over_preset"
+            / "feature_set_manifest.json"
+        ).read_text("utf-8")
+    )
+    assert manifest["feature_resolution"] == "explicit"
+    assert manifest["feature_set_id"] == "explicit_feature_columns"
+    assert manifest["feature_columns"] == ["feature_a", "feature_b"]
+    run_context = json.loads(
+        (
+            prediction_root
+            / "prediction_explicit_over_preset"
+            / "evaluation"
+            / "run_context.json"
+        ).read_text("utf-8")
+    )
+    metadata = run_context["config"]["evaluation_spec"]["metadata"]
+    assert metadata["source_ref"] == "explicit_feature_columns"
+    leaderboard = json.loads(
+        (
+            prediction_root
+            / "prediction_explicit_over_preset"
+            / "comparison"
+            / "model_leaderboard.json"
+        ).read_text("utf-8")
+    )
+    assert {row["feature_set_id"] for row in leaderboard} == {
+        "explicit_feature_columns"
+    }
+
+
+def test_a_share_prediction_handoff_api_uses_configured_alias_root_for_writes(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    configured_prediction_root = tmp_path / "configured_prediction_root"
+    client = TestClient(
+        create_app(
+            run_roots=[
+                ("platform", tmp_path / "runs"),
+                ("a_share_prediction", configured_prediction_root),
+            ],
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_configured_alias_root",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_preset": "a_share_literature_price_volume_preset_v1",
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert (configured_prediction_root / "prediction_configured_alias_root").is_dir()
+    runs = client.get("/api/runs")
+    assert runs.status_code == 200
+    assert "a_share_prediction/prediction_configured_alias_root" in {
         row["public_run_id"] for row in runs.json()
     }
 
@@ -371,6 +666,28 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
         json.dumps({"status": "reports/private_real/leak", "artifact_count": 6}),
         encoding="utf-8",
     )
+    (prediction_run / "schema_inventory.json").write_text(
+        json.dumps(
+            {
+                "schema_inventory_version": "a_share_schema_inventory_v1",
+                "row_count": 3,
+                "row_group_count": 1,
+                "columns": [
+                    {"name": "timestamp", "dtype": "timestamp[ns]", "role": "key"},
+                    {
+                        "name": "processed_private/leak",
+                        "dtype": "string",
+                        "role": "credential_token",
+                    },
+                ],
+                "missing_expected_columns": ["secret_token"],
+                "unexpected_columns": ["rev_1d"],
+                "duplicate_key_count": 0,
+                "date_range": {"min": "2024-01-01", "max": "2024-01-02"},
+            }
+        ),
+        encoding="utf-8",
+    )
     client = TestClient(
         create_app(
             run_roots=[("platform", tmp_path / "runs")],
@@ -386,10 +703,14 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
     prediction_eda = client.get(
         "/api/a-share/prediction-handoffs/bad_prediction_schema/eda"
     )
+    schema_inventory = client.get(
+        "/api/a-share/prediction-handoffs/bad_prediction_schema/schema-inventory"
+    )
 
     assert factor_eda.status_code == 200
     assert schema.status_code == 200
     assert prediction_eda.status_code == 200
+    assert schema_inventory.status_code == 200
     assert factor_eda.json() == {
         "run_id": "bad_factor_eda",
         "status": "unknown",
@@ -407,7 +728,16 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
         "status": "unknown",
         "artifact_count": 6,
     }
-    combined = factor_eda.text + schema.text + prediction_eda.text
+    assert schema_inventory.json()["columns"] == [
+        {"name": "timestamp", "dtype": "timestamp[ns]", "role": "key"}
+    ]
+    assert schema_inventory.json()["missing_expected_columns"] == []
+    combined = (
+        factor_eda.text
+        + schema.text
+        + prediction_eda.text
+        + schema_inventory.text
+    )
     assert str(tmp_path) not in combined
     assert "credential" not in combined
     assert "api_key" not in combined
@@ -415,6 +745,44 @@ def test_a_share_schema_and_eda_endpoints_sanitize_disk_loaded_strings(
     assert "token" not in combined
     assert "processed_private" not in combined
     assert "private_real" not in combined
+
+
+def test_a_share_schema_inventory_endpoint_rejects_malformed_numeric_fields(
+    tmp_path,
+) -> None:
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    prediction_run = prediction_root / "bad_schema_inventory_numeric"
+    prediction_run.mkdir(parents=True)
+    (prediction_run / "schema_inventory.json").write_text(
+        json.dumps(
+            {
+                "schema_inventory_version": "a_share_schema_inventory_v1",
+                "row_count": "not_an_int",
+                "row_group_count": 1,
+                "columns": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.get(
+        "/api/a-share/prediction-handoffs/"
+        "bad_schema_inventory_numeric/schema-inventory"
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == (
+        "prediction_schema_inventory_invalid"
+    )
+    assert "not_an_int" not in response.text
 
 
 def _panel() -> pd.DataFrame:
@@ -458,9 +826,19 @@ def _prediction_panel() -> pd.DataFrame:
                     "asset": asset,
                     "feature_a": float(idx) + offset,
                     "feature_b": float(idx % 3) - offset,
+                    "rev_1d": -(0.001 * idx + offset / 1000.0),
+                    "mom_20d": 0.002 * idx + offset / 1000.0,
+                    "eligible": True,
+                    "can_enter": True,
+                    "is_a_share_scope": True,
                     "forward_return_2d": 0.01 * idx + offset / 100.0,
                     "forward_return_20d": 0.02 * idx + offset / 100.0,
                     "forward_return_1d": 0.001 * idx,
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _prediction_panel_without_literature_features() -> pd.DataFrame:
+    frame = _prediction_panel()
+    return frame.drop(columns=["rev_1d", "mom_20d"])

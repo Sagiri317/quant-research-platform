@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import warnings
 
 import numpy as np
@@ -338,13 +339,29 @@ def select_literature_price_volume_features(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Select preset v1 feature columns and exclude labels/filters/leakage."""
 
+    return select_literature_price_volume_feature_columns_from_schema(
+        tuple(frame.columns),
+        expected_columns=expected_columns,
+        include_actual_factor_columns=expected_columns is None,
+    )
+
+
+def select_literature_price_volume_feature_columns_from_schema(
+    columns: tuple[str, ...] | list[str] | set[str],
+    *,
+    expected_columns: tuple[str, ...] | None = None,
+    include_actual_factor_columns: bool = False,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Resolve preset v1 feature columns from schema names only."""
+
+    schema_columns = tuple(columns)
     expected = expected_columns or expected_literature_price_volume_factor_columns()
     actual_factor_columns = (
         ()
-        if expected_columns is not None
+        if not include_actual_factor_columns
         else tuple(
             column
-            for column in frame.columns
+            for column in schema_columns
             if column.casefold().startswith(LITERATURE_FACTOR_PREFIXES)
         )
     )
@@ -352,14 +369,14 @@ def select_literature_price_volume_features(
         dict.fromkeys(
             (
                 *actual_factor_columns,
-                *(column for column in expected if column in frame.columns),
+                *(column for column in expected if column in schema_columns),
             )
         )
     )
     warnings_out: list[str] = [
         f"missing expected feature column: {column}"
         for column in expected
-        if column not in frame.columns
+        if column not in schema_columns
     ]
     selected = tuple(column for column in columns if not _is_excluded_feature(column))
     if not selected:
@@ -369,6 +386,19 @@ def select_literature_price_volume_features(
         f"excluded leakage/control column: {column}" for column in dropped
     )
     return selected, tuple(warnings_out)
+
+
+def largest_literature_price_volume_lookback_days(
+    expected_columns: tuple[str, ...] | list[str] | set[str],
+) -> int:
+    """Return the largest rolling/trailing lookback encoded in factor names."""
+
+    windows = []
+    for column in expected_columns:
+        if column == "rev_1d":
+            windows.append(1)
+        windows.extend(int(value) for value in re.findall(r"_(\d+)d(?:_|$)", column))
+    return max(windows, default=0)
 
 
 def warn_for_missing_literature_features(
@@ -486,6 +516,8 @@ __all__ = [
     "SMOKE_MINIMAL_FACTORS",
     "calculate_literature_price_volume_factors",
     "expected_literature_price_volume_factor_columns",
+    "largest_literature_price_volume_lookback_days",
+    "select_literature_price_volume_feature_columns_from_schema",
     "select_literature_price_volume_features",
     "unsupported_literature_price_volume_factors",
     "warn_for_missing_literature_features",

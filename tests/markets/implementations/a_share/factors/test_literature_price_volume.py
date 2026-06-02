@@ -9,6 +9,8 @@ from quant_research_platform.markets.implementations.a_share.factors.literature_
     LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID,
     calculate_literature_price_volume_factors,
     expected_literature_price_volume_factor_columns,
+    largest_literature_price_volume_lookback_days,
+    select_literature_price_volume_feature_columns_from_schema,
     select_literature_price_volume_features,
     unsupported_literature_price_volume_factors,
 )
@@ -100,6 +102,56 @@ def test_feature_preset_excludes_labels_filters_and_raw_identifiers() -> None:
     assert "stock_code" not in features
     assert "eligible" not in features
     assert warnings
+
+
+def test_feature_preset_resolves_from_schema_without_rows() -> None:
+    features, warnings = select_literature_price_volume_feature_columns_from_schema(
+        (
+            "timestamp",
+            "asset",
+            "trade_date",
+            "stock_code",
+            "rev_1d",
+            "mom_20d",
+            "vol_60d",
+            "forward_return_20d",
+            "target_score",
+            "eligible",
+            "can_enter",
+            "is_a_share_scope",
+        ),
+        expected_columns=("rev_1d", "mom_20d", "vol_60d", "forward_return_20d"),
+    )
+
+    assert features == ("rev_1d", "mom_20d", "vol_60d")
+    assert any("excluded leakage/control column" in item for item in warnings)
+
+
+def test_feature_preset_schema_resolver_ignores_arbitrary_prefixed_columns() -> None:
+    features, warnings = select_literature_price_volume_feature_columns_from_schema(
+        (
+            "rev_forward_return_20d",
+            "mom_20d_target_proxy",
+            "rev_1d",
+        )
+    )
+
+    assert features == ("rev_1d",)
+    assert "rev_forward_return_20d" not in features
+    assert "mom_20d_target_proxy" not in features
+    assert warnings
+
+
+def test_largest_lookback_uses_requested_factor_columns() -> None:
+    assert largest_literature_price_volume_lookback_days(
+        expected_literature_price_volume_factor_columns(
+            factor_set_tier="core_long_period"
+        )
+    ) == 120
+    assert largest_literature_price_volume_lookback_days(
+        expected_literature_price_volume_factor_columns(factor_set_tier="full")
+    ) == 252
+    assert largest_literature_price_volume_lookback_days(("mom_300d",)) == 300
 
 
 def test_unsupported_factor_list_records_missing_required_fields() -> None:

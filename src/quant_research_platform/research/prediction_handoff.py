@@ -36,6 +36,8 @@ from quant_research_platform.runtime.private_paths import (
 )
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
 
+SUPPORTED_FEATURE_PRESETS = frozenset({LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID})
+
 
 @dataclass(frozen=True)
 class PredictionHandoffConfig:
@@ -47,6 +49,7 @@ class PredictionHandoffConfig:
     timestamp_column: str = "timestamp"
     entity_column: str = "asset"
     feature_columns: tuple[str, ...] = ()
+    feature_preset: str | None = None
     label_column: str = "forward_return_20d"
     return_source_column: str = "forward_return_1d"
     label_horizon_days: int = 20
@@ -76,6 +79,7 @@ def run_prediction_handoff(
     run_dir = _new_run_dir(config.output_root, config.run_id)
     try:
         _write_preflight_files(config, run_dir)
+        _write_feature_set_manifest(config, run_dir)
         if config.dry_run:
             write_json_sanitized(
                 run_dir / "runtime_summary.json",
@@ -162,6 +166,8 @@ def _validate_config(config: PredictionHandoffConfig) -> None:
         raise FileNotFoundError(config.input_path)
     if not config.feature_columns:
         raise ValueError("invalid_feature_preset")
+    if config.feature_preset and config.feature_preset not in SUPPORTED_FEATURE_PRESETS:
+        raise ValueError("invalid_feature_preset")
     if not config.folds:
         raise ValueError("invalid_prediction_config")
     require_private_outputs_for_private_input(
@@ -214,6 +220,31 @@ def _write_preflight_files(config: PredictionHandoffConfig, run_dir: Path) -> No
         )
         _write_checkpoints(run_dir)
         raise ValueError("memory_preflight_failed")
+
+
+def _write_feature_set_manifest(
+    config: PredictionHandoffConfig,
+    run_dir: Path,
+) -> None:
+    write_json_sanitized(
+        run_dir / "feature_set_manifest.json",
+        {
+            "feature_set_id": _feature_set_id(config),
+            "feature_resolution": "preset" if config.feature_preset else "explicit",
+            "feature_columns": list(config.feature_columns),
+            "feature_count": len(config.feature_columns),
+            "excludes": [
+                "target",
+                "label",
+                "forward_return",
+                "filter",
+                "tradability",
+                "raw_identifier",
+                "timestamp",
+                "entity",
+            ],
+        },
+    )
 
 
 def _suite_folds(
@@ -269,14 +300,14 @@ def _run_prediction_evaluation(
         "uses_external_data": True,
         "prediction_handoff_version": PREDICTION_HANDOFF_VERSION,
         "prediction_columns": list(prediction_columns),
-        "label_columns": [config.label_column],
+            "label_columns": [config.label_column],
         "prediction_time_semantics": {
             "decision_time_column": config.timestamp_column,
             "as_of_time_columns": {
                 column: config.timestamp_column for column in prediction_columns
             },
         },
-        "source_ref": LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
+        "source_ref": _feature_set_id(config),
         "model_ref": A_SHARE_MODEL_SUITE_ID,
         "training_scope": PREDICTION_TRAINING_SCOPE,
         "prediction_boundary": MODEL_BOUNDARY,
@@ -307,6 +338,7 @@ def _write_comparison_outputs(
 ) -> None:
     comparison_dir = run_dir / "comparison"
     comparison_dir.mkdir(parents=True, exist_ok=True)
+    feature_set_id = _feature_set_id(config)
     rows = [
         _metric_row(
             frame,
@@ -315,7 +347,7 @@ def _write_comparison_outputs(
             timestamp_column=config.timestamp_column,
             model_id=_model_id_from_prediction_column(column, config.label_column),
             target_horizon=config.label_column.removeprefix("forward_return_"),
-            feature_set_id=LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
+            feature_set_id=feature_set_id,
         )
         for column in prediction_columns
     ]
@@ -332,7 +364,7 @@ def _write_comparison_outputs(
                 timestamp_column=config.timestamp_column,
                 model_id=model_id,
                 target_horizon=config.label_column.removeprefix("forward_return_"),
-                feature_set_id=LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID,
+                feature_set_id=feature_set_id,
             )
         )
     leaderboard = pd.DataFrame(rows)
@@ -405,6 +437,10 @@ def _metric_row(
         "coverage": float(len(valid) / len(frame)) if len(frame) else 0.0,
         "n_oos_rows": int(len(valid)),
     }
+
+
+def _feature_set_id(config: PredictionHandoffConfig) -> str:
+    return config.feature_preset or "explicit_feature_columns"
 
 
 def _finite_mean(values: pd.Series) -> float | None:
@@ -632,6 +668,7 @@ def _write_checkpoints(run_dir: Path) -> None:
     checkpoints = [
         ("schema_inventory", "schema_inventory.json"),
         ("memory_preflight", "memory_preflight.json"),
+        ("feature_set_manifest", "feature_set_manifest.json"),
         ("predictions", "predictions.parquet"),
         ("prediction_records", "prediction_records.parquet"),
         ("model_metadata", "model_metadata.json"),
@@ -655,6 +692,7 @@ def _checkpoint_ready(run_dir: Path, key: str) -> bool:
     paths = {
         "schema_inventory": run_dir / "schema_inventory.json",
         "memory_preflight": run_dir / "memory_preflight.json",
+        "feature_set_manifest": run_dir / "feature_set_manifest.json",
         "predictions": run_dir / "predictions.parquet",
         "prediction_records": run_dir / "prediction_records.parquet",
         "model_metadata": run_dir / "model_metadata.json",
@@ -672,33 +710,39 @@ def _write_optional_charts(
     missingness: pd.DataFrame,
 ) -> tuple[int, str]:
     try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
-    except ImportError:
+    except (ImportError, OSError, RuntimeError):
         return 0, "dependency_unavailable"
     chart_count = 0
-    if not coverage.empty:
-        fig, ax = plt.subplots(figsize=(6, 3))
-        coverage.plot.bar(x="year", y="row_count", ax=ax, legend=False)
-        ax.set_xlabel("year")
-        ax.set_ylabel("row_count")
-        fig.tight_layout()
-        fig.savefig(eda_dir / "coverage_by_year.png", dpi=120)
-        plt.close(fig)
-        chart_count += 1
-    if not missingness.empty:
-        fig, ax = plt.subplots(figsize=(7, 3))
-        missingness.head(20).plot.bar(
-            x="feature",
-            y="missing_fraction",
-            ax=ax,
-            legend=False,
-        )
-        ax.set_xlabel("feature")
-        ax.set_ylabel("missing_fraction")
-        fig.tight_layout()
-        fig.savefig(eda_dir / "missingness_top20.png", dpi=120)
-        plt.close(fig)
-        chart_count += 1
+    try:
+        if not coverage.empty:
+            fig, ax = plt.subplots(figsize=(6, 3))
+            coverage.plot.bar(x="year", y="row_count", ax=ax, legend=False)
+            ax.set_xlabel("year")
+            ax.set_ylabel("row_count")
+            fig.tight_layout()
+            fig.savefig(eda_dir / "coverage_by_year.png", dpi=120)
+            plt.close(fig)
+            chart_count += 1
+        if not missingness.empty:
+            fig, ax = plt.subplots(figsize=(7, 3))
+            missingness.head(20).plot.bar(
+                x="feature",
+                y="missing_fraction",
+                ax=ax,
+                legend=False,
+            )
+            ax.set_xlabel("feature")
+            ax.set_ylabel("missing_fraction")
+            fig.tight_layout()
+            fig.savefig(eda_dir / "missingness_top20.png", dpi=120)
+            plt.close(fig)
+            chart_count += 1
+    except (ImportError, OSError, RuntimeError):
+        return 0, "dependency_unavailable"
     return chart_count, "ready" if chart_count else "not_generated"
 
 
