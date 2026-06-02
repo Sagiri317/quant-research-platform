@@ -295,10 +295,10 @@ def _write_preflight_files(config: PredictionHandoffConfig, run_dir: Path) -> No
     if int(inventory.get("duplicate_key_count") or 0) > 0:
         write_json_sanitized(
             run_dir / "runtime_summary.json",
-            _summary(config, "failed", failure_code="invalid_prediction_config"),
+            _summary(config, "failed", failure_code="duplicate_prediction_key"),
         )
         _write_checkpoints(run_dir)
-        raise ValueError("invalid_prediction_config")
+        raise ValueError("duplicate_prediction_key")
 
 
 def _write_feature_set_manifest(
@@ -903,6 +903,7 @@ def _failure_code(exc: BaseException) -> str:
     known = {
         "memory_preflight_failed",
         "insufficient_sample",
+        "duplicate_prediction_key",
         "invalid_prediction_config",
         "invalid_feature_preset",
         "private_output_policy_violation",

@@ -50,6 +50,7 @@ _ALLOWED_CHART_DEPENDENCY_STATUSES = {
 }
 _ALLOWED_FAILURE_CODES = {
     "dependency_unavailable",
+    "duplicate_prediction_key",
     "duplicate_run_id",
     "factor_rebuild_failed",
     "factor_validation_failed",
@@ -967,6 +968,7 @@ def _batch_error_code(exc: BaseException, *, default: str) -> str:
     detail = str(exc)
     known = {
         "duplicate_run_id",
+        "duplicate_prediction_key",
         "private_output_policy_violation",
         "memory_preflight_failed",
         "invalid_feature_preset",

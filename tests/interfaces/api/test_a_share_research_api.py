@@ -688,6 +688,76 @@ def test_a_share_prediction_handoff_api_rejects_duplicate_run_id_before_input_re
     assert str(tmp_path) not in response.text
 
 
+def test_a_share_prediction_handoff_api_rejects_duplicate_prediction_keys(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    panel = pd.concat(
+        [_prediction_panel(), _prediction_panel().iloc[[0]]],
+        ignore_index=True,
+    )
+    panel.to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_duplicate_keys_api",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == "duplicate_prediction_key"
+    assert "Traceback" not in response.text
+    assert "000001" not in response.text
+    assert "2024-01-01" not in response.text
+    assert str(tmp_path) not in response.text
+    run_dir = prediction_root / "prediction_duplicate_keys_api"
+    assert not (run_dir / "predictions.parquet").exists()
+    assert not (run_dir / "prediction_records.parquet").exists()
+    assert not (run_dir / "model_metadata.json").exists()
+    assert not (run_dir / "evaluation").exists()
+    assert not (run_dir / "comparison").exists()
+    assert not (run_dir / "eda").exists()
+
+    status_response = client.get(
+        "/api/a-share/prediction-handoffs/prediction_duplicate_keys_api"
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["failure_code"] == "duplicate_prediction_key"
+
+    inventory_response = client.get(
+        "/api/a-share/prediction-handoffs/"
+        "prediction_duplicate_keys_api/schema-inventory"
+    )
+    assert inventory_response.status_code == 200
+    assert inventory_response.json()["duplicate_key_count"] > 0
+
+
 def test_a_share_prediction_handoff_api_rejects_malformed_folds_before_run_dir(
     tmp_path,
 ) -> None:

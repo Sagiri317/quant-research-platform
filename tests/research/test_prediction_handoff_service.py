@@ -890,7 +890,7 @@ def test_prediction_handoff_rejects_duplicate_prediction_keys_before_artifacts(
     panel = pd.concat([_panel(), _panel().iloc[[0]]], ignore_index=True)
     panel.to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
 
-    with pytest.raises(ValueError, match="invalid_prediction_config"):
+    with pytest.raises(ValueError, match="duplicate_prediction_key"):
         run_prediction_handoff(
             PredictionHandoffConfig(
                 input_path=input_path,
@@ -919,10 +919,15 @@ def test_prediction_handoff_rejects_duplicate_prediction_keys_before_artifacts(
     assert (run_dir / "memory_preflight.json").is_file()
     assert (run_dir / "runtime_summary.json").is_file()
     assert (run_dir / "checkpoints.json").is_file()
+    summary = json.loads((run_dir / "runtime_summary.json").read_text("utf-8"))
+    assert summary["failure_code"] == "duplicate_prediction_key"
     assert not (run_dir / "feature_set_manifest.json").exists()
     assert not (run_dir / "predictions.parquet").exists()
     assert not (run_dir / "prediction_records.parquet").exists()
+    assert not (run_dir / "model_metadata.json").exists()
     assert not (run_dir / "evaluation").exists()
+    assert not (run_dir / "comparison").exists()
+    assert not (run_dir / "eda").exists()
 
 
 def test_prediction_handoff_rejects_duplicate_run_id_before_input_read(

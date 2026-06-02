@@ -233,7 +233,7 @@ def test_model_suite_rejects_duplicate_prediction_keys_before_artifacts(
     panel = pd.concat([_panel(), _panel().iloc[[0]]], ignore_index=True)
     panel.to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
 
-    with pytest.raises(ValueError, match="invalid_prediction_config"):
+    with pytest.raises(ValueError, match="duplicate_prediction_key"):
         run_model_suite(
             ModelSuiteConfig(
                 input_path=input_path,

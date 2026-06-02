@@ -287,7 +287,7 @@ def _validate_unique_prediction_keys(
     entity_column: str,
 ) -> None:
     if frame.duplicated([timestamp_column, entity_column]).any():
-        raise ValueError("invalid_prediction_config")
+        raise ValueError("duplicate_prediction_key")
 
 
 def _validate_metadata_identifiers(values: tuple[str, ...]) -> None:

@@ -464,6 +464,61 @@ def test_a_share_eda_refresh_cli_regenerates_prediction_charts(tmp_path) -> None
     assert (run_dir / "eda" / "coverage_by_year.png").is_file()
 
 
+def test_a_share_prediction_handoff_cli_rejects_duplicate_prediction_keys(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    panel = pd.concat(
+        [_prediction_handoff_panel(), _prediction_handoff_panel().iloc[[0]]],
+        ignore_index=True,
+    )
+    panel.to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "prediction-handoff",
+            "--input-parquet",
+            str(input_path),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "prediction_cli_duplicate_keys",
+            "--feature-column",
+            "feature_a",
+            "--feature-column",
+            "feature_b",
+            "--target-column",
+            "forward_return_2d",
+            "--return-source-column",
+            "forward_return_1d",
+            "--label-horizon-days",
+            "2",
+            "--model-id",
+            "ridge",
+            "--walk-forward-fold",
+            "fold_001,2024-01-05,2024-01-08,2024-01-09",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "duplicate_prediction_key" in result.output
+    assert "Traceback" not in result.output
+    assert "000001" not in result.output
+    assert "2024-01-01" not in result.output
+    assert str(tmp_path) not in result.output
+    run_dir = output_root / "prediction_cli_duplicate_keys"
+    assert not (run_dir / "predictions.parquet").exists()
+    assert not (run_dir / "prediction_records.parquet").exists()
+    assert not (run_dir / "model_metadata.json").exists()
+    assert not (run_dir / "evaluation").exists()
+    assert not (run_dir / "comparison").exists()
+    assert not (run_dir / "eda").exists()
+
+
 def test_a_share_prediction_handoff_cli_resolves_feature_preset(tmp_path) -> None:
     input_path = tmp_path / "features.parquet"
     _prediction_handoff_panel().to_parquet(
