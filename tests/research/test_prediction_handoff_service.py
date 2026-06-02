@@ -5,6 +5,7 @@ import json
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.prediction_handoff as prediction_handoff
 from quant_research_platform.research.prediction_handoff import (
     PredictionHandoffConfig,
     _write_optional_charts,
@@ -58,11 +59,11 @@ def test_prediction_handoff_writes_predictions_evaluation_and_comparison(
         (run_dir / "eda" / "eda_manifest.json").read_text("utf-8")
     )
     assert eda_manifest["chart_dependency_status"] == "ready"
-    assert eda_manifest["chart_count"] >= 5
+    assert eda_manifest["chart_count"] >= 4
     assert "coverage_by_year.png" in eda_manifest["chart_files"]
-    assert "model_leaderboard_top20.png" in eda_manifest["chart_files"]
+    assert "model_leaderboard_top20.png" not in eda_manifest["chart_files"]
     assert (run_dir / "eda" / "coverage_by_year.png").is_file()
-    assert (run_dir / "eda" / "model_leaderboard_top20.png").is_file()
+    assert not (run_dir / "eda" / "model_leaderboard_top20.png").exists()
 
     summary = json.loads((run_dir / "runtime_summary.json").read_text("utf-8"))
     eval_summary = json.loads(
@@ -142,11 +143,145 @@ def test_refresh_prediction_handoff_eda_regenerates_static_charts(tmp_path) -> N
     manifest = json.loads((run_dir / "eda" / "eda_manifest.json").read_text("utf-8"))
 
     assert result["chart_dependency_status"] == "ready"
-    assert result["chart_count"] >= 5
+    assert result["chart_count"] >= 4
     assert "coverage_by_year.png" in manifest["chart_files"]
     assert "prediction_ic_by_year.png" in manifest["chart_files"]
-    assert "model_leaderboard_top20.png" in manifest["chart_files"]
+    assert "model_leaderboard_top20.png" not in manifest["chart_files"]
     assert (run_dir / "eda" / "coverage_by_year.png").is_file()
+
+
+def test_refresh_prediction_handoff_eda_rebuilds_stale_existing_csvs(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    run_prediction_handoff(
+        PredictionHandoffConfig(
+            input_path=input_path,
+            output_root=output_root,
+            run_id="prediction_refresh_stale_csv_run",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            return_source_column="forward_return_1d",
+            label_horizon_days=2,
+            folds=(
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                },
+            ),
+            model_ids=("ridge", "elastic_net"),
+        )
+    )
+
+    run_dir = output_root / "prediction_refresh_stale_csv_run"
+    stale_coverage = run_dir / "eda" / "data_coverage_by_year.csv"
+    pd.DataFrame({"year": [2099], "row_count": [999]}).to_csv(
+        stale_coverage,
+        index=False,
+    )
+
+    refresh_prediction_handoff_eda(run_dir)
+
+    coverage = pd.read_csv(stale_coverage)
+    assert 2099 not in set(coverage["year"])
+    predictions = pd.read_parquet(run_dir / "predictions.parquet")
+    assert coverage["row_count"].sum() == len(predictions)
+
+
+def test_refresh_prediction_handoff_eda_rebuilds_stale_feature_importance(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    run_prediction_handoff(
+        PredictionHandoffConfig(
+            input_path=input_path,
+            output_root=output_root,
+            run_id="prediction_refresh_stale_importance_run",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            return_source_column="forward_return_1d",
+            label_horizon_days=2,
+            folds=(
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                },
+            ),
+            model_ids=("random_forest_lite",),
+        )
+    )
+
+    run_dir = output_root / "prediction_refresh_stale_importance_run"
+    stale_importance = run_dir / "eda" / "tree_model_feature_importance.csv"
+    pd.DataFrame(
+        {
+            "fold_id": ["stale"],
+            "model_id": ["stale"],
+            "feature": ["vendor_feature"],
+            "importance": [999.0],
+        }
+    ).to_csv(stale_importance, index=False)
+
+    refresh_prediction_handoff_eda(run_dir)
+
+    importance = pd.read_csv(stale_importance)
+    assert "vendor_feature" not in set(importance["feature"])
+    assert set(importance["feature"]) == {"feature_a", "feature_b"}
+
+
+def test_refresh_prediction_handoff_eda_ignores_stale_comparison_leaderboard(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    run_prediction_handoff(
+        PredictionHandoffConfig(
+            input_path=input_path,
+            output_root=output_root,
+            run_id="prediction_refresh_stale_leaderboard_run",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            return_source_column="forward_return_1d",
+            label_horizon_days=2,
+            folds=(
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                },
+            ),
+            model_ids=("ridge",),
+        )
+    )
+    run_dir = output_root / "prediction_refresh_stale_leaderboard_run"
+    pd.DataFrame(
+        {
+            "model_id": ["stale"],
+            "mean_rankic": [999.0],
+        }
+    ).to_csv(run_dir / "comparison" / "model_leaderboard.csv", index=False)
+
+    refresh_prediction_handoff_eda(run_dir)
+
+    manifest = json.loads((run_dir / "eda" / "eda_manifest.json").read_text("utf-8"))
+    assert "model_leaderboard_top20.png" not in manifest["chart_files"]
+    assert not (run_dir / "eda" / "model_leaderboard_top20.png").exists()
 
 
 def test_refresh_prediction_handoff_eda_recovers_from_predictions_with_metadata_columns(
@@ -283,6 +418,57 @@ def test_prediction_handoff_dry_run_writes_no_row_level_outputs(tmp_path) -> Non
     assert not (run_dir / "evaluation").exists()
 
 
+def test_prediction_handoff_dry_run_runs_memory_preflight_before_inventory(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    preflight_seen = False
+    original_preflight = prediction_handoff.run_memory_preflight
+    original_inventory = prediction_handoff.build_schema_inventory
+
+    def tracking_preflight(*args, **kwargs):
+        nonlocal preflight_seen
+        preflight_seen = True
+        return original_preflight(*args, **kwargs)
+
+    def guarded_inventory(*args, **kwargs):
+        assert preflight_seen
+        return original_inventory(*args, **kwargs)
+
+    monkeypatch.setattr(prediction_handoff, "run_memory_preflight", tracking_preflight)
+    monkeypatch.setattr(prediction_handoff, "build_schema_inventory", guarded_inventory)
+
+    result = run_prediction_handoff(
+        PredictionHandoffConfig(
+            input_path=input_path,
+            output_root=output_root,
+            run_id="prediction_dry_run_no_row_read",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            return_source_column="forward_return_1d",
+            label_horizon_days=2,
+            folds=(
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                },
+            ),
+            model_ids=("ridge",),
+            dry_run=True,
+        )
+    )
+
+    assert result.status == "dry_run"
+
+
 def test_prediction_handoff_rejects_sensitive_feature_names_before_artifacts(
     tmp_path,
 ) -> None:
@@ -321,6 +507,90 @@ def test_prediction_handoff_rejects_sensitive_feature_names_before_artifacts(
         )
 
     assert not (output_root / "prediction_sensitive_feature").exists()
+
+
+@pytest.mark.parametrize("feature_name", ["source_factor", "sourceAlpha"])
+def test_prediction_handoff_rejects_vendor_source_local_feature_names_before_artifacts(
+    tmp_path,
+    feature_name,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    frame = _panel()
+    frame[feature_name] = 1.0
+    frame.to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="invalid_feature_preset"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_marker_feature",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=(feature_name,),
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("ridge",),
+                dry_run=True,
+            )
+        )
+
+    assert not (output_root / "prediction_marker_feature").exists()
+
+
+def test_prediction_handoff_rejects_private_marker_feature_names_before_artifacts(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().assign(private_factor=1.0).to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="invalid_feature_preset"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_marker_value_feature",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("private_factor",),
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("single_factor_baselines",),
+                dry_run=True,
+            )
+        )
+
+    assert not (output_root / "prediction_marker_value_feature").exists()
 
 
 @pytest.mark.parametrize(
@@ -369,6 +639,137 @@ def test_prediction_handoff_rejects_leakage_feature_names_before_artifacts(
         )
 
     assert not (output_root / "prediction_leakage_feature").exists()
+
+
+@pytest.mark.parametrize(
+    ("return_source_column", "extra_columns"),
+    [
+        ("forward_return_2d", {}),
+        ("prediction_score_ridge_2d", {"prediction_score_ridge_2d": 0.0}),
+    ],
+)
+def test_prediction_handoff_rejects_return_source_collisions_before_artifacts(
+    tmp_path,
+    return_source_column,
+    extra_columns,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    _panel().assign(**extra_columns).to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="invalid_prediction_config"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_return_source_collision",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                return_source_column=return_source_column,
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("ridge",),
+            )
+        )
+
+    assert not (output_root / "prediction_return_source_collision").exists()
+
+
+@pytest.mark.parametrize(
+    ("config_updates", "frame"),
+    [
+        (
+            {"timestamp_column": "local_timestamp"},
+            lambda: _panel().rename(columns={"timestamp": "local_timestamp"}),
+        ),
+        (
+            {"entity_column": "source_asset"},
+            lambda: _panel().rename(columns={"asset": "source_asset"}),
+        ),
+        ({"label_column": "vendor_label"}, lambda: _panel().assign(vendor_label=0.0)),
+        (
+            {"return_source_column": "local_return"},
+            lambda: _panel().assign(local_return=0.0),
+        ),
+        (
+            {
+                "folds": (
+                    {
+                        "fold_id": "vendor_fold",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                    },
+                )
+            },
+            lambda: _panel(),
+        ),
+        (
+            {
+                "folds": (
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "split_name": "local_split",
+                    },
+                )
+            },
+            lambda: _panel(),
+        ),
+    ],
+)
+def test_prediction_handoff_rejects_unsafe_metadata_identifiers_before_artifacts(
+    tmp_path,
+    config_updates,
+    frame,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    frame().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+    kwargs = {
+        "timestamp_column": "timestamp",
+        "entity_column": "asset",
+        "feature_columns": ("feature_a", "feature_b"),
+        "label_column": "forward_return_2d",
+        "return_source_column": "forward_return_1d",
+        "label_horizon_days": 2,
+        "folds": (
+            {
+                "fold_id": "fold_001",
+                "train_end": "2024-01-05",
+                "test_start": "2024-01-08",
+                "test_end": "2024-01-09",
+            },
+        ),
+        "model_ids": ("ridge",),
+    }
+    kwargs.update(config_updates)
+
+    with pytest.raises(ValueError, match="invalid_prediction_config"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_bad_metadata_identifier",
+                **kwargs,
+            )
+        )
+
+    assert not (output_root / "prediction_bad_metadata_identifier").exists()
 
 
 @pytest.mark.parametrize(
@@ -479,6 +880,49 @@ def test_prediction_handoff_rejects_malformed_folds_before_artifacts(
     assert "train_end" not in str(exc.value)
     assert "test_start" not in str(exc.value)
     assert not (output_root / "prediction_bad_folds").exists()
+
+
+def test_prediction_handoff_rejects_duplicate_prediction_keys_before_artifacts(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    panel = pd.concat([_panel(), _panel().iloc[[0]]], ignore_index=True)
+    panel.to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    with pytest.raises(ValueError, match="invalid_prediction_config"):
+        run_prediction_handoff(
+            PredictionHandoffConfig(
+                input_path=input_path,
+                output_root=output_root,
+                run_id="prediction_duplicate_keys",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                return_source_column="forward_return_1d",
+                label_horizon_days=2,
+                folds=(
+                    {
+                        "fold_id": "fold_001",
+                        "train_end": "2024-01-05",
+                        "test_start": "2024-01-08",
+                        "test_end": "2024-01-09",
+                    },
+                ),
+                model_ids=("ridge",),
+            )
+        )
+
+    run_dir = output_root / "prediction_duplicate_keys"
+    assert (run_dir / "schema_inventory.json").is_file()
+    assert (run_dir / "memory_preflight.json").is_file()
+    assert (run_dir / "runtime_summary.json").is_file()
+    assert (run_dir / "checkpoints.json").is_file()
+    assert not (run_dir / "feature_set_manifest.json").exists()
+    assert not (run_dir / "predictions.parquet").exists()
+    assert not (run_dir / "prediction_records.parquet").exists()
+    assert not (run_dir / "evaluation").exists()
 
 
 def test_prediction_handoff_rejects_duplicate_run_id_before_input_read(
@@ -607,6 +1051,52 @@ def test_prediction_handoff_chart_dependency_failure_does_not_crash(
     assert status == "dependency_unavailable"
     assert chart_files == ()
     assert not (tmp_path / "coverage_by_year.png").exists()
+
+
+def test_prediction_handoff_chart_dependency_failure_clears_stale_charts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import builtins
+
+    (tmp_path / "coverage_by_year.png").write_bytes(b"stale")
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "matplotlib" or name.startswith("matplotlib."):
+            raise OSError("DLL load failed while importing _imaging")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    chart_count, status, chart_files = _write_optional_charts(
+        tmp_path,
+        pd.DataFrame({"year": [2024], "row_count": [3]}),
+        pd.DataFrame({"feature": ["rev_1d"], "missing_fraction": [0.0]}),
+    )
+
+    assert chart_count == 0
+    assert status == "dependency_unavailable"
+    assert chart_files == ()
+    assert not (tmp_path / "coverage_by_year.png").exists()
+
+
+def test_prediction_handoff_chart_generation_clears_ineligible_stale_charts(
+    tmp_path,
+) -> None:
+    (tmp_path / "coverage_by_year.png").write_bytes(b"stale")
+    (tmp_path / "missingness_top20.png").write_bytes(b"stale")
+
+    chart_count, status, chart_files = _write_optional_charts(
+        tmp_path,
+        pd.DataFrame(columns=["year", "row_count"]),
+        pd.DataFrame({"feature": ["rev_1d"], "missing_fraction": [0.0]}),
+    )
+
+    assert chart_count == 1
+    assert status == "ready"
+    assert chart_files == ("missingness_top20.png",)
+    assert not (tmp_path / "coverage_by_year.png").exists()
+    assert (tmp_path / "missingness_top20.png").is_file()
 
 
 def _panel() -> pd.DataFrame:

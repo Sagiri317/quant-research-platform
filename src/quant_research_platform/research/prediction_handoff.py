@@ -33,12 +33,14 @@ from quant_research_platform.research.ml_model_suite import (
     SuiteFoldConfig,
     feature_name_has_sensitive_identifier,
     feature_name_looks_like_leakage,
+    identifier_has_unsafe_metadata_marker,
     run_model_suite,
     validate_prediction_folds,
 )
 from quant_research_platform.runtime.private_paths import (
     path_is_under_private_output_root,
     require_private_outputs_for_private_input,
+    text_has_private_marker,
 )
 from quant_research_platform.runtime.run_metadata import PREDICTION_TRAINING_SCOPE
 
@@ -178,6 +180,18 @@ def _validate_config(config: PredictionHandoffConfig) -> None:
         raise FileNotFoundError(config.input_path)
     if not config.feature_columns:
         raise ValueError("invalid_feature_preset")
+    if config.return_source_column == config.label_column:
+        raise ValueError("invalid_prediction_config")
+    if config.return_source_column.startswith("prediction_score_"):
+        raise ValueError("invalid_prediction_config")
+    _validate_metadata_identifiers(
+        (
+            config.timestamp_column,
+            config.entity_column,
+            config.label_column,
+            config.return_source_column,
+        )
+    )
     leakage = [
         column
         for column in config.feature_columns
@@ -190,11 +204,30 @@ def _validate_config(config: PredictionHandoffConfig) -> None:
         for column in config.feature_columns
     ):
         raise ValueError("invalid_feature_preset")
+    if any(
+        identifier_has_unsafe_metadata_marker(column)
+        for column in config.feature_columns
+    ):
+        raise ValueError("invalid_feature_preset")
+    if any(
+        feature_name_has_sensitive_identifier(model_id)
+        for model_id in config.model_ids
+    ):
+        raise ValueError("invalid_prediction_config")
+    if any(
+        identifier_has_unsafe_metadata_marker(model_id)
+        for model_id in config.model_ids
+    ):
+        raise ValueError("invalid_prediction_config")
     if config.feature_preset and config.feature_preset not in SUPPORTED_FEATURE_PRESETS:
         raise ValueError("invalid_feature_preset")
     if not config.folds:
         raise ValueError("invalid_prediction_config")
-    _suite_folds(config.folds)
+    folds = _suite_folds(config.folds)
+    _validate_metadata_identifiers(
+        tuple(fold.fold_id for fold in folds)
+        + tuple(fold.split_name for fold in folds)
+    )
     require_private_outputs_for_private_input(
         config.input_path,
         (config.output_root,),
@@ -205,7 +238,13 @@ def _validate_config(config: PredictionHandoffConfig) -> None:
 def ensure_prediction_run_id_available(output_root: Path, run_id: str) -> Path:
     """Validate that a prediction handoff run directory can be created."""
 
-    if Path(run_id).name != run_id or run_id in {"", ".", ".."}:
+    if (
+        Path(run_id).name != run_id
+        or run_id in {"", ".", ".."}
+        or feature_name_has_sensitive_identifier(run_id)
+        or identifier_has_unsafe_metadata_marker(run_id)
+        or text_has_private_marker(run_id)
+    ):
         raise ValueError("invalid_prediction_config")
     run_dir = output_root / run_id
     if run_dir.exists():
@@ -220,6 +259,25 @@ def _new_run_dir(output_root: Path, run_id: str) -> Path:
 
 
 def _write_preflight_files(config: PredictionHandoffConfig, run_dir: Path) -> None:
+    preflight = run_memory_preflight(
+        config.input_path,
+        required_columns=(
+            config.timestamp_column,
+            config.entity_column,
+            config.label_column,
+            config.return_source_column,
+            *config.feature_columns,
+        ),
+        memory_budget_gb=config.memory_budget_gb,
+    )
+    if preflight["status"] != "passed":
+        write_json_sanitized(run_dir / "memory_preflight.json", preflight)
+        write_json_sanitized(
+            run_dir / "runtime_summary.json",
+            _summary(config, "failed", failure_code="memory_preflight_failed"),
+        )
+        _write_checkpoints(run_dir)
+        raise ValueError("memory_preflight_failed")
     inventory = build_schema_inventory(
         config.input_path,
         expected_columns=(
@@ -232,26 +290,15 @@ def _write_preflight_files(config: PredictionHandoffConfig, run_dir: Path) -> No
         key_columns=(config.entity_column, config.timestamp_column),
         date_column=config.timestamp_column,
     )
-    preflight = run_memory_preflight(
-        config.input_path,
-        required_columns=(
-            config.timestamp_column,
-            config.entity_column,
-            config.label_column,
-            config.return_source_column,
-            *config.feature_columns,
-        ),
-        memory_budget_gb=config.memory_budget_gb,
-    )
-    write_json_sanitized(run_dir / "schema_inventory.json", inventory)
     write_json_sanitized(run_dir / "memory_preflight.json", preflight)
-    if preflight["status"] != "passed":
+    write_json_sanitized(run_dir / "schema_inventory.json", inventory)
+    if int(inventory.get("duplicate_key_count") or 0) > 0:
         write_json_sanitized(
             run_dir / "runtime_summary.json",
-            _summary(config, "failed", failure_code="memory_preflight_failed"),
+            _summary(config, "failed", failure_code="invalid_prediction_config"),
         )
         _write_checkpoints(run_dir)
-        raise ValueError("memory_preflight_failed")
+        raise ValueError("invalid_prediction_config")
 
 
 def _write_feature_set_manifest(
@@ -307,6 +354,13 @@ def _suite_folds(
             )
         )
     return validate_prediction_folds(tuple(folds))
+
+
+def _validate_metadata_identifiers(values: tuple[str, ...]) -> None:
+    if any(feature_name_has_sensitive_identifier(value) for value in values):
+        raise ValueError("invalid_prediction_config")
+    if any(identifier_has_unsafe_metadata_marker(value) for value in values):
+        raise ValueError("invalid_prediction_config")
 
 
 def _required_fold_field(value: object) -> str:
@@ -516,7 +570,8 @@ def _write_handoff_metadata_overlay(
             "return_source_column": config.return_source_column,
             "feature_columns": list(config.feature_columns),
             "feature_preset": config.feature_preset,
-            "model_ids": list(config.model_ids or DEFAULT_NON_DL_MODEL_IDS),
+            "model_ids": list(metadata.get("model_ids", [])),
+            "requested_model_ids": list(config.model_ids or DEFAULT_NON_DL_MODEL_IDS),
             "model_suite_id": A_SHARE_MODEL_SUITE_ID,
             "prediction_handoff_version": PREDICTION_HANDOFF_VERSION,
             "prediction_columns": list(prediction_columns),
@@ -637,14 +692,13 @@ def _write_prediction_eda_outputs(
     ic_month.to_csv(eda_dir / "prediction_ic_by_month.csv", index=False)
     importance_count = _write_feature_importance_outputs(run_dir, eda_dir)
     importance = _read_optional_csv(eda_dir / "tree_model_feature_importance.csv")
-    leaderboard = _read_optional_csv(run_dir / "comparison" / "model_leaderboard.csv")
     chart_count, chart_status, chart_files = _write_optional_charts(
         eda_dir,
         coverage,
         missingness,
         ic_year=ic_year,
         ic_month=ic_month,
-        leaderboard=leaderboard,
+        leaderboard=None,
         feature_importance=importance,
     )
     write_json_sanitized(
@@ -676,70 +730,24 @@ def refresh_prediction_handoff_eda(run_dir: Path) -> dict[str, object]:
         raise ValueError("private_output_policy_violation")
     eda_dir = run_dir / "eda"
     eda_dir.mkdir(parents=True, exist_ok=True)
-    required_csvs = (
-        "data_coverage_by_year.csv",
-        "data_coverage_by_month.csv",
-        "missingness_by_feature.csv",
-        "prediction_ic_by_year.csv",
-        "prediction_ic_by_month.csv",
+    metadata = _read_model_metadata(run_dir)
+    frame = pd.read_parquet(
+        run_dir / "predictions.parquet",
+        engine="pyarrow",
     )
-    if all((eda_dir / filename).is_file() for filename in required_csvs):
-        coverage = pd.read_csv(eda_dir / "data_coverage_by_year.csv")
-        missingness = pd.read_csv(eda_dir / "missingness_by_feature.csv")
-        ic_year = pd.read_csv(eda_dir / "prediction_ic_by_year.csv")
-        ic_month = pd.read_csv(eda_dir / "prediction_ic_by_month.csv")
-        leaderboard = _read_optional_csv(
-            run_dir / "comparison" / "model_leaderboard.csv"
-        )
-        importance = _read_optional_csv(
-            eda_dir / "tree_model_feature_importance.csv"
-        )
-        importance_count = 0 if importance.empty else 1
-        chart_count, chart_status, chart_files = _write_optional_charts(
-            eda_dir,
-            coverage,
-            missingness,
-            ic_year=ic_year,
-            ic_month=ic_month,
-            leaderboard=leaderboard,
-            feature_importance=importance,
-        )
-        write_json_sanitized(
-            eda_dir / "eda_manifest.json",
-            {
-                "status": "ready",
-                "eda_status": "experimental_non_contract",
-                "artifact_count": 6 + importance_count + chart_count,
-                "chart_count": chart_count,
-                "chart_dependency_status": chart_status,
-                "chart_files": list(chart_files),
-                "feature_importance_artifact_count": importance_count,
-            },
-        )
-        (eda_dir / "eda_report.md").write_text(
-            "# Prediction handoff EDA\n\n"
-            "Experimental aggregate-only diagnostics; not schema 0.7 contract.\n",
-            encoding="utf-8",
-        )
-    else:
-        metadata = _read_model_metadata(run_dir)
-        frame = pd.read_parquet(
-            run_dir / "predictions.parquet",
-            engine="pyarrow",
-        )
-        _write_prediction_eda_outputs(
-            run_dir=run_dir,
-            frame=frame,
-            prediction_columns=tuple(metadata["prediction_columns"]),
-            label_column=str(metadata.get("label_column") or metadata["target_column"]),
-            timestamp_column=str(metadata["timestamp_column"]),
-        )
-        manifest = json.loads(
-            (eda_dir / "eda_manifest.json").read_text(encoding="utf-8")
-        )
-        chart_count = int(manifest.get("chart_count", 0) or 0)
-        chart_status = str(manifest.get("chart_dependency_status", "unknown"))
-        chart_files = tuple(manifest.get("chart_files", []))
+    _write_prediction_eda_outputs(
+        run_dir=run_dir,
+        frame=frame,
+        prediction_columns=tuple(metadata["prediction_columns"]),
+        label_column=str(metadata.get("label_column") or metadata["target_column"]),
+        timestamp_column=str(metadata["timestamp_column"]),
+    )
+    manifest = json.loads(
+        (eda_dir / "eda_manifest.json").read_text(encoding="utf-8")
+    )
+    chart_count = int(manifest.get("chart_count", 0) or 0)
+    chart_status = str(manifest.get("chart_dependency_status", "unknown"))
+    chart_files = tuple(manifest.get("chart_files", []))
     _write_checkpoints(run_dir)
     return {
         "status": "ready",
@@ -858,6 +866,12 @@ def _write_feature_importance_outputs(run_dir: Path, eda_dir: Path) -> int:
                 }
             )
     if not rows:
+        pd.DataFrame(
+            columns=("fold_id", "model_id", "feature", "importance")
+        ).to_csv(
+            eda_dir / "tree_model_feature_importance.csv",
+            index=False,
+        )
         return 0
     pd.DataFrame(rows).to_csv(
         eda_dir / "tree_model_feature_importance.csv",
@@ -952,6 +966,7 @@ def _write_optional_charts(
     leaderboard: pd.DataFrame | None = None,
     feature_importance: pd.DataFrame | None = None,
 ) -> tuple[int, str, tuple[str, ...]]:
+    _clear_managed_chart_files(eda_dir)
     chart_files: list[str] = []
     try:
         import matplotlib
@@ -959,6 +974,7 @@ def _write_optional_charts(
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except (ImportError, OSError, RuntimeError):
+        _clear_managed_chart_files(eda_dir)
         return 0, "dependency_unavailable", ()
     try:
         with warnings.catch_warnings():
@@ -1053,14 +1069,25 @@ def _write_optional_charts(
                 fig.savefig(eda_dir / filename, dpi=120)
                 plt.close(fig)
     except (ImportError, OSError, RuntimeError):
-        for filename in chart_files:
-            (eda_dir / filename).unlink(missing_ok=True)
+        _clear_managed_chart_files(eda_dir)
         return 0, "dependency_unavailable", ()
     return (
         len(chart_files),
         "ready" if chart_files else "not_generated",
         tuple(chart_files),
     )
+
+
+def _clear_managed_chart_files(eda_dir: Path) -> None:
+    for filename in (
+        "coverage_by_year.png",
+        "missingness_top20.png",
+        "prediction_ic_by_year.png",
+        "prediction_ic_by_month.png",
+        "model_leaderboard_top20.png",
+        "feature_importance_top20.png",
+    ):
+        (eda_dir / filename).unlink(missing_ok=True)
 
 
 def _safe_tight_layout(fig: object) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import warnings
 from dataclasses import dataclass
@@ -37,7 +38,18 @@ from quant_research_platform.runtime.private_paths import (
     path_has_private_marker,
     path_is_under_private_output_root,
     require_private_outputs_for_private_input,
+    text_has_private_marker,
 )
+
+_UNSAFE_RUN_ID_MARKER_PATTERN = re.compile(
+    r"(^|[_-])(vendor|source|local)([_-]|$)",
+    re.IGNORECASE,
+)
+_SENSITIVE_RUN_ID_PATTERN = re.compile(
+    r"(credential|secret|token|api[_-]?key|password)",
+    re.IGNORECASE,
+)
+_UNSAFE_RUN_ID_MARKERS = frozenset({"vendor", "source", "local"})
 
 PREDICTION_SAFE_BOUNDARY = (
     "experimental research factor rebuild; not alpha proof; not investment advice; "
@@ -112,19 +124,23 @@ def write_schema_inventory_run(
         error_message="private_output_policy_violation",
     )
     run_dir = _new_run_dir(output_root, run_id)
+    preflight = run_memory_preflight(
+        input_parquet,
+        required_columns=("stock_code", "trade_date"),
+        memory_budget_gb=memory_budget_gb,
+    )
+    write_json_sanitized(run_dir / "memory_preflight.json", preflight)
+    if preflight["status"] != "passed":
+        _write_failed_run_summary(run_dir, run_id, "memory_preflight_failed")
+        _write_checkpoints(run_dir)
+        raise ValueError("memory_preflight_failed")
     inventory = build_schema_inventory(
         input_parquet,
         expected_columns=("stock_code", "trade_date"),
         start_date=None,
         end_date=None,
     )
-    preflight = run_memory_preflight(
-        input_parquet,
-        required_columns=("stock_code", "trade_date"),
-        memory_budget_gb=memory_budget_gb,
-    )
     write_json_sanitized(run_dir / "schema_inventory.json", inventory)
-    write_json_sanitized(run_dir / "memory_preflight.json", preflight)
     _write_checkpoints(run_dir)
     write_json_sanitized(
         run_dir / "runtime_summary.json",
@@ -141,31 +157,15 @@ def write_schema_inventory_run(
 def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
     """Run or dry-run one literature-prior factor rebuild."""
 
+    _validate_run_id_available(config.output_root, config.run_id)
     _validate_rebuild_config(config)
     run_dir = _new_run_dir(config.output_root, config.run_id)
     try:
-        inventory = build_schema_inventory(
-            config.panel_parquet,
-            expected_columns=FACTOR_REBUILD_INPUT_COLUMNS,
-            start_date=_calculation_start_date(config),
-            end_date=config.end_date,
-        )
         available_input_columns = tuple(
             pq.ParquetFile(config.panel_parquet).schema.names
         )
         expected_factors = expected_literature_price_volume_factor_columns(
             factor_set_tier=config.factor_set_tier
-        )
-        warmup = build_warmup_sufficiency_payload(
-            config=config,
-            expected_factors=expected_factors,
-        )
-        write_json_sanitized(run_dir / "warmup_sufficiency.json", warmup)
-        if config.require_sufficient_warmup and not warmup["warmup_sufficient"]:
-            raise ValueError("warmup_insufficient")
-        unsupported = unsupported_literature_price_volume_factors(
-            available_input_columns,
-            expected_columns=expected_factors,
         )
         preflight = run_memory_preflight(
             config.panel_parquet,
@@ -182,8 +182,27 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
             end_date=config.end_date,
             memory_budget_gb=config.memory_budget_gb,
         )
-        write_json_sanitized(run_dir / "schema_inventory.json", inventory)
         write_json_sanitized(run_dir / "memory_preflight.json", preflight)
+        if preflight["status"] != "passed":
+            raise ValueError("memory_preflight_failed")
+        inventory = build_schema_inventory(
+            config.panel_parquet,
+            expected_columns=FACTOR_REBUILD_INPUT_COLUMNS,
+            start_date=_calculation_start_date(config),
+            end_date=config.end_date,
+        )
+        write_json_sanitized(run_dir / "schema_inventory.json", inventory)
+        warmup = build_warmup_sufficiency_payload(
+            config=config,
+            expected_factors=expected_factors,
+        )
+        write_json_sanitized(run_dir / "warmup_sufficiency.json", warmup)
+        if config.require_sufficient_warmup and not warmup["warmup_sufficient"]:
+            raise ValueError("warmup_insufficient")
+        unsupported = unsupported_literature_price_volume_factors(
+            available_input_columns,
+            expected_columns=expected_factors,
+        )
         _write_feature_set_manifest(
             run_dir=run_dir,
             feature_columns=(),
@@ -192,8 +211,6 @@ def run_factor_rebuild(config: FactorRebuildConfig) -> FactorRebuildResult:
             row_count=0,
             factor_set_tier=config.factor_set_tier,
         )
-        if preflight["status"] != "passed":
-            raise ValueError("memory_preflight_failed")
         if config.dry_run:
             write_json_sanitized(
                 run_dir / "runtime_summary.json",
@@ -323,14 +340,46 @@ def _validate_rebuild_config(config: FactorRebuildConfig) -> None:
         raise ValueError("--backup-existing requires --overwrite-processed")
 
 
-def _new_run_dir(output_root: Path, run_id: str) -> Path:
-    if Path(run_id).name != run_id or run_id in {"", ".", ".."}:
+def _validate_run_id_available(output_root: Path, run_id: str) -> Path:
+    if (
+        Path(run_id).name != run_id
+        or run_id in {"", ".", ".."}
+        or _SENSITIVE_RUN_ID_PATTERN.search(run_id)
+        or _UNSAFE_RUN_ID_MARKER_PATTERN.search(run_id)
+        or _run_id_has_unsafe_marker(run_id)
+        or _run_id_has_unsafe_path_text(run_id)
+        or text_has_private_marker(run_id)
+    ):
         raise ValueError("invalid_factor_rebuild_config")
     run_dir = output_root / run_id
     if run_dir.exists():
         raise ValueError("duplicate_run_id")
+    return run_dir
+
+
+def _new_run_dir(output_root: Path, run_id: str) -> Path:
+    run_dir = _validate_run_id_available(output_root, run_id)
     run_dir.mkdir(parents=True)
     return run_dir
+
+
+def _run_id_has_unsafe_marker(run_id: str) -> bool:
+    camel_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", run_id)
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", camel_split)
+    return any(
+        token.casefold() in _UNSAFE_RUN_ID_MARKERS
+        for token in re.split(r"[^A-Za-z0-9]+", camel_split)
+        if token
+    )
+
+
+def _run_id_has_unsafe_path_text(run_id: str) -> bool:
+    normalized = run_id.replace("\\", "/")
+    if re.search(r"(?<![A-Za-z0-9])[A-Za-z]:/", normalized):
+        return True
+    if normalized.startswith(("/", "//")):
+        return True
+    return any(part == ".." for part in normalized.split("/"))
 
 
 def _available_columns(path: Path, wanted: tuple[str, ...]) -> list[str]:
@@ -592,28 +641,23 @@ def refresh_factor_rebuild_eda(run_dir: Path) -> dict[str, object]:
     eda_dir.mkdir(parents=True, exist_ok=True)
     coverage_path = eda_dir / "factor_coverage_by_year.csv"
     missingness_path = eda_dir / "factor_missingness_by_feature.csv"
-    if coverage_path.is_file():
-        coverage = pd.read_csv(coverage_path)
-    else:
-        dates = pd.to_datetime(
-            pd.read_parquet(
-                factor_path,
-                columns=("trade_date",),
-                engine="pyarrow",
-            )["trade_date"],
-            errors="coerce",
-        )
-        coverage = (
-            pd.DataFrame({"year": dates.dt.year})
-            .groupby("year", as_index=False)
-            .size()
-            .rename(columns={"size": "row_count"})
-        )
-        coverage.to_csv(coverage_path, index=False)
-    if missingness_path.is_file():
-        missingness = pd.read_csv(missingness_path)
-    else:
-        feature_columns = _feature_columns_from_manifest(run_dir)
+    dates = pd.to_datetime(
+        pd.read_parquet(
+            factor_path,
+            columns=("trade_date",),
+            engine="pyarrow",
+        )["trade_date"],
+        errors="coerce",
+    )
+    coverage = (
+        pd.DataFrame({"year": dates.dt.year})
+        .groupby("year", as_index=False)
+        .size()
+        .rename(columns={"size": "row_count"})
+    )
+    coverage.to_csv(coverage_path, index=False)
+    feature_columns = _feature_columns_from_manifest(run_dir)
+    if feature_columns:
         frame = pd.read_parquet(
             factor_path,
             columns=feature_columns,
@@ -627,7 +671,9 @@ def refresh_factor_rebuild_eda(run_dir: Path) -> dict[str, object]:
             .reset_index()
             .rename(columns={"index": "feature"})
         )
-        missingness.to_csv(missingness_path, index=False)
+    else:
+        missingness = pd.DataFrame(columns=["feature", "missing_fraction"])
+    missingness.to_csv(missingness_path, index=False)
     chart_count, chart_status, chart_files = _write_factor_charts(
         eda_dir,
         coverage,
@@ -676,6 +722,7 @@ def _write_factor_charts(
     coverage: pd.DataFrame,
     missingness: pd.DataFrame,
 ) -> tuple[int, str, tuple[str, ...]]:
+    _clear_factor_chart_files(eda_dir)
     chart_files: list[str] = []
     try:
         import matplotlib
@@ -683,6 +730,7 @@ def _write_factor_charts(
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except (ImportError, OSError, RuntimeError):
+        _clear_factor_chart_files(eda_dir)
         return 0, "dependency_unavailable", ()
     try:
         with warnings.catch_warnings():
@@ -712,14 +760,21 @@ def _write_factor_charts(
                 fig.savefig(eda_dir / filename, dpi=120)
                 plt.close(fig)
     except (ImportError, OSError, RuntimeError):
-        for filename in chart_files:
-            (eda_dir / filename).unlink(missing_ok=True)
+        _clear_factor_chart_files(eda_dir)
         return 0, "dependency_unavailable", ()
     return (
         len(chart_files),
         "ready" if chart_files else "not_generated",
         tuple(chart_files),
     )
+
+
+def _clear_factor_chart_files(eda_dir: Path) -> None:
+    for filename in (
+        "factor_coverage_by_year.png",
+        "factor_missingness_top20.png",
+    ):
+        (eda_dir / filename).unlink(missing_ok=True)
 
 
 def _safe_tight_layout(fig: object) -> None:

@@ -8,6 +8,7 @@ import pytest
 import quant_research_platform.research.ml_model_suite as ml_model_suite
 from quant_research_platform.research.ml_model_suite import (
     A_SHARE_MODEL_SUITE_ID,
+    DEFAULT_NON_DL_MODEL_IDS,
     DEFAULT_RESEARCH_RANDOM_SEED,
     ModelSuiteConfig,
     SuiteFoldConfig,
@@ -150,6 +151,154 @@ def test_model_suite_rejects_sensitive_identifier_feature_names(tmp_path) -> Non
                 ),
             )
         )
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "vendor_factor",
+        "vendorFactor",
+        "factorVendor",
+        "sourceAlpha",
+        "localTimestamp",
+        "../alpha",
+        "C:/tmp/alpha",
+        r"..\alpha",
+    ],
+)
+def test_metadata_identifier_helper_rejects_unsafe_variants(identifier) -> None:
+    assert ml_model_suite.identifier_has_unsafe_metadata_marker(identifier)
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        A_SHARE_MODEL_SUITE_ID,
+        "forward_return_1d",
+        "walk_forward",
+        "explicit_feature_columns",
+        "random_forest_lite",
+    ],
+)
+def test_metadata_identifier_helper_allows_public_contract_terms(identifier) -> None:
+    assert not ml_model_suite.identifier_has_unsafe_metadata_marker(identifier)
+
+
+@pytest.mark.parametrize("feature_name", ["vendor_factor", "vendorFactor"])
+def test_model_suite_rejects_vendor_source_local_feature_names_before_artifacts(
+    tmp_path,
+    feature_name,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    frame = _panel()
+    frame[feature_name] = 1.0
+    frame.to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+
+    with pytest.raises(ValueError, match="invalid_feature_preset"):
+        run_model_suite(
+            ModelSuiteConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                output_prediction_long_path=tmp_path / "prediction_records.parquet",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=(feature_name,),
+                label_column="forward_return_2d",
+                label_horizon_days=2,
+                folds=(
+                    SuiteFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2024-01-05",
+                        test_start="2024-01-08",
+                    ),
+                ),
+            )
+        )
+
+    assert not (tmp_path / "predictions.parquet").exists()
+    assert not (tmp_path / "prediction_records.parquet").exists()
+    assert not (tmp_path / "metadata.json").exists()
+
+
+def test_model_suite_rejects_duplicate_prediction_keys_before_artifacts(
+    tmp_path,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    panel = pd.concat([_panel(), _panel().iloc[[0]]], ignore_index=True)
+    panel.to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    with pytest.raises(ValueError, match="invalid_prediction_config"):
+        run_model_suite(
+            ModelSuiteConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                output_prediction_long_path=tmp_path / "prediction_records.parquet",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                label_horizon_days=2,
+                folds=(
+                    SuiteFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2024-01-05",
+                        test_start="2024-01-08",
+                    ),
+                ),
+                model_ids=("ridge",),
+            )
+        )
+
+    assert not (tmp_path / "predictions.parquet").exists()
+    assert not (tmp_path / "prediction_records.parquet").exists()
+    assert not (tmp_path / "metadata.json").exists()
+
+
+@pytest.mark.parametrize(
+    "model_suite_id",
+    ["source_model_v1", "sourceModelV1", "../alpha", "C:/tmp/alpha"],
+)
+def test_model_suite_rejects_unsafe_model_suite_id_before_artifacts(
+    tmp_path,
+    model_suite_id,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    with pytest.raises(ValueError, match="invalid_prediction_config"):
+        run_model_suite(
+            ModelSuiteConfig(
+                input_path=input_path,
+                output_prediction_path=tmp_path / "predictions.parquet",
+                output_metadata_path=tmp_path / "metadata.json",
+                output_prediction_long_path=tmp_path / "prediction_records.parquet",
+                timestamp_column="timestamp",
+                entity_column="asset",
+                feature_columns=("feature_a", "feature_b"),
+                label_column="forward_return_2d",
+                label_horizon_days=2,
+                folds=(
+                    SuiteFoldConfig(
+                        fold_id="fold_001",
+                        train_end="2024-01-05",
+                        test_start="2024-01-08",
+                    ),
+                ),
+                model_ids=("ridge",),
+                model_suite_id=model_suite_id,
+            )
+        )
+
+    assert not (tmp_path / "predictions.parquet").exists()
+    assert not (tmp_path / "prediction_records.parquet").exists()
+    assert not (tmp_path / "metadata.json").exists()
 
 
 def test_model_suite_adds_required_baseline_predictions(tmp_path) -> None:
@@ -465,6 +614,44 @@ def test_model_suite_randomized_models_are_repeatable_with_default_seed(
     assert first_metadata["model_statuses"] == second_metadata["model_statuses"]
 
 
+def test_model_suite_empty_model_ids_records_effective_defaults(tmp_path) -> None:
+    input_path = tmp_path / "features.parquet"
+    metadata_path = tmp_path / "metadata.json"
+    _panel().to_parquet(input_path, engine="pyarrow", compression="zstd", index=False)
+
+    run_model_suite(
+        ModelSuiteConfig(
+            input_path=input_path,
+            output_prediction_path=tmp_path / "predictions.parquet",
+            output_metadata_path=metadata_path,
+            output_prediction_long_path=tmp_path / "prediction_records.parquet",
+            timestamp_column="timestamp",
+            entity_column="asset",
+            feature_columns=("feature_a", "feature_b"),
+            label_column="forward_return_2d",
+            label_horizon_days=2,
+            folds=(
+                SuiteFoldConfig(
+                    fold_id="fold_001",
+                    train_end="2024-01-05",
+                    test_start="2024-01-08",
+                    test_end="2024-01-09",
+                ),
+            ),
+            model_ids=(),
+        )
+    )
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["requested_model_ids"] == list(DEFAULT_NON_DL_MODEL_IDS)
+    ready_status_ids = [
+        status["model_id"]
+        for status in metadata["model_statuses"]
+        if status["status"] == "ready"
+    ]
+    assert metadata["model_ids"] == list(dict.fromkeys(ready_status_ids))
+
+
 @pytest.mark.parametrize(
     ("module_name", "model_id"),
     [
@@ -556,6 +743,8 @@ def test_optional_boosting_models_record_missing_dependency_status(
     predictions = pd.read_parquet(prediction_path)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["prediction_columns"] == []
+    assert metadata["model_ids"] == []
+    assert metadata["requested_model_ids"] == ["xgboost_lite", "lightgbm_lite"]
     assert {
         (status["model_id"], status["status"])
         for status in metadata["model_statuses"]

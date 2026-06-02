@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from quant_research_platform.interfaces.api.app import create_app
@@ -101,6 +102,39 @@ def test_a_share_factor_rebuild_api_rejects_duplicate_run_id_before_read(
     assert response.json()["error"]["error_code"] == "duplicate_run_id"
     assert str(tmp_path) not in response.text
     assert "processed_private" not in response.text
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    ["factor_vendor_marker", "sourceAlpha", "../alpha", "C:/tmp/alpha"],
+)
+def test_a_share_factor_rebuild_api_rejects_unsafe_run_id_without_echo(
+    tmp_path,
+    run_id,
+) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            factor_rebuild_root=output_root,
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/factor-rebuild-runs",
+        json={
+            "run_id": run_id,
+            "panel_parquet": str(panel_path),
+            "dry_run": True,
+        },
+    )
+
+    assert response.status_code == 422
+    assert run_id not in response.text
+    assert not (output_root / run_id).exists()
 
 
 def test_a_share_prediction_handoff_api_creates_discoverable_evaluation(
@@ -465,6 +499,60 @@ def test_a_share_prediction_handoff_api_uses_configured_alias_root_for_writes(
     }
 
 
+def test_a_share_prediction_handoff_configured_alias_root_wins_over_env(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    input_path = tmp_path / "features.parquet"
+    _prediction_panel().to_parquet(
+        input_path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False,
+    )
+    configured_prediction_root = tmp_path / "configured_prediction_root"
+    env_prediction_root = tmp_path / "env_prediction_root"
+    monkeypatch.setenv("QRP_PREDICTION_HANDOFF_ROOT", str(env_prediction_root))
+    client = TestClient(
+        create_app(
+            run_roots=[
+                ("platform", tmp_path / "runs"),
+                ("a_share_prediction", configured_prediction_root),
+            ],
+        )
+    )
+
+    response = client.post(
+        "/api/a-share/prediction-handoffs",
+        json={
+            "run_id": "prediction_configured_alias_over_env",
+            "input_parquet": str(input_path),
+            "timestamp_column": "timestamp",
+            "entity_column": "asset",
+            "feature_columns": ["feature_a", "feature_b"],
+            "label_column": "forward_return_2d",
+            "return_source_column": "forward_return_1d",
+            "label_horizon_days": 2,
+            "model_ids": ["ridge"],
+            "folds": [
+                {
+                    "fold_id": "fold_001",
+                    "train_end": "2024-01-05",
+                    "test_start": "2024-01-08",
+                    "test_end": "2024-01-09",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    run_id = "prediction_configured_alias_over_env"
+    configured_run_dir = configured_prediction_root / run_id
+    env_run_dir = env_prediction_root / run_id
+    assert configured_run_dir.is_dir()
+    assert not env_run_dir.exists()
+
+
 def test_default_app_discovers_default_prediction_handoff_root(
     tmp_path,
     monkeypatch,
@@ -821,6 +909,33 @@ def test_a_share_status_endpoints_sanitize_disk_loaded_strings(tmp_path) -> None
     assert "api_key" not in prediction_status.text
     assert "Traceback" not in prediction_status.text
     assert "private_real" not in prediction_status.text
+
+
+def test_a_share_prediction_status_rejects_unsafe_run_id_without_echo(
+    tmp_path,
+) -> None:
+    prediction_root = (
+        tmp_path / "reports" / "private_real" / "a_share_prediction_handoffs"
+    )
+    run_id = "prediction_vendor_marker"
+    run_dir = prediction_root / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "runtime_summary.json").write_text(
+        json.dumps({"status": "ready", "run_id": run_id, "row_count": 5}),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            run_roots=[("platform", tmp_path / "runs")],
+            prediction_handoff_root=prediction_root,
+        )
+    )
+
+    response = client.get(f"/api/a-share/prediction-handoffs/{run_id}")
+
+    assert response.status_code == 404
+    assert "vendor" not in response.text
+    assert run_id not in response.text
 
 
 def test_a_share_status_and_schema_endpoints_reject_malformed_numeric_fields(

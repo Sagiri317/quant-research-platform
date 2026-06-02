@@ -123,6 +123,36 @@ def test_a_share_schema_inventory_cli_writes_aggregate_outputs(tmp_path) -> None
     assert str(tmp_path) not in payload_text
 
 
+def test_a_share_schema_inventory_cli_rejects_duplicate_run_id_before_input_read(
+    tmp_path,
+) -> None:
+    missing_input = tmp_path / "missing_panel.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_schema_inventory"
+    (output_root / "schema_inventory_duplicate").mkdir(parents=True)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "schema-inventory",
+            "--input-parquet",
+            str(missing_input),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "schema_inventory_duplicate",
+            "--memory-budget-gb",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "duplicate_run_id" in result.output
+    assert "missing_panel.parquet" not in result.output
+    assert str(tmp_path) not in result.output
+
+
 def test_a_share_factor_rebuild_dry_run_writes_no_row_level_artifact(tmp_path) -> None:
     panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
     panel_path.parent.mkdir(parents=True)
@@ -162,6 +192,37 @@ def test_a_share_factor_rebuild_dry_run_writes_no_row_level_artifact(tmp_path) -
     assert json.loads((run_dir / "runtime_summary.json").read_text("utf-8"))[
         "status"
     ] == "dry_run"
+
+
+def test_a_share_factor_rebuild_cli_rejects_duplicate_run_id_before_input_read(
+    tmp_path,
+) -> None:
+    missing_input = tmp_path / "missing_panel.parquet"
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    (output_root / "factor_rebuild_duplicate").mkdir(parents=True)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "a-share",
+            "factor-rebuild",
+            "--panel-parquet",
+            str(missing_input),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "factor_rebuild_duplicate",
+            "--dry-run",
+            "--memory-budget-gb",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "duplicate_run_id" in result.output
+    assert "missing_panel.parquet" not in result.output
+    assert str(tmp_path) not in result.output
 
 
 def test_a_share_factor_rebuild_rejects_private_input_public_output(tmp_path) -> None:

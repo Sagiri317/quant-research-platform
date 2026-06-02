@@ -83,10 +83,10 @@ def _prediction_handoff_root_from_config(
 ) -> Path:
     if prediction_handoff_root is not None:
         return Path(prediction_handoff_root)
-    if prediction_handoff_env:
-        return Path(prediction_handoff_env)
     if configured_prediction_root is not None:
         return configured_prediction_root
+    if prediction_handoff_env:
+        return Path(prediction_handoff_env)
     if run_roots_were_explicit:
         bases = [_run_root_project_base(root.path) for root in configured_roots]
         if bases and all(base.is_absolute() for base in bases):

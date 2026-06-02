@@ -5,10 +5,14 @@ import json
 import pandas as pd
 import pytest
 
+from quant_research_platform.markets.implementations.a_share import (
+    factor_rebuild,
+)
 from quant_research_platform.markets.implementations.a_share.factor_rebuild import (
     FactorRebuildConfig,
     refresh_factor_rebuild_eda,
     run_factor_rebuild,
+    write_schema_inventory_run,
 )
 
 
@@ -110,6 +114,134 @@ def test_factor_rebuild_date_filter_degraded_smoke(tmp_path) -> None:
     }
 
 
+def test_factor_rebuild_dry_run_runs_memory_preflight_before_inventory(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    preflight_seen = False
+    original_preflight = factor_rebuild.run_memory_preflight
+    original_inventory = factor_rebuild.build_schema_inventory
+
+    def tracking_preflight(*args, **kwargs):
+        nonlocal preflight_seen
+        preflight_seen = True
+        return original_preflight(*args, **kwargs)
+
+    def guarded_inventory(*args, **kwargs):
+        assert preflight_seen
+        return original_inventory(*args, **kwargs)
+
+    monkeypatch.setattr(factor_rebuild, "run_memory_preflight", tracking_preflight)
+    monkeypatch.setattr(factor_rebuild, "build_schema_inventory", guarded_inventory)
+
+    result = run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="factor_dry_run_preflight_first",
+            dry_run=True,
+            memory_budget_gb=1,
+        )
+    )
+
+    assert result.status == "dry_run"
+
+
+def test_factor_rebuild_rejects_duplicate_run_id_before_input_read(tmp_path) -> None:
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    (output_root / "duplicate_run").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="duplicate_run_id") as exc:
+        run_factor_rebuild(
+            FactorRebuildConfig(
+                panel_parquet=tmp_path / "missing.parquet",
+                output_root=output_root,
+                run_id="duplicate_run",
+                dry_run=True,
+            )
+        )
+
+    assert "missing.parquet" not in str(exc.value)
+
+
+def test_schema_inventory_run_runs_memory_preflight_before_inventory(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_schema_inventory"
+    preflight_seen = False
+    original_preflight = factor_rebuild.run_memory_preflight
+    original_inventory = factor_rebuild.build_schema_inventory
+
+    def tracking_preflight(*args, **kwargs):
+        nonlocal preflight_seen
+        preflight_seen = True
+        return original_preflight(*args, **kwargs)
+
+    def guarded_inventory(*args, **kwargs):
+        assert preflight_seen
+        return original_inventory(*args, **kwargs)
+
+    monkeypatch.setattr(factor_rebuild, "run_memory_preflight", tracking_preflight)
+    monkeypatch.setattr(factor_rebuild, "build_schema_inventory", guarded_inventory)
+
+    run_dir = write_schema_inventory_run(
+        input_parquet=panel_path,
+        output_root=output_root,
+        run_id="schema_inventory_preflight_first",
+        memory_budget_gb=1,
+    )
+
+    assert (run_dir / "memory_preflight.json").is_file()
+    assert (run_dir / "schema_inventory.json").is_file()
+
+
+def test_schema_inventory_run_blocks_failed_preflight_before_inventory(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_schema_inventory"
+
+    def failed_preflight(*args, **kwargs):
+        return {
+            "status": "failed",
+            "failure_code": "memory_budget_exceeded",
+            "required_columns": ["stock_code", "trade_date"],
+        }
+
+    def forbidden_inventory(*args, **kwargs):
+        raise AssertionError("schema inventory must not run after failed preflight")
+
+    monkeypatch.setattr(factor_rebuild, "run_memory_preflight", failed_preflight)
+    monkeypatch.setattr(factor_rebuild, "build_schema_inventory", forbidden_inventory)
+
+    with pytest.raises(ValueError, match="memory_preflight_failed"):
+        write_schema_inventory_run(
+            input_parquet=panel_path,
+            output_root=output_root,
+            run_id="schema_inventory_preflight_failed",
+            memory_budget_gb=0.001,
+        )
+
+    run_dir = output_root / "schema_inventory_preflight_failed"
+    assert (run_dir / "memory_preflight.json").is_file()
+    assert not (run_dir / "schema_inventory.json").exists()
+    summary = json.loads((run_dir / "runtime_summary.json").read_text())
+    assert summary["status"] == "failed"
+    assert summary["failure_code"] == "memory_preflight_failed"
+    assert (run_dir / "checkpoints.json").is_file()
+
+
 def test_factor_rebuild_uses_warmup_then_crops_output_window(tmp_path) -> None:
     panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
     panel_path.parent.mkdir(parents=True)
@@ -201,6 +333,88 @@ def test_refresh_factor_rebuild_eda_regenerates_static_charts(tmp_path) -> None:
     ]
     assert (run_dir / "eda" / "factor_coverage_by_year.png").is_file()
     assert (run_dir / "eda" / "factor_missingness_top20.png").is_file()
+
+
+def test_refresh_factor_rebuild_eda_rebuilds_stale_existing_csvs(tmp_path) -> None:
+    panel_path = tmp_path / "data" / "processed_private" / "csmar" / "panel.parquet"
+    panel_path.parent.mkdir(parents=True)
+    _panel().to_parquet(panel_path, engine="pyarrow", compression="zstd", index=False)
+    output_root = tmp_path / "reports" / "private_real" / "a_share_factor_rebuilds"
+    run_factor_rebuild(
+        FactorRebuildConfig(
+            panel_parquet=panel_path,
+            output_root=output_root,
+            run_id="refresh_factor_stale_csv_run",
+            memory_budget_gb=1,
+        )
+    )
+    run_dir = output_root / "refresh_factor_stale_csv_run"
+    stale_coverage = run_dir / "eda" / "factor_coverage_by_year.csv"
+    pd.DataFrame({"year": [2099], "row_count": [999]}).to_csv(
+        stale_coverage,
+        index=False,
+    )
+
+    refresh_factor_rebuild_eda(run_dir)
+
+    coverage = pd.read_csv(stale_coverage)
+    factor_rows = len(pd.read_parquet(run_dir / "factor_rebuild.parquet"))
+    assert 2099 not in set(coverage["year"])
+    assert coverage["row_count"].sum() == factor_rows
+
+
+def test_factor_rebuild_chart_dependency_failure_clears_stale_charts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import builtins
+
+    from quant_research_platform.markets.implementations.a_share.factor_rebuild import (
+        _write_factor_charts,
+    )
+
+    (tmp_path / "factor_coverage_by_year.png").write_bytes(b"stale")
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "matplotlib" or name.startswith("matplotlib."):
+            raise OSError("DLL load failed while importing _imaging")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    chart_count, status, chart_files = _write_factor_charts(
+        tmp_path,
+        pd.DataFrame({"year": [2024], "row_count": [3]}),
+        pd.DataFrame({"feature": ["rev_1d"], "missing_fraction": [0.0]}),
+    )
+
+    assert chart_count == 0
+    assert status == "dependency_unavailable"
+    assert chart_files == ()
+    assert not (tmp_path / "factor_coverage_by_year.png").exists()
+
+
+def test_factor_rebuild_chart_generation_clears_ineligible_stale_charts(
+    tmp_path,
+) -> None:
+    from quant_research_platform.markets.implementations.a_share.factor_rebuild import (
+        _write_factor_charts,
+    )
+
+    (tmp_path / "factor_coverage_by_year.png").write_bytes(b"stale")
+    (tmp_path / "factor_missingness_top20.png").write_bytes(b"stale")
+
+    chart_count, status, chart_files = _write_factor_charts(
+        tmp_path,
+        pd.DataFrame(columns=["year", "row_count"]),
+        pd.DataFrame({"feature": ["rev_1d"], "missing_fraction": [0.0]}),
+    )
+
+    assert chart_count == 1
+    assert status == "ready"
+    assert chart_files == ("factor_missingness_top20.png",)
+    assert not (tmp_path / "factor_coverage_by_year.png").exists()
+    assert (tmp_path / "factor_missingness_top20.png").is_file()
 
 
 def test_refresh_factor_rebuild_eda_rejects_public_run_root(tmp_path) -> None:

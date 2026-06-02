@@ -23,6 +23,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.research.ml_model_suite import (
     A_SHARE_MODEL_SUITE_ID,
     PREDICTION_HANDOFF_VERSION,
+    identifier_has_unsafe_metadata_marker,
 )
 from quant_research_platform.research.prediction_handoff import (
     DEFAULT_NON_DL_MODEL_IDS,
@@ -598,7 +599,13 @@ def _resolve_named_run_dir(
     not_found_error_code: str,
     message: str,
 ) -> Path:
-    if Path(run_id).name != run_id or run_id in {"", ".", ".."}:
+    if (
+        Path(run_id).name != run_id
+        or run_id in {"", ".", ".."}
+        or identifier_has_unsafe_metadata_marker(run_id)
+        or text_has_private_marker(run_id)
+        or _SENSITIVE_TEXT_PATTERN.search(run_id)
+    ):
         raise ApiError(
             error_code=invalid_error_code,
             message=message,

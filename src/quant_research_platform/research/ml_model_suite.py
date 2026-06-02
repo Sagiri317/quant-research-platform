@@ -22,6 +22,7 @@ from quant_research_platform.markets.implementations.a_share.research_batch_safe
 )
 from quant_research_platform.runtime.private_paths import (
     require_private_outputs_for_private_input,
+    text_has_private_marker,
 )
 
 A_SHARE_MODEL_SUITE_ID = "n6_a_share_sklearn_boosting_suite_v1"
@@ -50,6 +51,11 @@ _SENSITIVE_IDENTIFIER_PATTERN = re.compile(
     r"(credential|secret|token|api[_-]?key|password)",
     re.IGNORECASE,
 )
+_UNSAFE_METADATA_IDENTIFIER_PATTERN = re.compile(
+    r"(^|[_-])(vendor|source|local)([_-]|$)",
+    re.IGNORECASE,
+)
+_UNSAFE_METADATA_MARKERS = frozenset({"vendor", "source", "local"})
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,11 @@ def run_model_suite(config: ModelSuiteConfig) -> ModelSuiteResult:
     timestamps = pd.to_datetime(frame[config.timestamp_column], errors="coerce")
     if timestamps.isna().any():
         raise ValueError(f"{config.timestamp_column} must contain valid datetimes")
+    _validate_unique_prediction_keys(
+        frame,
+        timestamp_column=config.timestamp_column,
+        entity_column=config.entity_column,
+    )
 
     prediction_frames: list[pd.DataFrame] = []
     metadata_folds: list[dict[str, Any]] = []
@@ -203,6 +214,16 @@ def _validate_config(config: ModelSuiteConfig) -> None:
     expected_horizon = _horizon_days_from_label(config.label_column)
     if expected_horizon is not None and expected_horizon != config.label_horizon_days:
         raise ValueError("invalid_prediction_config")
+    _validate_metadata_identifiers(
+        (
+            config.timestamp_column,
+            config.entity_column,
+            config.label_column,
+            config.model_suite_id,
+            *(fold.fold_id for fold in config.folds),
+            *(fold.split_name for fold in config.folds),
+        )
+    )
     if not config.feature_columns:
         raise ValueError("invalid_feature_preset")
     leakage = [
@@ -217,9 +238,24 @@ def _validate_config(config: ModelSuiteConfig) -> None:
         for column in config.feature_columns
     ):
         raise ValueError("invalid_feature_preset")
+    if any(
+        identifier_has_unsafe_metadata_marker(column)
+        for column in config.feature_columns
+    ):
+        raise ValueError("invalid_feature_preset")
     forbidden_models = {"pytorch", "tensorflow", "deep_learning"}
     if any(model_id in forbidden_models for model_id in config.model_ids):
         raise ValueError("dependency_unavailable")
+    if any(
+        feature_name_has_sensitive_identifier(model_id)
+        for model_id in config.model_ids
+    ):
+        raise ValueError("invalid_prediction_config")
+    if any(
+        identifier_has_unsafe_metadata_marker(model_id)
+        for model_id in config.model_ids
+    ):
+        raise ValueError("invalid_prediction_config")
     output_paths = [config.output_prediction_path, config.output_metadata_path]
     if config.output_prediction_long_path is not None:
         output_paths.append(config.output_prediction_long_path)
@@ -242,6 +278,25 @@ def _read_columns(config: ModelSuiteConfig) -> list[str]:
             )
         )
     )
+
+
+def _validate_unique_prediction_keys(
+    frame: pd.DataFrame,
+    *,
+    timestamp_column: str,
+    entity_column: str,
+) -> None:
+    if frame.duplicated([timestamp_column, entity_column]).any():
+        raise ValueError("invalid_prediction_config")
+
+
+def _validate_metadata_identifiers(values: tuple[str, ...]) -> None:
+    if any(feature_name_has_sensitive_identifier(value) for value in values):
+        raise ValueError("invalid_prediction_config")
+    if any(identifier_has_unsafe_metadata_marker(value) for value in values):
+        raise ValueError("invalid_prediction_config")
+    if any(text_has_private_marker(value) for value in values):
+        raise ValueError("invalid_prediction_config")
 
 
 def _split_for_fold(
@@ -655,10 +710,11 @@ def _write_metadata(
     folds: list[dict[str, Any]],
     model_statuses: list[dict[str, Any]],
 ) -> None:
+    ready_model_ids = _ready_model_ids(model_statuses)
     payload = {
         "prediction_handoff_version": PREDICTION_HANDOFF_VERSION,
         "model_suite_id": config.model_suite_id,
-        "model_ids": list(config.model_ids),
+        "model_ids": list(ready_model_ids),
         "requested_model_ids": list(config.model_ids or DEFAULT_NON_DL_MODEL_IDS),
         "prediction_columns": list(prediction_columns),
         "feature_columns": list(config.feature_columns),
@@ -673,6 +729,15 @@ def _write_metadata(
         "boundary": MODEL_BOUNDARY,
     }
     write_json_sanitized(config.output_metadata_path, payload)
+
+
+def _ready_model_ids(model_statuses: list[dict[str, Any]]) -> tuple[str, ...]:
+    values = [
+        str(status["model_id"])
+        for status in model_statuses
+        if status.get("status") == "ready" and "model_id" in status
+    ]
+    return tuple(dict.fromkeys(values))
 
 
 def _looks_like_label_or_forward_return(column: str) -> bool:
@@ -697,6 +762,39 @@ def feature_name_has_sensitive_identifier(column: str) -> bool:
     return bool(_SENSITIVE_IDENTIFIER_PATTERN.search(column))
 
 
+def identifier_has_unsafe_metadata_marker(value: str) -> bool:
+    """Return whether an identifier exposes non-public source/vendor markers."""
+
+    return (
+        bool(_UNSAFE_METADATA_IDENTIFIER_PATTERN.search(value))
+        or any(
+            token in _UNSAFE_METADATA_MARKERS
+            for token in _metadata_identifier_tokens(value)
+        )
+        or _identifier_has_unsafe_path_text(value)
+        or text_has_private_marker(value)
+    )
+
+
+def _metadata_identifier_tokens(value: str) -> tuple[str, ...]:
+    camel_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", camel_split)
+    return tuple(
+        token.casefold()
+        for token in re.split(r"[^A-Za-z0-9]+", camel_split)
+        if token
+    )
+
+
+def _identifier_has_unsafe_path_text(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    if re.search(r"(?<![A-Za-z0-9])[A-Za-z]:/", normalized):
+        return True
+    if normalized.startswith(("/", "//")):
+        return True
+    return any(part == ".." for part in normalized.split("/"))
+
+
 __all__ = [
     "A_SHARE_MODEL_SUITE_ID",
     "DEFAULT_NON_DL_MODEL_IDS",
@@ -708,6 +806,7 @@ __all__ = [
     "SuiteFoldConfig",
     "feature_name_has_sensitive_identifier",
     "feature_name_looks_like_leakage",
+    "identifier_has_unsafe_metadata_marker",
     "run_model_suite",
     "validate_prediction_folds",
 ]
