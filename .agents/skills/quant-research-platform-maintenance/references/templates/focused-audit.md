@@ -1,4 +1,4 @@
-# Focused Audit
+﻿# Focused Audit
 
 ## Task Mode
 
@@ -29,13 +29,13 @@ Use Medium for a narrow diff or single surface. Use High for contract-adjacent, 
 
 - Do not edit files unless the audit envelope allows fixes.
 - Do not broaden into full-repo audit by default.
-- Do not change schemas, `manifest.display`, API/frontend behavior, private artifacts, deployment/trading scope, dependencies, or roadmap priority.
+- Do not change schemas, 0.1 report/API display contract, API/website UI behavior, private artifacts, deployment/trading scope, dependencies, or roadmap priority.
 
 ## Stop Conditions
 
 - Stop if impact crosses multiple architecture layers or blast radius becomes unclear.
 - Stop if fixing would require public contract, schema, dependency, directory, archive, private-data, or generated-output changes.
-- Stop for new dependency/framework, schema or `manifest.display` change, public API/frontend shared contract change, private path/row-level risk, roadmap priority change, trading/deployment scope, or repeated unclear test failure.
+- Stop for new dependency/framework, schema or 0.1 report/API display contract change, public API/website UI shared contract change, private path/row-level risk, roadmap priority change, trading/deployment scope, or repeated unclear test failure.
 
 ## Boundary Logic Gate
 

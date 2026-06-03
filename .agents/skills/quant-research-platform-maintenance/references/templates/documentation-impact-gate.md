@@ -1,4 +1,4 @@
-# Documentation Impact Gate
+﻿# Documentation Impact Gate
 
 ## Task Mode
 

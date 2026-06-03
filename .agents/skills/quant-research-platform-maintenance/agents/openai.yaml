@@ -1,7 +1,7 @@
 interface:
   display_name: "Quant Research Platform Maintenance"
-  short_description: "Maintain QRP workflow routing, docs/status sync, branch operations, contracts, artifacts, API, downloads, Factor Factory, and evidence UI"
-  default_prompt: "Use $quant-research-platform-maintenance for QRP maintenance workflow, including artifact contracts, manifest.display, evidence API, downloads, frontend evidence UI, A-share pipeline runs, Factor Factory runs, generated runs, docs/status sync, task routing templates, one-line prompt routing, branch/commit/push/fast-forward merge workflows, pre-commit review, private artifact writer boundary checks, contract-surface stop gates, and docs/code-map surfaces that describe those contracts."
+  short_description: "Maintain QRP Clean Rewrite 0.1 contracts, topology, reports, API/CLI, private boundaries, docs/status, and branch workflow"
+  default_prompt: "Use $quant-research-platform-maintenance for QRP Clean Rewrite maintenance: 0.1 contracts, storage/catalog boundaries, CSMAR and A-share data flow, research datasets, reports, API/CLI, private-boundary checks, docs/status sync, branch/commit/push workflow, and read-only subagent coordination."
 
 policy:
   allow_implicit_invocation: true

@@ -1,0 +1,1 @@
+"""Generic factor research helpers."""

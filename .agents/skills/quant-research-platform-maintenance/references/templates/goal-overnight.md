@@ -1,4 +1,4 @@
-# Goal Overnight
+﻿# Goal Overnight
 
 ## Task Mode
 
@@ -52,7 +52,7 @@ Goal mode can use high token budgets when the approved envelope justifies them. 
 ## Forbidden Scope
 
 - Do not remove private data boundaries.
-- Do not change schemas, `manifest.display`, API/frontend shared contracts, deployment/trading scope, market/frequency/simulation scope, dependencies, directory structure, archive placement, or unclear blast-radius surfaces unless the envelope explicitly approves that exact change.
+- Do not change schemas, 0.1 report/API display contract, API/website UI shared contracts, deployment/trading scope, market/frequency/simulation scope, dependencies, directory structure, archive placement, or unclear blast-radius surfaces unless the envelope explicitly approves that exact change.
 - Do not delete files, generate private artifacts, expose private data, install dependencies, or run full tests unless approved.
 - For any approved CLI, artifact writer, exporter, download, ZIP/package,
   metadata writer, or persisted row-level output slice, apply the maintenance
@@ -173,7 +173,7 @@ investment claims, or a long historical narrative.
 
 ## Stop Conditions
 
-- Stop for schema change, `manifest.display` change, public API/frontend shared contract change, directory restructuring, new dependency, new abstraction/framework, market/frequency/simulation/trading scope expansion, private/generated data edits, file deletion, archive or historical-doc physical moves, and unclear blast radius.
+- Stop for schema change, 0.1 report/API display contract change, public API/website UI shared contract change, directory restructuring, new dependency, new abstraction/framework, market/frequency/simulation/trading scope expansion, private/generated data edits, file deletion, archive or historical-doc physical moves, and unclear blast radius.
 - Stop for secrets, credentials, external API/vendor/broker/exchange connections, deployment exposure, or private data leakage risk.
 - Stop if verification failures point outside the approved envelope.
 

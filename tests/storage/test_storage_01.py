@@ -1,0 +1,341 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+from quant_research_platform.catalog.fields import (
+    platform_entity_time_key,
+    platform_interim_column_names,
+)
+from quant_research_platform.catalog.processed import (
+    InterimDataCatalog,
+    ProcessedDataCatalog,
+)
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    InterimDataSpec,
+    ProcessedDataSpec,
+)
+from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import write_manifest
+from quant_research_platform.storage.parquet import (
+    write_interim_data,
+    write_partitioned_parquet_dataset,
+    write_processed_data,
+    write_research_dataset,
+)
+from quant_research_platform.storage.privacy import is_private_boundary_path
+
+
+def test_partitioned_parquet_and_manifest_contract(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "asset_id": ["000001", "000002"],
+            "timestamp": pd.to_datetime(["2014-01-02", "2015-01-05"]),
+            "value": [1.0, 2.0],
+        }
+    )
+    data_root = tmp_path / "data" / "processed" / "a_share" / "panels" / "x" / "data"
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="panels",
+            processed_data_id="x",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "value": ColumnRole.CONTEXT,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    write_partitioned_parquet_dataset(frame, data_root, catalog=catalog, data_id="x")
+    manifest = write_manifest(
+        data_root.parent / "_manifest" / "manifest.json",
+        {
+            "schema_version": "0.1",
+            "primary_key": ["market_id", "asset_id", "timestamp"],
+        },
+    )
+
+    assert (data_root / "year=2014" / "part-000.parquet").is_file()
+    assert (data_root / "year=2015" / "part-000.parquet").is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["schema_version"] == "0.1"
+    assert is_private_boundary_path(tmp_path / "data" / "processed" / "a_share")
+    assert not is_private_boundary_path(tmp_path / "public" / "x" / "data")
+
+
+def test_processed_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "value": [1.0],
+        }
+    )
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="panels",
+            processed_data_id="daily_panel",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "value": ColumnRole.CONTEXT,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    data_root = write_processed_data(
+        frame,
+        layout=StorageLayout(project_root=tmp_path),
+        catalog=catalog,
+        processed_data_id="daily_panel",
+    )
+    manifest = json.loads(
+        (data_root.parent / "_manifest" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert data_root == (
+        tmp_path / "data" / "processed" / "a_share" / "panels" / "daily_panel" / "data"
+    )
+    assert manifest["schema_version"] == "0.1"
+    assert manifest["grain"] == "asset_timestamp"
+    assert manifest["primary_key"] == ["market_id", "asset_id", "timestamp"]
+
+
+def test_interim_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "session_date": pd.to_datetime(["2014-01-02"]),
+            "available_at": pd.to_datetime(["2014-01-02"]),
+            "source_id": ["csmar"],
+            "source_asset_id": ["000001"],
+            "close": [1.0],
+        }
+    )
+    catalog = InterimDataCatalog()
+    catalog.register(
+        InterimDataSpec(
+            market_id=MarketId("a_share"),
+            source_id=SourceId("csmar"),
+            interim_data_id="daily_market",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                **{
+                    name: ColumnRole.TIMESTAMP
+                    if name in {"timestamp", "session_date", "available_at"}
+                    else ColumnRole.SOURCE
+                    if name in {"source_id", "source_asset_id"}
+                    else ColumnRole.KEY
+                    for name in platform_interim_column_names()
+                },
+                "close": ColumnRole.CONTEXT,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    data_root = write_interim_data(
+        frame,
+        layout=StorageLayout(project_root=tmp_path),
+        catalog=catalog,
+        interim_data_id="daily_market",
+    )
+
+    assert data_root == (
+        tmp_path / "data" / "interim" / "csmar" / "daily_market" / "data"
+    )
+    assert (data_root / "year=2014" / "part-000.parquet").is_file()
+
+
+def test_research_dataset_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "mom_20d": [1.0],
+            "forward_return_20d": [0.01],
+        }
+    )
+    catalog = ResearchDatasetCatalog()
+    catalog.register(
+        ResearchDatasetSpec(
+            market_id=MarketId("a_share"),
+            dataset_id="demo",
+            processed_data_ids=("price_volume_56", "forward_returns"),
+            feature_columns=("mom_20d",),
+            label_columns=("forward_return_20d",),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.RESEARCH_ROW,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "mom_20d": ColumnRole.FEATURE,
+                "forward_return_20d": ColumnRole.LABEL,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    data_root = write_research_dataset(
+        frame,
+        layout=StorageLayout(project_root=tmp_path),
+        catalog=catalog,
+        dataset_id="demo",
+    )
+
+    assert data_root == (
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "research_datasets"
+        / "demo"
+        / "data"
+    )
+    assert (data_root.parent / "spec.json").is_file()
+    assert (data_root.parent / "_manifest" / "manifest.json").is_file()
+
+
+def test_parquet_writer_rejects_missing_required_columns(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+        }
+    )
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="factors",
+            processed_data_id="x",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "value": ColumnRole.FACTOR,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    with pytest.raises(ValueError, match="missing_required_columns"):
+        write_partitioned_parquet_dataset(
+            frame,
+            tmp_path / "data" / "processed" / "a_share" / "factors" / "x" / "data",
+            catalog=catalog,
+            data_id="x",
+        )
+
+
+def test_parquet_writer_rejects_unregistered_output_columns(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "value": [1.0],
+            "unknown": [2.0],
+        }
+    )
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="factors",
+            processed_data_id="x",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "value": ColumnRole.FACTOR,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    with pytest.raises(ValueError, match="unregistered_output_columns"):
+        write_partitioned_parquet_dataset(
+            frame,
+            tmp_path / "data" / "processed" / "a_share" / "factors" / "x" / "data",
+            catalog=catalog,
+            data_id="x",
+        )
+
+
+def test_parquet_writer_rejects_public_output_root(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "value": [1.0],
+        }
+    )
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="factors",
+            processed_data_id="x",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "value": ColumnRole.FACTOR,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    with pytest.raises(ValueError, match="outside_private_boundary"):
+        write_partitioned_parquet_dataset(
+            frame,
+            tmp_path / "public" / "factors" / "x" / "data",
+            catalog=catalog,
+            data_id="x",
+        )

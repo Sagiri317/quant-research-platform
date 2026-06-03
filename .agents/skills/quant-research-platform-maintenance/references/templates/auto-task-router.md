@@ -1,4 +1,4 @@
-# Auto Task Router
+﻿# Auto Task Router
 
 ## Task Mode
 
@@ -19,7 +19,7 @@ Use this only in Repo Router Mode: the user gives a short task intent and has no
 - Explicit direct-main docs-only task: use `direct-main-docs-only.md`.
 - Post-merge doc or handoff sync: use `post-merge-documentation-sync.md`.
 - Candidate-based docs impact check: use `documentation-impact-gate.md`.
-- Dependency, schema, `manifest.display`, public API, frontend shared contract, runtime boundary, or other contract approval: use `dependency-contract-approval.md`.
+- Dependency, schema, 0.1 report/API display contract, public API, website UI shared contract, runtime boundary, or other contract approval: use `dependency-contract-approval.md`.
 - Standard implementation: use `focused-implementation.md`.
 - Focused review/audit: use `focused-audit.md` or `pre-commit-review.md`.
 - Goal, overnight, or review-and-fix loop: use `goal-overnight.md`; run `pre-goal-blocker-discovery.md` before implementation.
@@ -46,7 +46,7 @@ Then select the minimal relevant template:
 - test-only -> verification path without file edits.
 - artifact/export/API/schema/report tasks -> route through the relevant implementation template and required safety gates, including the maintenance skill `Private Artifact Writer Checklist` when persisted artifacts, downloads, packages, reports, metadata, or row-level outputs are involved.
 
-Do not treat a one-line task approval as approval to commit directly to `main`, push `main`, merge branches, change schema/API/frontend/contracts, write private-derived artifacts to ordinary/public output, or convert review-only into implementation.
+Do not treat a one-line task approval as approval to commit directly to `main`, push `main`, merge branches, change schema/API/website UI/contracts, write private-derived artifacts to ordinary/public output, or convert review-only into implementation.
 
 If routing is ambiguous, stop and ask or choose the safer non-main branch path.
 
@@ -68,7 +68,7 @@ If closed-loop is approved, proceed only when the task stays inside that bounded
 
 - Working tree dirty or base branch unclear.
 - New dependency, framework, top-level package, scheduler, worker, model registry, feature store, deployment, external API, broker, exchange connector, paper/live trading, or trading-adjacent capability.
-- Schema, `manifest.display`, public API, frontend shared contract, artifact type, required artifact file, A-share adapter capability, private data/path, roadmap priority, directory structure, or unclear blast radius.
+- Schema, 0.1 report/API display contract, public API, website UI shared contract, artifact type, required artifact file, A-share adapter capability, private data/path, roadmap priority, directory structure, or unclear blast radius.
 - Repeated verification failure with unclear cause.
 
 ## Output Format

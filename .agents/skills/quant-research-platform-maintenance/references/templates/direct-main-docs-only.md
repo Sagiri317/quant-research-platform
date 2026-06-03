@@ -1,4 +1,4 @@
-# Direct Main Docs Only
+﻿# Direct Main Docs Only
 
 ## Task Mode
 
@@ -27,7 +27,7 @@ Use `feature/<task-name>` instead of direct `main` for high-impact docs/rules, i
 - roadmap priority
 - governance, workflow, or contract wording
 
-Do not change source, tests, schemas, `manifest.display`, API/frontend behavior, dependencies, generated artifacts, private data, or runtime behavior.
+Do not change source, tests, schemas, 0.1 report/API display contract, API/website UI behavior, dependencies, generated artifacts, private data, or runtime behavior.
 Do not amend, rebase, squash, force push, or create merge commits.
 
 ## Checks

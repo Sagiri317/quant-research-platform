@@ -1,10 +1,10 @@
-# Dependency Contract Approval
+﻿# Dependency Contract Approval
 
 ## Task Mode
 
 `dependency-contract-approval`
 
-Use when a task may require a dependency change, public contract change, schema change, `manifest.display` change, API/frontend shared contract change, or runtime boundary change.
+Use when a task may require a dependency change, public contract change, schema change, 0.1 report/API display contract change, API/website UI shared contract change, or runtime boundary change.
 
 ## Purpose
 
@@ -19,7 +19,7 @@ Classify the approval needed before implementation. This template does not autho
 ## Approval Required Before Implementation
 
 - New dependency, dependency update/removal, package manager change, or environment change.
-- Schema, `manifest.display`, public API, frontend shared contract, artifact type, required artifact file, directory structure, deployment/trading scope, or runtime behavior change.
+- Schema, 0.1 report/API display contract, public API, website UI shared contract, artifact type, required artifact file, directory structure, deployment/trading scope, or runtime behavior change.
 - External API, vendor, broker, exchange connector, model registry, feature store, scheduler, or worker.
 
 ## Decision Packet

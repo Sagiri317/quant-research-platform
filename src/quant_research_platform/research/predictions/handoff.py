@@ -1,0 +1,65 @@
+"""Spec-driven prediction handoff from ResearchDataset inputs."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+from quant_research_platform.catalog.models import ModelCatalog
+from quant_research_platform.catalog.predictions import PredictionCatalog
+from quant_research_platform.research.datasets import (
+    read_research_dataset,
+    validate_prediction_input,
+)
+from quant_research_platform.research.models import fit_linear_baseline
+from quant_research_platform.research.predictions.bundle import (
+    build_prediction_bundle,
+    write_prediction_bundle,
+)
+from quant_research_platform.storage.layout import layout_from_processed_market_root
+
+
+def run_prediction_from_research_dataset(
+    *,
+    processed_root: Path,
+    dataset_catalog: ResearchDatasetCatalog,
+    model_catalog: ModelCatalog,
+    prediction_catalog: PredictionCatalog,
+    prediction_id: str,
+    years: tuple[int, ...] | None = None,
+) -> Path:
+    prediction_spec = prediction_catalog.get(prediction_id)
+    model_spec = model_catalog.get(prediction_spec.model_id)
+    dataset_spec = dataset_catalog.get(prediction_spec.research_dataset_id)
+    read_columns = (
+        *prediction_spec.primary_key,
+        *model_spec.feature_columns,
+        model_spec.label_column,
+    )
+    frame = read_research_dataset(
+        processed_root,
+        prediction_spec.research_dataset_id,
+        years=years,
+        columns=read_columns,
+    )
+    validate_prediction_input(
+        frame,
+        dataset_spec,
+        feature_columns=model_spec.feature_columns,
+    )
+    coefficients = fit_linear_baseline(frame.dropna(), model_spec)
+    prediction = build_prediction_bundle(
+        frame,
+        prediction_spec,
+        coefficients,
+        model_spec.feature_columns,
+    )
+    layout = layout_from_processed_market_root(processed_root)
+    return write_prediction_bundle(
+        prediction,
+        prediction_spec,
+        layout.private_report_root(dataset_spec.market_id, prediction_spec.run_type),
+    )
+
+
+__all__ = ["run_prediction_from_research_dataset"]

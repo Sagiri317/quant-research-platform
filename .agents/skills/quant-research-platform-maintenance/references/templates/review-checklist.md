@@ -1,4 +1,4 @@
-# Review Checklist
+﻿# Review Checklist
 
 General review checklist for QRP docs, rules, contracts, and implementation surfaces. For pre-commit branch review, use `pre-commit-review.md` first; this checklist can be a supporting lens when the diff indicates broader risk.
 
@@ -24,7 +24,7 @@ Medium
 
 ## Forbidden Scope
 
-- Do not change schemas, `manifest.display`, API/frontend behavior, private artifacts, docs/archive, dependencies, deployment/trading scope, or roadmap priority unless explicitly approved.
+- Do not change schemas, 0.1 report/API display contract, API/website UI behavior, private artifacts, historical docs, dependencies, deployment/trading scope, or roadmap priority unless explicitly approved.
 - Do not delete files or run full tests without approval.
 
 ## Stop Conditions

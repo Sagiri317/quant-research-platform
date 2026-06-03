@@ -1,4 +1,4 @@
-# Focused Implementation
+﻿# Focused Implementation
 
 ## Task Mode
 
@@ -29,7 +29,7 @@ Use Medium for a single module or docs/rules batch. Use Medium-High when the cha
 
 ## Forbidden Scope
 
-- Do not change schemas, `manifest.display`, API/frontend behavior, private artifacts, docs/archive, roadmap priority, dependencies, or directory structure unless explicitly approved.
+- Do not change schemas, 0.1 report/API display contract, API/website UI behavior, private artifacts, historical docs, roadmap priority, dependencies, or directory structure unless explicitly approved.
 - Do not delete files or run full tests without approval.
 - Do not generate smoke/training/evaluation artifacts except under pytest `tmp_path` or an explicitly approved output path.
 - Do not commit generated artifacts, read/modify private generated artifacts, or write row-level private data, sample stocks, or full private paths.

@@ -1,4 +1,4 @@
-# Post Merge Documentation Sync
+﻿# Post Merge Documentation Sync
 
 ## Task Mode
 
@@ -31,7 +31,7 @@ Use after a feature branch has been merged and the user asks to synchronize docs
 
 ## Forbidden Scope
 
-- Do not change source, tests, schemas, `manifest.display`, API/frontend, runtime behavior, dependencies, generated artifacts, private data, or archive placement.
+- Do not change source, tests, schemas, 0.1 report/API display contract, API/website UI, runtime behavior, dependencies, generated artifacts, private data, or archive placement.
 - Do not merge, amend, rebase, force push, or delete branches.
 
 ## Stop Conditions

@@ -1,4 +1,4 @@
-# Discovery Only
+﻿# Discovery Only
 
 ## Task Mode
 
@@ -31,7 +31,7 @@ Low
 ## Stop Conditions
 
 - Stop if the next step would require edits, private data, secrets, dependency changes, deletion, or broad context expansion.
-- Stop if contract, schema, `manifest.display`, API/frontend, deployment/trading, or phase-boundary meaning is unclear.
+- Stop if contract, schema, 0.1 report/API display contract, API/website UI, deployment/trading, or phase-boundary meaning is unclear.
 
 ## Checks
 

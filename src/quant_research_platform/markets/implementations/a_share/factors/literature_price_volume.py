@@ -11,19 +11,21 @@ import pandas as pd
 from .price_volume import calculate_price_volume_factors
 
 LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID = (
-    "a_share_literature_price_volume_rebuild_v1"
+    "a_share_literature_price_volume_rewrite_01"
 )
 LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID = (
-    "a_share_literature_price_volume_preset_v1"
+    "a_share_literature_price_volume_preset_01"
 )
 
 DEFAULT_LITERATURE_WINDOWS: tuple[int, ...] = (1, 5, 10, 20, 60, 120, 252)
-LITERATURE_FACTOR_SET_TIERS: tuple[str, ...] = (
+LITERATURE_FACTOR_SETS: tuple[str, ...] = (
     "full",
-    "core_long_period",
-    "smoke_minimal",
+    "core",
+    "smoke",
+    "experimental",
+    "deprecated",
 )
-CORE_LONG_PERIOD_FACTORS: tuple[str, ...] = (
+CORE_FACTORS: tuple[str, ...] = (
     "rev_1d",
     "rev_5d",
     "rev_10d",
@@ -46,7 +48,7 @@ CORE_LONG_PERIOD_FACTORS: tuple[str, ...] = (
     "log_float_market_cap",
     "log_total_market_cap",
 )
-SMOKE_MINIMAL_FACTORS: tuple[str, ...] = (
+SMOKE_FACTORS: tuple[str, ...] = (
     "rev_1d",
     "mom_20d",
     "vol_20d",
@@ -134,16 +136,18 @@ BASE_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 def expected_literature_price_volume_factor_columns(
     *,
     windows: tuple[int, ...] = DEFAULT_LITERATURE_WINDOWS,
-    factor_set_tier: str = "full",
+    factor_set: str = "full",
 ) -> tuple[str, ...]:
-    """Return the explicit v1 literature-prior factor column contract."""
+    """Return the explicit 0.1 literature-prior factor column contract."""
 
-    if factor_set_tier == "core_long_period":
-        return CORE_LONG_PERIOD_FACTORS
-    if factor_set_tier == "smoke_minimal":
-        return SMOKE_MINIMAL_FACTORS
-    if factor_set_tier != "full":
-        raise ValueError("invalid_factor_rebuild_config")
+    if factor_set == "core":
+        return CORE_FACTORS
+    if factor_set == "smoke":
+        return SMOKE_FACTORS
+    if factor_set in {"experimental", "deprecated"}:
+        return ()
+    if factor_set != "full":
+        raise ValueError("invalid_factor_set")
 
     columns: list[str] = ["rev_1d"]
     for window in windows:
@@ -221,7 +225,7 @@ def calculate_literature_price_volume_factors(
     float_market_cap_column: str = "float_market_cap",
     total_market_cap_column: str = "total_market_cap",
 ) -> pd.DataFrame:
-    """Add v1 literature-prior price-volume factors without future data."""
+    """Add 0.1 literature-prior price-volume factors without future data."""
 
     requested = set(expected_columns or _all_literature_factor_columns(windows))
     required_windows = _windows_from_requested_factors(requested, windows=windows)
@@ -337,7 +341,7 @@ def select_literature_price_volume_features(
     *,
     expected_columns: tuple[str, ...] | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Select preset v1 feature columns and exclude labels/filters/leakage."""
+    """Select preset 0.1 feature columns and exclude labels/filters/leakage."""
 
     return select_literature_price_volume_feature_columns_from_schema(
         tuple(frame.columns),
@@ -352,7 +356,7 @@ def select_literature_price_volume_feature_columns_from_schema(
     expected_columns: tuple[str, ...] | None = None,
     include_actual_factor_columns: bool = False,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Resolve preset v1 feature columns from schema names only."""
+    """Resolve preset 0.1 feature columns from schema names only."""
 
     schema_columns = tuple(columns)
     expected = expected_columns or expected_literature_price_volume_factor_columns()
@@ -508,12 +512,12 @@ def _all_literature_factor_columns(windows: tuple[int, ...]) -> tuple[str, ...]:
 
 
 __all__ = [
+    "CORE_FACTORS",
     "DEFAULT_LITERATURE_WINDOWS",
-    "CORE_LONG_PERIOD_FACTORS",
+    "LITERATURE_FACTOR_SETS",
     "LITERATURE_PRICE_VOLUME_FEATURE_PRESET_ID",
-    "LITERATURE_FACTOR_SET_TIERS",
     "LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID",
-    "SMOKE_MINIMAL_FACTORS",
+    "SMOKE_FACTORS",
     "calculate_literature_price_volume_factors",
     "expected_literature_price_volume_factor_columns",
     "largest_literature_price_volume_lookback_days",

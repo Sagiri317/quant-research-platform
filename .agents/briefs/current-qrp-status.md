@@ -1,69 +1,51 @@
 # Current QRP Status
 
-This is a short current task context primer for ordinary QRP Codex tasks. It is
-not a Git log, latest HEAD tracker, changelog, or replacement for
-`PROJECT_STATUS.md`.
-
-Read this brief before broad-loading `PROJECT_STATUS.md`, `README.md`, or the
-roadmap when a task only needs current project orientation. Re-check
-`PROJECT_STATUS.md` before changing current topic, blocker, milestone, next
-step, public readiness, data/API/Git/Conda/privacy boundary, or handoff state.
-
-Ordinary commits, docs wording edits, pushes, and merges do not require an
-update here unless they change future Codex task context, safety boundaries, or
-the active next-step decision.
+This is a short current task context primer. It is not a Git log, changelog, or
+replacement for `PROJECT_STATUS.md`.
 
 ## Current Phase
 
-- Local Research Platform.
+- QRP Clean Rewrite `0.1.0`.
 - Current architecture style: Stable Core + High-Velocity Research Edge.
-- Current work stays centered on factor research, evaluations, artifact generation, local evidence workflow, and A-share research reliability.
+- Current work stays local-only and centered on contracts, storage layout,
+  catalogs, A-share source/market semantics, research workflows, reports, and
+  private-boundary reliability.
 
-## Status-Relevant Milestones
+## Current Implementation Context
 
-- N5 private real-data smoke passed: `n5_private_smoke_2025h2_rev120_v1`.
-- Pipeline failed-run reliability MVS and failed-run disk-recovery sanitization hardening have merged to `main`; API duplicate `run_id` / rerun guard is implemented in current code.
-- N6 prediction handoff guardrails, synthetic handoff smoke, local numpy/pandas ML baseline trainer, N6 prediction handoff MVS, local walk-forward / multi-fold handoff MVS, private marker helper centralization, `ml baseline train` CLI pre-read private-output validation, and the A-share literature-prior factor rebuild / non-DL prediction handoff backend batch are current implementation context.
-- Agent workflow layout has moved to `.agents`: the maintenance skill lives under `.agents/skills/quant-research-platform-maintenance/`, task templates live under `.agents/skills/quant-research-platform-maintenance/references/templates/`, and this brief lives under `.agents/briefs/current-qrp-status.md`.
-- These facts are status pointers, not full evidence records.
-- Re-check `PROJECT_STATUS.md` before changing current topic, blocker, milestone, next step, or handoff state.
+- Target source topology is `contracts`, `storage`, `catalog`, `sources`,
+  `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`,
+  `reports`, and `runtime`.
+- Project version is `0.1.0`; API/spec/contract version is `0.1`.
+- API paths use `/api/0.1/...`; do not add a version-letter prefix.
+- Current CLI contract is `qrp catalog/source/market/research/workflow/report`.
+- A-share is the first enabled market. Other markets are future design only.
+- `agents/` is proposal-only in this phase; it does not call external LLM APIs
+  and does not write private row-level data.
 
-## Milestone Context
+## Private Boundaries
 
-- N5 v1 private smoke demonstrates the current descriptive proxy diagnostics path on private A-share data.
-- Pipeline failed-run reliability now includes the original failed-run MVS, disk-loaded `runtime_summary.json` / `checkpoints.json` shared private-marker sanitization, and API-created duplicate `run_id` rejection before writing new pipeline outputs.
-- N6 now has initial handoff guardrails, a synthetic smoke path, a local baseline trainer, OOS / embargo / fold metadata, repeatable walk-forward folds, `ml baseline train` CLI handoff, private-output boundary guard, shared private-marker helper, CLI pre-read private-output validation, and backend support for an A-share literature-prior price-volume factor pack, schema inventory, memory preflight, warmup sufficiency metadata, explicit overwrite guard, non-DL sklearn / XGBoost / LightGBM lite model suite, prediction handoff evaluation, aggregate comparison/EDA outputs, backend API status routes, schema-inventory routes, and `a_share_prediction` run discovery from default or explicitly configured prediction roots. The current private-data evidence uses a warmup-aware full-period 2014-2025 `core_long_period` factor rebuild and 2023-2025 OOS prediction handoff runs for 5d / 20d / 60d labels. The full factor tier remains blocked by memory preflight under the local 16GB-machine budget. Static EDA PNG generation is supported when local matplotlib/Pillow dependencies are healthy, and this branch validated/regenerated factor and prediction EDA charts in the repaired local `analysis` environment; aggregate CSV/JSON/MD EDA fallback remains available, experimental/non-contract, and non-fatal. Prediction metadata records timestamp/entity/label/return-source and feature handoff fields for EDA refresh recovery, and the non-DL model suite uses deterministic seed `42` for local research reproducibility. Prediction output remains compatible with schema `0.7` evaluation artifacts; local QRP research training happens outside the evaluation layer, and evaluation consumes predictions without training models. This is not a complete ML pipeline, deep learning backend, model registry, feature store, frontend implementation, paper/live trading system, deployment, scheduler, worker, or external connector.
-- Task-mode template details live in `.agents/skills/quant-research-platform-maintenance/references/templates/`, not in this brief; one-line or underspecified QRP prompts route through `auto-task-router.md`.
+```text
+data/raw/csmar/
+data/interim/csmar/
+data/processed/a_share/
+reports/private_real/
+```
+
+Do not expose raw/interim/processed private rows, private reports, vendor
+markers, local absolute paths, credentials, or stock-code samples.
 
 ## Current Next Step
 
-- Finish pre-merge review / PR handling for the active N6 long-history backend batch; do not merge without explicit approval.
-- After this batch, return to a decision-only audit before expanding into frontend, Factor Factory LLM/agent work, retry/resume/global API envelope, model registry, feature store, scheduler, worker, or external connectors.
-
-## Known Limitations
-
-- Retry, resume, destructive overwrite, and global API error envelope remain unimplemented.
-- N5 v1 is descriptive proxy diagnostics only.
-- N5 v1 is not full risk modeling, capacity modeling, simulation, trading, validated alpha, or investment advice.
-- N6 baseline and prediction handoff work are not a complete ML platform, alpha proof, real risk/capacity model, trading simulation, paper/live trading evidence, deployment, model registry, feature store, frontend workbench implementation, or external connector.
-- Generated/private evidence remains local and should not be copied into public docs.
-- This brief is a short context primer, not a replacement for active project docs.
+- Continue porting the A-share source/interim, processed panel, factor/label,
+  research dataset, evaluation, prediction, report, and workflow slices into the
+  0.1 topology with test-first changes.
 
 ## Hard Reminders
 
-- `manifest.display` is the user-display contract for evidence, previews, downloads, charts, and presets.
-- API-visible run identity is `(source_alias, run_id)`.
-- Keep private CSMAR data and private real reports out of commits, logs, portable artifacts, and public summaries.
-- Do not connect vendor, broker, exchange, paper-trading, live-trading, or external market-data APIs.
-- Do not use Conda `base` for project work; the approved project environment is `analysis`.
-- Do not delete files or directories without exact explicit approval.
-- Ordinary tasks should use narrow context first; goal or overnight work needs an approved envelope.
-
-## Active Docs Pointers
-
-- `AGENTS.md`: execution boundaries, stop conditions, editable area, data/privacy rules.
-- `README.md`: project entry and Codex quick start.
-- `PROJECT_STATUS.md`: current status, handoff, blockers, next steps.
-- `.agents/skills/quant-research-platform-maintenance/SKILL.md`: maintenance workflow.
-- `.agents/skills/quant-research-platform-maintenance/references/context-routing.md`: task-specific context loading.
-- `.agents/skills/quant-research-platform-maintenance/references/templates/`: task-mode templates.
+- No frontend, deployment, scheduler, worker, model registry, feature store,
+  broker/exchange connector, external data API, paper trading, or live trading
+  in this clean rewrite slice.
+- Do not delete `AGENTS.md` or `.agents/`.
+- Run narrow tests first; broader checks come after the touched surface is
+  internally consistent.

@@ -100,29 +100,3 @@ def calculate_price_volume_factors(
         )
 
     return result
-
-
-def add_forward_return_labels(
-    frame: pd.DataFrame,
-    *,
-    horizons: tuple[int, ...] = (1, 5, 10, 20, 60, 120),
-    asset_column: str = "stock_code",
-    date_column: str = "trade_date",
-    execution_price_column: str = "adj_open",
-) -> pd.DataFrame:
-    """按 asset 和 trading-date 顺序添加 forward execution-price labels。
-
-    The entry price is the next execution open. A horizon-N label exits at the
-    open after N holding days, matching the evaluation convention where today's
-    signal can only trade on the next available execution price.
-    """
-
-    result = frame.sort_values([asset_column, date_column]).copy()
-    grouped = result.groupby(asset_column, sort=False)
-
-    entry_price = grouped[execution_price_column].shift(-1)
-    for horizon in horizons:
-        exit_price = grouped[execution_price_column].shift(-(horizon + 1))
-        result[f"forward_return_{horizon}d"] = exit_price / entry_price - 1.0
-
-    return result

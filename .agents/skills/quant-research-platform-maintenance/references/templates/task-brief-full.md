@@ -1,4 +1,4 @@
-# Task Brief Full
+﻿# Task Brief Full
 
 Use this full template for medium+, large, complex, contract-adjacent, or cross-surface work. For small bounded tasks, prefer the fast-path templates in `.agents/skills/quant-research-platform-maintenance/references/templates/`; for `/goal`, overnight, or review-and-fix-loop work, use `goal-overnight.md`.
 
@@ -17,7 +17,7 @@ Recommended template alternatives:
 - `post-merge-documentation-sync.md` for candidate-based active-doc sync after an approved merge.
 - `focused-audit.md` or `focused-implementation.md` for standard bounded work.
 - `documentation-impact-gate.md` before final reporting for medium+ or workflow/contract docs changes.
-- `dependency-contract-approval.md` before dependency, contract, schema, display, API/frontend, or runtime boundary changes.
+- `dependency-contract-approval.md` before dependency, contract, schema, display, API/website UI, or runtime boundary changes.
 - `pre-goal-blocker-discovery.md` before implementation in long goal work.
 - `pre-commit-review.md` for branch review before commit.
 - `commit-and-push.md`, `branch-push.md`, or `ff-merge-and-push.md` for Git operations.
@@ -124,7 +124,7 @@ Codex may use multiple subagents inside an approved envelope. Each subagent must
 
 ## Relevant Contracts
 
-- `manifest.display`
+- 0.1 report/API display contract
 - Artifact flow
 - Evidence flow
 
@@ -146,7 +146,7 @@ Codex may use multiple subagents inside an approved envelope. Each subagent must
 
 Stop for human confirmation if contract meaning, schema semantics, public interfaces, directory moves, phase boundary, or multi-layer scope is unclear.
 
-Also stop for new dependency/framework, schema or `manifest.display` changes, public API/frontend shared contract changes, new artifact type or required artifact file, new top-level package, A-share adapter capability expansion, model registry, feature store, scheduler, worker, deployment, external API/vendor/broker/exchange connector, paper/live trading, private path or row-level data risk, roadmap priority change, dirty working tree or unclear base branch, repeated unclear test failure, or unclear blast radius.
+Also stop for new dependency/framework, schema or 0.1 report/API display contract changes, public API/website UI shared contract changes, new artifact type or required artifact file, new top-level package, A-share adapter capability expansion, model registry, feature store, scheduler, worker, deployment, external API/vendor/broker/exchange connector, paper/live trading, private path or row-level data risk, roadmap priority change, dirty working tree or unclear base branch, repeated unclear test failure, or unclear blast radius.
 
 ## Challenge / Objection
 
@@ -157,8 +157,8 @@ If a prompt constraint appears wrong, too narrow, or in conflict with code/docs/
 - Why constraint may be wrong:
 - Affected surfaces:
   - schema:
-  - `manifest.display`:
-  - API/frontend shared contract:
+  - 0.1 report/API display contract:
+  - API/website UI shared contract:
   - data handoff:
   - private-data boundary:
   - memory/performance:

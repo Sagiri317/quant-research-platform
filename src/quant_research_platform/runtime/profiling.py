@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextvars
-import json
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -167,19 +166,16 @@ class StageProfiler:
     def write_artifacts(self, output_dir: str | Path) -> dict[str, Path]:
         """写出 stage profile 的 CSV、JSON 和 Markdown artifacts。"""
 
-        destination = Path(output_dir)
-        destination.mkdir(parents=True, exist_ok=True)
-        frame = self.to_frame()
-        csv_path = destination / "stage_profile.csv"
-        json_path = destination / "stage_profile.json"
-        report_path = destination / "stage_profile_report.md"
-        frame.to_csv(csv_path, index=False)
-        json_path.write_text(
-            json.dumps(frame.to_dict(orient="records"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        from quant_research_platform.reports.bundles import (
+            write_stage_profile_bundle,
         )
-        report_path.write_text(_render_stage_profile_report(frame), encoding="utf-8")
-        return {"csv": csv_path, "json": json_path, "report": report_path}
+
+        frame = self.to_frame()
+        return write_stage_profile_bundle(
+            frame,
+            output_dir=Path(output_dir),
+            report_text=_render_stage_profile_report(frame),
+        )
 
 
 _ACTIVE_STAGE_PROFILER: contextvars.ContextVar[StageProfiler | None] = (

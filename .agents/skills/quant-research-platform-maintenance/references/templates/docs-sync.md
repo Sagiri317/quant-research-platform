@@ -1,4 +1,4 @@
-# Docs Sync
+﻿# Docs Sync
 
 ## Task Mode
 
@@ -36,7 +36,7 @@ Low
 
 ## Forbidden Scope
 
-- Do not change source code, tests, schemas, `manifest.display`, API/frontend behavior, roadmap priority, private artifacts, or docs/archive.
+- Do not change source code, tests, schemas, 0.1 report/API display contract, API/website UI behavior, roadmap priority, private artifacts, or historical docs.
 - Do not lower private data, trading, deployment, external API, Conda, Git, or deletion boundaries.
 
 ## Stop Conditions

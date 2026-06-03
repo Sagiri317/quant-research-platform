@@ -1,4 +1,4 @@
-# Pre Goal Blocker Discovery
+﻿# Pre Goal Blocker Discovery
 
 ## Task Mode
 
@@ -39,4 +39,4 @@ If `Can proceed` is `no`, do not edit files.
 
 ## Stop Conditions
 
-Stop for any blocker or escalation listed by the approved envelope, including schema, `manifest.display`, public API/frontend shared contract, new dependency/framework, directory restructuring, private/generated data edits, trading/deployment scope, unclear blast radius, or repeated unclear test failure.
+Stop for any blocker or escalation listed by the approved envelope, including schema, 0.1 report/API display contract, public API/website UI shared contract, new dependency/framework, directory restructuring, private/generated data edits, trading/deployment scope, unclear blast radius, or repeated unclear test failure.
