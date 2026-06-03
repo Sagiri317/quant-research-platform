@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 import quant_research_platform.interfaces.api.app as api_app_module
 import quant_research_platform.interfaces.cli.commands as cli_commands_module
+from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
 from quant_research_platform.interfaces.cli import app
 
 create_app = api_app_module.create_app
@@ -32,7 +33,7 @@ def test_api_01_routes_are_exact_public_surface() -> None:
     }
 
 
-def test_api_01_skeleton_endpoints_execute_without_private_paths() -> None:
+def test_api_01_endpoints_execute_without_private_paths_or_planned_status() -> None:
     client = TestClient(create_app())
 
     responses = [
@@ -50,6 +51,7 @@ def test_api_01_skeleton_endpoints_execute_without_private_paths() -> None:
     payloads = [response.json() for response in responses]
     assert {payload["api_version"] for payload in payloads} == {"0.1"}
     assert not any("parquet" in str(payload).lower() for payload in payloads)
+    assert not any("planned" in str(payload).lower() for payload in payloads)
 
     factors = responses[0]
     labels = responses[1]
@@ -60,7 +62,7 @@ def test_api_01_skeleton_endpoints_execute_without_private_paths() -> None:
     assert universes.json()["items"][0]["universe_id"] == "a_share_default"
 
 
-def test_api_cli_skeleton_does_not_scan_parquet_paths() -> None:
+def test_api_cli_adapters_do_not_scan_parquet_paths() -> None:
     module_source = (
         inspect.getsource(api_app_module)
         + "\n"
@@ -105,6 +107,38 @@ def test_cli_rejects_non_fixed_source_and_market_names() -> None:
     assert runner.invoke(
         app, ["market", "build-processed", "--market", "other"]
     ).exit_code != 0
+
+
+def test_api_error_envelope_sanitizes_private_details() -> None:
+    response = api_error_response(
+        ApiError(
+            error_code="invalid_private_detail",
+            message=r"failed at C:\Users\DELL\data\raw\csmar\000001.SZ",
+            field="source_id",
+            details={
+                "traceback": "Traceback (most recent call last): /mnt/data/raw",
+                "token": "token=abcdef123456",
+            },
+        )
+    )
+    payload = response.body.decode("utf-8")
+
+    assert "C:" not in payload
+    assert "/mnt/" not in payload
+    assert "000001" not in payload
+    assert "abcdef123456" not in payload
+
+
+def test_cli_error_output_is_sanitized() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["source", "build-interim", "--source", r"C:\Users\DELL\000001.SZ"],
+    )
+
+    assert result.exit_code != 0
+    assert "C:" not in result.output
+    assert "000001" not in result.output
 
 
 def test_clean_rewrite_cli_does_not_expose_retired_commands() -> None:

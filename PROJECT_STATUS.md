@@ -20,8 +20,9 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 
 ## 当前有效样例
 
-Current clean-rewrite verification is code/test based. Private real-data runs
-remain local evidence only and are not copied into this document.
+Current clean-rewrite verification is code/test based. Private generated
+artifacts remain local evidence only. Public-safe aggregate parity and migration
+evidence is committed in `docs/reports/clean-rewrite-0.1-parity-evidence.md`.
 
 Current public-safe anchors:
 
@@ -29,8 +30,9 @@ Current public-safe anchors:
 - 0.1 contracts/storage/catalog/source tests.
 - 0.1 A-share processed, ResearchDataset, evaluation, and prediction tests.
 - 0.1 API/CLI route and command contract tests.
-- 2014 parity-or-explained-delta completed locally for processed layers,
-  ResearchDataset, evaluation, and prediction smoke.
+- Public-safe parity-or-explained-delta evidence committed for processed panel,
+  factor values, labels, masks/universes, ResearchDataset, evaluation, and
+  prediction smoke.
 - 2014-2025 historical migration completed locally for the new processed
   factor/label-supporting layout and ResearchDataset layout.
 
@@ -56,3 +58,4 @@ Current public-safe anchors:
 |---|---|---|---|---|
 | 2026-06-03 | status | QRP clean rewrite started on `feature/qrp-clean-rewrite`: source topology moved toward 0.1.0, API/CLI public surface changed to `/api/0.1/...`, private data boundaries changed to `data/raw`, `data/interim`, `data/processed`, and `reports/private_real`; old endpoint/command compatibility is no longer target-contract truth. | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-04 | status | QRP clean rewrite completed through Phase 10 locally: 2014 parity-or-explained-delta passed, 2014-2025 factor/label-supporting processed layers and ResearchDataset were migrated through spec-driven writers, and reports remain under `reports/private_real`. | WORKSPACE_STATUS, PLAN_INDEX | open |
+| 2026-06-04 | status | Pre-merge fix added public-safe clean rewrite parity evidence, thin API/CLI dry-run validation services, sanitizer/report/writer gates, and accepted explained-delta wording for full historical `daily_panel`. | WORKSPACE_STATUS, PLAN_INDEX | open |

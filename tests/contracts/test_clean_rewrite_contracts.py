@@ -55,6 +55,7 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
         factor_set=FactorSet.CORE,
         input_columns=("adj_close",),
         output_column="mom_20d",
+        required_processed_data_id="daily_panel",
         window=20,
     )
     label = LabelDefinition(
@@ -94,6 +95,7 @@ def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
             factor_set=FactorSet.FULL,
             input_columns=("return_1d",),
             output_column="rev_1d",
+            required_processed_data_id="daily_panel",
         )
     )
 

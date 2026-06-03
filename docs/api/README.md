@@ -15,6 +15,7 @@ paper trading, live trading, or investment advice.
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
+GET  /api/0.1/catalog/universes
 POST /api/0.1/sources/{source_id}/interim
 POST /api/0.1/markets/{market_id}/processed-data
 POST /api/0.1/research-datasets
@@ -28,17 +29,24 @@ Route ownership:
 |---|---|
 | `/catalog/factors` | `catalog.factors.FactorCatalog` and `contracts.factors.FactorDefinition` |
 | `/catalog/labels` | `catalog.labels.LabelCatalog` and `contracts.labels.LabelDefinition` |
-| `/sources/{source_id}/interim` | `sources/*` adapters; first active source is `csmar` |
-| `/markets/{market_id}/processed-data` | `markets/implementations/*` processed-data services |
-| `/research-datasets` | `research/datasets` assembly and validation |
-| `/workflows` | `workflows` specs, planner, executor, checkpoints |
-| `/reports/{run_id}` | `reports` manifests, summaries, bundles |
+| `/catalog/universes` | `contracts.universes.UniverseDefinition` metadata |
+| `/sources/{source_id}/interim` | `interfaces.services` dry-run validation for approved source specs |
+| `/markets/{market_id}/processed-data` | `interfaces.services` dry-run validation for approved processed specs |
+| `/research-datasets` | `interfaces.services` dry-run validation for ResearchDataset specs |
+| `/workflows` | `workflows` specs, planner, executor, checkpoints through `interfaces.services` |
+| `/reports/{run_id}` | structured report metadata response; no local folder scan in the adapter |
+
+The POST routes are thin service adapters in `0.1.0`: they validate approved
+spec/catalog boundaries and return sanitized dry-run summaries. They do not
+claim full remote execution, deployment, scheduler, worker, or public data
+access.
 
 ## CLI
 
 ```text
 qrp catalog factors
 qrp catalog labels
+qrp catalog universes
 qrp source build-interim
 qrp market build-processed
 qrp research build-dataset

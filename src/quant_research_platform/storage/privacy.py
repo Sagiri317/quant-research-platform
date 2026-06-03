@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 PRIVATE_BOUNDARY_ROOTS: tuple[str, ...] = ("data", "reports/private_real")
 PRIVATE_DATA_LAYERS: tuple[str, ...] = (
@@ -12,14 +14,27 @@ PRIVATE_DATA_LAYERS: tuple[str, ...] = (
     "processed",
     "reference_docs",
 )
-_LOCAL_PATH_RE = re.compile(
-    r"(?i)(?:[a-z]:[\\/][^\s,;:]+|\\\\[^\s,;:]+)"
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
+_UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
+_POSIX_PRIVATE_PATH_RE = re.compile(
+    r"(?i)(?<!\w)/(?:mnt|home|Users|tmp|var/tmp|private/tmp)/[^\r\n\t\"'<>|]+"
 )
-_STOCK_CODE_RE = re.compile(r"\b\d{6}(?:\.(?:SZ|SH|BJ))?\b", re.IGNORECASE)
+_REPO_PRIVATE_PATH_RE = re.compile(
+    r"(?i)\b(?:data/(?:raw|interim|processed)(?:/[^\s,;\"'<>|]+)?|"
+    r"reports/private_real(?:/[^\s,;\"'<>|]+)?)"
+)
+_STOCK_CODE_RE = re.compile(
+    r"\b(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?\b",
+    re.IGNORECASE,
+)
 _PRIVATE_MARKER_RE = re.compile(
-    r"(?i)\b(?:data/raw/csmar|data/interim/csmar|data/processed|"
-    r"reports/private_real|CSMAR|vendor)\b"
+    r"(?i)\b(?:CSMAR|vendor(?:[-_ ]?source)?|raw[-_ ]?source[-_ ]?marker)\b"
 )
+_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
+    r"[A-Za-z0-9._~+/=-]{8,}"
+)
+_TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
 
 
 def _parts(path: Path) -> tuple[str, ...]:
@@ -45,16 +60,43 @@ def is_private_boundary_path(path: Path) -> bool:
 
 
 def sanitize_public_text(text: object) -> str:
+    """Return public-safe text for API, CLI, manifest, and report summaries."""
+
     result = str(text)
-    result = _LOCAL_PATH_RE.sub("[local-path]", result)
+    result = _TRACEBACK_RE.sub("[traceback]", result)
+    result = _CREDENTIAL_RE.sub("[credential]", result)
+    result = _WINDOWS_DRIVE_PATH_RE.sub("[local-path]", result)
+    result = _UNC_PATH_RE.sub("[local-path]", result)
+    result = _POSIX_PRIVATE_PATH_RE.sub("[local-path]", result)
+    result = _REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _PRIVATE_MARKER_RE.sub("[private]", result)
     result = _STOCK_CODE_RE.sub("[asset-id]", result)
     return result
+
+
+def sanitize_public_object(value: Any) -> Any:
+    """Recursively sanitize mapping/list scalar values for public-safe metadata."""
+
+    if isinstance(value, Mapping):
+        return {
+            sanitize_public_text(key): sanitize_public_object(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_public_object(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(sanitize_public_object(item) for item in value)
+    if isinstance(value, set):
+        return sorted(sanitize_public_object(item) for item in value)
+    if isinstance(value, str):
+        return sanitize_public_text(value)
+    return value
 
 
 __all__ = [
     "PRIVATE_DATA_LAYERS",
     "PRIVATE_BOUNDARY_ROOTS",
     "is_private_boundary_path",
+    "sanitize_public_object",
     "sanitize_public_text",
 ]

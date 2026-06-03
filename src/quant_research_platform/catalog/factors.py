@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
+from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
+
+_PRICE_VOLUME_INPUT_COLUMNS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "adj_close",
+    "prev_close",
+    "volume",
+    "amount",
+    "turnover",
+    "return_1d",
+    "total_market_cap",
+    "float_market_cap",
+)
+_WINDOW_RE = re.compile(r"_(\d+)d\b")
 
 
 @dataclass
@@ -44,11 +62,37 @@ class FactorCatalog:
                     factor_id=factor_id,
                     market_id=MarketId("a_share"),
                     factor_set=FactorSet.FULL,
-                    input_columns=(),
+                    input_columns=_PRICE_VOLUME_INPUT_COLUMNS,
                     output_column=factor_id,
+                    display_name=factor_id,
+                    description=(
+                        "A-share daily price-volume factor registered by the "
+                        "QRP 0.1 factor catalog."
+                    ),
+                    family="price_volume",
+                    required_windows=_required_windows(factor_id),
+                    lookback_window=_lookback_window(factor_id),
+                    grain=DataGrain.ASSET_TIMESTAMP,
+                    timing_semantics="same_session_close_available_at_next_session",
+                    null_policy="preserve_nulls_after_min_periods",
+                    source_layer="processed",
+                    required_processed_data_id="daily_panel",
+                    window=_lookback_window(factor_id),
                 )
             )
         return catalog
+
+
+def _required_windows(factor_id: str) -> tuple[int, ...]:
+    windows = tuple(int(match) for match in _WINDOW_RE.findall(factor_id))
+    return windows
+
+
+def _lookback_window(factor_id: str) -> int | None:
+    windows = _required_windows(factor_id)
+    if not windows:
+        return None
+    return max(windows)
 
 
 __all__ = ["FactorCatalog"]

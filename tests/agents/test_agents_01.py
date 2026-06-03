@@ -118,6 +118,16 @@ def test_factories_return_only_public_safe_unapproved_proposals() -> None:
     assert not workflow.approved
 
 
+def test_factor_factory_rejects_unknown_input_columns() -> None:
+    with pytest.raises(ValueError, match="unknown_factor_input_columns"):
+        propose_factor(
+            proposal_id="factor-proposal-unknown-input",
+            factor_id="bad_input_factor",
+            rationale="Candidate with unregistered input.",
+            input_columns=("unknown_input_column",),
+        )
+
+
 def test_proposals_expose_spec_like_payloads_without_approval_state() -> None:
     proposal = WorkflowProposal(
         proposal_id="workflow-proposal-003",

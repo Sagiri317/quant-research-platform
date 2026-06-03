@@ -42,6 +42,7 @@ data/processed/
 data/external/
 data/private/
 data/reference_docs/
+# Backward-safety ignore only; not active clean-rewrite data layout.
 data/raw_private/
 data/interim_private/
 data/processed_private/

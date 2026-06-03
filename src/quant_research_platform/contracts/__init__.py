@@ -1,6 +1,6 @@
 """Stable 0.1 platform contracts."""
 
-from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
+from quant_research_platform.contracts.columns import ColumnRole, FieldSpec, LogicalType
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
@@ -17,6 +17,7 @@ from quant_research_platform.contracts.ids import (
 )
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.masks import MaskDefinition
+from quant_research_platform.contracts.reports import ReportDefinition, ReportSpec
 
 CONTRACT_VERSION = "0.1"
 
@@ -32,9 +33,12 @@ __all__ = [
     "FieldSpec",
     "InterimDataSpec",
     "LabelDefinition",
+    "LogicalType",
     "MarketId",
     "MaskDefinition",
     "ProcessedDataSpec",
+    "ReportDefinition",
+    "ReportSpec",
     "SourceAssetId",
     "SourceId",
 ]

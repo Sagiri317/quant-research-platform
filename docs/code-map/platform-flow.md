@@ -40,6 +40,7 @@ sources/csmar
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
+GET  /api/0.1/catalog/universes
 POST /api/0.1/sources/{source_id}/interim
 POST /api/0.1/markets/{market_id}/processed-data
 POST /api/0.1/research-datasets
@@ -47,14 +48,18 @@ POST /api/0.1/workflows
 GET  /api/0.1/reports/{run_id}
 ```
 
-The API is local-only. It does not expose deployment, paper/live trading,
-external data, broker/exchange, scheduler, worker, or website UI contracts.
+The API is local-only. Catalog routes return registered metadata. POST routes
+call the shared thin service layer for sanitized dry-run spec validation; they
+are not deployment, scheduler, worker, or remote execution contracts. The API
+does not expose paper/live trading, external data, broker/exchange, or website
+UI contracts.
 
 ## CLI Flow
 
 ```text
 qrp catalog factors
 qrp catalog labels
+qrp catalog universes
 qrp source build-interim
 qrp market build-processed
 qrp research build-dataset

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.storage.privacy import sanitize_public_object
+
 
 def read_manifest(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -13,7 +15,10 @@ def read_manifest(path: Path) -> dict[str, Any]:
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    text = (
+        json.dumps(sanitize_public_object(payload), ensure_ascii=False, indent=2)
+        + "\n"
+    )
     path.write_text(text, encoding="utf-8")
     return path
 

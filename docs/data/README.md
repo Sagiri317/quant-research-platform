@@ -12,6 +12,9 @@ data/processed/a_share/
 reports/private_real/
 ```
 
+`data/` and `reports/private_real/` are private by default. Privacy is enforced
+by approved roots and sanitizer policy, not by a suffix naming convention.
+
 ## Processed Layout
 
 ```text
@@ -59,3 +62,21 @@ available_at
 
 Source fields such as `stock_code` and `trade_date` may be retained only as
 source/migration fields.
+
+## Run Outputs
+
+Prediction, evaluation, diagnostics, factor-generation, and model-output run
+artifacts belong under:
+
+```text
+reports/private_real/<market>/<run_type>/<run_id>/
+```
+
+They must not be written to `data/processed/`.
+
+## Source Identifier Policy
+
+`csmar` is a public source identifier for catalog metadata and API routes.
+Public-safe evidence, manifest summaries, report summaries, stdout/stderr, and
+API errors must not expose source-row markers, local paths, row samples,
+stock-code samples, credentials, or raw values.

@@ -10,8 +10,13 @@ import pandas as pd
 
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.storage.manifests import write_manifest
-from quant_research_platform.storage.privacy import is_private_boundary_path
+from quant_research_platform.storage.privacy import (
+    is_private_boundary_path,
+    sanitize_public_object,
+    sanitize_public_text,
+)
 
 
 @dataclass(frozen=True)
@@ -23,24 +28,46 @@ class ReportBundle:
 def write_stage_profile_bundle(
     frame: pd.DataFrame,
     *,
-    output_dir: Path,
+    spec: ReportSpec,
+    output_root: Path,
     report_text: str,
 ) -> dict[str, Path]:
     """Write a private stage-profile report bundle."""
 
-    destination = Path(output_dir)
-    if not is_private_boundary_path(destination):
+    if spec.report_definition_id != "stage_profile_private_diagnostic":
+        raise ValueError("invalid_stage_profile_report_definition")
+    destination = Path(output_root)
+    if spec.private_boundary_required and not is_private_boundary_path(destination):
         raise ValueError("outside_private_boundary")
     destination.mkdir(parents=True, exist_ok=True)
     csv_path = destination / "stage_profile.csv"
     json_path = destination / "stage_profile.json"
     report_path = destination / "stage_profile_report.md"
-    frame.to_csv(csv_path, index=False)
+    safe_rows = sanitize_public_object(frame.to_dict(orient="records"))
+    safe_frame = pd.DataFrame.from_records(safe_rows)
+    safe_frame.to_csv(csv_path, index=False)
     json_path.write_text(
-        json.dumps(frame.to_dict(orient="records"), ensure_ascii=False, indent=2),
+        json.dumps(safe_rows, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    report_path.write_text(report_text, encoding="utf-8")
+    report_path.write_text(sanitize_public_text(report_text), encoding="utf-8")
+    write_manifest(
+        destination / "manifest.json",
+        {
+            "contract_version": spec.contract_version,
+            "report_id": spec.report_id,
+            "report_definition_id": spec.report_definition_id,
+            "run_id": spec.run_id,
+            "market_id": str(spec.market_id),
+            "run_type": spec.run_type,
+            "private_boundary_required": spec.private_boundary_required,
+            "artifacts": [
+                "stage_profile.csv",
+                "stage_profile.json",
+                "stage_profile_report.md",
+            ],
+        },
+    )
     return {"csv": csv_path, "json": json_path, "report": report_path}
 
 
@@ -80,6 +107,8 @@ def write_prediction_bundle_files(
             "prediction_id": spec.prediction_id,
             "model_id": spec.model_id,
             "research_dataset_id": spec.research_dataset_id,
+            "prediction_mode": "smoke_in_sample",
+            "oos": False,
             "prediction_column": spec.prediction_column,
             "primary_key": list(spec.primary_key),
         },

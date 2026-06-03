@@ -1,43 +1,36 @@
-# 私有数据区
+# QRP Clean Rewrite Data Layout
 
-本目录是 `quant-research-platform` 的本地私有数据边界。当前第一版完整 market module 是 A 股，数据来自用户手工导出的 CSMAR 文件。
+`data/` is a private boundary by default. It stores private row-level inputs and
+approved private research input layers for QRP Clean Rewrite `0.1.0`.
 
-## 目录职责
-
-```text
-reference_docs/      CSMAR PDF 说明书和版权声明
-raw_private/         用户手工导出的 CSMAR 原始文件
-interim_private/     raw 清洗后的中间审计层
-processed_private/   研究用 Parquet 输出
-```
-
-当前三层数据都属于本地私有数据，不得提交或公开。
-
-## 当前 processed 合同
+Active layout:
 
 ```text
-processed_private/csmar/
-  panel_full/
-    research_panel_2014_2025.parquet
-  price_volume_factors_full/
-    price_volume_factors_2014_2025.parquet
+data/
+  raw/csmar/
+  interim/csmar/
+  processed/a_share/
+
+reports/
+  private_real/<market>/<run_type>/<run_id>/
 ```
 
-- interim CSV 仍按年保存，便于人工核对和局部重建。
-- processed panel / factor 是 full-sample Parquet。
-- panel Parquet 是完整研究主表。
-- slim factor Parquet 是 A 股 evaluation 和 pipeline 输入之一。
-- factor 文件保留 key、过滤列、流动性/规模辅助列、factor columns 和 forward label columns。
+Rules:
 
-## 禁止用途
+- `data/raw/csmar/` keeps source exports in their original form.
+- `data/interim/csmar/` keeps canonical interim parquet generated through the
+  approved source adapter and catalog/spec writer.
+- `data/processed/a_share/` keeps processed market data and approved research
+  input layers only.
+- `reports/private_real/` is a private boundary by default.
+- Private boundary checks do not depend on a suffix convention.
+- Prediction, evaluation, diagnostics, factor-generation, and model-output run
+  artifacts must be written under `reports/private_real/<market>/<run_type>/<run_id>/`.
+- Run reports and model outputs must not be written to `data/processed/`.
 
-- 不要保存学校账号、密码、cookie、token、`.env` 或任何凭据。
-- 不要提交 CSMAR raw/interim/processed 数据。
-- 不要把本目录用于自动下载脚本、爬虫、API client 或浏览器自动化。
-- 不要公开 `raw_private/`、`interim_private/`、`processed_private/` 或 `reports/private_real/` 下的 vendor 明细。
+Source identifier policy:
 
-## 相关文档
-
-- A 股 CSMAR 数据手册：[../docs/data/a-share-csmar-data-manual.md](../docs/data/a-share-csmar-data-manual.md)
-- A 股字段可用性清单：[../docs/data/a-share-field-inventory.md](../docs/data/a-share-field-inventory.md)
-- 平台源码阅读地图：[../docs/code-map/README.md](../docs/code-map/README.md)
+- `csmar` is a public source identifier for catalog metadata and API routes.
+- Private row-level evidence, raw file evidence, manifest summaries, report
+  summaries, stdout/stderr, and API errors must not expose source-row markers,
+  local paths, row samples, stock-code samples, credentials, or raw values.

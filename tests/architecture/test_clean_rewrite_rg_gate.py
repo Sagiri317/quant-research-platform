@@ -10,6 +10,7 @@ SCAN_ROOTS = (
     Path("docs"),
     Path(".agents"),
     Path("README.md"),
+    Path("data/README.md"),
     Path("AGENTS.md"),
     Path("PROJECT_STATUS.md"),
     Path("pyproject.toml"),

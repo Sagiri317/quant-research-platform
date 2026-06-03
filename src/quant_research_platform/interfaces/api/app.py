@@ -7,10 +7,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from quant_research_platform.catalog.factors import FactorCatalog
-from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.universes import UniverseDefinition
+from quant_research_platform.interfaces import services
 from quant_research_platform.interfaces.api.errors import (
     ApiError,
     register_api_error_handlers,
@@ -57,70 +54,56 @@ def create_app() -> FastAPI:
 def _include_api_01_skeleton(app: FastAPI) -> None:
     @app.get("/api/0.1/catalog/factors")
     def catalog_factors() -> dict[str, object]:
-        catalog = FactorCatalog.bootstrap_default()
-        return {
-            "api_version": "0.1",
-            "items": [item.to_manifest() for item in catalog.list()],
-        }
+        return services.list_factors()
 
     @app.get("/api/0.1/catalog/labels")
     def catalog_labels() -> dict[str, object]:
-        catalog = LabelCatalog.bootstrap_default()
-        return {
-            "api_version": "0.1",
-            "items": [item.to_manifest() for item in catalog.list()],
-        }
+        return services.list_labels()
 
     @app.get("/api/0.1/catalog/universes")
     def catalog_universes() -> dict[str, object]:
-        universe = UniverseDefinition(
-            universe_id="a_share_default",
-            market_id=MarketId("a_share"),
-            membership_column="in_universe",
-        )
-        return {
-            "api_version": "0.1",
-            "items": [
-                {
-                    "definition_version": universe.definition_version,
-                    "universe_id": universe.universe_id,
-                    "market_id": str(universe.market_id),
-                    "membership_column": universe.membership_column,
-                }
-            ],
-        }
+        return services.list_universes()
 
     @app.post("/api/0.1/sources/{source_id}/interim")
     def build_source_interim(source_id: str) -> dict[str, object]:
-        if source_id != "csmar":
+        try:
+            return services.validate_source_interim(source_id)
+        except KeyError as exc:
             raise ApiError(
                 error_code="invalid_source_id",
-                message="unsupported source id for API 0.1",
+                message=str(exc),
                 field="source_id",
-            )
-        return {"api_version": "0.1", "source": source_id, "status": "planned"}
+            ) from exc
 
     @app.post("/api/0.1/markets/{market_id}/processed-data")
     def build_processed_data(market_id: str) -> dict[str, object]:
-        if market_id != "a_share":
+        try:
+            return services.validate_market_processed(market_id)
+        except KeyError as exc:
             raise ApiError(
                 error_code="invalid_market_id",
-                message="unsupported market id for API 0.1",
+                message=str(exc),
                 field="market_id",
-            )
-        return {"api_version": "0.1", "market": market_id, "status": "planned"}
+            ) from exc
 
     @app.post("/api/0.1/research-datasets")
     def build_research_dataset() -> dict[str, object]:
-        return {"api_version": "0.1", "status": "planned"}
+        return services.validate_research_dataset()
 
     @app.post("/api/0.1/workflows")
     def run_workflow() -> dict[str, object]:
-        return {"api_version": "0.1", "status": "planned"}
+        return services.validate_workflow_run()
 
     @app.get("/api/0.1/reports/{run_id}")
     def report_detail(run_id: str) -> dict[str, object]:
-        return {"api_version": "0.1", "run_id": run_id, "status": "planned"}
+        try:
+            return services.report_metadata(run_id)
+        except ValueError as exc:
+            raise ApiError(
+                error_code="invalid_run_id",
+                message=str(exc),
+                field="run_id",
+            ) from exc
 
 
 app = create_app()

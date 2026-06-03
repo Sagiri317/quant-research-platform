@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import typer
 
-from quant_research_platform.catalog.factors import FactorCatalog
-from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.universes import UniverseDefinition
+from quant_research_platform.interfaces import services
+from quant_research_platform.runtime.privacy import sanitize_public_text
 
 app = typer.Typer(add_completion=False)
 catalog_app = typer.Typer(add_completion=False, help="Catalog query commands.")
@@ -25,21 +25,27 @@ app.add_typer(workflow_app, name="workflow")
 app.add_typer(report_app, name="report")
 
 
-def _require_fixed_value(option_name: str, value: str, expected: str) -> None:
-    if value != expected:
-        typer.echo(f"{option_name} must be {expected}.", err=True)
-        raise typer.Exit(code=2)
+def _echo_safe(value: object, *, err: bool = False) -> None:
+    typer.echo(sanitize_public_text(value), err=err)
+
+
+def _run_cli(operation: Callable[[], object]) -> None:
+    try:
+        _echo_safe(operation())
+    except (KeyError, ValueError) as exc:
+        _echo_safe(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
 
 
 @catalog_app.command("factors")
 def catalog_factors() -> None:
     """List registered factor definitions."""
 
-    typer.echo("factor_id,market_id,factor_set,definition_version")
-    for item in FactorCatalog.bootstrap_default().list():
-        typer.echo(
-            f"{item.factor_id},{item.market_id},{item.factor_set},"
-            f"{item.definition_version}"
+    _echo_safe("factor_id,market_id,factor_set,definition_version")
+    for item in services.list_factors()["items"]:
+        _echo_safe(
+            f"{item['factor_id']},{item['market_id']},{item['factor_set']},"
+            f"{item['definition_version']}"
         )
 
 
@@ -47,11 +53,11 @@ def catalog_factors() -> None:
 def catalog_labels() -> None:
     """List registered label definitions."""
 
-    typer.echo("label_id,market_id,horizon,definition_version")
-    for item in LabelCatalog.bootstrap_default().list():
-        typer.echo(
-            f"{item.label_id},{item.market_id},{item.horizon},"
-            f"{item.definition_version}"
+    _echo_safe("label_id,market_id,horizon,definition_version")
+    for item in services.list_labels()["items"]:
+        _echo_safe(
+            f"{item['label_id']},{item['market_id']},{item['horizon']},"
+            f"{item['definition_version']}"
         )
 
 
@@ -59,16 +65,12 @@ def catalog_labels() -> None:
 def catalog_universes() -> None:
     """List registered universe definitions."""
 
-    universe = UniverseDefinition(
-        universe_id="a_share_default",
-        market_id=MarketId("a_share"),
-        membership_column="in_universe",
-    )
-    typer.echo("universe_id,market_id,membership_column,definition_version")
-    typer.echo(
-        f"{universe.universe_id},{universe.market_id},"
-        f"{universe.membership_column},{universe.definition_version}"
-    )
+    _echo_safe("universe_id,market_id,membership_column,definition_version")
+    for item in services.list_universes()["items"]:
+        _echo_safe(
+            f"{item['universe_id']},{item['market_id']},"
+            f"{item['membership_column']},{item['definition_version']}"
+        )
 
 
 @source_app.command("build-interim")
@@ -77,10 +79,7 @@ def source_build_interim(
 ) -> None:
     """Validate the canonical source interim build entry point."""
 
-    _require_fixed_value("--source", source, "csmar")
-    typer.echo(
-        f"source build-interim for {source} requires an approved source spec."
-    )
+    _run_cli(lambda: services.validate_source_interim(source))
 
 
 @market_app.command("build-processed")
@@ -89,32 +88,28 @@ def market_build_processed(
 ) -> None:
     """Validate the market processed-data build entry point."""
 
-    _require_fixed_value("--market", market, "a_share")
-    typer.echo(
-        f"market build-processed for {market} requires an approved "
-        "ProcessedDataSpec."
-    )
+    _run_cli(lambda: services.validate_market_processed(market))
 
 
 @research_app.command("build-dataset")
 def research_build_dataset() -> None:
     """Validate the research dataset build entry point."""
 
-    typer.echo("research build-dataset requires an approved ResearchDatasetSpec.")
+    _run_cli(services.validate_research_dataset)
 
 
 @workflow_app.command("run")
 def workflow_run() -> None:
     """Validate the workflow execution entry point."""
 
-    typer.echo("workflow run requires an approved WorkflowSpec.")
+    _run_cli(services.validate_workflow_run)
 
 
 @report_app.command("show")
 def report_show() -> None:
     """Validate the report query entry point."""
 
-    typer.echo("report show requires a run id.")
+    _run_cli(lambda: services.report_metadata("example-run"))
 
 
 def main() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
+from quant_research_platform.contracts.columns import ColumnRole, FieldSpec, LogicalType
 
 
 @dataclass(frozen=True)
@@ -84,42 +84,49 @@ def platform_field_catalog() -> FieldCatalog:
             name=names.market_id,
             role=ColumnRole.KEY,
             dtype="string",
+            logical_type=LogicalType.STRING_ID,
             description="Platform market identifier.",
         ),
         FieldSpec(
             name=names.asset_id,
             role=ColumnRole.KEY,
             dtype="string",
+            logical_type=LogicalType.STRING_ID,
             description="Platform asset identifier.",
         ),
         FieldSpec(
             name=names.timestamp,
             role=ColumnRole.TIMESTAMP,
             dtype="timestamp[ns]",
+            logical_type=LogicalType.TIMESTAMP,
             description="Logical observation timestamp.",
         ),
         FieldSpec(
             name=names.session_date,
             role=ColumnRole.TIMESTAMP,
             dtype="date",
+            logical_type=LogicalType.DATE,
             description="Market-local trading session date.",
         ),
         FieldSpec(
             name=names.available_at,
             role=ColumnRole.TIMESTAMP,
             dtype="timestamp[ns]",
+            logical_type=LogicalType.TIMESTAMP,
             description="Earliest research availability timestamp.",
         ),
         FieldSpec(
             name=names.source_id,
             role=ColumnRole.SOURCE,
             dtype="string",
+            logical_type=LogicalType.STRING_ID,
             description="Source adapter identifier.",
         ),
         FieldSpec(
             name=names.source_asset_id,
             role=ColumnRole.SOURCE,
             dtype="string",
+            logical_type=LogicalType.STRING_ID,
             description="Source-native asset identifier.",
         ),
     ):

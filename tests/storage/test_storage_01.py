@@ -80,6 +80,23 @@ def test_partitioned_parquet_and_manifest_contract(tmp_path: Path) -> None:
     assert not is_private_boundary_path(tmp_path / "public" / "x" / "data")
 
 
+def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> None:
+    manifest = write_manifest(
+        tmp_path / "reports" / "private_real" / "a_share" / "run" / "manifest.json",
+        {
+            "path": r"C:\Users\DELL\data\raw\csmar\000001.SZ",
+            "traceback": "Traceback (most recent call last): /mnt/data/raw",
+            "token": "token=abcdef123456",
+        },
+    )
+    text = manifest.read_text(encoding="utf-8")
+
+    assert "C:" not in text
+    assert "/mnt/" not in text
+    assert "000001" not in text
+    assert "abcdef123456" not in text
+
+
 def test_processed_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {
