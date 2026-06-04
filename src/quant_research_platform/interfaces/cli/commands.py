@@ -9,6 +9,7 @@ import typer
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.interfaces import services
 from quant_research_platform.runtime.privacy import sanitize_public_text
+from quant_research_platform.storage.errors import WriteRejectedError
 
 app = typer.Typer(add_completion=False)
 catalog_app = typer.Typer(add_completion=False, help="Catalog query commands.")
@@ -36,6 +37,9 @@ def _echo_safe(value: object, *, err: bool = False) -> None:
 def _run_cli(operation: Callable[[], object]) -> None:
     try:
         _echo_safe(operation())
+    except WriteRejectedError as exc:
+        _echo_safe(exc.to_public_summary(), err=True)
+        raise typer.Exit(code=2) from exc
     except (KeyError, ValueError) as exc:
         _echo_safe(str(exc), err=True)
         raise typer.Exit(code=2) from exc
@@ -87,21 +91,6 @@ def catalog_data_products() -> None:
             f"{item['data_product_id']},{item['market_id']},{item['grain']},"
             f"{item['contract_version']}"
         )
-
-
-@data_product_app.command("build-interim")
-def data_product_build_interim(
-    data_product: str = typer.Option(
-        "a_share_daily_bar",
-        "--data-product",
-        help="Data product id.",
-    ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Validate without writes."),
-    run_id: str | None = typer.Option(None, "--run-id", help="Logical run id."),
-) -> None:
-    """Run the public data product interim entry point."""
-
-    _run_data_product_interim(data_product, dry_run=dry_run, run_id=run_id)
 
 
 @data_product_app.command("interim")

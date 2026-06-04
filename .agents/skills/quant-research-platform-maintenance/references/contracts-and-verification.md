@@ -47,7 +47,7 @@ qrp catalog factors
 qrp catalog labels
 qrp catalog universes
 qrp catalog data-products
-qrp data-product build-interim --data-product a_share_daily_bar
+qrp data-product interim a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run

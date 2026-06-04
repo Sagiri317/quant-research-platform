@@ -132,7 +132,7 @@ def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:
     assert payload["row_level_output_committed"] is False
 
 
-def test_full_historical_daily_panel_covers_full_period_or_requires_approval() -> None:
+def test_full_historical_daily_panel_covers_full_2014_2025_period() -> None:
     path = Path("docs/reports/clean-rewrite-0.1-parity-evidence.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
     area = next(
@@ -141,12 +141,10 @@ def test_full_historical_daily_panel_covers_full_period_or_requires_approval() -
         if item["area"] == "full_historical_daily_panel_status"
     )
 
-    if area["period"] == "2014-01-01 through 2025-12-31":
-        assert area["human_approval_required"] is False
-    else:
-        assert area["human_approval_required"] is True
-        assert area["accepted_explained_delta"] is False
-        assert payload["merge_ready"] is False
+    assert area["period"] == "2014-01-01 through 2025-12-31"
+    assert area["human_approval_required"] is False
+    assert area["accepted_explained_delta"] is False
+    assert payload["merge_ready"] is True
 
 
 def test_full_historical_daily_panel_summary_streams_generated_chunks(

@@ -4,6 +4,7 @@ import pytest
 
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
+from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.markets.implementations.a_share.catalog import (
@@ -87,3 +88,10 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
 
     catalog.register(definition, replace=True)
     assert catalog.list() == (definition,)
+
+
+def test_source_registry_entries_are_internal_only() -> None:
+    sources = SourceRegistry.bootstrap_default().list()
+
+    assert sources
+    assert all(not item.public_identifier for item in sources)

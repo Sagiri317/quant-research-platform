@@ -135,6 +135,12 @@ def test_public_surfaces_do_not_expose_internal_provider_markers() -> None:
         ("csmar", re.compile(r"(?i)\bcsmar\b")),
         ("source_id", re.compile(r"\bsource_id\b")),
         ("provider_id", re.compile(r"\bprovider_id\b")),
+        ("implementation_package", re.compile(r"\bimplementation_package\b")),
+        ("--private-real", re.compile(r"--private-real\b")),
+        ("--source-root", re.compile(r"--source-root\b")),
+        ("--input-root", re.compile(r"--input-root\b")),
+        ("--data-root", re.compile(r"--data-root\b")),
+        ("--provider-path", re.compile(r"--provider-path\b")),
         ("public source route", re.compile(r"/api/0\.1/sources\b")),
         ("sources/csmar", re.compile(r"sources[/\\]csmar")),
     )
@@ -194,6 +200,23 @@ def test_no_retired_top_level_source_directories_exist() -> None:
     existing = {path.name for path in root.iterdir() if path.is_dir()}
 
     assert existing.isdisjoint(retired)
+
+
+def test_public_surfaces_do_not_expose_retired_public_cli_commands() -> None:
+    pattern = re.compile(r"\bbuild-interim\b")
+    current_file = Path(__file__).resolve()
+    hits: list[str] = []
+    for path in _iter_public_surface_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        if pattern.search(text):
+            hits.append(str(path))
+
+    assert hits == []
 
 
 def test_factor_and_label_definitions_do_not_use_future_data_token() -> None:
@@ -323,3 +346,26 @@ def test_direct_write_gate_detects_chained_open_write() -> None:
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
 
     assert any(_is_open_write_call(call) for call in calls)
+
+
+def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> None:
+    import inspect
+
+    from quant_research_platform.reports.bundles import (
+        write_evaluation_report_files,
+        write_prediction_bundle_files,
+        write_stage_profile_bundle,
+    )
+    from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
+
+    writer_signatures = (
+        inspect.signature(write_stage_profile_bundle),
+        inspect.signature(write_prediction_bundle_files),
+        inspect.signature(write_evaluation_report_files),
+        inspect.signature(StageProfiler.write_artifacts),
+    )
+
+    assert "output_dir" not in ProfileConfig.__dataclass_fields__
+    for signature in writer_signatures:
+        assert "output_root" not in signature.parameters
+        assert "output_dir" not in signature.parameters

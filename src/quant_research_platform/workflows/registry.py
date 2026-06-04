@@ -37,9 +37,6 @@ class WorkflowNodeRegistry:
         except KeyError as exc:
             raise ValueError(f"unknown_workflow_node: {node_id}") from exc
 
-    def handlers_for(self, node_ids: tuple[str, ...]) -> dict[str, NodeHandler]:
-        return {node_id: self.get(node_id).handler for node_id in node_ids}
-
     @classmethod
     def bootstrap_default(cls) -> WorkflowNodeRegistry:
         registry = cls()

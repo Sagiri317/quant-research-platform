@@ -27,9 +27,8 @@ research/evaluations
 - `interfaces/cli` exposes local report lookup through `qrp report show`.
 
 Persisted stage profile, prediction, and evaluation report outputs are derived
-from `StorageLayout + ReportSpec + run_id`. Optional `output_root` arguments in
-tests are accepted only when they equal the derived path; they are not business
-or API/CLI path-selection inputs.
+from `StorageLayout + ReportSpec + run_id`. Report writers do not accept
+arbitrary `output_root` or `output_dir` path-selection inputs.
 
 ## Privacy
 

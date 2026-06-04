@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.storage.parquet as parquet_module
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.fields import (
     platform_entity_time_key,
@@ -24,6 +25,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import (
@@ -416,3 +418,343 @@ def test_parquet_writer_rejects_existing_output_root_without_partial_write(
     assert sentinel.read_text(encoding="utf-8") == "existing\n"
     assert not (root / "year=2014").exists()
     assert list(root.parent.glob("*backup*")) == []
+
+
+def test_processed_writer_rejects_existing_manifest_before_creating_data(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _processed_writer_case()
+    artifact_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
+    manifest = artifact_root / "_manifest" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"existing": true}\n', encoding="utf-8")
+
+    with pytest.raises(OutputAlreadyExistsError):
+        write_processed_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            processed_data_id="x",
+        )
+
+    assert not (artifact_root / "data").exists()
+    assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
+    assert list(artifact_root.parent.glob(".x.tmp-*")) == []
+
+
+def test_processed_writer_rejects_existing_data_before_writing_manifest_or_spec(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _processed_writer_case()
+    artifact_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
+    data_root = artifact_root / "data"
+    data_root.mkdir(parents=True)
+    (data_root / "sentinel.txt").write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(OutputAlreadyExistsError):
+        write_processed_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            processed_data_id="x",
+        )
+
+    assert (data_root / "sentinel.txt").read_text(encoding="utf-8") == "existing\n"
+    assert not (artifact_root / "_manifest" / "manifest.json").exists()
+    assert not (artifact_root / "spec.json").exists()
+
+
+def test_processed_writer_rejects_existing_spec_before_creating_data(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _processed_writer_case()
+    artifact_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
+    spec_path = artifact_root / "spec.json"
+    spec_path.parent.mkdir(parents=True)
+    spec_path.write_text('{"existing": true}\n', encoding="utf-8")
+
+    with pytest.raises(OutputAlreadyExistsError):
+        write_processed_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            processed_data_id="x",
+        )
+
+    assert not (artifact_root / "data").exists()
+    assert spec_path.read_text(encoding="utf-8") == '{"existing": true}\n'
+    assert not (artifact_root / "_manifest" / "manifest.json").exists()
+
+
+def test_interim_writer_rejects_existing_manifest_before_creating_data(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _interim_writer_case()
+    artifact_root = tmp_path / "data" / "interim" / "csmar" / "daily_market"
+    manifest = artifact_root / "_manifest" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"existing": true}\n', encoding="utf-8")
+
+    with pytest.raises(OutputAlreadyExistsError):
+        write_interim_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            interim_data_id="daily_market",
+        )
+
+    assert not (artifact_root / "data").exists()
+    assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
+
+
+def test_interim_writer_rejects_existing_data_before_writing_manifest_or_spec(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _interim_writer_case()
+    artifact_root = tmp_path / "data" / "interim" / "csmar" / "daily_market"
+    data_root = artifact_root / "data"
+    data_root.mkdir(parents=True)
+    (data_root / "sentinel.txt").write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(OutputAlreadyExistsError):
+        write_interim_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            interim_data_id="daily_market",
+        )
+
+    assert (data_root / "sentinel.txt").read_text(encoding="utf-8") == "existing\n"
+    assert not (artifact_root / "_manifest" / "manifest.json").exists()
+    assert not (artifact_root / "spec.json").exists()
+
+
+def test_research_dataset_writer_rejects_existing_spec_before_creating_data(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _research_dataset_writer_case()
+    artifact_root = (
+        tmp_path / "data" / "processed" / "a_share" / "research_datasets" / "demo"
+    )
+    spec_path = artifact_root / "spec.json"
+    spec_path.parent.mkdir(parents=True)
+    spec_path.write_text('{"existing": true}\n', encoding="utf-8")
+
+    with pytest.raises(OutputAlreadyExistsError):
+        write_research_dataset(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            dataset_id="demo",
+        )
+
+    assert not (artifact_root / "data").exists()
+    assert spec_path.read_text(encoding="utf-8") == '{"existing": true}\n'
+    assert not (artifact_root / "_manifest" / "manifest.json").exists()
+
+
+def test_research_dataset_writer_rejects_existing_data_before_writing_metadata(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _research_dataset_writer_case()
+    artifact_root = (
+        tmp_path / "data" / "processed" / "a_share" / "research_datasets" / "demo"
+    )
+    data_root = artifact_root / "data"
+    data_root.mkdir(parents=True)
+    (data_root / "sentinel.txt").write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(OutputAlreadyExistsError):
+        write_research_dataset(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            dataset_id="demo",
+        )
+
+    assert (data_root / "sentinel.txt").read_text(encoding="utf-8") == "existing\n"
+    assert not (artifact_root / "spec.json").exists()
+    assert not (artifact_root / "_manifest" / "manifest.json").exists()
+
+
+def test_processed_writer_cleans_artifact_temp_root_after_parquet_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame, catalog = _processed_writer_case()
+    artifact_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
+
+    def fail_parquet_write(_frame: pd.DataFrame, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (path.parent / "partial.txt").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("simulated_parquet_failure")
+
+    monkeypatch.setattr(parquet_module, "_write_parquet_file", fail_parquet_write)
+
+    with pytest.raises(RuntimeError, match="simulated_parquet_failure"):
+        write_processed_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            processed_data_id="x",
+        )
+
+    assert not artifact_root.exists()
+    assert list(artifact_root.parent.glob(".x.tmp-*")) == []
+
+
+def test_interim_writer_cleans_artifact_temp_root_after_parquet_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame, catalog = _interim_writer_case()
+    artifact_root = tmp_path / "data" / "interim" / "csmar" / "daily_market"
+
+    def fail_parquet_write(_frame: pd.DataFrame, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (path.parent / "partial.txt").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("simulated_parquet_failure")
+
+    monkeypatch.setattr(parquet_module, "_write_parquet_file", fail_parquet_write)
+
+    with pytest.raises(RuntimeError, match="simulated_parquet_failure"):
+        write_interim_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            interim_data_id="daily_market",
+        )
+
+    assert not artifact_root.exists()
+    assert list(artifact_root.parent.glob(".daily_market.tmp-*")) == []
+
+
+def test_research_dataset_writer_cleans_artifact_temp_root_after_parquet_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame, catalog = _research_dataset_writer_case()
+    artifact_root = (
+        tmp_path / "data" / "processed" / "a_share" / "research_datasets" / "demo"
+    )
+
+    def fail_parquet_write(_frame: pd.DataFrame, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (path.parent / "partial.txt").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("simulated_parquet_failure")
+
+    monkeypatch.setattr(parquet_module, "_write_parquet_file", fail_parquet_write)
+
+    with pytest.raises(RuntimeError, match="simulated_parquet_failure"):
+        write_research_dataset(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            dataset_id="demo",
+        )
+
+    assert not artifact_root.exists()
+    assert list(artifact_root.parent.glob(".demo.tmp-*")) == []
+
+
+def _processed_writer_case() -> tuple[pd.DataFrame, ProcessedDataCatalog]:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "value": [1.0],
+        }
+    )
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="factors",
+            processed_data_id="x",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "value": ColumnRole.FACTOR,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    return frame, catalog
+
+
+def _interim_writer_case() -> tuple[pd.DataFrame, InterimDataCatalog]:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "session_date": pd.to_datetime(["2014-01-02"]),
+            "available_at": pd.to_datetime(["2014-01-02"]),
+            "source_id": ["csmar"],
+            "source_asset_id": ["000001"],
+            "close": [1.0],
+        }
+    )
+    catalog = InterimDataCatalog()
+    catalog.register(
+        InterimDataSpec(
+            market_id=MarketId("a_share"),
+            source_id=SourceId("csmar"),
+            interim_data_id="daily_market",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                **{
+                    name: ColumnRole.TIMESTAMP
+                    if name in {"timestamp", "session_date", "available_at"}
+                    else ColumnRole.SOURCE
+                    if name in {"source_id", "source_asset_id"}
+                    else ColumnRole.KEY
+                    for name in platform_interim_column_names()
+                },
+                "close": ColumnRole.CONTEXT,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    return frame, catalog
+
+
+def _research_dataset_writer_case() -> tuple[pd.DataFrame, ResearchDatasetCatalog]:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "mom_20d": [1.0],
+            "forward_return_20d": [0.01],
+        }
+    )
+    catalog = ResearchDatasetCatalog()
+    catalog.register(
+        ResearchDatasetSpec(
+            market_id=MarketId("a_share"),
+            dataset_id="demo",
+            processed_data_ids=("price_volume_56", "forward_returns"),
+            feature_columns=("mom_20d",),
+            label_columns=("forward_return_20d",),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.RESEARCH_ROW,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "mom_20d": ColumnRole.FEATURE,
+                "forward_return_20d": ColumnRole.LABEL,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    return frame, catalog

@@ -40,8 +40,8 @@ Route ownership:
 
 The data-product POST route accepts `DataProductInterimRequest` with
 `execution_mode` and optional `run_id`. `execution_mode` defaults to `execute`;
-`dry_run` validates catalog/spec/workflow/writer boundaries and returns
-sanitized planned output only. `execute` runs the minimal fixture-backed
+`dry_run` validates catalog/spec/workflow/writer boundaries and returns a
+sanitized validation summary only. `execute` runs the minimal fixture-backed
 registered workflow path. Private real-data execution is not exposed through
 API/CLI in `0.1.0`.
 
@@ -57,7 +57,7 @@ qrp catalog labels
 qrp catalog universes
 qrp catalog data-products
 qrp data-product interim a_share_daily_bar
-qrp data-product build-interim --data-product a_share_daily_bar
+qrp data-product interim a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run

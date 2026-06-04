@@ -39,15 +39,20 @@ def write_interim_data(
     spec = catalog.get(interim_data_id)
     if not isinstance(spec, InterimDataSpec):
         raise ValueError("expected_interim_data_spec")
-    data_root = layout.interim_data_root(spec.source_id, spec.interim_data_id) / "data"
-    write_partitioned_parquet_dataset(
-        frame,
-        data_root,
-        catalog=catalog,
-        data_id=interim_data_id,
-    )
-    _write_data_manifest(data_root.parent / "_manifest" / "manifest.json", spec)
-    return data_root
+    artifact_root = layout.interim_data_root(spec.source_id, spec.interim_data_id)
+
+    def _write(temp_root: Path) -> None:
+        _write_partitioned_parquet_dataset_contents(
+            frame,
+            temp_root / "data",
+            catalog=catalog,
+            data_id=interim_data_id,
+        )
+        _write_data_spec(temp_root / "spec.json", spec)
+        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec)
+
+    atomic_write_directory(artifact_root, _write)
+    return artifact_root / "data"
 
 
 def write_processed_data(
@@ -60,22 +65,24 @@ def write_processed_data(
     spec = catalog.get(processed_data_id)
     if not isinstance(spec, ProcessedDataSpec):
         raise ValueError("expected_processed_data_spec")
-    data_root = (
-        layout.processed_data_root(
-            spec.market_id,
-            spec.category,
-            spec.processed_data_id,
+    artifact_root = layout.processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
+    )
+
+    def _write(temp_root: Path) -> None:
+        _write_partitioned_parquet_dataset_contents(
+            frame,
+            temp_root / "data",
+            catalog=catalog,
+            data_id=processed_data_id,
         )
-        / "data"
-    )
-    write_partitioned_parquet_dataset(
-        frame,
-        data_root,
-        catalog=catalog,
-        data_id=processed_data_id,
-    )
-    _write_data_manifest(data_root.parent / "_manifest" / "manifest.json", spec)
-    return data_root
+        _write_data_spec(temp_root / "spec.json", spec)
+        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec)
+
+    atomic_write_directory(artifact_root, _write)
+    return artifact_root / "data"
 
 
 def write_research_dataset(
@@ -88,16 +95,20 @@ def write_research_dataset(
     spec = catalog.get(dataset_id)
     if not isinstance(spec, ResearchDatasetSpec):
         raise ValueError("expected_research_dataset_spec")
-    data_root = layout.research_dataset_root(spec.market_id, spec.dataset_id) / "data"
-    write_partitioned_parquet_dataset(
-        frame,
-        data_root,
-        catalog=catalog,
-        data_id=dataset_id,
-    )
-    _write_research_dataset_spec(data_root.parent / "spec.json", spec)
-    _write_data_manifest(data_root.parent / "_manifest" / "manifest.json", spec)
-    return data_root
+    artifact_root = layout.research_dataset_root(spec.market_id, spec.dataset_id)
+
+    def _write(temp_root: Path) -> None:
+        _write_partitioned_parquet_dataset_contents(
+            frame,
+            temp_root / "data",
+            catalog=catalog,
+            data_id=dataset_id,
+        )
+        _write_data_spec(temp_root / "spec.json", spec)
+        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec)
+
+    atomic_write_directory(artifact_root, _write)
+    return artifact_root / "data"
 
 
 def write_partitioned_parquet_dataset(
@@ -112,15 +123,30 @@ def write_partitioned_parquet_dataset(
     final_root = Path(root)
 
     def _write(temp_root: Path) -> None:
-        partitioned = add_year_partition(frame, timestamp_column=timestamp_column)
-        for year, year_frame in partitioned.groupby("year", sort=True):
-            partition_root = temp_root / f"year={int(year)}"
-            _write_parquet_file(
-                year_frame.drop(columns=["year"]),
-                partition_root / "part-000.parquet",
-            )
+        _write_partitioned_parquet_files(
+            frame,
+            temp_root,
+            timestamp_column=timestamp_column,
+        )
 
     atomic_write_directory(final_root, _write)
+    return root
+
+
+def _write_partitioned_parquet_dataset_contents(
+    frame: pd.DataFrame,
+    root: Path,
+    *,
+    catalog: DataSpecCatalog,
+    data_id: str,
+) -> Path:
+    spec = catalog.get(data_id)
+    timestamp_column = validate_parquet_dataset_write(frame, root, spec)
+    _write_partitioned_parquet_files(
+        frame,
+        Path(root),
+        timestamp_column=timestamp_column,
+    )
     return root
 
 
@@ -250,8 +276,31 @@ def _write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:
     return path
 
 
+def _write_partitioned_parquet_files(
+    frame: pd.DataFrame,
+    root: Path,
+    *,
+    timestamp_column: str,
+) -> None:
+    partitioned = add_year_partition(frame, timestamp_column=timestamp_column)
+    for year, year_frame in partitioned.groupby("year", sort=True):
+        partition_root = root / f"year={int(year)}"
+        _write_parquet_file(
+            year_frame.drop(columns=["year"]),
+            partition_root / "part-000.parquet",
+        )
+
+
 def _write_data_manifest(path: Path, spec: DataSpec) -> Path:
-    payload = {
+    return write_manifest(path, _data_spec_payload(spec))
+
+
+def _write_data_spec(path: Path, spec: DataSpec) -> Path:
+    return write_manifest(path, _data_spec_payload(spec))
+
+
+def _data_spec_payload(spec: DataSpec) -> dict[str, object]:
+    payload: dict[str, object] = {
         "schema_version": spec.schema_version,
         "market_id": str(spec.market_id),
         "frequency": spec.frequency.value,
@@ -291,33 +340,7 @@ def _write_data_manifest(path: Path, spec: DataSpec) -> Path:
                 "mask_ids": list(spec.mask_ids),
             }
         )
-    return write_manifest(path, payload)
-
-
-def _write_research_dataset_spec(path: Path, spec: ResearchDatasetSpec) -> Path:
-    return write_manifest(
-        path,
-        {
-            "schema_version": spec.schema_version,
-            "dataset_id": spec.dataset_id,
-            "market_id": str(spec.market_id),
-            "processed_data_ids": list(spec.processed_data_ids),
-            "feature_columns": list(spec.feature_columns),
-            "label_columns": list(spec.label_columns),
-            "filter_columns": list(spec.filter_columns),
-            "context_columns": list(spec.context_columns),
-            "source_columns": list(spec.source_columns),
-            "universe_id": spec.universe_id,
-            "mask_ids": list(spec.mask_ids),
-            "frequency": spec.frequency.value,
-            "grain": spec.grain.value,
-            "primary_key": list(spec.primary_key),
-            "partition_columns": list(spec.partition_columns),
-            "column_roles": {
-                column: role.value for column, role in sorted(spec.column_roles.items())
-            },
-        },
-    )
+    return payload
 
 
 __all__ = [

@@ -7,11 +7,13 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import TracebackType
 from typing import Any
 
 import pandas as pd
+
+from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.storage.layout import StorageLayout
 
 
 @dataclass(frozen=True)
@@ -20,7 +22,6 @@ class ProfileConfig:
 
     enabled: bool = False
     write_artifacts: bool = False
-    output_dir: str | Path | None = None
     sample_memory: bool = True
 
     def __post_init__(self) -> None:
@@ -163,32 +164,23 @@ class StageProfiler:
             rows.append(row)
         return pd.DataFrame.from_records(rows)
 
-    def write_artifacts(self, output_dir: str | Path) -> dict[str, Path]:
+    def write_artifacts(
+        self,
+        *,
+        spec: ReportSpec,
+        layout: StorageLayout,
+    ) -> dict[str, object]:
         """写出 stage profile 的 CSV、JSON 和 Markdown artifacts。"""
 
-        from quant_research_platform.contracts.ids import MarketId
-        from quant_research_platform.contracts.reports import ReportSpec
         from quant_research_platform.reports.bundles import (
             write_stage_profile_bundle,
         )
-        from quant_research_platform.storage.layout import StorageLayout
-        from quant_research_platform.storage.privacy import is_private_boundary_path
 
         frame = self.to_frame()
-        destination = Path(output_dir)
-        if not is_private_boundary_path(destination):
-            raise ValueError("outside_private_boundary")
-        market_id = _infer_market_id(destination)
         return write_stage_profile_bundle(
             frame,
-            spec=ReportSpec(
-                report_id="stage_profile",
-                report_definition_id="stage_profile_private_diagnostic",
-                run_id=destination.name,
-                market_id=MarketId(market_id),
-                run_type="diagnostics",
-            ),
-            layout=StorageLayout(project_root=_infer_project_root(destination)),
+            spec=spec,
+            layout=layout,
             report_text=_render_stage_profile_report(frame),
         )
 
@@ -290,19 +282,3 @@ def _format_optional_mb(value: object) -> str:
     if value is None or pd.isna(value):
         return "unavailable"
     return f"{float(value):.3f} MB"
-
-
-def _infer_market_id(path: Path) -> str:
-    parts = path.parts
-    for index, part in enumerate(parts[:-2]):
-        if part == "private_real":
-            return parts[index + 1]
-    return "unknown"
-
-
-def _infer_project_root(path: Path) -> Path:
-    parts = path.parts
-    for index in range(len(parts) - 2):
-        if parts[index : index + 2] == ("reports", "private_real"):
-            return Path(*parts[:index]) if index else Path(".")
-    return Path(".")

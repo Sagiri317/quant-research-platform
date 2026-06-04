@@ -12,7 +12,7 @@ class SourceDefinition:
     source_id: SourceId
     display_name: str
     interim_spec_ids: tuple[str, ...]
-    public_identifier: bool = True
+    public_identifier: bool = False
     definition_version: str = "0.1"
 
 

@@ -126,6 +126,7 @@ def test_workflow_executor_does_not_accept_arbitrary_output_root() -> None:
 def test_workflow_executor_rejects_arbitrary_handler_injection() -> None:
     assert "handlers" not in inspect.signature(execute_workflow).parameters
     assert "include_summary" not in inspect.signature(execute_workflow).parameters
+    assert not hasattr(WorkflowNodeRegistry, "handlers_for")
     with pytest.raises(TypeError):
         execute_workflow(  # type: ignore[call-arg]
             WorkflowSpec(workflow_id="no_handlers"),

@@ -39,7 +39,6 @@ def write_stage_profile_bundle(
     spec: ReportSpec,
     report_text: str,
     layout: StorageLayout,
-    output_root: Path | None = None,
 ) -> dict[str, Path]:
     """Write a private stage-profile report bundle."""
 
@@ -48,7 +47,6 @@ def write_stage_profile_bundle(
         layout=layout,
         expected_definition_id="stage_profile_private_diagnostic",
         expected_run_id=spec.run_id,
-        output_root=output_root,
     )
 
     def _write(temp_root: Path) -> None:
@@ -92,7 +90,6 @@ def write_prediction_bundle_files(
     spec: PredictionSpec,
     report_spec: ReportSpec,
     layout: StorageLayout,
-    output_root: Path | None = None,
 ) -> Path:
     """Write a private prediction bundle under reports/private_real."""
 
@@ -101,7 +98,6 @@ def write_prediction_bundle_files(
         layout=layout,
         expected_definition_id="prediction_bundle_private",
         expected_run_id=spec.prediction_id,
-        output_root=output_root,
     )
     required = (*spec.primary_key, spec.prediction_column)
     missing = sorted(set(required).difference(frame.columns))
@@ -149,7 +145,6 @@ def write_evaluation_report_files(
     spec: EvaluationSpec,
     report_spec: ReportSpec,
     layout: StorageLayout,
-    output_root: Path | None = None,
 ) -> Path:
     """Write a private evaluation report bundle under reports/private_real."""
 
@@ -158,7 +153,6 @@ def write_evaluation_report_files(
         layout=layout,
         expected_definition_id="evaluation_report_private",
         expected_run_id=spec.run_id,
-        output_root=output_root,
     )
 
     _validate_report_frame(
@@ -225,7 +219,6 @@ def _derive_report_run_root(
     layout: StorageLayout,
     expected_definition_id: str,
     expected_run_id: str,
-    output_root: Path | None,
 ) -> Path:
     try:
         definition = ReportCatalog.bootstrap_default().get(
@@ -245,8 +238,6 @@ def _derive_report_run_root(
         layout.private_report_root(report_spec.market_id, report_spec.run_type)
         / report_spec.run_id
     )
-    if output_root is not None and Path(output_root) != run_root:
-        raise ValueError("report_output_root_mismatch")
     if report_spec.private_boundary_required and not is_private_boundary_path(run_root):
         raise ValueError("outside_private_boundary")
     if "data/processed" in run_root.as_posix():

@@ -13,6 +13,7 @@ from quant_research_platform.interfaces.api.errors import (
     register_api_error_handlers,
 )
 from quant_research_platform.interfaces.api.models import DataProductInterimRequest
+from quant_research_platform.storage.errors import WriteRejectedError
 
 CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
 DEFAULT_CORS_ORIGINS = (
@@ -90,6 +91,13 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
                 message=str(exc),
                 status_code=404,
                 field="data_product_id",
+            ) from exc
+        except WriteRejectedError as exc:
+            raise ApiError(
+                error_code=exc.failure_code,
+                message=exc.failure_code,
+                status_code=409,
+                details=exc.to_public_summary(),
             ) from exc
         except ValueError as exc:
             raise ApiError(

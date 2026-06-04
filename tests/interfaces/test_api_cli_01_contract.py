@@ -11,6 +11,7 @@ import quant_research_platform.interfaces.services as services_module
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
 from quant_research_platform.interfaces.cli import app
+from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
 create_app = api_app_module.create_app
 
@@ -116,14 +117,8 @@ def test_cli_exposes_clean_rewrite_command_groups() -> None:
         ["catalog", "labels"],
         ["catalog", "universes"],
         ["catalog", "data-products"],
-        ["data-product", "build-interim", "--data-product", "a_share_daily_bar"],
-        [
-            "data-product",
-            "build-interim",
-            "--data-product",
-            "a_share_daily_bar",
-            "--dry-run",
-        ],
+        ["data-product", "interim", "a_share_daily_bar"],
+        ["data-product", "interim", "a_share_daily_bar", "--dry-run"],
         ["market", "build-processed", "--market", "a_share"],
         ["research", "build-dataset"],
         ["workflow", "run"],
@@ -141,11 +136,13 @@ def test_cli_exposes_clean_rewrite_command_groups() -> None:
 
 def test_cli_help_exposes_dry_run_without_execute_or_private_flags() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["data-product", "build-interim", "--help"])
+    result = runner.invoke(app, ["data-product", "interim", "--help"])
+    group_help = runner.invoke(app, ["data-product", "--help"])
 
     assert result.exit_code == 0
     assert "--dry-run" in result.output
     assert "--execute" not in result.output
+    assert "build-interim" not in group_help.output
     assert "--private-real" not in result.output
     assert "--source-root" not in result.output
     assert "--input-root" not in result.output
@@ -201,7 +198,7 @@ def test_cli_rejects_non_fixed_data_product_and_market_names() -> None:
     runner = CliRunner()
 
     assert runner.invoke(
-        app, ["data-product", "build-interim", "--data-product", "other"]
+        app, ["data-product", "interim", "other"]
     ).exit_code != 0
     assert runner.invoke(
         app, ["market", "build-processed", "--market", "other"]
@@ -237,8 +234,7 @@ def test_cli_error_output_is_sanitized() -> None:
         app,
         [
             "data-product",
-            "build-interim",
-            "--data-product",
+            "interim",
             r"C:\Users\DELL\000001.SZ",
         ],
     )
@@ -247,6 +243,56 @@ def test_cli_error_output_is_sanitized() -> None:
     assert "C:" not in result.output
     assert "000001" not in result.output
     assert "csmar" not in result.output.lower()
+
+
+def test_cli_writer_failure_summary_is_sanitized(monkeypatch) -> None:
+    def fail_with_existing_output(*_args, **_kwargs):
+        raise OutputAlreadyExistsError(
+            r"failed at C:\Users\DELL\data\raw\csmar\000001.SZ"
+        )
+
+    monkeypatch.setattr(
+        services_module,
+        "validate_data_product_interim",
+        fail_with_existing_output,
+    )
+    result = CliRunner().invoke(app, ["data-product", "interim", "a_share_daily_bar"])
+
+    assert result.exit_code == 2
+    assert "status" in result.output
+    assert "failed" in result.output
+    assert "failure_code" in result.output
+    assert "output_already_exists" in result.output
+    assert "C:" not in result.output
+    assert "000001" not in result.output
+    assert "csmar" not in result.output.lower()
+
+
+def test_api_writer_failure_summary_is_sanitized(monkeypatch) -> None:
+    def fail_with_existing_output(*_args, **_kwargs):
+        raise OutputAlreadyExistsError(
+            r"failed at C:\Users\DELL\data\raw\csmar\000001.SZ"
+        )
+
+    monkeypatch.setattr(
+        services_module,
+        "validate_data_product_interim",
+        fail_with_existing_output,
+    )
+    response = TestClient(create_app()).post(
+        "/api/0.1/data-products/a_share_daily_bar/interim"
+    )
+    payload = response.json()
+
+    assert response.status_code == 409
+    assert payload["error"]["error_code"] == "output_already_exists"
+    assert payload["error"]["details"] == {
+        "status": "failed",
+        "failure_code": "output_already_exists",
+    }
+    assert "C:" not in str(payload)
+    assert "000001" not in str(payload)
+    assert "csmar" not in str(payload).lower()
 
 
 def test_clean_rewrite_cli_does_not_expose_retired_commands() -> None:
