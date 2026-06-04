@@ -5,10 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from quant_research_platform.contracts.data import DataGrain
-from quant_research_platform.contracts.data_products import (
-    DataProductDefinition,
-    ProviderBinding,
-)
+from quant_research_platform.contracts.data_products import DataProductDefinition
 from quant_research_platform.contracts.ids import MarketId
 
 
@@ -41,10 +38,6 @@ class DataProductRegistry:
                 market_id=MarketId("a_share"),
                 grain=DataGrain.ASSET_TIMESTAMP,
                 interim_spec_ids=("a_share_daily_bar_interim",),
-                provider_binding=ProviderBinding(
-                    provider_id="csmar",
-                    implementation_package="quant_research_platform.sources.csmar",
-                ),
             )
         )
         return registry

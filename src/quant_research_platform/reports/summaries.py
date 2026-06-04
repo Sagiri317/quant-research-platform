@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.runtime.privacy import sanitize_public_object
 
 
@@ -28,6 +29,9 @@ class ReportSummary:
     status: str
     contract_version: str = "0.1"
     aggregate_metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        validate_run_id(self.run_id)
 
     def to_record(self) -> dict[str, Any]:
         return sanitize_public_object(asdict(self))
@@ -55,6 +59,9 @@ class ReportRunIndexRecord:
     status: str
     report_definition_id: str
     contract_version: str = "0.1"
+
+    def __post_init__(self) -> None:
+        validate_run_id(self.run_id)
 
     def to_record(self) -> dict[str, Any]:
         return sanitize_public_object(asdict(self))

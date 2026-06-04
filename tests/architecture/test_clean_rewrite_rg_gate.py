@@ -43,6 +43,7 @@ APPROVED_FIELD_SPEC_FILES = {
 }
 
 APPROVED_WRITER_MODULES = {
+    Path("src/quant_research_platform/storage/atomic.py"),
     Path("src/quant_research_platform/storage/parquet.py"),
     Path("src/quant_research_platform/storage/manifests.py"),
     Path("src/quant_research_platform/reports/bundles.py"),
@@ -256,6 +257,9 @@ def test_business_logic_does_not_bypass_persistent_writers() -> None:
             if call_name in FORBIDDEN_WRITER_METHODS:
                 hits.append(f"{path}:{node.lineno}: {call_name}")
                 continue
+            if _is_open_write_call(node):
+                hits.append(f"{path}:{node.lineno}: open(...).write")
+                continue
             if _is_open_call(node.func):
                 mode = _open_mode(node)
                 if mode is None:
@@ -284,6 +288,15 @@ def _is_open_call(func: ast.expr) -> bool:
     return isinstance(func, ast.Attribute) and func.attr == "open"
 
 
+def _is_open_write_call(call: ast.Call) -> bool:
+    return (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "write"
+        and isinstance(call.func.value, ast.Call)
+        and _is_open_call(call.func.value.func)
+    )
+
+
 def _open_mode(call: ast.Call) -> str | None:
     for keyword in call.keywords:
         if keyword.arg == "mode":
@@ -303,3 +316,10 @@ def _literal_string(node: ast.expr) -> str | None:
 
 def _is_write_mode(mode: str) -> bool:
     return any(flag in mode for flag in ("w", "a", "x", "+"))
+
+
+def test_direct_write_gate_detects_chained_open_write() -> None:
+    tree = ast.parse("open('artifact.txt', 'w').write('unsafe')\n")
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+    assert any(_is_open_write_call(call) for call in calls)

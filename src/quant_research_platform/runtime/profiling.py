@@ -189,7 +189,6 @@ class StageProfiler:
                 run_type="diagnostics",
             ),
             layout=StorageLayout(project_root=_infer_project_root(destination)),
-            output_root=destination,
             report_text=_render_stage_profile_report(frame),
         )
 

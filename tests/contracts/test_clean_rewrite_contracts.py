@@ -13,6 +13,7 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     ProcessedDataSpec,
 )
+from quant_research_platform.contracts.data_products import DataProductDefinition
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
@@ -46,6 +47,21 @@ def test_contract_versions_and_canonical_processed_key() -> None:
     assert spec.schema_version == "0.1"
     assert spec.primary_key == platform_entity_time_key()
     assert spec.partition_columns == ("year",)
+
+
+def test_data_product_contract_does_not_own_provider_binding() -> None:
+    import quant_research_platform.contracts as contracts
+    import quant_research_platform.contracts.data_products as data_products
+
+    assert "ProviderBinding" not in data_products.__all__
+    assert "BindingVisibility" not in data_products.__all__
+    assert not hasattr(data_products, "ProviderBinding")
+    assert not hasattr(data_products, "BindingVisibility")
+    assert "ProviderBinding" not in contracts.__all__
+    assert "BindingVisibility" not in contracts.__all__
+    assert not hasattr(contracts, "ProviderBinding")
+    assert not hasattr(contracts, "BindingVisibility")
+    assert "provider_binding" not in DataProductDefinition.__dataclass_fields__
 
 
 def test_factor_and_label_definitions_keep_future_flags_out() -> None:

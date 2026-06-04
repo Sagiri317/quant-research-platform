@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
+from quant_research_platform.agents.safety import (
+    ProposalSafetyError,
+    assert_public_safe_text,
+)
 from quant_research_platform.runtime.privacy import (
     sanitize_public_object,
     sanitize_public_text,
@@ -49,3 +55,17 @@ def test_sanitizer_recurses_public_objects() -> None:
     assert "D:" not in str(sanitized)
     assert "000001" not in str(sanitized)
     assert "abcdef123456" not in str(sanitized)
+
+
+def test_private_marker_input_is_rejected_before_row_level_read() -> None:
+    row_reader_called = False
+
+    def guarded_public_output(input_text: str) -> None:
+        nonlocal row_reader_called
+        assert_public_safe_text(input_text)
+        row_reader_called = True
+
+    with pytest.raises(ProposalSafetyError):
+        guarded_public_output(r"data\processed\a_share row sample: market_id=asset")
+
+    assert row_reader_called is False

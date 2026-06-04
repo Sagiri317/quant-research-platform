@@ -25,6 +25,9 @@ replacement for `PROJECT_STATUS.md`.
 - Fixture-backed API/CLI execution is supported; private real-data execution is
   not exposed through API/CLI in `0.1.0`.
 - Report writers derive paths from `StorageLayout + ReportSpec + run_id`.
+- Public-safe aggregate evidence is generated from local private aggregate
+  verification; full historical `daily_panel` aggregate coverage now spans
+  `2014-01-01` through `2025-12-31` without committed row-level output.
 - A-share is the first enabled market. Other markets are future design only.
 - `agents/` is proposal-only in this phase; it does not call external LLM APIs
   and does not write private row-level data.
@@ -43,8 +46,8 @@ markers, local absolute paths, credentials, or stock-code samples.
 
 ## Current Next Step
 
-- Run final pre-merge verification gates, review the diff, then commit and push
-  `feature/qrp-clean-rewrite`.
+- Run final pre-merge verification gates, review the diff, and commit/push only
+  if no required blocker remains.
 
 ## Hard Reminders
 

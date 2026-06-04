@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from quant_research_platform.contracts.run_id import validate_run_id
+
 
 @dataclass(frozen=True)
 class PredictionSpec:
@@ -14,18 +16,25 @@ class PredictionSpec:
     primary_key: tuple[str, ...]
     train_end: str
     test_start: str
+    test_end: str | None = None
     run_type: str = "prediction"
     prediction_mode: str = "minimal_oos"
     is_oos: bool = True
+    is_final_oos_window: bool = True
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
         if self.contract_version != "0.1":
             raise ValueError("unsupported_prediction_contract_version")
-        if self.prediction_mode != "minimal_oos":
+        validate_run_id(self.prediction_id)
+        if self.prediction_mode not in {"minimal_oos", "oos_smoke"}:
             raise ValueError("unsupported_prediction_mode")
         if not self.is_oos:
             raise ValueError("prediction_must_be_oos")
+        if self.test_end is None and not self.is_final_oos_window:
+            raise ValueError("prediction_open_ended_window_must_be_final")
+        if self.test_end is not None and self.is_final_oos_window:
+            object.__setattr__(self, "is_final_oos_window", False)
 
 
 __all__ = ["PredictionSpec"]

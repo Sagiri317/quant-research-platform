@@ -17,6 +17,12 @@ from quant_research_platform.agents.safety import (
     require_human_approval,
 )
 from quant_research_platform.agents.workflow_planner import plan_workflow
+from quant_research_platform.catalog.factors import FactorCatalog
+from quant_research_platform.contracts.factors import FactorDefinition
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_field_catalog,
+)
 
 
 def test_agent_proposals_start_unapproved() -> None:
@@ -125,6 +131,82 @@ def test_factor_factory_rejects_unknown_input_columns() -> None:
             factor_id="bad_input_factor",
             rationale="Candidate with unregistered input.",
             input_columns=("unknown_input_column",),
+        )
+
+
+def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() -> None:
+    proposal = FactorProposal(
+        proposal_id="factor-proposal-unregistered",
+        factor_id="candidate_factor",
+        rationale="Candidate for catalog review only.",
+        input_columns=("close",),
+        output_columns=("candidate_factor",),
+        required_processed_data_id="daily_panel",
+    )
+
+    assert not hasattr(proposal, "execute")
+    assert not hasattr(proposal, "persist")
+    assert not hasattr(proposal, "to_workflow_node")
+
+
+def test_factor_catalog_registers_valid_factor_proposal() -> None:
+    proposal = propose_factor(
+        proposal_id="factor-proposal-register",
+        factor_id="candidate_factor",
+        rationale="Candidate based on registered close field.",
+        input_columns=("close",),
+        output_columns=("candidate_factor",),
+        required_processed_data_id="daily_panel",
+    )
+    catalog = FactorCatalog()
+
+    definition = catalog.register_proposal(
+        proposal,
+        market_id=MarketId("a_share"),
+        field_names=set(a_share_field_catalog().list_names()),
+    )
+
+    assert isinstance(definition, FactorDefinition)
+    assert definition.factor_id == "candidate_factor"
+    assert definition.output_column == "candidate_factor"
+    assert catalog.get("candidate_factor") == definition
+
+
+def test_factor_proposal_registration_rejects_duplicate_output_columns() -> None:
+    proposal = FactorProposal(
+        proposal_id="factor-proposal-duplicate-output",
+        factor_id="candidate_factor",
+        rationale="Invalid duplicate output candidate.",
+        input_columns=("close",),
+        output_columns=("candidate_factor", "candidate_factor"),
+        required_processed_data_id="daily_panel",
+    )
+
+    with pytest.raises(ValueError, match="duplicate_factor_output_column"):
+        FactorCatalog().register_proposal(
+            proposal,
+            market_id=MarketId("a_share"),
+            field_names=set(a_share_field_catalog().list_names()),
+        )
+
+
+def test_factor_proposal_registration_rejects_unresolved_derived_input() -> None:
+    proposal = FactorProposal(
+        proposal_id="factor-proposal-unresolved-derived",
+        factor_id="candidate_factor",
+        rationale="Invalid derived input candidate.",
+        input_columns=("close", "candidate_derived"),
+        base_input_columns=("close",),
+        derived_input_columns=("candidate_derived",),
+        output_columns=("candidate_factor",),
+        required_processed_data_id="daily_panel",
+    )
+
+    with pytest.raises(ValueError, match="unresolved_factor_derived_input"):
+        FactorCatalog().register_proposal(
+            proposal,
+            market_id=MarketId("a_share"),
+            field_names=set(a_share_field_catalog().list_names()),
         )
 
 

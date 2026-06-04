@@ -8,6 +8,8 @@ from typing import Any
 
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.runtime.privacy import sanitize_public_object
 
 
 class WorkflowCheckpointPolicy(StrEnum):
@@ -95,6 +97,9 @@ class WorkflowRunSummary:
     artifact_writer_policy: str
     failure_code: str | None = None
 
+    def __post_init__(self) -> None:
+        validate_run_id(self.run_id)
+
     def to_public_record(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "workflow_id": self.workflow_id,
@@ -114,7 +119,7 @@ class WorkflowRunSummary:
         }
         if self.failure_code is not None:
             payload["failure_code"] = self.failure_code
-        return payload
+        return sanitize_public_object(payload)
 
 
 __all__ = [

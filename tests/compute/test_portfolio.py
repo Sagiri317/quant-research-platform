@@ -3,14 +3,24 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-import quant_research_platform.compute.dataframe.portfolio as portfolio_module
-import quant_research_platform.compute.dataframe.portfolio_helpers as portfolio_helpers
+from quant_research_platform.compute.dataframe import (
+    constraints as dataframe_constraints,
+)
 from quant_research_platform.compute.dataframe import (
     construction as dataframe_construction,
 )
-from quant_research_platform.compute.dataframe import exposure as dataframe_exposure
-from quant_research_platform.compute.dataframe import reporting as dataframe_reporting
-from quant_research_platform.compute.dataframe import turnover as dataframe_turnover
+from quant_research_platform.compute.dataframe import (
+    exposure as dataframe_exposure,
+)
+from quant_research_platform.compute.dataframe import (
+    performance as dataframe_performance,
+)
+from quant_research_platform.compute.dataframe import (
+    reporting as dataframe_reporting,
+)
+from quant_research_platform.compute.dataframe import (
+    turnover as dataframe_turnover,
+)
 from quant_research_platform.compute.dataframe.portfolio import (
     build_long_short_positions,
     build_weighted_positions,
@@ -38,7 +48,7 @@ def test_portfolio_split_modules_preserve_public_imports() -> None:
     assert dataframe_construction.build_weighted_positions is build_weighted_positions
     assert dataframe_turnover.calculate_turnover is calculate_turnover
     assert dataframe_exposure.summarize_exposure is summarize_exposure
-    assert dataframe_reporting.summarize_performance is summarize_performance
+    assert dataframe_performance.summarize_performance is summarize_performance
     assert hasattr(tensor_construction, "build_tensor_weighted_positions")
     assert hasattr(tensor_turnover, "calculate_tensor_turnover_and_cost")
     assert hasattr(tensor_exposure, "summarize_tensor_exposure_from_path")
@@ -161,14 +171,14 @@ def test_weighted_position_ranking_avoids_dataframe_signal_sort(
 
 
 def test_weighted_positions_pass_sparse_targets_to_tradability(monkeypatch) -> None:
-    original_apply = portfolio_module._apply_tradability_constraints
+    original_apply = dataframe_construction._apply_tradability_constraints
 
     def assert_sparse_positions(*, positions, **kwargs):
         assert len(positions) == 2
         return original_apply(positions=positions, **kwargs)
 
     monkeypatch.setattr(
-        portfolio_module,
+        dataframe_construction,
         "_apply_tradability_constraints",
         assert_sparse_positions,
     )
@@ -308,7 +318,7 @@ def test_tradability_ignores_previous_assets_missing_from_timestamp() -> None:
     )
     positions = {"A": 1.0}
 
-    adjusted = portfolio_helpers._apply_tradability_constraints(
+    adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
@@ -359,8 +369,8 @@ def test_tradability_constraints_skip_asset_loop_when_all_flags_true(
     def fail_block_check(*args, **kwargs):
         raise AssertionError("all-true tradability flags should skip asset checks")
 
-    monkeypatch.setattr(portfolio_helpers, "_is_entry_blocked", fail_block_check)
-    monkeypatch.setattr(portfolio_helpers, "_is_exit_blocked", fail_block_check)
+    monkeypatch.setattr(dataframe_constraints, "_is_entry_blocked", fail_block_check)
+    monkeypatch.setattr(dataframe_constraints, "_is_exit_blocked", fail_block_check)
     panel = _ranking_panel().assign(can_enter=True, can_exit=True)
     spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
 
@@ -393,7 +403,7 @@ def test_tradability_constraints_adjust_positions_in_place() -> None:
     )
     positions = {"A": 1.0, "B": -1.0}
 
-    adjusted = portfolio_helpers._apply_tradability_constraints(
+    adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
@@ -411,7 +421,7 @@ def test_tradability_constraints_skip_entry_check_for_zero_targets(
     def fail_entry_check(*args, **kwargs):
         raise AssertionError("zero target positions should skip entry checks")
 
-    monkeypatch.setattr(portfolio_helpers, "_is_entry_blocked", fail_entry_check)
+    monkeypatch.setattr(dataframe_constraints, "_is_entry_blocked", fail_entry_check)
     panel = pd.DataFrame(
         {
             "timestamp": ["2026-01-01", "2026-01-01"],
@@ -423,7 +433,7 @@ def test_tradability_constraints_skip_entry_check_for_zero_targets(
     )
     positions = {"A": 0.0, "B": 0.0}
 
-    adjusted = portfolio_helpers._apply_tradability_constraints(
+    adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
@@ -440,7 +450,7 @@ def test_tradability_constraints_skip_entry_check_for_same_sign_positions(
     def fail_entry_check(*args, **kwargs):
         raise AssertionError("same-sign existing positions should skip entry checks")
 
-    monkeypatch.setattr(portfolio_helpers, "_is_entry_blocked", fail_entry_check)
+    monkeypatch.setattr(dataframe_constraints, "_is_entry_blocked", fail_entry_check)
     panel = pd.DataFrame(
         {
             "timestamp": ["2026-01-01"],
@@ -452,7 +462,7 @@ def test_tradability_constraints_skip_entry_check_for_same_sign_positions(
     )
     positions = {"A": 1.0}
 
-    adjusted = portfolio_helpers._apply_tradability_constraints(
+    adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
         spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
@@ -613,11 +623,8 @@ def test_simulation_does_not_join_timestamp_asset_labels(monkeypatch) -> None:
 def test_simulation_does_not_scan_turnover_and_cost_per_return_group(
     monkeypatch,
 ) -> None:
-    def fail_lookup(*args, **kwargs):
-        raise AssertionError("returns should use prepared turnover/cost lookups")
-
-    monkeypatch.setattr(portfolio_module, "_lookup_turnover", fail_lookup)
-    monkeypatch.setattr(portfolio_module, "_lookup_cost", fail_lookup)
+    assert not hasattr(dataframe_reporting, "_lookup_turnover")
+    assert not hasattr(dataframe_reporting, "_lookup_cost")
 
     simulate_weighted_long_short_returns(
         _ranking_panel(),
@@ -632,10 +639,10 @@ def test_simulation_streams_portfolio_path_without_rebuilding_from_positions(
     def fail_rebuild(*args, **kwargs):
         raise AssertionError("simulation should stream turnover/cost/returns")
 
-    monkeypatch.setattr(portfolio_module, "calculate_turnover", fail_rebuild)
-    monkeypatch.setattr(portfolio_module, "calculate_cost_breakdown", fail_rebuild)
+    monkeypatch.setattr(dataframe_turnover, "calculate_turnover", fail_rebuild)
+    monkeypatch.setattr(dataframe_turnover, "calculate_cost_breakdown", fail_rebuild)
     monkeypatch.setattr(
-        portfolio_module,
+        dataframe_reporting,
         "_calculate_long_short_from_positions",
         fail_rebuild,
     )

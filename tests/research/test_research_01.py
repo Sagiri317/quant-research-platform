@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -244,6 +245,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         primary_key=platform_entity_time_key(),
         train_end="2014-01-02",
         test_start="2014-01-03",
+        test_end="2014-01-03",
     )
 
     evaluation = evaluate_factor_frame(frame, eval_spec)
@@ -272,17 +274,11 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert len(evaluation.metrics) == 2
     assert prediction_spec.prediction_column in prediction.columns
     assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
+    assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
     assert run_root.as_posix().endswith(
         "reports/private_real/a_share/prediction/pred_demo"
     )
-    with pytest.raises(ValueError, match="report_output_root_mismatch"):
-        write_prediction_bundle(
-            prediction,
-            prediction_spec,
-            report_spec=report_spec,
-            layout=layout,
-            output_root=tmp_path / "public",
-        )
+    assert "output_root" not in inspect.signature(write_prediction_bundle).parameters
 
 
 def test_prediction_handoff_reads_research_dataset_and_writes_report(
@@ -315,6 +311,7 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
             primary_key=platform_entity_time_key(),
             train_end="2014-01-02",
             test_start="2014-01-03",
+            test_end="2014-01-03",
         )
     )
 
@@ -335,8 +332,11 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     assert manifest["prediction_mode"] == "minimal_oos"
     assert manifest["train_end"] == "2014-01-02"
     assert manifest["test_start"] == "2014-01-03"
+    assert manifest["test_end"] == "2014-01-03"
+    assert manifest["is_final_oos_window"] is False
     written = pd.read_parquet(run_root / "prediction.parquet")
     assert written["timestamp"].min() >= pd.Timestamp("2014-01-03")
+    assert written["timestamp"].max() <= pd.Timestamp("2014-01-03")
 
 
 def test_prediction_handoff_rejects_overlapping_oos_split(tmp_path: Path) -> None:
@@ -380,6 +380,41 @@ def test_prediction_handoff_rejects_overlapping_oos_split(tmp_path: Path) -> Non
             model_catalog=model_catalog,
             prediction_catalog=prediction_catalog,
             prediction_id="pred_demo",
+        )
+
+
+def test_prediction_spec_rejects_open_ended_non_final_window() -> None:
+    with pytest.raises(ValueError, match="prediction_open_ended_window_must_be_final"):
+        PredictionSpec(
+            prediction_id="pred_demo",
+            model_id="linear_demo",
+            research_dataset_id="demo",
+            prediction_column=default_prediction_column(),
+            primary_key=platform_entity_time_key(),
+            train_end="2014-01-02",
+            test_start="2014-01-03",
+            is_final_oos_window=False,
+        )
+
+
+def test_prediction_bundle_rejects_empty_oos_test_window() -> None:
+    frame = _research_frame()
+    spec = PredictionSpec(
+        prediction_id="pred_demo",
+        model_id="linear_demo",
+        research_dataset_id="demo",
+        prediction_column=default_prediction_column(),
+        primary_key=platform_entity_time_key(),
+        train_end="2014-01-02",
+        test_start="2099-01-01",
+    )
+
+    with pytest.raises(ValueError, match="prediction_oos_test_window_empty"):
+        build_prediction_bundle(
+            frame,
+            spec,
+            coefficients=pd.Series([0.0, 1.0]).to_numpy(),
+            feature_columns=("mom_20d",),
         )
 
 

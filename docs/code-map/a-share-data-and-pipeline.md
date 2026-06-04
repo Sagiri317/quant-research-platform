@@ -63,10 +63,11 @@ processed canonical key.
 ## Verification Intent
 
 - 2014 processed panel parity-or-explained-delta.
-- 2014 factor value parity-or-explained-delta.
-- 2014 label value parity-or-explained-delta.
-- Masks/universes parity.
-- Research dataset row/key/column parity.
+- 2014-2025 full historical `daily_panel` aggregate coverage.
+- 2014-2025 factor value parity-or-explained-delta.
+- 2014-2025 label value parity-or-explained-delta.
+- 2014-2025 masks/universes parity.
+- 2014-2025 research dataset row/key/column parity.
 - Evaluation and prediction smoke parity.
 - Private boundary and sanitizer tests.
 
@@ -78,5 +79,6 @@ processed canonical key.
   spec-driven writers.
 - 2014-2025 `a_share_price_volume_forward_returns` ResearchDataset materialized
   through the ResearchDataset assembler.
-- Full historical `daily_panel` remains generated/validated for 2014 only in
-  this clean-rewrite slice.
+- Full historical `daily_panel` aggregate coverage is verified for
+  `2014-01-01` through `2025-12-31` by local private aggregate verification
+  without committing row-level output artifacts.

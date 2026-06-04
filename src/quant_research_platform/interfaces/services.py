@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import re
-
 from quant_research_platform.catalog.data_products import DataProductRegistry
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
@@ -20,7 +19,6 @@ from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.workflows.services import execute_registered_workflow
 
 API_VERSION = "0.1"
-_RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 def list_factors() -> dict[str, object]:
@@ -172,12 +170,11 @@ def validate_workflow_run() -> dict[str, object]:
 
 
 def report_metadata(run_id: str) -> dict[str, object]:
-    if not run_id or "/" in run_id or "\\" in run_id:
-        raise ValueError("invalid_run_id")
+    resolved_run_id = validate_run_id(run_id)
     return _response(
         status="metadata_unavailable",
         mode="catalog_query_only",
-        run_id=run_id,
+        run_id=resolved_run_id,
         note="No local report index lookup is performed by the interface adapter.",
     )
 
@@ -188,21 +185,7 @@ def _response(**payload: object) -> dict[str, object]:
 
 def _resolve_run_id(run_id: str | None, *, prefix: str) -> str:
     resolved = run_id or f"{prefix}-fixture"
-    if not _RUN_ID_RE.fullmatch(resolved):
-        raise ValueError("invalid_run_id")
-    forbidden_fragments = (
-        "cs" + "mar",
-        "data/raw",
-        "data/interim",
-        "data/processed",
-        "reports/private_real",
-        "http",
-        "www.",
-    )
-    lowered = resolved.lower()
-    if any(fragment in lowered for fragment in forbidden_fragments):
-        raise ValueError("invalid_run_id")
-    return resolved
+    return validate_run_id(resolved)
 
 
 __all__ = [

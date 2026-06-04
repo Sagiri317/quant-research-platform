@@ -165,6 +165,38 @@ def test_api_schema_uses_execution_mode_not_dry_run_bool() -> None:
     assert "executionMode" not in text
 
 
+def test_openapi_schema_does_not_expose_provider_markers() -> None:
+    schema = create_app().openapi()
+    forbidden = ("csmar", "provider_id", "source_id", "implementation_package")
+    hits: list[str] = []
+
+    for path, path_item in schema["paths"].items():
+        for marker in forbidden:
+            if marker in path.lower():
+                hits.append(f"path:{path}:{marker}")
+        for method, operation in path_item.items():
+            if method not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            searchable = [
+                str(operation.get("operationId", "")),
+                str(operation.get("summary", "")),
+                str(operation.get("description", "")),
+                " ".join(str(tag) for tag in operation.get("tags", [])),
+            ]
+            combined = "\n".join(searchable).lower()
+            for marker in forbidden:
+                if marker in combined:
+                    hits.append(f"operation:{method}:{path}:{marker}")
+
+    for schema_name, component_schema in schema["components"]["schemas"].items():
+        combined = f"{schema_name}\n{component_schema}".lower()
+        for marker in forbidden:
+            if marker in combined:
+                hits.append(f"schema:{schema_name}:{marker}")
+
+    assert hits == []
+
+
 def test_cli_rejects_non_fixed_data_product_and_market_names() -> None:
     runner = CliRunner()
 

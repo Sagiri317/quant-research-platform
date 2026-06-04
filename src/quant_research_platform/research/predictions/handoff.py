@@ -55,7 +55,10 @@ def run_prediction_from_research_dataset(
     if train_end >= test_start:
         raise ValueError("prediction_train_end_must_precede_test_start")
     train_frame = frame.loc[frame["timestamp"] <= train_end].dropna()
-    test_frame = frame.loc[frame["timestamp"] >= test_start]
+    test_mask = frame["timestamp"] >= test_start
+    if prediction_spec.test_end is not None:
+        test_mask &= frame["timestamp"] <= pd.Timestamp(prediction_spec.test_end)
+    test_frame = frame.loc[test_mask]
     if train_frame.empty or test_frame.empty:
         raise ValueError("prediction_oos_split_has_empty_side")
     coefficients = fit_linear_baseline(train_frame, model_spec)

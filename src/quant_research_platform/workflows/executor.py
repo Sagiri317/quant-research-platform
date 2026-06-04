@@ -2,42 +2,32 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from pathlib import Path
-from typing import Any
-
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowRunSummary,
     WorkflowSpec,
 )
-from quant_research_platform.runtime.privacy import (
-    is_private_boundary_path,
-    sanitize_public_object,
-)
 from quant_research_platform.workflows.checkpoints import InMemoryCheckpointStore
 from quant_research_platform.workflows.planner import plan_topological_steps
 from quant_research_platform.workflows.registry import WorkflowNodeRegistry
 
-NodeHandler = Callable[[], Any]
 
-
-def execute_steps(
+def _execute_registered_steps(
     step_ids: tuple[str, ...],
-    handlers: dict[str, NodeHandler],
+    registry: WorkflowNodeRegistry,
     checkpoints: InMemoryCheckpointStore | None = None,
-) -> dict[str, Any]:
-    results: dict[str, Any] = {}
+) -> tuple[str, ...]:
+    completed: list[str] = []
     for step_id in step_ids:
-        if step_id not in handlers:
-            raise ValueError(f"missing_workflow_handler: {step_id}")
+        definition = registry.get(step_id)
         if checkpoints is not None:
             checkpoints.record(step_id, "running")
-        results[step_id] = handlers[step_id]()
+        definition.handler()
         if checkpoints is not None:
             checkpoints.record(step_id, "completed")
-    return results
+        completed.append(step_id)
+    return tuple(completed)
 
 
 def execute_workflow(
@@ -46,41 +36,31 @@ def execute_workflow(
     checkpoints: InMemoryCheckpointStore | None = None,
     *,
     allowed_spec_ids: set[str] | None = None,
-    output_root: Path | None = None,
     execution_mode: ExecutionMode | str | None = None,
     run_id: str = "workflow-fixture-run",
-    include_summary: bool = False,
-) -> dict[str, Any]:
+) -> WorkflowRunSummary:
     mode = ExecutionMode.normalize(execution_mode)
     _validate_workflow_execution(
         spec,
         allowed_spec_ids=allowed_spec_ids,
-        output_root=output_root,
     )
-    handlers = registry.handlers_for(spec.step_ids)
-    results = execute_steps(
+    completed_nodes = _execute_registered_steps(
         plan_topological_steps(spec),
-        handlers,
+        registry,
         checkpoints=checkpoints,
     )
-    if include_summary:
-        return {
-            "results": results,
-            "summary": workflow_run_summary(
-                spec,
-                results,
-                execution_mode=mode,
-                run_id=run_id,
-            ),
-        }
-    return results
+    return workflow_run_summary(
+        spec,
+        completed_nodes=completed_nodes,
+        execution_mode=mode,
+        run_id=run_id,
+    )
 
 
 def _validate_workflow_execution(
     spec: WorkflowSpec,
     *,
     allowed_spec_ids: set[str] | None,
-    output_root: Path | None,
 ) -> None:
     if allowed_spec_ids is not None:
         requested = set(spec.input_spec_ids).union(spec.output_spec_ids)
@@ -92,19 +72,15 @@ def _validate_workflow_execution(
         and not spec.output_spec_ids
     ):
         raise ValueError("workflow_output_spec_required")
-    if output_root is not None and spec.requires_private_boundary:
-        if not is_private_boundary_path(output_root):
-            raise ValueError("workflow_output_outside_private_boundary")
-
 
 def workflow_run_summary(
     spec: WorkflowSpec,
-    results: dict[str, Any],
     *,
+    completed_nodes: tuple[str, ...],
     execution_mode: ExecutionMode | str | None = None,
     run_id: str = "workflow-fixture-run",
-) -> dict[str, Any]:
-    summary = WorkflowRunSummary(
+) -> WorkflowRunSummary:
+    return WorkflowRunSummary(
         workflow_id=spec.workflow_id,
         workflow_version=spec.workflow_version,
         execution_mode=ExecutionMode.normalize(execution_mode),
@@ -116,16 +92,13 @@ def workflow_run_summary(
         input_spec_ids=spec.input_spec_ids,
         output_spec_ids=spec.output_spec_ids,
         node_count=len(spec.nodes),
-        completed_nodes=tuple(sorted(results)),
+        completed_nodes=tuple(sorted(completed_nodes)),
         private_boundary_required=spec.requires_private_boundary,
         artifact_writer_policy=spec.artifact_writer_policy.value,
     )
-    return sanitize_public_object(summary.to_public_record())
 
 
 __all__ = [
-    "NodeHandler",
-    "execute_steps",
     "execute_workflow",
     "workflow_run_summary",
 ]

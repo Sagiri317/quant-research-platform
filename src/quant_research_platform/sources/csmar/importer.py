@@ -18,7 +18,6 @@ from quant_research_platform.sources.csmar.columns import (
     load_column_overrides,
     render_column_pruning_report,
 )
-from quant_research_platform.sources.csmar.contracts import parse_raw_filename
 from quant_research_platform.sources.csmar.mappers import (
     filter_by_date_range,
     find_dataset_files,
@@ -26,6 +25,7 @@ from quant_research_platform.sources.csmar.mappers import (
     normalize_private_export_frame,
     with_benchmark_index_fields,
 )
+from quant_research_platform.sources.csmar.raw_schemas import parse_raw_filename
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.parquet import write_interim_data
 

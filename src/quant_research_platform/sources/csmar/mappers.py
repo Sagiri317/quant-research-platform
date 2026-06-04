@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
-from quant_research_platform.sources.csmar.contracts import (
+from quant_research_platform.sources.csmar.field_mappings import (
     map_csmar_columns,
     normalize_stock_code,
 )

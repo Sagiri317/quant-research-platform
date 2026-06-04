@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
 
+import quant_research_platform.workflows.executor as executor_module
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowNode,
+    WorkflowRunSummary,
     WorkflowSpec,
 )
 from quant_research_platform.workflows.checkpoints import InMemoryCheckpointStore
 from quant_research_platform.workflows.executor import (
-    execute_steps,
     execute_workflow,
     workflow_run_summary,
 )
@@ -48,18 +50,15 @@ def test_workflow_executor_runs_registered_nodes_in_topological_order() -> None:
             WorkflowNodeDefinition(node_id=node_id, handler=handler(node_id))
         )
 
-    results = execute_workflow(
+    summary = execute_workflow(
         spec,
         registry=registry,
     )
 
     assert calls == ["panel", "factors", "labels", "dataset"]
-    assert results == {
-        "panel": "panel:done",
-        "factors": "factors:done",
-        "labels": "labels:done",
-        "dataset": "dataset:done",
-    }
+    assert isinstance(summary, WorkflowRunSummary)
+    assert summary.status == "executed"
+    assert summary.completed_nodes == ("dataset", "factors", "labels", "panel")
 
 
 def test_workflow_executor_records_memory_checkpoints_only() -> None:
@@ -118,24 +117,15 @@ def test_workflow_executor_requires_output_spec_for_spec_driven_writer() -> None
         execute_workflow(spec, registry=WorkflowNodeRegistry.bootstrap_default())
 
 
-def test_workflow_executor_rejects_private_output_to_public_root(tmp_path) -> None:
-    spec = WorkflowSpec(
-        workflow_id="private_output",
-        output_spec_ids=("daily_panel",),
-        artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
-        nodes=(WorkflowNode(node_id="write"),),
-    )
-
-    with pytest.raises(ValueError, match="workflow_output_outside_private_boundary"):
-        execute_workflow(
-            spec,
-            registry=WorkflowNodeRegistry.bootstrap_default(),
-            output_root=tmp_path / "public",
-        )
+def test_workflow_executor_does_not_accept_arbitrary_output_root() -> None:
+    assert "output_root" not in inspect.signature(execute_workflow).parameters
+    service_params = inspect.signature(execute_registered_workflow).parameters
+    assert "output_root" not in service_params
 
 
 def test_workflow_executor_rejects_arbitrary_handler_injection() -> None:
-    assert "handlers" not in execute_workflow.__annotations__
+    assert "handlers" not in inspect.signature(execute_workflow).parameters
+    assert "include_summary" not in inspect.signature(execute_workflow).parameters
     with pytest.raises(TypeError):
         execute_workflow(  # type: ignore[call-arg]
             WorkflowSpec(workflow_id="no_handlers"),
@@ -143,9 +133,9 @@ def test_workflow_executor_rejects_arbitrary_handler_injection() -> None:
         )
 
 
-def test_execute_steps_internal_helper_still_requires_registered_handler_map() -> None:
-    with pytest.raises(ValueError, match="missing_workflow_handler"):
-        execute_steps(("unknown",), handlers={})
+def test_handler_map_execution_is_not_public_executor_surface() -> None:
+    assert "execute_steps" not in executor_module.__all__
+    assert not hasattr(executor_module, "execute_steps")
 
 
 def test_workflow_summary_is_sanitized() -> None:
@@ -157,11 +147,18 @@ def test_workflow_summary_is_sanitized() -> None:
         nodes=(WorkflowNode(node_id="node"),),
     )
 
-    summary = workflow_run_summary(spec, {"node": Path("/mnt/data/000001.SZ")})
+    summary = workflow_run_summary(
+        spec,
+        completed_nodes=("node",),
+        execution_mode="execute",
+        run_id="workflow-fixture-run",
+    )
 
-    assert "C:" not in str(summary)
-    assert "/mnt/" not in str(summary)
-    assert "000001" not in str(summary)
+    assert isinstance(summary, WorkflowRunSummary)
+    public_record = summary.to_public_record()
+    assert "C:" not in str(public_record)
+    assert "/mnt/" not in str(public_record)
+    assert "000001" not in str(public_record)
 
 
 def test_registered_workflow_rejects_unknown_node() -> None:

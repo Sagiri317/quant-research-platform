@@ -16,6 +16,9 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.storage.atomic import (
+    atomic_write_directory,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.partitions import add_year_partition
@@ -106,14 +109,18 @@ def write_partitioned_parquet_dataset(
 ) -> Path:
     spec = catalog.get(data_id)
     timestamp_column = validate_parquet_dataset_write(frame, root, spec)
-    root.mkdir(parents=True, exist_ok=True)
-    partitioned = add_year_partition(frame, timestamp_column=timestamp_column)
-    for year, year_frame in partitioned.groupby("year", sort=True):
-        partition_root = root / f"year={int(year)}"
-        _write_parquet_file(
-            year_frame.drop(columns=["year"]),
-            partition_root / "part-000.parquet",
-        )
+    final_root = Path(root)
+
+    def _write(temp_root: Path) -> None:
+        partitioned = add_year_partition(frame, timestamp_column=timestamp_column)
+        for year, year_frame in partitioned.groupby("year", sort=True):
+            partition_root = temp_root / f"year={int(year)}"
+            _write_parquet_file(
+                year_frame.drop(columns=["year"]),
+                partition_root / "part-000.parquet",
+            )
+
+    atomic_write_directory(final_root, _write)
     return root
 
 

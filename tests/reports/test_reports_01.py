@@ -9,6 +9,7 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.bundles import write_stage_profile_bundle
 from quant_research_platform.reports.index import ReportRunIndex
+from quant_research_platform.reports.manifests import ReportManifest
 from quant_research_platform.reports.summaries import (
     ManifestSummary,
     ParityEvidenceSummary,
@@ -60,7 +61,7 @@ def test_stage_profile_bundle_requires_approved_report_spec(tmp_path):
             }
         ]
     )
-    with pytest.raises(ValueError, match="invalid_stage_profile_report_definition"):
+    with pytest.raises(ValueError, match="report_spec_mismatch"):
         write_stage_profile_bundle(
             frame,
             spec=ReportSpec(
@@ -72,6 +73,30 @@ def test_stage_profile_bundle_requires_approved_report_spec(tmp_path):
             ),
             layout=StorageLayout(project_root=tmp_path),
             report_text="CSMAR vendor path /mnt/data/raw",
+        )
+
+
+def test_report_spec_has_no_allowed_output_root_field() -> None:
+    assert "allowed_output_root" not in ReportSpec.__dataclass_fields__
+
+
+def test_stage_profile_bundle_uses_report_catalog_gate(tmp_path):
+    frame = pd.DataFrame.from_records(
+        [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
+    )
+
+    with pytest.raises(ValueError, match="report_spec_mismatch"):
+        write_stage_profile_bundle(
+            frame,
+            spec=ReportSpec(
+                report_id="stage_profile",
+                report_definition_id="stage_profile_private_diagnostic",
+                run_id="run",
+                market_id=MarketId("a_share"),
+                run_type="prediction",
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+            report_text="safe",
         )
 
 
@@ -140,6 +165,44 @@ def test_stage_profile_bundle_rejects_arbitrary_output_root(tmp_path):
         )
 
 
+def test_stage_profile_bundle_rejects_existing_run_root_without_target_writes(
+    tmp_path,
+):
+    frame = pd.DataFrame.from_records(
+        [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
+    )
+    run_root = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "diagnostics"
+        / "run"
+    )
+    run_root.mkdir(parents=True)
+    sentinel = run_root / "sentinel.txt"
+    sentinel.write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="output_already_exists"):
+        write_stage_profile_bundle(
+            frame,
+            spec=ReportSpec(
+                report_id="stage_profile",
+                report_definition_id="stage_profile_private_diagnostic",
+                run_id="run",
+                market_id=MarketId("a_share"),
+                run_type="diagnostics",
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+            report_text="safe",
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "existing\n"
+    assert not (run_root / "stage_profile.csv").exists()
+    assert not (run_root / "manifest.json").exists()
+    assert list(run_root.parent.glob("*backup*")) == []
+
+
 def test_report_summary_records_are_database_ready_and_sanitized():
     summary = ReportSummary(
         run_id="run",
@@ -160,6 +223,26 @@ def test_report_summary_records_are_database_ready_and_sanitized():
     assert "C:" not in str(summary.to_record())
     assert "000001" not in str(summary.to_record())
     assert index.to_record()["report_definition_id"] == "evaluation_report_private"
+
+
+def test_report_manifest_and_summaries_validate_run_id() -> None:
+    with pytest.raises(ValueError, match="invalid_run_id"):
+        ReportManifest(run_id="run 01")
+    with pytest.raises(ValueError, match="invalid_run_id"):
+        ReportSummary(
+            run_id="600000.sh",
+            market_id="a_share",
+            run_type="evaluation",
+            status="completed",
+        )
+    with pytest.raises(ValueError, match="invalid_run_id"):
+        ReportRunIndexRecord(
+            run_id="data/raw/run",
+            market_id="a_share",
+            run_type="evaluation",
+            status="completed",
+            report_definition_id="evaluation_report_private",
+        )
 
 
 def test_report_index_records_do_not_require_filesystem_scan():

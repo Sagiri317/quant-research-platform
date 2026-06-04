@@ -17,6 +17,8 @@ def test_price_volume_56_factor_definitions_have_input_requirements() -> None:
     registered_fields = set(a_share_field_catalog().list_names())
 
     assert len(definitions) == 56
+    output_columns = [definition.output_column for definition in definitions]
+    assert len(output_columns) == len(set(output_columns))
     for definition in definitions:
         assert definition.input_columns
         assert definition.input_columns == tuple(

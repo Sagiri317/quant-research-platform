@@ -24,7 +24,12 @@ def build_prediction_bundle(
     if missing:
         raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
     _validate_oos_split(spec)
-    test_frame = frame.loc[frame["timestamp"] >= pd.Timestamp(spec.test_start)].copy()
+    test_mask = frame["timestamp"] >= pd.Timestamp(spec.test_start)
+    if spec.test_end is not None:
+        test_mask &= frame["timestamp"] <= pd.Timestamp(spec.test_end)
+    test_frame = frame.loc[test_mask].copy()
+    if test_frame.empty:
+        raise ValueError("prediction_oos_test_window_empty")
     design = np.column_stack(
         [
             np.ones(len(test_frame)),
@@ -39,6 +44,10 @@ def build_prediction_bundle(
 def _validate_oos_split(spec: PredictionSpec) -> None:
     if pd.Timestamp(spec.train_end) >= pd.Timestamp(spec.test_start):
         raise ValueError("prediction_train_end_must_precede_test_start")
+    if spec.test_end is not None and pd.Timestamp(spec.test_end) < pd.Timestamp(
+        spec.test_start
+    ):
+        raise ValueError("prediction_test_end_must_not_precede_test_start")
 
 
 def write_prediction_bundle(
@@ -47,14 +56,12 @@ def write_prediction_bundle(
     *,
     report_spec: ReportSpec,
     layout: StorageLayout,
-    output_root: Path | None = None,
 ) -> Path:
     return write_prediction_bundle_files(
         frame,
         spec=spec,
         report_spec=report_spec,
         layout=layout,
-        output_root=output_root,
     )
 
 

@@ -13,6 +13,11 @@ def propose_factor(
     factor_id: str,
     rationale: str,
     input_columns: tuple[str, ...],
+    output_columns: tuple[str, ...] | None = None,
+    base_input_columns: tuple[str, ...] | None = None,
+    derived_input_columns: tuple[str, ...] = (),
+    derived_input_producers: dict[str, str] | None = None,
+    required_processed_data_id: str = "daily_panel",
 ) -> FactorProposal:
     _validate_input_columns(tuple(input_columns))
     proposal = FactorProposal(
@@ -20,6 +25,11 @@ def propose_factor(
         factor_id=factor_id,
         rationale=rationale,
         input_columns=tuple(input_columns),
+        output_columns=tuple(output_columns or (factor_id,)),
+        base_input_columns=tuple(base_input_columns or input_columns),
+        derived_input_columns=tuple(derived_input_columns),
+        derived_input_producers=dict(derived_input_producers or {}),
+        required_processed_data_id=required_processed_data_id,
     )
     assert_proposal_is_public_safe(proposal)
     return proposal

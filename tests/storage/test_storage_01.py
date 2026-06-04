@@ -97,6 +97,24 @@ def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> Non
     assert "abcdef123456" not in text
 
 
+def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
+    manifest = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "run"
+        / "manifest.json"
+    )
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"existing": true}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="output_already_exists"):
+        write_manifest(manifest, {"schema_version": "0.1"})
+
+    assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
+
+
 def test_processed_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {
@@ -356,3 +374,45 @@ def test_parquet_writer_rejects_public_output_root(tmp_path: Path) -> None:
             catalog=catalog,
             data_id="x",
         )
+
+
+def test_parquet_writer_rejects_existing_output_root_without_partial_write(
+    tmp_path: Path,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "value": [1.0],
+        }
+    )
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="factors",
+            processed_data_id="x",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "value": ColumnRole.FACTOR,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x" / "data"
+    root.mkdir(parents=True)
+    sentinel = root / "sentinel.txt"
+    sentinel.write_text("existing\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="output_already_exists"):
+        write_partitioned_parquet_dataset(frame, root, catalog=catalog, data_id="x")
+
+    assert sentinel.read_text(encoding="utf-8") == "existing\n"
+    assert not (root / "year=2014").exists()
+    assert list(root.parent.glob("*backup*")) == []

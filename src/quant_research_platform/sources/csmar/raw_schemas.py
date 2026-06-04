@@ -8,9 +8,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 
 import pandas as pd
@@ -489,89 +487,6 @@ def missing_raw_column_names(columns: tuple[str, ...], dataset: str) -> list[str
     return missing
 
 
-def map_csmar_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
-    """把已知原始 CSMAR columns 重命名为内部名称，并保留额外 columns。"""
-
-    contract = RAW_TABLE_CONTRACTS[dataset]
-    missing = missing_raw_columns(frame, dataset)
-    if missing:
-        raise ValueError(f"{dataset} raw export is missing CSMAR columns: {missing}")
-    aliases = contract.column_aliases or {}
-    alias_mapping = {
-        alias: contract.column_mapping[column]
-        for column, alias_columns in aliases.items()
-        for alias in alias_columns
-    }
-    return frame.rename(columns={**alias_mapping, **contract.column_mapping}).copy()
-
-
-def normalize_stock_code(series: pd.Series) -> pd.Series:
-    """把 CSMAR stock codes 规范化为六位字符串。"""
-
-    return (
-        series.astype(str).str.strip().str.replace(r"\.0$", "", regex=True).str.zfill(6)
-    )
-
-
-def normalize_trdnew_capchg(frame: pd.DataFrame) -> pd.DataFrame:
-    """标准化原始 ``TRDNEW_Capchg`` 股本变动 rows。"""
-
-    result = map_csmar_columns(frame, "market_cap")
-    result["stock_code"] = normalize_stock_code(result["stock_code"])
-    result["share_change_date"] = pd.to_datetime(result["share_change_date"])
-    return result.sort_values(["stock_code", "share_change_date"]).reset_index(
-        drop=True
-    )
-
-
-def normalize_trdnew_daily_market(
-    frame: pd.DataFrame, *, raw_capchg: pd.DataFrame | None = None
-) -> pd.DataFrame:
-    """把原始 ``TRDNEW_Dalyr`` rows 标准化为内部 daily schema。
-
-    The function is mock-safe: it accepts already-loaded small DataFrames and does
-    not read vendor files. Real file loading is kept in the header inspection
-    layer until the user approves processing specific private files.
-    """
-
-    result = map_csmar_columns(frame, "daily_market")
-    result["stock_code"] = normalize_stock_code(result["stock_code"])
-    result["trade_date"] = pd.to_datetime(result["trade_date"])
-    result["return_1d"] = result["return_with_dividend"]
-    result["adj_close"] = result["comparable_close_with_dividend"]
-    result["adj_open"] = result["open"] * result["adj_close"] / result["close"]
-    result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
-    result["total_market_cap"] = result["total_market_cap_thousand"] * 1000.0
-    result["is_limit_up"] = result["limit_status"] == 1
-    result["is_limit_down"] = result["limit_status"] == -1
-    result["is_trading"] = result["filling_flag"].astype(str).eq("0")
-    result["is_st"] = result["trading_status_code"].isin(
-        [2, 3, 5, 6, 8, 9, 11, 12, 14, 15]
-    )
-
-    if raw_capchg is not None:
-        capchg = normalize_trdnew_capchg(raw_capchg)
-        merged_groups = []
-        for stock_code, stock_frame in result.groupby("stock_code", sort=False):
-            capchg_frame = capchg[capchg["stock_code"] == stock_code]
-            merged_groups.append(
-                pd.merge_asof(
-                    stock_frame.sort_values("trade_date"),
-                    capchg_frame.sort_values("share_change_date"),
-                    left_on="trade_date",
-                    right_on="share_change_date",
-                    direction="backward",
-                    suffixes=("", "_capchg"),
-                )
-            )
-        result = pd.concat(merged_groups, ignore_index=True)
-        result["float_shares"] = result["a_float_shares"]
-        result["turnover"] = result["volume"] / result["float_shares"]
-    else:
-        result["turnover"] = pd.NA
-
-    return result.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
-
 
 def read_export_header(path: str | Path) -> tuple[str, ...]:
     """只读取 CSV、TXT 或 XLSX CSMAR export 的 header row。"""
@@ -595,80 +510,6 @@ def default_metadata_path(path: str | Path) -> Path:
     export_path = Path(path)
     return export_path.with_suffix(".metadata.json")
 
-
-def _format_metadata_date(value: str) -> str:
-    """把紧凑 ``YYYYMMDD`` 日期格式化为可读 metadata。"""
-
-    if value == "full":
-        return value
-    return f"{value[:4]}-{value[4:6]}-{value[6:8]}"
-
-
-def _count_csv_rows(path: Path) -> int:
-    """在不物化整表的情况下统计 CSV-like export 数据行数。"""
-
-    with path.open("rb") as handle:
-        line_count = sum(1 for _ in handle)
-    return max(line_count - 1, 0)
-
-
-def _file_sha256(path: Path) -> str:
-    """返回原始 export 文件的 SHA-256 digest。"""
-
-    digest = sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def build_raw_export_metadata(
-    path: str | Path,
-    *,
-    filters: Mapping[str, object] | None = None,
-    notes: str | None = None,
-) -> dict[str, object]:
-    """为单个原始 export 构造推荐的私有 metadata payload。"""
-
-    export_path = Path(path)
-    filename_metadata = parse_raw_filename(export_path)
-    dataset = filename_metadata.dataset
-    contract = RAW_TABLE_CONTRACTS[dataset]
-    columns = read_export_header(export_path)
-    row_count = _count_csv_rows(export_path) if export_path.suffix == ".csv" else None
-    payload: dict[str, object] = {
-        "source": "CSMAR",
-        "account_type": "school_authorized_web_export",
-        "exported_by": "user",
-        "export_date": _format_metadata_date(filename_metadata.export_date),
-        "dataset": dataset,
-        "table_code": contract.table_code,
-        "table_name_zh": contract.table_name_zh,
-        "frequency": "daily"
-        if dataset in {"daily_market", "adjustment", "index_market"}
-        else "event_or_static",
-        "market_scope": filename_metadata.market_scope,
-        "start_date": _format_metadata_date(filename_metadata.start_date),
-        "end_date": _format_metadata_date(filename_metadata.end_date),
-        "part": filename_metadata.part,
-        "filters": dict(filters)
-        if filters is not None
-        else {
-            "share_class": "A-share",
-            "boards": ["main", "chinext", "star"],
-            "bjse": "excluded_in_first_version",
-        },
-        "fields_zh": {
-            column: contract.chinese_meanings.get(column, "") for column in columns
-        },
-        "fields_raw": list(columns),
-        "row_count": row_count,
-        "file_sha256": _file_sha256(export_path),
-        "license_boundary": ("private research only; do not commit raw vendor data"),
-        "notes": notes
-        or "No credentials, cookies, tokens, or school account information stored.",
-    }
-    return payload
 
 
 def inspect_raw_export_file(path: str | Path) -> RawExportInspection:

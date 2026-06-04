@@ -39,6 +39,8 @@ def test_csmar_interim_catalog_registers_daily_market_spec() -> None:
 def test_csmar_contracts_split_keeps_thin_facade_exports() -> None:
     assert parse_raw_filename is raw_schemas.parse_raw_filename
     assert map_csmar_columns is field_mappings.map_csmar_columns
+    assert field_mappings.map_csmar_columns.__module__.endswith(".field_mappings")
+    assert checksums.build_raw_export_metadata.__module__.endswith(".checksums")
     assert hasattr(checksums, "raw_export_sha256")
 
 

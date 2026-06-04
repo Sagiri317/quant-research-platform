@@ -9,18 +9,21 @@ Machine-readable evidence lives in `docs/reports/clean-rewrite-0.1-parity-eviden
 | processed panel parity | 660416 | 48 | 2014-01-01 through 2014-12-31 | verified aggregate |
 | factor value parity | 12231140 | 69 | 2014-01-01 through 2025-12-31 | verified aggregate |
 | label value parity | 12231140 | 14 | 2014-01-01 through 2025-12-31 | verified aggregate |
-| masks / universes parity | 48924560 | 8 | 2014-01-01 through 2025-12-31 | verified aggregate |
+| masks universes parity | 48924560 | 8 | 2014-01-01 through 2025-12-31 | verified aggregate |
 | research dataset parity | 12231140 | 75 | 2014-01-01 through 2025-12-31 | verified aggregate |
 | evaluation parity | 1446 | 7 | 2014-01-29 through 2014-12-31 | verified aggregate |
-| prediction OOS smoke parity | 660416 | 4 | 2014-01-01 through 2014-12-31 | verified aggregate |
-| 2014-2025 supporting layers migration | 97849120 | 79 | 2014-01-01 through 2025-12-31 | verified aggregate |
-| full historical daily_panel status | 660416 | 48 | 2014-01-01 through 2014-12-31 | accepted explained-delta |
+| prediction oos smoke parity | 660416 | 4 | 2014-01-01 through 2014-12-31 | verified aggregate |
+| supporting layers migration 2014 2025 | 85617980 | 79 | 2014-01-01 through 2025-12-31 | verified aggregate |
+| full historical daily panel status | 12231140 | 48 | 2014-01-01 through 2025-12-31 | verified aggregate |
 
 Public-safe status:
 
 - `privacy_level | public_safe_aggregate`
 - `contract_version | 0.1`
-- `fixture-backed API/CLI execution supported`
-- `private real-data execution not exposed through API/CLI in 0.1.0`
-- `private aggregate metadata verification run locally`
-- no row-level artifacts committed by this evidence update
+- `verification_kind | private_real_data_aggregate`
+- `verification_scope | aggregate_public_safe_parity`
+- `evidence_generation_mode | local_private_data_public_safe_aggregate`
+- `source_data_visibility | private_local_only`
+- `row_level_output_committed | false`
+- `merge_ready | true`
+- private local aggregate run completed without committed row-level artifacts
