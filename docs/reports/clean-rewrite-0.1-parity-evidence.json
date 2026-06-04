@@ -6,7 +6,7 @@
   "market_id": "a_share",
   "status": "private real-data aggregate verification completed",
   "merge_ready": true,
-  "generated_at": "2026-06-04T12:53:18Z",
+  "generated_at": "2026-06-04T13:22:21Z",
   "verification_kind": "private_real_data_aggregate",
   "verification_scope": "aggregate_public_safe_parity",
   "evidence_generation_mode": "local_private_data_public_safe_aggregate",

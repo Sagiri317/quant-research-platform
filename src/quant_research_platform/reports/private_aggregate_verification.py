@@ -40,6 +40,7 @@ class AggregateInput:
     expected_period: str | None
     explanation_name: str
     summary_kind: str = "parquet_roots"
+    years: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -219,6 +220,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             (daily_panel,),
             "2014-01-01 through 2014-12-31",
             "processed panel",
+            years=(2014,),
         ),
         AggregateInput(
             "factor_value_parity",
@@ -264,10 +266,9 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         ),
         AggregateInput(
             "full_historical_daily_panel_status",
-            (root,),
+            (daily_panel,),
             FULL_HISTORY_PERIOD,
             "full historical daily panel",
-            "generated_daily_panel_from_interim",
         ),
     )
 
@@ -340,7 +341,7 @@ def _summarize_area_input(area_input: AggregateInput) -> AggregateSummary:
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
         return _summarize_generated_full_daily_panel(area_input.roots[0])
-    return _summarize_roots(area_input.roots)
+    return _summarize_roots(area_input.roots, years=area_input.years)
 
 
 def _summarize_generated_full_daily_panel(project_root: Path) -> AggregateSummary:
@@ -543,16 +544,38 @@ def _chunked(values: Sequence[str], size: int) -> Iterator[tuple[str, ...]]:
         yield tuple(values[index : index + size])
 
 
-def _summarize_roots(roots: tuple[Path, ...]) -> AggregateSummary:
-    summaries = [_summarize_parquet_root(root) for root in roots]
+def _summarize_roots(
+    roots: tuple[Path, ...],
+    *,
+    years: tuple[int, ...] | None = None,
+) -> AggregateSummary:
+    summaries = [_summarize_parquet_root(root, years=years) for root in roots]
     return _combine_summaries(summaries)
 
 
-def _summarize_parquet_root(root: Path) -> AggregateSummary:
-    files = sorted(Path(root).rglob("*.parquet"))
+def _summarize_parquet_root(
+    root: Path,
+    *,
+    years: tuple[int, ...] | None = None,
+) -> AggregateSummary:
+    files = _parquet_files_for_summary(root, years=years)
     if not files:
         raise FileNotFoundError("private_aggregate_input_missing")
     return _summarize_frames(pd.read_parquet(file) for file in files)
+
+
+def _parquet_files_for_summary(
+    root: Path,
+    *,
+    years: tuple[int, ...] | None,
+) -> tuple[Path, ...]:
+    data_root = Path(root)
+    if years is None:
+        return tuple(sorted(data_root.rglob("*.parquet")))
+    paths: list[Path] = []
+    for year in years:
+        paths.extend(sorted((data_root / f"year={year}").glob("*.parquet")))
+    return tuple(paths)
 
 
 def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
