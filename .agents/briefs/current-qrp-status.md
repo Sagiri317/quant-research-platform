@@ -19,11 +19,15 @@ replacement for `PROJECT_STATUS.md`.
 - Project version is `0.1.0`; API/spec/contract version is `0.1`.
 - API paths use `/api/0.1/...`; do not add a version-letter prefix.
 - Public data product id is `a_share_daily_bar`.
-- Current CLI contract is `qrp catalog/data-product/market/research/workflow/report`.
+- Current CLI contract is `qrp catalog`, `qrp data-products`, and
+  `qrp research-datasets`.
 - `execution_mode` defaults to `execute`; `--dry-run` maps to
   `execution_mode=dry_run`.
 - Fixture-backed API/CLI execution is supported; private real-data execution is
   not exposed through API/CLI in `0.1.0`.
+- Future-only public-contract work remains outside this slice:
+  `processed-data-runs`, `workflow-runs`, `report index/show`,
+  `RunRepository`, `ReportRepository`, `private plugin`, and `qrp-private`.
 - Report writers derive paths from `StorageLayout + ReportSpec + run_id`.
 - Public-safe aggregate evidence is generated from local private aggregate
   verification; full historical `daily_panel` aggregate coverage now spans

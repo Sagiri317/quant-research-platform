@@ -11,6 +11,8 @@ from quant_research_platform.sources.csmar.checksums import (
 )
 from quant_research_platform.sources.csmar.field_mappings import (
     map_csmar_columns,
+    missing_raw_column_names,
+    missing_raw_columns,
     normalize_stock_code,
     normalize_trdnew_capchg,
     normalize_trdnew_daily_market,
@@ -29,8 +31,6 @@ from quant_research_platform.sources.csmar.raw_schemas import (
     duplicate_primary_keys,
     infer_dataset_from_native_export,
     inspect_raw_export_file,
-    missing_raw_column_names,
-    missing_raw_columns,
     missing_required_columns,
     negative_liquidity_rows,
     ohlc_violations,

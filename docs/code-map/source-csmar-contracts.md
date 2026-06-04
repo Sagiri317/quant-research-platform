@@ -10,9 +10,11 @@ modules are:
 
 Allowed responsibilities:
 
-- `raw_schemas.py`: raw export schema descriptors and raw inspection helpers
-- `field_mappings.py`: source-to-interim field mapping helpers
-- `checksums.py`: source-level checksum helpers
+- `raw_schemas.py`: raw export schema descriptors and raw table inspection
+  helpers only
+- `field_mappings.py`: source-to-interim field mapping metadata, approved
+  aliases, field descriptions, and mapping helpers
+- `checksums.py`: source-level checksum and metadata checksum helpers
 - `contracts.py`: compatibility exports for existing internal imports
 - portable validation errors for the source adapter
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from quant_research_platform.catalog.data_products import DataProductRegistry
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.run_id import validate_run_id
@@ -14,6 +13,9 @@ from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowNode,
     WorkflowSpec,
+)
+from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_research_dataset_catalog,
 )
 from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.workflows.services import execute_registered_workflow
@@ -60,7 +62,7 @@ def list_data_products() -> dict[str, object]:
     )
 
 
-def validate_data_product_interim(
+def run_data_product_interim(
     data_product_id: str,
     *,
     execution_mode: ExecutionMode | str | None = None,
@@ -101,81 +103,18 @@ def validate_data_product_interim(
     )
 
 
-def validate_market_processed(market_id: str) -> dict[str, object]:
-    market = MarketRegistry.bootstrap_default().get(market_id)
-    spec = WorkflowSpec(
-        workflow_id="market_processed_validation",
-        market_id=MarketId(str(market.market_id)),
-        input_spec_ids=("a_share_daily_bar_interim",),
-        output_spec_ids=market.processed_spec_ids,
-        run_type="market_processed_data",
-        artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
-        nodes=(WorkflowNode(node_id="validate_processed_specs"),),
-    )
-    summary = execute_registered_workflow(
-        spec,
-        allowed_spec_ids=set(market.processed_spec_ids).union(
-            {"a_share_daily_bar_interim"}
-        ),
-        execution_mode=ExecutionMode.DRY_RUN,
-        run_id="market-processed-validation-fixture",
-    )
+def describe_research_dataset_requirements(dataset_id: str) -> dict[str, object]:
+    spec = a_share_research_dataset_catalog().get(dataset_id)
     return _response(
-        status="validated",
-        mode="dry_run_spec_validation",
-        market_id=str(market.market_id),
-        workflow=summary,
-    )
-
-
-def validate_research_dataset() -> dict[str, object]:
-    return _response(
-        status="validated",
-        mode="dry_run_spec_validation",
-        dataset_id="a_share_price_volume_forward_returns",
-        required_specs=[
-            "price_volume_56",
-            "forward_returns",
-            "daily_context",
-            "a_share_default",
-            "a_share_execution",
-        ],
-    )
-
-
-def validate_workflow_run() -> dict[str, object]:
-    spec = WorkflowSpec(
-        workflow_id="clean_rewrite_smoke_validation",
-        market_id=MarketId("a_share"),
-        input_spec_ids=("daily_panel",),
-        output_spec_ids=("a_share_price_volume_forward_returns",),
-        run_type="workflow_validation",
-        artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
-        nodes=(
-            WorkflowNode(node_id="validate_inputs"),
-            WorkflowNode(node_id="validate_outputs", dependencies=("validate_inputs",)),
-        ),
-    )
-    summary = execute_registered_workflow(
-        spec,
-        allowed_spec_ids={"daily_panel", "a_share_price_volume_forward_returns"},
-        execution_mode=ExecutionMode.DRY_RUN,
-        run_id="workflow-validation-fixture",
-    )
-    return _response(
-        status="validated",
-        mode="dry_run_spec_validation",
-        workflow=summary,
-    )
-
-
-def report_metadata(run_id: str) -> dict[str, object]:
-    resolved_run_id = validate_run_id(run_id)
-    return _response(
-        status="metadata_unavailable",
-        mode="catalog_query_only",
-        run_id=resolved_run_id,
-        note="No local report index lookup is performed by the interface adapter.",
+        status="available",
+        mode="requirements_query_only",
+        dataset_id=spec.dataset_id,
+        market_id=str(spec.market_id),
+        required_processed_data_ids=list(spec.processed_data_ids),
+        feature_count=len(spec.feature_columns),
+        label_count=len(spec.label_columns),
+        universe_id=spec.universe_id,
+        mask_ids=list(spec.mask_ids),
     )
 
 
@@ -194,9 +133,6 @@ __all__ = [
     "list_data_products",
     "list_labels",
     "list_universes",
-    "report_metadata",
-    "validate_data_product_interim",
-    "validate_market_processed",
-    "validate_research_dataset",
-    "validate_workflow_run",
+    "describe_research_dataset_requirements",
+    "run_data_product_interim",
 ]

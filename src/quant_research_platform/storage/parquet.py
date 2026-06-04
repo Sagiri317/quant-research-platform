@@ -247,17 +247,42 @@ def _validate_column_roles(spec: DataSpec) -> None:
 def _validate_allowed_output_root(root: Path, spec: DataSpec) -> None:
     parts = _relative_parts(root)
     if isinstance(spec, InterimDataSpec):
-        if parts[:2] != ("data", "interim"):
+        if (
+            len(parts) != 5
+            or parts[:3] != ("data", "interim", str(spec.source_id))
+            or not _matches_artifact_segment(parts[3], spec.interim_data_id)
+            or parts[4] != "data"
+        ):
             raise ValueError("invalid_interim_output_root")
         return
     if isinstance(spec, ProcessedDataSpec):
-        if parts[:2] != ("data", "processed"):
+        category_parts = tuple(
+            part for part in PurePosixPath(spec.category).parts if part != "/"
+        )
+        expected_prefix = (
+            "data",
+            "processed",
+            str(spec.market_id),
+            *category_parts,
+        )
+        if (
+            len(parts) != len(expected_prefix) + 2
+            or parts[: len(expected_prefix)] != expected_prefix
+            or not _matches_artifact_segment(
+                parts[len(expected_prefix)], spec.processed_data_id
+            )
+            or parts[-1] != "data"
+        ):
             raise ValueError("invalid_processed_output_root")
         return
     if isinstance(spec, ResearchDatasetSpec):
-        if parts[:2] != ("data", "processed"):
-            raise ValueError("invalid_research_dataset_output_root")
-        if "research_datasets" not in parts:
+        if (
+            len(parts) != 6
+            or parts[:4]
+            != ("data", "processed", str(spec.market_id), "research_datasets")
+            or not _matches_artifact_segment(parts[4], spec.dataset_id)
+            or parts[5] != "data"
+        ):
             raise ValueError("invalid_research_dataset_output_root")
         return
     raise ValueError("unsupported_data_spec_type")
@@ -268,6 +293,10 @@ def _relative_parts(path: Path) -> tuple[str, ...]:
     if "data" not in parts:
         return parts
     return parts[parts.index("data") :]
+
+
+def _matches_artifact_segment(segment: str, expected: str) -> bool:
+    return segment == expected or segment.startswith(f".{expected}.tmp-")
 
 
 def _write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:

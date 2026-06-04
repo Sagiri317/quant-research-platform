@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 
+from quant_research_platform.sources.csmar.field_mappings import (
+    csmar_field_descriptions,
+)
 from quant_research_platform.sources.csmar.raw_schemas import (
     RAW_TABLE_CONTRACTS,
     parse_raw_filename,
@@ -53,6 +56,7 @@ def build_raw_export_metadata(
     dataset = filename_metadata.dataset
     contract = RAW_TABLE_CONTRACTS[dataset]
     columns = read_export_header(export_path)
+    field_descriptions = csmar_field_descriptions(dataset)
     row_count = _count_csv_rows(export_path) if export_path.suffix == ".csv" else None
     payload: dict[str, object] = {
         "source": "CSMAR",
@@ -76,9 +80,7 @@ def build_raw_export_metadata(
             "boards": ["main", "chinext", "star"],
             "bjse": "excluded_in_first_version",
         },
-        "fields_zh": {
-            column: contract.chinese_meanings.get(column, "") for column in columns
-        },
+        "fields_zh": {column: field_descriptions.get(column, "") for column in columns},
         "fields_raw": list(columns),
         "row_count": row_count,
         "file_sha256": _file_sha256(export_path),

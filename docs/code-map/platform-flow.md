@@ -42,19 +42,17 @@ GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
 GET  /api/0.1/catalog/universes
 GET  /api/0.1/catalog/data-products
-POST /api/0.1/data-products/a_share_daily_bar/interim
-POST /api/0.1/markets/{market_id}/processed-data
-POST /api/0.1/research-datasets
-POST /api/0.1/workflows
-GET  /api/0.1/reports/{run_id}
+POST /api/0.1/data-products/{data_product_id}/interim-runs
+GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```
 
 The API is local-only. Catalog routes return registered metadata. The data
 product POST route accepts `execution_mode`, defaults to `execute`, and runs the
-minimal fixture-backed registered workflow path; `dry_run` performs sanitized
-catalog/spec/workflow/writer validation without row-level writes. The API does
-not expose private real-data execution, deployment, scheduler, worker,
-paper/live trading, external data, broker/exchange, or website UI contracts.
+minimal fixture-backed registered path; `dry_run` performs sanitized
+catalog/spec/writer validation without row-level writes. The research dataset
+requirements route is read-only and does not build artifacts. The API does not
+expose private real-data execution, deployment, scheduler, worker, paper/live
+trading, external data, broker/exchange, or website UI contracts.
 
 ## CLI Flow
 
@@ -63,16 +61,19 @@ qrp catalog factors
 qrp catalog labels
 qrp catalog universes
 qrp catalog data-products
-qrp data-product interim a_share_daily_bar
-qrp data-product interim a_share_daily_bar
-qrp market build-processed
-qrp research build-dataset
-qrp workflow run
-qrp report show
+qrp data-products run-interim <data_product_id>
+qrp data-products run-interim <data_product_id> --dry-run
+qrp data-products run-interim <data_product_id> --run-id <run_id>
+qrp research-datasets requirements <dataset_id>
 ```
 
-`qrp data-product ...` defaults to `execution_mode=execute`; `--dry-run` maps to
-`execution_mode=dry_run`. No private-source root flags are part of the `0.1.0`
-CLI contract.
+`qrp data-products run-interim ...` defaults to `execution_mode=execute`;
+`--dry-run` maps to `execution_mode=dry_run`, and `--run-id` is validated by the
+shared public-safe run id contract. No private-source root flags are part of the
+`0.1.0` CLI contract.
 
 Retired commands and endpoints are not current clean-rewrite contracts.
+
+Future-only items remain outside the active surface: `processed-data-runs`,
+`workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`,
+`private plugin`, and `qrp-private`.

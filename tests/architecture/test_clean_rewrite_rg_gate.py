@@ -50,6 +50,57 @@ APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/reports/manifests.py"),
 }
 
+PUBLIC_CONTRACT_DOCS = (
+    Path("README.md"),
+    Path("docs/api/README.md"),
+    Path("docs/code-map/platform-flow.md"),
+    Path(".agents/briefs/current-qrp-status.md"),
+    Path("PROJECT_STATUS.md"),
+)
+
+APPROVED_API_LINES = (
+    "GET  /api/0.1/catalog/data-products",
+    "GET  /api/0.1/catalog/factors",
+    "GET  /api/0.1/catalog/labels",
+    "GET  /api/0.1/catalog/universes",
+    "POST /api/0.1/data-products/{data_product_id}/interim-runs",
+    "GET  /api/0.1/research-datasets/{dataset_id}/requirements",
+)
+
+APPROVED_CLI_LINES = (
+    "qrp catalog data-products",
+    "qrp catalog factors",
+    "qrp catalog labels",
+    "qrp catalog universes",
+    "qrp data-products run-interim <data_product_id>",
+    "qrp data-products run-interim <data_product_id> --dry-run",
+    "qrp data-products run-interim <data_product_id> --run-id <run_id>",
+    "qrp research-datasets requirements <dataset_id>",
+)
+
+RETIRED_PUBLIC_CONTRACT_TEXT = (
+    "/api/0.1/data-products/a_share_daily_bar/interim",
+    "/api/0.1/markets/{market_id}/processed-data",
+    "POST /api/0.1/research-datasets",
+    "POST /api/0.1/workflows",
+    "GET  /api/0.1/reports/{run_id}",
+    "qrp data-product interim",
+    "qrp market build-processed",
+    "qrp research build-dataset",
+    "qrp workflow run",
+    "qrp report show",
+)
+
+FUTURE_PUBLIC_TODO_TERMS = (
+    "processed-data-runs",
+    "workflow-runs",
+    "report index/show",
+    "RunRepository",
+    "ReportRepository",
+    "private plugin",
+    "qrp-private",
+)
+
 FORBIDDEN_WRITER_METHODS = {
     "to_parquet",
     "to_csv",
@@ -217,6 +268,54 @@ def test_public_surfaces_do_not_expose_retired_public_cli_commands() -> None:
             hits.append(str(path))
 
     assert hits == []
+
+
+def test_public_docs_record_exact_final_api_and_cli_surface() -> None:
+    docs = {
+        path: path.read_text(encoding="utf-8")
+        for path in (
+            Path("README.md"),
+            Path("docs/api/README.md"),
+            Path("docs/code-map/platform-flow.md"),
+        )
+    }
+    missing: list[str] = []
+    stale: list[str] = []
+
+    for path, text in docs.items():
+        for line in APPROVED_API_LINES + APPROVED_CLI_LINES:
+            if line not in text:
+                missing.append(f"{path}: {line}")
+        for retired in RETIRED_PUBLIC_CONTRACT_TEXT:
+            if retired in text:
+                stale.append(f"{path}: {retired}")
+
+    assert missing == []
+    assert stale == []
+
+
+def test_public_docs_capture_naming_rules_and_future_only_items() -> None:
+    api_doc = Path("docs/api/README.md").read_text(encoding="utf-8")
+    combined = "\n".join(
+        path.read_text(encoding="utf-8") for path in PUBLIC_CONTRACT_DOCS
+    )
+    required_naming_rules = (
+        "API resource segment: kebab-case + plural",
+        "API path parameter: snake_case",
+        "ID value: snake_case",
+        "JSON field: snake_case",
+        "CLI group / command / option: kebab-case",
+        "Python module/function: snake_case",
+    )
+    missing = [
+        rule for rule in required_naming_rules if rule not in api_doc
+    ]
+    missing_future = [
+        term for term in FUTURE_PUBLIC_TODO_TERMS if term not in combined
+    ]
+
+    assert missing == []
+    assert missing_future == []
 
 
 def test_factor_and_label_definitions_do_not_use_future_data_token() -> None:

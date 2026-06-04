@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
@@ -15,6 +16,49 @@ from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
 create_app = api_app_module.create_app
 
+APPROVED_API_ROUTES = {
+    ("GET", "/api/0.1/catalog/data-products"),
+    ("GET", "/api/0.1/catalog/factors"),
+    ("GET", "/api/0.1/catalog/labels"),
+    ("GET", "/api/0.1/catalog/universes"),
+    ("POST", "/api/0.1/data-products/{data_product_id}/interim-runs"),
+    ("GET", "/api/0.1/research-datasets/{dataset_id}/requirements"),
+}
+
+FORBIDDEN_PUBLIC_MARKERS = (
+    "csmar",
+    "provider_id",
+    "source_id",
+    "implementation_package",
+    "data/raw",
+    "data\\raw",
+    "data/interim",
+    "data\\interim",
+    "data/processed",
+    "data\\processed",
+    "reports/private_real",
+    "reports\\private_real",
+    "000001",
+    "600000",
+    "row sample",
+)
+
+RETIRED_API_FRAGMENTS = (
+    "/markets/{market_id}/processed-data",
+    "/research-datasets",
+    "/workflows",
+    "/reports/{run_id}",
+    "/data-products/a_share_daily_bar/interim",
+)
+
+RETIRED_CLI_COMMANDS = (
+    ("data-product", "interim", "a_share_daily_bar"),
+    ("market", "build-processed", "--market", "a_share"),
+    ("research", "build-dataset"),
+    ("workflow", "run"),
+    ("report", "show"),
+)
+
 
 def test_api_01_routes_are_exact_public_surface() -> None:
     api = create_app()
@@ -24,20 +68,44 @@ def test_api_01_routes_are_exact_public_surface() -> None:
         if route.path.startswith("/api/")
     }
 
-    assert routes == {
-        ("GET", "/api/0.1/catalog/factors"),
-        ("GET", "/api/0.1/catalog/labels"),
-        ("GET", "/api/0.1/catalog/universes"),
-        ("GET", "/api/0.1/catalog/data-products"),
-        ("POST", "/api/0.1/data-products/a_share_daily_bar/interim"),
-        ("POST", "/api/0.1/markets/{market_id}/processed-data"),
-        ("POST", "/api/0.1/research-datasets"),
-        ("POST", "/api/0.1/workflows"),
-        ("GET", "/api/0.1/reports/{run_id}"),
+    assert routes == APPROVED_API_ROUTES
+
+
+def test_openapi_uses_approved_operation_ids_and_no_retired_operations() -> None:
+    schema = create_app().openapi()
+    operation_ids = {
+        operation["operationId"]
+        for path_item in schema["paths"].values()
+        for method, operation in path_item.items()
+        if method in {"get", "post"}
     }
 
+    assert operation_ids == {
+        "list_catalog_data_products",
+        "list_catalog_factors",
+        "list_catalog_labels",
+        "list_catalog_universes",
+        "run_data_product_interim",
+        "describe_research_dataset_requirements",
+    }
 
-def test_api_01_endpoints_execute_without_private_paths_or_planned_status() -> None:
+    text = str(schema).lower()
+    stale_terms = (
+        "build_dataset",
+        "workflow_run",
+        "report_show",
+        "processed_data",
+        "build-processed",
+        "build-dataset",
+        "workflow run",
+        "report show",
+        "data-product interim",
+    )
+    for term in stale_terms:
+        assert term not in text
+
+
+def test_api_01_endpoints_execute_without_private_markers_or_planned_status() -> None:
     client = TestClient(create_app())
 
     responses = [
@@ -45,31 +113,38 @@ def test_api_01_endpoints_execute_without_private_paths_or_planned_status() -> N
         client.get("/api/0.1/catalog/labels"),
         client.get("/api/0.1/catalog/universes"),
         client.get("/api/0.1/catalog/data-products"),
-        client.post("/api/0.1/data-products/a_share_daily_bar/interim"),
-        client.post("/api/0.1/markets/a_share/processed-data"),
-        client.post("/api/0.1/research-datasets"),
-        client.post("/api/0.1/workflows"),
-        client.get("/api/0.1/reports/example-run"),
+        client.post("/api/0.1/data-products/a_share_daily_bar/interim-runs"),
+        client.get(
+            "/api/0.1/research-datasets/"
+            "a_share_price_volume_forward_returns/requirements"
+        ),
     ]
 
     assert [response.status_code for response in responses] == [200] * len(responses)
     payloads = [response.json() for response in responses]
     assert {payload["api_version"] for payload in payloads} == {"0.1"}
-    assert not any("parquet" in str(payload).lower() for payload in payloads)
-    assert not any("planned" in str(payload).lower() for payload in payloads)
-    assert not any("csmar" in str(payload).lower() for payload in payloads)
-    assert not any("source_id" in str(payload).lower() for payload in payloads)
-    assert not any("provider_id" in str(payload).lower() for payload in payloads)
+    combined = "\n".join(str(payload) for payload in payloads)
+    assert "planned" not in combined.lower()
+    assert "parquet" not in combined.lower()
+    _assert_public_text_has_no_private_markers(combined)
 
     factors = responses[0]
     labels = responses[1]
     universes = responses[2]
     data_products = responses[3]
-    assert factors.json()["api_version"] == "0.1"
+    requirements = responses[5]
     assert len(factors.json()["items"]) == 56
     assert labels.json()["items"][0]["definition_version"] == "0.1"
     assert universes.json()["items"][0]["universe_id"] == "a_share_default"
     assert data_products.json()["items"][0]["data_product_id"] == "a_share_daily_bar"
+    assert requirements.json()["dataset_id"] == "a_share_price_volume_forward_returns"
+    assert requirements.json()["required_processed_data_ids"] == [
+        "price_volume_56",
+        "forward_returns",
+        "daily_context",
+        "a_share_default",
+        "a_share_execution",
+    ]
 
 
 def test_execution_mode_contract_uses_execute_default_and_dry_run_field() -> None:
@@ -77,10 +152,8 @@ def test_execution_mode_contract_uses_execute_default_and_dry_run_field() -> Non
     assert ExecutionMode.DRY_RUN == "dry_run"
     assert ExecutionMode.default() is ExecutionMode.EXECUTE
 
-    default_payload = services_module.validate_data_product_interim(
-        "a_share_daily_bar"
-    )
-    dry_run_payload = services_module.validate_data_product_interim(
+    default_payload = services_module.run_data_product_interim("a_share_daily_bar")
+    dry_run_payload = services_module.run_data_product_interim(
         "a_share_daily_bar",
         execution_mode=ExecutionMode.DRY_RUN,
     )
@@ -109,7 +182,7 @@ def test_api_cli_adapters_do_not_scan_parquet_paths() -> None:
         assert term not in module_source
 
 
-def test_cli_exposes_clean_rewrite_command_groups() -> None:
+def test_cli_exposes_only_clean_rewrite_public_commands() -> None:
     runner = CliRunner()
 
     commands = [
@@ -117,46 +190,106 @@ def test_cli_exposes_clean_rewrite_command_groups() -> None:
         ["catalog", "labels"],
         ["catalog", "universes"],
         ["catalog", "data-products"],
-        ["data-product", "interim", "a_share_daily_bar"],
-        ["data-product", "interim", "a_share_daily_bar", "--dry-run"],
-        ["market", "build-processed", "--market", "a_share"],
-        ["research", "build-dataset"],
-        ["workflow", "run"],
-        ["report", "show"],
+        ["data-products", "run-interim", "a_share_daily_bar"],
+        ["data-products", "run-interim", "a_share_daily_bar", "--dry-run"],
+        ["data-products", "run-interim", "a_share_daily_bar", "--run-id", "run_01"],
+        [
+            "research-datasets",
+            "requirements",
+            "a_share_price_volume_forward_returns",
+        ],
     ]
 
     for command in commands:
         result = runner.invoke(app, command)
         assert result.exit_code == 0
-        assert "csmar" not in result.output.lower()
-        assert "CSMAR" not in result.output
-        assert "source_id" not in result.output
-        assert "provider_id" not in result.output
+        _assert_public_text_has_no_private_markers(result.output)
+
+    for command in RETIRED_CLI_COMMANDS:
+        assert runner.invoke(app, list(command)).exit_code != 0
 
 
-def test_cli_help_exposes_dry_run_without_execute_or_private_flags() -> None:
+def test_cli_help_exposes_approved_groups_options_and_no_retired_commands() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["data-product", "interim", "--help"])
-    group_help = runner.invoke(app, ["data-product", "--help"])
+    top_help = runner.invoke(app, ["--help"])
+    data_products_help = runner.invoke(app, ["data-products", "--help"])
+    run_interim_help = runner.invoke(app, ["data-products", "run-interim", "--help"])
+    research_datasets_help = runner.invoke(app, ["research-datasets", "--help"])
 
-    assert result.exit_code == 0
-    assert "--dry-run" in result.output
-    assert "--execute" not in result.output
-    assert "build-interim" not in group_help.output
-    assert "--private-real" not in result.output
-    assert "--source-root" not in result.output
-    assert "--input-root" not in result.output
-    assert "--data-root" not in result.output
-    assert "--provider-path" not in result.output
+    assert top_help.exit_code == 0
+    assert data_products_help.exit_code == 0
+    assert run_interim_help.exit_code == 0
+    assert research_datasets_help.exit_code == 0
+
+    combined = "\n".join(
+        [
+            top_help.output,
+            data_products_help.output,
+            run_interim_help.output,
+            research_datasets_help.output,
+        ]
+    )
+    assert "data-products" in top_help.output
+    assert "research-datasets" in top_help.output
+    assert "run-interim" in data_products_help.output
+    assert "requirements" in research_datasets_help.output
+    assert "--dry-run" in run_interim_help.output
+    assert "--run-id" in run_interim_help.output
+    assert "--execute" not in run_interim_help.output
+    assert "--private-real" not in run_interim_help.output
+    assert "--source-root" not in run_interim_help.output
+    assert "--input-root" not in run_interim_help.output
+    assert "--data-root" not in run_interim_help.output
+    assert "--provider-path" not in run_interim_help.output
+    for command in RETIRED_CLI_COMMANDS:
+        assert " ".join(command[:2]) not in combined
+    _assert_public_text_has_no_private_markers(combined)
+
+
+def test_api_and_cli_naming_conventions_are_contractual() -> None:
+    schema = create_app().openapi()
+    resource_segment_re = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*s$")
+    snake_case_re = re.compile(r"^[a-z][a-z0-9_]*$")
+    exempt_segments = {"api", "0.1", "catalog"}
+
+    for path in schema["paths"]:
+        for segment in path.strip("/").split("/"):
+            if segment in exempt_segments:
+                continue
+            if segment.startswith("{") and segment.endswith("}"):
+                assert snake_case_re.fullmatch(segment.strip("{}"))
+                continue
+            assert resource_segment_re.fullmatch(segment)
+
+    data_product = services_module.list_data_products()["items"][0]["data_product_id"]
+    requirements = services_module.describe_research_dataset_requirements(
+        "a_share_price_volume_forward_returns"
+    )
+    assert snake_case_re.fullmatch(data_product)
+    assert snake_case_re.fullmatch(requirements["dataset_id"])
+
+    request_schema = schema["components"]["schemas"]["DataProductInterimRunRequest"]
+    for field_name in request_schema["properties"]:
+        assert snake_case_re.fullmatch(field_name)
+
+    help_text = CliRunner().invoke(app, ["data-products", "run-interim", "--help"])
+    assert help_text.exit_code == 0
+    assert "data-products" in help_text.output
+    assert "run-interim" in help_text.output
+    assert "--dry-run" in help_text.output
+    assert "--run-id" in help_text.output
+    assert "run_interim" not in help_text.output
+    assert "--dry_run" not in help_text.output
+    assert "--run_id" not in help_text.output
 
 
 def test_api_schema_uses_execution_mode_not_dry_run_bool() -> None:
     schema = create_app().openapi()
     text = str(schema)
-    request_schema = schema["components"]["schemas"]["DataProductInterimRequest"]
+    request_schema = schema["components"]["schemas"]["DataProductInterimRunRequest"]
 
     assert "execution_mode" in text
-    assert "DataProductInterimRequest" in text
+    assert "DataProductInterimRunRequest" in text
     assert "dry_run" not in request_schema.get("properties", {})
     assert "dryRun" not in text
     assert "executionMode" not in text
@@ -164,12 +297,11 @@ def test_api_schema_uses_execution_mode_not_dry_run_bool() -> None:
 
 def test_openapi_schema_does_not_expose_provider_markers() -> None:
     schema = create_app().openapi()
-    forbidden = ("csmar", "provider_id", "source_id", "implementation_package")
     hits: list[str] = []
 
     for path, path_item in schema["paths"].items():
-        for marker in forbidden:
-            if marker in path.lower():
+        for marker in FORBIDDEN_PUBLIC_MARKERS:
+            if marker.lower() in path.lower():
                 hits.append(f"path:{path}:{marker}")
         for method, operation in path_item.items():
             if method not in {"get", "post", "put", "patch", "delete"}:
@@ -180,28 +312,198 @@ def test_openapi_schema_does_not_expose_provider_markers() -> None:
                 str(operation.get("description", "")),
                 " ".join(str(tag) for tag in operation.get("tags", [])),
             ]
-            combined = "\n".join(searchable).lower()
-            for marker in forbidden:
-                if marker in combined:
+            combined = "\n".join(searchable)
+            for marker in FORBIDDEN_PUBLIC_MARKERS:
+                if marker.lower() in combined.lower():
                     hits.append(f"operation:{method}:{path}:{marker}")
 
     for schema_name, component_schema in schema["components"]["schemas"].items():
-        combined = f"{schema_name}\n{component_schema}".lower()
-        for marker in forbidden:
-            if marker in combined:
+        combined = f"{schema_name}\n{component_schema}"
+        for marker in FORBIDDEN_PUBLIC_MARKERS:
+            if marker.lower() in combined.lower():
                 hits.append(f"schema:{schema_name}:{marker}")
 
     assert hits == []
 
 
-def test_cli_rejects_non_fixed_data_product_and_market_names() -> None:
+def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> None:
+    calls: dict[str, list[tuple[object, ...]]] = {
+        "list_data_products": [],
+        "list_factors": [],
+        "list_labels": [],
+        "list_universes": [],
+        "run_data_product_interim": [],
+        "describe_research_dataset_requirements": [],
+    }
+
+    def list_data_products() -> dict[str, object]:
+        calls["list_data_products"].append(())
+        return {
+            "api_version": "0.1",
+            "items": [
+                {
+                    "data_product_id": "sentinel_product",
+                    "market_id": "a_share",
+                    "grain": "asset_timestamp",
+                    "contract_version": "0.1",
+                }
+            ],
+        }
+
+    def list_factors() -> dict[str, object]:
+        calls["list_factors"].append(())
+        return {
+            "api_version": "0.1",
+            "items": [
+                {
+                    "factor_id": "sentinel_factor",
+                    "market_id": "a_share",
+                    "factor_set": "price_volume_56",
+                    "definition_version": "0.1",
+                }
+            ],
+        }
+
+    def list_labels() -> dict[str, object]:
+        calls["list_labels"].append(())
+        return {
+            "api_version": "0.1",
+            "items": [
+                {
+                    "label_id": "sentinel_label",
+                    "market_id": "a_share",
+                    "horizon": 1,
+                    "definition_version": "0.1",
+                }
+            ],
+        }
+
+    def list_universes() -> dict[str, object]:
+        calls["list_universes"].append(())
+        return {
+            "api_version": "0.1",
+            "items": [
+                {
+                    "universe_id": "sentinel_universe",
+                    "market_id": "a_share",
+                    "membership_column": "in_universe",
+                    "definition_version": "0.1",
+                }
+            ],
+        }
+
+    def run_data_product_interim(
+        data_product_id: str,
+        *,
+        execution_mode: ExecutionMode | str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
+        calls["run_data_product_interim"].append(
+            (data_product_id, execution_mode, run_id)
+        )
+        return {
+            "api_version": "0.1",
+            "status": "sentinel_run",
+            "data_product_id": data_product_id,
+            "execution_mode": ExecutionMode.normalize(execution_mode).value,
+            "run_id": run_id or "sentinel_run_id",
+        }
+
+    def describe_research_dataset_requirements(dataset_id: str) -> dict[str, object]:
+        calls["describe_research_dataset_requirements"].append((dataset_id,))
+        return {
+            "api_version": "0.1",
+            "status": "sentinel_requirements",
+            "dataset_id": dataset_id,
+            "required_processed_data_ids": ["price_volume_56"],
+        }
+
+    monkeypatch.setattr(services_module, "list_data_products", list_data_products)
+    monkeypatch.setattr(services_module, "list_factors", list_factors)
+    monkeypatch.setattr(services_module, "list_labels", list_labels)
+    monkeypatch.setattr(services_module, "list_universes", list_universes)
+    monkeypatch.setattr(
+        services_module, "run_data_product_interim", run_data_product_interim
+    )
+    monkeypatch.setattr(
+        services_module,
+        "describe_research_dataset_requirements",
+        describe_research_dataset_requirements,
+    )
+
+    client = TestClient(create_app())
+    runner = CliRunner()
+    api_and_cli = [
+        (
+            "list_data_products",
+            lambda: client.get("/api/0.1/catalog/data-products"),
+            lambda: runner.invoke(app, ["catalog", "data-products"]),
+        ),
+        (
+            "list_factors",
+            lambda: client.get("/api/0.1/catalog/factors"),
+            lambda: runner.invoke(app, ["catalog", "factors"]),
+        ),
+        (
+            "list_labels",
+            lambda: client.get("/api/0.1/catalog/labels"),
+            lambda: runner.invoke(app, ["catalog", "labels"]),
+        ),
+        (
+            "list_universes",
+            lambda: client.get("/api/0.1/catalog/universes"),
+            lambda: runner.invoke(app, ["catalog", "universes"]),
+        ),
+        (
+            "run_data_product_interim",
+            lambda: client.post(
+                "/api/0.1/data-products/a_share_daily_bar/interim-runs",
+                json={"execution_mode": "dry_run", "run_id": "same_service_run"},
+            ),
+            lambda: runner.invoke(
+                app,
+                [
+                    "data-products",
+                    "run-interim",
+                    "a_share_daily_bar",
+                    "--dry-run",
+                    "--run-id",
+                    "same_service_run",
+                ],
+            ),
+        ),
+        (
+            "describe_research_dataset_requirements",
+            lambda: client.get(
+                "/api/0.1/research-datasets/"
+                "a_share_price_volume_forward_returns/requirements"
+            ),
+            lambda: runner.invoke(
+                app,
+                [
+                    "research-datasets",
+                    "requirements",
+                    "a_share_price_volume_forward_returns",
+                ],
+            ),
+        ),
+    ]
+
+    for service_name, call_api, call_cli in api_and_cli:
+        assert call_api().status_code == 200
+        cli_result = call_cli()
+        assert cli_result.exit_code == 0
+        assert len(calls[service_name]) == 2
+
+
+def test_rejected_data_product_and_dataset_ids_are_sanitized() -> None:
     runner = CliRunner()
 
     assert runner.invoke(
-        app, ["data-product", "interim", "other"]
+        app, ["data-products", "run-interim", "other"]
     ).exit_code != 0
     assert runner.invoke(
-        app, ["market", "build-processed", "--market", "other"]
+        app, ["research-datasets", "requirements", "other"]
     ).exit_code != 0
 
 
@@ -228,13 +530,27 @@ def test_api_error_envelope_sanitizes_private_details() -> None:
     assert "provider_id" not in payload
 
 
+def test_api_request_validation_errors_are_sanitized() -> None:
+    response = TestClient(create_app()).post(
+        "/api/0.1/data-products/a_share_daily_bar/interim-runs",
+        json={"execution_mode": r"C:\Users\DELL\data\raw\csmar\000001.SZ"},
+    )
+    payload = response.json()
+
+    assert response.status_code == 422
+    assert payload["error"]["error_code"] == "request_validation_error"
+    assert "C:" not in str(payload)
+    assert "000001" not in str(payload)
+    assert "csmar" not in str(payload).lower()
+    assert "input" not in str(payload).lower()
+
+
 def test_cli_error_output_is_sanitized() -> None:
-    runner = CliRunner()
-    result = runner.invoke(
+    result = CliRunner().invoke(
         app,
         [
-            "data-product",
-            "interim",
+            "data-products",
+            "run-interim",
             r"C:\Users\DELL\000001.SZ",
         ],
     )
@@ -253,10 +569,12 @@ def test_cli_writer_failure_summary_is_sanitized(monkeypatch) -> None:
 
     monkeypatch.setattr(
         services_module,
-        "validate_data_product_interim",
+        "run_data_product_interim",
         fail_with_existing_output,
     )
-    result = CliRunner().invoke(app, ["data-product", "interim", "a_share_daily_bar"])
+    result = CliRunner().invoke(
+        app, ["data-products", "run-interim", "a_share_daily_bar"]
+    )
 
     assert result.exit_code == 2
     assert "status" in result.output
@@ -276,11 +594,11 @@ def test_api_writer_failure_summary_is_sanitized(monkeypatch) -> None:
 
     monkeypatch.setattr(
         services_module,
-        "validate_data_product_interim",
+        "run_data_product_interim",
         fail_with_existing_output,
     )
     response = TestClient(create_app()).post(
-        "/api/0.1/data-products/a_share_daily_bar/interim"
+        "/api/0.1/data-products/a_share_daily_bar/interim-runs"
     )
     payload = response.json()
 
@@ -295,6 +613,42 @@ def test_api_writer_failure_summary_is_sanitized(monkeypatch) -> None:
     assert "csmar" not in str(payload).lower()
 
 
+def test_run_id_sanitizer_rejects_api_body_and_cli_option_markers() -> None:
+    client = TestClient(create_app())
+    runner = CliRunner()
+
+    invalid_values = [
+        "csmar-run",
+        "provider_id-run",
+        "source_id-run",
+        "implementation_package-run",
+        "data-raw-000001.sh",
+        "reports/private_real/run",
+    ]
+    for value in invalid_values:
+        response = client.post(
+            "/api/0.1/data-products/a_share_daily_bar/interim-runs",
+            json={"run_id": value},
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["error_code"] == "invalid_run_id"
+        assert response.json()["error"]["field"] == "run_id"
+        _assert_public_text_has_no_private_markers(str(response.json()))
+
+        result = runner.invoke(
+            app,
+            [
+                "data-products",
+                "run-interim",
+                "a_share_daily_bar",
+                "--run-id",
+                value,
+            ],
+        )
+        assert result.exit_code == 2
+        _assert_public_text_has_no_private_markers(result.output)
+
+
 def test_clean_rewrite_cli_does_not_expose_retired_commands() -> None:
     runner = CliRunner()
     retired = [
@@ -304,7 +658,14 @@ def test_clean_rewrite_cli_does_not_expose_retired_commands() -> None:
         ["factor" + "-rebuild", "--help"],
         ["prediction" + "-handoff", "--help"],
         ["compare", "--help"],
+        *[list(command[:2]) + ["--help"] for command in RETIRED_CLI_COMMANDS],
     ]
 
     for command in retired:
         assert runner.invoke(app, command).exit_code != 0
+
+
+def _assert_public_text_has_no_private_markers(text: str) -> None:
+    lowered = text.lower()
+    for marker in FORBIDDEN_PUBLIC_MARKERS:
+        assert marker.lower() not in lowered

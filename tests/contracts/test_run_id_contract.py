@@ -94,6 +94,6 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
 
 
 @pytest.mark.parametrize("run_id", ["run 01", "csmar-run", "600000.sh"])
-def test_report_metadata_lookup_uses_shared_run_id_validation(run_id: str) -> None:
+def test_data_product_interim_uses_shared_run_id_validation(run_id: str) -> None:
     with pytest.raises(ValueError, match="invalid_run_id"):
-        services.report_metadata(run_id)
+        services.run_data_product_interim("a_share_daily_bar", run_id=run_id)

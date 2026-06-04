@@ -7,6 +7,7 @@ from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.sources.csmar import checksums, field_mappings, raw_schemas
 from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
 from quant_research_platform.sources.csmar.contracts import (
+    inspect_raw_export_file,
     map_csmar_columns,
     parse_raw_filename,
 )
@@ -194,6 +195,30 @@ def test_csmar_index_info_reader_preserves_formula_commas_and_empty_na(
     assert pd.isna(result.loc[1, "Idxinfo01"])
     assert pd.isna(result.loc[1, "Idxinfo02"])
     assert pd.isna(result.loc[1, "Idxinfo10"])
+
+
+def test_csmar_raw_export_inspection_accepts_approved_adjustment_aliases(
+    tmp_path,
+) -> None:
+    export = tmp_path / (
+        "csmar__adjustment__all_a_ex_bjse__20240101_20251231__"
+        "export-20260515.csv"
+    )
+    pd.DataFrame(
+        {
+            "Stkcd": ["1"],
+            "Trddt": ["2024-01-02"],
+            "FwardFactor": [1.0],
+            "BwardFactor": [1.0],
+            "CumulateFwardFactor": [1.0],
+            "CumulateBwardFactor": [1.0],
+        }
+    ).to_csv(export, index=False)
+
+    inspection = inspect_raw_export_file(export)
+
+    assert inspection.dataset == "adjustment"
+    assert inspection.missing_required_columns == []
 
 
 def test_csmar_importer_builds_canonical_interim_frame(tmp_path) -> None:

@@ -62,11 +62,8 @@ GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
 GET  /api/0.1/catalog/universes
 GET  /api/0.1/catalog/data-products
-POST /api/0.1/data-products/a_share_daily_bar/interim
-POST /api/0.1/markets/{market_id}/processed-data
-POST /api/0.1/research-datasets
-POST /api/0.1/workflows
-GET  /api/0.1/reports/{run_id}
+POST /api/0.1/data-products/{data_product_id}/interim-runs
+GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```
 
 The clean CLI surface is:
@@ -76,21 +73,22 @@ qrp catalog factors
 qrp catalog labels
 qrp catalog universes
 qrp catalog data-products
-qrp data-product interim a_share_daily_bar
-qrp data-product interim a_share_daily_bar
-qrp market build-processed
-qrp research build-dataset
-qrp workflow run
-qrp report show
+qrp data-products run-interim <data_product_id>
+qrp data-products run-interim <data_product_id> --dry-run
+qrp data-products run-interim <data_product_id> --run-id <run_id>
+qrp research-datasets requirements <dataset_id>
 ```
 
 `execution_mode` defaults to `execute`. API requests use the JSON field
-`execution_mode`; CLI exposes optional `--dry-run` and does not expose
-`--execute` or private-source path flags. `execute` is fixture-backed registered
-workflow execution for `0.1.0`; private real-data execution is not exposed
+`execution_mode`; CLI exposes optional `--dry-run` and `--run-id` and does not
+expose `--execute` or private-source path flags. `execute` is fixture-backed
+registered execution for `0.1.0`; private real-data execution is not exposed
 through API/CLI.
 
-Old command and endpoint names are not clean-rewrite public contracts.
+Removed public placeholders are not compatibility requirements. Future-only
+work remains explicit: `processed-data-runs`, `workflow-runs`, `report
+index/show`, `RunRepository`, `ReportRepository`, `private plugin`, and
+`qrp-private`.
 
 ## Development Checks
 

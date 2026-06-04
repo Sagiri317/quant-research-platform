@@ -13,21 +13,18 @@ from quant_research_platform.storage.errors import WriteRejectedError
 
 app = typer.Typer(add_completion=False)
 catalog_app = typer.Typer(add_completion=False, help="Catalog query commands.")
-data_product_app = typer.Typer(
+data_products_app = typer.Typer(
     add_completion=False,
-    help="Data product ingestion commands.",
+    help="Data product run commands.",
 )
-market_app = typer.Typer(add_completion=False, help="Market build commands.")
-research_app = typer.Typer(add_completion=False, help="Research dataset commands.")
-workflow_app = typer.Typer(add_completion=False, help="Workflow commands.")
-report_app = typer.Typer(add_completion=False, help="Report commands.")
+research_datasets_app = typer.Typer(
+    add_completion=False,
+    help="Research dataset query commands.",
+)
 
 app.add_typer(catalog_app, name="catalog")
-app.add_typer(data_product_app, name="data-product")
-app.add_typer(market_app, name="market")
-app.add_typer(research_app, name="research")
-app.add_typer(workflow_app, name="workflow")
-app.add_typer(report_app, name="report")
+app.add_typer(data_products_app, name="data-products")
+app.add_typer(research_datasets_app, name="research-datasets")
 
 
 def _echo_safe(value: object, *, err: bool = False) -> None:
@@ -93,8 +90,8 @@ def catalog_data_products() -> None:
         )
 
 
-@data_product_app.command("interim")
-def data_product_interim(
+@data_products_app.command("run-interim")
+def run_data_product_interim(
     data_product_id: str = typer.Argument(..., help="Data product id."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate without writes."),
     run_id: str | None = typer.Option(None, "--run-id", help="Logical run id."),
@@ -113,7 +110,7 @@ def _run_data_product_interim(
     execution_mode = ExecutionMode.DRY_RUN if dry_run else ExecutionMode.EXECUTE
 
     _run_cli(
-        lambda: services.validate_data_product_interim(
+        lambda: services.run_data_product_interim(
             data_product_id,
             execution_mode=execution_mode,
             run_id=run_id,
@@ -121,34 +118,13 @@ def _run_data_product_interim(
     )
 
 
-@market_app.command("build-processed")
-def market_build_processed(
-    market: str = typer.Option("a_share", "--market", help="Market id."),
+@research_datasets_app.command("requirements")
+def research_dataset_requirements(
+    dataset_id: str = typer.Argument(..., help="Research dataset id."),
 ) -> None:
-    """Validate the market processed-data build entry point."""
+    """Describe public research dataset requirements."""
 
-    _run_cli(lambda: services.validate_market_processed(market))
-
-
-@research_app.command("build-dataset")
-def research_build_dataset() -> None:
-    """Validate the research dataset build entry point."""
-
-    _run_cli(services.validate_research_dataset)
-
-
-@workflow_app.command("run")
-def workflow_run() -> None:
-    """Validate the workflow execution entry point."""
-
-    _run_cli(services.validate_workflow_run)
-
-
-@report_app.command("show")
-def report_show() -> None:
-    """Validate the report query entry point."""
-
-    _run_cli(lambda: services.report_metadata("example-run"))
+    _run_cli(lambda: services.describe_research_dataset_requirements(dataset_id))
 
 
 def main() -> None:

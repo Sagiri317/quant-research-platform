@@ -6,6 +6,7 @@ import json
 import pandas as pd
 import pytest
 
+import quant_research_platform.reports.bundles as bundles_module
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -262,6 +263,115 @@ def test_evaluation_report_rejects_existing_run_root_without_target_writes(
     assert sentinel.read_text(encoding="utf-8") == "existing\n"
     assert not (run_root / "metrics.parquet").exists()
     assert not (run_root / "manifest.json").exists()
+
+
+def test_stage_profile_bundle_cleans_temp_root_after_mid_bundle_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    frame = pd.DataFrame.from_records(
+        [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
+    )
+    run_root = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "diagnostics"
+        / "run"
+    )
+
+    def fail_json_write(path, *_args, **_kwargs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (path.parent / "partial.json").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("simulated_stage_profile_failure")
+
+    monkeypatch.setattr(bundles_module, "atomic_write_json", fail_json_write)
+
+    with pytest.raises(RuntimeError, match="simulated_stage_profile_failure"):
+        write_stage_profile_bundle(
+            frame,
+            spec=_stage_profile_report_spec(),
+            layout=StorageLayout(project_root=tmp_path),
+            report_text="safe",
+        )
+
+    assert not run_root.exists()
+    assert list(run_root.parent.glob(".run.tmp-*")) == []
+
+
+def test_prediction_bundle_cleans_temp_root_after_mid_bundle_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    run_root = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "prediction"
+        / "pred-run"
+    )
+
+    def fail_parquet_write(_frame, path, **_kwargs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (path.parent / "partial.parquet").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("simulated_prediction_failure")
+
+    monkeypatch.setattr(bundles_module, "atomic_write_parquet", fail_parquet_write)
+
+    with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
+        write_prediction_bundle_files(
+            _prediction_frame(),
+            spec=_prediction_spec(),
+            report_spec=_prediction_report_spec(),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+    assert not run_root.exists()
+    assert list(run_root.parent.glob(".pred-run.tmp-*")) == []
+
+
+def test_evaluation_report_cleans_temp_root_after_mid_bundle_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    run_root = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "evaluation"
+        / "eval-run"
+    )
+    call_count = 0
+
+    def fail_second_parquet_write(_frame, path, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if call_count == 2:
+            (path.parent / "partial.parquet").write_text("partial\n", encoding="utf-8")
+            raise RuntimeError("simulated_evaluation_failure")
+        path.write_text("first\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        bundles_module,
+        "atomic_write_parquet",
+        fail_second_parquet_write,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated_evaluation_failure"):
+        write_evaluation_report_files(
+            _evaluation_metrics_frame(),
+            _evaluation_grouped_returns_frame(),
+            spec=_evaluation_spec(),
+            report_spec=_evaluation_report_spec(),
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+    assert not run_root.exists()
+    assert list(run_root.parent.glob(".eval-run.tmp-*")) == []
 
 
 def test_output_already_exists_error_public_summary_is_path_free() -> None:

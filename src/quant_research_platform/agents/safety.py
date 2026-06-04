@@ -64,7 +64,7 @@ def _iter_text_values(value: Any) -> tuple[str, ...]:
             texts.extend(_iter_text_values(key))
             texts.extend(_iter_text_values(item))
         return tuple(texts)
-    if isinstance(value, (tuple, list, set, frozenset)):
+    if isinstance(value, tuple | list | set | frozenset):
         texts = []
         for item in value:
             texts.extend(_iter_text_values(item))

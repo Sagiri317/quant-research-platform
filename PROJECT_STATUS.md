@@ -11,9 +11,9 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 | 当前阶段 | QRP Clean Rewrite `0.1.0` on Local Research Platform |
 | 当前分支 | `feature/qrp-clean-rewrite` |
 | Conda 环境 | `analysis` |
-| 版本边界 | project `0.1.0`; API/contracts/processed-data/research-dataset/workflow specs use `0.1` |
+| 版本边界 | project `0.1.0`; API/contracts use `0.1` |
 | 源码拓扑 | `contracts`, `storage`, `catalog`, `sources`, `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`, `reports`, `runtime` |
-| 当前 API/CLI | `/api/0.1/...` and clean `qrp catalog/data-product/market/research/workflow/report` commands |
+| 当前 API/CLI | `/api/0.1/...` catalog routes, data product interim runs, research dataset requirements; `qrp catalog`, `qrp data-products`, `qrp research-datasets` |
 | 执行边界 | API/CLI `execution_mode` defaults to `execute`; `--dry-run` maps to `dry_run`; private real-data execution is not exposed through API/CLI |
 | 市场范围 | A-share enabled; other markets are future design only, with no empty implementation packages |
 | 私有边界 | `data/raw/<internal-provider>`, `data/interim/<internal-provider>`, `data/processed/a_share`, `reports/private_real` |
@@ -47,9 +47,10 @@ Current public-safe anchors:
 
 ## 当前 blocker / 风险
 
-1. Retired API/CLI compatibility tests are no longer authoritative after the
-   clean public surface removed retired endpoints and commands.
-2. This branch is not merged to `main`.
+1. This branch is not merged to `main`.
+2. Future-only items remain out of the active public contract:
+   `processed-data-runs`, `workflow-runs`, `report index/show`,
+   `RunRepository`, `ReportRepository`, `private plugin`, and `qrp-private`.
 
 ## 下一步
 

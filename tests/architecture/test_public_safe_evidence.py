@@ -66,6 +66,8 @@ FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS = [
     "token=",
     "provider_id",
     "source_id",
+    "implementation_package",
+    "placeholder",
 ]
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 HASH_FIELDS = {
@@ -82,7 +84,15 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert payload["contract_version"] == "0.1"
+    assert payload["project_version"] == "0.1.0"
     assert payload["privacy_level"] == "public_safe_aggregate"
+    assert payload["data_product_id"] == "a_share_daily_bar"
+    assert payload["market_id"] == "a_share"
+    assert payload["verification_kind"] == "private_real_data_aggregate"
+    assert payload["verification_scope"] == "aggregate_public_safe_parity"
+    assert payload["source_data_visibility"] == "private_local_only"
+    assert payload["row_level_output_committed"] is False
+    assert len(payload["areas"]) == 9
     assert {item["area"] for item in payload["areas"]} == REQUIRED_AREAS
     for item in payload["areas"]:
         assert REQUIRED_FIELDS.issubset(item)
@@ -299,3 +309,15 @@ def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> N
 
     for term in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS:
         assert term not in combined
+
+
+def test_clean_rewrite_public_safe_parity_evidence_uses_lf_newlines() -> None:
+    paths = [
+        Path("docs/reports/clean-rewrite-0.1-parity-evidence.md"),
+        Path("docs/reports/clean-rewrite-0.1-parity-evidence.json"),
+    ]
+
+    for path in paths:
+        content = path.read_bytes()
+        assert b"\r\n" not in content
+        assert content.endswith(b"\n")

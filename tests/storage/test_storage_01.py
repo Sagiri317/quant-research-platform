@@ -378,6 +378,80 @@ def test_parquet_writer_rejects_public_output_root(tmp_path: Path) -> None:
         )
 
 
+def test_partitioned_writer_rejects_processed_root_not_derived_from_spec(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _processed_writer_case()
+    invalid_roots = [
+        tmp_path / "data" / "processed" / "other_market" / "factors" / "x" / "data",
+        tmp_path / "data" / "processed" / "a_share" / "other_category" / "x" / "data",
+        tmp_path / "data" / "processed" / "a_share" / "factors" / "other_id" / "data",
+    ]
+
+    for root in invalid_roots:
+        with pytest.raises(ValueError, match="invalid_processed_output_root"):
+            write_partitioned_parquet_dataset(frame, root, catalog=catalog, data_id="x")
+
+        assert not root.exists()
+        assert list(root.parent.glob(".data.tmp-*")) == []
+
+
+def test_partitioned_writer_rejects_interim_root_not_derived_from_spec(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _interim_writer_case()
+    invalid_roots = [
+        tmp_path / "data" / "interim" / "other_source" / "daily_market" / "data",
+        tmp_path / "data" / "interim" / "csmar" / "other_interim" / "data",
+    ]
+
+    for root in invalid_roots:
+        with pytest.raises(ValueError, match="invalid_interim_output_root"):
+            write_partitioned_parquet_dataset(
+                frame,
+                root,
+                catalog=catalog,
+                data_id="daily_market",
+            )
+
+        assert not root.exists()
+        assert list(root.parent.glob(".data.tmp-*")) == []
+
+
+def test_partitioned_writer_rejects_research_root_not_derived_from_spec(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _research_dataset_writer_case()
+    invalid_roots = [
+        tmp_path
+        / "data"
+        / "processed"
+        / "other_market"
+        / "research_datasets"
+        / "demo"
+        / "data",
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "research_datasets"
+        / "other_dataset"
+        / "data",
+    ]
+
+    for root in invalid_roots:
+        with pytest.raises(ValueError, match="invalid_research_dataset_output_root"):
+            write_partitioned_parquet_dataset(
+                frame,
+                root,
+                catalog=catalog,
+                data_id="demo",
+            )
+
+        assert not root.exists()
+        assert list(root.parent.glob(".data.tmp-*")) == []
+
+
 def test_parquet_writer_rejects_existing_output_root_without_partial_write(
     tmp_path: Path,
 ) -> None:

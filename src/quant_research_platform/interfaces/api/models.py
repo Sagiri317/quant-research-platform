@@ -9,8 +9,8 @@ from pydantic import BaseModel, Field
 from quant_research_platform.contracts.execution import ExecutionMode
 
 
-class DataProductInterimRequest(BaseModel):
-    """Request body for public data product interim workflow validation/execution."""
+class DataProductInterimRunRequest(BaseModel):
+    """Request body for public data product interim run execution."""
 
     execution_mode: ExecutionMode = Field(default=ExecutionMode.EXECUTE)
     run_id: str | None = None

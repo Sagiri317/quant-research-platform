@@ -11,8 +11,7 @@ research/evaluations
 -> reports/manifests.py
 -> reports/summaries.py
 -> reports/bundles.py
--> interfaces/api /api/0.1/reports/{run_id}
--> interfaces/cli qrp report show
+-> reports/private_real/<market>/<run_type>/<run_id>
 ```
 
 ## Contract Boundaries
@@ -23,8 +22,9 @@ research/evaluations
 - `contracts/reports.py` defines `ReportDefinition` and `ReportSpec`.
 - `catalog/reports.py` owns `ReportCatalog` and registered report definitions.
 - `reports/` owns report manifests, summaries, and bundles.
-- `interfaces/api` exposes local report lookup through `/api/0.1/reports/{run_id}`.
-- `interfaces/cli` exposes local report lookup through `qrp report show`.
+- Public API/CLI report lookup is not part of the active `0.1.0` surface.
+- Future-only report lookup belongs with `report index/show` and
+  `ReportRepository` planning.
 
 Persisted stage profile, prediction, and evaluation report outputs are derived
 from `StorageLayout + ReportSpec + run_id`. Report writers do not accept

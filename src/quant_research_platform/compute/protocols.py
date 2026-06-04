@@ -202,14 +202,14 @@ def validate_panel(frame: pd.DataFrame, spec: PanelSpec) -> pd.DataFrame:
 
 
 def _validate_quantile(value: float, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be numeric.")
     if not 0 < float(value) <= 1:
         raise ValueError(f"{name} must be greater than 0 and at most 1.")
 
 
 def _validate_nonnegative(value: float, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be numeric.")
     if float(value) < 0:
         raise ValueError(f"{name} must be nonnegative.")

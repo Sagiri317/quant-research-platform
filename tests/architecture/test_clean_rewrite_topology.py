@@ -148,7 +148,7 @@ def test_compute_portfolio_modules_are_facades_only() -> None:
     ):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 hits.append(f"{path}:{node.lineno}: {node.name}")
 
     assert hits == []
@@ -173,7 +173,7 @@ def test_compute_split_modules_own_implementations() -> None:
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text, filename=str(path))
         has_impl = any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
             for node in tree.body
         )
         if not has_impl:
@@ -220,7 +220,7 @@ def test_csmar_contracts_module_is_facade_only() -> None:
     definitions = [
         f"{path}:{node.lineno}: {node.name}"
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
     ]
     star_imports = [
         f"{path}:{node.lineno}: {alias.name}"
@@ -236,9 +236,12 @@ def test_csmar_contracts_module_is_facade_only() -> None:
 
 def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
     raw_path = SOURCE_ROOT / "sources/csmar/raw_schemas.py"
+    raw_text = raw_path.read_text(encoding="utf-8")
     raw_tree = ast.parse(raw_path.read_text(encoding="utf-8"), filename=str(raw_path))
     forbidden_raw_owners = {
         "map_csmar_columns",
+        "missing_raw_columns",
+        "missing_raw_column_names",
         "normalize_stock_code",
         "normalize_trdnew_capchg",
         "normalize_trdnew_daily_market",
@@ -253,11 +256,17 @@ def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
     ]
 
     assert raw_hits == []
+    assert "column_mapping" not in raw_text
+    assert "column_aliases" not in raw_text
+    assert "chinese_meanings" not in raw_text
+    assert "sha256" not in raw_text
 
 
 def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
     expected = {
         SOURCE_ROOT / "sources/csmar/field_mappings.py": {
+            "missing_raw_columns",
+            "missing_raw_column_names",
             "map_csmar_columns",
             "normalize_stock_code",
             "normalize_trdnew_capchg",
@@ -292,3 +301,52 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
 
     assert missing == []
     assert reverse_imports == []
+
+
+def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
+    raw_path = SOURCE_ROOT / "sources/csmar/raw_schemas.py"
+    mapping_path = SOURCE_ROOT / "sources/csmar/field_mappings.py"
+    checksum_path = SOURCE_ROOT / "sources/csmar/checksums.py"
+    raw_tree = ast.parse(raw_path.read_text(encoding="utf-8"), filename=str(raw_path))
+    mapping_tree = ast.parse(
+        mapping_path.read_text(encoding="utf-8"), filename=str(mapping_path)
+    )
+    checksum_tree = ast.parse(
+        checksum_path.read_text(encoding="utf-8"), filename=str(checksum_path)
+    )
+
+    raw_dataclass_fields = {
+        node.target.id
+        for class_node in raw_tree.body
+        if (
+            isinstance(class_node, ast.ClassDef)
+            and class_node.name == "RawTableContract"
+        )
+        for node in class_node.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    mapping_assignments = {
+        node.targets[0].id
+        for node in mapping_tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    }
+    checksum_functions = {
+        node.name for node in checksum_tree.body if isinstance(node, ast.FunctionDef)
+    }
+
+    assert raw_dataclass_fields == {
+        "dataset",
+        "table_code",
+        "table_name_zh",
+        "required_columns",
+    }
+    assert {
+        "CSMAR_COLUMN_MAPPINGS",
+        "CSMAR_COLUMN_ALIASES",
+        "CSMAR_FIELD_DESCRIPTIONS",
+    }.issubset(mapping_assignments)
+    assert {"_file_sha256", "raw_export_sha256", "build_raw_export_metadata"}.issubset(
+        checksum_functions
+    )
