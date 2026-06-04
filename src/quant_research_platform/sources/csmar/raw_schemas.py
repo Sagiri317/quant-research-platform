@@ -1,9 +1,4 @@
-"""Internal provider raw file, table, and schema contracts.
-
-本模块不读取真实 CSMAR 文件，只定义预期 dataset contracts 和小型 validators，
-使真实私有 vendor export 检查前可以先用小样本测试。
-
-"""
+"""Internal provider raw file, table, and export-inspection contracts."""
 
 from __future__ import annotations
 
@@ -12,15 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
-
-
-@dataclass(frozen=True)
-class DatasetContract:
-    """定义一个 CSMAR 派生 dataset 的内部 schema。"""
-
-    name: str
-    required_columns: tuple[str, ...]
-    primary_key: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -57,95 +43,6 @@ class RawExportInspection:
     missing_required_columns: list[str]
     has_metadata: bool
 
-
-DATASET_CONTRACTS: dict[str, DatasetContract] = {
-    "stock_master": DatasetContract(
-        name="stock_master",
-        required_columns=(
-            "stock_code",
-            "stock_name",
-            "exchange",
-            "board",
-            "share_class",
-            "listing_date",
-            "delisting_date",
-            "company_status",
-        ),
-        primary_key=("stock_code",),
-    ),
-    "daily_market": DatasetContract(
-        name="daily_market",
-        required_columns=(
-            "stock_code",
-            "trade_date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "prev_close",
-            "volume",
-            "amount",
-            "turnover",
-            "return_1d",
-        ),
-        primary_key=("stock_code", "trade_date"),
-    ),
-    "adjustment": DatasetContract(
-        name="adjustment",
-        required_columns=("stock_code", "trade_date", "adj_factor"),
-        primary_key=("stock_code", "trade_date"),
-    ),
-    "market_cap": DatasetContract(
-        name="market_cap",
-        required_columns=(
-            "stock_code",
-            "trade_date",
-            "total_market_cap",
-            "float_market_cap",
-            "total_shares",
-            "float_shares",
-        ),
-        primary_key=("stock_code", "trade_date"),
-    ),
-    "trading_status": DatasetContract(
-        name="trading_status",
-        required_columns=(
-            "stock_code",
-            "trade_date",
-            "is_trading",
-            "is_suspended",
-        ),
-        primary_key=("stock_code", "trade_date"),
-    ),
-    "st_status": DatasetContract(
-        name="st_status",
-        required_columns=("stock_code", "st_type", "start_date", "end_date"),
-        primary_key=("stock_code", "start_date"),
-    ),
-    "industry": DatasetContract(
-        name="industry",
-        required_columns=(
-            "stock_code",
-            "industry_system",
-            "industry_level",
-            "industry_code",
-            "industry_name",
-            "start_date",
-            "end_date",
-        ),
-        primary_key=("stock_code", "industry_system", "industry_level", "start_date"),
-    ),
-    "index_market": DatasetContract(
-        name="index_market",
-        required_columns=("index_code", "trade_date", "open", "close", "return_1d"),
-        primary_key=("index_code", "trade_date"),
-    ),
-    "index_info": DatasetContract(
-        name="index_info",
-        required_columns=("index_code",),
-        primary_key=("index_code",),
-    ),
-}
 
 RAW_TABLE_CONTRACTS: dict[str, RawTableContract] = {
     "stock_master": RawTableContract(
@@ -265,7 +162,7 @@ def parse_raw_filename(path: str | Path) -> RawFileMetadata:
         raise ValueError(f"Invalid CSMAR raw filename: {name}")
 
     dataset = match.group("dataset")
-    if dataset not in DATASET_CONTRACTS:
+    if dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError(f"Unknown CSMAR dataset in filename: {dataset}")
 
     return RawFileMetadata(
@@ -288,19 +185,10 @@ def infer_dataset_from_native_export(path: str | Path) -> str:
         return NATIVE_TABLE_DATASETS[stem]
 
     for part in reversed(export_path.parts):
-        if part in DATASET_CONTRACTS:
+        if part in RAW_TABLE_CONTRACTS:
             return part
 
     raise ValueError(f"Cannot infer CSMAR dataset from native filename: {export_path}")
-
-
-def missing_required_columns(frame: pd.DataFrame, dataset: str) -> list[str]:
-    """返回 DataFrame 中缺失的 required columns。"""
-
-    contract = DATASET_CONTRACTS[dataset]
-    return [
-        column for column in contract.required_columns if column not in frame.columns
-    ]
 
 
 def read_export_header(path: str | Path) -> tuple[str, ...]:
@@ -324,7 +212,6 @@ def default_metadata_path(path: str | Path) -> Path:
 
     export_path = Path(path)
     return export_path.with_suffix(".metadata.json")
-
 
 
 def inspect_raw_export_file(path: str | Path) -> RawExportInspection:
@@ -351,39 +238,3 @@ def inspect_raw_export_file(path: str | Path) -> RawExportInspection:
         missing_required_columns=missing,
         has_metadata=default_metadata_path(export_path).exists(),
     )
-
-
-def assert_required_columns(frame: pd.DataFrame, dataset: str) -> None:
-    """当 DataFrame 不满足 dataset required columns 时抛出异常。"""
-
-    missing = missing_required_columns(frame, dataset)
-    if missing:
-        raise ValueError(f"{dataset} is missing required columns: {missing}")
-
-
-def duplicate_primary_keys(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
-    """返回 dataset 中 primary key 重复的 rows。"""
-
-    contract = DATASET_CONTRACTS[dataset]
-    assert_required_columns(frame, dataset)
-    return frame[frame.duplicated(list(contract.primary_key), keep=False)]
-
-
-def ohlc_violations(frame: pd.DataFrame) -> pd.DataFrame:
-    """返回日行情中 OHLC 关系不可能成立的 rows。"""
-
-    assert_required_columns(frame, "daily_market")
-    invalid = (
-        (frame["high"] < frame[["open", "close"]].max(axis=1))
-        | (frame["low"] > frame[["open", "close"]].min(axis=1))
-        | (frame["high"] < frame["low"])
-    )
-    return frame[invalid]
-
-
-def negative_liquidity_rows(frame: pd.DataFrame) -> pd.DataFrame:
-    """返回日行情中 volume、amount 或 turnover 为负的 rows。"""
-
-    assert_required_columns(frame, "daily_market")
-    invalid = (frame[["volume", "amount", "turnover"]] < 0).any(axis=1)
-    return frame[invalid]

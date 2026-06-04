@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from operator import itemgetter
 
 import numpy as np
@@ -49,6 +50,7 @@ from quant_research_platform.compute.tensor.turnover import _position_map_from_a
 from quant_research_platform.runtime.profiling import measure_stage
 
 
+@dataclass(frozen=True)
 class _TimestampPositionInput:
     assets: tuple[str, ...]
     asset_to_offset: dict[str, int]
@@ -59,6 +61,8 @@ class _TimestampPositionInput:
     can_enter: np.ndarray | None
     can_exit: np.ndarray | None
 
+
+@dataclass(frozen=True)
 class TensorPortfolioArtifacts:
     """一次 streaming pass 构造的内部 tensor portfolio artifacts。"""
 

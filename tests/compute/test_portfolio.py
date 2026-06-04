@@ -102,6 +102,59 @@ def test_build_weighted_positions_outputs_nonzero_rows_only() -> None:
     }
 
 
+def test_tensor_weighted_positions_builds_artifacts_from_execution_path() -> None:
+    panel = _ranking_panel().assign(
+        timestamp=lambda frame: pd.to_datetime(frame["timestamp"])
+    )
+    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+
+    artifacts = tensor_construction.build_tensor_portfolio_artifacts(
+        panel,
+        spec,
+        WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+    )
+    positions, diagnostics = tensor_construction.build_tensor_weighted_positions(
+        panel,
+        spec,
+        WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+    )
+
+    assert isinstance(artifacts, tensor_construction.TensorPortfolioArtifacts)
+    assert list(artifacts.positions.columns) == [
+        "timestamp",
+        "asset",
+        "feature",
+        "position",
+    ]
+    assert list(artifacts.diagnostics["timestamp"]) == [
+        pd.Timestamp("2026-01-01"),
+        pd.Timestamp("2026-01-02"),
+    ]
+    assert len(artifacts.turnover) == 2
+    assert {"timestamp", "feature", "turnover"}.issubset(artifacts.turnover.columns)
+    assert len(artifacts.cost_breakdown) == 2
+    assert {"timestamp", "feature", "total_cost"}.issubset(
+        artifacts.cost_breakdown.columns
+    )
+    assert len(artifacts.returns) == 2
+    assert {"timestamp", "feature", "net_portfolio_return"}.issubset(
+        artifacts.returns.columns
+    )
+    assert len(artifacts.exposure_path) == 2
+    assert {"timestamp", "feature", "gross_exposure", "net_exposure"}.issubset(
+        artifacts.exposure_path.columns
+    )
+    first = artifacts.positions[
+        artifacts.positions["timestamp"] == pd.Timestamp("2026-01-01")
+    ]
+    assert first.set_index("asset")["position"].to_dict() == {
+        "A": -1.0,
+        "C": 1.0,
+    }
+    assert positions.equals(artifacts.positions)
+    assert diagnostics.equals(artifacts.diagnostics)
+
+
 def test_build_weighted_positions_supports_long_only_top_leg() -> None:
     spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
 

@@ -76,6 +76,35 @@ HASH_FIELDS = {
     "null_summary_hash",
     "aggregate_checksum",
 }
+SUMMARY_TOP_LEVEL_FIELDS = {
+    "contract_version",
+    "project_version",
+    "verification_kind",
+    "generated_at",
+    "privacy_level",
+    "source_data_visibility",
+    "row_level_output_committed",
+    "processed_inventory",
+    "covered_roots",
+    "uncovered_roots",
+    "allowed_unverified_roots",
+    "merge_ready",
+}
+INVENTORY_FIELDS = {
+    "category",
+    "artifact_id",
+    "logical_root",
+    "period",
+    "row_count",
+    "column_count",
+    "key_count",
+    "duplicate_key_count",
+    "column_set_hash",
+    "dtype_summary_hash",
+    "null_summary_hash",
+    "aggregate_checksum",
+    "covered_by_evidence_area",
+}
 PLACEHOLDER_HASH_VALUES = {"passed", "accepted"}
 
 
@@ -315,6 +344,76 @@ def test_clean_rewrite_public_safe_parity_evidence_uses_lf_newlines() -> None:
     paths = [
         Path("docs/reports/clean-rewrite-0.1-parity-evidence.md"),
         Path("docs/reports/clean-rewrite-0.1-parity-evidence.json"),
+    ]
+
+    for path in paths:
+        content = path.read_bytes()
+        assert b"\r\n" not in content
+        assert content.endswith(b"\n")
+
+
+def test_private_verification_summary_json_schema_and_coverage() -> None:
+    path = Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    assert SUMMARY_TOP_LEVEL_FIELDS.issubset(payload)
+    assert payload["contract_version"] == "0.1"
+    assert payload["project_version"] == "0.1.0"
+    assert payload["verification_kind"] == "private_real_data_aggregate_inventory"
+    assert payload["privacy_level"] == "public_safe_aggregate"
+    assert payload["source_data_visibility"] == "private_local_only"
+    assert payload["row_level_output_committed"] is False
+    assert payload["merge_ready"] is True
+    assert payload["uncovered_roots"] == []
+    assert payload["allowed_unverified_roots"] == []
+    assert payload["covered_roots"] == [
+        item["logical_root"] for item in payload["processed_inventory"]
+    ]
+
+    for item in payload["processed_inventory"]:
+        assert INVENTORY_FIELDS.issubset(item)
+        assert item["logical_root"].startswith("processed/a_share/")
+        assert "data/processed" not in item["logical_root"]
+        assert item["row_count"] > 0
+        assert item["column_count"] > 0
+        assert item["key_count"] > 0
+        assert item["duplicate_key_count"] == 0
+        assert item["covered_by_evidence_area"]
+        for field in HASH_FIELDS:
+            assert HASH_RE.fullmatch(item[field])
+
+
+def test_private_verification_summary_covers_full_historical_panel() -> None:
+    path = Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    daily_panel = next(
+        item
+        for item in payload["processed_inventory"]
+        if item["logical_root"] == "processed/a_share/panels/daily_panel"
+    )
+
+    assert daily_panel["period"] == "2014-01-01 through 2025-12-31"
+    assert (
+        daily_panel["covered_by_evidence_area"]
+        == "full_historical_daily_panel_status"
+    )
+
+
+def test_private_verification_summary_has_no_private_samples() -> None:
+    paths = [
+        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.md"),
+        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json"),
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+    for term in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS:
+        assert term not in combined
+
+
+def test_private_verification_summary_uses_lf_newlines() -> None:
+    paths = [
+        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.md"),
+        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json"),
     ]
 
     for path in paths:

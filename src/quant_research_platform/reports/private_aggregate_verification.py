@@ -32,6 +32,21 @@ GENERATED_PANEL_MEMORY_FRACTION = 0.7
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 DEFAULT_AVAILABLE_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 
+PROCESSED_ROOT_AREA_COVERAGE = {
+    "processed/a_share/panels/daily_panel": "full_historical_daily_panel_status",
+    "processed/a_share/factors/price_volume_56": "factor_value_parity",
+    "processed/a_share/labels/forward_returns": "label_value_parity",
+    "processed/a_share/universes/a_share_default": "masks_universes_parity",
+    "processed/a_share/masks/as_of/a_share_as_of": "masks_universes_parity",
+    "processed/a_share/masks/execution/a_share_execution": "masks_universes_parity",
+    "processed/a_share/masks/evaluation/a_share_evaluation": "masks_universes_parity",
+    "processed/a_share/contexts/daily_context": (
+        "supporting_layers_migration_2014_2025"
+    ),
+    "processed/a_share/research_datasets/"
+    "a_share_price_volume_forward_returns": "research_dataset_parity",
+}
+
 
 @dataclass(frozen=True)
 class AggregateInput:
@@ -189,6 +204,114 @@ def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def generate_private_verification_summary(
+    project_root: Path = Path("."),
+    *,
+    evidence_payload: dict[str, Any] | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Generate a public-safe inventory summary for processed artifacts."""
+
+    root = Path(project_root)
+    generated_at = generated_at or datetime.now(UTC)
+    if evidence_payload is None:
+        evidence_payload = generate_public_safe_aggregate_evidence(
+            root,
+            generated_at=generated_at,
+        )
+    inventory = _processed_inventory(root)
+    covered_roots = [
+        item["logical_root"]
+        for item in inventory
+        if item["covered_by_evidence_area"]
+    ]
+    uncovered_roots = [
+        item["logical_root"]
+        for item in inventory
+        if not item["covered_by_evidence_area"]
+    ]
+    allowed_unverified_roots: list[dict[str, str]] = []
+    merge_ready = (
+        bool(evidence_payload.get("merge_ready"))
+        and not uncovered_roots
+        and not allowed_unverified_roots
+    )
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "project_version": PROJECT_VERSION,
+        "verification_kind": "private_real_data_aggregate_inventory",
+        "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        "privacy_level": PRIVACY_LEVEL,
+        "source_data_visibility": "private_local_only",
+        "row_level_output_committed": False,
+        "processed_inventory": inventory,
+        "covered_roots": covered_roots,
+        "uncovered_roots": uncovered_roots,
+        "allowed_unverified_roots": allowed_unverified_roots,
+        "merge_ready": merge_ready,
+    }
+
+
+def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str:
+    """Render the processed inventory summary as public-safe Markdown."""
+
+    lines = [
+        "# Clean Rewrite 0.1 Private Verification Summary",
+        "",
+        (
+            "This summary records aggregate-only processed artifact inventory "
+            "for QRP Clean Rewrite `0.1.0`."
+        ),
+        "",
+        (
+            "Machine-readable summary lives in "
+            "`docs/reports/clean-rewrite-0.1-private-verification-summary.json`."
+        ),
+        "",
+        "| Logical Root | Area | Rows | Columns | Period |",
+        "| --- | --- | ---: | ---: | --- |",
+    ]
+    for item in payload["processed_inventory"]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    item["logical_root"],
+                    item["covered_by_evidence_area"] or "uncovered",
+                    str(item["row_count"]),
+                    str(item["column_count"]),
+                    str(item["period"]),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "Public-safe status:",
+            "",
+            f"- `privacy_level | {payload['privacy_level']}`",
+            f"- `contract_version | {payload['contract_version']}`",
+            f"- `verification_kind | {payload['verification_kind']}`",
+            f"- `source_data_visibility | {payload['source_data_visibility']}`",
+            "- `row_level_output_committed | false`",
+            f"- `covered_roots | {len(payload['covered_roots'])}`",
+            f"- `uncovered_roots | {len(payload['uncovered_roots'])}`",
+            (
+                "- `allowed_unverified_roots | "
+                f"{len(payload['allowed_unverified_roots'])}`"
+            ),
+            f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+        ]
+    )
+    if payload["uncovered_roots"]:
+        lines.append("- uncovered processed roots require review before merge-ready")
+    return "\n".join(lines) + "\n"
+
+
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
     reports_root = root / "reports" / "private_real" / MARKET_ID
@@ -271,6 +394,60 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             "full historical daily panel",
         ),
     )
+
+
+def _processed_inventory(root: Path) -> list[dict[str, Any]]:
+    inventory: list[dict[str, Any]] = []
+    for artifact_root in _official_processed_artifact_roots(root):
+        logical_root = _logical_processed_root(root, artifact_root)
+        summary = _summarize_parquet_root(artifact_root / "data")
+        category, artifact_id = _processed_category_and_artifact_id(logical_root)
+        inventory.append(
+            {
+                "category": category,
+                "artifact_id": artifact_id,
+                "logical_root": logical_root,
+                "period": summary.period,
+                "row_count": summary.row_count,
+                "column_count": summary.column_count,
+                "key_count": summary.key_count,
+                "duplicate_key_count": summary.duplicate_key_count,
+                "column_set_hash": summary.column_set_hash,
+                "dtype_summary_hash": summary.dtype_summary_hash,
+                "null_summary_hash": summary.null_summary_hash,
+                "aggregate_checksum": summary.aggregate_checksum,
+                "covered_by_evidence_area": PROCESSED_ROOT_AREA_COVERAGE.get(
+                    logical_root,
+                    "",
+                ),
+            }
+        )
+    return sorted(inventory, key=lambda item: item["logical_root"])
+
+
+def _official_processed_artifact_roots(root: Path) -> tuple[Path, ...]:
+    processed_root = Path(root) / "data" / "processed" / MARKET_ID
+    if not processed_root.exists():
+        raise FileNotFoundError("private_processed_root_missing")
+    roots = [
+        path.parent
+        for path in processed_root.rglob("data")
+        if path.is_dir() and any(path.rglob("*.parquet"))
+    ]
+    return tuple(sorted(set(roots), key=lambda path: path.as_posix()))
+
+
+def _logical_processed_root(root: Path, artifact_root: Path) -> str:
+    relative = artifact_root.relative_to(Path(root) / "data" / "processed")
+    return "processed/" + relative.as_posix()
+
+
+def _processed_category_and_artifact_id(logical_root: str) -> tuple[str, str]:
+    parts = logical_root.split("/")
+    if len(parts) < 4 or parts[:2] != ["processed", MARKET_ID]:
+        raise ValueError("invalid_processed_logical_root")
+    category_parts = parts[2:-1]
+    return "/".join(category_parts), parts[-1]
 
 
 def _area_record(area_input: AggregateInput) -> dict[str, Any]:
@@ -807,6 +984,8 @@ def _sha256_json(payload: Any) -> str:
 
 
 __all__ = [
+    "generate_private_verification_summary",
     "generate_public_safe_aggregate_evidence",
+    "render_private_verification_summary_markdown",
     "render_public_safe_evidence_markdown",
 ]

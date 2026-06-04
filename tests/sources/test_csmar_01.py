@@ -4,15 +4,15 @@ import pandas as pd
 
 from quant_research_platform.catalog.fields import platform_interim_column_names
 from quant_research_platform.contracts.data import DataGrain
-from quant_research_platform.sources.csmar import checksums, field_mappings, raw_schemas
-from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
-from quant_research_platform.sources.csmar.contracts import (
-    inspect_raw_export_file,
-    map_csmar_columns,
-    parse_raw_filename,
+from quant_research_platform.sources.csmar import (
+    checksums,
+    dataset_contracts,
+    field_mappings,
+    raw_schemas,
 )
+from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
 from quant_research_platform.sources.csmar.importer import (
-    build_interim_frame,
+    build_csmar_interim_frame,
     import_interim_data,
 )
 from quant_research_platform.sources.csmar.interim import (
@@ -37,9 +37,15 @@ def test_csmar_interim_catalog_registers_daily_market_spec() -> None:
         assert column in spec.required_columns
 
 
-def test_csmar_contracts_split_keeps_thin_facade_exports() -> None:
-    assert parse_raw_filename is raw_schemas.parse_raw_filename
-    assert map_csmar_columns is field_mappings.map_csmar_columns
+def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
+    assert raw_schemas.parse_raw_filename.__module__.endswith(".raw_schemas")
+    assert field_mappings.map_csmar_columns.__module__.endswith(".field_mappings")
+    assert dataset_contracts.DatasetContract.__module__.endswith(
+        ".dataset_contracts"
+    )
+    assert dataset_contracts.missing_required_columns.__module__.endswith(
+        ".dataset_contracts"
+    )
     assert field_mappings.map_csmar_columns.__module__.endswith(".field_mappings")
     assert checksums.build_raw_export_metadata.__module__.endswith(".checksums")
     assert hasattr(checksums, "raw_export_sha256")
@@ -215,7 +221,7 @@ def test_csmar_raw_export_inspection_accepts_approved_adjustment_aliases(
         }
     ).to_csv(export, index=False)
 
-    inspection = inspect_raw_export_file(export)
+    inspection = raw_schemas.inspect_raw_export_file(export)
 
     assert inspection.dataset == "adjustment"
     assert inspection.missing_required_columns == []
@@ -228,7 +234,7 @@ def test_csmar_importer_builds_canonical_interim_frame(tmp_path) -> None:
     )
     _write_daily_market_raw_export(export)
 
-    frame = build_interim_frame(
+    frame = build_csmar_interim_frame(
         interim_data_id="daily_market",
         input_files=[export],
         start_date="2024-01-01",

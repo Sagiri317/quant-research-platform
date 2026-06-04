@@ -51,7 +51,7 @@ class InterimImportResult:
     pruning_report_text: str
 
 
-def build_interim_frame(
+def build_csmar_interim_frame(
     *,
     interim_data_id: str,
     input_files: list[Path],
@@ -131,7 +131,7 @@ def import_interim_data(
         if not input_files:
             skipped.append(interim_data_id)
             continue
-        frame = build_interim_frame(
+        frame = build_csmar_interim_frame(
             interim_data_id=interim_data_id,
             input_files=input_files,
             start_date=start_date,
@@ -246,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "DEFAULT_INTERIM_DATASETS",
     "InterimImportResult",
-    "build_interim_frame",
+    "build_csmar_interim_frame",
     "import_interim_data",
     "main",
 ]
