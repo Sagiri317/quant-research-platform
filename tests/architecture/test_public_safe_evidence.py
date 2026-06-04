@@ -190,48 +190,7 @@ def test_full_historical_daily_panel_summary_streams_generated_chunks(
     assert summary.period == "2014-01-01 through 2025-12-31"
 
 
-def test_full_historical_daily_panel_generation_prefers_full_frame(
-    monkeypatch,
-) -> None:
-    from quant_research_platform.reports import private_aggregate_verification
-
-    full_frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"],
-            "asset_id": ["asset-a"],
-            "timestamp": [pd.Timestamp("2014-01-01")],
-        }
-    )
-
-    def build_full_frame(project_root: Path):
-        assert project_root == Path(".")
-        return full_frame
-
-    def iter_stock_chunks(project_root: Path):
-        raise AssertionError("stock chunk fallback should not run")
-        yield pd.DataFrame()
-
-    monkeypatch.setattr(
-        private_aggregate_verification,
-        "_build_generated_full_daily_panel_frame",
-        build_full_frame,
-    )
-    monkeypatch.setattr(
-        private_aggregate_verification,
-        "_iter_generated_full_daily_panel_stock_chunks",
-        iter_stock_chunks,
-    )
-
-    frames = list(
-        private_aggregate_verification._iter_generated_full_daily_panel_chunks(
-            Path(".")
-        )
-    )
-
-    assert frames == [full_frame]
-
-
-def test_full_historical_daily_panel_generation_falls_back_to_stock_chunks(
+def test_full_historical_daily_panel_generation_always_uses_chunks(
     monkeypatch,
 ) -> None:
     from quant_research_platform.reports import private_aggregate_verification
@@ -244,19 +203,10 @@ def test_full_historical_daily_panel_generation_falls_back_to_stock_chunks(
         }
     )
 
-    def build_full_frame(project_root: Path):
-        assert project_root == Path(".")
-        raise MemoryError
-
     def iter_stock_chunks(project_root: Path):
         assert project_root == Path(".")
         return iter((chunk,))
 
-    monkeypatch.setattr(
-        private_aggregate_verification,
-        "_build_generated_full_daily_panel_frame",
-        build_full_frame,
-    )
     monkeypatch.setattr(
         private_aggregate_verification,
         "_iter_generated_full_daily_panel_stock_chunks",
@@ -269,7 +219,14 @@ def test_full_historical_daily_panel_generation_falls_back_to_stock_chunks(
         )
     )
 
-    assert frames == [chunk]
+    assert len(frames) == 1
+    assert frames[0].equals(chunk)
+
+
+def test_generated_panel_memory_budget_uses_70_percent_available_memory() -> None:
+    from quant_research_platform.reports import private_aggregate_verification
+
+    assert private_aggregate_verification.GENERATED_PANEL_MEMORY_FRACTION == 0.7
 
 
 def test_dynamic_stock_chunk_size_uses_one_chunk_when_memory_fits() -> None:
@@ -309,6 +266,30 @@ def test_generated_panel_memory_budget_allows_current_full_frame_scale() -> None
     )
 
     assert chunk_size == 5420
+
+
+def test_aggregate_summary_checksum_is_invariant_to_chunking() -> None:
+    from quant_research_platform.reports import private_aggregate_verification
+
+    combined = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 12,
+            "asset_id": [f"asset-{index:02d}" for index in range(12)],
+            "timestamp": [pd.Timestamp("2025-12-31")] * 12,
+            "value": [float(index) + 0.25 for index in range(12)],
+        }
+    )
+    chunks = tuple(
+        combined.iloc[start : start + 3].reset_index(drop=True)
+        for start in range(0, len(combined), 3)
+    )
+
+    full_summary = private_aggregate_verification._summarize_frames((combined,))
+    chunk_summary = private_aggregate_verification._summarize_frames(chunks)
+
+    assert "numeric_sum" not in full_summary.content_summary["timestamp"]
+    assert "numeric_sum" not in full_summary.content_summary["value"]
+    assert chunk_summary.aggregate_checksum == full_summary.aggregate_checksum
 
 
 def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> None:

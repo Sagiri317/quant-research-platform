@@ -28,6 +28,8 @@ replacement for `PROJECT_STATUS.md`.
 - Public-safe aggregate evidence is generated from local private aggregate
   verification; full historical `daily_panel` aggregate coverage now spans
   `2014-01-01` through `2025-12-31` without committed row-level output.
+- Evaluation and prediction evidence is 2014 smoke scope only; it is not a
+  2014-2025 full historical evaluation or prediction run.
 - A-share is the first enabled market. Other markets are future design only.
 - `agents/` is proposal-only in this phase; it does not call external LLM APIs
   and does not write private row-level data.

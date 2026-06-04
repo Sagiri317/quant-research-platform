@@ -33,7 +33,8 @@ Current public-safe anchors:
 - 0.1 API/CLI route and command contract tests.
 - Public-safe parity-or-explained-delta evidence committed for processed panel,
   factor values, labels, masks/universes, ResearchDataset, evaluation, and
-  prediction smoke.
+  prediction smoke. Evaluation and prediction evidence remains a 2014 smoke
+  scope, not a 2014-2025 full historical run.
 - P2 compute portfolio and internal provider contract split modules exist with
   compatibility facades.
 - Report writers derive paths through `ReportSpec`, `ReportCatalog`,

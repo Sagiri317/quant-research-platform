@@ -68,7 +68,7 @@ processed canonical key.
 - 2014-2025 label value parity-or-explained-delta.
 - 2014-2025 masks/universes parity.
 - 2014-2025 research dataset row/key/column parity.
-- Evaluation and prediction smoke parity.
+- 2014 evaluation and prediction smoke parity only.
 - Private boundary and sanitizer tests.
 
 ## Current Local Migration Status
@@ -82,3 +82,5 @@ processed canonical key.
 - Full historical `daily_panel` aggregate coverage is verified for
   `2014-01-01` through `2025-12-31` by local private aggregate verification
   without committing row-level output artifacts.
+- Evaluation and prediction remain 2014 smoke evidence; they have not been
+  expanded into full historical 2014-2025 runs.

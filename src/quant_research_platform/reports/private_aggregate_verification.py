@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import gc
 import hashlib
 import json
 import os
@@ -29,7 +28,7 @@ FULL_HISTORY_START_YEAR = 2014
 FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
-GENERATED_PANEL_MEMORY_FRACTION = 0.55
+GENERATED_PANEL_MEMORY_FRACTION = 0.7
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 DEFAULT_AVAILABLE_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -351,42 +350,7 @@ def _summarize_generated_full_daily_panel(project_root: Path) -> AggregateSummar
 def _iter_generated_full_daily_panel_chunks(
     project_root: Path,
 ) -> Iterator[pd.DataFrame]:
-    try:
-        yield _build_generated_full_daily_panel_frame(project_root)
-    except MemoryError:
-        gc.collect()
-        yield from _iter_generated_full_daily_panel_stock_chunks(project_root)
-
-
-def _build_generated_full_daily_panel_frame(project_root: Path) -> pd.DataFrame:
-    from quant_research_platform.catalog.provider_bindings import (
-        private_interim_root_for_data_product,
-    )
-    from quant_research_platform.markets.implementations.a_share.catalog import (
-        a_share_processed_catalog,
-    )
-    from quant_research_platform.markets.implementations.a_share.processed import (
-        panels,
-    )
-
-    panel = panels.build_panel_frame_from_interim(
-        interim_root=private_interim_root_for_data_product(
-            project_root,
-            DATA_PRODUCT_ID,
-        ),
-        start_year=FULL_HISTORY_START_YEAR,
-        end_year=FULL_HISTORY_END_YEAR,
-    )
-    spec = a_share_processed_catalog().get("daily_panel")
-    output = panel[list(spec.required_columns)].copy()
-    timestamp = pd.to_datetime(output["timestamp"], errors="coerce")
-    return output.loc[
-        timestamp.between(
-            FULL_HISTORY_START_DATE,
-            FULL_HISTORY_END_DATE,
-            inclusive="both",
-        )
-    ].reset_index(drop=True)
+    yield from _iter_generated_full_daily_panel_stock_chunks(project_root)
 
 
 def _iter_generated_full_daily_panel_stock_chunks(
@@ -716,8 +680,6 @@ def _update_content_summary(
     numeric = numeric.replace([np.inf, -np.inf], np.nan).dropna()
     if numeric.empty:
         return
-    numeric_sum = float(numeric.sum())
-    stats["numeric_sum"] = float(stats.get("numeric_sum", 0.0)) + numeric_sum
     numeric_min = float(numeric.min())
     numeric_max = float(numeric.max())
     stats["numeric_min"] = min(
@@ -746,11 +708,8 @@ def _merge_content_stats(
     target["non_null_count"] = int(target["non_null_count"]) + int(
         stats["non_null_count"]
     )
-    if "numeric_sum" not in stats:
+    if "numeric_min" not in stats:
         return
-    target["numeric_sum"] = float(target.get("numeric_sum", 0.0)) + float(
-        stats["numeric_sum"]
-    )
     target["numeric_min"] = min(
         float(target.get("numeric_min", stats["numeric_min"])),
         float(stats["numeric_min"]),
@@ -767,10 +726,9 @@ def _normalize_content_stats(stats: dict[str, Any]) -> dict[str, Any]:
         "hash_xor": int(stats["hash_xor"]),
         "non_null_count": int(stats["non_null_count"]),
     }
-    if "numeric_sum" in stats:
+    if "numeric_min" in stats:
         result.update(
             {
-                "numeric_sum": round(float(stats["numeric_sum"]), 10),
                 "numeric_min": round(float(stats["numeric_min"]), 10),
                 "numeric_max": round(float(stats["numeric_max"]), 10),
             }
