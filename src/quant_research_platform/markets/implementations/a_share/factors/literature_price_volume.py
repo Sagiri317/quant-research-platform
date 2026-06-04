@@ -183,6 +183,15 @@ def expected_literature_price_volume_factor_columns(
     return tuple(dict.fromkeys(columns))
 
 
+def exact_literature_price_volume_factor_input_columns(factor: str) -> tuple[str, ...]:
+    """Return exact base input columns required by one registered factor."""
+
+    required = _required_fields_for_factor(factor)
+    if not required:
+        raise ValueError(f"unknown_literature_price_volume_factor: {factor}")
+    return required
+
+
 def unsupported_literature_price_volume_factors(
     available_columns: tuple[str, ...] | list[str] | set[str],
     *,
@@ -520,6 +529,7 @@ __all__ = [
     "SMOKE_FACTORS",
     "calculate_literature_price_volume_factors",
     "expected_literature_price_volume_factor_columns",
+    "exact_literature_price_volume_factor_input_columns",
     "largest_literature_price_volume_lookback_days",
     "select_literature_price_volume_feature_columns_from_schema",
     "select_literature_price_volume_features",

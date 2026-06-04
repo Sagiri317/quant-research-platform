@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from quant_research_platform.catalog.data_products import DataProductRegistry
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
-from quant_research_platform.catalog.sources import SourceRegistry
-from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
@@ -14,7 +14,7 @@ from quant_research_platform.contracts.workflows import (
     WorkflowSpec,
 )
 from quant_research_platform.runtime.privacy import sanitize_public_object
-from quant_research_platform.workflows.executor import execute_workflow
+from quant_research_platform.workflows.services import execute_registered_workflow
 
 API_VERSION = "0.1"
 
@@ -49,27 +49,41 @@ def list_universes() -> dict[str, object]:
     )
 
 
-def validate_source_interim(source_id: str) -> dict[str, object]:
-    source = SourceRegistry.bootstrap_default().get(source_id)
+def list_data_products() -> dict[str, object]:
+    return _response(
+        items=[
+            item.to_public_record()
+            for item in DataProductRegistry.bootstrap_default().list()
+        ]
+    )
+
+
+def validate_data_product_interim(
+    data_product_id: str,
+    *,
+    dry_run: bool = True,
+) -> dict[str, object]:
+    data_product = DataProductRegistry.bootstrap_default().get(data_product_id)
     spec = WorkflowSpec(
-        workflow_id="source_interim_validation",
-        source_id=SourceId(str(source.source_id)),
+        workflow_id="data_product_interim_validation",
+        market_id=MarketId(str(data_product.market_id)),
+        data_product_id=data_product.data_product_id,
         input_spec_ids=(),
-        output_spec_ids=source.interim_spec_ids,
-        run_type="source_interim",
+        output_spec_ids=data_product.interim_spec_ids,
+        run_type="data_product_interim",
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="validate_interim_spec"),),
     )
-    summary = execute_workflow(
+    summary = execute_registered_workflow(
         spec,
-        handlers={"validate_interim_spec": lambda: "validated"},
-        allowed_spec_ids=set(source.interim_spec_ids),
-        include_summary=True,
-    )["summary"]
+        allowed_spec_ids=set(data_product.interim_spec_ids),
+    )
     return _response(
         status="validated",
-        mode="dry_run_spec_validation",
-        source_id=str(source.source_id),
+        mode="dry_run_spec_validation" if dry_run else "fixture_backed_execution",
+        data_product_id=data_product.data_product_id,
+        market_id=str(data_product.market_id),
+        contract_version=data_product.contract_version,
         workflow=summary,
     )
 
@@ -79,20 +93,18 @@ def validate_market_processed(market_id: str) -> dict[str, object]:
     spec = WorkflowSpec(
         workflow_id="market_processed_validation",
         market_id=MarketId(str(market.market_id)),
-        input_spec_ids=("csmar_daily_market_interim",),
+        input_spec_ids=("a_share_daily_bar_interim",),
         output_spec_ids=market.processed_spec_ids,
         run_type="market_processed_data",
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="validate_processed_specs"),),
     )
-    summary = execute_workflow(
+    summary = execute_registered_workflow(
         spec,
-        handlers={"validate_processed_specs": lambda: "validated"},
         allowed_spec_ids=set(market.processed_spec_ids).union(
-            {"csmar_daily_market_interim"}
+            {"a_share_daily_bar_interim"}
         ),
-        include_summary=True,
-    )["summary"]
+    )
     return _response(
         status="validated",
         mode="dry_run_spec_validation",
@@ -129,15 +141,10 @@ def validate_workflow_run() -> dict[str, object]:
             WorkflowNode(node_id="validate_outputs", dependencies=("validate_inputs",)),
         ),
     )
-    summary = execute_workflow(
+    summary = execute_registered_workflow(
         spec,
-        handlers={
-            "validate_inputs": lambda: "validated",
-            "validate_outputs": lambda: "validated",
-        },
         allowed_spec_ids={"daily_panel", "a_share_price_volume_forward_returns"},
-        include_summary=True,
-    )["summary"]
+    )
     return _response(
         status="validated",
         mode="dry_run_spec_validation",
@@ -163,11 +170,12 @@ def _response(**payload: object) -> dict[str, object]:
 __all__ = [
     "API_VERSION",
     "list_factors",
+    "list_data_products",
     "list_labels",
     "list_universes",
     "report_metadata",
+    "validate_data_product_interim",
     "validate_market_processed",
     "validate_research_dataset",
-    "validate_source_interim",
     "validate_workflow_run",
 ]

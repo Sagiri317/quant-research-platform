@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -237,6 +238,8 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         research_dataset_id="demo",
         prediction_column=default_prediction_column(),
         primary_key=platform_entity_time_key(),
+        train_end="2014-01-02",
+        test_start="2014-01-03",
     )
 
     evaluation = evaluate_factor_frame(frame, eval_spec)
@@ -255,6 +258,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
 
     assert len(evaluation.metrics) == 2
     assert prediction_spec.prediction_column in prediction.columns
+    assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
     assert run_root.as_posix().endswith(
         "reports/private_real/a_share/prediction/pred_demo"
     )
@@ -290,6 +294,8 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
             research_dataset_id="demo",
             prediction_column=default_prediction_column(),
             primary_key=platform_entity_time_key(),
+            train_end="2014-01-02",
+            test_start="2014-01-03",
         )
     )
 
@@ -305,7 +311,57 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
         "reports/private_real/a_share/prediction/pred_demo"
     )
     assert (run_root / "prediction.parquet").is_file()
-    assert (run_root / "manifest.json").is_file()
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["is_oos"] is True
+    assert manifest["prediction_mode"] == "minimal_oos"
+    assert manifest["train_end"] == "2014-01-02"
+    assert manifest["test_start"] == "2014-01-03"
+    written = pd.read_parquet(run_root / "prediction.parquet")
+    assert written["timestamp"].min() >= pd.Timestamp("2014-01-03")
+
+
+def test_prediction_handoff_rejects_overlapping_oos_split(tmp_path: Path) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    dataset_catalog = _research_dataset_catalog()
+    assemble_research_dataset(
+        _research_frame(),
+        dataset_catalog,
+        "demo",
+        processed_root,
+    )
+    model_catalog = ModelCatalog()
+    model_catalog.register(
+        ModelSpec(
+            model_id="linear_demo",
+            model_family="linear",
+            feature_columns=("mom_20d",),
+            label_column="forward_return_20d",
+        )
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="pred_demo",
+            model_id="linear_demo",
+            research_dataset_id="demo",
+            prediction_column=default_prediction_column(),
+            primary_key=platform_entity_time_key(),
+            train_end="2014-01-03",
+            test_start="2014-01-03",
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="prediction_train_end_must_precede_test_start",
+    ):
+        run_prediction_from_research_dataset(
+            processed_root=processed_root,
+            dataset_catalog=dataset_catalog,
+            model_catalog=model_catalog,
+            prediction_catalog=prediction_catalog,
+            prediction_id="pred_demo",
+        )
 
 
 def test_evaluation_runner_reads_research_dataset_and_writes_report(

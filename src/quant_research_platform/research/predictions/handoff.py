@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
@@ -47,7 +49,15 @@ def run_prediction_from_research_dataset(
         dataset_spec,
         feature_columns=model_spec.feature_columns,
     )
-    coefficients = fit_linear_baseline(frame.dropna(), model_spec)
+    train_end = pd.Timestamp(prediction_spec.train_end)
+    test_start = pd.Timestamp(prediction_spec.test_start)
+    if train_end >= test_start:
+        raise ValueError("prediction_train_end_must_precede_test_start")
+    train_frame = frame.loc[frame["timestamp"] <= train_end].dropna()
+    test_frame = frame.loc[frame["timestamp"] >= test_start]
+    if train_frame.empty or test_frame.empty:
+        raise ValueError("prediction_oos_split_has_empty_side")
+    coefficients = fit_linear_baseline(train_frame, model_spec)
     prediction = build_prediction_bundle(
         frame,
         prediction_spec,

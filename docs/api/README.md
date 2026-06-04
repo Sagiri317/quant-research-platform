@@ -16,7 +16,8 @@ paper trading, live trading, or investment advice.
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
 GET  /api/0.1/catalog/universes
-POST /api/0.1/sources/{source_id}/interim
+GET  /api/0.1/catalog/data-products
+POST /api/0.1/data-products/a_share_daily_bar/interim
 POST /api/0.1/markets/{market_id}/processed-data
 POST /api/0.1/research-datasets
 POST /api/0.1/workflows
@@ -30,7 +31,8 @@ Route ownership:
 | `/catalog/factors` | `catalog.factors.FactorCatalog` and `contracts.factors.FactorDefinition` |
 | `/catalog/labels` | `catalog.labels.LabelCatalog` and `contracts.labels.LabelDefinition` |
 | `/catalog/universes` | `contracts.universes.UniverseDefinition` metadata |
-| `/sources/{source_id}/interim` | `interfaces.services` dry-run validation for approved source specs |
+| `/catalog/data-products` | `catalog.data_products.DataProductRegistry` public records |
+| `/data-products/a_share_daily_bar/interim` | `interfaces.services` dry-run validation for approved data product specs |
 | `/markets/{market_id}/processed-data` | `interfaces.services` dry-run validation for approved processed specs |
 | `/research-datasets` | `interfaces.services` dry-run validation for ResearchDataset specs |
 | `/workflows` | `workflows` specs, planner, executor, checkpoints through `interfaces.services` |
@@ -47,7 +49,8 @@ access.
 qrp catalog factors
 qrp catalog labels
 qrp catalog universes
-qrp source build-interim
+qrp catalog data-products
+qrp data-product build-interim --data-product a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run
@@ -64,7 +67,7 @@ API responses, CLI output, manifests, reports, and errors must not expose:
 private absolute paths
 row samples
 stock-code samples
-vendor/source markers
+vendor markers
 credentials/secrets/tokens
 raw tracebacks with local/private context
 ```

@@ -81,6 +81,6 @@ reports/
 runtime/
 ```
 
-The first active source is `sources/csmar`. The first active market is
+The public data product is `a_share_daily_bar`. The first active market is
 `markets/implementations/a_share`. Future markets and sources must not be added
 as empty packages.

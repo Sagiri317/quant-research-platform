@@ -29,6 +29,9 @@ from quant_research_platform.compute.protocols import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.compute.tensor.portfolio_constants import (
+    EXPOSURE_PATH_COLUMNS,
+)
 from quant_research_platform.compute.tensor.portfolio_helpers import (
     _apply_array_tradability_constraints,
     _filter_panel_group,
@@ -282,7 +285,7 @@ def build_tensor_portfolio_artifacts(
     )
     exposure_path = pd.DataFrame.from_records(
         exposure_records,
-        columns=[*segment_columns, *_EXPOSURE_PATH_COLUMNS],
+        columns=[*segment_columns, *EXPOSURE_PATH_COLUMNS],
     )
     return TensorPortfolioArtifacts(
         positions=positions,
@@ -292,15 +295,6 @@ def build_tensor_portfolio_artifacts(
         returns=returns,
         exposure_path=exposure_path,
     )
-
-
-_EXPOSURE_PATH_COLUMNS = [
-    "timestamp",
-    "feature",
-    "gross_exposure",
-    "net_exposure",
-    "position_count",
-]
 
 
 def summarize_tensor_exposure_from_path(

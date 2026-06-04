@@ -36,7 +36,7 @@ def create_app() -> FastAPI:
         title="Quant Research Platform",
         version="0.1.0",
         description=(
-            "Spec-first local API for catalog queries, source imports, "
+            "Spec-first local API for catalog queries, data product imports, "
             "market processed data, research datasets, workflows, and reports."
         ),
     )
@@ -64,15 +64,22 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
     def catalog_universes() -> dict[str, object]:
         return services.list_universes()
 
-    @app.post("/api/0.1/sources/{source_id}/interim")
-    def build_source_interim(source_id: str) -> dict[str, object]:
+    @app.get("/api/0.1/catalog/data-products")
+    def catalog_data_products() -> dict[str, object]:
+        return services.list_data_products()
+
+    @app.post("/api/0.1/data-products/a_share_daily_bar/interim")
+    def build_data_product_interim(dry_run: bool = True) -> dict[str, object]:
         try:
-            return services.validate_source_interim(source_id)
+            return services.validate_data_product_interim(
+                "a_share_daily_bar",
+                dry_run=dry_run,
+            )
         except KeyError as exc:
             raise ApiError(
-                error_code="invalid_source_id",
+                error_code="invalid_data_product_id",
                 message=str(exc),
-                field="source_id",
+                field="data_product_id",
             ) from exc
 
     @app.post("/api/0.1/markets/{market_id}/processed-data")

@@ -8,6 +8,11 @@ from quant_research_platform.contracts.data import (
     InterimDataSpec,
     ProcessedDataSpec,
 )
+from quant_research_platform.contracts.data_products import (
+    BindingVisibility,
+    DataProductDefinition,
+    ProviderBinding,
+)
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import (
     AssetId,
@@ -24,9 +29,11 @@ CONTRACT_VERSION = "0.1"
 __all__ = [
     "CONTRACT_VERSION",
     "AssetId",
+    "BindingVisibility",
     "ColumnRole",
     "DataFrequency",
     "DataGrain",
+    "DataProductDefinition",
     "DataSpec",
     "FactorDefinition",
     "FactorSet",
@@ -37,6 +44,7 @@ __all__ = [
     "MarketId",
     "MaskDefinition",
     "ProcessedDataSpec",
+    "ProviderBinding",
     "ReportDefinition",
     "ReportSpec",
     "SourceAssetId",

@@ -21,6 +21,22 @@ EXCLUDED_SCAN_PARTS = {
     ("__pycache__",),
 }
 
+PUBLIC_SURFACE_SCAN_ROOTS = (
+    Path("src/quant_research_platform/interfaces"),
+    Path("src/quant_research_platform/agents"),
+    Path("src/quant_research_platform/reports"),
+    Path("docs"),
+    Path(".agents"),
+    Path("README.md"),
+    Path("data/README.md"),
+    Path("AGENTS.md"),
+    Path("PROJECT_STATUS.md"),
+)
+
+INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
+    ("docs", "code-map", "source-csmar-contracts.md"),
+}
+
 APPROVED_FIELD_SPEC_FILES = {
     Path("src/quant_research_platform/catalog/fields.py"),
     Path("src/quant_research_platform/markets/implementations/a_share/catalog.py"),
@@ -111,6 +127,54 @@ def test_active_tree_has_no_retired_terms() -> None:
                 hits.append(f"{path}: {name}")
 
     assert hits == []
+
+
+def test_public_surfaces_do_not_expose_internal_provider_markers() -> None:
+    forbidden_patterns = (
+        ("csmar", re.compile(r"(?i)\bcsmar\b")),
+        ("source_id", re.compile(r"\bsource_id\b")),
+        ("provider_id", re.compile(r"\bprovider_id\b")),
+        ("public source route", re.compile(r"/api/0\.1/sources\b")),
+        ("sources/csmar", re.compile(r"sources[/\\]csmar")),
+    )
+    current_file = Path(__file__).resolve()
+    hits: list[str] = []
+    for path in _iter_public_surface_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for name, pattern in forbidden_patterns:
+            if pattern.search(text):
+                hits.append(f"{path}: {name}")
+
+    assert hits == []
+
+
+def _iter_public_surface_files() -> list[Path]:
+    files: list[Path] = []
+    for root in PUBLIC_SURFACE_SCAN_ROOTS:
+        if root.is_file():
+            files.append(root)
+            continue
+        for path in root.rglob("*"):
+            if (
+                path.is_file()
+                and not _is_excluded(path)
+                and not _is_internal_provider_doc(path)
+            ):
+                files.append(path)
+    return files
+
+
+def _is_internal_provider_doc(path: Path) -> bool:
+    parts = path.parts
+    return any(
+        _contains_parts(parts, excluded)
+        for excluded in INTERNAL_PROVIDER_SCAN_EXCLUSIONS
+    )
 
 
 def test_no_retired_top_level_source_directories_exist() -> None:

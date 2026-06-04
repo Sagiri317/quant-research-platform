@@ -13,9 +13,9 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 | Conda 环境 | `analysis` |
 | 版本边界 | project `0.1.0`; API/contracts/processed-data/research-dataset/workflow specs use `0.1` |
 | 源码拓扑 | `contracts`, `storage`, `catalog`, `sources`, `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`, `reports`, `runtime` |
-| 当前 API/CLI | `/api/0.1/...` and clean `qrp catalog/source/market/research/workflow/report` commands |
+| 当前 API/CLI | `/api/0.1/...` and clean `qrp catalog/data-product/market/research/workflow/report` commands |
 | 市场范围 | A-share enabled; other markets are future design only, with no empty implementation packages |
-| 私有边界 | `data/raw/csmar`, `data/interim/csmar`, `data/processed/a_share`, `reports/private_real` |
+| 私有边界 | `data/raw/<internal-provider>`, `data/interim/<internal-provider>`, `data/processed/a_share`, `reports/private_real` |
 | 交易边界 | No investment advice, paper/live trading, broker/exchange connector, deployment, scheduler, worker, or external data API |
 
 ## 当前有效样例

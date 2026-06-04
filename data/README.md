@@ -7,8 +7,8 @@ Active layout:
 
 ```text
 data/
-  raw/csmar/
-  interim/csmar/
+  raw/<internal-provider>/
+  interim/<internal-provider>/
   processed/a_share/
 
 reports/
@@ -17,9 +17,9 @@ reports/
 
 Rules:
 
-- `data/raw/csmar/` keeps source exports in their original form.
-- `data/interim/csmar/` keeps canonical interim parquet generated through the
-  approved source adapter and catalog/spec writer.
+- Raw private exports remain in their original form under approved private roots.
+- Interim parquet is generated through approved internal adapters and
+  catalog/spec writers.
 - `data/processed/a_share/` keeps processed market data and approved research
   input layers only.
 - `reports/private_real/` is a private boundary by default.
@@ -28,9 +28,9 @@ Rules:
   artifacts must be written under `reports/private_real/<market>/<run_type>/<run_id>/`.
 - Run reports and model outputs must not be written to `data/processed/`.
 
-Source identifier policy:
+Public identifier policy:
 
-- `csmar` is a public source identifier for catalog metadata and API routes.
+- Public surfaces use `data_product_id=a_share_daily_bar`.
 - Private row-level evidence, raw file evidence, manifest summaries, report
-  summaries, stdout/stderr, and API errors must not expose source-row markers,
+  summaries, stdout/stderr, and API errors must not expose provider markers,
   local paths, row samples, stock-code samples, credentials, or raw values.

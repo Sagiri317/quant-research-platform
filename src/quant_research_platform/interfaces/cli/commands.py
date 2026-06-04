@@ -11,14 +11,17 @@ from quant_research_platform.runtime.privacy import sanitize_public_text
 
 app = typer.Typer(add_completion=False)
 catalog_app = typer.Typer(add_completion=False, help="Catalog query commands.")
-source_app = typer.Typer(add_completion=False, help="Source ingestion commands.")
+data_product_app = typer.Typer(
+    add_completion=False,
+    help="Data product ingestion commands.",
+)
 market_app = typer.Typer(add_completion=False, help="Market build commands.")
 research_app = typer.Typer(add_completion=False, help="Research dataset commands.")
 workflow_app = typer.Typer(add_completion=False, help="Workflow commands.")
 report_app = typer.Typer(add_completion=False, help="Report commands.")
 
 app.add_typer(catalog_app, name="catalog")
-app.add_typer(source_app, name="source")
+app.add_typer(data_product_app, name="data-product")
 app.add_typer(market_app, name="market")
 app.add_typer(research_app, name="research")
 app.add_typer(workflow_app, name="workflow")
@@ -73,13 +76,35 @@ def catalog_universes() -> None:
         )
 
 
-@source_app.command("build-interim")
-def source_build_interim(
-    source: str = typer.Option("csmar", "--source", help="Source id."),
-) -> None:
-    """Validate the canonical source interim build entry point."""
+@catalog_app.command("data-products")
+def catalog_data_products() -> None:
+    """List public data products."""
 
-    _run_cli(lambda: services.validate_source_interim(source))
+    _echo_safe("data_product_id,market_id,grain,contract_version")
+    for item in services.list_data_products()["items"]:
+        _echo_safe(
+            f"{item['data_product_id']},{item['market_id']},{item['grain']},"
+            f"{item['contract_version']}"
+        )
+
+
+@data_product_app.command("build-interim")
+def data_product_build_interim(
+    data_product: str = typer.Option(
+        "a_share_daily_bar",
+        "--data-product",
+        help="Data product id.",
+    ),
+    dry_run: bool = typer.Option(True, "--dry-run/--execute"),
+) -> None:
+    """Validate the public data product interim build entry point."""
+
+    _run_cli(
+        lambda: services.validate_data_product_interim(
+            data_product,
+            dry_run=dry_run,
+        )
+    )
 
 
 @market_app.command("build-processed")

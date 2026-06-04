@@ -21,15 +21,22 @@ def build_prediction_bundle(
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
+    _validate_oos_split(spec)
+    test_frame = frame.loc[frame["timestamp"] >= pd.Timestamp(spec.test_start)].copy()
     design = np.column_stack(
         [
-            np.ones(len(frame)),
-            frame.loc[:, feature_columns].to_numpy(dtype=float),
+            np.ones(len(test_frame)),
+            test_frame.loc[:, feature_columns].to_numpy(dtype=float),
         ]
     )
-    result = frame.loc[:, spec.primary_key].copy()
+    result = test_frame.loc[:, spec.primary_key].copy()
     result[spec.prediction_column] = design @ coefficients
     return result
+
+
+def _validate_oos_split(spec: PredictionSpec) -> None:
+    if pd.Timestamp(spec.train_end) >= pd.Timestamp(spec.test_start):
+        raise ValueError("prediction_train_end_must_precede_test_start")
 
 
 def write_prediction_bundle(

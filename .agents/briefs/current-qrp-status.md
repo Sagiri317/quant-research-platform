@@ -8,7 +8,7 @@ replacement for `PROJECT_STATUS.md`.
 - QRP Clean Rewrite `0.1.0`.
 - Current architecture style: Stable Core + High-Velocity Research Edge.
 - Current work stays local-only and centered on contracts, storage layout,
-  catalogs, A-share source/market semantics, research workflows, reports, and
+  catalogs, A-share market semantics, research workflows, reports, and
   private-boundary reliability.
 
 ## Current Implementation Context
@@ -18,7 +18,8 @@ replacement for `PROJECT_STATUS.md`.
   `reports`, and `runtime`.
 - Project version is `0.1.0`; API/spec/contract version is `0.1`.
 - API paths use `/api/0.1/...`; do not add a version-letter prefix.
-- Current CLI contract is `qrp catalog/source/market/research/workflow/report`.
+- Public data product id is `a_share_daily_bar`.
+- Current CLI contract is `qrp catalog/data-product/market/research/workflow/report`.
 - A-share is the first enabled market. Other markets are future design only.
 - `agents/` is proposal-only in this phase; it does not call external LLM APIs
   and does not write private row-level data.
@@ -26,8 +27,8 @@ replacement for `PROJECT_STATUS.md`.
 ## Private Boundaries
 
 ```text
-data/raw/csmar/
-data/interim/csmar/
+data/raw/<internal-provider>/
+data/interim/<internal-provider>/
 data/processed/a_share/
 reports/private_real/
 ```
@@ -37,7 +38,7 @@ markers, local absolute paths, credentials, or stock-code samples.
 
 ## Current Next Step
 
-- Continue porting the A-share source/interim, processed panel, factor/label,
+- Continue porting the A-share data product, processed panel, factor/label,
   research dataset, evaluation, prediction, report, and workflow slices into the
   0.1 topology with test-first changes.
 

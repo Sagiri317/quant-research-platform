@@ -11,6 +11,7 @@ import pandas as pd
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.privacy import (
     is_private_boundary_path,
@@ -29,14 +30,19 @@ def write_stage_profile_bundle(
     frame: pd.DataFrame,
     *,
     spec: ReportSpec,
-    output_root: Path,
     report_text: str,
+    layout: StorageLayout,
+    output_root: Path | None = None,
 ) -> dict[str, Path]:
     """Write a private stage-profile report bundle."""
 
     if spec.report_definition_id != "stage_profile_private_diagnostic":
         raise ValueError("invalid_stage_profile_report_definition")
-    destination = Path(output_root)
+    destination = (
+        layout.private_report_root(spec.market_id, spec.run_type) / spec.run_id
+    )
+    if output_root is not None and Path(output_root) != destination:
+        raise ValueError("report_output_root_mismatch")
     if spec.private_boundary_required and not is_private_boundary_path(destination):
         raise ValueError("outside_private_boundary")
     destination.mkdir(parents=True, exist_ok=True)
@@ -107,8 +113,10 @@ def write_prediction_bundle_files(
             "prediction_id": spec.prediction_id,
             "model_id": spec.model_id,
             "research_dataset_id": spec.research_dataset_id,
-            "prediction_mode": "smoke_in_sample",
-            "oos": False,
+            "prediction_mode": spec.prediction_mode,
+            "is_oos": spec.is_oos,
+            "train_end": spec.train_end,
+            "test_start": spec.test_start,
             "prediction_column": spec.prediction_column,
             "primary_key": list(spec.primary_key),
         },

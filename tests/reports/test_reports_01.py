@@ -8,11 +8,15 @@ import pytest
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.bundles import write_stage_profile_bundle
+from quant_research_platform.reports.index import ReportRunIndex
 from quant_research_platform.reports.summaries import (
+    ManifestSummary,
+    ParityEvidenceSummary,
     ReportRunIndexRecord,
     ReportSummary,
 )
 from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
+from quant_research_platform.storage.layout import StorageLayout
 
 
 def test_stage_profile_bundle_writes_only_inside_private_report_boundary(tmp_path):
@@ -20,15 +24,22 @@ def test_stage_profile_bundle_writes_only_inside_private_report_boundary(tmp_pat
         with profiler.stage("evaluation", "ic", sample_memory=False):
             pass
 
-    output_dir = (
+    output_dir = profiler.write_artifacts(
         tmp_path / "reports" / "private_real" / "a_share" / "diagnostics" / "run"
     )
-    paths = profiler.write_artifacts(output_dir)
 
-    assert paths["csv"].is_file()
-    assert paths["json"].is_file()
-    assert paths["report"].is_file()
-    assert (output_dir / "manifest.json").is_file()
+    assert output_dir["csv"].is_file()
+    assert output_dir["json"].is_file()
+    assert output_dir["report"].is_file()
+    assert (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "diagnostics"
+        / "run"
+        / "manifest.json"
+    ).is_file()
 
 
 def test_stage_profile_bundle_rejects_public_output(tmp_path):
@@ -49,10 +60,6 @@ def test_stage_profile_bundle_requires_approved_report_spec(tmp_path):
             }
         ]
     )
-    output_dir = (
-        tmp_path / "reports" / "private_real" / "a_share" / "diagnostics" / "run"
-    )
-
     with pytest.raises(ValueError, match="invalid_stage_profile_report_definition"):
         write_stage_profile_bundle(
             frame,
@@ -63,7 +70,7 @@ def test_stage_profile_bundle_requires_approved_report_spec(tmp_path):
                 market_id=MarketId("a_share"),
                 run_type="diagnostics",
             ),
-            output_root=output_dir,
+            layout=StorageLayout(project_root=tmp_path),
             report_text="CSMAR vendor path /mnt/data/raw",
         )
 
@@ -79,10 +86,6 @@ def test_stage_profile_bundle_sanitizes_outputs(tmp_path):
             }
         ]
     )
-    output_dir = (
-        tmp_path / "reports" / "private_real" / "a_share" / "diagnostics" / "run"
-    )
-
     paths = write_stage_profile_bundle(
         frame,
         spec=ReportSpec(
@@ -92,8 +95,16 @@ def test_stage_profile_bundle_sanitizes_outputs(tmp_path):
             market_id=MarketId("a_share"),
             run_type="diagnostics",
         ),
-        output_root=output_dir,
+        layout=StorageLayout(project_root=tmp_path),
         report_text="CSMAR vendor path /mnt/data/raw token=abcdef123456",
+    )
+    output_dir = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "diagnostics"
+        / "run"
     )
 
     combined = (
@@ -106,6 +117,27 @@ def test_stage_profile_bundle_sanitizes_outputs(tmp_path):
     assert "600000" not in combined
     assert "CSMAR" not in combined
     assert "abcdef123456" not in combined
+
+
+def test_stage_profile_bundle_rejects_arbitrary_output_root(tmp_path):
+    frame = pd.DataFrame.from_records(
+        [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
+    )
+
+    with pytest.raises(ValueError, match="report_output_root_mismatch"):
+        write_stage_profile_bundle(
+            frame,
+            spec=ReportSpec(
+                report_id="stage_profile",
+                report_definition_id="stage_profile_private_diagnostic",
+                run_id="run",
+                market_id=MarketId("a_share"),
+                run_type="diagnostics",
+            ),
+            layout=StorageLayout(project_root=tmp_path),
+            output_root=tmp_path / "reports" / "private_real" / "a_share" / "other",
+            report_text="safe",
+        )
 
 
 def test_report_summary_records_are_database_ready_and_sanitized():
@@ -128,3 +160,44 @@ def test_report_summary_records_are_database_ready_and_sanitized():
     assert "C:" not in str(summary.to_record())
     assert "000001" not in str(summary.to_record())
     assert index.to_record()["report_definition_id"] == "evaluation_report_private"
+
+
+def test_report_index_records_do_not_require_filesystem_scan():
+    run_index = ReportRunIndex()
+    record = ReportRunIndexRecord(
+        run_id="run",
+        market_id="a_share",
+        run_type="prediction",
+        status="completed",
+        report_definition_id="prediction_bundle_private",
+    )
+
+    run_index.register(record)
+
+    assert run_index.get("run") == record
+    with pytest.raises(KeyError, match="unknown_report_run"):
+        run_index.get("missing")
+
+
+def test_manifest_and_parity_summaries_are_public_safe():
+    manifest = ManifestSummary(
+        artifact_id="artifact",
+        market_id="a_share",
+        status="completed",
+        aggregate_metadata={"path": r"C:\Users\DELL\data\raw\csmar\000001.SZ"},
+    )
+    parity = ParityEvidenceSummary(
+        evidence_id="evidence",
+        market_id="a_share",
+        data_product_id="a_share_daily_bar",
+        privacy_level="public_safe_aggregate",
+        status="accepted",
+        aggregate_metadata={"provider_id": "csmar"},
+    )
+
+    combined = str(manifest.to_record()) + str(parity.to_record())
+
+    assert "C:" not in combined
+    assert "000001" not in combined
+    assert "csmar" not in combined.lower()
+    assert "provider_id" not in combined

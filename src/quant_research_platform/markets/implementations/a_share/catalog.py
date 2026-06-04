@@ -355,6 +355,8 @@ def a_share_prediction_catalog() -> PredictionCatalog:
             research_dataset_id="a_share_price_volume_forward_returns",
             prediction_column=default_prediction_column(),
             primary_key=platform_entity_time_key(),
+            train_end="2014-06-30",
+            test_start="2014-07-01",
         )
     )
     return catalog

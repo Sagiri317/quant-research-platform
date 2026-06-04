@@ -171,18 +171,24 @@ class StageProfiler:
         from quant_research_platform.reports.bundles import (
             write_stage_profile_bundle,
         )
+        from quant_research_platform.storage.layout import StorageLayout
+        from quant_research_platform.storage.privacy import is_private_boundary_path
 
         frame = self.to_frame()
         destination = Path(output_dir)
+        if not is_private_boundary_path(destination):
+            raise ValueError("outside_private_boundary")
+        market_id = _infer_market_id(destination)
         return write_stage_profile_bundle(
             frame,
             spec=ReportSpec(
                 report_id="stage_profile",
                 report_definition_id="stage_profile_private_diagnostic",
                 run_id=destination.name,
-                market_id=MarketId(_infer_market_id(destination)),
+                market_id=MarketId(market_id),
                 run_type="diagnostics",
             ),
+            layout=StorageLayout(project_root=_infer_project_root(destination)),
             output_root=destination,
             report_text=_render_stage_profile_report(frame),
         )
@@ -293,3 +299,11 @@ def _infer_market_id(path: Path) -> str:
         if part == "private_real":
             return parts[index + 1]
     return "unknown"
+
+
+def _infer_project_root(path: Path) -> Path:
+    parts = path.parts
+    for index in range(len(parts) - 2):
+        if parts[index : index + 2] == ("reports", "private_real"):
+            return Path(*parts[:index]) if index else Path(".")
+    return Path(".")

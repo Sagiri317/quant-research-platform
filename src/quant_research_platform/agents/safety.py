@@ -23,7 +23,7 @@ _UNSAFE_TEXT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("stock_code", re.compile(r"(?i)\bstock\s+code\b|\b(?:00|30|60|68)\d{4}\b")),
     (
         "source_marker",
-        re.compile(r"(?i)\bcsmar\b|\bsource\s+marker\b|\bvendor\s+marker\b"),
+        re.compile(r"(?i)\bsource\s+marker\b|\bvendor\s+marker\b"),
     ),
 )
 

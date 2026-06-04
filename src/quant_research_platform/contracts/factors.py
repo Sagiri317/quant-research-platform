@@ -25,6 +25,8 @@ class FactorDefinition:
     factor_set: FactorSet
     input_columns: tuple[str, ...]
     output_column: str
+    base_input_columns: tuple[str, ...] = ()
+    derived_input_columns: tuple[str, ...] = ()
     display_name: str = ""
     description: str = ""
     family: str = "unknown"
@@ -43,6 +45,13 @@ class FactorDefinition:
             raise ValueError("unsupported_factor_definition_version")
         if not self.input_columns:
             raise ValueError("factor_input_columns_required")
+        base_inputs = self.base_input_columns or self.input_columns
+        derived_inputs = self.derived_input_columns
+        expected_inputs = tuple(dict.fromkeys((*base_inputs, *derived_inputs)))
+        if expected_inputs != self.input_columns:
+            raise ValueError("factor_input_columns_must_match_base_and_derived")
+        object.__setattr__(self, "base_input_columns", base_inputs)
+        object.__setattr__(self, "derived_input_columns", derived_inputs)
         if not self.required_processed_data_id:
             raise ValueError("factor_required_processed_data_id_required")
 
@@ -56,6 +65,8 @@ class FactorDefinition:
             "description": self.description,
             "family": self.family,
             "input_columns": list(self.input_columns),
+            "base_input_columns": list(self.base_input_columns),
+            "derived_input_columns": list(self.derived_input_columns),
             "output_column": self.output_column,
             "required_windows": list(self.required_windows),
             "lookback_window": self.lookback_window,

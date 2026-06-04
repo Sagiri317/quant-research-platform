@@ -15,7 +15,8 @@ boundary. It is not a record of old branch history.
 - Stable contracts live in `src/quant_research_platform/contracts/`.
 - Storage layout and privacy checks live in `storage/` and `runtime/`.
 - Catalogs are the queryable source of truth for registered platform objects.
-- Source adapters live under `sources/`; the first active source is `csmar`.
+- Public data products live in `catalog/data_products.py`.
+- Internal provider adapters live under `sources/`.
 - Market semantics live under `markets/`; the first active market is `a_share`.
 - Research assembly, evaluation, prediction, and portfolio simulation live under
   `research/`.

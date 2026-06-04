@@ -5,7 +5,7 @@ QRP Clean Rewrite `0.1.0`.
 
 This project is local research infrastructure, not investment advice, paper
 trading, live trading, broker/exchange connectivity, production deployment, or
-a performance guarantee. It does not log in to CSMAR, download vendor data,
+a performance guarantee. It does not log in to vendors, download vendor data,
 manage credentials, or connect external market-data APIs.
 
 ## Current Boundary
@@ -13,7 +13,7 @@ manage credentials, or connect external market-data APIs.
 - Project version: `0.1.0`.
 - Public API/spec/contract version: `0.1`.
 - Current enabled market module: A-share.
-- Current source adapter: local user-provided CSMAR exports only.
+- Public data product id: `a_share_daily_bar`.
 - Current website UI work: out of scope for this clean rewrite slice.
 - Current deployment/scheduler/worker/model-registry/feature-store scope: out
   of scope.
@@ -21,8 +21,8 @@ manage credentials, or connect external market-data APIs.
 Private boundaries:
 
 ```text
-data/raw/csmar/
-data/interim/csmar/
+data/raw/<internal-provider>/
+data/interim/<internal-provider>/
 data/processed/a_share/
 reports/private_real/
 ```
@@ -38,7 +38,7 @@ src/quant_research_platform/
   contracts/        Stable 0.1 definitions and specs
   storage/          Layout, parquet, manifests, partitions, checksums, privacy
   catalog/          Queryable registries for platform objects
-  sources/          Vendor/source adapters; first active source is csmar
+  sources/          Internal provider adapters
   markets/          Market semantics; first active implementation is a_share
   research/         Factors, labels, features, datasets, evaluations, models,
                     predictions, portfolios
@@ -60,7 +60,9 @@ The clean API uses `/api/0.1/...`, without a `v` prefix:
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
-POST /api/0.1/sources/{source_id}/interim
+GET  /api/0.1/catalog/universes
+GET  /api/0.1/catalog/data-products
+POST /api/0.1/data-products/a_share_daily_bar/interim
 POST /api/0.1/markets/{market_id}/processed-data
 POST /api/0.1/research-datasets
 POST /api/0.1/workflows
@@ -72,7 +74,9 @@ The clean CLI surface is:
 ```text
 qrp catalog factors
 qrp catalog labels
-qrp source build-interim
+qrp catalog universes
+qrp catalog data-products
+qrp data-product build-interim --data-product a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run

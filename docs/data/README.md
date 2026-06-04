@@ -6,8 +6,8 @@ It does not contain vendor field samples or private row-level examples.
 ## Private Roots
 
 ```text
-data/raw/csmar/
-data/interim/csmar/
+data/raw/<internal-provider>/
+data/interim/<internal-provider>/
 data/processed/a_share/
 reports/private_real/
 ```
@@ -60,8 +60,8 @@ session_date
 available_at
 ```
 
-Source fields such as `stock_code` and `trade_date` may be retained only as
-source/migration fields.
+Provider fields such as `stock_code` and `trade_date` may be retained only as
+internal source/migration fields.
 
 ## Run Outputs
 
@@ -74,9 +74,9 @@ reports/private_real/<market>/<run_type>/<run_id>/
 
 They must not be written to `data/processed/`.
 
-## Source Identifier Policy
+## Public Identifier Policy
 
-`csmar` is a public source identifier for catalog metadata and API routes.
-Public-safe evidence, manifest summaries, report summaries, stdout/stderr, and
-API errors must not expose source-row markers, local paths, row samples,
-stock-code samples, credentials, or raw values.
+Public surfaces use `data_product_id=a_share_daily_bar`. Public-safe evidence,
+manifest summaries, report summaries, stdout/stderr, and API errors must not
+expose provider markers, local paths, row samples, stock-code samples,
+credentials, or raw values.

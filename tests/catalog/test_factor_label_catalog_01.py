@@ -19,10 +19,51 @@ def test_price_volume_56_factor_definitions_have_input_requirements() -> None:
     assert len(definitions) == 56
     for definition in definitions:
         assert definition.input_columns
+        assert definition.input_columns == tuple(
+            dict.fromkeys(
+                (*definition.base_input_columns, *definition.derived_input_columns)
+            )
+        )
         assert set(definition.input_columns).issubset(registered_fields)
+        assert set(definition.base_input_columns).issubset(registered_fields)
+        assert set(definition.derived_input_columns).issubset(registered_fields)
         assert definition.output_column == definition.factor_id
         assert definition.family == "price_volume"
         assert definition.required_processed_data_id == "daily_panel"
+
+    shared_full_superset = {
+        "open",
+        "high",
+        "low",
+        "close",
+        "adj_close",
+        "prev_close",
+        "volume",
+        "amount",
+        "turnover",
+        "return_1d",
+        "total_market_cap",
+        "float_market_cap",
+    }
+    assert not any(
+        set(item.input_columns) == shared_full_superset for item in definitions
+    )
+    assert catalog.get("rev_1d").base_input_columns == ("return_1d",)
+    assert catalog.get("mom_20d").base_input_columns == ("adj_close",)
+    assert catalog.get("amihud_20d").base_input_columns == ("return_1d", "amount")
+    assert catalog.get("amplitude_20d").base_input_columns == (
+        "high",
+        "low",
+        "prev_close",
+    )
+    assert catalog.get("intraday_range_20d").base_input_columns == (
+        "high",
+        "low",
+        "adj_close",
+    )
+    assert catalog.get("log_float_market_cap").base_input_columns == (
+        "float_market_cap",
+    )
 
 
 def test_label_catalog_rejects_duplicate_label_by_default() -> None:

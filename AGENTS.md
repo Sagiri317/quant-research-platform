@@ -11,18 +11,19 @@ This file is for execution boundaries only. Project facts belong in
 Project purpose:
 
 - Local quantitative research platform.
-- A-share is the first enabled market module, backed by local private CSMAR
+- A-share is the first enabled market module, backed by local private vendor
   exports.
 - Current implementation phase is QRP Clean Rewrite `0.1.0`.
 - Public API/spec/contract version is `0.1`.
+- Public data product id is `a_share_daily_bar`.
 - Code and public-safe aggregate summaries may later be published after review.
-- CSMAR raw/interim/processed data and private real reports remain private.
+- Raw/interim/processed private data and private real reports remain private.
 
 Hard boundaries:
 
-- Do not publish, commit, copy, or expose CSMAR raw/interim/processed data.
-- Do not log in to CSMAR, automate browser downloads, use CSMAR APIs, or handle
-  credentials.
+- Do not publish, commit, copy, or expose raw/interim/processed private data.
+- Do not log in to vendors, automate browser downloads, use vendor APIs, or
+  handle credentials.
 - Do not create, read, print, store, or commit credentials, tokens, cookies,
   secrets, or `.env` files.
 - Do not connect vendor APIs, exchange APIs, broker APIs, paper/live trading,
@@ -61,8 +62,8 @@ active targets. Use the owners above instead.
 Private data/report roots:
 
 ```text
-data/raw/csmar/
-data/interim/csmar/
+data/raw/<internal-provider>/
+data/interim/<internal-provider>/
 data/processed/a_share/
 reports/private_real/
 ```
@@ -89,7 +90,9 @@ set is:
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
-POST /api/0.1/sources/{source_id}/interim
+GET  /api/0.1/catalog/universes
+GET  /api/0.1/catalog/data-products
+POST /api/0.1/data-products/a_share_daily_bar/interim
 POST /api/0.1/markets/{market_id}/processed-data
 POST /api/0.1/research-datasets
 POST /api/0.1/workflows
@@ -101,7 +104,9 @@ The clean CLI surface is:
 ```text
 qrp catalog factors
 qrp catalog labels
-qrp source build-interim
+qrp catalog universes
+qrp catalog data-products
+qrp data-product build-interim --data-product a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run
@@ -129,12 +134,11 @@ Medium+ tasks must start from a scope declaration, implementation plan,
 verification plan, and stop conditions unless the user has already provided and
 approved a bounded execution envelope.
 
-Within an approved goal envelope, Codex may split work, use read-only subagents,
-edit in-scope files, run approved checks, fix in-scope defects, commit, and push
-the feature branch. Stop when a listed stop condition is reached.
+Within an approved goal envelope, Codex may split work, use subagents, edit
+in-scope files, run approved checks, fix in-scope defects, commit, and push the
+feature branch. Stop when a listed stop condition is reached.
 
-Subagents are read-only unless the user explicitly approves otherwise. The main
-agent owns all edits, verification, commits, and pushes.
+The main agent owns integration, verification, commits, and pushes.
 
 ## 7. File And Deletion Safety
 
@@ -147,7 +151,7 @@ approval.
 
 Private data directories may be read or transformed only when the task envelope
 approves that data action. Do not print row samples, stock-code samples, private
-absolute paths, vendor/source markers, secrets, tokens, or raw tracebacks with
+absolute paths, vendor markers, secrets, tokens, or raw tracebacks with
 local/private context.
 
 ## 8. Environment

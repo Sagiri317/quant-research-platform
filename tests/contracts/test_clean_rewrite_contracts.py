@@ -71,6 +71,9 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
 
     assert "uses_future_data" not in factor.to_manifest()
     assert "uses_future_data" not in label.to_manifest()
+    assert factor.to_manifest()["input_columns"] == ["adj_close"]
+    assert factor.to_manifest()["base_input_columns"] == ["adj_close"]
+    assert factor.to_manifest()["derived_input_columns"] == []
     assert label.to_manifest()["lookahead"] == 21
 
 

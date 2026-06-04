@@ -10,6 +10,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     price_volume,
 )
 from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
+    exact_literature_price_volume_factor_input_columns,
     expected_literature_price_volume_factor_columns,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
@@ -69,6 +70,8 @@ def test_a_share_price_volume_factor_contract_is_56_columns() -> None:
     assert "mom_20d" in columns
     assert "forward_return_20d" not in columns
     assert expected_literature_price_volume_factor_columns(factor_set="core")
+    for factor_id in columns:
+        assert exact_literature_price_volume_factor_input_columns(factor_id)
     with pytest.raises(ValueError, match="invalid_factor_set"):
         expected_literature_price_volume_factor_columns(
             factor_set="core" + "_long_period"

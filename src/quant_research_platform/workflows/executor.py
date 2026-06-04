@@ -94,7 +94,7 @@ def workflow_run_summary(
             "workflow_id": spec.workflow_id,
             "workflow_version": spec.workflow_version,
             "market_id": str(spec.market_id) if spec.market_id else None,
-            "source_id": str(spec.source_id) if spec.source_id else None,
+            "data_product_id": spec.data_product_id,
             "run_type": spec.run_type,
             "input_spec_ids": list(spec.input_spec_ids),
             "output_spec_ids": list(spec.output_spec_ids),

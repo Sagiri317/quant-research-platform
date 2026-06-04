@@ -9,20 +9,6 @@ from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 
-_PRICE_VOLUME_INPUT_COLUMNS: tuple[str, ...] = (
-    "open",
-    "high",
-    "low",
-    "close",
-    "adj_close",
-    "prev_close",
-    "volume",
-    "amount",
-    "turnover",
-    "return_1d",
-    "total_market_cap",
-    "float_market_cap",
-)
 _WINDOW_RE = re.compile(r"_(\d+)d\b")
 
 
@@ -52,17 +38,21 @@ class FactorCatalog:
     @classmethod
     def bootstrap_default(cls) -> FactorCatalog:
         from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
+            exact_literature_price_volume_factor_input_columns,
             expected_literature_price_volume_factor_columns,
         )
 
         catalog = cls()
         for factor_id in expected_literature_price_volume_factor_columns():
+            base_inputs = exact_literature_price_volume_factor_input_columns(factor_id)
             catalog.register(
                 FactorDefinition(
                     factor_id=factor_id,
                     market_id=MarketId("a_share"),
                     factor_set=FactorSet.FULL,
-                    input_columns=_PRICE_VOLUME_INPUT_COLUMNS,
+                    input_columns=base_inputs,
+                    base_input_columns=base_inputs,
+                    derived_input_columns=(),
                     output_column=factor_id,
                     display_name=factor_id,
                     description=(

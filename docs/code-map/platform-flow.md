@@ -3,12 +3,12 @@
 This map records the QRP Clean Rewrite `0.1.0` implementation flow. It is a
 current code-reading map, not a roadmap or historical closeout.
 
-## Source Flow
+## Flow
 
 ```text
-sources/csmar
--> data/raw/csmar
--> data/interim/csmar
+catalog/data_products -> data_product_id=a_share_daily_bar
+-> internal provider adapter
+-> private raw/interim data roots
 -> markets/implementations/a_share
 -> data/processed/a_share
 -> ResearchDatasetSpec -> research/datasets
@@ -25,7 +25,7 @@ sources/csmar
 | `contracts/` | Stable 0.1 definitions and specs |
 | `storage/` | Layout, parquet, manifests, partitions, checksums, privacy |
 | `catalog/` | Queryable source of truth for platform objects |
-| `sources/` | Source adapters, first active adapter: `csmar` |
+| `sources/` | Internal provider adapters |
 | `markets/` | Market-specific semantics, first active market: `a_share` |
 | `research/` | Factors, labels, features, datasets, evaluations, models, predictions, portfolios |
 | `workflows/` | Simple DAG specs, planner, executor, checkpoints |
@@ -41,7 +41,8 @@ sources/csmar
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
 GET  /api/0.1/catalog/universes
-POST /api/0.1/sources/{source_id}/interim
+GET  /api/0.1/catalog/data-products
+POST /api/0.1/data-products/a_share_daily_bar/interim
 POST /api/0.1/markets/{market_id}/processed-data
 POST /api/0.1/research-datasets
 POST /api/0.1/workflows
@@ -60,7 +61,8 @@ UI contracts.
 qrp catalog factors
 qrp catalog labels
 qrp catalog universes
-qrp source build-interim
+qrp catalog data-products
+qrp data-product build-interim --data-product a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run

@@ -8,7 +8,7 @@ implementation priorities, not historical branch closeout.
 | Priority | Scope | Status |
 |---|---|---|
 | C1 | Complete 0.1 source topology and contract skeleton | implemented in branch |
-| C2 | Port CSMAR raw-to-interim and A-share processed-data builders | implemented skeleton |
+| C2 | Port raw-to-interim and A-share processed-data builders | implemented skeleton |
 | C3 | Port full price-volume factor and forward-label semantics | implemented skeleton |
 | C4 | Port research dataset assembly and validation | implemented skeleton |
 | C5 | Port evaluation and prediction smoke flows under report contracts | implemented skeleton |

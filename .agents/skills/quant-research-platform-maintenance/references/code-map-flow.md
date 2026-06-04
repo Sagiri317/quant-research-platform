@@ -13,7 +13,7 @@ Load this reference when changing `docs/code-map/platform-flow.md`.
 
 ## Required Relationships
 
-- `sources/csmar` converts local raw CSMAR exports to canonical interim data.
+- Public data products map to internal provider adapters for canonical interim data.
 - A-share processed layers live under `markets/implementations/a_share/`.
 - Research datasets, evaluations, models, and predictions live under `research/`.
 - Run evidence writes under `reports/private_real`.

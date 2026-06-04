@@ -7,16 +7,17 @@ external APIs, paper trading, or live trading.
 ## Private Data Layers
 
 ```text
-data/raw/csmar/
--> sources/csmar/
--> data/interim/csmar/
+data_product_id=a_share_daily_bar
+-> internal provider adapter
+-> data/raw/<internal-provider>/
+-> data/interim/<internal-provider>/
 -> markets/implementations/a_share/
 -> data/processed/a_share/
 -> reports/private_real/a_share/
 ```
 
-Raw CSMAR files are user-provided local exports. The project does not log in to
-CSMAR, download vendor data, or manage credentials.
+Raw files are user-provided local exports. The project does not log in to
+vendors, download vendor data, or manage credentials.
 
 ## Processed Layout
 
@@ -42,14 +43,14 @@ asset_id
 timestamp
 ```
 
-`stock_code` and `trade_date` are source/migration fields, not the processed
-canonical key.
+`stock_code` and `trade_date` are internal source/migration fields, not the
+processed canonical key.
 
 ## Current Migration Targets
 
 | Capability | Target owner |
 |---|---|
-| CSMAR raw/interim normalization | `sources/csmar/` |
+| Raw/interim normalization | `sources/` internal adapters |
 | A-share processed panel/context/universe/masks | `markets/implementations/a_share/processed/` |
 | A-share factor formulas | `markets/implementations/a_share/factors/` |
 | Forward labels | `markets/implementations/a_share/labels/` |

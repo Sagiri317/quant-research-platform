@@ -50,20 +50,23 @@ def run_evaluation_from_research_dataset(
     layout = layout_from_processed_market_root(processed_root)
     return write_evaluation_result(
         result,
-        report_root=layout.private_report_root(spec.market_id, spec.run_type),
+        layout=layout,
     )
 
 
 def write_evaluation_result(
     result: EvaluationResult,
     *,
-    report_root: Path,
+    layout,
 ) -> Path:
     return write_evaluation_report_files(
         result.metrics,
         result.grouped_returns,
         spec=result.spec,
-        output_root=report_root,
+        output_root=layout.private_report_root(
+            result.spec.market_id,
+            result.spec.run_type,
+        ),
     )
 
 

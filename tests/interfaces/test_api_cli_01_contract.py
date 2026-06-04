@@ -25,7 +25,8 @@ def test_api_01_routes_are_exact_public_surface() -> None:
         ("GET", "/api/0.1/catalog/factors"),
         ("GET", "/api/0.1/catalog/labels"),
         ("GET", "/api/0.1/catalog/universes"),
-        ("POST", "/api/0.1/sources/{source_id}/interim"),
+        ("GET", "/api/0.1/catalog/data-products"),
+        ("POST", "/api/0.1/data-products/a_share_daily_bar/interim"),
         ("POST", "/api/0.1/markets/{market_id}/processed-data"),
         ("POST", "/api/0.1/research-datasets"),
         ("POST", "/api/0.1/workflows"),
@@ -40,26 +41,32 @@ def test_api_01_endpoints_execute_without_private_paths_or_planned_status() -> N
         client.get("/api/0.1/catalog/factors"),
         client.get("/api/0.1/catalog/labels"),
         client.get("/api/0.1/catalog/universes"),
-        client.post("/api/0.1/sources/csmar/interim"),
+        client.get("/api/0.1/catalog/data-products"),
+        client.post("/api/0.1/data-products/a_share_daily_bar/interim"),
         client.post("/api/0.1/markets/a_share/processed-data"),
         client.post("/api/0.1/research-datasets"),
         client.post("/api/0.1/workflows"),
         client.get("/api/0.1/reports/example-run"),
     ]
 
-    assert [response.status_code for response in responses] == [200] * 8
+    assert [response.status_code for response in responses] == [200] * len(responses)
     payloads = [response.json() for response in responses]
     assert {payload["api_version"] for payload in payloads} == {"0.1"}
     assert not any("parquet" in str(payload).lower() for payload in payloads)
     assert not any("planned" in str(payload).lower() for payload in payloads)
+    assert not any("csmar" in str(payload).lower() for payload in payloads)
+    assert not any("source_id" in str(payload).lower() for payload in payloads)
+    assert not any("provider_id" in str(payload).lower() for payload in payloads)
 
     factors = responses[0]
     labels = responses[1]
     universes = responses[2]
+    data_products = responses[3]
     assert factors.json()["api_version"] == "0.1"
     assert len(factors.json()["items"]) == 56
     assert labels.json()["items"][0]["definition_version"] == "0.1"
     assert universes.json()["items"][0]["universe_id"] == "a_share_default"
+    assert data_products.json()["items"][0]["data_product_id"] == "a_share_daily_bar"
 
 
 def test_api_cli_adapters_do_not_scan_parquet_paths() -> None:
@@ -87,7 +94,15 @@ def test_cli_exposes_clean_rewrite_command_groups() -> None:
         ["catalog", "factors"],
         ["catalog", "labels"],
         ["catalog", "universes"],
-        ["source", "build-interim", "--source", "csmar"],
+        ["catalog", "data-products"],
+        ["data-product", "build-interim", "--data-product", "a_share_daily_bar"],
+        [
+            "data-product",
+            "build-interim",
+            "--data-product",
+            "a_share_daily_bar",
+            "--dry-run",
+        ],
         ["market", "build-processed", "--market", "a_share"],
         ["research", "build-dataset"],
         ["workflow", "run"],
@@ -95,14 +110,19 @@ def test_cli_exposes_clean_rewrite_command_groups() -> None:
     ]
 
     for command in commands:
-        assert runner.invoke(app, command).exit_code == 0
+        result = runner.invoke(app, command)
+        assert result.exit_code == 0
+        assert "csmar" not in result.output.lower()
+        assert "CSMAR" not in result.output
+        assert "source_id" not in result.output
+        assert "provider_id" not in result.output
 
 
-def test_cli_rejects_non_fixed_source_and_market_names() -> None:
+def test_cli_rejects_non_fixed_data_product_and_market_names() -> None:
     runner = CliRunner()
 
     assert runner.invoke(
-        app, ["source", "build-interim", "--source", "other"]
+        app, ["data-product", "build-interim", "--data-product", "other"]
     ).exit_code != 0
     assert runner.invoke(
         app, ["market", "build-processed", "--market", "other"]
@@ -114,10 +134,11 @@ def test_api_error_envelope_sanitizes_private_details() -> None:
         ApiError(
             error_code="invalid_private_detail",
             message=r"failed at C:\Users\DELL\data\raw\csmar\000001.SZ",
-            field="source_id",
+            field="data_product_id",
             details={
                 "traceback": "Traceback (most recent call last): /mnt/data/raw",
                 "token": "token=abcdef123456",
+                "provider_id": "csmar",
             },
         )
     )
@@ -127,18 +148,26 @@ def test_api_error_envelope_sanitizes_private_details() -> None:
     assert "/mnt/" not in payload
     assert "000001" not in payload
     assert "abcdef123456" not in payload
+    assert "csmar" not in payload.lower()
+    assert "provider_id" not in payload
 
 
 def test_cli_error_output_is_sanitized() -> None:
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["source", "build-interim", "--source", r"C:\Users\DELL\000001.SZ"],
+        [
+            "data-product",
+            "build-interim",
+            "--data-product",
+            r"C:\Users\DELL\000001.SZ",
+        ],
     )
 
     assert result.exit_code != 0
     assert "C:" not in result.output
     assert "000001" not in result.output
+    assert "csmar" not in result.output.lower()
 
 
 def test_clean_rewrite_cli_does_not_expose_retired_commands() -> None:

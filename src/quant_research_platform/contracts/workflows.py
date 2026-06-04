@@ -32,6 +32,7 @@ class WorkflowSpec:
     nodes: tuple[WorkflowNode, ...] = field(default_factory=tuple)
     workflow_version: str = "0.1"
     market_id: MarketId | None = None
+    data_product_id: str | None = None
     source_id: SourceId | None = None
     input_spec_ids: tuple[str, ...] = field(default_factory=tuple)
     output_spec_ids: tuple[str, ...] = field(default_factory=tuple)
