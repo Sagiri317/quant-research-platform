@@ -12,6 +12,7 @@ from quant_research_platform.interfaces.api.errors import (
     ApiError,
     register_api_error_handlers,
 )
+from quant_research_platform.interfaces.api.models import DataProductInterimRequest
 
 CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
 DEFAULT_CORS_ORIGINS = (
@@ -68,18 +69,34 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
     def catalog_data_products() -> dict[str, object]:
         return services.list_data_products()
 
-    @app.post("/api/0.1/data-products/a_share_daily_bar/interim")
-    def build_data_product_interim(dry_run: bool = True) -> dict[str, object]:
+    @app.post(
+        "/api/0.1/data-products/a_share_daily_bar/interim",
+        tags=["Data Products"],
+        operation_id="create_data_product_interim",
+    )
+    def build_data_product_interim(
+        request: DataProductInterimRequest | None = None,
+    ) -> dict[str, object]:
+        payload = request or DataProductInterimRequest()
         try:
             return services.validate_data_product_interim(
                 "a_share_daily_bar",
-                dry_run=dry_run,
+                execution_mode=payload.execution_mode,
+                run_id=payload.run_id,
             )
         except KeyError as exc:
             raise ApiError(
-                error_code="invalid_data_product_id",
+                error_code="unknown_data_product",
                 message=str(exc),
+                status_code=404,
                 field="data_product_id",
+            ) from exc
+        except ValueError as exc:
+            raise ApiError(
+                error_code="invalid_execution_mode",
+                message=str(exc),
+                status_code=400,
+                field="execution_mode",
             ) from exc
 
     @app.post("/api/0.1/markets/{market_id}/processed-data")

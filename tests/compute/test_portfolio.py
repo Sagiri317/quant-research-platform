@@ -5,6 +5,12 @@ import pytest
 
 import quant_research_platform.compute.dataframe.portfolio as portfolio_module
 import quant_research_platform.compute.dataframe.portfolio_helpers as portfolio_helpers
+from quant_research_platform.compute.dataframe import (
+    construction as dataframe_construction,
+)
+from quant_research_platform.compute.dataframe import exposure as dataframe_exposure
+from quant_research_platform.compute.dataframe import reporting as dataframe_reporting
+from quant_research_platform.compute.dataframe import turnover as dataframe_turnover
 from quant_research_platform.compute.dataframe.portfolio import (
     build_long_short_positions,
     build_weighted_positions,
@@ -22,6 +28,21 @@ from quant_research_platform.compute.protocols import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.compute.tensor import construction as tensor_construction
+from quant_research_platform.compute.tensor import exposure as tensor_exposure
+from quant_research_platform.compute.tensor import reporting as tensor_reporting
+from quant_research_platform.compute.tensor import turnover as tensor_turnover
+
+
+def test_portfolio_split_modules_preserve_public_imports() -> None:
+    assert dataframe_construction.build_weighted_positions is build_weighted_positions
+    assert dataframe_turnover.calculate_turnover is calculate_turnover
+    assert dataframe_exposure.summarize_exposure is summarize_exposure
+    assert dataframe_reporting.summarize_performance is summarize_performance
+    assert hasattr(tensor_construction, "build_tensor_weighted_positions")
+    assert hasattr(tensor_turnover, "calculate_tensor_turnover_and_cost")
+    assert hasattr(tensor_exposure, "summarize_tensor_exposure_from_path")
+    assert hasattr(tensor_reporting, "calculate_tensor_long_short")
 
 
 def _ranking_panel() -> pd.DataFrame:

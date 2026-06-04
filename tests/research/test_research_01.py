@@ -26,6 +26,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
     assemble_research_dataset_from_processed,
@@ -48,7 +49,10 @@ from quant_research_platform.research.predictions import (
     run_prediction_from_research_dataset,
     write_prediction_bundle,
 )
-from quant_research_platform.storage.layout import layout_from_processed_market_root
+from quant_research_platform.storage.layout import (
+    StorageLayout,
+    layout_from_processed_market_root,
+)
 from quant_research_platform.storage.parquet import write_processed_data
 
 
@@ -250,10 +254,19 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         coefficients,
         model_spec.feature_columns,
     )
+    layout = StorageLayout(project_root=tmp_path)
+    report_spec = ReportSpec(
+        report_id="prediction_bundle",
+        report_definition_id="prediction_bundle_private",
+        run_id=prediction_spec.prediction_id,
+        market_id=MarketId("a_share"),
+        run_type=prediction_spec.run_type,
+    )
     run_root = write_prediction_bundle(
         prediction,
         prediction_spec,
-        tmp_path / "reports" / "private_real" / "a_share" / "prediction",
+        report_spec=report_spec,
+        layout=layout,
     )
 
     assert len(evaluation.metrics) == 2
@@ -262,8 +275,14 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert run_root.as_posix().endswith(
         "reports/private_real/a_share/prediction/pred_demo"
     )
-    with pytest.raises(ValueError, match="outside_private_boundary"):
-        write_prediction_bundle(prediction, prediction_spec, tmp_path / "public")
+    with pytest.raises(ValueError, match="report_output_root_mismatch"):
+        write_prediction_bundle(
+            prediction,
+            prediction_spec,
+            report_spec=report_spec,
+            layout=layout,
+            output_root=tmp_path / "public",
+        )
 
 
 def test_prediction_handoff_reads_research_dataset_and_writes_report(

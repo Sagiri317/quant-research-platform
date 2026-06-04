@@ -49,11 +49,12 @@ POST /api/0.1/workflows
 GET  /api/0.1/reports/{run_id}
 ```
 
-The API is local-only. Catalog routes return registered metadata. POST routes
-call the shared thin service layer for sanitized dry-run spec validation; they
-are not deployment, scheduler, worker, or remote execution contracts. The API
-does not expose paper/live trading, external data, broker/exchange, or website
-UI contracts.
+The API is local-only. Catalog routes return registered metadata. The data
+product POST route accepts `execution_mode`, defaults to `execute`, and runs the
+minimal fixture-backed registered workflow path; `dry_run` performs sanitized
+catalog/spec/workflow/writer validation without row-level writes. The API does
+not expose private real-data execution, deployment, scheduler, worker,
+paper/live trading, external data, broker/exchange, or website UI contracts.
 
 ## CLI Flow
 
@@ -62,11 +63,16 @@ qrp catalog factors
 qrp catalog labels
 qrp catalog universes
 qrp catalog data-products
+qrp data-product interim a_share_daily_bar
 qrp data-product build-interim --data-product a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run
 qrp report show
 ```
+
+`qrp data-product ...` defaults to `execution_mode=execute`; `--dry-run` maps to
+`execution_mode=dry_run`. No private-source root flags are part of the `0.1.0`
+CLI contract.
 
 Retired commands and endpoints are not current clean-rewrite contracts.

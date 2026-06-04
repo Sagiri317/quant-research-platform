@@ -73,6 +73,8 @@ reports/private_real/<market>/<run_type>/<run_id>/
 ```
 
 They must not be written to `data/processed/`.
+Writers derive these roots from `StorageLayout + ReportSpec + run_id`; API/CLI
+and business services do not accept arbitrary public output roots.
 
 ## Public Identifier Policy
 

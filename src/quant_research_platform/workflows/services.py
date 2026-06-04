@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.workflows import WorkflowSpec
 from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.workflows.executor import execute_workflow
@@ -17,20 +18,24 @@ def execute_registered_workflow(
     registry: WorkflowNodeRegistry | None = None,
     allowed_spec_ids: set[str] | None = None,
     output_root: Path | None = None,
+    execution_mode: ExecutionMode | str | None = None,
+    run_id: str = "workflow-fixture-run",
 ) -> dict[str, Any]:
     node_registry = registry or WorkflowNodeRegistry.bootstrap_default()
-    handlers = node_registry.handlers_for(spec.step_ids)
+    mode = ExecutionMode.normalize(execution_mode)
     result = execute_workflow(
         spec,
-        handlers=handlers,
+        registry=node_registry,
         allowed_spec_ids=allowed_spec_ids,
         output_root=output_root,
+        execution_mode=mode,
+        run_id=run_id,
         include_summary=True,
     )
     return sanitize_public_object(
         {
-            "status": "validated",
             **result["summary"],
+            "status": "executed" if mode is ExecutionMode.EXECUTE else "validated",
         }
     )
 

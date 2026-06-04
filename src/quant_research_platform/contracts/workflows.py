@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId, SourceId
 
 
@@ -75,9 +77,50 @@ class WorkflowSpec:
             )
 
 
+@dataclass(frozen=True)
+class WorkflowRunSummary:
+    workflow_id: str
+    workflow_version: str
+    execution_mode: ExecutionMode
+    run_id: str
+    status: str
+    market_id: str | None
+    data_product_id: str | None
+    run_type: str
+    input_spec_ids: tuple[str, ...]
+    output_spec_ids: tuple[str, ...]
+    node_count: int
+    completed_nodes: tuple[str, ...]
+    private_boundary_required: bool
+    artifact_writer_policy: str
+    failure_code: str | None = None
+
+    def to_public_record(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "workflow_id": self.workflow_id,
+            "workflow_version": self.workflow_version,
+            "execution_mode": self.execution_mode.value,
+            "run_id": self.run_id,
+            "status": self.status,
+            "market_id": self.market_id,
+            "data_product_id": self.data_product_id,
+            "run_type": self.run_type,
+            "input_spec_ids": list(self.input_spec_ids),
+            "output_spec_ids": list(self.output_spec_ids),
+            "node_count": self.node_count,
+            "completed_nodes": list(self.completed_nodes),
+            "private_boundary_required": self.private_boundary_required,
+            "artifact_writer_policy": self.artifact_writer_policy,
+        }
+        if self.failure_code is not None:
+            payload["failure_code"] = self.failure_code
+        return payload
+
+
 __all__ = [
     "WorkflowArtifactWriterPolicy",
     "WorkflowCheckpointPolicy",
     "WorkflowNode",
+    "WorkflowRunSummary",
     "WorkflowSpec",
 ]

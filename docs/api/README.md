@@ -32,16 +32,22 @@ Route ownership:
 | `/catalog/labels` | `catalog.labels.LabelCatalog` and `contracts.labels.LabelDefinition` |
 | `/catalog/universes` | `contracts.universes.UniverseDefinition` metadata |
 | `/catalog/data-products` | `catalog.data_products.DataProductRegistry` public records |
-| `/data-products/a_share_daily_bar/interim` | `interfaces.services` dry-run validation for approved data product specs |
+| `/data-products/a_share_daily_bar/interim` | `interfaces.services` fixture-backed registered workflow execution or dry-run validation for approved data product specs |
 | `/markets/{market_id}/processed-data` | `interfaces.services` dry-run validation for approved processed specs |
 | `/research-datasets` | `interfaces.services` dry-run validation for ResearchDataset specs |
 | `/workflows` | `workflows` specs, planner, executor, checkpoints through `interfaces.services` |
 | `/reports/{run_id}` | structured report metadata response; no local folder scan in the adapter |
 
-The POST routes are thin service adapters in `0.1.0`: they validate approved
-spec/catalog boundaries and return sanitized dry-run summaries. They do not
-claim full remote execution, deployment, scheduler, worker, or public data
-access.
+The data-product POST route accepts `DataProductInterimRequest` with
+`execution_mode` and optional `run_id`. `execution_mode` defaults to `execute`;
+`dry_run` validates catalog/spec/workflow/writer boundaries and returns
+sanitized planned output only. `execute` runs the minimal fixture-backed
+registered workflow path. Private real-data execution is not exposed through
+API/CLI in `0.1.0`.
+
+Other POST routes are thin service adapters in `0.1.0`: they validate approved
+spec/catalog boundaries and return sanitized summaries. They do not claim full
+remote execution, deployment, scheduler, worker, or public data access.
 
 ## CLI
 
@@ -50,12 +56,18 @@ qrp catalog factors
 qrp catalog labels
 qrp catalog universes
 qrp catalog data-products
+qrp data-product interim a_share_daily_bar
 qrp data-product build-interim --data-product a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run
 qrp report show
 ```
+
+CLI `qrp data-product ...` defaults to `execution_mode=execute`; pass
+`--dry-run` to request `execution_mode=dry_run`. The CLI does not expose
+`--execute`, private real-data flags, source roots, input roots, data roots, or
+provider paths.
 
 Retired legacy command names are not public clean-rewrite contracts.
 

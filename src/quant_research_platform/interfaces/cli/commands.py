@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import typer
 
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.interfaces import services
 from quant_research_platform.runtime.privacy import sanitize_public_text
 
@@ -95,14 +96,38 @@ def data_product_build_interim(
         "--data-product",
         help="Data product id.",
     ),
-    dry_run: bool = typer.Option(True, "--dry-run/--execute"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate without writes."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Logical run id."),
 ) -> None:
-    """Validate the public data product interim build entry point."""
+    """Run the public data product interim entry point."""
+
+    _run_data_product_interim(data_product, dry_run=dry_run, run_id=run_id)
+
+
+@data_product_app.command("interim")
+def data_product_interim(
+    data_product_id: str = typer.Argument(..., help="Data product id."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate without writes."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Logical run id."),
+) -> None:
+    """Run the public data product interim entry point."""
+
+    _run_data_product_interim(data_product_id, dry_run=dry_run, run_id=run_id)
+
+
+def _run_data_product_interim(
+    data_product_id: str,
+    *,
+    dry_run: bool,
+    run_id: str | None,
+) -> None:
+    execution_mode = ExecutionMode.DRY_RUN if dry_run else ExecutionMode.EXECUTE
 
     _run_cli(
         lambda: services.validate_data_product_interim(
-            data_product,
-            dry_run=dry_run,
+            data_product_id,
+            execution_mode=execution_mode,
+            run_id=run_id,
         )
     )
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 from quant_research_platform.catalog.data_products import DataProductRegistry
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.contracts.workflows import (
@@ -17,6 +20,7 @@ from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.workflows.services import execute_registered_workflow
 
 API_VERSION = "0.1"
+_RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 def list_factors() -> dict[str, object]:
@@ -61,8 +65,11 @@ def list_data_products() -> dict[str, object]:
 def validate_data_product_interim(
     data_product_id: str,
     *,
-    dry_run: bool = True,
+    execution_mode: ExecutionMode | str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, object]:
+    mode = ExecutionMode.normalize(execution_mode)
+    resolved_run_id = _resolve_run_id(run_id, prefix=f"{data_product_id}-interim")
     data_product = DataProductRegistry.bootstrap_default().get(data_product_id)
     spec = WorkflowSpec(
         workflow_id="data_product_interim_validation",
@@ -77,10 +84,18 @@ def validate_data_product_interim(
     summary = execute_registered_workflow(
         spec,
         allowed_spec_ids=set(data_product.interim_spec_ids),
+        execution_mode=mode,
+        run_id=resolved_run_id,
     )
     return _response(
-        status="validated",
-        mode="dry_run_spec_validation" if dry_run else "fixture_backed_execution",
+        status="validated" if mode is ExecutionMode.DRY_RUN else "executed",
+        execution_mode=mode.value,
+        run_id=resolved_run_id,
+        mode=(
+            "dry_run_spec_validation"
+            if mode is ExecutionMode.DRY_RUN
+            else "fixture_backed_execution"
+        ),
         data_product_id=data_product.data_product_id,
         market_id=str(data_product.market_id),
         contract_version=data_product.contract_version,
@@ -104,6 +119,8 @@ def validate_market_processed(market_id: str) -> dict[str, object]:
         allowed_spec_ids=set(market.processed_spec_ids).union(
             {"a_share_daily_bar_interim"}
         ),
+        execution_mode=ExecutionMode.DRY_RUN,
+        run_id="market-processed-validation-fixture",
     )
     return _response(
         status="validated",
@@ -144,6 +161,8 @@ def validate_workflow_run() -> dict[str, object]:
     summary = execute_registered_workflow(
         spec,
         allowed_spec_ids={"daily_panel", "a_share_price_volume_forward_returns"},
+        execution_mode=ExecutionMode.DRY_RUN,
+        run_id="workflow-validation-fixture",
     )
     return _response(
         status="validated",
@@ -165,6 +184,25 @@ def report_metadata(run_id: str) -> dict[str, object]:
 
 def _response(**payload: object) -> dict[str, object]:
     return sanitize_public_object({"api_version": API_VERSION, **payload})
+
+
+def _resolve_run_id(run_id: str | None, *, prefix: str) -> str:
+    resolved = run_id or f"{prefix}-fixture"
+    if not _RUN_ID_RE.fullmatch(resolved):
+        raise ValueError("invalid_run_id")
+    forbidden_fragments = (
+        "cs" + "mar",
+        "data/raw",
+        "data/interim",
+        "data/processed",
+        "reports/private_real",
+        "http",
+        "www.",
+    )
+    lowered = resolved.lower()
+    if any(fragment in lowered for fragment in forbidden_fragments):
+        raise ValueError("invalid_run_id")
+    return resolved
 
 
 __all__ = [

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
@@ -81,14 +82,19 @@ def write_prediction_bundle_files(
     frame: pd.DataFrame,
     *,
     spec: PredictionSpec,
-    output_root: Path,
+    report_spec: ReportSpec,
+    layout: StorageLayout,
+    output_root: Path | None = None,
 ) -> Path:
     """Write a private prediction bundle under reports/private_real."""
 
-    if not is_private_boundary_path(output_root):
-        raise ValueError("outside_private_boundary")
-    if "data/processed" in output_root.as_posix():
-        raise ValueError("prediction_output_must_be_report_root")
+    run_root = _derive_report_run_root(
+        report_spec=report_spec,
+        layout=layout,
+        expected_definition_id="prediction_bundle_private",
+        expected_run_id=spec.prediction_id,
+        output_root=output_root,
+    )
     required = (*spec.primary_key, spec.prediction_column)
     missing = sorted(set(required).difference(frame.columns))
     if missing:
@@ -98,7 +104,6 @@ def write_prediction_bundle_files(
         raise ValueError(f"unregistered_prediction_bundle_columns: {', '.join(extra)}")
     if bool(frame.duplicated(list(spec.primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
-    run_root = output_root / spec.prediction_id
     run_root.mkdir(parents=True, exist_ok=True)
     frame.loc[:, list(required)].to_parquet(
         run_root / "prediction.parquet",
@@ -129,14 +134,19 @@ def write_evaluation_report_files(
     grouped_returns: pd.DataFrame,
     *,
     spec: EvaluationSpec,
-    output_root: Path,
+    report_spec: ReportSpec,
+    layout: StorageLayout,
+    output_root: Path | None = None,
 ) -> Path:
     """Write a private evaluation report bundle under reports/private_real."""
 
-    if not is_private_boundary_path(output_root):
-        raise ValueError("outside_private_boundary")
-    if "data/processed" in output_root.as_posix():
-        raise ValueError("evaluation_output_must_be_report_root")
+    run_root = _derive_report_run_root(
+        report_spec=report_spec,
+        layout=layout,
+        expected_definition_id="evaluation_report_private",
+        expected_run_id=spec.run_id,
+        output_root=output_root,
+    )
 
     _validate_report_frame(
         metrics,
@@ -149,7 +159,6 @@ def write_evaluation_report_files(
         error_name="evaluation_grouped_returns",
     )
 
-    run_root = output_root / spec.run_id
     run_root.mkdir(parents=True, exist_ok=True)
     metrics.to_parquet(
         run_root / "metrics.parquet",
@@ -191,6 +200,34 @@ def _validate_report_frame(
     extra = sorted(set(frame.columns).difference(required))
     if extra:
         raise ValueError(f"unregistered_{error_name}_columns: {', '.join(extra)}")
+
+
+def _derive_report_run_root(
+    *,
+    report_spec: ReportSpec,
+    layout: StorageLayout,
+    expected_definition_id: str,
+    expected_run_id: str,
+    output_root: Path | None,
+) -> Path:
+    definition = ReportCatalog.bootstrap_default().get(report_spec.report_definition_id)
+    if definition.report_definition_id != expected_definition_id:
+        raise ValueError("report_spec_mismatch")
+    if report_spec.run_id != expected_run_id:
+        raise ValueError("report_spec_mismatch")
+    if definition.run_type != report_spec.run_type:
+        raise ValueError("report_spec_mismatch")
+    run_root = (
+        layout.private_report_root(report_spec.market_id, report_spec.run_type)
+        / report_spec.run_id
+    )
+    if output_root is not None and Path(output_root) != run_root:
+        raise ValueError("report_output_root_mismatch")
+    if report_spec.private_boundary_required and not is_private_boundary_path(run_root):
+        raise ValueError("outside_private_boundary")
+    if "data/processed" in run_root.as_posix():
+        raise ValueError("report_output_must_be_report_root")
+    return run_root
 
 
 __all__ = [

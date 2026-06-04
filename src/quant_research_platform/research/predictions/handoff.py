@@ -9,6 +9,7 @@ import pandas as pd
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
+from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.research.datasets import (
     read_research_dataset,
     validate_prediction_input,
@@ -65,10 +66,18 @@ def run_prediction_from_research_dataset(
         model_spec.feature_columns,
     )
     layout = layout_from_processed_market_root(processed_root)
+    report_spec = ReportSpec(
+        report_id="prediction_bundle",
+        report_definition_id="prediction_bundle_private",
+        run_id=prediction_spec.prediction_id,
+        market_id=dataset_spec.market_id,
+        run_type=prediction_spec.run_type,
+    )
     return write_prediction_bundle(
         prediction,
         prediction_spec,
-        layout.private_report_root(dataset_spec.market_id, prediction_spec.run_type),
+        report_spec=report_spec,
+        layout=layout,
     )
 
 

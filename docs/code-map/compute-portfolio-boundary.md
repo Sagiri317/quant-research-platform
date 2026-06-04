@@ -1,19 +1,21 @@
 # Compute Portfolio Boundary
 
-`compute/dataframe/portfolio.py` and `compute/tensor/portfolio.py` remain compute
-backend modules for QRP `0.1`. They must not gain storage, catalog, API,
-workflow, market, broker, exchange, paper trading, or live trading
-responsibilities.
+`compute/dataframe/portfolio.py` and `compute/tensor/portfolio.py` remain
+compatibility facades for QRP `0.1` public imports. Focused portfolio compute
+entry points are split into:
 
-Accepted 0.1.0 limitation: the files are not split in this pre-merge fix
-because the current task is contract and acceptance repair. Future work should
-split portfolio compute into:
+- `compute/dataframe/construction.py`
+- `compute/dataframe/constraints.py`
+- `compute/dataframe/turnover.py`
+- `compute/dataframe/exposure.py`
+- `compute/dataframe/reporting.py`
+- `compute/tensor/construction.py`
+- `compute/tensor/constraints.py`
+- `compute/tensor/turnover.py`
+- `compute/tensor/exposure.py`
+- `compute/tensor/reporting.py`
 
-- construction
-- constraints
-- turnover
-- exposure
-- reporting
-
-No new portfolio logic should be added to the monolithic files unless it is
-first assigned to one of those future submodules.
+These modules must not gain storage, catalog, API, workflow, market,
+broker/exchange, paper trading, or live trading responsibilities. New portfolio
+logic should be assigned to the focused module that owns the behavior while the
+facade preserves public import compatibility.

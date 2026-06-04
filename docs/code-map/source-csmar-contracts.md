@@ -1,13 +1,19 @@
 # CSMAR Source Contract Boundary
 
-`src/quant_research_platform/sources/csmar/contracts.py` is retained as the
-source-adapter contract boundary for QRP `0.1`.
+`src/quant_research_platform/sources/csmar/contracts.py` is retained as a thin
+compatibility facade for the internal provider implementation. The split
+modules are:
+
+- `raw_schemas.py`
+- `field_mappings.py`
+- `checksums.py`
 
 Allowed responsibilities:
 
-- raw export schema descriptors
-- source-to-interim field mapping descriptors
-- source-level checksum helpers
+- `raw_schemas.py`: raw export schema descriptors and raw inspection helpers
+- `field_mappings.py`: source-to-interim field mapping helpers
+- `checksums.py`: source-level checksum helpers
+- `contracts.py`: compatibility exports for existing internal imports
 - portable validation errors for the source adapter
 
 Forbidden responsibilities:
@@ -18,5 +24,5 @@ Forbidden responsibilities:
   portfolio logic
 - output path selection or persisted writer calls
 
-If this file grows again, split it into `raw_schemas.py`, `field_mappings.py`,
-and `checksums.py`, leaving `contracts.py` as public exports only.
+This is an internal provider implementation boundary, not a public API/CLI
+surface.

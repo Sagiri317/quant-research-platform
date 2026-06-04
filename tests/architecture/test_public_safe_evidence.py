@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 REQUIRED_AREAS = {
@@ -55,6 +56,14 @@ FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS = [
     "provider_id",
     "source_id",
 ]
+HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+HASH_FIELDS = {
+    "column_set_hash",
+    "dtype_summary_hash",
+    "null_summary_hash",
+    "aggregate_checksum",
+}
+PLACEHOLDER_HASH_VALUES = {"passed", "accepted"}
 
 
 def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
@@ -68,6 +77,19 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
         assert REQUIRED_FIELDS.issubset(item)
         assert item["contract_version"] == "0.1"
         assert item["privacy_level"] == "public_safe_aggregate"
+        for field in HASH_FIELDS:
+            value = item[field]
+            assert isinstance(value, str)
+            assert HASH_RE.fullmatch(value)
+            assert not value.startswith("sha256:")
+            assert value not in PLACEHOLDER_HASH_VALUES
+        assert item["tolerance"] >= 0
+        if item["tolerance"] == 0:
+            assert item["max_abs_delta"] == 0
+            assert item["mean_abs_delta"] == 0
+        if item["max_abs_delta"] > item["tolerance"]:
+            assert item["accepted_explained_delta"] is True
+            assert item["explanation"]
 
 
 def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> None:

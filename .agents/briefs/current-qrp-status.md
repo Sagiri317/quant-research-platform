@@ -20,6 +20,11 @@ replacement for `PROJECT_STATUS.md`.
 - API paths use `/api/0.1/...`; do not add a version-letter prefix.
 - Public data product id is `a_share_daily_bar`.
 - Current CLI contract is `qrp catalog/data-product/market/research/workflow/report`.
+- `execution_mode` defaults to `execute`; `--dry-run` maps to
+  `execution_mode=dry_run`.
+- Fixture-backed API/CLI execution is supported; private real-data execution is
+  not exposed through API/CLI in `0.1.0`.
+- Report writers derive paths from `StorageLayout + ReportSpec + run_id`.
 - A-share is the first enabled market. Other markets are future design only.
 - `agents/` is proposal-only in this phase; it does not call external LLM APIs
   and does not write private row-level data.
@@ -38,9 +43,8 @@ markers, local absolute paths, credentials, or stock-code samples.
 
 ## Current Next Step
 
-- Continue porting the A-share data product, processed panel, factor/label,
-  research dataset, evaluation, prediction, report, and workflow slices into the
-  0.1 topology with test-first changes.
+- Run final pre-merge verification gates, review the diff, then commit and push
+  `feature/qrp-clean-rewrite`.
 
 ## Hard Reminders
 

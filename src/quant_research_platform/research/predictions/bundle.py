@@ -8,7 +8,9 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.bundles import write_prediction_bundle_files
+from quant_research_platform.storage.layout import StorageLayout
 
 
 def build_prediction_bundle(
@@ -42,11 +44,16 @@ def _validate_oos_split(spec: PredictionSpec) -> None:
 def write_prediction_bundle(
     frame: pd.DataFrame,
     spec: PredictionSpec,
-    output_root: Path,
+    *,
+    report_spec: ReportSpec,
+    layout: StorageLayout,
+    output_root: Path | None = None,
 ) -> Path:
     return write_prediction_bundle_files(
         frame,
         spec=spec,
+        report_spec=report_spec,
+        layout=layout,
         output_root=output_root,
     )
 

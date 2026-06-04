@@ -13,6 +13,7 @@ from quant_research_platform.contracts.data_products import (
     DataProductDefinition,
     ProviderBinding,
 )
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import (
     AssetId,
@@ -22,6 +23,7 @@ from quant_research_platform.contracts.ids import (
 )
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.masks import MaskDefinition
+from quant_research_platform.contracts.privacy import PrivacyLevel
 from quant_research_platform.contracts.reports import ReportDefinition, ReportSpec
 
 CONTRACT_VERSION = "0.1"
@@ -35,6 +37,7 @@ __all__ = [
     "DataGrain",
     "DataProductDefinition",
     "DataSpec",
+    "ExecutionMode",
     "FactorDefinition",
     "FactorSet",
     "FieldSpec",
@@ -45,6 +48,7 @@ __all__ = [
     "MaskDefinition",
     "ProcessedDataSpec",
     "ProviderBinding",
+    "PrivacyLevel",
     "ReportDefinition",
     "ReportSpec",
     "SourceAssetId",

@@ -7,6 +7,8 @@ from typer.testing import CliRunner
 
 import quant_research_platform.interfaces.api.app as api_app_module
 import quant_research_platform.interfaces.cli.commands as cli_commands_module
+import quant_research_platform.interfaces.services as services_module
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
 from quant_research_platform.interfaces.cli import app
 
@@ -69,6 +71,25 @@ def test_api_01_endpoints_execute_without_private_paths_or_planned_status() -> N
     assert data_products.json()["items"][0]["data_product_id"] == "a_share_daily_bar"
 
 
+def test_execution_mode_contract_uses_execute_default_and_dry_run_field() -> None:
+    assert ExecutionMode.EXECUTE == "execute"
+    assert ExecutionMode.DRY_RUN == "dry_run"
+    assert ExecutionMode.default() is ExecutionMode.EXECUTE
+
+    default_payload = services_module.validate_data_product_interim(
+        "a_share_daily_bar"
+    )
+    dry_run_payload = services_module.validate_data_product_interim(
+        "a_share_daily_bar",
+        execution_mode=ExecutionMode.DRY_RUN,
+    )
+
+    assert default_payload["execution_mode"] == "execute"
+    assert default_payload["status"] == "executed"
+    assert dry_run_payload["execution_mode"] == "dry_run"
+    assert dry_run_payload["status"] == "validated"
+
+
 def test_api_cli_adapters_do_not_scan_parquet_paths() -> None:
     module_source = (
         inspect.getsource(api_app_module)
@@ -116,6 +137,32 @@ def test_cli_exposes_clean_rewrite_command_groups() -> None:
         assert "CSMAR" not in result.output
         assert "source_id" not in result.output
         assert "provider_id" not in result.output
+
+
+def test_cli_help_exposes_dry_run_without_execute_or_private_flags() -> None:
+    runner = CliRunner()
+    result = runner.invoke(app, ["data-product", "build-interim", "--help"])
+
+    assert result.exit_code == 0
+    assert "--dry-run" in result.output
+    assert "--execute" not in result.output
+    assert "--private-real" not in result.output
+    assert "--source-root" not in result.output
+    assert "--input-root" not in result.output
+    assert "--data-root" not in result.output
+    assert "--provider-path" not in result.output
+
+
+def test_api_schema_uses_execution_mode_not_dry_run_bool() -> None:
+    schema = create_app().openapi()
+    text = str(schema)
+    request_schema = schema["components"]["schemas"]["DataProductInterimRequest"]
+
+    assert "execution_mode" in text
+    assert "DataProductInterimRequest" in text
+    assert "dry_run" not in request_schema.get("properties", {})
+    assert "dryRun" not in text
+    assert "executionMode" not in text
 
 
 def test_cli_rejects_non_fixed_data_product_and_market_names() -> None:

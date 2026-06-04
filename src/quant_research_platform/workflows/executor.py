@@ -6,8 +6,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
+    WorkflowRunSummary,
     WorkflowSpec,
 )
 from quant_research_platform.runtime.privacy import (
@@ -16,6 +18,7 @@ from quant_research_platform.runtime.privacy import (
 )
 from quant_research_platform.workflows.checkpoints import InMemoryCheckpointStore
 from quant_research_platform.workflows.planner import plan_topological_steps
+from quant_research_platform.workflows.registry import WorkflowNodeRegistry
 
 NodeHandler = Callable[[], Any]
 
@@ -39,18 +42,22 @@ def execute_steps(
 
 def execute_workflow(
     spec: WorkflowSpec,
-    handlers: dict[str, NodeHandler],
+    registry: WorkflowNodeRegistry,
     checkpoints: InMemoryCheckpointStore | None = None,
     *,
     allowed_spec_ids: set[str] | None = None,
     output_root: Path | None = None,
+    execution_mode: ExecutionMode | str | None = None,
+    run_id: str = "workflow-fixture-run",
     include_summary: bool = False,
 ) -> dict[str, Any]:
+    mode = ExecutionMode.normalize(execution_mode)
     _validate_workflow_execution(
         spec,
         allowed_spec_ids=allowed_spec_ids,
         output_root=output_root,
     )
+    handlers = registry.handlers_for(spec.step_ids)
     results = execute_steps(
         plan_topological_steps(spec),
         handlers,
@@ -59,7 +66,12 @@ def execute_workflow(
     if include_summary:
         return {
             "results": results,
-            "summary": workflow_run_summary(spec, results),
+            "summary": workflow_run_summary(
+                spec,
+                results,
+                execution_mode=mode,
+                run_id=run_id,
+            ),
         }
     return results
 
@@ -88,22 +100,27 @@ def _validate_workflow_execution(
 def workflow_run_summary(
     spec: WorkflowSpec,
     results: dict[str, Any],
+    *,
+    execution_mode: ExecutionMode | str | None = None,
+    run_id: str = "workflow-fixture-run",
 ) -> dict[str, Any]:
-    return sanitize_public_object(
-        {
-            "workflow_id": spec.workflow_id,
-            "workflow_version": spec.workflow_version,
-            "market_id": str(spec.market_id) if spec.market_id else None,
-            "data_product_id": spec.data_product_id,
-            "run_type": spec.run_type,
-            "input_spec_ids": list(spec.input_spec_ids),
-            "output_spec_ids": list(spec.output_spec_ids),
-            "node_count": len(spec.nodes),
-            "completed_nodes": sorted(results),
-            "private_boundary_required": spec.requires_private_boundary,
-            "artifact_writer_policy": spec.artifact_writer_policy.value,
-        }
+    summary = WorkflowRunSummary(
+        workflow_id=spec.workflow_id,
+        workflow_version=spec.workflow_version,
+        execution_mode=ExecutionMode.normalize(execution_mode),
+        run_id=run_id,
+        status="executed",
+        market_id=str(spec.market_id) if spec.market_id else None,
+        data_product_id=spec.data_product_id,
+        run_type=spec.run_type,
+        input_spec_ids=spec.input_spec_ids,
+        output_spec_ids=spec.output_spec_ids,
+        node_count=len(spec.nodes),
+        completed_nodes=tuple(sorted(results)),
+        private_boundary_required=spec.requires_private_boundary,
+        artifact_writer_policy=spec.artifact_writer_policy.value,
     )
+    return sanitize_public_object(summary.to_public_record())
 
 
 __all__ = [

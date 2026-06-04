@@ -76,12 +76,19 @@ qrp catalog factors
 qrp catalog labels
 qrp catalog universes
 qrp catalog data-products
+qrp data-product interim a_share_daily_bar
 qrp data-product build-interim --data-product a_share_daily_bar
 qrp market build-processed
 qrp research build-dataset
 qrp workflow run
 qrp report show
 ```
+
+`execution_mode` defaults to `execute`. API requests use the JSON field
+`execution_mode`; CLI exposes optional `--dry-run` and does not expose
+`--execute` or private-source path flags. `execute` is fixture-backed registered
+workflow execution for `0.1.0`; private real-data execution is not exposed
+through API/CLI.
 
 Old command and endpoint names are not clean-rewrite public contracts.
 

@@ -4,7 +4,12 @@ import pandas as pd
 
 from quant_research_platform.catalog.fields import platform_interim_column_names
 from quant_research_platform.contracts.data import DataGrain
+from quant_research_platform.sources.csmar import checksums, field_mappings, raw_schemas
 from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
+from quant_research_platform.sources.csmar.contracts import (
+    map_csmar_columns,
+    parse_raw_filename,
+)
 from quant_research_platform.sources.csmar.importer import (
     build_interim_frame,
     import_interim_data,
@@ -29,6 +34,12 @@ def test_csmar_interim_catalog_registers_daily_market_spec() -> None:
     assert spec.grain is DataGrain.ASSET_TIMESTAMP
     for column in platform_interim_column_names():
         assert column in spec.required_columns
+
+
+def test_csmar_contracts_split_keeps_thin_facade_exports() -> None:
+    assert parse_raw_filename is raw_schemas.parse_raw_filename
+    assert map_csmar_columns is field_mappings.map_csmar_columns
+    assert hasattr(checksums, "raw_export_sha256")
 
 
 def test_csmar_daily_interim_adds_canonical_keys() -> None:

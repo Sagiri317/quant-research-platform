@@ -14,6 +14,7 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 | 版本边界 | project `0.1.0`; API/contracts/processed-data/research-dataset/workflow specs use `0.1` |
 | 源码拓扑 | `contracts`, `storage`, `catalog`, `sources`, `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`, `reports`, `runtime` |
 | 当前 API/CLI | `/api/0.1/...` and clean `qrp catalog/data-product/market/research/workflow/report` commands |
+| 执行边界 | API/CLI `execution_mode` defaults to `execute`; `--dry-run` maps to `dry_run`; private real-data execution is not exposed through API/CLI |
 | 市场范围 | A-share enabled; other markets are future design only, with no empty implementation packages |
 | 私有边界 | `data/raw/<internal-provider>`, `data/interim/<internal-provider>`, `data/processed/a_share`, `reports/private_real` |
 | 交易边界 | No investment advice, paper/live trading, broker/exchange connector, deployment, scheduler, worker, or external data API |
@@ -33,6 +34,10 @@ Current public-safe anchors:
 - Public-safe parity-or-explained-delta evidence committed for processed panel,
   factor values, labels, masks/universes, ResearchDataset, evaluation, and
   prediction smoke.
+- P2 compute portfolio and internal provider contract split modules exist with
+  compatibility facades.
+- Report writers derive paths through `ReportSpec`, `ReportCatalog`,
+  `StorageLayout`, and `run_id`.
 - 2014-2025 historical migration completed locally for the new processed
   factor/label-supporting layout and ResearchDataset layout.
 
@@ -59,3 +64,4 @@ Current public-safe anchors:
 | 2026-06-03 | status | QRP clean rewrite started on `feature/qrp-clean-rewrite`: source topology moved toward 0.1.0, API/CLI public surface changed to `/api/0.1/...`, private data boundaries changed to `data/raw`, `data/interim`, `data/processed`, and `reports/private_real`; old endpoint/command compatibility is no longer target-contract truth. | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-04 | status | QRP clean rewrite completed through Phase 10 locally: 2014 parity-or-explained-delta passed, 2014-2025 factor/label-supporting processed layers and ResearchDataset were migrated through spec-driven writers, and reports remain under `reports/private_real`. | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-04 | status | Pre-merge fix added public-safe clean rewrite parity evidence, thin API/CLI dry-run validation services, sanitizer/report/writer gates, and accepted explained-delta wording for full historical `daily_panel`. | WORKSPACE_STATUS, PLAN_INDEX | open |
+| 2026-06-04 | status | Pre-merge blocker repair updated `execution_mode`, registered workflow execution, ReportSpec/ReportCatalog writer gates, P2 split modules, and public-safe aggregate evidence hash validation. | WORKSPACE_STATUS, PLAN_INDEX | open |

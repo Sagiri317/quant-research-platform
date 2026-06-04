@@ -6,6 +6,7 @@ from pathlib import Path
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
+from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.bundles import write_evaluation_report_files
 from quant_research_platform.research.datasets import (
     read_research_dataset,
@@ -59,14 +60,19 @@ def write_evaluation_result(
     *,
     layout,
 ) -> Path:
+    report_spec = ReportSpec(
+        report_id="evaluation_report",
+        report_definition_id="evaluation_report_private",
+        run_id=result.spec.run_id,
+        market_id=result.spec.market_id,
+        run_type=result.spec.run_type,
+    )
     return write_evaluation_report_files(
         result.metrics,
         result.grouped_returns,
         spec=result.spec,
-        output_root=layout.private_report_root(
-            result.spec.market_id,
-            result.spec.run_type,
-        ),
+        report_spec=report_spec,
+        layout=layout,
     )
 
 
