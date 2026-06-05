@@ -66,7 +66,7 @@ def register_api_error_handlers(app: FastAPI) -> None:
         return api_error_response(
             ApiError(
                 error_code="internal_error",
-                message=sanitize_public_text(repr(exc)),
+                message="internal_error",
                 status_code=500,
             )
         )

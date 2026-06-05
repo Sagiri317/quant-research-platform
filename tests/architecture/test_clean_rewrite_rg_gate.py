@@ -164,6 +164,10 @@ def test_active_tree_has_no_retired_terms() -> None:
         ("schema 1.0", re.compile(r"schema\s+`?1\.0`?")),
         ("panel_full", re.compile(r"panel_full")),
         ("price_volume_factors_full", re.compile(r"price_volume_factors_full")),
+        (
+            "_".join(("csmar", "daily", "market", "interim")),
+            re.compile(r"csmar_" r"daily_market_interim"),
+        ),
     )
     current_file = Path(__file__).resolve()
     hits: list[str] = []
@@ -228,6 +232,10 @@ def _iter_public_surface_files() -> list[Path]:
 
 
 def _is_internal_provider_doc(path: Path) -> bool:
+    if path.parts[:2] == ("docs", "code-map") and path.name.startswith(
+        "source-csmar-"
+    ):
+        return True
     parts = path.parts
     return any(
         _contains_parts(parts, excluded)

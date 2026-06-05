@@ -7,6 +7,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from quant_research_platform.catalog.registry_validation import CatalogConsistencyError
 from quant_research_platform.contracts.run_id import RunIdValidationError
 from quant_research_platform.interfaces import services
 from quant_research_platform.interfaces.api.errors import (
@@ -119,6 +120,12 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
                 message=str(exc),
                 status_code=422,
                 field="run_id",
+            ) from exc
+        except CatalogConsistencyError as exc:
+            raise ApiError(
+                error_code=exc.error_code,
+                message=exc.error_code,
+                status_code=500,
             ) from exc
         except ValueError as exc:
             raise ApiError(

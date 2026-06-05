@@ -28,8 +28,8 @@ _STOCK_CODE_RE = re.compile(
     re.IGNORECASE,
 )
 _PRIVATE_MARKER_RE = re.compile(
-    r"(?i)\b(?:csmar|source_id|provider_id|vendor(?:[-_ ]?source)?|"
-    r"raw[-_ ]?source[-_ ]?marker)\b"
+    r"(?i)\b(?:csmar|source_id|provider_id|implementation_package|"
+    r"vendor(?:[-_ ]?source)?|raw[-_ ]?source[-_ ]?marker)\b"
 )
 _CREDENTIAL_RE = re.compile(
     r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"

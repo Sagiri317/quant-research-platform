@@ -15,7 +15,9 @@ class BindingVisibility(StrEnum):
 class ProviderBinding:
     data_product_id: str
     provider_id: str
+    source_id: str
     implementation_package: str
+    required_source_dataset_ids: tuple[str, ...]
     visibility: BindingVisibility = BindingVisibility.INTERNAL_PRIVATE
 
     def __post_init__(self) -> None:
@@ -45,7 +47,17 @@ class ProviderBindingRegistry:
             ProviderBinding(
                 data_product_id="a_share_daily_bar",
                 provider_id="csmar",
+                source_id="csmar",
                 implementation_package="quant_research_platform.sources.csmar",
+                required_source_dataset_ids=(
+                    "daily_market",
+                    "stock_master",
+                    "market_cap",
+                    "adjustment",
+                    "index_market",
+                    "index_info",
+                    "benchmark_index_market",
+                ),
             )
         )
         return registry

@@ -30,6 +30,7 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "provider_id",
     "source_id",
     "implementation_package",
+    "quant_research_platform.sources.csmar",
     "data/raw",
     "data\\raw",
     "data/interim",
@@ -162,6 +163,89 @@ def test_execution_mode_contract_uses_execute_default_and_dry_run_field() -> Non
     assert default_payload["status"] == "executed"
     assert dry_run_payload["execution_mode"] == "dry_run"
     assert dry_run_payload["status"] == "validated"
+
+
+def test_data_product_interim_dry_run_hides_provider_binding_details() -> None:
+    client = TestClient(create_app())
+    runner = CliRunner()
+
+    api_response = client.post(
+        "/api/0.1/data-products/a_share_daily_bar/interim-runs",
+        json={"execution_mode": "dry_run"},
+    )
+    cli_result = runner.invoke(
+        app, ["data-products", "run-interim", "a_share_daily_bar", "--dry-run"]
+    )
+
+    assert api_response.status_code == 200
+    assert cli_result.exit_code == 0
+    for text in (str(api_response.json()), cli_result.output):
+        assert "a_share_daily_bar_interim" in text
+        _assert_public_text_has_no_private_markers(text)
+
+
+def test_registry_graph_validation_failure_is_public_safe(monkeypatch) -> None:
+    from quant_research_platform.catalog.registry_validation import (
+        CatalogConsistencyError,
+    )
+
+    def fail_validation(*_args, **_kwargs) -> None:
+        raise CatalogConsistencyError()
+
+    monkeypatch.setattr(
+        services_module,
+        "validate_data_product_source_graph",
+        fail_validation,
+    )
+
+    api_response = TestClient(create_app()).post(
+        "/api/0.1/data-products/a_share_daily_bar/interim-runs",
+        json={"execution_mode": "dry_run"},
+    )
+    cli_result = CliRunner().invoke(
+        app, ["data-products", "run-interim", "a_share_daily_bar", "--dry-run"]
+    )
+
+    assert api_response.status_code == 500
+    assert api_response.json()["error"]["error_code"] == (
+        "catalog_registry_graph_invalid"
+    )
+    assert cli_result.exit_code == 2
+    assert "catalog_registry_graph_invalid" in cli_result.output
+    _assert_public_text_has_no_private_markers(str(api_response.json()))
+    _assert_public_text_has_no_private_markers(cli_result.output)
+
+
+def test_unexpected_api_and_cli_errors_use_stable_public_summary(
+    monkeypatch,
+) -> None:
+    def fail_with_internal_detail(*_args, **_kwargs):
+        raise RuntimeError(
+            "quant_research_platform.sources.csmar provider_id source_id "
+            "implementation_package"
+        )
+
+    monkeypatch.setattr(
+        services_module,
+        "run_data_product_interim",
+        fail_with_internal_detail,
+    )
+
+    api_response = TestClient(
+        create_app(),
+        raise_server_exceptions=False,
+    ).post("/api/0.1/data-products/a_share_daily_bar/interim-runs")
+    cli_result = CliRunner().invoke(
+        app, ["data-products", "run-interim", "a_share_daily_bar"]
+    )
+
+    assert api_response.status_code == 500
+    assert api_response.json()["error"]["error_code"] == "internal_error"
+    assert api_response.json()["error"]["message"] == "internal_error"
+    assert cli_result.exit_code == 2
+    assert "internal_error" in cli_result.output
+    _assert_public_text_has_no_private_markers(str(api_response.json()))
+    _assert_public_text_has_no_private_markers(cli_result.output)
 
 
 def test_api_cli_adapters_do_not_scan_parquet_paths() -> None:
@@ -497,14 +581,38 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
 
 
 def test_rejected_data_product_and_dataset_ids_are_sanitized() -> None:
+    client = TestClient(create_app())
     runner = CliRunner()
 
-    assert runner.invoke(
-        app, ["data-products", "run-interim", "other"]
-    ).exit_code != 0
-    assert runner.invoke(
-        app, ["research-datasets", "requirements", "other"]
-    ).exit_code != 0
+    rejected_values = (
+        "other",
+        "provider_id",
+        "source_id",
+        "implementation_package",
+    )
+    for value in rejected_values:
+        product_response = client.post(
+            f"/api/0.1/data-products/{value}/interim-runs",
+            json={"run_id": "safe_run_id"},
+        )
+        dataset_response = client.get(
+            f"/api/0.1/research-datasets/{value}/requirements"
+        )
+        product_result = runner.invoke(
+            app, ["data-products", "run-interim", value, "--run-id", "safe_run_id"]
+        )
+        dataset_result = runner.invoke(
+            app, ["research-datasets", "requirements", value]
+        )
+
+        assert product_response.status_code == 404
+        assert dataset_response.status_code == 404
+        assert product_result.exit_code != 0
+        assert dataset_result.exit_code != 0
+        _assert_public_text_has_no_private_markers(str(product_response.json()))
+        _assert_public_text_has_no_private_markers(str(dataset_response.json()))
+        _assert_public_text_has_no_private_markers(product_result.output)
+        _assert_public_text_has_no_private_markers(dataset_result.output)
 
 
 def test_api_error_envelope_sanitizes_private_details() -> None:

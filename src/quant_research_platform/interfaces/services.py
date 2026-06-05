@@ -5,6 +5,9 @@ from __future__ import annotations
 from quant_research_platform.catalog.data_products import DataProductRegistry
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
+from quant_research_platform.catalog.registry_validation import (
+    validate_data_product_source_graph,
+)
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.run_id import validate_run_id
@@ -71,6 +74,7 @@ def run_data_product_interim(
     mode = ExecutionMode.normalize(execution_mode)
     resolved_run_id = _resolve_run_id(run_id, prefix=f"{data_product_id}-interim")
     data_product = DataProductRegistry.bootstrap_default().get(data_product_id)
+    validate_data_product_source_graph(data_product.data_product_id)
     spec = WorkflowSpec(
         workflow_id="data_product_interim_validation",
         market_id=MarketId(str(data_product.market_id)),

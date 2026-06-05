@@ -25,6 +25,7 @@ from quant_research_platform.sources.csmar.mappers import (
     normalize_private_export_frame,
     read_private_export_file,
 )
+from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -35,6 +36,22 @@ def test_csmar_interim_catalog_registers_daily_market_spec() -> None:
     assert spec.grain is DataGrain.ASSET_TIMESTAMP
     for column in platform_interim_column_names():
         assert column in spec.required_columns
+
+
+def test_csmar_interim_catalog_registers_real_source_dataset_ids() -> None:
+    specs = csmar_interim_catalog().list()
+
+    assert {spec.interim_data_id for spec in specs} == {
+        "daily_market",
+        "stock_master",
+        "market_cap",
+        "adjustment",
+        "index_info",
+        "benchmark_index_market",
+        "index_market",
+    }
+    assert {str(spec.source_id) for spec in specs} == {"csmar"}
+    assert "benchmark_index_market" not in RAW_TABLE_CONTRACTS
 
 
 def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
