@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
@@ -15,6 +19,7 @@ from quant_research_platform.interfaces.cli import app
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
 create_app = api_app_module.create_app
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 APPROVED_API_ROUTES = {
     ("GET", "/api/0.1/catalog/data-products"),
@@ -328,6 +333,29 @@ def test_cli_help_exposes_approved_groups_options_and_no_retired_commands() -> N
     for command in RETIRED_CLI_COMMANDS:
         assert " ".join(command[:2]) not in combined
     _assert_public_text_has_no_private_markers(combined)
+
+
+def test_cli_commands_module_help_invokes_existing_app() -> None:
+    env = {**os.environ, "PYTHONPATH": "src"}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "quant_research_platform.interfaces.cli.commands",
+            "--help",
+        ],
+        check=False,
+        capture_output=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "data-products" in result.stdout
+    assert "research-datasets" in result.stdout
+    assert "run-interim" not in result.stdout
+    _assert_public_text_has_no_private_markers(result.stdout)
 
 
 def test_api_and_cli_naming_conventions_are_contractual() -> None:

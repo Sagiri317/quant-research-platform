@@ -64,3 +64,19 @@ Forbidden responsibilities:
 
 This is an internal provider implementation boundary, not a public API/CLI
 surface.
+
+## Follow-up TODOs
+
+These are deferred cleanup considerations, not roadmap commitments:
+
+- Possible future rename `interim_spec_ids` -> `interim_output_ids` to reduce
+  naming ambiguity.
+- Possible future removal of duplicated `implementation_package` from
+  `ProviderBinding` after multi-source semantics stabilize.
+- Future generic source-root layout replacing CSMAR-specific accessors such as
+  `raw_csmar_root` / `interim_csmar_root` once a second source is added.
+- Future dev/test dependency cleanup, including whether `pytest-cov` should be
+  declared if coverage becomes a formal gate.
+- Future broader coverage improvements for tensor, raw_exports, checksums, and
+  selected error paths.
+- Optional private verification B rerun as verification-only, not code cleanup.
