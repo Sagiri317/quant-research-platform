@@ -61,7 +61,8 @@ def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
         elif definition.factor_id in CORE_PRICE_VOLUME_FACTORS:
             assert definition.factor_set is FactorSet.CORE
         else:
-            assert definition.factor_set is FactorSet.FULL
+            assert definition.factor_set is FactorSet.STANDARD
+            assert definition.to_manifest()["factor_set"] == "standard"
 
     assert by_id["rev_1d"].input_columns == ("return_1d",)
     assert by_id["mom_20d"].input_columns == ("adj_close",)

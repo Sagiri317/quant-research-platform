@@ -258,7 +258,7 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     assert label_payload["schema_version"] == "0.1"
 
 
-def test_a_share_factor_full_passes_spec_columns_to_price_volume_helper(
+def test_a_share_factor_build_passes_spec_columns_to_price_volume_helper(
     tmp_path,
     monkeypatch,
 ) -> None:

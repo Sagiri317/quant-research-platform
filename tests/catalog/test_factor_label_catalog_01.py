@@ -44,7 +44,7 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
         assert definition.family == "price_volume"
         assert definition.required_processed_data_id == "daily_panel"
 
-    shared_full_superset = {
+    shared_input_superset = {
         "open",
         "high",
         "low",
@@ -59,7 +59,7 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
         "float_market_cap",
     }
     assert not any(
-        set(item.input_columns) == shared_full_superset for item in definitions
+        set(item.input_columns) == shared_input_superset for item in definitions
     )
     assert catalog.get("rev_1d").base_input_columns == ("return_1d",)
     assert catalog.get("mom_20d").base_input_columns == ("adj_close",)

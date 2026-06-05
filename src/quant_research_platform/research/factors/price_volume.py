@@ -530,7 +530,7 @@ def _factor_set_for_column(factor_id: str) -> FactorSet:
         return FactorSet.SMOKE
     if factor_id in CORE_PRICE_VOLUME_FACTORS:
         return FactorSet.CORE
-    return FactorSet.FULL
+    return FactorSet.STANDARD
 
 
 def _required_windows(factor_id: str) -> tuple[int, ...]:

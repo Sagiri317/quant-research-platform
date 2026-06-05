@@ -114,15 +114,15 @@ def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
         FactorDefinition(
             factor_id="rev_1d",
             market_id=MarketId("a_share"),
-            factor_set=FactorSet.FULL,
+            factor_set=FactorSet.STANDARD,
             input_columns=("return_1d",),
             output_column="rev_1d",
             required_processed_data_id="daily_panel",
         )
     )
 
-    assert catalog.get("rev_1d").factor_set == FactorSet.FULL
-    retired_values = ("core" + "_long_period", "smoke" + "_minimal")
+    assert catalog.get("rev_1d").factor_set == FactorSet.STANDARD
+    retired_values = ("full", "core" + "_long_period", "smoke" + "_minimal")
     for value in retired_values:
         with pytest.raises(ValueError, match="invalid_factor_set"):
             catalog.resolve_factor_set(value)

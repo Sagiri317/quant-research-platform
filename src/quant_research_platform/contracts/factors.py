@@ -11,7 +11,7 @@ from quant_research_platform.contracts.ids import MarketId
 
 
 class FactorSet(StrEnum):
-    FULL = "full"
+    STANDARD = "standard"
     CORE = "core"
     SMOKE = "smoke"
     EXPERIMENTAL = "experimental"

@@ -19,8 +19,8 @@ These standards keep QRP research outputs defensible during Clean Rewrite
   and exit rule.
 - Masks may be as-of, execution, or evaluation masks; future-dependent masks
   must not enter feature sets.
-- Current allowed factor sets are `full`, `core`, `smoke`, `experimental`, and
-  `deprecated`.
+- Current allowed factor sets are `standard`, `core`, `smoke`, `experimental`,
+  and `deprecated`.
 
 ## Evaluation
 
