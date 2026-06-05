@@ -10,6 +10,9 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
+from quant_research_platform.markets.implementations.a_share.calendar import (
+    compute_listing_age_trading_days,
+)
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_processed_catalog,
 )
@@ -44,6 +47,7 @@ def build_research_panel(
     *,
     stock_master: pd.DataFrame,
     market_cap: pd.DataFrame,
+    trading_calendar: pd.DataFrame,
     min_listing_trading_days: int = 120,
 ) -> pd.DataFrame:
     """从 interim tables 构建第一版 A-share research panel。
@@ -124,7 +128,14 @@ def build_research_panel(
         panel["a_float_shares"], errors="coerce"
     )
     panel = panel.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
-    panel["listing_age_trading_days"] = panel.groupby("stock_code").cumcount() + 1
+    market_type_column = "market_type" if "market_type" in panel.columns else None
+    panel["listing_age_trading_days"] = compute_listing_age_trading_days(
+        panel,
+        trading_calendar,
+        trade_date_column="trade_date",
+        listing_date_column="listing_date",
+        market_type_column=market_type_column,
+    )
     panel["eligible_after_listing_age"] = (
         panel["listing_age_trading_days"] >= min_listing_trading_days
     )
@@ -301,6 +312,10 @@ def build_panel_frame_from_interim(
 
     stock_master = _read_interim_data(interim_root, "stock_master")
     market_cap = _read_interim_data(interim_root, "market_cap")
+    try:
+        trading_calendar = _read_interim_data(interim_root, "trading_calendar")
+    except FileNotFoundError as exc:
+        raise ValueError("missing_trading_calendar_interim") from exc
     daily = _read_interim_data(
         interim_root,
         "daily_market",
@@ -310,6 +325,7 @@ def build_panel_frame_from_interim(
         daily,
         stock_master=stock_master,
         market_cap=market_cap,
+        trading_calendar=trading_calendar,
         min_listing_trading_days=min_listing_trading_days,
     )
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])

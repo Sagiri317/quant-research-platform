@@ -550,6 +550,9 @@ def _iter_generated_full_daily_panel_stock_chunks(
         interim_root / "stock_master" / "data"
     )
     market_cap = read_partitioned_parquet_dataset(interim_root / "market_cap" / "data")
+    trading_calendar = read_partitioned_parquet_dataset(
+        interim_root / "trading_calendar" / "data"
+    )
     spec = a_share_processed_catalog().get("daily_panel")
     years = tuple(range(FULL_HISTORY_START_YEAR, FULL_HISTORY_END_YEAR + 1))
     stock_codes = _daily_market_stock_codes(interim_root, years=years)
@@ -574,6 +577,7 @@ def _iter_generated_full_daily_panel_stock_chunks(
             daily,
             stock_master=_filter_stock_frame(stock_master, code_chunk),
             market_cap=_filter_stock_frame(market_cap, code_chunk),
+            trading_calendar=trading_calendar,
         )
         output = panel[list(spec.required_columns)].copy()
         timestamp = pd.to_datetime(output["timestamp"], errors="coerce")

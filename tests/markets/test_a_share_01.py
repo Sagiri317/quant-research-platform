@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -263,6 +264,7 @@ def test_a_share_panel_joins_stock_master_as_of_trade_date() -> None:
         daily,
         stock_master=stock_master,
         market_cap=pd.DataFrame([_market_cap_row()]),
+        trading_calendar=_basic_trading_calendar(),
         min_listing_trading_days=1,
     )
 
@@ -305,6 +307,7 @@ def test_a_share_panel_stock_master_duplicate_effective_date_keeps_last() -> Non
         daily,
         stock_master=stock_master,
         market_cap=pd.DataFrame([_market_cap_row()]),
+        trading_calendar=_basic_trading_calendar(),
         min_listing_trading_days=1,
     )
 
@@ -330,6 +333,7 @@ def test_a_share_panel_stock_master_does_not_use_future_status() -> None:
         daily,
         stock_master=stock_master,
         market_cap=pd.DataFrame([_market_cap_row()]),
+        trading_calendar=_basic_trading_calendar(),
         min_listing_trading_days=1,
     )
 
@@ -339,6 +343,237 @@ def test_a_share_panel_stock_master_does_not_use_future_status() -> None:
     assert pd.isna(panel.loc[0, "status_change_date"])
     assert pd.isna(panel.loc[0, "csrc_2012_industry_code"])
     assert panel.loc[0, "listing_date"] == pd.Timestamp("2010-01-01")
+
+
+def test_a_share_panel_listing_age_uses_calendar_before_build_window() -> None:
+    daily = pd.DataFrame([_daily_market_row("2014-01-02", market_type=1)])
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                listing_date="2010-01-01",
+                status_change_date="2010-01-01",
+                company_status="normal",
+                industry_code="I1",
+            )
+        ]
+    )
+    calendar_dates = list(pd.bdate_range("2010-01-01", periods=130))
+    calendar_dates.append(pd.Timestamp("2014-01-02"))
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame([_market_cap_row()]),
+        trading_calendar=_trading_calendar_frame(calendar_dates, market_type=1),
+        min_listing_trading_days=120,
+    )
+
+    assert panel.loc[0, "listing_age_trading_days"] > 120
+    assert bool(panel.loc[0, "eligible_after_listing_age"]) is True
+
+
+def test_a_share_panel_listing_age_new_stock_threshold() -> None:
+    trade_dates = pd.date_range("2020-01-01", periods=3, freq="D")
+    daily = pd.DataFrame(
+        [_daily_market_row(str(date.date()), market_type=1) for date in trade_dates]
+    )
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                listing_date="2020-01-01",
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I1",
+            )
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame([_market_cap_row(share_change_date="2020-01-01")]),
+        trading_calendar=_trading_calendar_frame(trade_dates, market_type=1),
+        min_listing_trading_days=3,
+    )
+
+    assert panel["listing_age_trading_days"].tolist() == [1, 2, 3]
+    assert panel["eligible_after_listing_age"].tolist() == [False, False, True]
+
+
+def test_a_share_panel_listing_age_starts_after_closed_listing_date() -> None:
+    daily = pd.DataFrame(
+        [
+            _daily_market_row("2020-01-01", market_type=1),
+            _daily_market_row("2020-01-02", market_type=1),
+        ]
+    )
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                listing_date="2020-01-01",
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I1",
+            )
+        ]
+    )
+    calendar = _trading_calendar_rows(
+        [
+            ("2020-01-01", 1, False),
+            ("2020-01-02", 1, True),
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame([_market_cap_row(share_change_date="2020-01-01")]),
+        trading_calendar=calendar,
+        min_listing_trading_days=1,
+    )
+
+    assert panel["listing_age_trading_days"].tolist() == [0, 1]
+    assert panel["eligible_after_listing_age"].tolist() == [False, True]
+
+
+def test_a_share_panel_listing_age_uses_market_specific_sessions() -> None:
+    daily = pd.DataFrame(
+        [
+            _daily_market_row("2020-01-01", stock_code="000001", market_type=1),
+            _daily_market_row("2020-01-01", stock_code="000002", market_type=32),
+        ]
+    )
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                stock_code="000001",
+                listing_date="2020-01-01",
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I1",
+            ),
+            _stock_master_row(
+                stock_code="000002",
+                listing_date="2020-01-01",
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I2",
+            ),
+        ]
+    )
+    calendar = _trading_calendar_rows(
+        [
+            ("2020-01-01", 1, True),
+            ("2020-01-01", 32, False),
+            ("2020-01-02", 32, True),
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame(
+            [
+                _market_cap_row(stock_code="000001", share_change_date="2020-01-01"),
+                _market_cap_row(stock_code="000002", share_change_date="2020-01-01"),
+            ]
+        ),
+        trading_calendar=calendar,
+        min_listing_trading_days=1,
+    )
+
+    ages = panel.set_index("stock_code")["listing_age_trading_days"].to_dict()
+    assert ages == {"000001": 1, "000002": 0}
+
+
+def test_a_share_panel_listing_age_fallback_unified_excludes_bjse() -> None:
+    daily = pd.DataFrame(
+        [
+            _daily_market_row("2020-01-01", market_type=999),
+            _daily_market_row("2020-01-02", market_type=999),
+        ]
+    )
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                listing_date="2020-01-01",
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I1",
+            )
+        ]
+    )
+    calendar = _trading_calendar_rows(
+        [
+            ("2020-01-01", 64, True),
+            ("2020-01-02", 1, True),
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame([_market_cap_row(share_change_date="2020-01-01")]),
+        trading_calendar=calendar,
+        min_listing_trading_days=1,
+    )
+
+    assert panel["listing_age_trading_days"].tolist() == [0, 1]
+    assert panel["eligible_after_listing_age"].tolist() == [False, True]
+
+
+def test_a_share_panel_from_interim_requires_trading_calendar(tmp_path) -> None:
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    _write_minimal_panel_interim_fixture(interim_root)
+
+    with pytest.raises(ValueError, match="missing_trading_calendar_interim"):
+        panels.build_panel_from_interim(
+            interim_root=interim_root,
+            processed_root=processed_root,
+            start_year=2024,
+            end_year=2024,
+            end_date="2024-06-30",
+            min_listing_trading_days=1,
+        )
+
+
+def test_a_share_panel_from_interim_preserves_invalid_calendar_error(tmp_path) -> None:
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    _write_minimal_panel_interim_fixture(interim_root)
+    data_root = interim_root / "trading_calendar" / "data" / "year=2024"
+    data_root.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "calendar_date": [pd.Timestamp("2024-06-28")],
+            "is_trading_day": [True],
+        }
+    ).to_parquet(data_root / "part-000.parquet", index=False)
+
+    with pytest.raises(ValueError, match="calendar_missing_normalized_columns"):
+        panels.build_panel_from_interim(
+            interim_root=interim_root,
+            processed_root=processed_root,
+            start_year=2024,
+            end_year=2024,
+            end_date="2024-06-30",
+            min_listing_trading_days=1,
+        )
+
+
+def test_a_share_panel_builder_does_not_depend_on_raw_calendar() -> None:
+    source = Path(panels.__file__).read_text(encoding="utf-8")
+
+    forbidden_terms = (
+        "data/raw/csmar/trading_calendar",
+        'normalize_private_export_frame(raw_frame, "trading_calendar")',
+        "Markettype",
+        "Clddt",
+        "Daywk",
+        "State",
+    )
+    assert not any(term in source for term in forbidden_terms)
 
 
 def test_a_share_panel_from_interim_applies_exact_end_date(tmp_path) -> None:
@@ -386,6 +621,14 @@ def test_a_share_panel_from_interim_applies_exact_end_date(tmp_path) -> None:
             ]
         ),
     )
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(
+            pd.date_range("2020-01-01", "2024-07-01", freq="D"),
+            market_type=1,
+        ),
+    )
 
     output_root, rows = panels.build_panel_from_interim(
         interim_root=interim_root,
@@ -401,17 +644,22 @@ def test_a_share_panel_from_interim_applies_exact_end_date(tmp_path) -> None:
     assert written["trade_date"].tolist() == [pd.Timestamp("2024-06-28")]
 
 
-def _daily_market_row(trade_date: str) -> dict[str, object]:
+def _daily_market_row(
+    trade_date: str,
+    *,
+    stock_code: str = "000001",
+    market_type: object = "A",
+) -> dict[str, object]:
     timestamp = pd.Timestamp(trade_date)
     return {
         "market_id": "a_share",
-        "asset_id": "000001",
+        "asset_id": stock_code,
         "timestamp": timestamp,
         "session_date": timestamp,
         "available_at": timestamp,
-        "stock_code": "000001",
+        "stock_code": stock_code,
         "trade_date": timestamp,
-        "market_type": "A",
+        "market_type": market_type,
         "trading_status_code": 1,
         "filling_flag": "0",
         "open": 10.0,
@@ -439,14 +687,16 @@ def _daily_market_row(trade_date: str) -> dict[str, object]:
 
 def _stock_master_row(
     *,
+    stock_code: str = "000001",
+    listing_date: str = "2010-01-01",
     status_change_date: str,
     company_status: str,
     industry_code: str,
 ) -> dict[str, object]:
     return {
-        "stock_code": "000001",
+        "stock_code": stock_code,
         "stock_name": "demo",
-        "listing_date": pd.Timestamp("2010-01-01"),
+        "listing_date": pd.Timestamp(listing_date),
         "delisting_date": pd.NaT,
         "company_status": company_status,
         "status_change_date": pd.Timestamp(status_change_date),
@@ -455,13 +705,93 @@ def _stock_master_row(
     }
 
 
-def _market_cap_row() -> dict[str, object]:
+def _market_cap_row(
+    *,
+    stock_code: str = "000001",
+    share_change_date: str = "2010-01-01",
+) -> dict[str, object]:
     return {
-        "stock_code": "000001",
-        "share_change_date": pd.Timestamp("2010-01-01"),
+        "stock_code": stock_code,
+        "share_change_date": pd.Timestamp(share_change_date),
         "total_shares": 1000.0,
         "a_float_shares": 500.0,
     }
+
+
+def _basic_trading_calendar() -> pd.DataFrame:
+    return _trading_calendar_frame(
+        pd.date_range("2010-01-01", "2024-12-31", freq="D"),
+        market_type=1,
+    )
+
+
+def _trading_calendar_frame(
+    calendar_dates,
+    *,
+    market_type: int,
+    is_trading_day: bool = True,
+) -> pd.DataFrame:
+    return _trading_calendar_rows(
+        [(date, market_type, is_trading_day) for date in calendar_dates]
+    )
+
+
+def _trading_calendar_rows(rows) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "market_id": "a_share",
+                "source_id": "csmar",
+                "timestamp": pd.Timestamp(date),
+                "calendar_date": pd.Timestamp(date),
+                "source_market_type": market_type,
+                "is_trading_day": is_trading_day,
+                "source_day_of_week": pd.Timestamp(date).dayofweek + 1,
+                "source_state": "O" if is_trading_day else "C",
+            }
+            for date, market_type, is_trading_day in rows
+        ]
+    )
+
+
+def _write_minimal_panel_interim_fixture(interim_root) -> None:
+    _write_interim_fixture(
+        interim_root,
+        "daily_market",
+        pd.DataFrame([_daily_market_row("2024-06-28", market_type=1)]),
+    )
+    _write_interim_fixture(
+        interim_root,
+        "stock_master",
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": "000001",
+                    "stock_name": "demo",
+                    "listing_date": pd.Timestamp("2020-01-01"),
+                    "delisting_date": pd.NaT,
+                    "company_status": "active",
+                    "status_change_date": pd.Timestamp("2020-01-01"),
+                    "csrc_2012_industry_code": "I",
+                    "csrc_2012_industry_name": "industry",
+                }
+            ]
+        ),
+    )
+    _write_interim_fixture(
+        interim_root,
+        "market_cap",
+        pd.DataFrame(
+            [
+                {
+                    "stock_code": "000001",
+                    "share_change_date": pd.Timestamp("2020-01-01"),
+                    "total_shares": 1000.0,
+                    "a_float_shares": 500.0,
+                }
+            ]
+        ),
+    )
 
 
 def _write_interim_fixture(
@@ -469,6 +799,23 @@ def _write_interim_fixture(
     interim_data_id: str,
     frame: pd.DataFrame,
 ) -> None:
-    data_root = interim_root / interim_data_id / "data" / "year=2024"
-    data_root.mkdir(parents=True)
-    frame.to_parquet(data_root / "part-000.parquet", index=False)
+    result = frame.copy()
+    date_column = next(
+        column
+        for column in (
+            "calendar_date",
+            "timestamp",
+            "trade_date",
+            "listing_date",
+            "share_change_date",
+        )
+        if column in result.columns
+    )
+    result["_fixture_year"] = pd.to_datetime(result[date_column]).dt.year
+    for year, year_frame in result.groupby("_fixture_year"):
+        data_root = interim_root / interim_data_id / "data" / f"year={int(year)}"
+        data_root.mkdir(parents=True)
+        year_frame.drop(columns=["_fixture_year"]).to_parquet(
+            data_root / "part-000.parquet",
+            index=False,
+        )
