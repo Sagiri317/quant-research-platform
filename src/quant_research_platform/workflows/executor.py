@@ -30,6 +30,14 @@ def _execute_registered_steps(
     return tuple(completed)
 
 
+def _validate_registered_steps(
+    step_ids: tuple[str, ...],
+    registry: WorkflowNodeRegistry,
+) -> None:
+    for step_id in step_ids:
+        registry.get(step_id)
+
+
 def execute_workflow(
     spec: WorkflowSpec,
     registry: WorkflowNodeRegistry,
@@ -46,6 +54,7 @@ def execute_workflow(
     )
     step_ids = plan_topological_steps(spec)
     if mode is ExecutionMode.DRY_RUN:
+        _validate_registered_steps(step_ids, registry)
         return workflow_run_summary(
             spec,
             completed_nodes=(),

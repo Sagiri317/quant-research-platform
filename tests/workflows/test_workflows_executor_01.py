@@ -126,6 +126,20 @@ def test_workflow_dry_run_does_not_call_handlers_or_write_checkpoints() -> None:
     assert execute_summary.completed_nodes == ("panel",)
 
 
+def test_workflow_dry_run_rejects_unknown_registered_node() -> None:
+    spec = WorkflowSpec(
+        workflow_id="dry_run_missing_node",
+        nodes=(WorkflowNode(node_id="missing"),),
+    )
+
+    with pytest.raises(ValueError, match="unknown_workflow_node"):
+        execute_workflow(
+            spec,
+            registry=WorkflowNodeRegistry(),
+            execution_mode="dry_run",
+        )
+
+
 def test_workflow_executor_rejects_unknown_spec_id() -> None:
     spec = WorkflowSpec(
         workflow_id="unknown_spec",
