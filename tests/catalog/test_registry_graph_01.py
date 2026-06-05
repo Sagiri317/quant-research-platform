@@ -17,9 +17,9 @@ EXPECTED_CSMAR_SOURCE_DATASET_IDS = (
     "stock_master",
     "market_cap",
     "adjustment",
-    "index_market",
     "index_info",
     "benchmark_index_market",
+    "trading_calendar",
 )
 
 
@@ -35,6 +35,8 @@ def test_data_product_provider_source_registry_graph_closes() -> None:
     assert binding.source_id == "csmar"
     assert binding.visibility is BindingVisibility.INTERNAL_PRIVATE
     assert binding.required_source_dataset_ids == EXPECTED_CSMAR_SOURCE_DATASET_IDS
+    assert "benchmark_index_market" in binding.required_source_dataset_ids
+    assert "index_market" not in binding.required_source_dataset_ids
     assert str(source.source_id) == "csmar"
     assert source.provider_id == "csmar"
     assert source.implementation_package == "quant_research_platform.sources.csmar"
@@ -116,6 +118,13 @@ def test_registry_graph_does_not_depend_on_stale_source_dataset_id() -> None:
     assert stale_id not in binding.required_source_dataset_ids
     assert not hasattr(source, "interim_spec_ids")
     assert stale_id not in _csmar_catalog_ids()
+
+
+def test_csmar_catalog_retains_direct_index_market_source_dataset() -> None:
+    csmar_catalog_ids = _csmar_catalog_ids()
+
+    assert "index_market" in csmar_catalog_ids
+    assert "benchmark_index_market" in csmar_catalog_ids
 
 
 def _csmar_catalog_ids() -> set[str]:

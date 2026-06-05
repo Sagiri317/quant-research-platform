@@ -54,9 +54,9 @@ class ProviderBindingRegistry:
                     "stock_master",
                     "market_cap",
                     "adjustment",
-                    "index_market",
                     "index_info",
                     "benchmark_index_market",
+                    "trading_calendar",
                 ),
             )
         )

@@ -15,7 +15,7 @@ catalog/data_products.py
 catalog/provider_bindings.py
   a_share_daily_bar -> csmar source
   required_source_dataset_ids = daily_market / stock_master / market_cap /
-    adjustment / index_market / index_info / benchmark_index_market
+    adjustment / index_info / benchmark_index_market / trading_calendar
 
 catalog/sources.py
   csmar = internal source identity and implementation package
@@ -73,11 +73,10 @@ These are deferred cleanup considerations, not roadmap commitments:
   naming ambiguity.
 - Possible future removal of duplicated `implementation_package` from
   `ProviderBinding` after multi-source semantics stabilize.
-- Future clarification of whether
-  `ProviderBinding.required_source_dataset_ids` should align with
-  `DEFAULT_INTERIM_DATASETS`, especially because `benchmark_index_market` is
-  derived from raw `index_market` while `DEFAULT_INTERIM_DATASETS` does not
-  materialize `index_market` by default; this does not change current behavior.
+- Direct `index_market` duplicate conflict policy remains a P2 follow-up. The
+  current `a_share_daily_bar` 0.1.0 binding requires `benchmark_index_market`,
+  derived from raw `index_market`, but does not require materialized direct
+  `index_market`.
 - Future generic source-root layout replacing CSMAR-specific accessors such as
   `raw_csmar_root` / `interim_csmar_root` once a second source is added.
 - Future dev/test dependency cleanup, including whether `pytest-cov` should be
