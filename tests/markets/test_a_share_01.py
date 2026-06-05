@@ -6,15 +6,18 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.catalog.fields import platform_entity_time_key
+from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_factor_catalog,
+    a_share_price_volume_factor_columns,
+    a_share_price_volume_panel_input_columns,
+)
 from quant_research_platform.markets.implementations.a_share.factors import (
     build_factors,
-    price_volume,
 )
-from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
-    calculate_literature_price_volume_factors,
-    exact_literature_price_volume_factor_input_columns,
-    expected_literature_price_volume_factor_columns,
-    largest_literature_price_volume_lookback_days,
+from quant_research_platform.markets.implementations.a_share.ids import (
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     build_labels,
@@ -29,6 +32,12 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.markets.implementations.a_share.universes import (
     build as build_universes,
+)
+from quant_research_platform.research.factors.price_volume import (
+    calculate_price_volume_factors,
+    largest_price_volume_lookback_days,
+    price_volume_factor_columns,
+    price_volume_factor_input_columns,
 )
 from quant_research_platform.storage.layout import (
     processed_data_manifest_path,
@@ -122,9 +131,9 @@ def test_a_share_calendar_helper_rejects_invalid_warmup_window() -> None:
         )
 
 
-def test_literature_factor_lookback_infers_requested_factor_window() -> None:
-    assert largest_literature_price_volume_lookback_days(("mom_3d",)) == 3
-    assert largest_literature_price_volume_lookback_days(()) == 0
+def test_price_volume_factor_lookback_infers_requested_factor_window() -> None:
+    assert largest_price_volume_lookback_days(("mom_3d",)) == 3
+    assert largest_price_volume_lookback_days(()) == 0
 
 
 def _panel() -> pd.DataFrame:
@@ -160,26 +169,26 @@ def _panel() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_a_share_price_volume_factor_contract_is_56_columns() -> None:
-    columns = expected_literature_price_volume_factor_columns()
+def test_a_share_price_volume_factor_contract_is_catalog_driven() -> None:
+    columns = price_volume_factor_columns()
 
-    assert len(columns) == 56
+    assert columns == a_share_price_volume_factor_columns()
     assert "mom_20d" in columns
+    assert "mom_252d" in columns
+    assert "rev_252d" in columns
+    assert "vol_252d" not in columns
     assert "forward_return_20d" not in columns
-    assert expected_literature_price_volume_factor_columns(factor_set="core")
     for factor_id in columns:
-        assert exact_literature_price_volume_factor_input_columns(factor_id)
-    with pytest.raises(ValueError, match="invalid_factor_set"):
-        expected_literature_price_volume_factor_columns(
-            factor_set="core" + "_long_period"
-        )
+        assert price_volume_factor_input_columns(factor_id)
+    with pytest.raises(ValueError, match="invalid_price_volume_preset"):
+        price_volume_factor_columns(preset="full")
 
 
 def test_a_share_factor_and_label_helpers_use_past_and_forward_domains() -> None:
     panel = _panel()
-    factored = price_volume.calculate_price_volume_factors(
+    factored = calculate_price_volume_factors(
         panel,
-        windows=(2,),
+        factor_columns=("mom_2d",),
         asset_column="asset_id",
         date_column="timestamp",
     )
@@ -221,11 +230,12 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
         end_year=2014,
     )
     factor_manifest = processed_data_manifest_path(
-        processed_root, "factors", "price_volume_56"
+        processed_root, "factors", PRICE_VOLUME_PROCESSED_DATA_ID
     )
     label_manifest = processed_data_manifest_path(
-        processed_root, "labels", "forward_returns"
+        processed_root, "labels", FORWARD_RETURNS_PROCESSED_DATA_ID
     )
+    factor_output = read_partitioned_parquet_dataset(factor_path, years=(2014,))
 
     assert "mom_2d" in factored.columns
     assert not any(column.startswith("forward_return_") for column in factored)
@@ -233,10 +243,14 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     assert factor_rows == len(panel)
     assert label_rows == len(panel)
     assert factor_path.as_posix().endswith(
-        "processed/a_share/factors/price_volume_56/data"
+        "processed/a_share/factors/price_volume/data"
     )
     assert label_path.as_posix().endswith(
         "processed/a_share/labels/forward_returns/data"
+    )
+    assert tuple(factor_output.columns) == (
+        *platform_entity_time_key(),
+        *a_share_price_volume_factor_columns(),
     )
     factor_payload = json.loads(factor_manifest.read_text(encoding="utf-8"))
     label_payload = json.loads(label_manifest.read_text(encoding="utf-8"))
@@ -244,7 +258,7 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     assert label_payload["schema_version"] == "0.1"
 
 
-def test_a_share_factor_full_passes_spec_columns_to_literature_helper(
+def test_a_share_factor_full_passes_spec_columns_to_price_volume_helper(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -259,17 +273,17 @@ def test_a_share_factor_full_passes_spec_columns_to_literature_helper(
     )
     captured: dict[str, object] = {}
 
-    def fake_literature_helper(frame, **kwargs):
-        captured["expected_columns"] = kwargs.get("expected_columns")
+    def fake_price_volume_helper(frame, **kwargs):
+        captured["factor_columns"] = kwargs.get("factor_columns")
         result = frame.copy()
-        for column in expected_literature_price_volume_factor_columns():
+        for column in a_share_price_volume_factor_columns():
             result[column] = 0.0
         return result
 
     monkeypatch.setattr(
         build_factors,
-        "calculate_literature_price_volume_factors",
-        fake_literature_helper,
+        "calculate_price_volume_factors",
+        fake_price_volume_helper,
     )
 
     output_root, rows = build_factors.calculate_price_volume_factor_full(
@@ -280,29 +294,27 @@ def test_a_share_factor_full_passes_spec_columns_to_literature_helper(
     )
     output = read_partitioned_parquet_dataset(output_root, years=(2014,))
 
-    assert captured["expected_columns"] == build_factors._factor_output_columns()
-    assert set(captured["expected_columns"]) == set(
-        expected_literature_price_volume_factor_columns()
+    assert captured["factor_columns"] == build_factors._factor_output_columns()
+    assert set(captured["factor_columns"]) == set(
+        definition.output_column for definition in a_share_factor_catalog().list()
     )
     assert rows == len(output)
-    assert set(expected_literature_price_volume_factor_columns()).issubset(
-        output.columns
-    )
+    assert set(a_share_price_volume_factor_columns()).issubset(output.columns)
 
 
-def test_literature_helper_with_contract_columns_avoids_extra_factor_outputs() -> None:
-    contract_columns = expected_literature_price_volume_factor_columns()
+def test_price_volume_helper_prunes_contract_extra_outputs() -> None:
+    contract_columns = price_volume_factor_columns()
     panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=260))
 
-    result = calculate_literature_price_volume_factors(
+    result = calculate_price_volume_factors(
         panel,
-        expected_columns=contract_columns,
+        factor_columns=contract_columns,
     )
     slim = build_factors.select_slim_factor_columns(result)
     extra_factor_columns = {
         column
         for column in result.columns
-        if _looks_like_literature_factor_column(column)
+        if _looks_like_price_volume_factor_column(column)
         and column not in contract_columns
     }
 
@@ -329,9 +341,47 @@ def test_literature_helper_with_contract_columns_avoids_extra_factor_outputs() -
     assert extra_factor_columns == set()
     assert tuple(slim.columns) == tuple(
         build_factors.a_share_processed_catalog()
-        .get("price_volume_56")
+        .get(PRICE_VOLUME_PROCESSED_DATA_ID)
         .required_columns
     )
+    assert tuple(slim.columns) == (
+        *platform_entity_time_key(),
+        *a_share_price_volume_factor_columns(),
+    )
+
+
+def test_factor_builder_reads_inputs_from_factor_definitions() -> None:
+    source = Path(build_factors.__file__).read_text(encoding="utf-8")
+
+    assert build_factors._factor_panel_input_columns() == (
+        a_share_price_volume_panel_input_columns()
+    )
+    assert "FACTOR" + "_INPUT_COLUMNS" not in source
+    assert "select_existing_columns" not in source
+
+
+def test_factor_builder_fails_closed_when_registered_input_column_missing(
+    tmp_path,
+) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5)).drop(
+        columns=["amount"]
+    )
+    _write_processed_panel_fixture(processed_root, panel)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(panel["trade_date"], market_type=1),
+    )
+
+    with pytest.raises(ValueError, match="missing_factor_panel_input_columns: amount"):
+        build_factors.calculate_price_volume_factor_full(
+            interim_root=interim_root,
+            processed_root=processed_root,
+            start_year=2014,
+            end_year=2014,
+        )
 
 
 def test_a_share_factor_builder_reads_calendar_warmup_and_writes_requested_window(
@@ -1213,7 +1263,7 @@ def _write_interim_fixture(
         )
 
 
-def _looks_like_literature_factor_column(column: str) -> bool:
+def _looks_like_price_volume_factor_column(column: str) -> bool:
     prefixes = (
         "mom_",
         "rev_",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from quant_research_platform.catalog.data_products import DataProductRegistry
-from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.registry_validation import (
     validate_data_product_source_graph,
@@ -18,6 +17,7 @@ from quant_research_platform.contracts.workflows import (
     WorkflowSpec,
 )
 from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_factor_catalog,
     a_share_research_dataset_catalog,
 )
 from quant_research_platform.runtime.privacy import sanitize_public_object
@@ -28,7 +28,7 @@ API_VERSION = "0.1"
 
 def list_factors() -> dict[str, object]:
     return _response(
-        items=[item.to_manifest() for item in FactorCatalog.bootstrap_default().list()]
+        items=[item.to_manifest() for item in a_share_factor_catalog().list()]
     )
 
 

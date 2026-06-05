@@ -18,6 +18,9 @@ from quant_research_platform.contracts.factors import FactorDefinition, FactorSe
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.masks import MaskDefinition
+from quant_research_platform.markets.implementations.a_share.ids import (
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
 from quant_research_platform.sources.csmar.interim import normalize_daily_market_frame
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.privacy import (
@@ -31,7 +34,7 @@ def test_contract_versions_and_canonical_processed_key() -> None:
     spec = ProcessedDataSpec(
         market_id=MarketId("a_share"),
         category="factors",
-        processed_data_id="price_volume_56",
+        processed_data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles={

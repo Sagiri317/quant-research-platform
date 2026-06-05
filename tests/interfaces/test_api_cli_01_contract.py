@@ -16,6 +16,16 @@ import quant_research_platform.interfaces.services as services_module
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
 from quant_research_platform.interfaces.cli import app
+from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_DEFAULT_UNIVERSE_ID,
+    A_SHARE_EXECUTION_MASK_ID,
+    DAILY_CONTEXT_PROCESSED_DATA_ID,
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
+from quant_research_platform.research.factors.price_volume import (
+    price_volume_factor_columns,
+)
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
 create_app = api_app_module.create_app
@@ -139,18 +149,19 @@ def test_api_01_endpoints_execute_without_private_markers_or_planned_status() ->
     universes = responses[2]
     data_products = responses[3]
     requirements = responses[5]
-    assert len(factors.json()["items"]) == 56
+    assert len(factors.json()["items"]) == len(price_volume_factor_columns())
     assert labels.json()["items"][0]["definition_version"] == "0.1"
     assert universes.json()["items"][0]["universe_id"] == "a_share_default"
     assert data_products.json()["items"][0]["data_product_id"] == "a_share_daily_bar"
     assert requirements.json()["dataset_id"] == "a_share_price_volume_forward_returns"
     assert requirements.json()["required_processed_data_ids"] == [
-        "price_volume_56",
-        "forward_returns",
-        "daily_context",
-        "a_share_default",
-        "a_share_execution",
+        PRICE_VOLUME_PROCESSED_DATA_ID,
+        FORWARD_RETURNS_PROCESSED_DATA_ID,
+        DAILY_CONTEXT_PROCESSED_DATA_ID,
+        A_SHARE_DEFAULT_UNIVERSE_ID,
+        A_SHARE_EXECUTION_MASK_ID,
     ]
+    assert "price_volume" + "_56" not in combined
 
 
 def test_execution_mode_contract_uses_execute_default_and_dry_run_field() -> None:
@@ -470,7 +481,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
                 {
                     "factor_id": "sentinel_factor",
                     "market_id": "a_share",
-                    "factor_set": "price_volume_56",
+                    "factor_set": "core",
                     "definition_version": "0.1",
                 }
             ],
@@ -527,7 +538,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
             "api_version": "0.1",
             "status": "sentinel_requirements",
             "dataset_id": dataset_id,
-            "required_processed_data_ids": ["price_volume_56"],
+            "required_processed_data_ids": [PRICE_VOLUME_PROCESSED_DATA_ID],
         }
 
     monkeypatch.setattr(services_module, "list_data_products", list_data_products)

@@ -5,6 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_AS_OF_MASK_ID,
+    A_SHARE_DEFAULT_UNIVERSE_ID,
+    A_SHARE_EVALUATION_MASK_ID,
+    A_SHARE_EXECUTION_MASK_ID,
+    A_SHARE_MARKET_ID,
+    DAILY_CONTEXT_PROCESSED_DATA_ID,
+    DAILY_PANEL_PROCESSED_DATA_ID,
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
 
 
 @dataclass(frozen=True)
@@ -39,17 +50,17 @@ class MarketRegistry:
         registry = cls()
         registry.register(
             MarketDefinition(
-                market_id=MarketId("a_share"),
+                market_id=A_SHARE_MARKET_ID,
                 display_name="A-share market implementation",
                 processed_spec_ids=(
-                    "daily_panel",
-                    "daily_context",
-                    "a_share_default",
-                    "a_share_as_of",
-                    "a_share_execution",
-                    "a_share_evaluation",
-                    "price_volume_56",
-                    "forward_returns",
+                    DAILY_PANEL_PROCESSED_DATA_ID,
+                    DAILY_CONTEXT_PROCESSED_DATA_ID,
+                    A_SHARE_DEFAULT_UNIVERSE_ID,
+                    A_SHARE_AS_OF_MASK_ID,
+                    A_SHARE_EXECUTION_MASK_ID,
+                    A_SHARE_EVALUATION_MASK_ID,
+                    PRICE_VOLUME_PROCESSED_DATA_ID,
+                    FORWARD_RETURNS_PROCESSED_DATA_ID,
                 ),
             )
         )

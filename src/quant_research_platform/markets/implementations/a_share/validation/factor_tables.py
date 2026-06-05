@@ -10,6 +10,9 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_label_catalog,
     a_share_processed_catalog,
 )
+from quant_research_platform.markets.implementations.a_share.ids import (
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
 
 from .quality_report import (
     QualityIssue,
@@ -58,7 +61,7 @@ def check_factor_table(
 ) -> QualityReport:
     """Validate a split price-volume factor table against catalog/spec columns."""
 
-    spec = a_share_processed_catalog().get("price_volume_56")
+    spec = a_share_processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
     result = frame.copy()
     result["timestamp"] = to_datetime(result["timestamp"])
     factors = factor_columns(result)
@@ -135,7 +138,7 @@ def check_factor_table(
 
 
 def _factor_base_columns() -> tuple[str, ...]:
-    spec = a_share_processed_catalog().get("price_volume_56")
+    spec = a_share_processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
     return tuple(
         column
         for column in spec.required_columns

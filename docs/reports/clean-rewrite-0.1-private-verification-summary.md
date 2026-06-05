@@ -4,10 +4,14 @@ This summary records aggregate-only processed artifact inventory for QRP Clean R
 
 Machine-readable summary lives in `docs/reports/clean-rewrite-0.1-private-verification-summary.json`.
 
+Status: `superseded_by_factor_catalog_refactor`; `evidence_pending_regeneration`.
+This file records pre-refactor aggregate inventory only and is not current
+merge-ready evidence for the catalog-driven `price_volume` artifact.
+
 | Logical Root | Area | Rows | Columns | Period |
 | --- | --- | ---: | ---: | --- |
 | processed/a_share/contexts/daily_context | supporting_layers_migration_2014_2025 | 12231140 | 14 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/factors/price_volume_56 | factor_value_parity | 12231140 | 69 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/factors/(superseded count-based factor artifact) | factor_value_parity_superseded | 12231140 | 69 | 2014-01-01 through 2025-12-31 |
 | processed/a_share/labels/forward_returns | label_value_parity | 12231140 | 14 | 2014-01-01 through 2025-12-31 |
 | processed/a_share/masks/as_of/a_share_as_of | masks_universes_parity | 12231140 | 6 | 2014-01-01 through 2025-12-31 |
 | processed/a_share/masks/evaluation/a_share_evaluation | masks_universes_parity | 12231140 | 7 | 2014-01-01 through 2025-12-31 |
@@ -26,4 +30,4 @@ Public-safe status:
 - `covered_roots | 9`
 - `uncovered_roots | 0`
 - `allowed_unverified_roots | 0`
-- `merge_ready | true`
+- `merge_ready | false`

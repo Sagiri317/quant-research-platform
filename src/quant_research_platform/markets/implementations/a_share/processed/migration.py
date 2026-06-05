@@ -13,6 +13,9 @@ from quant_research_platform.markets.implementations.a_share.adapter import (
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_processed_catalog,
 )
+from quant_research_platform.markets.implementations.a_share.ids import (
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
 from quant_research_platform.markets.implementations.a_share.processed.io import (
     layout_from_processed_root,
 )
@@ -52,7 +55,7 @@ def migrate_reference_factor_label_history(
                 ]
             ),
             "a_share_evaluation": _evaluation_mask_frame(year_frames),
-            "price_volume_56": _factor_frame(year_frames),
+            PRICE_VOLUME_PROCESSED_DATA_ID: _factor_frame(year_frames),
             "forward_returns": _label_frame(year_frames),
         }
         _write_migrated_frames(migrated, processed_root=processed_root)

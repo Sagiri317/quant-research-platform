@@ -2,6 +2,8 @@
   "contract_version": "0.1",
   "project_version": "0.1.0",
   "verification_kind": "private_real_data_aggregate_inventory",
+  "status": "superseded_by_factor_catalog_refactor",
+  "evidence_status": "evidence_pending_regeneration",
   "generated_at": "2026-06-04T21:21:22Z",
   "privacy_level": "public_safe_aggregate",
   "source_data_visibility": "private_local_only",
@@ -24,8 +26,8 @@
     },
     {
       "category": "factors",
-      "artifact_id": "price_volume_56",
-      "logical_root": "processed/a_share/factors/price_volume_56",
+      "artifact_id": "superseded_count_based_factor_artifact",
+      "logical_root": "processed/a_share/factors/superseded_count_based_factor_artifact",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 69,
@@ -35,7 +37,9 @@
       "dtype_summary_hash": "4215ee2485d674680b8a996b29296fb75432619d0c577c4939c6863a4f7a515e",
       "null_summary_hash": "358ad65299fe10f62d3e66f8c64a814aebd808bfd0bfd900dcea6deff69f3dd9",
       "aggregate_checksum": "8bd6b59aa80a8fad686775703757efcecdf6c73d25809bca6991e8be489f67c7",
-      "covered_by_evidence_area": "factor_value_parity"
+      "covered_by_evidence_area": "factor_value_parity_superseded",
+      "status": "superseded_by_factor_catalog_refactor",
+      "evidence_status": "evidence_pending_regeneration"
     },
     {
       "category": "labels",
@@ -145,7 +149,7 @@
   ],
   "covered_roots": [
     "processed/a_share/contexts/daily_context",
-    "processed/a_share/factors/price_volume_56",
+    "processed/a_share/factors/superseded_count_based_factor_artifact",
     "processed/a_share/labels/forward_returns",
     "processed/a_share/masks/as_of/a_share_as_of",
     "processed/a_share/masks/evaluation/a_share_evaluation",
@@ -156,5 +160,5 @@
   ],
   "uncovered_roots": [],
   "allowed_unverified_roots": [],
-  "merge_ready": true
+  "merge_ready": false
 }

@@ -14,15 +14,20 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
     warmup_start_date_for_window,
 )
 from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_price_volume_panel_input_columns,
     a_share_processed_catalog,
 )
-from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
-    DEFAULT_LITERATURE_WINDOWS,
-    calculate_literature_price_volume_factors,
-    largest_literature_price_volume_lookback_days,
+from quant_research_platform.markets.implementations.a_share.ids import (
+    DAILY_PANEL_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 from quant_research_platform.markets.implementations.a_share.processed.io import (
     layout_from_processed_root,
+)
+from quant_research_platform.research.factors.price_volume import (
+    _price_volume_factor_columns_for_windows,
+    calculate_price_volume_factors,
+    largest_price_volume_lookback_days,
 )
 from quant_research_platform.storage.layout import processed_data_parquet_root
 from quant_research_platform.storage.parquet import (
@@ -31,28 +36,7 @@ from quant_research_platform.storage.parquet import (
     write_processed_data,
 )
 
-from .price_volume import (  # noqa: E402
-    DEFAULT_PRICE_VOLUME_WINDOWS,
-    calculate_price_volume_factors,
-)
-
-FACTOR_INPUT_COLUMNS = (
-    "market_id",
-    "asset_id",
-    "timestamp",
-    "session_date",
-    "available_at",
-    "stock_code",
-    "trade_date",
-    "adj_open",
-    "adj_close",
-    "return_1d",
-    "amount",
-    "turnover",
-    "high",
-    "low",
-    "prev_close",
-)
+DEFAULT_PRICE_VOLUME_WINDOWS: tuple[int, ...] = (20, 60, 120)
 
 
 def read_panel(
@@ -68,18 +52,10 @@ def read_panel(
     return result
 
 
-def select_existing_columns(path: Path, wanted: tuple[str, ...]) -> list[str]:
-    """返回 panel 文件中实际存在的 requested columns。"""
-
-    wanted_unique = list(dict.fromkeys(wanted))
-    columns = parquet_dataset_columns(path)
-    return [column for column in wanted_unique if column in columns]
-
-
 def select_slim_factor_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    """Keep keys, filters, common controls, and factor columns only."""
+    """Keep canonical primary key and factor columns only."""
 
-    spec = a_share_processed_catalog().get("price_volume_56")
+    spec = a_share_processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
     missing = [
         column for column in spec.required_columns if column not in frame.columns
     ]
@@ -95,7 +71,10 @@ def calculate_panel_factors(
 ) -> pd.DataFrame:
     """Add price-volume factors without forward labels."""
 
-    return calculate_price_volume_factors(panel, windows=windows)
+    return calculate_price_volume_factors(
+        panel,
+        factor_columns=_price_volume_factor_columns_for_windows(windows),
+    )
 
 
 def read_full_panel_for_factor_build(
@@ -105,11 +84,16 @@ def read_full_panel_for_factor_build(
 ) -> pd.DataFrame:
     """读取 factor construction 所需的全样本 panel。"""
 
-    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
-    read_columns = select_existing_columns(
-        data_root,
-        _factor_panel_input_columns(),
+    data_root = processed_data_parquet_root(
+        processed_root, "panels", DAILY_PANEL_PROCESSED_DATA_ID
     )
+    read_columns = _factor_panel_input_columns()
+    available_columns = set(parquet_dataset_columns(data_root))
+    missing = [column for column in read_columns if column not in available_columns]
+    if missing:
+        raise ValueError(
+            "missing_factor_panel_input_columns: " + ", ".join(missing)
+        )
     return read_panel(
         data_root,
         columns=read_columns,
@@ -123,12 +107,11 @@ def calculate_price_volume_factor_full(
     processed_root: Path,
     start_year: int,
     end_year: int,
-    windows: tuple[int, ...] = DEFAULT_LITERATURE_WINDOWS,
 ) -> tuple[Path, int]:
     """Calculate and write split price-volume factor processed data."""
 
     catalog = a_share_processed_catalog()
-    spec = catalog.get("price_volume_56")
+    spec = catalog.get(PRICE_VOLUME_PROCESSED_DATA_ID)
     factor_columns = _factor_output_columns()
     max_window = _infer_factor_warmup_window(factor_columns)
     trading_calendar = _read_trading_calendar_interim(interim_root)
@@ -153,9 +136,9 @@ def calculate_price_volume_factor_full(
         processed_root=processed_root,
         years=input_years,
     )
-    panel["trade_date"] = pd.to_datetime(panel["trade_date"])
+    panel["timestamp"] = pd.to_datetime(panel["timestamp"])
     panel = panel.loc[
-        panel["trade_date"].between(
+        panel["timestamp"].between(
             warmup_start_date,
             requested_end_date,
             inclusive="both",
@@ -168,24 +151,23 @@ def calculate_price_volume_factor_full(
         raise ValueError(
             "factor_input_missing_canonical_key: " + ", ".join(missing_key)
         )
-    factored = calculate_literature_price_volume_factors(
+    factored = calculate_price_volume_factors(
         panel,
-        windows=windows,
-        expected_columns=factor_columns,
+        factor_columns=factor_columns,
     )
-    factored["trade_date"] = pd.to_datetime(factored["trade_date"])
-    mask = factored["trade_date"].between(
+    factored["timestamp"] = pd.to_datetime(factored["timestamp"])
+    mask = factored["timestamp"].between(
         requested_start_date,
         requested_end_date,
         inclusive="both",
     )
     output = select_slim_factor_columns(factored.loc[mask].copy())
-    output = output.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
+    output = output.sort_values(list(spec.primary_key)).reset_index(drop=True)
     data_root = write_processed_data(
         output,
         layout=layout_from_processed_root(processed_root),
         catalog=catalog,
-        processed_data_id="price_volume_56",
+        processed_data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
     )
     return data_root, len(output)
 
@@ -200,7 +182,7 @@ def _read_trading_calendar_interim(interim_root: Path) -> pd.DataFrame:
 
 
 def _factor_output_columns() -> tuple[str, ...]:
-    spec = a_share_processed_catalog().get("price_volume_56")
+    spec = a_share_processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
     return tuple(
         column
         for column in spec.required_columns
@@ -211,7 +193,7 @@ def _factor_output_columns() -> tuple[str, ...]:
 def _infer_factor_warmup_window(factor_columns: tuple[str, ...]) -> int:
     if not factor_columns:
         raise ValueError("unable_to_infer_factor_warmup_window")
-    max_window = largest_literature_price_volume_lookback_days(factor_columns)
+    max_window = largest_price_volume_lookback_days(factor_columns)
     if max_window < 0:
         raise ValueError("invalid_factor_warmup_window")
     return max_window
@@ -223,7 +205,9 @@ def _assert_requested_panel_partitions_present(
     start_year: int,
     end_year: int,
 ) -> None:
-    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    data_root = processed_data_parquet_root(
+        processed_root, "panels", DAILY_PANEL_PROCESSED_DATA_ID
+    )
     missing = [
         year
         for year in range(start_year, end_year + 1)
@@ -242,7 +226,9 @@ def _available_panel_years(
     start_year: int,
     end_year: int,
 ) -> tuple[int, ...]:
-    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    data_root = processed_data_parquet_root(
+        processed_root, "panels", DAILY_PANEL_PROCESSED_DATA_ID
+    )
     years = tuple(
         year
         for year in range(start_year, end_year + 1)
@@ -258,7 +244,9 @@ def _panel_part_paths(
     start_year: int,
     end_year: int,
 ) -> list[Path]:
-    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    data_root = processed_data_parquet_root(
+        processed_root, "panels", DAILY_PANEL_PROCESSED_DATA_ID
+    )
     paths = [
         data_root / f"year={year}" / "part-000.parquet"
         for year in range(start_year, end_year + 1)
@@ -275,17 +263,7 @@ def _panel_part_paths(
 
 
 def _factor_panel_input_columns() -> tuple[str, ...]:
-    spec = a_share_processed_catalog().get("price_volume_56")
-    control_columns = tuple(
-        column
-        for column in spec.required_columns
-        if spec.column_roles[column] is not ColumnRole.FACTOR
-    )
-    return tuple(dict.fromkeys((*FACTOR_INPUT_COLUMNS, *control_columns)))
-
-
-def _parse_int_tuple(value: str) -> tuple[int, ...]:
-    return tuple(int(item) for item in value.split(",") if item)
+    return a_share_price_volume_panel_input_columns()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -296,7 +274,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start-year", type=int, default=2014)
     parser.add_argument("--end-year", type=int, default=2025)
     parser.add_argument("--factor-set", default="price_volume")
-    parser.add_argument("--windows", default="1,5,10,20,60,120,252")
     args = parser.parse_args(argv)
 
     if args.factor_set != "price_volume":
@@ -307,9 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         processed_root=Path(args.processed_root),
         start_year=args.start_year,
         end_year=args.end_year,
-        windows=_parse_int_tuple(args.windows),
     )
-    print(f"wrote price_volume_56 rows={rows}")
+    print(f"wrote {PRICE_VOLUME_PROCESSED_DATA_ID} rows={rows}")
     return 0
 
 

@@ -4,10 +4,14 @@ This evidence records public-safe aggregate validation for QRP Clean Rewrite `0.
 
 Machine-readable evidence lives in `docs/reports/clean-rewrite-0.1-parity-evidence.json`.
 
+Status: `superseded_by_factor_catalog_refactor`; `evidence_pending_regeneration`.
+This file records pre-refactor aggregate parity only and is not current
+merge-ready evidence for the catalog-driven `price_volume` artifact.
+
 | Area | Rows | Columns | Period | Status |
 | --- | ---: | ---: | --- | --- |
 | processed panel parity | 660416 | 48 | 2014-01-01 through 2014-12-31 | verified aggregate |
-| factor value parity | 12231140 | 69 | 2014-01-01 through 2025-12-31 | verified aggregate |
+| factor value parity | 12231140 | 69 | 2014-01-01 through 2025-12-31 | superseded pending regeneration |
 | label value parity | 12231140 | 14 | 2014-01-01 through 2025-12-31 | verified aggregate |
 | masks universes parity | 48924560 | 8 | 2014-01-01 through 2025-12-31 | verified aggregate |
 | research dataset parity | 12231140 | 75 | 2014-01-01 through 2025-12-31 | verified aggregate |
@@ -25,5 +29,5 @@ Public-safe status:
 - `evidence_generation_mode | local_private_data_public_safe_aggregate`
 - `source_data_visibility | private_local_only`
 - `row_level_output_committed | false`
-- `merge_ready | true`
+- `merge_ready | false`
 - private local aggregate run completed without committed row-level artifacts

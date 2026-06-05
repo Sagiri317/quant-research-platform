@@ -11,6 +11,7 @@ from quant_research_platform.storage.layout import processed_data_parquet_root
 from quant_research_platform.storage.parquet import read_partitioned_parquet_dataset
 
 from ..factors.build_factors import calculate_price_volume_factor_full
+from ..ids import PRICE_VOLUME_PROCESSED_DATA_ID
 from ..labels.build_labels import calculate_panel_labels, write_forward_labels
 from ..masks.build import write_masks
 from ..universes.build import write_universe
@@ -96,14 +97,14 @@ def build_a_share_processed_layers(
         "daily_panel": panel_root,
         "daily_context": context_root,
         "a_share_default": universe_root,
-        "price_volume_56": factor_root,
+        PRICE_VOLUME_PROCESSED_DATA_ID: factor_root,
         "forward_returns": label_root,
     }
     row_counts = {
         "daily_panel": panel_rows,
         "daily_context": context_rows,
         "a_share_default": universe_rows,
-        "price_volume_56": factor_rows,
+        PRICE_VOLUME_PROCESSED_DATA_ID: factor_rows,
         "forward_returns": label_rows,
     }
     for mask_kind, (path, rows) in mask_outputs.items():

@@ -8,16 +8,26 @@ from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_factor_catalog,
     a_share_field_catalog,
+)
+from quant_research_platform.research.factors.price_volume import (
+    price_volume_factor_columns,
 )
 
 
-def test_price_volume_56_factor_definitions_have_input_requirements() -> None:
-    catalog = FactorCatalog.bootstrap_default()
+def test_factor_catalog_is_pure_registry_without_market_bootstrap() -> None:
+    assert not hasattr(FactorCatalog, "bootstrap_default")
+
+
+def test_a_share_price_volume_factor_definitions_have_input_requirements() -> None:
+    catalog = a_share_factor_catalog()
     definitions = catalog.list()
     registered_fields = set(a_share_field_catalog().list_names())
 
-    assert len(definitions) == 56
+    assert tuple(definition.output_column for definition in definitions) == (
+        price_volume_factor_columns()
+    )
     output_columns = [definition.output_column for definition in definitions]
     assert len(output_columns) == len(set(output_columns))
     for definition in definitions:

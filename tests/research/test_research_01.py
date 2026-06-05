@@ -28,6 +28,10 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.markets.implementations.a_share.ids import (
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
     assemble_research_dataset_from_processed,
@@ -77,7 +81,10 @@ def _research_dataset_catalog() -> ResearchDatasetCatalog:
         ResearchDatasetSpec(
             dataset_id="demo",
             market_id=MarketId("a_share"),
-            processed_data_ids=("price_volume_56", "forward_returns"),
+            processed_data_ids=(
+                PRICE_VOLUME_PROCESSED_DATA_ID,
+                FORWARD_RETURNS_PROCESSED_DATA_ID,
+            ),
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
             frequency=DataFrequency.DAILY,

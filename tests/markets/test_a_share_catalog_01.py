@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import pytest
+
 from quant_research_platform.catalog.fields import (
     platform_entity_time_key,
     platform_field_catalog,
 )
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_factor_catalog,
     a_share_field_catalog,
+    a_share_price_volume_factor_columns,
     a_share_processed_catalog,
+)
+from quant_research_platform.markets.implementations.a_share.ids import (
+    PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 
 
@@ -58,18 +65,40 @@ def test_a_share_processed_specs_use_canonical_entity_time_key() -> None:
         assert spec.column_roles["timestamp"] is ColumnRole.TIMESTAMP
 
 
-def test_a_share_factor_spec_contains_56_registered_factor_columns() -> None:
-    spec = a_share_processed_catalog().get("price_volume_56")
+def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
+    catalog = a_share_processed_catalog()
+    spec = catalog.get(PRICE_VOLUME_PROCESSED_DATA_ID)
     factor_columns = [
         column
         for column, role in spec.column_roles.items()
         if role is ColumnRole.FACTOR
     ]
+    registered_columns = [
+        definition.output_column for definition in a_share_factor_catalog().list()
+    ]
 
-    assert len(factor_columns) == 56
+    with pytest.raises(KeyError, match="unknown_processed_data_spec"):
+        catalog.get("price_volume" + "_56")
+    assert tuple(factor_columns) == a_share_price_volume_factor_columns()
+    assert tuple(registered_columns) == a_share_price_volume_factor_columns()
+    assert spec.required_columns == (
+        *platform_entity_time_key(),
+        *a_share_price_volume_factor_columns(),
+    )
     assert "mom_20d" in factor_columns
     assert "log_float_market_cap" in factor_columns
     assert "forward_return_20d" not in factor_columns
+    assert not {
+        "stock_code",
+        "trade_date",
+        "eligible",
+        "eligible_after_listing_age",
+        "can_enter",
+        "can_exit",
+        "amount",
+        "market_cap",
+        "turnover",
+    }.intersection(spec.required_columns)
 
 
 def test_a_share_label_mask_and_universe_specs_are_queryable() -> None:

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ..factors.build_factors import (
-    FACTOR_INPUT_COLUMNS,
+from ..catalog import (
+    a_share_price_volume_panel_input_columns,
 )
 from .quality_report import (
     QualityIssue,
@@ -28,7 +28,7 @@ PANEL_REQUIRED_COLUMNS = (
     "can_exit",
     "listing_date",
     "turnover",
-    *FACTOR_INPUT_COLUMNS,
+    *a_share_price_volume_panel_input_columns(),
 )
 
 

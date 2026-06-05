@@ -16,6 +16,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.markets.implementations.a_share.ids import (
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
+
 CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
 PRIVACY_LEVEL = "public_safe_aggregate"
@@ -34,7 +38,9 @@ DEFAULT_AVAILABLE_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/panels/daily_panel": "full_historical_daily_panel_status",
-    "processed/a_share/factors/price_volume_56": "factor_value_parity",
+    f"processed/a_share/factors/{PRICE_VOLUME_PROCESSED_DATA_ID}": (
+        "factor_value_parity"
+    ),
     "processed/a_share/labels/forward_returns": "label_value_parity",
     "processed/a_share/universes/a_share_default": "masks_universes_parity",
     "processed/a_share/masks/as_of/a_share_as_of": "masks_universes_parity",
@@ -316,7 +322,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
     reports_root = root / "reports" / "private_real" / MARKET_ID
     daily_panel = processed / "panels" / "daily_panel" / "data"
-    factor = processed / "factors" / "price_volume_56" / "data"
+    factor = processed / "factors" / PRICE_VOLUME_PROCESSED_DATA_ID / "data"
     label = processed / "labels" / "forward_returns" / "data"
     universe = processed / "universes" / "a_share_default" / "data"
     masks = (

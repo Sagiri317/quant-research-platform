@@ -22,8 +22,10 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 ## 当前有效样例
 
 Current clean-rewrite verification is code/test based. Private generated
-artifacts remain local evidence only. Public-safe aggregate parity and migration
-evidence is committed in `docs/reports/clean-rewrite-0.1-parity-evidence.md`.
+artifacts remain local evidence only. The previous public-safe aggregate parity
+and migration evidence in `docs/reports/` is
+`superseded_by_factor_catalog_refactor` and
+`evidence_pending_regeneration` until the next private rebuild.
 
 Current public-safe anchors:
 
@@ -31,10 +33,9 @@ Current public-safe anchors:
 - 0.1 contracts/storage/catalog/source tests.
 - 0.1 A-share processed, ResearchDataset, evaluation, and prediction tests.
 - 0.1 API/CLI route and command contract tests.
-- Public-safe parity-or-explained-delta evidence committed for processed panel,
-  factor values, labels, masks/universes, ResearchDataset, evaluation, and
-  prediction smoke. Evaluation and prediction evidence remains a 2014 smoke
-  scope, not a 2014-2025 full historical run.
+- Public-safe parity-or-explained-delta evidence for processed panel, factor
+  values, labels, masks/universes, ResearchDataset, evaluation, and prediction
+  smoke is superseded pending regeneration after the factor catalog refactor.
 - P2 compute portfolio and internal provider contract split modules exist with
   compatibility facades.
 - Report writers derive paths through `ReportSpec`, `ReportCatalog`,

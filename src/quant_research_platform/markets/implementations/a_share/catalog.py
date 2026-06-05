@@ -25,14 +25,25 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
-    expected_literature_price_volume_factor_columns,
+from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_AS_OF_MASK_ID,
+    A_SHARE_DEFAULT_UNIVERSE_ID,
+    A_SHARE_EVALUATION_MASK_ID,
+    A_SHARE_EXECUTION_MASK_ID,
+    A_SHARE_MARKET_ID,
+    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+    DAILY_CONTEXT_PROCESSED_DATA_ID,
+    DAILY_PANEL_PROCESSED_DATA_ID,
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
 )
-
-A_SHARE_MARKET_ID = MarketId("a_share")
+from quant_research_platform.research.factors.price_volume import (
+    PRICE_VOLUME_STANDARD_PRESET,
+    price_volume_factor_definitions,
+)
 
 A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(
@@ -187,22 +198,6 @@ _UNIVERSE_COLUMNS: tuple[str, ...] = (
     "eligible",
 )
 
-_FACTOR_CONTROL_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
-    "stock_code",
-    "trade_date",
-    "market_type",
-    "eligible",
-    "can_enter",
-    "can_exit",
-    "amount",
-    "turnover",
-    "total_market_cap",
-    "float_market_cap",
-)
-
 _LABEL_CONTROL_COLUMNS: tuple[str, ...] = (
     "market_id",
     "asset_id",
@@ -249,7 +244,47 @@ def a_share_field_catalog() -> FieldCatalog:
 def a_share_factor_catalog() -> FactorCatalog:
     """Return the A-share factor registry used by processed factor specs."""
 
-    return FactorCatalog.bootstrap_default()
+    catalog = FactorCatalog()
+    for definition in a_share_price_volume_factor_definitions():
+        catalog.register(definition)
+    return catalog
+
+
+def a_share_price_volume_factor_definitions() -> tuple[FactorDefinition, ...]:
+    """Return standard A-share price-volume factor definitions."""
+
+    return price_volume_factor_definitions(
+        market_id=A_SHARE_MARKET_ID,
+        required_processed_data_id=DAILY_PANEL_PROCESSED_DATA_ID,
+        preset=PRICE_VOLUME_STANDARD_PRESET,
+    )
+
+
+def a_share_price_volume_factor_columns() -> tuple[str, ...]:
+    """Return A-share price-volume output columns from registered definitions."""
+
+    return tuple(
+        definition.output_column
+        for definition in a_share_price_volume_factor_definitions()
+    )
+
+
+def a_share_price_volume_panel_input_columns() -> tuple[str, ...]:
+    """Return required daily panel columns for standard price-volume factors."""
+
+    factor_inputs = tuple(
+        column
+        for definition in a_share_price_volume_factor_definitions()
+        for column in definition.input_columns
+    )
+    return tuple(
+        dict.fromkeys(
+            (
+                *platform_entity_time_key(),
+                *factor_inputs,
+            )
+        )
+    )
 
 
 def a_share_label_catalog() -> LabelCatalog:
@@ -283,22 +318,22 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
     catalog = ResearchDatasetCatalog()
     catalog.register(
         ResearchDatasetSpec(
-            dataset_id="a_share_price_volume_forward_returns",
+            dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             market_id=A_SHARE_MARKET_ID,
             processed_data_ids=(
-                "price_volume_56",
-                "forward_returns",
-                "daily_context",
-                "a_share_default",
-                "a_share_execution",
+                PRICE_VOLUME_PROCESSED_DATA_ID,
+                FORWARD_RETURNS_PROCESSED_DATA_ID,
+                DAILY_CONTEXT_PROCESSED_DATA_ID,
+                A_SHARE_DEFAULT_UNIVERSE_ID,
+                A_SHARE_EXECUTION_MASK_ID,
             ),
             feature_columns=factor_columns,
             label_columns=label_columns,
             filter_columns=_RESEARCH_DATASET_FILTER_COLUMNS,
             context_columns=_RESEARCH_DATASET_CONTEXT_COLUMNS,
             source_columns=_RESEARCH_DATASET_SOURCE_COLUMNS,
-            universe_id="a_share_default",
-            mask_ids=("a_share_execution",),
+            universe_id=A_SHARE_DEFAULT_UNIVERSE_ID,
+            mask_ids=(A_SHARE_EXECUTION_MASK_ID,),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.RESEARCH_ROW,
             column_roles=_research_dataset_column_roles(
@@ -321,7 +356,7 @@ def a_share_evaluation_catalog() -> EvaluationCatalog:
         EvaluationSpec(
             run_id="a_share_mom_20d_forward_return_20d_2014",
             market_id=A_SHARE_MARKET_ID,
-            research_dataset_id="a_share_price_volume_forward_returns",
+            research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
         )
@@ -352,7 +387,7 @@ def a_share_prediction_catalog() -> PredictionCatalog:
         PredictionSpec(
             prediction_id="a_share_linear_mom_20d_prediction_2014",
             model_id="a_share_linear_mom_20d_forward_return_20d",
-            research_dataset_id="a_share_price_volume_forward_returns",
+            research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             prediction_column=default_prediction_column(),
             primary_key=platform_entity_time_key(),
             train_end="2014-06-30",
@@ -368,23 +403,23 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
     return (
         _processed_spec(
             category="panels",
-            processed_data_id="daily_panel",
+            processed_data_id=DAILY_PANEL_PROCESSED_DATA_ID,
             columns=_PANEL_COLUMNS,
         ),
         _processed_spec(
             category="contexts",
-            processed_data_id="daily_context",
+            processed_data_id=DAILY_CONTEXT_PROCESSED_DATA_ID,
             columns=_CONTEXT_COLUMNS,
         ),
         _processed_spec(
             category="universes",
-            processed_data_id="a_share_default",
+            processed_data_id=A_SHARE_DEFAULT_UNIVERSE_ID,
             columns=_UNIVERSE_COLUMNS,
             role_overrides={"eligible": ColumnRole.UNIVERSE},
         ),
         _processed_spec(
             category="masks/as_of",
-            processed_data_id="a_share_as_of",
+            processed_data_id=A_SHARE_AS_OF_MASK_ID,
             columns=(
                 "market_id",
                 "asset_id",
@@ -397,7 +432,7 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
         ),
         _processed_spec(
             category="masks/execution",
-            processed_data_id="a_share_execution",
+            processed_data_id=A_SHARE_EXECUTION_MASK_ID,
             columns=(
                 "market_id",
                 "asset_id",
@@ -414,7 +449,7 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
         ),
         _processed_spec(
             category="masks/evaluation",
-            processed_data_id="a_share_evaluation",
+            processed_data_id=A_SHARE_EVALUATION_MASK_ID,
             columns=(
                 "market_id",
                 "asset_id",
@@ -431,13 +466,13 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
         ),
         _processed_spec(
             category="factors",
-            processed_data_id="price_volume_56",
-            columns=(*_FACTOR_CONTROL_COLUMNS, *factor_columns),
+            processed_data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
+            columns=(*platform_entity_time_key(), *factor_columns),
             role_overrides={column: ColumnRole.FACTOR for column in factor_columns},
         ),
         _processed_spec(
             category="labels",
-            processed_data_id="forward_returns",
+            processed_data_id=FORWARD_RETURNS_PROCESSED_DATA_ID,
             columns=(*_LABEL_CONTROL_COLUMNS, *label_columns),
             role_overrides={column: ColumnRole.LABEL for column in label_columns},
         ),
@@ -511,12 +546,9 @@ def _research_dataset_column_roles(
 
 
 def _registered_factor_columns() -> tuple[str, ...]:
-    catalog_columns = tuple(
+    return tuple(
         definition.output_column for definition in a_share_factor_catalog().list()
     )
-    if catalog_columns:
-        return catalog_columns
-    return expected_literature_price_volume_factor_columns()
 
 
 def _registered_label_columns() -> tuple[str, ...]:
@@ -534,6 +566,9 @@ __all__ = [
     "a_share_field_catalog",
     "a_share_label_catalog",
     "a_share_model_catalog",
+    "a_share_price_volume_factor_columns",
+    "a_share_price_volume_factor_definitions",
+    "a_share_price_volume_panel_input_columns",
     "a_share_prediction_catalog",
     "a_share_processed_catalog",
     "a_share_research_dataset_catalog",

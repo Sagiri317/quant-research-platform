@@ -169,6 +169,9 @@ def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:
         "local_private_data_public_safe_aggregate"
     )
     assert payload["row_level_output_committed"] is False
+    assert payload["status"] == "superseded_by_factor_catalog_refactor"
+    assert payload["evidence_status"] == "evidence_pending_regeneration"
+    assert payload["merge_ready"] is False
 
 
 def test_full_historical_daily_panel_covers_full_2014_2025_period() -> None:
@@ -183,7 +186,8 @@ def test_full_historical_daily_panel_covers_full_2014_2025_period() -> None:
     assert area["period"] == "2014-01-01 through 2025-12-31"
     assert area["human_approval_required"] is False
     assert area["accepted_explained_delta"] is False
-    assert payload["merge_ready"] is True
+    assert payload["merge_ready"] is False
+    assert payload["evidence_status"] == "evidence_pending_regeneration"
 
 
 def test_full_historical_daily_panel_summary_streams_generated_chunks(
@@ -363,7 +367,9 @@ def test_private_verification_summary_json_schema_and_coverage() -> None:
     assert payload["privacy_level"] == "public_safe_aggregate"
     assert payload["source_data_visibility"] == "private_local_only"
     assert payload["row_level_output_committed"] is False
-    assert payload["merge_ready"] is True
+    assert payload["status"] == "superseded_by_factor_catalog_refactor"
+    assert payload["evidence_status"] == "evidence_pending_regeneration"
+    assert payload["merge_ready"] is False
     assert payload["uncovered_roots"] == []
     assert payload["allowed_unverified_roots"] == []
     assert payload["covered_roots"] == [

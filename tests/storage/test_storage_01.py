@@ -25,6 +25,10 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.markets.implementations.a_share.ids import (
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -318,7 +322,10 @@ def test_research_dataset_writer_resolves_spec_and_layout(tmp_path: Path) -> Non
         ResearchDatasetSpec(
             market_id=MarketId("a_share"),
             dataset_id="demo",
-            processed_data_ids=("price_volume_56", "forward_returns"),
+            processed_data_ids=(
+                PRICE_VOLUME_PROCESSED_DATA_ID,
+                FORWARD_RETURNS_PROCESSED_DATA_ID,
+            ),
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
             frequency=DataFrequency.DAILY,
@@ -967,7 +974,10 @@ def _research_dataset_writer_case() -> tuple[pd.DataFrame, ResearchDatasetCatalo
         ResearchDatasetSpec(
             market_id=MarketId("a_share"),
             dataset_id="demo",
-            processed_data_ids=("price_volume_56", "forward_returns"),
+            processed_data_ids=(
+                PRICE_VOLUME_PROCESSED_DATA_ID,
+                FORWARD_RETURNS_PROCESSED_DATA_ID,
+            ),
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
             frequency=DataFrequency.DAILY,
