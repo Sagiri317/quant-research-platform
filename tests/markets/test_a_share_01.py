@@ -272,6 +272,91 @@ def test_a_share_factor_builder_reads_calendar_warmup_and_writes_requested_windo
     assert pd.notna(first_2020["mom_252d"])
 
 
+def test_a_share_factor_builder_allows_missing_pre_start_warmup_years(
+    tmp_path,
+) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    calendar_dates = pd.bdate_range("2012-12-31", "2014-12-31")
+    panel = _factor_panel_for_dates(calendar_dates[calendar_dates.year == 2014])
+    _write_processed_panel_fixture(processed_root, panel)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(calendar_dates, market_type=1),
+    )
+
+    output_root, rows = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
+        processed_root=processed_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    output = read_partitioned_parquet_dataset(output_root, years=(2014,))
+
+    assert rows == len(output)
+    assert output["timestamp"].min() >= pd.Timestamp("2014-01-01")
+    assert output["timestamp"].max() <= pd.Timestamp("2014-12-31")
+    assert pd.isna(output.sort_values("timestamp").iloc[0]["mom_252d"])
+
+
+def test_a_share_factor_builder_reads_available_warmup_years_when_present(
+    tmp_path,
+) -> None:
+    calendar_dates = pd.bdate_range("2012-12-31", "2014-12-31")
+
+    no_warmup_root = tmp_path / "no_warmup" / "data" / "processed" / "a_share"
+    no_warmup_interim = tmp_path / "no_warmup" / "data" / "interim" / "csmar"
+    no_warmup_panel = _factor_panel_for_dates(
+        calendar_dates[calendar_dates.year == 2014]
+    )
+    _write_processed_panel_fixture(no_warmup_root, no_warmup_panel)
+    _write_interim_fixture(
+        no_warmup_interim,
+        "trading_calendar",
+        _trading_calendar_frame(calendar_dates, market_type=1),
+    )
+    no_warmup_output_root, _ = build_factors.calculate_price_volume_factor_full(
+        interim_root=no_warmup_interim,
+        processed_root=no_warmup_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    no_warmup_output = read_partitioned_parquet_dataset(
+        no_warmup_output_root,
+        years=(2014,),
+    )
+
+    warmup_root = tmp_path / "with_warmup" / "data" / "processed" / "a_share"
+    warmup_interim = tmp_path / "with_warmup" / "data" / "interim" / "csmar"
+    warmup_panel = _factor_panel_for_dates(
+        calendar_dates[calendar_dates.year.isin([2013, 2014])]
+    )
+    _write_processed_panel_fixture(warmup_root, warmup_panel)
+    _write_interim_fixture(
+        warmup_interim,
+        "trading_calendar",
+        _trading_calendar_frame(calendar_dates, market_type=1),
+    )
+    warmup_output_root, _ = build_factors.calculate_price_volume_factor_full(
+        interim_root=warmup_interim,
+        processed_root=warmup_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    warmup_output = read_partitioned_parquet_dataset(
+        warmup_output_root,
+        years=(2014,),
+    )
+
+    assert warmup_output["timestamp"].min() >= pd.Timestamp("2014-01-01")
+    assert warmup_output["timestamp"].max() <= pd.Timestamp("2014-12-31")
+    assert (
+        warmup_output["mom_252d"].isna().sum()
+        < no_warmup_output["mom_252d"].isna().sum()
+    )
+
+
 def test_a_share_factor_builder_requires_trading_calendar(tmp_path) -> None:
     processed_root = tmp_path / "data" / "processed" / "a_share"
     interim_root = tmp_path / "data" / "interim" / "csmar"
@@ -287,11 +372,13 @@ def test_a_share_factor_builder_requires_trading_calendar(tmp_path) -> None:
         )
 
 
-def test_a_share_factor_builder_requires_warmup_panel_partition(tmp_path) -> None:
+def test_a_share_factor_builder_requires_requested_output_partition(
+    tmp_path,
+) -> None:
     processed_root = tmp_path / "data" / "processed" / "a_share"
     interim_root = tmp_path / "data" / "interim" / "csmar"
     dates = pd.bdate_range("2019-01-14", periods=254)
-    panel = _factor_panel_for_dates(dates[dates.year == 2020])
+    panel = _factor_panel_for_dates(dates[dates.year == 2019])
     _write_processed_panel_fixture(processed_root, panel)
     _write_interim_fixture(
         interim_root,
@@ -299,13 +386,55 @@ def test_a_share_factor_builder_requires_warmup_panel_partition(tmp_path) -> Non
         _trading_calendar_frame(dates, market_type=1),
     )
 
-    with pytest.raises(ValueError, match="missing_warmup_processed_input"):
+    with pytest.raises(ValueError, match="missing_requested_processed_input"):
         build_factors.calculate_price_volume_factor_full(
             interim_root=interim_root,
             processed_root=processed_root,
             start_year=2020,
             end_year=2020,
         )
+
+
+def test_a_share_label_builder_allows_missing_future_lookahead_year(tmp_path) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-12-29", "2014-12-31"))
+    labels = build_labels.calculate_panel_labels(panel)
+
+    label_path, label_rows = build_labels.write_forward_labels(
+        labels,
+        processed_root=processed_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    output = read_partitioned_parquet_dataset(label_path, years=(2014,))
+
+    assert label_rows == len(output)
+    assert output["timestamp"].dt.year.tolist() == [2014, 2014, 2014]
+    assert output["forward_return_1d"].isna().sum() == 2
+
+
+def test_a_share_label_builder_uses_future_lookahead_when_available(
+    tmp_path,
+) -> None:
+    panel_without_future = _factor_panel_for_dates(
+        pd.bdate_range("2014-12-29", "2014-12-31")
+    )
+    labels_without_future = build_labels.calculate_panel_labels(panel_without_future)
+
+    panel_with_future = _factor_panel_for_dates(
+        pd.bdate_range("2014-12-29", "2015-01-02")
+    )
+    labels_with_future = build_labels.calculate_panel_labels(panel_with_future)
+
+    tail_without_future = labels_without_future.loc[
+        labels_without_future["trade_date"].dt.year == 2014,
+        "forward_return_1d",
+    ]
+    tail_with_future = labels_with_future.loc[
+        labels_with_future["trade_date"].dt.year == 2014,
+        "forward_return_1d",
+    ]
+    assert tail_with_future.isna().sum() < tail_without_future.isna().sum()
 
 
 def test_a_share_factor_builder_does_not_depend_on_raw_calendar() -> None:

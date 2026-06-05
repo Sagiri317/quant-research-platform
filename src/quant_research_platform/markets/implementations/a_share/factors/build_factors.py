@@ -101,8 +101,7 @@ def calculate_panel_factors(
 def read_full_panel_for_factor_build(
     *,
     processed_root: Path,
-    start_year: int,
-    end_year: int,
+    years: tuple[int, ...],
 ) -> pd.DataFrame:
     """读取 factor construction 所需的全样本 panel。"""
 
@@ -114,7 +113,7 @@ def read_full_panel_for_factor_build(
     return read_panel(
         data_root,
         columns=read_columns,
-        years=tuple(range(start_year, end_year + 1)),
+        years=years,
     )
 
 
@@ -140,15 +139,19 @@ def calculate_price_volume_factor_full(
         start_date=requested_start_date,
         max_window=max_window,
     )
-    _assert_panel_partitions_present(
+    _assert_requested_panel_partitions_present(
+        processed_root=processed_root,
+        start_year=start_year,
+        end_year=end_year,
+    )
+    input_years = _available_panel_years(
         processed_root=processed_root,
         start_year=warmup_start_date.year,
         end_year=end_year,
     )
     panel = read_full_panel_for_factor_build(
         processed_root=processed_root,
-        start_year=warmup_start_date.year,
-        end_year=end_year,
+        years=input_years,
     )
     panel["trade_date"] = pd.to_datetime(panel["trade_date"])
     panel = panel.loc[
@@ -213,7 +216,7 @@ def _infer_factor_warmup_window(factor_columns: tuple[str, ...]) -> int:
     return max_window
 
 
-def _assert_panel_partitions_present(
+def _assert_requested_panel_partitions_present(
     *,
     processed_root: Path,
     start_year: int,
@@ -227,9 +230,26 @@ def _assert_panel_partitions_present(
     ]
     if missing:
         raise ValueError(
-            "missing_warmup_processed_input: "
+            "missing_requested_processed_input: "
             + ", ".join(str(year) for year in missing)
         )
+
+
+def _available_panel_years(
+    *,
+    processed_root: Path,
+    start_year: int,
+    end_year: int,
+) -> tuple[int, ...]:
+    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    years = tuple(
+        year
+        for year in range(start_year, end_year + 1)
+        if list((data_root / f"year={year}").glob("*.parquet"))
+    )
+    if not years:
+        raise ValueError("missing_requested_processed_input")
+    return years
 
 
 def _panel_part_paths(
