@@ -132,6 +132,12 @@ RAW_TABLE_CONTRACTS: dict[str, RawTableContract] = {
         table_name_zh="指数基本信息文件",
         required_columns=("Indexcd",),
     ),
+    "trading_calendar": RawTableContract(
+        dataset="trading_calendar",
+        table_code="TRDNEW_Cale",
+        table_name_zh="交易日历",
+        required_columns=("Markettype", "Clddt", "Daywk", "State"),
+    ),
 }
 
 
@@ -150,6 +156,7 @@ NATIVE_TABLE_DATASETS: dict[str, str] = {
     "TRD_AdjustFactor": "adjustment",
     "IDX_Idxinfo": "index_info",
     "IDX_Idxtrd": "index_market",
+    "TRDNEW_Cale": "trading_calendar",
 }
 
 

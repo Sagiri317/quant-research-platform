@@ -34,6 +34,55 @@ from quant_research_platform.storage.layout import (
 from quant_research_platform.storage.parquet import read_partitioned_parquet_dataset
 
 
+def test_a_share_calendar_helper_builds_unified_and_market_sessions() -> None:
+    from quant_research_platform.markets.implementations.a_share import calendar
+
+    frame = pd.DataFrame(
+        {
+            "calendar_date": pd.to_datetime(
+                [
+                    "2024-01-02",
+                    "2024-01-02",
+                    "2024-01-03",
+                    "2024-01-06",
+                    "2024-01-08",
+                    "2024-01-09",
+                    "2024-01-09",
+                ]
+            ),
+            "source_market_type": [1, 4, 16, 32, 64, 1, 1],
+            "is_trading_day": [True, True, False, True, True, False, False],
+        }
+    )
+
+    unified = calendar.a_share_unified_trading_sessions(frame)
+    market_1 = calendar.market_type_trading_sessions(frame, 1)
+    market_64 = calendar.market_type_trading_sessions(frame, 64)
+
+    assert isinstance(unified, pd.DatetimeIndex)
+    assert unified.tolist() == [
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-06"),
+    ]
+    assert market_1.tolist() == [pd.Timestamp("2024-01-02")]
+    assert market_64.tolist() == [pd.Timestamp("2024-01-08")]
+
+
+def test_a_share_calendar_helper_rejects_raw_calendar_columns() -> None:
+    from quant_research_platform.markets.implementations.a_share import calendar
+
+    raw_like = pd.DataFrame(
+        {
+            "Markettype": [1],
+            "Clddt": ["2024-01-02"],
+            "State": ["O"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="calendar_missing_normalized_columns"):
+        calendar.a_share_unified_trading_sessions(raw_like)
+
+
 def _panel() -> pd.DataFrame:
     rows = []
     for day in range(1, 6):

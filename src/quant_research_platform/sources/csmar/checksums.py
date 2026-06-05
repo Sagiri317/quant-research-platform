@@ -43,6 +43,28 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _metadata_frequency(dataset: str) -> str:
+    if dataset == "trading_calendar":
+        return "reference_calendar"
+    if dataset in {"daily_market", "adjustment", "index_market"}:
+        return "daily"
+    return "event_or_static"
+
+
+def _default_metadata_filters(dataset: str) -> dict[str, object]:
+    if dataset == "trading_calendar":
+        return {
+            "market_types": [1, 2, 4, 8, 16, 32, 64],
+            "state_values": ["O", "C"],
+            "calendar_scope": "all_market_types",
+        }
+    return {
+        "share_class": "A-share",
+        "boards": ["main", "chinext", "star"],
+        "bjse": "excluded_in_first_version",
+    }
+
+
 def build_raw_export_metadata(
     path: str | Path,
     *,
@@ -66,20 +88,14 @@ def build_raw_export_metadata(
         "dataset": dataset,
         "table_code": contract.table_code,
         "table_name_zh": contract.table_name_zh,
-        "frequency": "daily"
-        if dataset in {"daily_market", "adjustment", "index_market"}
-        else "event_or_static",
+        "frequency": _metadata_frequency(dataset),
         "market_scope": filename_metadata.market_scope,
         "start_date": _format_metadata_date(filename_metadata.start_date),
         "end_date": _format_metadata_date(filename_metadata.end_date),
         "part": filename_metadata.part,
         "filters": dict(filters)
         if filters is not None
-        else {
-            "share_class": "A-share",
-            "boards": ["main", "chinext", "star"],
-            "bjse": "excluded_in_first_version",
-        },
+        else _default_metadata_filters(dataset),
         "fields_zh": {column: field_descriptions.get(column, "") for column in columns},
         "fields_raw": list(columns),
         "row_count": row_count,

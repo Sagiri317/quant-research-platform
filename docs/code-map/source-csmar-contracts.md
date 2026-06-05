@@ -85,3 +85,9 @@ These are deferred cleanup considerations, not roadmap commitments:
 - Future broader coverage improvements for tensor, raw_exports, checksums, and
   selected error paths.
 - Optional private verification B rerun as verification-only, not code cleanup.
+- Future calendar reference storage: if trading calendar becomes shared across
+  multiple sources, markets, or repeated builders, promote the in-memory CSMAR
+  `trading_calendar` normalizer into a persistent reference/interim calendar
+  dataset or database-backed calendar catalog. Current 0.1.0 keeps it as
+  private in-memory reference input to avoid expanding public
+  data-product/provider-binding/storage contracts.

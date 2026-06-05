@@ -77,6 +77,9 @@ def normalize_private_export_frame(
     if "index_code" in mapped.columns:
         mapped["index_code"] = mapped["index_code"].astype(str).str.strip()
 
+    if dataset == "trading_calendar":
+        return _normalize_trading_calendar_frame(mapped)
+
     if dataset == "daily_market":
         result = mapped.copy()
         result["trade_date"] = pd.to_datetime(result["trade_date"])
@@ -154,6 +157,46 @@ def normalize_private_export_frame(
         return result.sort_values(["asset_id"]).reset_index(drop=True)
 
     raise ValueError(f"unsupported_csmar_dataset: {dataset}")
+
+
+def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    result["calendar_date"] = pd.to_datetime(result["calendar_date"], errors="raise")
+    result["source_market_type"] = pd.to_numeric(
+        result["source_market_type"],
+        errors="raise",
+    ).astype("int64")
+    result["source_day_of_week"] = pd.to_numeric(
+        result["source_day_of_week"],
+        errors="raise",
+    ).astype("int64")
+    result["source_state"] = result["source_state"].astype("string").str.strip()
+    result["source_state"] = result["source_state"].str.upper()
+    invalid = sorted(
+        state
+        for state in result["source_state"].dropna().unique()
+        if state not in {"O", "C"}
+    )
+    if invalid or result["source_state"].isna().any():
+        raise ValueError(f"invalid_trading_calendar_state: {invalid}")
+    duplicate = result.duplicated(["source_market_type", "calendar_date"], keep=False)
+    if duplicate.any():
+        raise ValueError("duplicate_trading_calendar_key")
+    result["is_trading_day"] = result["source_state"].eq("O")
+    result["market_id"] = "a_share"
+    columns = [
+        "market_id",
+        "source_market_type",
+        "calendar_date",
+        "is_trading_day",
+        "source_day_of_week",
+        "source_state",
+    ]
+    return (
+        result[columns]
+        .sort_values(["source_market_type", "calendar_date"])
+        .reset_index(drop=True)
+    )
 
 
 def read_private_export_file(path: str | Path, dataset: str) -> pd.DataFrame:

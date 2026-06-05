@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import re
+
 import pandas as pd
+import pytest
 
 from quant_research_platform.catalog.fields import platform_interim_column_names
 from quant_research_platform.contracts.data import DataGrain
@@ -8,6 +12,7 @@ from quant_research_platform.sources.csmar import (
     checksums,
     dataset_contracts,
     field_mappings,
+    raw_exports,
     raw_schemas,
 )
 from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
@@ -359,6 +364,176 @@ def test_csmar_raw_export_inspection_accepts_approved_adjustment_aliases(
     assert inspection.missing_required_columns == []
 
 
+def test_csmar_trading_calendar_raw_filename_and_native_inference() -> None:
+    metadata = raw_schemas.parse_raw_filename(
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.csv"
+    )
+
+    assert metadata.dataset == "trading_calendar"
+    assert metadata.market_scope == "all_market_types"
+    assert metadata.start_date == "19901219"
+    assert metadata.end_date == "20261231"
+    assert metadata.export_date == "20260605"
+    assert metadata.extension == "csv"
+    assert raw_schemas.infer_dataset_from_native_export(
+        "raw/TRDNEW_Cale.csv"
+    ) == "trading_calendar"
+
+
+def test_csmar_trading_calendar_raw_export_inspection(tmp_path) -> None:
+    export = tmp_path / (
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.csv"
+    )
+    _write_trading_calendar_raw_export(export)
+
+    inspection = raw_schemas.inspect_raw_export_file(export)
+
+    assert inspection.dataset == "trading_calendar"
+    assert inspection.table_code == "TRDNEW_Cale"
+    assert inspection.columns == ("Markettype", "Clddt", "Daywk", "State")
+    assert inspection.missing_required_columns == []
+
+
+def test_csmar_trading_calendar_inspection_reports_missing_required_columns(
+    tmp_path,
+) -> None:
+    export = tmp_path / "TRDNEW_Cale.csv"
+    pd.DataFrame(
+        {
+            "Markettype": [1],
+            "Daywk": [1],
+        }
+    ).to_csv(export, index=False)
+
+    inspection = raw_schemas.inspect_raw_export_file(export)
+
+    assert inspection.dataset == "trading_calendar"
+    assert inspection.missing_required_columns == ["Clddt", "State"]
+
+
+def test_csmar_trading_calendar_metadata_uses_reference_calendar_filters(
+    tmp_path,
+) -> None:
+    export = tmp_path / (
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.csv"
+    )
+    _write_trading_calendar_raw_export(export)
+
+    payload = checksums.build_raw_export_metadata(export)
+    metadata_path = raw_exports.write_raw_export_metadata(export)
+    sidecar = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert payload["dataset"] == "trading_calendar"
+    assert payload["table_code"] == "TRDNEW_Cale"
+    assert payload["table_name_zh"] == "交易日历"
+    assert payload["frequency"] == "reference_calendar"
+    assert payload["market_scope"] == "all_market_types"
+    assert payload["start_date"] == "1990-12-19"
+    assert payload["end_date"] == "2026-12-31"
+    assert payload["fields_raw"] == ["Markettype", "Clddt", "Daywk", "State"]
+    assert payload["row_count"] == 3
+    assert re.fullmatch(r"[0-9a-f]{64}", str(payload["file_sha256"]))
+    assert payload["filters"] == {
+        "market_types": [1, 2, 4, 8, 16, 32, 64],
+        "state_values": ["O", "C"],
+        "calendar_scope": "all_market_types",
+    }
+    assert "bjse" not in payload["filters"]
+    assert metadata_path == export.with_suffix(".metadata.json")
+    assert sidecar["dataset"] == payload["dataset"]
+    assert sidecar["table_code"] == payload["table_code"]
+    assert sidecar["frequency"] == payload["frequency"]
+    assert sidecar["filters"] == payload["filters"]
+
+
+def test_csmar_trading_calendar_field_mapping_and_missing_columns() -> None:
+    raw = pd.DataFrame(
+        {
+            "Markettype": [1],
+            "Clddt": ["2024-01-06"],
+            "Daywk": [6],
+            "State": ["O"],
+        }
+    )
+
+    mapped = field_mappings.map_csmar_columns(raw, "trading_calendar")
+
+    assert mapped.columns.tolist() == [
+        "source_market_type",
+        "calendar_date",
+        "source_day_of_week",
+        "source_state",
+    ]
+    assert field_mappings.missing_raw_column_names(
+        ("Markettype", "Daywk"),
+        "trading_calendar",
+    ) == ["Clddt", "State"]
+    descriptions = field_mappings.csmar_field_descriptions("trading_calendar")
+    assert set(descriptions) == {"Markettype", "Clddt", "Daywk", "State"}
+
+
+def test_csmar_trading_calendar_normalizer_outputs_internal_contract() -> None:
+    raw = pd.DataFrame(
+        {
+            "Markettype": [4, 1, 4],
+            "Clddt": ["2024-01-06", "2024-01-02", "2024-01-07"],
+            "Daywk": [6, 2, 0],
+            "State": ["O", "C", "C"],
+        }
+    )
+
+    result = normalize_private_export_frame(raw, "trading_calendar")
+
+    assert result.columns.tolist() == [
+        "market_id",
+        "source_market_type",
+        "calendar_date",
+        "is_trading_day",
+        "source_day_of_week",
+        "source_state",
+    ]
+    assert set(result["market_id"]) == {"a_share"}
+    assert result["calendar_date"].tolist() == [
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-06"),
+        pd.Timestamp("2024-01-07"),
+    ]
+    assert result["source_market_type"].tolist() == [1, 4, 4]
+    assert result["is_trading_day"].tolist() == [False, True, False]
+    assert not {"Markettype", "Clddt", "Daywk", "State"}.intersection(result.columns)
+
+
+def test_csmar_trading_calendar_normalizer_rejects_duplicate_keys() -> None:
+    raw = pd.DataFrame(
+        {
+            "Markettype": [1, 1],
+            "Clddt": ["2024-01-02", "2024-01-02"],
+            "Daywk": [2, 2],
+            "State": ["O", "C"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate_trading_calendar_key"):
+        normalize_private_export_frame(raw, "trading_calendar")
+
+
+def test_csmar_trading_calendar_normalizer_rejects_invalid_state() -> None:
+    raw = pd.DataFrame(
+        {
+            "Markettype": [1],
+            "Clddt": ["2024-01-02"],
+            "Daywk": [2],
+            "State": ["X"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_trading_calendar_state"):
+        normalize_private_export_frame(raw, "trading_calendar")
+
+
 def test_csmar_importer_builds_canonical_interim_frame(tmp_path) -> None:
     export = tmp_path / (
         "csmar__daily_market__all_a_ex_bjse__20240101_20251231__"
@@ -404,6 +579,31 @@ def test_csmar_importer_writes_interim_parquet_through_catalog(tmp_path) -> None
     )
     assert (data_root / "year=2024" / "part-000.parquet").is_file()
     assert (data_root.parent / "_manifest" / "manifest.json").is_file()
+
+
+def _write_trading_calendar_raw_export(path) -> None:
+    pd.DataFrame(
+        [
+            {
+                "Markettype": 1,
+                "Clddt": "1990-12-19",
+                "Daywk": 3,
+                "State": "O",
+            },
+            {
+                "Markettype": 4,
+                "Clddt": "2024-01-06",
+                "Daywk": 6,
+                "State": "O",
+            },
+            {
+                "Markettype": 64,
+                "Clddt": "2026-12-31",
+                "Daywk": 4,
+                "State": "C",
+            },
+        ]
+    ).to_csv(path, index=False)
 
 
 def _write_daily_market_raw_export(path) -> None:

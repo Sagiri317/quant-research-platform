@@ -86,6 +86,12 @@ CSMAR_COLUMN_MAPPINGS = {
         "Idxinfo09": "market_belonging",
         "Idxinfo10": "calculation_formula",
     },
+    "trading_calendar": {
+        "Markettype": "source_market_type",
+        "Clddt": "calendar_date",
+        "Daywk": "source_day_of_week",
+        "State": "source_state",
+    },
 }
 
 CSMAR_COLUMN_ALIASES = {
@@ -172,6 +178,12 @@ CSMAR_FIELD_DESCRIPTIONS = {
         "Idxinfo08": "指数类型",
         "Idxinfo09": "所属市场",
         "Idxinfo10": "计算公式",
+    },
+    "trading_calendar": {
+        "Markettype": "市场类型",
+        "Clddt": "日历日期",
+        "Daywk": "星期",
+        "State": "开市情况",
     },
 }
 
