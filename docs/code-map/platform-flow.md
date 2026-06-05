@@ -77,3 +77,13 @@ Retired commands and endpoints are not current clean-rewrite contracts.
 Future-only items remain outside the active surface: `processed-data-runs`,
 `workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`,
 `private plugin`, and `qrp-private`.
+
+## Narrow Follow-up Notes
+
+- Workflow summaries currently expose `completed_nodes`; a future summary model
+  may separate `planned_nodes` from `completed_nodes` so dry-run plans are not
+  represented as completed work.
+- Storage writer root validation currently validates spec-shaped legal suffixes;
+  a future implementation should make this project-root-relative, likely by
+  passing `StorageLayout.project_root` or equivalent through writer validation
+  paths.

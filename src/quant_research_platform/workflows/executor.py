@@ -44,8 +44,17 @@ def execute_workflow(
         spec,
         allowed_spec_ids=allowed_spec_ids,
     )
+    step_ids = plan_topological_steps(spec)
+    if mode is ExecutionMode.DRY_RUN:
+        return workflow_run_summary(
+            spec,
+            completed_nodes=(),
+            execution_mode=mode,
+            run_id=run_id,
+            status="validated",
+        )
     completed_nodes = _execute_registered_steps(
-        plan_topological_steps(spec),
+        step_ids,
         registry,
         checkpoints=checkpoints,
     )
@@ -79,13 +88,14 @@ def workflow_run_summary(
     completed_nodes: tuple[str, ...],
     execution_mode: ExecutionMode | str | None = None,
     run_id: str = "workflow-fixture-run",
+    status: str = "executed",
 ) -> WorkflowRunSummary:
     return WorkflowRunSummary(
         workflow_id=spec.workflow_id,
         workflow_version=spec.workflow_version,
         execution_mode=ExecutionMode.normalize(execution_mode),
         run_id=run_id,
-        status="executed",
+        status=status,
         market_id=str(spec.market_id) if spec.market_id else None,
         data_product_id=spec.data_product_id,
         run_type=spec.run_type,

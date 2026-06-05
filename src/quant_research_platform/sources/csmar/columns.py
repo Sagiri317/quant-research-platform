@@ -99,6 +99,21 @@ BENCHMARK_INDEX_MARKET_KEEP_COLUMNS: tuple[str, ...] = (
     "ohlc_valid",
 )
 
+INDEX_MARKET_KEEP_COLUMNS: tuple[str, ...] = (
+    *CANONICAL_INTERIM_KEEP_COLUMNS,
+    "index_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume_10k_shares",
+    "amount_10k_cny",
+    "return_1d_pct",
+    "return_1d",
+    "index_name",
+)
+
 INTERIM_KEEP_COLUMNS: dict[str, tuple[str, ...]] = {
     "daily_market": DAILY_MARKET_INTERIM_KEEP_COLUMNS,
     "stock_master": STOCK_MASTER_INTERIM_KEEP_COLUMNS,
@@ -106,7 +121,7 @@ INTERIM_KEEP_COLUMNS: dict[str, tuple[str, ...]] = {
     "adjustment": ADJUSTMENT_INTERIM_KEEP_COLUMNS,
     "index_info": INDEX_INFO_INTERIM_KEEP_COLUMNS,
     "benchmark_index_market": BENCHMARK_INDEX_MARKET_KEEP_COLUMNS,
-    "index_market": BENCHMARK_INDEX_MARKET_KEEP_COLUMNS,
+    "index_market": INDEX_MARKET_KEEP_COLUMNS,
 }
 
 AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {

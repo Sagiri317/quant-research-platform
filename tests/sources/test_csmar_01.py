@@ -11,6 +11,7 @@ from quant_research_platform.sources.csmar import (
     raw_schemas,
 )
 from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
+from quant_research_platform.sources.csmar.columns import apply_interim_column_rules
 from quant_research_platform.sources.csmar.importer import (
     build_csmar_interim_frame,
     import_interim_data,
@@ -24,6 +25,7 @@ from quant_research_platform.sources.csmar.interim import (
 from quant_research_platform.sources.csmar.mappers import (
     normalize_private_export_frame,
     read_private_export_file,
+    with_benchmark_index_fields,
 )
 from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
 from quant_research_platform.storage.layout import StorageLayout
@@ -127,6 +129,65 @@ def test_csmar_index_interim_uses_index_asset_namespace() -> None:
     assert result.loc[0, "asset_id"] == "index:000985"
     assert result.loc[0, "source_id"] == "csmar"
     assert result.loc[0, "source_asset_id"] == "000985"
+
+
+def test_csmar_direct_index_market_contract_does_not_require_benchmark_fields() -> None:
+    raw = pd.DataFrame(
+        {
+            "Indexcd": ["000985"],
+            "Idxtrd01": ["2014-01-02"],
+            "Idxtrd02": [100.0],
+            "Idxtrd03": [101.0],
+            "Idxtrd04": [99.0],
+            "Idxtrd05": [100.5],
+            "Idxtrd06": [10.0],
+            "Idxtrd07": [1000.0],
+            "Idxtrd08": [0.01],
+            "Idxtrd09": ["benchmark"],
+        }
+    )
+    normalized = normalize_private_export_frame(raw, "index_market")
+
+    pruned, report = apply_interim_column_rules(normalized, "index_market")
+    spec = csmar_interim_catalog().get("index_market")
+
+    benchmark_only = {"benchmark_name", "benchmark_tier", "ohlc_valid"}
+    assert set(spec.required_columns).isdisjoint(benchmark_only)
+    assert set(pruned.columns).isdisjoint(benchmark_only)
+    assert not set(spec.required_columns).difference(pruned.columns)
+    assert report["dataset"] == "index_market"
+
+
+def test_csmar_benchmark_index_market_contract_keeps_benchmark_fields() -> None:
+    raw = pd.DataFrame(
+        {
+            "Indexcd": ["000985"],
+            "Idxtrd01": ["2014-01-02"],
+            "Idxtrd02": [100.0],
+            "Idxtrd03": [101.0],
+            "Idxtrd04": [99.0],
+            "Idxtrd05": [100.5],
+            "Idxtrd06": [10.0],
+            "Idxtrd07": [1000.0],
+            "Idxtrd08": [0.01],
+            "Idxtrd09": ["benchmark"],
+        }
+    )
+    normalized = with_benchmark_index_fields(
+        normalize_private_export_frame(raw, "index_market")
+    )
+
+    pruned, report = apply_interim_column_rules(
+        normalized,
+        "benchmark_index_market",
+    )
+    spec = csmar_interim_catalog().get("benchmark_index_market")
+
+    benchmark_only = {"benchmark_name", "benchmark_tier", "ohlc_valid"}
+    assert benchmark_only.issubset(spec.required_columns)
+    assert benchmark_only.issubset(pruned.columns)
+    assert not set(spec.required_columns).difference(pruned.columns)
+    assert report["dataset"] == "benchmark_index_market"
 
 
 def test_csmar_index_metadata_interim_allows_missing_time_column() -> None:

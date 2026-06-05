@@ -202,6 +202,7 @@ def build_panel_from_interim(
         min_listing_trading_days=min_listing_trading_days,
     )
     panel = _filter_panel_years(panel, start_year=start_year, end_year=end_year)
+    panel = _filter_panel_end_date(panel, end_date=end_date)
     return write_panel_processed_data(panel, processed_root=processed_root), len(panel)
 
 
@@ -253,6 +254,14 @@ def _filter_panel_years(
     return result.loc[
         result["trade_date"].dt.year.between(start_year, end_year)
     ].reset_index(drop=True)
+
+
+def _filter_panel_end_date(frame: pd.DataFrame, *, end_date: str) -> pd.DataFrame:
+    result = frame.copy()
+    result["trade_date"] = pd.to_datetime(result["trade_date"])
+    return result.loc[result["trade_date"] <= pd.Timestamp(end_date)].reset_index(
+        drop=True
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -30,6 +30,7 @@ from quant_research_platform.compute.protocols import (
     PanelSpec,
     TradabilityConfig,
     WeightConfig,
+    validate_panel,
 )
 from quant_research_platform.compute.tensor.constraints import (
     _apply_array_tradability_constraints,
@@ -117,6 +118,7 @@ def build_tensor_portfolio_artifacts(
     """构造 tensor portfolio artifacts，同时不保留 dense path matrices。"""
 
     dtype = _validate_value_dtype(value_dtype)
+    panel = validate_panel(panel, spec)
     _validate_segment_columns(panel, segment_columns)
     _validate_weight_columns(panel, weight_config)
     if cost_config is None:

@@ -396,6 +396,70 @@ def test_partitioned_writer_rejects_processed_root_not_derived_from_spec(
         assert list(root.parent.glob(".data.tmp-*")) == []
 
 
+def test_partitioned_writer_accepts_processed_root_when_parent_contains_data(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _processed_writer_case()
+    project_root = tmp_path / "outer" / "data" / "checkout" / "repo"
+    root = project_root / "data" / "processed" / "a_share" / "factors" / "x" / "data"
+
+    write_partitioned_parquet_dataset(frame, root, catalog=catalog, data_id="x")
+
+    assert (root / "year=2014" / "part-000.parquet").is_file()
+
+
+def test_partitioned_writer_accepts_interim_root_when_parent_contains_data(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _interim_writer_case()
+    project_root = tmp_path / "outer" / "data" / "checkout" / "repo"
+    root = project_root / "data" / "interim" / "csmar" / "daily_market" / "data"
+
+    write_partitioned_parquet_dataset(
+        frame,
+        root,
+        catalog=catalog,
+        data_id="daily_market",
+    )
+
+    assert (root / "year=2014" / "part-000.parquet").is_file()
+
+
+def test_partitioned_writer_fails_closed_for_invalid_data_suffixes(
+    tmp_path: Path,
+) -> None:
+    frame, catalog = _processed_writer_case()
+    project_root = tmp_path / "outer" / "data" / "checkout" / "repo"
+    invalid_roots = [
+        project_root
+        / "data"
+        / "processed"
+        / "a_share"
+        / "factors"
+        / "x"
+        / "data"
+        / "extra",
+        project_root
+        / "data"
+        / "processed"
+        / "a_share"
+        / "factors"
+        / "x"
+        / "data"
+        / "repo"
+        / "data"
+        / "processed"
+        / "a_share"
+        / "factors"
+        / "x"
+        / "data",
+    ]
+
+    for root in invalid_roots:
+        with pytest.raises(ValueError, match="invalid_processed_output_root"):
+            write_partitioned_parquet_dataset(frame, root, catalog=catalog, data_id="x")
+
+
 def test_partitioned_writer_rejects_interim_root_not_derived_from_spec(
     tmp_path: Path,
 ) -> None:

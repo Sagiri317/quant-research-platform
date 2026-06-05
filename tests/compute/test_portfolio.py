@@ -155,6 +155,37 @@ def test_tensor_weighted_positions_builds_artifacts_from_execution_path() -> Non
     assert diagnostics.equals(artifacts.diagnostics)
 
 
+def test_tensor_weighted_positions_accepts_string_timestamps_like_dataframe() -> None:
+    panel = _ranking_panel()
+    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    weight_config = WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3)
+
+    dataframe_positions, _ = build_weighted_positions(panel, spec, weight_config)
+    tensor_positions, _ = tensor_construction.build_tensor_weighted_positions(
+        panel,
+        spec,
+        weight_config,
+    )
+
+    assert dataframe_positions["timestamp"].map(type).eq(pd.Timestamp).all()
+    assert tensor_positions["timestamp"].map(type).eq(pd.Timestamp).all()
+
+
+def test_tensor_weighted_positions_rejects_duplicate_keys_like_dataframe() -> None:
+    panel = pd.concat([_ranking_panel(), _ranking_panel().iloc[[0]]], ignore_index=True)
+    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    weight_config = WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3)
+
+    with pytest.raises(ValueError, match="unique timestamp-asset keys"):
+        build_weighted_positions(panel, spec, weight_config)
+    with pytest.raises(ValueError, match="unique timestamp-asset keys"):
+        tensor_construction.build_tensor_weighted_positions(
+            panel,
+            spec,
+            weight_config,
+        )
+
+
 def test_build_weighted_positions_supports_long_only_top_leg() -> None:
     spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
 

@@ -91,6 +91,41 @@ def test_workflow_executor_records_memory_checkpoints_only() -> None:
     assert checkpoints.get("panel").status == "completed"
 
 
+def test_workflow_dry_run_does_not_call_handlers_or_write_checkpoints() -> None:
+    spec = WorkflowSpec(
+        workflow_id="dry_run_no_side_effects",
+        nodes=(WorkflowNode(node_id="panel"),),
+    )
+    calls: list[str] = []
+    checkpoints = InMemoryCheckpointStore()
+    registry = WorkflowNodeRegistry()
+    registry.register(
+        WorkflowNodeDefinition(
+            node_id="panel",
+            handler=lambda: calls.append("panel"),
+        )
+    )
+
+    dry_run_summary = execute_workflow(
+        spec,
+        registry=registry,
+        checkpoints=checkpoints,
+        execution_mode="dry_run",
+    )
+    execute_summary = execute_workflow(
+        spec,
+        registry=registry,
+        execution_mode="execute",
+    )
+
+    assert calls == ["panel"]
+    assert checkpoints.list() == ()
+    assert dry_run_summary.status == "validated"
+    assert dry_run_summary.completed_nodes == ()
+    assert execute_summary.status == "executed"
+    assert execute_summary.completed_nodes == ("panel",)
+
+
 def test_workflow_executor_rejects_unknown_spec_id() -> None:
     spec = WorkflowSpec(
         workflow_id="unknown_spec",

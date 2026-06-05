@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -245,54 +246,110 @@ def _validate_column_roles(spec: DataSpec) -> None:
 
 
 def _validate_allowed_output_root(root: Path, spec: DataSpec) -> None:
-    parts = _relative_parts(root)
+    path_parts = _path_parts(root)
     if isinstance(spec, InterimDataSpec):
-        if (
-            len(parts) != 5
-            or parts[:3] != ("data", "interim", str(spec.source_id))
-            or not _matches_artifact_segment(parts[3], spec.interim_data_id)
-            or parts[4] != "data"
-        ):
+        parts = _unique_matching_suffix(
+            path_parts,
+            lambda candidate: _is_interim_output_suffix(candidate, spec),
+        )
+        if parts is None:
             raise ValueError("invalid_interim_output_root")
         return
     if isinstance(spec, ProcessedDataSpec):
-        category_parts = tuple(
-            part for part in PurePosixPath(spec.category).parts if part != "/"
+        parts = _unique_matching_suffix(
+            path_parts,
+            lambda candidate: _is_processed_output_suffix(candidate, spec),
         )
-        expected_prefix = (
-            "data",
-            "processed",
-            str(spec.market_id),
-            *category_parts,
-        )
-        if (
-            len(parts) != len(expected_prefix) + 2
-            or parts[: len(expected_prefix)] != expected_prefix
-            or not _matches_artifact_segment(
-                parts[len(expected_prefix)], spec.processed_data_id
-            )
-            or parts[-1] != "data"
-        ):
+        if parts is None:
             raise ValueError("invalid_processed_output_root")
         return
     if isinstance(spec, ResearchDatasetSpec):
-        if (
-            len(parts) != 6
-            or parts[:4]
-            != ("data", "processed", str(spec.market_id), "research_datasets")
-            or not _matches_artifact_segment(parts[4], spec.dataset_id)
-            or parts[5] != "data"
-        ):
+        parts = _unique_matching_suffix(
+            path_parts,
+            lambda candidate: _is_research_dataset_output_suffix(candidate, spec),
+        )
+        if parts is None:
             raise ValueError("invalid_research_dataset_output_root")
         return
     raise ValueError("unsupported_data_spec_type")
 
 
-def _relative_parts(path: Path) -> tuple[str, ...]:
+def _path_parts(path: Path) -> tuple[str, ...]:
     parts = tuple(part for part in PurePosixPath(path.as_posix()).parts if part != "/")
-    if "data" not in parts:
-        return parts
-    return parts[parts.index("data") :]
+    return parts
+
+
+def _unique_matching_suffix(
+    parts: tuple[str, ...],
+    predicate: Callable[[tuple[str, ...]], bool],
+) -> tuple[str, ...] | None:
+    candidates = [
+        parts[index:] for index, part in enumerate(parts) if part == "data"
+    ]
+    matches = [candidate for candidate in candidates if predicate(candidate)]
+    storage_like_invalid = [
+        candidate
+        for candidate in candidates
+        if _starts_storage_layout(candidate) and not predicate(candidate)
+    ]
+    if len(matches) != 1 or storage_like_invalid:
+        return None
+    return matches[0]
+
+
+def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
+    return len(parts) >= 2 and parts[0] == "data" and parts[1] in {
+        "interim",
+        "processed",
+    }
+
+
+def _is_interim_output_suffix(
+    parts: tuple[str, ...],
+    spec: InterimDataSpec,
+) -> bool:
+    return (
+        len(parts) == 5
+        and parts[:3] == ("data", "interim", str(spec.source_id))
+        and _matches_artifact_segment(parts[3], spec.interim_data_id)
+        and parts[4] == "data"
+    )
+
+
+def _is_processed_output_suffix(
+    parts: tuple[str, ...],
+    spec: ProcessedDataSpec,
+) -> bool:
+    category_parts = tuple(
+        part for part in PurePosixPath(spec.category).parts if part != "/"
+    )
+    expected_prefix = (
+        "data",
+        "processed",
+        str(spec.market_id),
+        *category_parts,
+    )
+    return (
+        len(parts) == len(expected_prefix) + 2
+        and parts[: len(expected_prefix)] == expected_prefix
+        and _matches_artifact_segment(
+            parts[len(expected_prefix)], spec.processed_data_id
+        )
+        and parts[-1] == "data"
+    )
+
+
+def _is_research_dataset_output_suffix(
+    parts: tuple[str, ...],
+    spec: ResearchDatasetSpec,
+) -> bool:
+    return (
+        len(parts) == 6
+        and parts[:4]
+        == ("data", "processed", str(spec.market_id), "research_datasets")
+        and _matches_artifact_segment(parts[4], spec.dataset_id)
+        and parts[5] == "data"
+    )
 
 
 def _matches_artifact_segment(segment: str, expected: str) -> bool:
