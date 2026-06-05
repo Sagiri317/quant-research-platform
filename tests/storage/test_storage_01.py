@@ -27,7 +27,10 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import write_manifest
+from quant_research_platform.storage.manifests import (
+    write_internal_artifact_manifest,
+    write_manifest,
+)
 from quant_research_platform.storage.parquet import (
     write_interim_data,
     write_partitioned_parquet_dataset,
@@ -213,6 +216,91 @@ def test_interim_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
         tmp_path / "data" / "interim" / "csmar" / "daily_market" / "data"
     )
     assert (data_root / "year=2014" / "part-000.parquet").is_file()
+
+
+def test_interim_manifest_preserves_source_id_schema_fields(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "source_id": ["csmar", "csmar"],
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+            "calendar_date": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+            "source_market_type": [1, 1],
+            "is_trading_day": [False, True],
+            "source_day_of_week": [1, 2],
+            "source_state": ["C", "O"],
+        }
+    )
+    catalog = InterimDataCatalog()
+    catalog.register(
+        InterimDataSpec(
+            market_id=MarketId("a_share"),
+            source_id=SourceId("csmar"),
+            interim_data_id="trading_calendar",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.SOURCE_MARKET_CALENDAR_DATE,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "source_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "calendar_date": ColumnRole.TIMESTAMP,
+                "source_market_type": ColumnRole.KEY,
+                "is_trading_day": ColumnRole.CONTEXT,
+                "source_day_of_week": ColumnRole.CONTEXT,
+                "source_state": ColumnRole.CONTEXT,
+            },
+            primary_key=(
+                "market_id",
+                "source_id",
+                "source_market_type",
+                "calendar_date",
+            ),
+            partition_columns=("year",),
+        )
+    )
+
+    data_root = write_interim_data(
+        frame,
+        layout=StorageLayout(project_root=tmp_path),
+        catalog=catalog,
+        interim_data_id="trading_calendar",
+    )
+    manifest = json.loads(
+        (data_root.parent / "_manifest" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    spec_json = json.loads((data_root.parent / "spec.json").read_text("utf-8"))
+
+    for payload in (manifest, spec_json):
+        assert payload["source_id"] == "csmar"
+        assert payload["grain"] == "source_market_calendar_date"
+        assert payload["primary_key"] == [
+            "market_id",
+            "source_id",
+            "source_market_type",
+            "calendar_date",
+        ]
+        assert "source_id" in payload["required_columns"]
+        assert payload["column_roles"]["source_id"] == "key"
+        assert "[private]" not in payload["primary_key"]
+        assert "[private]" not in payload["required_columns"]
+        assert "[private]" not in payload["column_roles"]
+
+
+def test_internal_interim_manifest_rejects_dangerous_paths(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unsafe_internal_artifact_metadata"):
+        write_internal_artifact_manifest(
+            tmp_path / "data" / "interim" / "csmar" / "bad" / "spec.json",
+            {
+                "schema_version": "0.1",
+                "source_id": "csmar",
+                "primary_key": ["market_id", "source_id", "timestamp"],
+                "raw_path": r"C:\Users\DELL\data\raw\csmar\export.csv",
+            },
+        )
+
+    assert not (tmp_path / "data" / "interim" / "csmar" / "bad" / "spec.json").exists()
 
 
 def test_research_dataset_writer_resolves_spec_and_layout(tmp_path: Path) -> None:

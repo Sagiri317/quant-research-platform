@@ -21,7 +21,9 @@ from quant_research_platform.storage.atomic import (
     atomic_write_directory,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import write_manifest
+from quant_research_platform.storage.manifests import (
+    write_internal_artifact_manifest,
+)
 from quant_research_platform.storage.partitions import add_year_partition
 from quant_research_platform.storage.privacy import is_private_boundary_path
 
@@ -378,11 +380,11 @@ def _write_partitioned_parquet_files(
 
 
 def _write_data_manifest(path: Path, spec: DataSpec) -> Path:
-    return write_manifest(path, _data_spec_payload(spec))
+    return write_internal_artifact_manifest(path, _data_spec_payload(spec))
 
 
 def _write_data_spec(path: Path, spec: DataSpec) -> Path:
-    return write_manifest(path, _data_spec_payload(spec))
+    return write_internal_artifact_manifest(path, _data_spec_payload(spec))
 
 
 def _data_spec_payload(spec: DataSpec) -> dict[str, object]:
