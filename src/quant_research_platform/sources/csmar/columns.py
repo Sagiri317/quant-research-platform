@@ -114,6 +114,17 @@ INDEX_MARKET_KEEP_COLUMNS: tuple[str, ...] = (
     "index_name",
 )
 
+TRADING_CALENDAR_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
+    "market_id",
+    "source_id",
+    "timestamp",
+    "calendar_date",
+    "source_market_type",
+    "is_trading_day",
+    "source_day_of_week",
+    "source_state",
+)
+
 INTERIM_KEEP_COLUMNS: dict[str, tuple[str, ...]] = {
     "daily_market": DAILY_MARKET_INTERIM_KEEP_COLUMNS,
     "stock_master": STOCK_MASTER_INTERIM_KEEP_COLUMNS,
@@ -122,6 +133,7 @@ INTERIM_KEEP_COLUMNS: dict[str, tuple[str, ...]] = {
     "index_info": INDEX_INFO_INTERIM_KEEP_COLUMNS,
     "benchmark_index_market": BENCHMARK_INDEX_MARKET_KEEP_COLUMNS,
     "index_market": INDEX_MARKET_KEEP_COLUMNS,
+    "trading_calendar": TRADING_CALENDAR_INTERIM_KEEP_COLUMNS,
 }
 
 AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {

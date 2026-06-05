@@ -10,9 +10,11 @@ SOURCE_IDENTIFIER_FIELDS = {
     "trade_date",
     "share_change_date",
     "asset_record_date",
+    "calendar_date",
     "release_date",
     "base_date",
     "start_date",
+    "source_market_type",
 }
 
 

@@ -18,6 +18,7 @@ class DataFrequency(StrEnum):
 class DataGrain(StrEnum):
     ASSET_TIMESTAMP = "asset_timestamp"
     MARKET_TIMESTAMP = "market_timestamp"
+    SOURCE_MARKET_CALENDAR_DATE = "source_market_calendar_date"
     TRADE_EVENT = "trade_event"
     ORDER_BOOK_LEVEL = "order_book_level"
     RESEARCH_ROW = "research_row"

@@ -184,10 +184,14 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("duplicate_trading_calendar_key")
     result["is_trading_day"] = result["source_state"].eq("O")
     result["market_id"] = "a_share"
+    result["source_id"] = "csmar"
+    result["timestamp"] = result["calendar_date"]
     columns = [
         "market_id",
-        "source_market_type",
+        "source_id",
+        "timestamp",
         "calendar_date",
+        "source_market_type",
         "is_trading_day",
         "source_day_of_week",
         "source_state",

@@ -23,6 +23,25 @@ from quant_research_platform.sources.csmar.interim import CSMAR_SOURCE_ID
 def csmar_interim_catalog() -> InterimDataCatalog:
     catalog = InterimDataCatalog()
     for interim_data_id, columns in INTERIM_KEEP_COLUMNS.items():
+        if interim_data_id == "trading_calendar":
+            catalog.register(
+                InterimDataSpec(
+                    market_id=MarketId("a_share"),
+                    source_id=SourceId(CSMAR_SOURCE_ID),
+                    interim_data_id=interim_data_id,
+                    frequency=DataFrequency.DAILY,
+                    grain=DataGrain.SOURCE_MARKET_CALENDAR_DATE,
+                    column_roles=_trading_calendar_column_roles(columns),
+                    primary_key=(
+                        "market_id",
+                        "source_id",
+                        "source_market_type",
+                        "calendar_date",
+                    ),
+                    partition_columns=("year",),
+                )
+            )
+            continue
         catalog.register(
             InterimDataSpec(
                 market_id=MarketId("a_share"),
@@ -36,6 +55,18 @@ def csmar_interim_catalog() -> InterimDataCatalog:
             )
         )
     return catalog
+
+
+def _trading_calendar_column_roles(columns: tuple[str, ...]) -> dict[str, ColumnRole]:
+    roles: dict[str, ColumnRole] = {}
+    for column in columns:
+        if column in {"market_id", "source_id", "source_market_type"}:
+            roles[column] = ColumnRole.KEY
+        elif column in {"timestamp", "calendar_date"}:
+            roles[column] = ColumnRole.TIMESTAMP
+        else:
+            roles[column] = ColumnRole.CONTEXT
+    return roles
 
 
 def _column_roles(columns: tuple[str, ...]) -> dict[str, ColumnRole]:

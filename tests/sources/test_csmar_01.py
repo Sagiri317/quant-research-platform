@@ -6,7 +6,10 @@ import re
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.fields import platform_interim_column_names
+from quant_research_platform.catalog.fields import (
+    platform_entity_time_key,
+    platform_interim_column_names,
+)
 from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.sources.csmar import (
     checksums,
@@ -34,6 +37,10 @@ from quant_research_platform.sources.csmar.mappers import (
 )
 from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.parquet import (
+    read_partitioned_parquet_dataset,
+    write_interim_data,
+)
 
 
 def test_csmar_interim_catalog_registers_daily_market_spec() -> None:
@@ -56,9 +63,33 @@ def test_csmar_interim_catalog_registers_real_source_dataset_ids() -> None:
         "index_info",
         "benchmark_index_market",
         "index_market",
+        "trading_calendar",
     }
     assert {str(spec.source_id) for spec in specs} == {"csmar"}
     assert "benchmark_index_market" not in RAW_TABLE_CONTRACTS
+
+
+def test_csmar_trading_calendar_interim_spec_uses_calendar_grain() -> None:
+    catalog = csmar_interim_catalog()
+    spec = catalog.get("trading_calendar")
+
+    assert spec.grain is DataGrain.SOURCE_MARKET_CALENDAR_DATE
+    assert spec.primary_key == (
+        "market_id",
+        "source_id",
+        "source_market_type",
+        "calendar_date",
+    )
+    assert spec.partition_columns == ("year",)
+    assert "asset_id" not in spec.required_columns
+    assert "stock_code" not in spec.required_columns
+    assert "index_code" not in spec.required_columns
+
+    for interim_data_id in ("daily_market", "stock_master"):
+        existing = catalog.get(interim_data_id)
+        assert existing.grain is DataGrain.ASSET_TIMESTAMP
+        assert existing.primary_key == platform_entity_time_key()
+        assert existing.partition_columns == ("year",)
 
 
 def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
@@ -489,13 +520,17 @@ def test_csmar_trading_calendar_normalizer_outputs_internal_contract() -> None:
 
     assert result.columns.tolist() == [
         "market_id",
-        "source_market_type",
+        "source_id",
+        "timestamp",
         "calendar_date",
+        "source_market_type",
         "is_trading_day",
         "source_day_of_week",
         "source_state",
     ]
     assert set(result["market_id"]) == {"a_share"}
+    assert set(result["source_id"]) == {"csmar"}
+    assert result["timestamp"].tolist() == result["calendar_date"].tolist()
     assert result["calendar_date"].tolist() == [
         pd.Timestamp("2024-01-02"),
         pd.Timestamp("2024-01-06"),
@@ -504,6 +539,87 @@ def test_csmar_trading_calendar_normalizer_outputs_internal_contract() -> None:
     assert result["source_market_type"].tolist() == [1, 4, 4]
     assert result["is_trading_day"].tolist() == [False, True, False]
     assert not {"Markettype", "Clddt", "Daywk", "State"}.intersection(result.columns)
+    assert not {"asset_id", "stock_code", "index_code"}.intersection(result.columns)
+
+
+def test_csmar_trading_calendar_interim_column_rules() -> None:
+    normalized = normalize_private_export_frame(
+        pd.DataFrame(
+            {
+                "Markettype": [1],
+                "Clddt": ["2024-01-02"],
+                "Daywk": [2],
+                "State": ["O"],
+            }
+        ),
+        "trading_calendar",
+    )
+
+    pruned, report = apply_interim_column_rules(normalized, "trading_calendar")
+    spec = csmar_interim_catalog().get("trading_calendar")
+
+    assert tuple(pruned.columns) == spec.required_columns
+    assert "asset_id" not in pruned.columns
+    assert "stock_code" not in pruned.columns
+    assert "index_code" not in pruned.columns
+    assert report["dataset"] == "trading_calendar"
+
+
+def test_csmar_trading_calendar_interim_write_roundtrip(tmp_path) -> None:
+    raw = pd.DataFrame(
+        {
+            "Markettype": [1, 4],
+            "Clddt": ["2024-01-02", "2025-01-03"],
+            "Daywk": [2, 5],
+            "State": ["O", "C"],
+        }
+    )
+    normalized = normalize_private_export_frame(raw, "trading_calendar")
+    frame, _ = apply_interim_column_rules(normalized, "trading_calendar")
+    catalog = csmar_interim_catalog()
+
+    data_root = write_interim_data(
+        frame,
+        layout=StorageLayout(project_root=tmp_path),
+        catalog=catalog,
+        interim_data_id="trading_calendar",
+    )
+    read_back = read_partitioned_parquet_dataset(data_root)
+
+    assert data_root == (
+        tmp_path / "data" / "interim" / "csmar" / "trading_calendar" / "data"
+    )
+    assert (data_root / "year=2024" / "part-000.parquet").is_file()
+    assert (data_root / "year=2025" / "part-000.parquet").is_file()
+    assert len(read_back) == len(frame)
+    assert set(read_back["calendar_date"].dt.year) == {2024, 2025}
+    assert read_back.sort_values(
+        ["source_market_type", "calendar_date"]
+    ).reset_index(drop=True)[list(frame.columns)].equals(frame)
+
+
+def test_csmar_trading_calendar_interim_writer_rejects_duplicate_key(
+    tmp_path,
+) -> None:
+    raw = pd.DataFrame(
+        {
+            "Markettype": [1],
+            "Clddt": ["2024-01-02"],
+            "Daywk": [2],
+            "State": ["O"],
+        }
+    )
+    normalized = normalize_private_export_frame(raw, "trading_calendar")
+    frame, _ = apply_interim_column_rules(normalized, "trading_calendar")
+    duplicate = pd.concat([frame, frame], ignore_index=True)
+
+    with pytest.raises(ValueError, match="duplicate_primary_key"):
+        write_interim_data(
+            duplicate,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=csmar_interim_catalog(),
+            interim_data_id="trading_calendar",
+        )
 
 
 def test_csmar_trading_calendar_normalizer_rejects_duplicate_keys() -> None:
