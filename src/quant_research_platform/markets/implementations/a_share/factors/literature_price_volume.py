@@ -8,8 +8,6 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .price_volume import calculate_price_volume_factors
-
 LITERATURE_PRICE_VOLUME_REBUILD_PACK_ID = (
     "a_share_literature_price_volume_rewrite_01"
 )
@@ -238,39 +236,37 @@ def calculate_literature_price_volume_factors(
 
     requested = set(expected_columns or _all_literature_factor_columns(windows))
     required_windows = _windows_from_requested_factors(requested, windows=windows)
-    usable_base_windows = tuple(
-        window for window in required_windows if window in {5, 10, 20, 60, 120}
-    )
-    result = calculate_price_volume_factors(
-        frame,
-        windows=usable_base_windows,
-        asset_column=asset_column,
-        date_column=date_column,
-        price_column=price_column,
-        return_column=return_column,
-        amount_column=amount_column,
-        turnover_column=turnover_column,
-        high_column=high_column,
-        low_column=low_column,
-        prev_close_column=prev_close_column,
-    )
-    result = result.sort_values([asset_column, date_column]).copy()
+    result = frame.sort_values([asset_column, date_column]).copy()
     grouped = result.groupby(asset_column, sort=False)
+    price = pd.to_numeric(result[price_column], errors="coerce")
     returns = pd.to_numeric(result[return_column], errors="coerce")
+    amount = pd.to_numeric(result[amount_column], errors="coerce")
+    turnover = pd.to_numeric(result[turnover_column], errors="coerce")
 
     if "rev_1d" in requested:
         result["rev_1d"] = -returns
     for window in required_windows:
         if window == 1:
             continue
-        shifted_price = grouped[price_column].shift(window)
-        trailing_return = result[price_column] / shifted_price - 1.0
-        if f"mom_{window}d" not in result.columns:
+        needs_momentum = f"mom_{window}d" in requested
+        needs_reversal = f"rev_{window}d" in requested
+        if needs_momentum or needs_reversal:
+            shifted_price = price.groupby(result[asset_column], sort=False).shift(
+                window
+            )
+            trailing_return = price / shifted_price - 1.0
+        if needs_momentum:
             result[f"mom_{window}d"] = trailing_return
-        if f"rev_{window}d" not in result.columns:
+        if needs_reversal:
             result[f"rev_{window}d"] = -trailing_return
 
     for window in required_windows:
+        if f"vol_{window}d" in requested:
+            result[f"vol_{window}d"] = returns.groupby(
+                result[asset_column], sort=False
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).std()
+            )
         if f"downside_vol_{window}d" in requested:
             result[f"downside_vol_{window}d"] = _rolling_rms(
                 returns.clip(upper=0.0),
@@ -306,14 +302,29 @@ def calculate_literature_price_volume_factors(
                 lambda series, w=window: series.rolling(w, min_periods=w).kurt()
             )
 
-    turnover = pd.to_numeric(result[turnover_column], errors="coerce")
     for window in required_windows:
+        if f"avg_amount_{window}d" in requested:
+            result[f"avg_amount_{window}d"] = amount.groupby(
+                result[asset_column], sort=False
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+        if f"turnover_{window}d" in requested:
+            result[f"turnover_{window}d"] = turnover.groupby(
+                result[asset_column], sort=False
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
         if f"turnover_chg_{window}d" in requested:
-            shifted_turnover = grouped[turnover_column].shift(window)
+            shifted_turnover = turnover.groupby(result[asset_column], sort=False).shift(
+                window
+            )
             denominator = shifted_turnover.where(shifted_turnover != 0.0)
             result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
         if f"turnover_vol_{window}d" in requested:
-            result[f"turnover_vol_{window}d"] = grouped[turnover_column].transform(
+            result[f"turnover_vol_{window}d"] = turnover.groupby(
+                result[asset_column], sort=False
+            ).transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).std()
             )
         if f"zero_volume_ratio_{window}d" in requested:
@@ -324,6 +335,26 @@ def calculate_literature_price_volume_factors(
                 .transform(
                     lambda series, w=window: series.rolling(w, min_periods=w).mean()
                 )
+            )
+
+    denominator = amount.where(amount != 0.0)
+    illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
+    amplitude = (
+        pd.to_numeric(result[high_column], errors="coerce")
+        - pd.to_numeric(result[low_column], errors="coerce")
+    ) / pd.to_numeric(result[prev_close_column], errors="coerce")
+    for window in required_windows:
+        if f"amihud_{window}d" in requested:
+            result[f"amihud_{window}d"] = illiquidity.groupby(
+                result[asset_column], sort=False
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            )
+        if f"amplitude_{window}d" in requested:
+            result[f"amplitude_{window}d"] = amplitude.groupby(
+                result[asset_column], sort=False
+            ).transform(
+                lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
 
     intraday_range = (
@@ -338,9 +369,15 @@ def calculate_literature_price_volume_factors(
                 lambda series, w=window: series.rolling(w, min_periods=w).mean()
             )
 
-    if float_market_cap_column in result.columns:
+    if (
+        "log_float_market_cap" in requested
+        and float_market_cap_column in result.columns
+    ):
         result["log_float_market_cap"] = _safe_log(result[float_market_cap_column])
-    if total_market_cap_column in result.columns:
+    if (
+        "log_total_market_cap" in requested
+        and total_market_cap_column in result.columns
+    ):
         result["log_total_market_cap"] = _safe_log(result[total_market_cap_column])
     return result
 

@@ -11,6 +11,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     price_volume,
 )
 from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
+    calculate_literature_price_volume_factors,
     exact_literature_price_volume_factor_input_columns,
     expected_literature_price_volume_factor_columns,
     largest_literature_price_volume_lookback_days,
@@ -241,6 +242,96 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     label_payload = json.loads(label_manifest.read_text(encoding="utf-8"))
     assert factor_payload["schema_version"] == "0.1"
     assert label_payload["schema_version"] == "0.1"
+
+
+def test_a_share_factor_full_passes_spec_columns_to_literature_helper(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
+    _write_processed_panel_fixture(processed_root, panel)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(panel["trade_date"], market_type=1),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_literature_helper(frame, **kwargs):
+        captured["expected_columns"] = kwargs.get("expected_columns")
+        result = frame.copy()
+        for column in expected_literature_price_volume_factor_columns():
+            result[column] = 0.0
+        return result
+
+    monkeypatch.setattr(
+        build_factors,
+        "calculate_literature_price_volume_factors",
+        fake_literature_helper,
+    )
+
+    output_root, rows = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
+        processed_root=processed_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    output = read_partitioned_parquet_dataset(output_root, years=(2014,))
+
+    assert captured["expected_columns"] == build_factors._factor_output_columns()
+    assert set(captured["expected_columns"]) == set(
+        expected_literature_price_volume_factor_columns()
+    )
+    assert rows == len(output)
+    assert set(expected_literature_price_volume_factor_columns()).issubset(
+        output.columns
+    )
+
+
+def test_literature_helper_with_contract_columns_avoids_extra_factor_outputs() -> None:
+    contract_columns = expected_literature_price_volume_factor_columns()
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=260))
+
+    result = calculate_literature_price_volume_factors(
+        panel,
+        expected_columns=contract_columns,
+    )
+    slim = build_factors.select_slim_factor_columns(result)
+    extra_factor_columns = {
+        column
+        for column in result.columns
+        if _looks_like_literature_factor_column(column)
+        and column not in contract_columns
+    }
+
+    assert "mom_252d" in result.columns
+    assert "rev_252d" in result.columns
+    assert not {
+        "vol_252d",
+        "downside_vol_252d",
+        "upside_vol_252d",
+        "max_return_252d",
+        "min_return_252d",
+        "drawdown_252d",
+        "skew_252d",
+        "kurt_252d",
+        "avg_amount_252d",
+        "turnover_252d",
+        "turnover_chg_252d",
+        "turnover_vol_252d",
+        "amihud_252d",
+        "zero_volume_ratio_252d",
+        "amplitude_252d",
+        "intraday_range_252d",
+    }.intersection(result.columns)
+    assert extra_factor_columns == set()
+    assert tuple(slim.columns) == tuple(
+        build_factors.a_share_processed_catalog()
+        .get("price_volume_56")
+        .required_columns
+    )
 
 
 def test_a_share_factor_builder_reads_calendar_warmup_and_writes_requested_window(
@@ -1120,3 +1211,29 @@ def _write_interim_fixture(
             data_root / "part-000.parquet",
             index=False,
         )
+
+
+def _looks_like_literature_factor_column(column: str) -> bool:
+    prefixes = (
+        "mom_",
+        "rev_",
+        "vol_",
+        "downside_vol_",
+        "upside_vol_",
+        "max_return_",
+        "min_return_",
+        "drawdown_",
+        "skew_",
+        "kurt_",
+        "avg_amount_",
+        "turnover_",
+        "turnover_chg_",
+        "turnover_vol_",
+        "amihud_",
+        "zero_volume_ratio_",
+        "amplitude_",
+        "intraday_range_",
+        "log_float_market_cap",
+        "log_total_market_cap",
+    )
+    return column.startswith(prefixes)

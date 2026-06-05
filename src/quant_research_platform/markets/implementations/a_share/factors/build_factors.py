@@ -171,6 +171,7 @@ def calculate_price_volume_factor_full(
     factored = calculate_literature_price_volume_factors(
         panel,
         windows=windows,
+        expected_columns=factor_columns,
     )
     factored["trade_date"] = pd.to_datetime(factored["trade_date"])
     mask = factored["trade_date"].between(
