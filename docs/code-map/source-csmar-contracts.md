@@ -73,6 +73,11 @@ These are deferred cleanup considerations, not roadmap commitments:
   naming ambiguity.
 - Possible future removal of duplicated `implementation_package` from
   `ProviderBinding` after multi-source semantics stabilize.
+- Future clarification of whether
+  `ProviderBinding.required_source_dataset_ids` should align with
+  `DEFAULT_INTERIM_DATASETS`, especially because `benchmark_index_market` is
+  derived from raw `index_market` while `DEFAULT_INTERIM_DATASETS` does not
+  materialize `index_market` by default; this does not change current behavior.
 - Future generic source-root layout replacing CSMAR-specific accessors such as
   `raw_csmar_root` / `interim_csmar_root` once a second source is added.
 - Future dev/test dependency cleanup, including whether `pytest-cov` should be
