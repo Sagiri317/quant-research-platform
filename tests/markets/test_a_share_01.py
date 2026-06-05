@@ -188,6 +188,110 @@ def test_a_share_context_universe_and_mask_builders_write_split_layers(
     )["schema_version"] == "0.1"
 
 
+def test_a_share_panel_joins_stock_master_as_of_trade_date() -> None:
+    daily = pd.DataFrame(
+        [
+            _daily_market_row("2020-06-30"),
+            _daily_market_row("2020-07-02"),
+        ]
+    )
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I1",
+            ),
+            _stock_master_row(
+                status_change_date="2020-07-01",
+                company_status="special_status",
+                industry_code="I2",
+            ),
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame([_market_cap_row()]),
+        min_listing_trading_days=1,
+    )
+
+    assert len(panel) == len(daily)
+    assert not panel.duplicated(["stock_code", "trade_date"]).any()
+    by_date = panel.set_index("trade_date").sort_index()
+    assert by_date.loc[pd.Timestamp("2020-06-30"), "company_status"] == "normal"
+    assert (
+        by_date.loc[pd.Timestamp("2020-06-30"), "status_change_date"]
+        == pd.Timestamp("2020-01-01")
+    )
+    assert by_date.loc[pd.Timestamp("2020-07-02"), "company_status"] == (
+        "special_status"
+    )
+    assert (
+        by_date.loc[pd.Timestamp("2020-07-02"), "status_change_date"]
+        == pd.Timestamp("2020-07-01")
+    )
+    assert by_date["listing_date"].eq(pd.Timestamp("2010-01-01")).all()
+
+
+def test_a_share_panel_stock_master_duplicate_effective_date_keeps_last() -> None:
+    daily = pd.DataFrame([_daily_market_row("2020-07-02")])
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                status_change_date="2020-07-01",
+                company_status="older_duplicate",
+                industry_code="I1",
+            ),
+            _stock_master_row(
+                status_change_date="2020-07-01",
+                company_status="newer_duplicate",
+                industry_code="I2",
+            ),
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame([_market_cap_row()]),
+        min_listing_trading_days=1,
+    )
+
+    assert len(panel) == 1
+    assert not panel.duplicated(["stock_code", "trade_date"]).any()
+    assert panel.loc[0, "company_status"] == "newer_duplicate"
+    assert panel.loc[0, "csrc_2012_industry_code"] == "I2"
+
+
+def test_a_share_panel_stock_master_does_not_use_future_status() -> None:
+    daily = pd.DataFrame([_daily_market_row("2020-01-01")])
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                status_change_date="2020-07-01",
+                company_status="future_status",
+                industry_code="I2",
+            ),
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=pd.DataFrame([_market_cap_row()]),
+        min_listing_trading_days=1,
+    )
+
+    assert len(panel) == 1
+    assert not panel.duplicated(["stock_code", "trade_date"]).any()
+    assert pd.isna(panel.loc[0, "company_status"])
+    assert pd.isna(panel.loc[0, "status_change_date"])
+    assert pd.isna(panel.loc[0, "csrc_2012_industry_code"])
+    assert panel.loc[0, "listing_date"] == pd.Timestamp("2010-01-01")
+
+
 def test_a_share_panel_from_interim_applies_exact_end_date(tmp_path) -> None:
     interim_root = tmp_path / "data" / "interim" / "csmar"
     processed_root = tmp_path / "data" / "processed" / "a_share"
@@ -281,6 +385,33 @@ def _daily_market_row(trade_date: str) -> dict[str, object]:
         "eligible_base": True,
         "total_market_cap": 200000.0,
         "float_market_cap": 100000.0,
+    }
+
+
+def _stock_master_row(
+    *,
+    status_change_date: str,
+    company_status: str,
+    industry_code: str,
+) -> dict[str, object]:
+    return {
+        "stock_code": "000001",
+        "stock_name": "demo",
+        "listing_date": pd.Timestamp("2010-01-01"),
+        "delisting_date": pd.NaT,
+        "company_status": company_status,
+        "status_change_date": pd.Timestamp(status_change_date),
+        "csrc_2012_industry_code": industry_code,
+        "csrc_2012_industry_name": f"industry {industry_code}",
+    }
+
+
+def _market_cap_row() -> dict[str, object]:
+    return {
+        "stock_code": "000001",
+        "share_change_date": pd.Timestamp("2010-01-01"),
+        "total_shares": 1000.0,
+        "a_float_shares": 500.0,
     }
 
 

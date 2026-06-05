@@ -84,3 +84,11 @@ processed canonical key.
   without committing row-level output artifacts.
 - Evaluation and prediction remain 2014 smoke evidence; they have not been
   expanded into full historical 2014-2025 runs.
+
+## Narrow Follow-up Notes
+
+- Future `stock_master` conflict policy should detect non-identical duplicate
+  records for the same `stock_code + effective_date` and decide whether to
+  reject, quarantine, or require explicit source-cleaning approval. The current
+  `0.1.0` fix uses deterministic `keep="last"` to avoid row explosion without
+  introducing a broader data-quality workflow.

@@ -81,7 +81,7 @@ def build_research_panel(
         )
         if column in stocks.columns
     ]
-    panel = daily.merge(stocks[keep_stock_columns], on="stock_code", how="left")
+    panel = _asof_join_stock_master(daily, stocks[keep_stock_columns])
     panel["listing_age_days"] = (panel["trade_date"] - panel["listing_date"]).dt.days
 
     cap_columns = [
@@ -163,6 +163,90 @@ def build_research_panel(
     ordered.extend(column for column in panel.columns if column not in ordered)
     panel = panel[ordered]
     return panel
+
+
+def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
+    stock_rows = stocks.copy()
+    stock_rows["_stock_master_row_order"] = range(len(stock_rows))
+    stock_rows["stock_effective_date"] = _stock_master_effective_date(stock_rows)
+    static_listing_date = _first_static_stock_value(stock_rows, "listing_date")
+    stock_rows = (
+        stock_rows.dropna(subset=["stock_effective_date"])
+        .sort_values(
+            ["stock_code", "stock_effective_date", "_stock_master_row_order"],
+            kind="mergesort",
+        )
+        .drop_duplicates(["stock_code", "stock_effective_date"], keep="last")
+    )
+    merged_groups = []
+    stock_output_columns = [
+        column
+        for column in stocks.columns
+        if column not in {"stock_code", "stock_effective_date"}
+    ]
+    for stock_code, daily_stock_frame in daily.groupby("stock_code", sort=False):
+        stock_frame = stock_rows[stock_rows["stock_code"] == stock_code]
+        if stock_frame.empty:
+            stock_result = daily_stock_frame.copy()
+            for column in stock_output_columns:
+                if column not in stock_result.columns:
+                    stock_result[column] = pd.NA
+        else:
+            stock_result = pd.merge_asof(
+                daily_stock_frame.sort_values("trade_date"),
+                stock_frame.sort_values("stock_effective_date"),
+                left_on="trade_date",
+                right_on="stock_effective_date",
+                direction="backward",
+                suffixes=("", "_stock_master"),
+            )
+            if "stock_code_stock_master" in stock_result.columns:
+                stock_result = stock_result.drop(columns=["stock_code_stock_master"])
+            stock_result = stock_result.drop(
+                columns=[
+                    column
+                    for column in ("stock_effective_date", "_stock_master_row_order")
+                    if column in stock_result.columns
+                ]
+            )
+        if "listing_date" in stock_result.columns and stock_code in static_listing_date:
+            stock_result["listing_date"] = stock_result["listing_date"].fillna(
+                static_listing_date[stock_code]
+            )
+        merged_groups.append(stock_result)
+    return pd.concat(merged_groups, ignore_index=True)
+
+
+def _stock_master_effective_date(stocks: pd.DataFrame) -> pd.Series:
+    effective = (
+        pd.to_datetime(stocks["status_change_date"], errors="coerce")
+        if "status_change_date" in stocks
+        else pd.Series(pd.NaT, index=stocks.index)
+    )
+    if "timestamp" in stocks:
+        effective = effective.combine_first(
+            pd.to_datetime(stocks["timestamp"], errors="coerce")
+        )
+    if "listing_date" in stocks:
+        effective = effective.combine_first(
+            pd.to_datetime(stocks["listing_date"], errors="coerce")
+        )
+    return effective
+
+
+def _first_static_stock_value(
+    stocks: pd.DataFrame,
+    column: str,
+) -> dict[object, object]:
+    if column not in stocks:
+        return {}
+    values = (
+        stocks.dropna(subset=[column])
+        .sort_values(["stock_code", "_stock_master_row_order"], kind="mergesort")
+        .drop_duplicates(["stock_code"], keep="first")
+        .set_index("stock_code")[column]
+    )
+    return values.to_dict()
 
 
 def write_panel_processed_data(

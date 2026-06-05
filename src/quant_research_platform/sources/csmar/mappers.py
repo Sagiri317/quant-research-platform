@@ -128,8 +128,13 @@ def normalize_private_export_frame(
         for column in ("listing_date", "delisting_date", "status_change_date"):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], errors="coerce")
-        result["asset_record_date"] = result["listing_date"].combine_first(
-            result.get("status_change_date", result["listing_date"])
+        status_change = (
+            result["status_change_date"]
+            if "status_change_date" in result.columns
+            else pd.Series(pd.NaT, index=result.index)
+        )
+        result["asset_record_date"] = status_change.combine_first(
+            result["listing_date"]
         )
         result = normalize_asset_time_frame(result, time_column="asset_record_date")
         return result.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)

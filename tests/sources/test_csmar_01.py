@@ -114,6 +114,60 @@ def test_csmar_stock_level_interim_uses_uniform_canonical_fields() -> None:
     assert str(result.loc[0, "timestamp"].date()) == "2014-03-04"
 
 
+def test_csmar_stock_master_uses_status_change_date_as_effective_date() -> None:
+    raw = pd.DataFrame(
+        {
+            "Stkcd": ["1", "1"],
+            "Stknme": ["demo", "demo"],
+            "Listdt": ["2010-01-01", "2010-01-01"],
+            "DelistedDate": ["", ""],
+            "Markettype": [4, 4],
+            "Nnindcd": ["I1", "I2"],
+            "Nnindnme": ["industry old", "industry new"],
+            "Statco": ["normal", "special_status"],
+            "Statdt": ["2020-01-01", "2020-07-01"],
+        }
+    )
+
+    result = normalize_private_export_frame(raw, "stock_master")
+
+    assert result["asset_record_date"].tolist() == [
+        pd.Timestamp("2020-01-01"),
+        pd.Timestamp("2020-07-01"),
+    ]
+    assert result["timestamp"].tolist() == [
+        pd.Timestamp("2020-01-01"),
+        pd.Timestamp("2020-07-01"),
+    ]
+    assert result["listing_date"].tolist() == [
+        pd.Timestamp("2010-01-01"),
+        pd.Timestamp("2010-01-01"),
+    ]
+    assert result["timestamp"].nunique() == 2
+
+
+def test_csmar_stock_master_effective_date_falls_back_to_listing_date() -> None:
+    raw = pd.DataFrame(
+        {
+            "Stkcd": ["1"],
+            "Stknme": ["demo"],
+            "Listdt": ["2010-01-01"],
+            "DelistedDate": [""],
+            "Markettype": [4],
+            "Nnindcd": ["I1"],
+            "Nnindnme": ["industry"],
+            "Statco": ["normal"],
+            "Statdt": [""],
+        }
+    )
+
+    result = normalize_private_export_frame(raw, "stock_master")
+
+    assert result.loc[0, "asset_record_date"] == pd.Timestamp("2010-01-01")
+    assert result.loc[0, "timestamp"] == pd.Timestamp("2010-01-01")
+    assert result.loc[0, "listing_date"] == pd.Timestamp("2010-01-01")
+
+
 def test_csmar_index_interim_uses_index_asset_namespace() -> None:
     frame = pd.DataFrame(
         {
