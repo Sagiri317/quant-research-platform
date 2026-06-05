@@ -13,6 +13,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
     exact_literature_price_volume_factor_input_columns,
     expected_literature_price_volume_factor_columns,
+    largest_literature_price_volume_lookback_days,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     build_labels,
@@ -84,6 +85,47 @@ def test_a_share_calendar_helper_rejects_raw_calendar_columns() -> None:
         calendar.a_share_unified_trading_sessions(raw_like)
 
 
+def test_a_share_calendar_helper_calculates_warmup_start_from_open_sessions() -> None:
+    from quant_research_platform.markets.implementations.a_share import calendar
+
+    frame = _trading_calendar_rows(
+        [
+            ("2019-12-26", 1, True),
+            ("2019-12-27", 1, True),
+            ("2019-12-28", 1, False),
+            ("2019-12-29", 1, True),
+            ("2019-12-30", 1, True),
+            ("2020-01-01", 1, False),
+            ("2020-01-02", 1, True),
+            ("2020-01-02", 64, True),
+        ]
+    )
+
+    warmup_start = calendar.warmup_start_date_for_window(
+        frame,
+        start_date="2020-01-01",
+        max_window=3,
+    )
+
+    assert warmup_start == pd.Timestamp("2019-12-27")
+
+
+def test_a_share_calendar_helper_rejects_invalid_warmup_window() -> None:
+    from quant_research_platform.markets.implementations.a_share import calendar
+
+    with pytest.raises(ValueError, match="invalid_factor_warmup_window"):
+        calendar.warmup_start_date_for_window(
+            _trading_calendar_frame(["2020-01-02"], market_type=1),
+            start_date="2020-01-02",
+            max_window=-1,
+        )
+
+
+def test_literature_factor_lookback_infers_requested_factor_window() -> None:
+    assert largest_literature_price_volume_lookback_days(("mom_3d",)) == 3
+    assert largest_literature_price_volume_lookback_days(()) == 0
+
+
 def _panel() -> pd.DataFrame:
     rows = []
     for day in range(1, 6):
@@ -150,6 +192,7 @@ def test_a_share_factor_and_label_helpers_use_past_and_forward_domains() -> None
 def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     panel = _panel()
     processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
     panel_path = (
         processed_data_parquet_root(processed_root, "panels", "daily_panel")
         / "year=2014"
@@ -157,9 +200,15 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     )
     panel_path.parent.mkdir(parents=True)
     panel.to_parquet(panel_path, index=False)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(panel["trade_date"], market_type=1),
+    )
     factored = build_factors.calculate_panel_factors(panel, windows=(2,))
     labels = build_labels.calculate_panel_labels(panel)
     factor_path, factor_rows = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
@@ -192,6 +241,85 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     label_payload = json.loads(label_manifest.read_text(encoding="utf-8"))
     assert factor_payload["schema_version"] == "0.1"
     assert label_payload["schema_version"] == "0.1"
+
+
+def test_a_share_factor_builder_reads_calendar_warmup_and_writes_requested_window(
+    tmp_path,
+) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    dates = pd.bdate_range("2019-01-14", periods=254)
+    panel = _factor_panel_for_dates(dates)
+    _write_processed_panel_fixture(processed_root, panel)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(dates, market_type=1),
+    )
+
+    output_root, rows = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
+        processed_root=processed_root,
+        start_year=2020,
+        end_year=2020,
+    )
+    output = read_partitioned_parquet_dataset(output_root, years=(2020,))
+
+    assert rows == len(output)
+    assert output["timestamp"].min() >= pd.Timestamp("2020-01-01")
+    assert output["timestamp"].max() <= pd.Timestamp("2020-12-31")
+    first_2020 = output.sort_values("timestamp").iloc[0]
+    assert pd.notna(first_2020["mom_252d"])
+
+
+def test_a_share_factor_builder_requires_trading_calendar(tmp_path) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    panel = _factor_panel_for_dates(pd.bdate_range("2020-01-01", periods=3))
+    _write_processed_panel_fixture(processed_root, panel)
+
+    with pytest.raises(ValueError, match="missing_trading_calendar_interim"):
+        build_factors.calculate_price_volume_factor_full(
+            interim_root=interim_root,
+            processed_root=processed_root,
+            start_year=2020,
+            end_year=2020,
+        )
+
+
+def test_a_share_factor_builder_requires_warmup_panel_partition(tmp_path) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    dates = pd.bdate_range("2019-01-14", periods=254)
+    panel = _factor_panel_for_dates(dates[dates.year == 2020])
+    _write_processed_panel_fixture(processed_root, panel)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(dates, market_type=1),
+    )
+
+    with pytest.raises(ValueError, match="missing_warmup_processed_input"):
+        build_factors.calculate_price_volume_factor_full(
+            interim_root=interim_root,
+            processed_root=processed_root,
+            start_year=2020,
+            end_year=2020,
+        )
+
+
+def test_a_share_factor_builder_does_not_depend_on_raw_calendar() -> None:
+    source = Path(build_factors.__file__).read_text(encoding="utf-8")
+
+    forbidden_terms = (
+        "data/raw/csmar/trading_calendar",
+        'normalize_private_export_frame(raw_frame, "trading_calendar")',
+        "Markettype",
+        "Clddt",
+        "Daywk",
+        "State",
+    )
+    assert not any(term in source for term in forbidden_terms)
 
 
 def test_a_share_context_universe_and_mask_builders_write_split_layers(
@@ -725,6 +853,37 @@ def _basic_trading_calendar() -> pd.DataFrame:
     )
 
 
+def _factor_panel_for_dates(dates) -> pd.DataFrame:
+    rows = []
+    for offset, date in enumerate(pd.to_datetime(dates), start=1):
+        rows.append(
+            {
+                "market_id": "a_share",
+                "asset_id": "000001",
+                "stock_code": "000001",
+                "timestamp": pd.Timestamp(date),
+                "session_date": pd.Timestamp(date),
+                "available_at": pd.Timestamp(date),
+                "trade_date": pd.Timestamp(date),
+                "adj_open": float(100 + offset),
+                "adj_close": float(100 + offset),
+                "return_1d": 0.001 * offset,
+                "amount": 10000.0 + offset,
+                "turnover": 0.01 + offset / 100000.0,
+                "market_type": 1,
+                "high": float(101 + offset),
+                "low": float(99 + offset),
+                "prev_close": float(99 + offset),
+                "total_market_cap": float(1_000_000 + offset),
+                "float_market_cap": float(500_000 + offset),
+                "eligible": True,
+                "can_enter": True,
+                "can_exit": True,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _trading_calendar_frame(
     calendar_dates,
     *,
@@ -752,6 +911,19 @@ def _trading_calendar_rows(rows) -> pd.DataFrame:
             for date, market_type, is_trading_day in rows
         ]
     )
+
+
+def _write_processed_panel_fixture(processed_root, frame: pd.DataFrame) -> None:
+    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    result = frame.copy()
+    result["_fixture_year"] = pd.to_datetime(result["timestamp"]).dt.year
+    for year, year_frame in result.groupby("_fixture_year"):
+        partition_root = data_root / f"year={int(year)}"
+        partition_root.mkdir(parents=True)
+        year_frame.drop(columns=["_fixture_year"]).to_parquet(
+            partition_root / "part-000.parquet",
+            index=False,
+        )
 
 
 def _write_minimal_panel_interim_fixture(interim_root) -> None:

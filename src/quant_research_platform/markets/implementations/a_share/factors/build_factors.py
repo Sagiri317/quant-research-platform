@@ -10,12 +10,16 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.markets.implementations.a_share.calendar import (
+    warmup_start_date_for_window,
+)
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.factors.literature_price_volume import (  # noqa: E501
     DEFAULT_LITERATURE_WINDOWS,
     calculate_literature_price_volume_factors,
+    largest_literature_price_volume_lookback_days,
 )
 from quant_research_platform.markets.implementations.a_share.processed.io import (
     layout_from_processed_root,
@@ -116,6 +120,7 @@ def read_full_panel_for_factor_build(
 
 def calculate_price_volume_factor_full(
     *,
+    interim_root: Path,
     processed_root: Path,
     start_year: int,
     end_year: int,
@@ -123,13 +128,36 @@ def calculate_price_volume_factor_full(
 ) -> tuple[Path, int]:
     """Calculate and write split price-volume factor processed data."""
 
-    panel = read_full_panel_for_factor_build(
-        processed_root=processed_root,
-        start_year=start_year,
-        end_year=end_year,
-    )
     catalog = a_share_processed_catalog()
     spec = catalog.get("price_volume_56")
+    factor_columns = _factor_output_columns()
+    max_window = _infer_factor_warmup_window(factor_columns)
+    trading_calendar = _read_trading_calendar_interim(interim_root)
+    requested_start_date = pd.Timestamp(year=start_year, month=1, day=1)
+    requested_end_date = pd.Timestamp(year=end_year, month=12, day=31)
+    warmup_start_date = warmup_start_date_for_window(
+        trading_calendar,
+        start_date=requested_start_date,
+        max_window=max_window,
+    )
+    _assert_panel_partitions_present(
+        processed_root=processed_root,
+        start_year=warmup_start_date.year,
+        end_year=end_year,
+    )
+    panel = read_full_panel_for_factor_build(
+        processed_root=processed_root,
+        start_year=warmup_start_date.year,
+        end_year=end_year,
+    )
+    panel["trade_date"] = pd.to_datetime(panel["trade_date"])
+    panel = panel.loc[
+        panel["trade_date"].between(
+            warmup_start_date,
+            requested_end_date,
+            inclusive="both",
+        )
+    ].copy()
     missing_key = [
         column for column in spec.primary_key if column not in panel.columns
     ]
@@ -142,7 +170,11 @@ def calculate_price_volume_factor_full(
         windows=windows,
     )
     factored["trade_date"] = pd.to_datetime(factored["trade_date"])
-    mask = factored["trade_date"].dt.year.between(start_year, end_year)
+    mask = factored["trade_date"].between(
+        requested_start_date,
+        requested_end_date,
+        inclusive="both",
+    )
     output = select_slim_factor_columns(factored.loc[mask].copy())
     output = output.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
     data_root = write_processed_data(
@@ -152,6 +184,52 @@ def calculate_price_volume_factor_full(
         processed_data_id="price_volume_56",
     )
     return data_root, len(output)
+
+
+def _read_trading_calendar_interim(interim_root: Path) -> pd.DataFrame:
+    try:
+        return read_partitioned_parquet_dataset(
+            Path(interim_root) / "trading_calendar" / "data"
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("missing_trading_calendar_interim") from exc
+
+
+def _factor_output_columns() -> tuple[str, ...]:
+    spec = a_share_processed_catalog().get("price_volume_56")
+    return tuple(
+        column
+        for column in spec.required_columns
+        if spec.column_roles[column] is ColumnRole.FACTOR
+    )
+
+
+def _infer_factor_warmup_window(factor_columns: tuple[str, ...]) -> int:
+    if not factor_columns:
+        raise ValueError("unable_to_infer_factor_warmup_window")
+    max_window = largest_literature_price_volume_lookback_days(factor_columns)
+    if max_window < 0:
+        raise ValueError("invalid_factor_warmup_window")
+    return max_window
+
+
+def _assert_panel_partitions_present(
+    *,
+    processed_root: Path,
+    start_year: int,
+    end_year: int,
+) -> None:
+    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    missing = [
+        year
+        for year in range(start_year, end_year + 1)
+        if not list((data_root / f"year={year}").glob("*.parquet"))
+    ]
+    if missing:
+        raise ValueError(
+            "missing_warmup_processed_input: "
+            + ", ".join(str(year) for year in missing)
+        )
 
 
 def _panel_part_paths(
@@ -204,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: unsupported factor set: {args.factor_set}")
         return 2
     output_path, rows = calculate_price_volume_factor_full(
+        interim_root=Path("data/interim/csmar"),
         processed_root=Path(args.processed_root),
         start_year=args.start_year,
         end_year=args.end_year,

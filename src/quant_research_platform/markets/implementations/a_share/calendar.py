@@ -47,6 +47,32 @@ def market_type_trading_sessions(
     return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
 
 
+def warmup_start_date_for_window(
+    calendar: pd.DataFrame,
+    *,
+    start_date: str | pd.Timestamp,
+    max_window: int,
+) -> pd.Timestamp:
+    """Return the first warmup input session for a requested start date."""
+
+    if max_window < 0:
+        raise ValueError("invalid_factor_warmup_window")
+    normalized = _require_normalized_calendar(calendar)
+    if bool(
+        normalized.duplicated(["source_market_type", "calendar_date"], keep=False).any()
+    ):
+        raise ValueError("duplicate_trading_calendar_key")
+    sessions = a_share_unified_trading_sessions(normalized)
+    if sessions.empty:
+        raise ValueError("trading_calendar_no_unified_sessions")
+    requested_start = pd.Timestamp(start_date).normalize()
+    start_index = int(sessions.searchsorted(requested_start, side="left"))
+    if start_index >= len(sessions):
+        raise ValueError("trading_calendar_start_date_out_of_range")
+    warmup_start_index = max(0, start_index - max_window)
+    return pd.Timestamp(sessions[warmup_start_index])
+
+
 def compute_listing_age_trading_days(
     frame: pd.DataFrame,
     calendar: pd.DataFrame,
@@ -147,4 +173,5 @@ __all__ = [
     "a_share_unified_trading_sessions",
     "compute_listing_age_trading_days",
     "market_type_trading_sessions",
+    "warmup_start_date_for_window",
 ]

@@ -75,6 +75,7 @@ def build_a_share_processed_layers(
         end_year=end_year,
     )
     factor_root, factor_rows = calculate_price_volume_factor_full(
+        interim_root=interim_root,
         processed_root=processed_root,
         start_year=start_year,
         end_year=end_year,
