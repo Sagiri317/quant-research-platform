@@ -34,6 +34,8 @@ def build_schema_inventory(project_root: Path) -> list[dict[str, Any]]:
 
     root = Path(project_root)
     items = [_inventory_item(root, data_root) for data_root in _iter_data_roots(root)]
+    if not items:
+        raise ValueError("schema_inventory_no_datasets_found")
     return sorted(items, key=lambda item: item["logical_relative_root"])
 
 

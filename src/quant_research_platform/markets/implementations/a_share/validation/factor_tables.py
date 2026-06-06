@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.markets.implementations.a_share.catalog import (
@@ -112,6 +113,17 @@ def check_factor_table(
                 message="Factor table contains split label columns.",
             )
         )
+    non_finite_count = _non_finite_numeric_count(result, factors)
+    if non_finite_count:
+        issues.append(
+            QualityIssue(
+                dataset="factor_table",
+                check="non_finite_factor_values",
+                severity="blocking",
+                count=non_finite_count,
+                message="Factor table contains non-finite numeric factor values.",
+            )
+        )
     forbidden_present = [
         column for column in FORBIDDEN_FACTOR_TABLE_COLUMNS if column in result
     ]
@@ -163,6 +175,7 @@ def check_label_table(
         result["timestamp"] = timestamps
     labels = label_columns(result)
     factors = factor_columns(result)
+    present_labels = [column for column in labels if column in spec.required_columns]
     issues = [
         issue
         for issue in (
@@ -188,9 +201,19 @@ def check_label_table(
                 message="Label table contains split factor columns.",
             )
         )
+    non_finite_count = _non_finite_numeric_count(result, present_labels)
+    if non_finite_count:
+        issues.append(
+            QualityIssue(
+                dataset="label_table",
+                check="non_finite_label_values",
+                severity="blocking",
+                count=non_finite_count,
+                message="Label table contains non-finite numeric label values.",
+            )
+        )
     min_date, max_date = date_bounds(timestamps)
     rows = len(result)
-    present_labels = [column for column in labels if column in spec.required_columns]
     non_null_rates = {
         column: float(result[column].notna().mean()) if rows else 0.0
         for column in present_labels
@@ -235,3 +258,11 @@ def _unexpected_columns_issue(
         count=len(unexpected),
         message=f"Unexpected columns: {unexpected}.",
     )
+
+
+def _non_finite_numeric_count(frame: pd.DataFrame, columns: list[str]) -> int:
+    count = 0
+    for column in columns:
+        numeric = pd.to_numeric(frame[column], errors="coerce")
+        count += int(np.isinf(numeric).sum())
+    return count

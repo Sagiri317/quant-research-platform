@@ -44,8 +44,8 @@ from quant_research_platform.storage.parquet import write_interim_data
 
 INDEX_METADATA_TIME_COLUMNS: tuple[str, ...] = (
     "release_date",
-    "base_date",
     "start_date",
+    "base_date",
 )
 DEFAULT_INTERIM_DATASETS: tuple[str, ...] = (
     "daily_market",
@@ -68,6 +68,10 @@ ASSET_REFERENCE_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
     "asset_id",
     "source_id",
     "source_asset_id",
+)
+ASSET_REFERENCE_TIMESTAMP_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
+    *ASSET_REFERENCE_INTERIM_KEEP_COLUMNS,
+    "timestamp",
 )
 DAILY_MARKET_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
     *ASSET_TIME_INTERIM_KEEP_COLUMNS,
@@ -97,7 +101,7 @@ DAILY_MARKET_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
     "turnover",
 )
 STOCK_MASTER_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
-    *ASSET_REFERENCE_INTERIM_KEEP_COLUMNS,
+    *ASSET_REFERENCE_TIMESTAMP_INTERIM_KEEP_COLUMNS,
     "stock_name",
     "listing_date",
     "delisting_date",
@@ -120,11 +124,12 @@ ADJUSTMENT_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
     "cum_backward_adjust_factor",
 )
 INDEX_INFO_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
-    *ASSET_REFERENCE_INTERIM_KEEP_COLUMNS,
+    *ASSET_REFERENCE_TIMESTAMP_INTERIM_KEEP_COLUMNS,
     "index_name",
     "calculation_formula",
     "index_class",
     "release_date",
+    "start_date",
     "base_date",
 )
 BENCHMARK_INDEX_MARKET_KEEP_COLUMNS: tuple[str, ...] = (
@@ -385,6 +390,42 @@ def a_share_csmar_interim_catalog() -> InterimDataCatalog:
     return catalog
 
 
+def a_share_csmar_reference_spec_for_frame(
+    interim_data_id: str,
+    frame: pd.DataFrame,
+    *,
+    force_time_aware: bool = False,
+) -> InterimDataSpec:
+    """Return the reference spec implied by one normalized reference frame."""
+
+    if interim_data_id not in ASSET_REFERENCE_INTERIM_DATASETS:
+        raise ValueError(f"unsupported_reference_interim_data_id: {interim_data_id}")
+    columns = A_SHARE_CSMAR_INTERIM_KEEP_COLUMNS[interim_data_id]
+    time_aware = force_time_aware or _has_multiple_effective_reference_records(frame)
+    if time_aware:
+        primary_key = (
+            *ASSET_REFERENCE_INTERIM_KEEP_COLUMNS,
+            "timestamp",
+        )
+        grain = DataGrain.ASSET_REFERENCE_TIMESTAMP
+        partition_columns = ("year",)
+    else:
+        primary_key = ASSET_REFERENCE_INTERIM_KEEP_COLUMNS
+        grain = DataGrain.ASSET_REFERENCE
+        partition_columns = ()
+        columns = tuple(column for column in columns if column != "timestamp")
+    return InterimDataSpec(
+        market_id=MarketId("a_share"),
+        source_id=SourceId(CSMAR_SOURCE_ID),
+        interim_data_id=interim_data_id,
+        frequency=DataFrequency.DAILY,
+        grain=grain,
+        column_roles=_column_roles(columns, primary_key=primary_key),
+        primary_key=primary_key,
+        partition_columns=partition_columns,
+    )
+
+
 def a_share_csmar_provider_binding() -> ProviderBinding:
     """Return the A-share data product binding to CSMAR source datasets."""
 
@@ -544,6 +585,8 @@ def a_share_csmar_normalize_private_export_frame(
         result["asset_record_date"] = status_change.combine_first(
             result["listing_date"]
         )
+        if result["asset_record_date"].isna().any():
+            raise ValueError("missing_stock_master_effective_timestamp")
         result = a_share_csmar_normalize_asset_time_frame(
             result,
             time_column="asset_record_date",
@@ -670,7 +713,10 @@ def a_share_csmar_build_interim_frame(
 
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    result = pd.concat(frames, ignore_index=True)
+    if interim_data_id in ASSET_REFERENCE_INTERIM_DATASETS:
+        result = _dedupe_reference_primary_key_rows(result, interim_data_id)
+    return result
 
 
 def a_share_csmar_import_interim_data(
@@ -731,6 +777,63 @@ def a_share_csmar_import_interim_data(
     )
 
 
+def _dedupe_reference_primary_key_rows(
+    frame: pd.DataFrame,
+    interim_data_id: str,
+) -> pd.DataFrame:
+    spec = a_share_csmar_interim_catalog().get(interim_data_id)
+    primary_key = list(spec.primary_key)
+    missing = [column for column in primary_key if column not in frame.columns]
+    if missing:
+        raise ValueError("missing_reference_primary_key_columns: " + ", ".join(missing))
+    duplicated = frame.duplicated(primary_key, keep=False)
+    if not bool(duplicated.any()):
+        result = frame.copy()
+        result.attrs["reference_exact_duplicate_count"] = 0
+        return result
+
+    ordered = frame.copy()
+    ordered["_reference_row_order"] = range(len(ordered))
+    exact_duplicate_count = 0
+    for _, group in ordered.loc[duplicated].groupby(
+        primary_key,
+        sort=False,
+        dropna=False,
+    ):
+        content = group.drop(columns=["_reference_row_order"])
+        if len(content.drop_duplicates()) > 1:
+            raise ValueError(
+                f"conflicting_reference_primary_key_duplicates: {interim_data_id}"
+            )
+        exact_duplicate_count += len(group) - 1
+
+    result = (
+        ordered.sort_values(
+            [*primary_key, "_reference_row_order"],
+            kind="mergesort",
+        )
+        .drop_duplicates(primary_key, keep="last")
+        .drop(columns=["_reference_row_order"])
+        .reset_index(drop=True)
+    )
+    result.attrs["reference_exact_duplicate_count"] = int(exact_duplicate_count)
+    return result
+
+
+def _has_multiple_effective_reference_records(frame: pd.DataFrame) -> bool:
+    if frame.empty:
+        return False
+    identity_columns = list(ASSET_REFERENCE_INTERIM_KEEP_COLUMNS)
+    if any(column not in frame.columns for column in (*identity_columns, "timestamp")):
+        return False
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    grouped = frame.assign(_effective_timestamp=timestamps).groupby(
+        identity_columns,
+        dropna=False,
+    )["_effective_timestamp"]
+    return bool((grouped.nunique(dropna=True) > 1).any())
+
+
 def _interim_spec(interim_data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
     if interim_data_id == "trading_calendar":
         primary_key = ("market_id", "source_id", "timestamp", "source_market_type")
@@ -744,14 +847,38 @@ def _interim_spec(interim_data_id: str, columns: tuple[str, ...]) -> InterimData
             primary_key=primary_key,
             partition_columns=("year",),
         )
-    if interim_data_id in ASSET_REFERENCE_INTERIM_DATASETS:
-        primary_key = ("market_id", "asset_id", "source_id", "source_asset_id")
+    if interim_data_id == "stock_master":
+        primary_key = (
+            "market_id",
+            "asset_id",
+            "source_id",
+            "source_asset_id",
+            "timestamp",
+        )
         return InterimDataSpec(
             market_id=MarketId("a_share"),
             source_id=SourceId(CSMAR_SOURCE_ID),
             interim_data_id=interim_data_id,
             frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
+    if interim_data_id == "index_info":
+        return a_share_csmar_reference_spec_for_frame(
+            interim_data_id,
+            pd.DataFrame(columns=list(columns)),
+            force_time_aware=True,
+        )
+    if interim_data_id in ASSET_REFERENCE_INTERIM_DATASETS:
+        primary_key = ASSET_REFERENCE_INTERIM_KEEP_COLUMNS
+        return InterimDataSpec(
+            market_id=MarketId("a_share"),
+            source_id=SourceId(CSMAR_SOURCE_ID),
+            interim_data_id=interim_data_id,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE,
             column_roles=_column_roles(columns, primary_key=primary_key),
             primary_key=primary_key,
             partition_columns=(),
@@ -926,6 +1053,7 @@ __all__ = [
     "a_share_csmar_normalize_index_time_frame",
     "a_share_csmar_normalize_private_export_frame",
     "a_share_csmar_provider_binding",
+    "a_share_csmar_reference_spec_for_frame",
     "a_share_csmar_render_column_pruning_report",
     "a_share_csmar_with_benchmark_index_fields",
     "a_share_csmar_with_ohlc_valid",

@@ -282,6 +282,57 @@ def test_package_inits_do_not_forward_storage_or_cli_owner_symbols() -> None:
     assert hits == []
 
 
+def test_reviewed_package_inits_do_not_reexport_convenience_symbols() -> None:
+    hits: list[str] = []
+    for path in (
+        SOURCE_ROOT / "research/evaluations/__init__.py",
+        SOURCE_ROOT / "compute/tensor/__init__.py",
+    ):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom | ast.Import):
+                hits.append(f"{path}:{node.lineno}: import")
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "__all__":
+                        hits.append(f"{path}:{node.lineno}: __all__")
+
+    assert hits == []
+
+
+def test_non_interface_source_modules_do_not_define_hidden_cli_entrypoints() -> None:
+    allowed_cli_root = SOURCE_ROOT / "interfaces/cli"
+    allowed_private_cli = SOURCE_ROOT / "interfaces/private_cli.py"
+    hits: list[str] = []
+    for path in _python_files((SOURCE_ROOT,)):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if path == allowed_private_cli or _is_relative_to(path, allowed_cli_root):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "argparse":
+                        hits.append(f"{path}:{node.lineno}: argparse")
+            elif isinstance(node, ast.ImportFrom) and node.module == "argparse":
+                hits.append(f"{path}:{node.lineno}: argparse")
+            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and (
+                node.name == "main"
+            ):
+                hits.append(f"{path}:{node.lineno}: main")
+            elif isinstance(node, ast.Call):
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "Typer"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "typer"
+                ):
+                    hits.append(f"{path}:{node.lineno}: typer.Typer")
+            elif isinstance(node, ast.If) and _is_dunder_main_guard(node.test):
+                hits.append(f"{path}:{node.lineno}: __main__")
+
+    assert hits == []
+
+
 def test_csmar_source_package_does_not_own_market_interim_contracts() -> None:
     source_root = SOURCE_ROOT / "sources/csmar"
     forbidden_raw_names = {
@@ -421,6 +472,30 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
 
     assert missing == []
     assert reverse_imports == []
+
+
+def test_csmar_source_raw_exports_do_not_write_metadata_manifests() -> None:
+    path = SOURCE_ROOT / "sources/csmar/raw_exports.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    text = path.read_text(encoding="utf-8")
+    hits: list[str] = []
+    forbidden_functions = {"write_raw_export_metadata"}
+    forbidden_imports = {
+        "write_manifest",
+        "write_internal_artifact_manifest",
+        "build_raw_export_metadata",
+    }
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in forbidden_functions:
+            hits.append(f"{path}:{node.lineno}: {node.name}")
+        if isinstance(node, ast.ImportFrom):
+            imported = {alias.name for alias in node.names}
+            for name in sorted(imported & forbidden_imports):
+                hits.append(f"{path}:{node.lineno}: {name}")
+
+    assert "write_metadata" not in text
+    assert "metadata_path" not in text
+    assert hits == []
 
 
 def test_csmar_field_mappings_does_not_own_validators_checksums_or_mappers() -> None:
@@ -620,3 +695,26 @@ def _python_files(roots: tuple[Path, ...]) -> list[Path]:
             continue
         files.extend(path for path in root.rglob("*.py") if path.is_file())
     return files
+
+
+def _is_dunder_main_guard(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Compare):
+        return False
+    if not (
+        isinstance(node.left, ast.Name)
+        and node.left.id == "__name__"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and len(node.comparators) == 1
+    ):
+        return False
+    comparator = node.comparators[0]
+    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True

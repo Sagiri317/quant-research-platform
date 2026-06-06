@@ -39,8 +39,8 @@ from quant_research_platform.research.datasets import (
     validate_evaluation_input,
     validate_prediction_input,
 )
-from quant_research_platform.research.evaluations import (
-    evaluate_factor_frame,
+from quant_research_platform.research.evaluations.engine import evaluate_factor_frame
+from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
 )
 from quant_research_platform.research.models import fit_linear_baseline

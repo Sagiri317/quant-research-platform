@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -249,6 +250,50 @@ def test_a_share_label_validator_requires_exact_registered_columns() -> None:
         and "unknown_label" in issue.message
         and "eligible" in issue.message
         for issue in extra_report.issues
+    )
+
+
+def test_a_share_factor_and_label_validators_reject_infinite_numeric_outputs() -> None:
+    factor_frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset_a"],
+            "timestamp": pd.to_datetime(["2024-01-02"]),
+            **{
+                column: [0.0]
+                for column in a_share_price_volume_factor_columns()
+            },
+        }
+    )
+    label_columns = (
+        "forward_return_1d",
+        "forward_return_5d",
+        "forward_return_10d",
+        "forward_return_20d",
+        "forward_return_60d",
+        "forward_return_120d",
+    )
+    label_frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset_a"],
+            "timestamp": pd.to_datetime(["2024-01-02"]),
+            **{column: [0.0] for column in label_columns},
+        }
+    )
+    factor_frame.loc[0, "mom_20d"] = np.inf
+    label_frame.loc[0, "forward_return_20d"] = -np.inf
+
+    factor_report = factor_tables.check_factor_table(factor_frame)
+    label_report = factor_tables.check_label_table(label_frame)
+
+    assert any(
+        issue.check == "non_finite_factor_values" and issue.count == 1
+        for issue in factor_report.issues
+    )
+    assert any(
+        issue.check == "non_finite_label_values" and issue.count == 1
+        for issue in label_report.issues
     )
 
 

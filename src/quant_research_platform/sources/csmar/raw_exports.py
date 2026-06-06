@@ -9,14 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.storage.manifests import write_manifest
-
-from .checksums import build_raw_export_metadata
-from .raw_schemas import (
-    RawExportInspection,
-    default_metadata_path,
-    inspect_raw_export_file,
-)
+from .raw_schemas import RawExportInspection, inspect_raw_export_file
 
 SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv", ".xlsx", ".txt"}
 STRING_CODE_DTYPES = {"Stkcd": str, "Symbol": str, "Indexcd": str}
@@ -24,22 +17,21 @@ STRING_CODE_DTYPES = {"Stkcd": str, "Symbol": str, "Indexcd": str}
 
 @dataclass(frozen=True)
 class RawExportIntakeResult:
-    """记录单个 raw export 检查结果，可附带 metadata output。"""
+    """Record one raw export inspection result."""
 
     path: Path
     inspection: RawExportInspection | None = None
-    metadata_path: Path | None = None
     error: str | None = None
 
     @property
     def ok(self) -> bool:
-        """返回检查和可选 metadata 生成是否成功。"""
+        """Return whether inspection succeeded."""
 
         return self.error is None and self.inspection is not None
 
 
 def is_raw_export_file(path: Path) -> bool:
-    """判断路径是否像原始 CSMAR export 数据文件。"""
+    """Return whether the path looks like a supported raw export file."""
 
     return (
         path.is_file()
@@ -51,39 +43,20 @@ def is_raw_export_file(path: Path) -> bool:
 
 
 def iter_raw_export_files(root: Path) -> list[Path]:
-    """返回私有 raw directory 下的原始 CSMAR export files。"""
+    """Return supported raw export files under a private raw directory."""
 
     return sorted(path for path in root.rglob("*") if is_raw_export_file(path))
 
 
-def inspect_raw_export(
-    path: Path,
-    *,
-    write_metadata: bool = False,
-) -> RawExportIntakeResult:
-    """检查单个 raw export，并可选写出 metadata sidecar。"""
+def inspect_raw_export(path: Path) -> RawExportIntakeResult:
+    """Inspect one raw export without writing metadata sidecars."""
 
     try:
-        metadata_path = write_raw_export_metadata(path) if write_metadata else None
         inspection = inspect_raw_export_file(path)
     except Exception as exc:  # noqa: BLE001
         return RawExportIntakeResult(path=path, error=str(exc))
 
-    return RawExportIntakeResult(
-        path=path,
-        inspection=inspection,
-        metadata_path=metadata_path,
-    )
-
-
-def write_raw_export_metadata(path: str | Path) -> Path:
-    """Write the approved raw export metadata sidecar through manifest storage."""
-
-    export_path = Path(path)
-    return write_manifest(
-        default_metadata_path(export_path),
-        build_raw_export_metadata(export_path),
-    )
+    return RawExportIntakeResult(path=path, inspection=inspection)
 
 
 def read_private_export_file(path: str | Path, dataset: str) -> pd.DataFrame:
@@ -138,17 +111,10 @@ def find_dataset_files(raw_root: Path, dataset: str) -> list[Path]:
     )
 
 
-def inspect_raw_export_tree(
-    root: Path,
-    *,
-    write_metadata: bool = False,
-) -> list[RawExportIntakeResult]:
-    """检查私有 raw directory 下所有受支持的 raw exports。"""
+def inspect_raw_export_tree(root: Path) -> list[RawExportIntakeResult]:
+    """Inspect supported raw exports under a private raw directory."""
 
-    return [
-        inspect_raw_export(path, write_metadata=write_metadata)
-        for path in iter_raw_export_files(root)
-    ]
+    return [inspect_raw_export(path) for path in iter_raw_export_files(root)]
 
 
 __all__ = [
@@ -162,5 +128,4 @@ __all__ = [
     "iter_private_export_chunks",
     "iter_raw_export_files",
     "read_private_export_file",
-    "write_raw_export_metadata",
 ]

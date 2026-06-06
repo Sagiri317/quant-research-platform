@@ -42,7 +42,13 @@ def schema_inventory(
     if output.exists():
         typer.echo("output_already_exists", err=True)
         raise typer.Exit(code=2)
-    inventory = build_schema_inventory(project_root)
+    try:
+        inventory = build_schema_inventory(project_root)
+    except ValueError as exc:
+        if str(exc) == "schema_inventory_no_datasets_found":
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        raise
     atomic_write_text(
         output,
         json.dumps(inventory, ensure_ascii=False, indent=2) + "\n",

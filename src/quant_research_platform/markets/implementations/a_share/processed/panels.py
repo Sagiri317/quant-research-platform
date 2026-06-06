@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pandas as pd
@@ -367,31 +366,3 @@ def _filter_panel_end_date(frame: pd.DataFrame, *, end_date: str) -> pd.DataFram
     return result.loc[result["timestamp"] <= pd.Timestamp(end_date)].reset_index(
         drop=True
     )
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Build full-sample private CSMAR research panel."
-    )
-    parser.add_argument("--interim-root", default="data/interim/csmar")
-    parser.add_argument("--processed-root", default="data/processed/a_share")
-    parser.add_argument("--start-year", type=int, default=2014)
-    parser.add_argument("--end-year", type=int, default=2025)
-    parser.add_argument("--end-date", default="2025-12-31")
-    parser.add_argument("--min-listing-trading-days", type=int, default=120)
-    args = parser.parse_args(argv)
-
-    output_path, rows = build_panel_from_interim(
-        interim_root=Path(args.interim_root),
-        processed_root=Path(args.processed_root),
-        start_year=args.start_year,
-        end_year=args.end_year,
-        end_date=args.end_date,
-        min_listing_trading_days=args.min_listing_trading_days,
-    )
-    print(f"wrote daily_panel rows={rows}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

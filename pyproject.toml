@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-qrp = "quant_research_platform.interfaces.cli:main"
+qrp = "quant_research_platform.interfaces.cli.commands:main"
 qrp-private = "quant_research_platform.interfaces.private_cli:main"
 
 [tool.pytest.ini_options]

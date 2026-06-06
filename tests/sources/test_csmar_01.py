@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import re
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -26,6 +26,10 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.parquet import (
     read_partitioned_parquet_dataset,
     write_interim_data,
+)
+from tests.helpers.synthetic_a_share import (
+    make_synthetic_index_info_dynamic,
+    make_synthetic_index_info_static,
 )
 
 a_share_csmar_apply_interim_column_rules = (
@@ -111,13 +115,47 @@ def test_csmar_trading_calendar_interim_spec_uses_calendar_grain() -> None:
     assert daily_market.partition_columns == ("year",)
 
     stock_master = catalog.get("stock_master")
+    assert stock_master.grain is DataGrain.ASSET_REFERENCE_TIMESTAMP
     assert stock_master.primary_key == (
         "market_id",
         "asset_id",
         "source_id",
         "source_asset_id",
+        "timestamp",
     )
-    assert stock_master.partition_columns == ()
+    assert stock_master.partition_columns == ("year",)
+    assert "timestamp" in stock_master.required_columns
+    assert "session_date" not in stock_master.required_columns
+    assert "available_at" not in stock_master.required_columns
+
+
+def test_csmar_index_info_synthetic_reference_classification() -> None:
+    static_spec = a_share_csmar.a_share_csmar_reference_spec_for_frame(
+        "index_info",
+        make_synthetic_index_info_static(),
+    )
+    dynamic_spec = a_share_csmar.a_share_csmar_reference_spec_for_frame(
+        "index_info",
+        make_synthetic_index_info_dynamic(),
+    )
+
+    assert static_spec.grain is DataGrain.ASSET_REFERENCE
+    assert static_spec.primary_key == (
+        "market_id",
+        "asset_id",
+        "source_id",
+        "source_asset_id",
+    )
+    assert static_spec.partition_columns == ()
+    assert dynamic_spec.grain is DataGrain.ASSET_REFERENCE_TIMESTAMP
+    assert dynamic_spec.primary_key == (
+        "market_id",
+        "asset_id",
+        "source_id",
+        "source_asset_id",
+        "timestamp",
+    )
+    assert dynamic_spec.partition_columns == ("year",)
 
 
 def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
@@ -127,6 +165,21 @@ def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
     assert checksums.build_raw_export_metadata.__module__.endswith(".checksums")
     assert raw_exports.read_private_export_file.__module__.endswith(".raw_exports")
     assert hasattr(checksums, "raw_export_sha256")
+    assert not hasattr(raw_exports, "write_raw_export_metadata")
+
+
+def test_csmar_field_mappings_describe_source_local_aliases() -> None:
+    assert "source-local normalized column mappings" in (
+        field_mappings.csmar_column_mapping.__doc__ or ""
+    )
+    assert "source-local normalized aliases" in (
+        field_mappings.map_csmar_columns.__doc__ or ""
+    )
+    source = Path("src/quant_research_platform/sources/csmar/field_mappings.py")
+    text = source.read_text(encoding="utf-8")
+
+    assert "canonical field mappings" not in text
+    assert "internal canonical names" not in text
 
 
 def test_csmar_daily_interim_adds_canonical_keys() -> None:
@@ -228,6 +281,96 @@ def test_csmar_stock_master_effective_date_falls_back_to_listing_date() -> None:
     assert result.loc[0, "asset_record_date"] == pd.Timestamp("2010-01-01")
     assert result.loc[0, "timestamp"] == pd.Timestamp("2010-01-01")
     assert result.loc[0, "listing_date"] == pd.Timestamp("2010-01-01")
+
+
+def test_csmar_stock_master_missing_effective_dates_fails_closed() -> None:
+    raw = pd.DataFrame(
+        {
+            "Stkcd": ["1"],
+            "Stknme": ["demo"],
+            "Listdt": [""],
+            "DelistedDate": [""],
+            "Markettype": [4],
+            "Nnindcd": ["I1"],
+            "Nnindnme": ["industry"],
+            "Statco": ["normal"],
+            "Statdt": [""],
+        }
+    )
+
+    with pytest.raises(ValueError, match="missing_stock_master_effective_timestamp"):
+        a_share_csmar_normalize_private_export_frame(raw, "stock_master")
+
+
+def test_csmar_stock_master_column_rules_preserve_reference_timestamp() -> None:
+    raw = pd.DataFrame(
+        {
+            "Stkcd": ["1", "1"],
+            "Stknme": ["demo", "demo"],
+            "Listdt": ["2010-01-01", "2010-01-01"],
+            "DelistedDate": ["", ""],
+            "Markettype": [4, 4],
+            "Nnindcd": ["I1", "I2"],
+            "Nnindnme": ["industry old", "industry new"],
+            "Statco": ["normal", "special_status"],
+            "Statdt": ["2020-01-01", "2020-07-01"],
+        }
+    )
+
+    normalized = a_share_csmar_normalize_private_export_frame(raw, "stock_master")
+    pruned, _ = a_share_csmar_apply_interim_column_rules(
+        normalized,
+        "stock_master",
+    )
+
+    assert "timestamp" in pruned.columns
+    assert "session_date" not in pruned.columns
+    assert "available_at" not in pruned.columns
+    assert pruned["timestamp"].tolist() == [
+        pd.Timestamp("2020-01-01"),
+        pd.Timestamp("2020-07-01"),
+    ]
+
+
+def test_csmar_stock_master_reference_duplicates_are_deduped_or_rejected(
+    tmp_path,
+) -> None:
+    exact_duplicate = pd.DataFrame(
+        [
+            _stock_master_raw_row("normal", "I1", "2020-01-01"),
+            _stock_master_raw_row("normal", "I1", "2020-01-01"),
+        ]
+    )
+    conflicting_duplicate = pd.DataFrame(
+        [
+            _stock_master_raw_row("normal", "I1", "2020-01-01"),
+            _stock_master_raw_row("renamed", "I2", "2020-01-01"),
+        ]
+    )
+    exact_path = tmp_path / "stock_master_exact.csv"
+    conflict_path = tmp_path / "stock_master_conflict.csv"
+    exact_duplicate.to_csv(exact_path, index=False)
+    conflicting_duplicate.to_csv(conflict_path, index=False)
+
+    deduped = a_share_csmar_build_interim_frame(
+        interim_data_id="stock_master",
+        input_files=[exact_path],
+        start_date=None,
+        end_date=None,
+    )
+
+    assert len(deduped) == 1
+    assert int(deduped.attrs["reference_exact_duplicate_count"]) == 1
+    with pytest.raises(
+        ValueError,
+        match="conflicting_reference_primary_key_duplicates: stock_master",
+    ):
+        a_share_csmar_build_interim_frame(
+            interim_data_id="stock_master",
+            input_files=[conflict_path],
+            start_date=None,
+            end_date=None,
+        )
 
 
 def test_csmar_index_interim_uses_index_asset_namespace() -> None:
@@ -483,8 +626,7 @@ def test_csmar_trading_calendar_metadata_uses_reference_calendar_filters(
     _write_trading_calendar_raw_export(export)
 
     payload = checksums.build_raw_export_metadata(export)
-    metadata_path = raw_exports.write_raw_export_metadata(export)
-    sidecar = json.loads(metadata_path.read_text(encoding="utf-8"))
+    inspection = raw_exports.inspect_raw_export(export)
 
     assert payload["dataset"] == "trading_calendar"
     assert payload["table_code"] == "TRDNEW_Cale"
@@ -502,11 +644,8 @@ def test_csmar_trading_calendar_metadata_uses_reference_calendar_filters(
     }
     assert "market_types" not in payload["filters"]
     assert "bjse" not in payload["filters"]
-    assert metadata_path == export.with_suffix(".metadata.json")
-    assert sidecar["dataset"] == payload["dataset"]
-    assert sidecar["table_code"] == payload["table_code"]
-    assert sidecar["frequency"] == payload["frequency"]
-    assert sidecar["filters"] == payload["filters"]
+    assert inspection.ok
+    assert not export.with_suffix(".metadata.json").exists()
 
 
 def test_csmar_raw_export_metadata_defaults_are_source_neutral(tmp_path) -> None:
@@ -837,3 +976,21 @@ def _write_daily_market_raw_export(path) -> None:
             },
         ]
     ).to_csv(path, index=False)
+
+
+def _stock_master_raw_row(
+    company_status: str,
+    industry_code: str,
+    status_change_date: str,
+) -> dict[str, object]:
+    return {
+        "Stkcd": "1",
+        "Stknme": "demo",
+        "Listdt": "2010-01-01",
+        "DelistedDate": "",
+        "Markettype": 4,
+        "Nnindcd": industry_code,
+        "Nnindnme": f"industry {industry_code}",
+        "Statco": company_status,
+        "Statdt": status_change_date,
+    }

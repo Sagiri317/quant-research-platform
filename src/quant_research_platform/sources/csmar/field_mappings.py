@@ -210,7 +210,7 @@ def missing_raw_column_names(columns: tuple[str, ...], dataset: str) -> list[str
 
 
 def csmar_column_mapping(dataset: str) -> dict[str, str]:
-    """Return raw-provider to canonical field mappings for one dataset."""
+    """Return raw-provider to source-local normalized column mappings."""
 
     return CSMAR_COLUMN_MAPPINGS[dataset]
 
@@ -222,7 +222,7 @@ def csmar_field_descriptions(dataset: str) -> dict[str, str]:
 
 
 def map_csmar_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
-    """Rename known raw provider columns to internal canonical names."""
+    """Rename raw provider columns to source-local normalized aliases."""
 
     mapping = csmar_column_mapping(dataset)
     missing = missing_raw_columns(frame, dataset)

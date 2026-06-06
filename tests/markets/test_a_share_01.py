@@ -44,6 +44,12 @@ from quant_research_platform.storage.layout import (
     processed_data_parquet_root,
 )
 from quant_research_platform.storage.parquet import read_partitioned_parquet_dataset
+from tests.helpers.synthetic_a_share import (
+    make_synthetic_daily_market,
+    make_synthetic_market_cap,
+    make_synthetic_stock_master,
+    make_synthetic_trading_calendar,
+)
 
 
 def test_a_share_calendar_helper_builds_unified_and_market_sessions() -> None:
@@ -798,6 +804,38 @@ def test_a_share_panel_listing_age_new_stock_threshold() -> None:
 
     assert panel["listing_age_trading_days"].tolist() == [1, 2, 3]
     assert panel["eligible_after_listing_age"].tolist() == [False, False, True]
+
+
+def test_a_share_panel_masks_use_reference_asof_calendar_and_next_day_limits() -> None:
+    panel = panels.build_research_panel(
+        make_synthetic_daily_market(),
+        stock_master=make_synthetic_stock_master(),
+        market_cap=make_synthetic_market_cap(),
+        trading_calendar=make_synthetic_trading_calendar(),
+        min_listing_trading_days=4,
+    )
+    by_key = panel.set_index(["asset_id", "timestamp"]).sort_index()
+
+    asset_a_early = by_key.loc[("asset_a", pd.Timestamp("2024-01-03"))]
+    asset_a_after_change = by_key.loc[("asset_a", pd.Timestamp("2024-01-08"))]
+    asset_a_before_limit_up = by_key.loc[("asset_a", pd.Timestamp("2024-01-02"))]
+    asset_b_before_limit_down = by_key.loc[("asset_b", pd.Timestamp("2024-01-02"))]
+    asset_c_zero_liquidity = by_key.loc[("asset_c", pd.Timestamp("2024-01-05"))]
+    asset_a_last = by_key.loc[("asset_a", pd.Timestamp("2024-01-08"))]
+
+    assert int(asset_a_early["listing_age_trading_days"]) == 3
+    assert bool(asset_a_early["eligible_after_listing_age"]) is False
+    assert bool(asset_a_after_change["eligible_after_listing_age"]) is True
+    assert asset_a_early["company_status"] == "normal"
+    assert asset_a_after_change["company_status"] == "watched"
+    assert float(asset_a_early["total_shares"]) == 1000.0
+    assert float(asset_a_after_change["total_shares"]) == 2000.0
+    assert bool(asset_b_before_limit_down["eligible"]) is False
+    assert bool(asset_c_zero_liquidity["eligible_liquidity"]) is False
+    assert bool(asset_a_before_limit_up["can_enter"]) is False
+    assert bool(asset_b_before_limit_down["can_exit"]) is False
+    assert bool(asset_a_last["can_enter"]) is False
+    assert bool(asset_a_last["can_exit"]) is False
 
 
 def test_a_share_panel_listing_age_starts_after_closed_listing_date() -> None:

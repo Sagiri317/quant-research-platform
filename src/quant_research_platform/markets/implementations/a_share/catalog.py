@@ -35,7 +35,7 @@ from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_AS_OF_MASK_ID,
     A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
-    A_SHARE_DAILY_BAR_INTERIM_DATA_PRODUCT_ID,
+    A_SHARE_DAILY_BAR_INTERIM_SPEC_ID,
     A_SHARE_DEFAULT_UNIVERSE_ID,
     A_SHARE_EVALUATION_MASK_ID,
     A_SHARE_EXECUTION_MASK_ID,
@@ -222,7 +222,7 @@ def a_share_daily_bar_data_product_definition() -> DataProductDefinition:
         data_product_id=A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
         market_id=A_SHARE_MARKET_ID,
         grain=DataGrain.ASSET_TIMESTAMP,
-        interim_spec_ids=(A_SHARE_DAILY_BAR_INTERIM_DATA_PRODUCT_ID,),
+        interim_spec_ids=(A_SHARE_DAILY_BAR_INTERIM_SPEC_ID,),
     )
 
 

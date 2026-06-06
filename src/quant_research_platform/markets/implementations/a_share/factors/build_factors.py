@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pandas as pd
@@ -256,30 +255,3 @@ def _panel_part_paths(
 
 def _factor_panel_input_columns() -> tuple[str, ...]:
     return a_share_price_volume_panel_input_columns()
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Calculate one full-sample factor table."
-    )
-    parser.add_argument("--processed-root", default="data/processed/a_share")
-    parser.add_argument("--start-year", type=int, default=2014)
-    parser.add_argument("--end-year", type=int, default=2025)
-    parser.add_argument("--factor-set", default="price_volume")
-    args = parser.parse_args(argv)
-
-    if args.factor_set != "price_volume":
-        print(f"ERROR: unsupported factor set: {args.factor_set}")
-        return 2
-    output_path, rows = calculate_price_volume_factor_full(
-        interim_root=Path("data/interim/csmar"),
-        processed_root=Path(args.processed_root),
-        start_year=args.start_year,
-        end_year=args.end_year,
-    )
-    print(f"wrote {PRICE_VOLUME_PROCESSED_DATA_ID} rows={rows}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

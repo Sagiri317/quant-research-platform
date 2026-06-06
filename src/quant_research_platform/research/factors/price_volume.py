@@ -85,8 +85,9 @@ PRICE_VOLUME_FACTOR_PREFIXES: tuple[str, ...] = (
 )
 PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS: frozenset[str] = frozenset(
     {
+        "market_id",
+        "asset_id",
         "timestamp",
-        "asset",
     }
 )
 BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
@@ -300,7 +301,8 @@ def calculate_price_volume_factors(
             shifted_price = price.groupby(result[asset_column], sort=False).shift(
                 window
             )
-            trailing_return = price / shifted_price - 1.0
+            denominator = _valid_denominator(shifted_price)
+            trailing_return = _finite_or_nan(price / denominator - 1.0)
         if needs_momentum:
             result[f"mom_{window}d"] = trailing_return
         if needs_reversal:
@@ -365,7 +367,7 @@ def calculate_price_volume_factors(
             shifted_turnover = turnover.groupby(result[asset_column], sort=False).shift(
                 window
             )
-            denominator = shifted_turnover.where(shifted_turnover != 0.0)
+            denominator = _valid_denominator(shifted_turnover)
             result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
         if f"turnover_vol_{window}d" in requested_set:
             result[f"turnover_vol_{window}d"] = turnover.groupby(
@@ -383,12 +385,13 @@ def calculate_price_volume_factors(
                 )
             )
 
-    denominator = amount.where(amount != 0.0)
+    denominator = _valid_denominator(amount)
     illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
     amplitude = (
         pd.to_numeric(result[high_column], errors="coerce")
         - pd.to_numeric(result[low_column], errors="coerce")
-    ) / pd.to_numeric(result[prev_close_column], errors="coerce")
+    ) / _valid_denominator(pd.to_numeric(result[prev_close_column], errors="coerce"))
+    amplitude = _finite_or_nan(amplitude)
     for window in required_windows:
         if f"amihud_{window}d" in requested_set:
             result[f"amihud_{window}d"] = illiquidity.groupby(
@@ -406,7 +409,8 @@ def calculate_price_volume_factors(
     intraday_range = (
         pd.to_numeric(result[high_column], errors="coerce")
         - pd.to_numeric(result[low_column], errors="coerce")
-    ) / pd.to_numeric(result[price_column], errors="coerce").replace(0.0, np.nan)
+    ) / _valid_denominator(pd.to_numeric(result[price_column], errors="coerce"))
+    intraday_range = _finite_or_nan(intraday_range)
     for window in required_windows:
         if f"intraday_range_{window}d" in requested_set:
             result[f"intraday_range_{window}d"] = intraday_range.groupby(
@@ -419,6 +423,12 @@ def calculate_price_volume_factors(
         result["log_float_market_cap"] = _safe_log(result[float_market_cap_column])
     if "log_total_market_cap" in requested_set:
         result["log_total_market_cap"] = _safe_log(result[total_market_cap_column])
+    output_columns = [column for column in requested if column in result.columns]
+    if output_columns:
+        result.loc[:, output_columns] = result.loc[:, output_columns].replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
     return result
 
 
@@ -543,7 +553,7 @@ def _rolling_drawdown(
 ) -> pd.Series:
     def drawdown(series: pd.Series) -> float:
         peak = series.cummax()
-        return float((series / peak - 1.0).min())
+        return float(_finite_or_nan(series / peak.replace(0.0, np.nan) - 1.0).min())
 
     return values.groupby(group_keys, sort=False).transform(
         lambda series, w=window: series.rolling(w, min_periods=w).apply(
@@ -555,7 +565,17 @@ def _rolling_drawdown(
 
 def _safe_log(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
-    return np.log(numeric.where(numeric > 0.0))
+    numeric = numeric.where(np.isfinite(numeric) & numeric.gt(0.0))
+    return _finite_or_nan(np.log(numeric))
+
+
+def _finite_or_nan(values: pd.Series) -> pd.Series:
+    return values.replace([np.inf, -np.inf], np.nan)
+
+
+def _valid_denominator(values: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    return numeric.where(np.isfinite(numeric) & numeric.ne(0.0))
 
 
 def _is_excluded_feature(column: str) -> bool:

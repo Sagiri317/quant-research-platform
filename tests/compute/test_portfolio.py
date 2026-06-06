@@ -3,6 +3,10 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import quant_research_platform.compute.tensor.construction as tensor_construction
+import quant_research_platform.compute.tensor.exposure as tensor_exposure
+import quant_research_platform.compute.tensor.reporting as tensor_reporting
+import quant_research_platform.compute.tensor.turnover as tensor_turnover
 from quant_research_platform.compute.config import (
     CostConfig,
     TradabilityConfig,
@@ -44,10 +48,6 @@ from quant_research_platform.compute.dataframe.turnover import (
     calculate_turnover,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
-from quant_research_platform.compute.tensor import construction as tensor_construction
-from quant_research_platform.compute.tensor import exposure as tensor_exposure
-from quant_research_platform.compute.tensor import reporting as tensor_reporting
-from quant_research_platform.compute.tensor import turnover as tensor_turnover
 
 
 def test_portfolio_split_modules_are_direct_owners() -> None:
