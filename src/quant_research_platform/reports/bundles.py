@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.catalog.reports import ReportCatalog
+from quant_research_platform.catalog.defaults import default_report_catalog
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
@@ -221,7 +221,7 @@ def _derive_report_run_root(
     expected_run_id: str,
 ) -> Path:
     try:
-        definition = ReportCatalog.bootstrap_default().get(
+        definition = default_report_catalog().get(
             report_spec.report_definition_id
         )
     except KeyError as exc:

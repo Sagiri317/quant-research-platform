@@ -40,28 +40,6 @@ class ProviderBindingRegistry:
         except KeyError as exc:
             raise KeyError(f"unknown_provider_binding: {data_product_id}") from exc
 
-    @classmethod
-    def bootstrap_default(cls) -> ProviderBindingRegistry:
-        registry = cls()
-        registry.register(
-            ProviderBinding(
-                data_product_id="a_share_daily_bar",
-                provider_id="csmar",
-                source_id="csmar",
-                implementation_package="quant_research_platform.sources.csmar",
-                required_source_dataset_ids=(
-                    "daily_market",
-                    "stock_master",
-                    "market_cap",
-                    "adjustment",
-                    "index_info",
-                    "benchmark_index_market",
-                    "trading_calendar",
-                ),
-            )
-        )
-        return registry
-
 
 def private_interim_root_for_data_product(
     project_root: Path,
@@ -69,7 +47,11 @@ def private_interim_root_for_data_product(
 ) -> Path:
     """Return the local private interim root for an internal binding."""
 
-    binding = ProviderBindingRegistry.bootstrap_default().get(data_product_id)
+    from quant_research_platform.catalog.defaults import (
+        default_provider_binding_registry,
+    )
+
+    binding = default_provider_binding_registry().get(data_product_id)
     return Path(project_root) / "data" / "interim" / binding.provider_id
 
 

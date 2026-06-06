@@ -11,7 +11,7 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.fields import FieldCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.markets import MarketRegistry
+from quant_research_platform.catalog.markets import MarketDefinition, MarketRegistry
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import (
@@ -19,11 +19,14 @@ from quant_research_platform.catalog.processed import (
     ProcessedDataCatalog,
 )
 from quant_research_platform.catalog.provider_bindings import (
+    ProviderBinding,
     ProviderBindingRegistry,
 )
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.catalog.universes import UniverseCatalog
+from quant_research_platform.contracts.data import DataGrain
+from quant_research_platform.contracts.data_products import DataProductDefinition
 from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_evaluation_catalog,
@@ -36,10 +39,21 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_AS_OF_MASK_ID,
     A_SHARE_DEFAULT_UNIVERSE_ID,
+    A_SHARE_EVALUATION_MASK_ID,
+    A_SHARE_EXECUTION_MASK_ID,
     A_SHARE_MARKET_ID,
+    DAILY_CONTEXT_PROCESSED_DATA_ID,
+    DAILY_PANEL_PROCESSED_DATA_ID,
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
 )
-from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
+from quant_research_platform.reports.catalog import report_catalog
+from quant_research_platform.sources.csmar.catalog import (
+    csmar_interim_catalog,
+    csmar_source_definition,
+)
 
 
 @dataclass(frozen=True)
@@ -94,28 +108,31 @@ def default_prediction_catalog() -> PredictionCatalog:
 
 
 def default_data_product_registry() -> DataProductRegistry:
-    # TODO(Batch 3): move concrete bootstrap payloads into owner/default composition.
-    return DataProductRegistry.bootstrap_default()
+    registry = DataProductRegistry()
+    _register_default_data_products(registry)
+    return registry
 
 
 def default_provider_binding_registry() -> ProviderBindingRegistry:
-    # TODO(Batch 3): move concrete bootstrap payloads into owner/default composition.
-    return ProviderBindingRegistry.bootstrap_default()
+    registry = ProviderBindingRegistry()
+    _register_default_provider_bindings(registry)
+    return registry
 
 
 def default_source_registry() -> SourceRegistry:
-    # TODO(Batch 3): move concrete bootstrap payloads into owner/default composition.
-    return SourceRegistry.bootstrap_default()
+    registry = SourceRegistry()
+    registry.register(csmar_source_definition())
+    return registry
 
 
 def default_market_registry() -> MarketRegistry:
-    # TODO(Batch 3): move concrete bootstrap payloads into owner/default composition.
-    return MarketRegistry.bootstrap_default()
+    registry = MarketRegistry()
+    _register_default_markets(registry)
+    return registry
 
 
 def default_report_catalog() -> ReportCatalog:
-    # TODO(Batch 3): move concrete bootstrap payloads into owner/default composition.
-    return ReportCatalog.bootstrap_default()
+    return report_catalog()
 
 
 def default_source_interim_catalogs() -> dict[str, InterimDataCatalog]:
@@ -151,6 +168,58 @@ def default_catalogs() -> PlatformCatalogs:
         reports=default_report_catalog(),
         source_interim_catalogs=default_source_interim_catalogs(),
         universes=default_universe_catalog(),
+    )
+
+
+def _register_default_data_products(registry: DataProductRegistry) -> None:
+    registry.register(
+        DataProductDefinition(
+            data_product_id="a_share_daily_bar",
+            market_id=A_SHARE_MARKET_ID,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            interim_spec_ids=("a_share_daily_bar_interim",),
+        )
+    )
+
+
+def _register_default_provider_bindings(
+    registry: ProviderBindingRegistry,
+) -> None:
+    registry.register(
+        ProviderBinding(
+            data_product_id="a_share_daily_bar",
+            provider_id="csmar",
+            source_id="csmar",
+            implementation_package="quant_research_platform.sources.csmar",
+            required_source_dataset_ids=(
+                "daily_market",
+                "stock_master",
+                "market_cap",
+                "adjustment",
+                "index_info",
+                "benchmark_index_market",
+                "trading_calendar",
+            ),
+        )
+    )
+
+
+def _register_default_markets(registry: MarketRegistry) -> None:
+    registry.register(
+        MarketDefinition(
+            market_id=A_SHARE_MARKET_ID,
+            display_name="A-share market implementation",
+            processed_spec_ids=(
+                DAILY_PANEL_PROCESSED_DATA_ID,
+                DAILY_CONTEXT_PROCESSED_DATA_ID,
+                A_SHARE_DEFAULT_UNIVERSE_ID,
+                A_SHARE_AS_OF_MASK_ID,
+                A_SHARE_EXECUTION_MASK_ID,
+                A_SHARE_EVALUATION_MASK_ID,
+                PRICE_VOLUME_PROCESSED_DATA_ID,
+                FORWARD_RETURNS_PROCESSED_DATA_ID,
+            ),
+        )
     )
 
 

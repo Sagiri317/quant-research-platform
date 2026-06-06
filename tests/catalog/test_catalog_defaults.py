@@ -6,7 +6,9 @@ from quant_research_platform.catalog.defaults import (
     default_data_product_registry,
     default_factor_catalog,
     default_label_catalog,
+    default_market_registry,
     default_provider_binding_registry,
+    default_report_catalog,
     default_research_dataset_catalog,
     default_source_interim_catalogs,
     default_source_registry,
@@ -64,7 +66,7 @@ def test_default_research_dataset_catalog_delegates_to_a_share_owner() -> None:
     assert default_spec.dataset_id == owner_spec.dataset_id
 
 
-def test_default_internal_registries_are_available_for_batch_three_bridge() -> None:
+def test_default_internal_registries_are_composed_by_platform_defaults() -> None:
     assert default_data_product_registry().get("a_share_daily_bar").data_product_id == (
         "a_share_daily_bar"
     )
@@ -72,6 +74,12 @@ def test_default_internal_registries_are_available_for_batch_three_bridge() -> N
         "a_share_daily_bar"
     ).source_id == "csmar"
     assert default_source_registry().get("csmar").provider_id == "csmar"
+    assert default_market_registry().get("a_share").display_name == (
+        "A-share market implementation"
+    )
+    assert default_report_catalog().get(
+        "evaluation_report_private"
+    ).run_type == "evaluation"
 
 
 def test_default_source_and_universe_catalogs_are_platform_composed() -> None:

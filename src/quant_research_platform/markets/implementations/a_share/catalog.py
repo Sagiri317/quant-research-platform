@@ -26,6 +26,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.factors import FactorDefinition
+from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.markets.implementations.a_share.ids import (
@@ -290,7 +291,21 @@ def a_share_price_volume_panel_input_columns() -> tuple[str, ...]:
 def a_share_label_catalog() -> LabelCatalog:
     """Return the A-share forward-return label registry."""
 
-    return LabelCatalog.bootstrap_default()
+    catalog = LabelCatalog()
+    for horizon in (1, 5, 10, 20, 60, 120):
+        catalog.register(
+            LabelDefinition(
+                label_id=f"forward_return_{horizon}d",
+                market_id=A_SHARE_MARKET_ID,
+                output_column=f"forward_return_{horizon}d",
+                label_timing="next_open_to_horizon_open",
+                horizon=horizon,
+                lookahead=horizon + 1,
+                entry_rule="next_session_open",
+                exit_rule="horizon_session_open",
+            )
+        )
+    return catalog
 
 
 def a_share_processed_catalog() -> ProcessedDataCatalog:

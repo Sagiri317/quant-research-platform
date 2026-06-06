@@ -48,18 +48,5 @@ class SourceRegistry:
     def list(self) -> tuple[SourceDefinition, ...]:
         return tuple(self._items[key] for key in sorted(self._items))
 
-    @classmethod
-    def bootstrap_default(cls) -> SourceRegistry:
-        registry = cls()
-        registry.register(
-            SourceDefinition(
-                source_id=SourceId("csmar"),
-                provider_id="csmar",
-                display_name="CSMAR source adapter",
-                implementation_package="quant_research_platform.sources.csmar",
-            )
-        )
-        return registry
-
 
 __all__ = ["SourceDefinition", "SourceRegistry", "SourceVisibility"]

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.data_products import DataProductDefinition
-from quant_research_platform.contracts.ids import MarketId
 
 
 @dataclass
@@ -28,19 +26,6 @@ class DataProductRegistry:
 
     def list(self) -> tuple[DataProductDefinition, ...]:
         return tuple(self._items[key] for key in sorted(self._items))
-
-    @classmethod
-    def bootstrap_default(cls) -> DataProductRegistry:
-        registry = cls()
-        registry.register(
-            DataProductDefinition(
-                data_product_id="a_share_daily_bar",
-                market_id=MarketId("a_share"),
-                grain=DataGrain.ASSET_TIMESTAMP,
-                interim_spec_ids=("a_share_daily_bar_interim",),
-            )
-        )
-        return registry
 
 
 __all__ = ["DataProductRegistry"]

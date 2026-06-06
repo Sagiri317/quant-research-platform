@@ -29,31 +29,5 @@ class ReportCatalog:
     def list(self) -> tuple[ReportDefinition, ...]:
         return tuple(self._items[key] for key in sorted(self._items))
 
-    @classmethod
-    def bootstrap_default(cls) -> ReportCatalog:
-        catalog = cls()
-        catalog.register(
-            ReportDefinition(
-                report_definition_id="stage_profile_private_diagnostic",
-                display_name="Private stage profile diagnostic",
-                run_type="diagnostics",
-            )
-        )
-        catalog.register(
-            ReportDefinition(
-                report_definition_id="prediction_bundle_private",
-                display_name="Private prediction bundle",
-                run_type="prediction",
-            )
-        )
-        catalog.register(
-            ReportDefinition(
-                report_definition_id="evaluation_report_private",
-                display_name="Private evaluation report",
-                run_type="evaluation",
-            )
-        )
-        return catalog
-
 
 __all__ = ["ReportCatalog"]

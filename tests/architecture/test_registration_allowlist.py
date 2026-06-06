@@ -5,50 +5,26 @@ from pathlib import Path
 
 PROJECT_SRC = Path("src/quant_research_platform")
 WORKFLOW_REGISTRY = PROJECT_SRC / "workflows" / "registry.py"
-BATCH_3_BOOTSTRAP_TARGET = (
-    "Batch 3: move concrete bootstrap payloads into owner/default composition."
-)
-
-KNOWN_BOOTSTRAP_DEFAULTS = {
-    "src/quant_research_platform/catalog/data_products.py": {
-        "owner": "P1",
-        "target": BATCH_3_BOOTSTRAP_TARGET,
-    },
-    "src/quant_research_platform/catalog/labels.py": {
-        "owner": "P1",
-        "target": BATCH_3_BOOTSTRAP_TARGET,
-    },
-    "src/quant_research_platform/catalog/markets.py": {
-        "owner": "P1",
-        "target": BATCH_3_BOOTSTRAP_TARGET,
-    },
-    "src/quant_research_platform/catalog/provider_bindings.py": {
-        "owner": "P1",
-        "target": BATCH_3_BOOTSTRAP_TARGET,
-    },
-    "src/quant_research_platform/catalog/reports.py": {
-        "owner": "P1",
-        "target": BATCH_3_BOOTSTRAP_TARGET,
-    },
-    "src/quant_research_platform/catalog/sources.py": {
-        "owner": "P1",
-        "target": BATCH_3_BOOTSTRAP_TARGET,
-    },
+GENERIC_CATALOG_BOOTSTRAP_FORBIDDEN_FILES = {
+    "src/quant_research_platform/catalog/data_products.py",
+    "src/quant_research_platform/catalog/labels.py",
+    "src/quant_research_platform/catalog/markets.py",
+    "src/quant_research_platform/catalog/provider_bindings.py",
+    "src/quant_research_platform/catalog/reports.py",
+    "src/quant_research_platform/catalog/sources.py",
 }
 
 
-def test_bootstrap_default_occurrences_are_known_and_classified() -> None:
-    found = {
-        path.as_posix(): lineno
+def test_generic_catalogs_do_not_define_bootstrap_defaults() -> None:
+    hits = [
+        f"{path}:{lineno}"
         for path, lineno in _iter_bootstrap_default_definitions()
-    }
-    unclassified = sorted(set(found) - set(KNOWN_BOOTSTRAP_DEFAULTS))
-    stale = sorted(set(KNOWN_BOOTSTRAP_DEFAULTS) - set(found))
+        if path.as_posix() in GENERIC_CATALOG_BOOTSTRAP_FORBIDDEN_FILES
+    ]
 
-    assert not unclassified, "unclassified_bootstrap_default: " + repr(
-        [(path, found[path]) for path in unclassified]
+    assert not hits, (
+        "generic_catalog_bootstrap_default_forbidden: " + "; ".join(hits)
     )
-    assert not stale, "stale_bootstrap_default_allowlist_entry: " + repr(stale)
 
 
 def test_workflow_registry_uses_execution_mode_factory() -> None:

@@ -58,7 +58,14 @@ def test_catalog_defaults_remains_platform_composition_root() -> None:
 
     assert "quant_research_platform.markets.implementations.a_share.catalog" in modules
     assert "quant_research_platform.sources.csmar.catalog" in modules
+    assert "quant_research_platform.reports.catalog" in modules
     assert "default_catalogs" in all_names
+
+
+def test_catalog_defaults_does_not_call_bootstrap_default() -> None:
+    source = CATALOG_DEFAULTS.read_text(encoding="utf-8")
+
+    assert ".bootstrap_default(" not in source
 
 
 def _module_all_names(tree: ast.AST) -> tuple[str, ...]:

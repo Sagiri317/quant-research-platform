@@ -22,11 +22,6 @@ AGENT_A_SHARE_FIELD_VALIDATION = (
     "src/quant_research_platform/agents/factor_factory.py",
     "quant_research_platform.markets.implementations.a_share.catalog",
 )
-# P1, Batch 2/3: generic catalog currently owns concrete A-share market defaults.
-CATALOG_A_SHARE_MARKET_DEFAULTS = (
-    "src/quant_research_platform/catalog/markets.py",
-    "quant_research_platform.markets.implementations.a_share.ids",
-)
 # Batch 2: catalog/defaults.py is the platform composition root.
 DEFAULTS_A_SHARE_CATALOG_FACTORIES = (
     "src/quant_research_platform/catalog/defaults.py",
@@ -41,6 +36,11 @@ DEFAULTS_A_SHARE_IDS = (
 DEFAULTS_CSMAR_CATALOG = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.sources.csmar.catalog",
+)
+# Batch 3: catalog/defaults.py may compose report owner definitions.
+DEFAULTS_REPORT_CATALOG = (
+    "src/quant_research_platform/catalog/defaults.py",
+    "quant_research_platform.reports.catalog",
 )
 # P2, Batch 4: private aggregate verification is temporarily report-local.
 REPORT_A_SHARE_IDS = (
@@ -65,10 +65,10 @@ CSMAR_A_SHARE_ADAPTER = (
 
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST = {
     AGENT_A_SHARE_FIELD_VALIDATION,
-    CATALOG_A_SHARE_MARKET_DEFAULTS,
     DEFAULTS_A_SHARE_CATALOG_FACTORIES,
     DEFAULTS_A_SHARE_IDS,
     DEFAULTS_CSMAR_CATALOG,
+    DEFAULTS_REPORT_CATALOG,
     REPORT_A_SHARE_IDS,
     REPORT_A_SHARE_CATALOG,
     REPORT_A_SHARE_PROCESSED,
@@ -149,6 +149,7 @@ def _is_selected_boundary(path: Path, module: str) -> bool:
         return module.startswith(
             (
                 "quant_research_platform.markets.implementations",
+                "quant_research_platform.reports",
                 "quant_research_platform.sources",
             )
         )

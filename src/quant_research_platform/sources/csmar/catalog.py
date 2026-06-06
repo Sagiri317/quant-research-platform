@@ -8,6 +8,7 @@ from quant_research_platform.catalog.fields import (
     platform_interim_column_names,
 )
 from quant_research_platform.catalog.processed import InterimDataCatalog
+from quant_research_platform.catalog.sources import SourceDefinition
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -18,6 +19,15 @@ from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.sources.csmar.columns import INTERIM_KEEP_COLUMNS
 from quant_research_platform.sources.csmar.fields import csmar_field_role
 from quant_research_platform.sources.csmar.interim import CSMAR_SOURCE_ID
+
+
+def csmar_source_definition() -> SourceDefinition:
+    return SourceDefinition(
+        source_id=SourceId(CSMAR_SOURCE_ID),
+        provider_id=CSMAR_SOURCE_ID,
+        display_name="CSMAR source adapter",
+        implementation_package="quant_research_platform.sources.csmar",
+    )
 
 
 def csmar_interim_catalog() -> InterimDataCatalog:
@@ -81,4 +91,4 @@ def _column_roles(columns: tuple[str, ...]) -> dict[str, ColumnRole]:
     return roles
 
 
-__all__ = ["csmar_interim_catalog"]
+__all__ = ["csmar_interim_catalog", "csmar_source_definition"]
