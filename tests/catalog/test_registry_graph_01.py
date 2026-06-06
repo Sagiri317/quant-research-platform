@@ -122,11 +122,11 @@ def test_registry_graph_does_not_depend_on_stale_source_dataset_id() -> None:
     assert stale_id not in _csmar_catalog_ids()
 
 
-def test_csmar_catalog_retains_direct_index_market_source_dataset() -> None:
+def test_csmar_catalog_exposes_benchmark_not_direct_index_market_artifact() -> None:
     csmar_catalog_ids = _csmar_catalog_ids()
 
-    assert "index_market" in csmar_catalog_ids
     assert "benchmark_index_market" in csmar_catalog_ids
+    assert "index_market" not in csmar_catalog_ids
 
 
 def _csmar_catalog_ids() -> set[str]:

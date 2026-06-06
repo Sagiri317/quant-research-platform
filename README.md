@@ -96,11 +96,19 @@ qrp-private schema-inventory --project-root . --output <path>
 ```
 
 `qrp-private` currently exposes only sanitized schema inventory. It does not run
-private import, private rebuild, or private evidence regeneration.
+private import, private rebuild, or private evidence regeneration. Treat this as
+private aggregate schema inventory, not as public-safe aggregate evidence,
+because logical source paths or source field names may be included.
 
 ## Development Checks
 
-Use the approved Conda environment:
+Use the approved Conda environment. Install dev/test tools conda-first:
+
+```powershell
+conda install -n analysis -c conda-forge pytest ruff pytest-cov coverage hypothesis
+```
+
+Then run checks:
 
 ```powershell
 $env:PYTHONPATH="src"

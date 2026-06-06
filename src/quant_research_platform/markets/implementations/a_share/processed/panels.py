@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
@@ -159,19 +160,27 @@ def build_research_panel(
     panel["eligible"] = (
         base & panel["eligible_after_listing_age"] & panel["eligible_liquidity"]
     )
+    panel = _add_one_word_limit_masks(panel)
     grouped = panel.groupby("asset_id", sort=False)
     # 入场和出场标记基于下一交易日，因为 label 使用下一次可执行开盘。
     # 涨停阻断新开仓，跌停阻断退出。
     panel["next_day_is_trading"] = grouped["is_trading"].shift(-1).fillna(False)
+    panel["next_day_is_trading"] = panel["next_day_is_trading"].astype(bool)
     panel["next_day_limit_status"] = grouped["limit_status"].shift(-1)
+    next_one_word_limit_up = (
+        grouped["one_word_limit_up"].shift(-1).fillna(False).astype(bool)
+    )
+    next_one_word_limit_down = (
+        grouped["one_word_limit_down"].shift(-1).fillna(False).astype(bool)
+    )
     panel["can_enter"] = (
         panel["eligible"]
         & panel["next_day_is_trading"].astype(bool)
-        & panel["next_day_limit_status"].ne(1)
+        & ~next_one_word_limit_up
     )
-    panel["can_exit"] = panel["next_day_is_trading"].astype(bool) & panel[
-        "next_day_limit_status"
-    ].ne(-1)
+    panel["can_exit"] = panel["next_day_is_trading"].astype(bool) & (
+        ~next_one_word_limit_down
+    )
     leading = [
         "market_id",
         "asset_id",
@@ -183,6 +192,58 @@ def build_research_panel(
     ordered.extend(column for column in panel.columns if column not in ordered)
     panel = panel[ordered]
     return panel
+
+
+def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
+    result = panel.copy()
+    explicit = {"one_word_limit_up", "one_word_limit_down"}
+    if explicit.issubset(result.columns):
+        result["one_word_limit_up"] = _bool_like_column(result, "one_word_limit_up")
+        result["one_word_limit_down"] = _bool_like_column(
+            result,
+            "one_word_limit_down",
+        )
+        return result
+    if explicit.intersection(result.columns):
+        missing = sorted(explicit.difference(result.columns))
+        raise ValueError(
+            "missing_one_word_limit_explicit_columns: " + ", ".join(missing)
+        )
+    required = ("open", "high", "low", "close", "limit_status")
+    missing = [column for column in required if column not in result.columns]
+    if missing:
+        raise ValueError(
+            "missing_one_word_limit_inference_columns: " + ", ".join(missing)
+        )
+    prices = result.loc[:, ["open", "high", "low", "close"]].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    if prices.isna().any(axis=None):
+        raise ValueError("invalid_one_word_limit_inference_values")
+    status = pd.to_numeric(result["limit_status"], errors="coerce")
+    if status.isna().any():
+        raise ValueError("invalid_one_word_limit_status")
+    equal_prices = (
+        np.isclose(prices["open"], prices["high"], rtol=1e-7, atol=1e-8)
+        & np.isclose(prices["open"], prices["low"], rtol=1e-7, atol=1e-8)
+        & np.isclose(prices["open"], prices["close"], rtol=1e-7, atol=1e-8)
+    )
+    result["one_word_limit_up"] = status.eq(1) & equal_prices
+    result["one_word_limit_down"] = status.eq(-1) & equal_prices
+    return result
+
+
+def _bool_like_column(frame: pd.DataFrame, column: str) -> pd.Series:
+    series = frame[column]
+    if bool(series.isna().any()):
+        raise ValueError(f"null_one_word_limit_column: {column}")
+    if series.dtype == bool:
+        return series.astype(bool)
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.isna().any() or not set(numeric.unique()).issubset({0, 1}):
+        raise ValueError(f"invalid_one_word_limit_column: {column}")
+    return numeric.astype(bool)
 
 
 def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:

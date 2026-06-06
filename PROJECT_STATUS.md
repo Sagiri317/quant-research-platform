@@ -34,7 +34,8 @@ Current public-safe anchors:
 
 - 0.1 source topology tests.
 - 0.1 contracts/storage/catalog/source tests.
-- 0.1 A-share processed, ResearchDataset, evaluation, and prediction tests.
+- 0.1 A-share processed, ResearchDataset, evaluation, model, and prediction
+  tests.
 - 0.1 API/CLI route and command contract tests.
 - Public-safe parity-or-explained-delta evidence for processed panel, factor
   values, labels, masks/universes, ResearchDataset, evaluation, and prediction
@@ -43,11 +44,11 @@ Current public-safe anchors:
   owner modules only.
 - Report writers derive paths through `ReportSpec`, `ReportCatalog`,
   `StorageLayout`, and `run_id`.
-- 2014-2025 historical coverage was verified locally for the new processed
-  factor/label-supporting layout and ResearchDataset layout.
-- Public-safe aggregate evidence verifies full historical `daily_panel`
+- Prior local verification covered the new processed factor/label-supporting
+  layout, ResearchDataset layout, and full historical `daily_panel` aggregate
   coverage for `2014-01-01` through `2025-12-31` without committing row-level
-  output artifacts.
+  output artifacts; full public-safe evidence/report regeneration remains
+  pending after the factor catalog refactor.
 
 ## 当前 blocker / 风险
 

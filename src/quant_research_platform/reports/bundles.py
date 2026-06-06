@@ -131,6 +131,9 @@ def write_prediction_bundle_files(
                 "is_final_oos_window": spec.is_final_oos_window,
                 "prediction_column": spec.prediction_column,
                 "primary_key": list(spec.primary_key),
+                "sample_filter_mode": spec.sample_filter_mode,
+                "model_metadata": frame.attrs.get("model_metadata", {}),
+                "prediction_metadata": frame.attrs.get("metadata", {}),
             },
         )
 
@@ -153,6 +156,9 @@ def write_evaluation_report_files(
         layout=layout,
         expected_definition_id="evaluation_report_private",
         expected_run_id=spec.run_id,
+    )
+    spec_metadata = sanitize_public_object(
+        metrics.attrs.get("metadata", {})
     )
 
     _validate_report_frame(
@@ -191,6 +197,8 @@ def write_evaluation_report_files(
                 "research_dataset_id": spec.research_dataset_id,
                 "feature_columns": list(spec.feature_columns),
                 "label_columns": list(spec.label_columns),
+                "filter_mode": spec.filter_mode,
+                "metadata": spec_metadata,
                 "artifacts": ["metrics.parquet", "grouped_returns.parquet"],
             },
         )

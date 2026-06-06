@@ -174,7 +174,6 @@ A_SHARE_CSMAR_INTERIM_KEEP_COLUMNS: dict[str, tuple[str, ...]] = {
     "adjustment": ADJUSTMENT_INTERIM_KEEP_COLUMNS,
     "index_info": INDEX_INFO_INTERIM_KEEP_COLUMNS,
     "benchmark_index_market": BENCHMARK_INDEX_MARKET_KEEP_COLUMNS,
-    "index_market": INDEX_MARKET_KEEP_COLUMNS,
     "trading_calendar": TRADING_CALENDAR_INTERIM_KEEP_COLUMNS,
 }
 A_SHARE_CSMAR_AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
@@ -727,6 +726,8 @@ def a_share_csmar_build_interim_frame(
     if not frames:
         return pd.DataFrame()
     result = pd.concat(frames, ignore_index=True)
+    if interim_data_id == "benchmark_index_market":
+        result = _dedupe_benchmark_index_market_rows(result)
     if interim_data_id in ASSET_REFERENCE_INTERIM_DATASETS:
         result = _dedupe_reference_primary_key_rows(result, interim_data_id)
         if pruning_reports is not None:
@@ -794,6 +795,49 @@ def a_share_csmar_import_interim_data(
             pruning_reports,
         ),
     )
+
+
+def _dedupe_benchmark_index_market_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    spec = a_share_csmar_interim_catalog().get("benchmark_index_market")
+    primary_key = list(spec.primary_key)
+    missing = [column for column in primary_key if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            "missing_benchmark_index_market_primary_key_columns: "
+            + ", ".join(missing)
+        )
+    duplicated = frame.duplicated(primary_key, keep=False)
+    if not bool(duplicated.any()):
+        result = frame.copy()
+        result.attrs["benchmark_exact_duplicate_count"] = 0
+        return result
+
+    ordered = frame.copy()
+    ordered["_benchmark_row_order"] = range(len(ordered))
+    exact_duplicate_count = 0
+    for _, group in ordered.loc[duplicated].groupby(
+        primary_key,
+        sort=False,
+        dropna=False,
+    ):
+        content = group.drop(columns=["_benchmark_row_order"])
+        if len(content.drop_duplicates()) > 1:
+            raise ValueError(
+                "conflicting_benchmark_index_market_primary_key_duplicates"
+            )
+        exact_duplicate_count += len(group) - 1
+
+    result = (
+        ordered.sort_values(
+            [*primary_key, "_benchmark_row_order"],
+            kind="mergesort",
+        )
+        .drop_duplicates(primary_key, keep="last")
+        .drop(columns=["_benchmark_row_order"])
+        .reset_index(drop=True)
+    )
+    result.attrs["benchmark_exact_duplicate_count"] = int(exact_duplicate_count)
+    return result
 
 
 def _dedupe_reference_primary_key_rows(

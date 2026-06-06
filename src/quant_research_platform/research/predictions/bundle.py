@@ -7,9 +7,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.filtering import reject_filter_feature_columns
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.bundles import write_prediction_bundle_files
+from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -19,15 +21,23 @@ def build_prediction_bundle(
     coefficients: np.ndarray,
     feature_columns: tuple[str, ...],
 ) -> pd.DataFrame:
+    reject_filter_feature_columns(feature_columns)
     required = set((*spec.primary_key, *feature_columns))
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
     _validate_oos_split(spec)
-    test_mask = frame["timestamp"] >= pd.Timestamp(spec.test_start)
+    filtered, metadata = apply_filter_mode(
+        frame,
+        mode=spec.sample_filter_mode,
+        metadata_key="sample_filter_mode",
+    )
+    usable = filtered.dropna(subset=list(feature_columns)).copy()
+    metadata["rows_after_feature_dropna"] = int(len(usable))
+    test_mask = usable["timestamp"] >= pd.Timestamp(spec.test_start)
     if spec.test_end is not None:
-        test_mask &= frame["timestamp"] <= pd.Timestamp(spec.test_end)
-    test_frame = frame.loc[test_mask].copy()
+        test_mask &= usable["timestamp"] <= pd.Timestamp(spec.test_end)
+    test_frame = usable.loc[test_mask].copy()
     if test_frame.empty:
         raise ValueError("prediction_oos_test_window_empty")
     design = np.column_stack(
@@ -38,6 +48,7 @@ def build_prediction_bundle(
     )
     result = test_frame.loc[:, spec.primary_key].copy()
     result[spec.prediction_column] = design @ coefficients
+    result.attrs["metadata"] = metadata
     return result
 
 

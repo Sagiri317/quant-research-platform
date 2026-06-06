@@ -6,6 +6,7 @@ from pathlib import Path
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
+from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.bundles import write_evaluation_report_files
 from quant_research_platform.research.datasets import (
@@ -34,6 +35,7 @@ def run_evaluation_from_research_dataset(
         *dataset_spec.primary_key,
         *spec.feature_columns,
         *spec.label_columns,
+        *required_filter_columns(spec.filter_mode),
     )
     frame = read_research_dataset(
         processed_root,

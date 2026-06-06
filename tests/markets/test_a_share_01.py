@@ -913,9 +913,154 @@ def test_a_share_panel_masks_use_reference_asof_calendar_and_next_day_limits() -
     assert bool(asset_b_before_limit_down["eligible"]) is False
     assert bool(asset_c_zero_liquidity["eligible_liquidity"]) is False
     assert bool(asset_a_before_limit_up["can_enter"]) is False
-    assert bool(asset_b_before_limit_down["can_exit"]) is False
+    assert bool(asset_b_before_limit_down["can_exit"]) is True
     assert bool(asset_a_last["can_enter"]) is False
     assert bool(asset_a_last["can_exit"]) is False
+
+
+def test_a_share_panel_masks_block_only_one_word_next_day_limits() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2020-01-01",
+            "2020-01-02",
+            "2020-01-03",
+            "2020-01-06",
+            "2020-01-07",
+        ]
+    )
+    rows = [
+        _daily_market_row("2020-01-01", market_type=1),
+        {
+            **_daily_market_row("2020-01-02", market_type=1),
+            "limit_status": 1,
+            "open": 11.0,
+            "high": 11.0,
+            "low": 11.0,
+            "close": 11.0,
+        },
+        {
+            **_daily_market_row("2020-01-03", market_type=1),
+            "limit_status": 1,
+            "open": 10.8,
+            "high": 11.0,
+            "low": 10.7,
+            "close": 10.9,
+        },
+        {
+            **_daily_market_row("2020-01-06", market_type=1),
+            "limit_status": -1,
+            "open": 9.0,
+            "high": 9.0,
+            "low": 9.0,
+            "close": 9.0,
+        },
+        {
+            **_daily_market_row("2020-01-07", market_type=1),
+            "limit_status": -1,
+            "open": 9.2,
+            "high": 9.4,
+            "low": 9.0,
+            "close": 9.1,
+        },
+    ]
+
+    panel = panels.build_research_panel(
+        pd.DataFrame(rows),
+        stock_master=pd.DataFrame(
+            [
+                _stock_master_row(
+                    status_change_date="2010-01-01",
+                    company_status="normal",
+                    industry_code="I1",
+                )
+            ]
+        ),
+        market_cap=pd.DataFrame([_market_cap_row(share_change_date="2010-01-01")]),
+        trading_calendar=_trading_calendar_frame(timestamps, market_type=1),
+        min_listing_trading_days=1,
+    ).set_index("timestamp")
+
+    assert bool(panel.loc[pd.Timestamp("2020-01-01"), "can_enter"]) is False
+    assert bool(panel.loc[pd.Timestamp("2020-01-02"), "can_enter"]) is True
+    assert bool(panel.loc[pd.Timestamp("2020-01-03"), "can_exit"]) is False
+    assert bool(panel.loc[pd.Timestamp("2020-01-06"), "can_exit"]) is True
+    assert bool(panel.loc[pd.Timestamp("2020-01-07"), "can_enter"]) is False
+    assert bool(panel.loc[pd.Timestamp("2020-01-07"), "can_exit"]) is False
+
+
+def test_a_share_panel_masks_use_explicit_one_word_fields_when_available() -> None:
+    daily = pd.DataFrame(
+        [
+            {
+                **_daily_market_row("2020-01-01", market_type=1),
+                "one_word_limit_up": False,
+                "one_word_limit_down": False,
+            },
+            {
+                **_daily_market_row("2020-01-02", market_type=1),
+                "limit_status": 1,
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+                "one_word_limit_up": True,
+                "one_word_limit_down": False,
+            },
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=pd.DataFrame(
+            [
+                _stock_master_row(
+                    status_change_date="2010-01-01",
+                    company_status="normal",
+                    industry_code="I1",
+                )
+            ]
+        ),
+        market_cap=pd.DataFrame([_market_cap_row(share_change_date="2010-01-01")]),
+        trading_calendar=_trading_calendar_frame(
+            pd.to_datetime(["2020-01-01", "2020-01-02"]),
+            market_type=1,
+        ),
+        min_listing_trading_days=1,
+    )
+
+    assert bool(panel.loc[0, "can_enter"]) is False
+
+
+def test_a_share_panel_masks_fail_closed_without_one_word_inference_columns() -> None:
+    daily = pd.DataFrame(
+        [
+            _daily_market_row("2020-01-01", market_type=1),
+            _daily_market_row("2020-01-02", market_type=1),
+        ]
+    ).drop(columns=["low"])
+
+    with pytest.raises(
+        ValueError,
+        match="missing_one_word_limit_inference_columns: low",
+    ):
+        panels.build_research_panel(
+            daily,
+            stock_master=pd.DataFrame(
+                [
+                    _stock_master_row(
+                        status_change_date="2010-01-01",
+                        company_status="normal",
+                        industry_code="I1",
+                    )
+                ]
+            ),
+            market_cap=pd.DataFrame([_market_cap_row(share_change_date="2010-01-01")]),
+            trading_calendar=_trading_calendar_frame(
+                pd.to_datetime(["2020-01-01", "2020-01-02"]),
+                market_type=1,
+            ),
+            min_listing_trading_days=1,
+        )
 
 
 def test_a_share_panel_listing_age_starts_after_closed_listing_date() -> None:

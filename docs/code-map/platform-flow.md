@@ -80,7 +80,9 @@ and `private plugin`.
 
 Private local schema inventory is exposed separately through
 `qrp-private schema-inventory --project-root . --output <path>`. It scans only
-`data/interim` and `data/processed` and emits sanitized aggregate metadata.
+`data/interim` and `data/processed` and emits private aggregate schema
+inventory metadata. This inventory may include logical source paths or source
+field names, so it is not the same thing as public-safe aggregate evidence.
 
 ## Narrow Follow-up Notes
 

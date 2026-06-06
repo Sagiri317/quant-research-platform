@@ -34,11 +34,16 @@ replacement for `PROJECT_STATUS.md`.
 - Active private local-data CLI is limited to
   `qrp-private schema-inventory --project-root . --output <path>`.
 - Report writers derive paths from `StorageLayout + ReportSpec + run_id`.
-- Public-safe aggregate evidence is generated from local private aggregate
-  verification; full historical `daily_panel` aggregate coverage now spans
-  `2014-01-01` through `2025-12-31` without committed row-level output.
+- Prior local private aggregate verification covered full historical
+  `daily_panel` aggregate coverage for `2014-01-01` through `2025-12-31`
+  without committed row-level output; full evidence/report regeneration remains
+  pending after the factor catalog refactor.
 - Evaluation and prediction evidence is 2014 smoke scope only; it is not a
   2014-2025 full historical evaluation or prediction run.
+- `eligible[t]` is the single EOD-as-of-t ResearchDataset universe mask, known
+  after signal-date close and intended for t+1 open research prediction and
+  evaluation. Model and prediction default sample filtering may use
+  `eligible`, but they do not use `can_enter` or `can_exit`.
 - Before the next PE/full-data run, processed panel as-of joins should fail
   closed on conflicting duplicate `stock_master` and `market_cap` keys while
   exact duplicate rows are deterministically deduped.

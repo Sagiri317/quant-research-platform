@@ -43,7 +43,7 @@ from quant_research_platform.research.evaluations.engine import evaluate_factor_
 from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
 )
-from quant_research_platform.research.models import fit_linear_baseline
+from quant_research_platform.research.models import fit_linear_baseline_result
 from quant_research_platform.research.predictions import (
     build_prediction_bundle,
     run_prediction_from_research_dataset,
@@ -66,6 +66,9 @@ def _research_frame() -> pd.DataFrame:
             ),
             "mom_20d": [1.0, 2.0, 2.0, 1.0],
             "forward_return_20d": [0.01, 0.03, 0.02, 0.00],
+            "eligible": [True, True, True, True],
+            "can_enter": [True, True, True, True],
+            "can_exit": [True, True, True, True],
         }
     )
 
@@ -82,6 +85,7 @@ def _research_dataset_catalog() -> ResearchDatasetCatalog:
             ),
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
+            filter_columns=("eligible", "can_enter", "can_exit"),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.RESEARCH_ROW,
             column_roles={
@@ -90,6 +94,9 @@ def _research_dataset_catalog() -> ResearchDatasetCatalog:
                 "timestamp": ColumnRole.TIMESTAMP,
                 "mom_20d": ColumnRole.FEATURE,
                 "forward_return_20d": ColumnRole.LABEL,
+                "eligible": ColumnRole.MASK,
+                "can_enter": ColumnRole.MASK,
+                "can_exit": ColumnRole.MASK,
             },
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
@@ -116,6 +123,9 @@ def test_research_dataset_assemble_read_validate(tmp_path: Path) -> None:
         "timestamp",
         "mom_20d",
         "forward_return_20d",
+        "eligible",
+        "can_enter",
+        "can_exit",
     }
 
 
@@ -251,7 +261,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     )
 
     evaluation = evaluate_factor_frame(frame, eval_spec)
-    coefficients = fit_linear_baseline(frame, model_spec)
+    coefficients = fit_linear_baseline_result(frame, model_spec).coefficients
     prediction = build_prediction_bundle(
         frame,
         prediction_spec,

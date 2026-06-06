@@ -30,6 +30,16 @@ Persisted stage profile, prediction, and evaluation report outputs are derived
 from `StorageLayout + ReportSpec + run_id`. Report writers do not accept
 arbitrary `output_root` or `output_dir` path-selection inputs.
 
+Evaluation reports record `filter_mode` metadata. Supported modes are
+`eligible`, `tradable`, and `unfiltered`; `tradable` is an execution-aware
+evaluation diagnostic only, not a backtest, live tradable PnL, or production
+trading result.
+
+Prediction bundles record `sample_filter_mode` metadata. Supported modes are
+`eligible` and `unfiltered`; prediction generation uses feature values only and
+does not use labels as prediction inputs. The current prediction path remains a
+historical research handoff, not label-free live inference.
+
 ## Privacy
 
 Report payloads and errors must not expose local absolute paths, private layer

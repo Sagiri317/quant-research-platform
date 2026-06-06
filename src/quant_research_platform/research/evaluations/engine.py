@@ -14,6 +14,7 @@ class EvaluationResult:
     spec: EvaluationSpec
     metrics: pd.DataFrame
     grouped_returns: pd.DataFrame
+    metadata: dict[str, object]
 
 
 def evaluate_factor_frame(
@@ -31,10 +32,20 @@ def evaluate_factor_frame(
     if missing:
         raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
 
+    from quant_research_platform.research.filtering import apply_filter_mode
+
+    filtered, metadata = apply_filter_mode(
+        frame,
+        mode=spec.filter_mode,
+        metadata_key="filter_mode",
+    )
+    usable_frame = filtered.dropna(subset=[feature, label]).copy()
+    metadata["rows_after_feature_label_dropna"] = int(len(usable_frame))
+
     rows: list[dict[str, object]] = []
     grouped_rows: list[dict[str, object]] = []
-    for timestamp, group in frame.groupby("timestamp", sort=True):
-        usable = group[[feature, label]].dropna()
+    for timestamp, group in usable_frame.groupby("timestamp", sort=True):
+        usable = group[[feature, label]]
         if len(usable) < 2:
             continue
         rows.append(
@@ -61,10 +72,15 @@ def evaluate_factor_frame(
                     "mean_return": float(bucket_frame[label].mean()),
                 }
             )
+    metrics = pd.DataFrame(rows)
+    grouped_returns = pd.DataFrame(grouped_rows)
+    metrics.attrs["metadata"] = metadata
+    grouped_returns.attrs["metadata"] = metadata
     return EvaluationResult(
         spec=spec,
-        metrics=pd.DataFrame(rows),
-        grouped_returns=pd.DataFrame(grouped_rows),
+        metrics=metrics,
+        grouped_returns=grouped_returns,
+        metadata=metadata,
     )
 
 

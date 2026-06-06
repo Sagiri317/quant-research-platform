@@ -63,7 +63,9 @@ processed canonical key.
 ## Verification Intent
 
 - 2014 processed panel parity-or-explained-delta.
-- 2014-2025 full historical `daily_panel` aggregate coverage.
+- Prior local 2014-2025 full historical `daily_panel` aggregate coverage;
+  full evidence/report regeneration remains pending after the factor catalog
+  refactor.
 - 2014-2025 factor value parity-or-explained-delta.
 - 2014-2025 label value parity-or-explained-delta.
 - 2014-2025 masks/universes parity.
@@ -84,6 +86,13 @@ processed canonical key.
   without committing row-level output artifacts.
 - Evaluation and prediction remain 2014 smoke evidence; they have not been
   expanded into full historical 2014-2025 runs.
+- Evaluation supports `eligible`, `tradable`, and `unfiltered` filter modes.
+  `tradable` means `eligible and can_enter and can_exit` and is an
+  execution-aware evaluation diagnostic only, not a backtest, live tradable PnL,
+  or production trading result.
+- Model training and historical prediction handoff support only `eligible` and
+  `unfiltered` sample filter modes. They do not use `can_enter` or `can_exit`
+  for sample filtering.
 
 ## Narrow Follow-up Notes
 
@@ -93,3 +102,15 @@ processed canonical key.
 - `market_cap` panel as-of joins use processed keys `asset_id + timestamp`.
   Exact duplicate rows are deduped deterministically and conflicting duplicate
   keys fail closed.
+- `eligible[t]` is the single EOD-as-of-t ResearchDataset universe mask. It is
+  known after signal-date close and intended for t+1 open research
+  prediction/evaluation. It may combine pre-open/reference information and
+  t-day EOD trading/liquidity information.
+- ST/PT timing exactness remains future P2. The current mask does not split
+  pre-open reference status, trade-date effective status, EOD liquidity, and
+  next-open-known ST/PT status.
+- `can_enter[t]` is false only when the next trading row is one-word limit up
+  or unavailable/non-trading; `can_exit[t]` is false only when the next trading
+  row is one-word limit down or unavailable/non-trading. Non-one-word limit
+  up/down rows remain tradable at the open-price abstraction used in this
+  research batch.

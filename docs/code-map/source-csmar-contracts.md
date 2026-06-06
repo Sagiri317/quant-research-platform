@@ -24,7 +24,7 @@ sources/csmar/catalog.py
   csmar source identity
 
 markets/implementations/a_share/source_bindings/csmar.py
-  A-share CSMAR interim catalog, provider binding, market semantics,
+  A-share CSMAR persisted interim catalog, provider binding, market semantics,
     interim pruning, and private raw-to-interim import orchestration
 ```
 
@@ -71,12 +71,17 @@ These are deferred cleanup considerations, not roadmap commitments:
   naming ambiguity.
 - Possible future removal of duplicated `implementation_package` from
   `ProviderBinding` after multi-source semantics stabilize.
-- Direct `index_market` duplicate conflict policy remains a P2 follow-up. The
-  current `a_share_daily_bar` 0.1.0 binding requires `benchmark_index_market`,
-  derived from raw `index_market`, but does not require materialized direct
-  `index_market`.
-- Future dev/test dependency cleanup, including whether `pytest-cov` should be
-  declared if coverage becomes a formal gate.
+- Raw `index_market` support remains in the source schema, mapping, raw loader,
+  and benchmark extraction path. The current persisted A-share CSMAR interim
+  catalog exposes `benchmark_index_market`, derived from raw `index_market`,
+  but does not expose direct materialized `index_market`.
+- `benchmark_index_market` filters to the benchmark subset before duplicate
+  validation. Exact duplicate benchmark keys are deterministically deduped,
+  conflicting benchmark keys fail closed, and unrelated non-benchmark raw
+  conflicts do not block the benchmark artifact.
+- Dev/test tooling is declared in the optional `dev` dependency group; use the
+  README conda-first install command rather than adding pytest/ruff to runtime
+  dependencies.
 - Future broader coverage improvements for tensor, raw_exports, checksums, and
   selected error paths.
 - Optional private verification B rerun as verification-only, not code cleanup.

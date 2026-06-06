@@ -78,11 +78,12 @@ def test_csmar_interim_catalog_registers_real_source_dataset_ids() -> None:
         "adjustment",
         "index_info",
         "benchmark_index_market",
-        "index_market",
         "trading_calendar",
     }
     assert {str(spec.source_id) for spec in specs} == {"csmar"}
     assert "benchmark_index_market" not in RAW_TABLE_CONTRACTS
+    with pytest.raises(KeyError, match="unknown_interim_data_spec: index_market"):
+        csmar_interim_catalog().get("index_market")
 
 
 def test_a_share_csmar_default_import_datasets_cover_required_binding_inputs() -> None:
@@ -471,7 +472,7 @@ def test_csmar_index_interim_uses_index_asset_namespace() -> None:
     assert result.loc[0, "source_asset_id"] == "000985"
 
 
-def test_csmar_direct_index_market_contract_does_not_require_benchmark_fields() -> None:
+def test_csmar_raw_index_market_normalization_support_is_retained() -> None:
     raw = pd.DataFrame(
         {
             "Indexcd": ["000985"],
@@ -488,17 +489,9 @@ def test_csmar_direct_index_market_contract_does_not_require_benchmark_fields() 
     )
     normalized = a_share_csmar_normalize_private_export_frame(raw, "index_market")
 
-    pruned, report = a_share_csmar_apply_interim_column_rules(
-        normalized,
-        "index_market",
-    )
-    spec = csmar_interim_catalog().get("index_market")
-
-    benchmark_only = {"benchmark_name", "benchmark_tier", "ohlc_valid"}
-    assert set(spec.required_columns).isdisjoint(benchmark_only)
-    assert set(pruned.columns).isdisjoint(benchmark_only)
-    assert not set(spec.required_columns).difference(pruned.columns)
-    assert report["dataset"] == "index_market"
+    assert normalized.loc[0, "asset_id"] == "index:000985"
+    assert normalized.loc[0, "source_asset_id"] == "000985"
+    assert normalized.loc[0, "timestamp"] == pd.Timestamp("2014-01-02")
 
 
 def test_csmar_benchmark_index_market_contract_keeps_benchmark_fields() -> None:
@@ -531,6 +524,88 @@ def test_csmar_benchmark_index_market_contract_keeps_benchmark_fields() -> None:
     assert benchmark_only.issubset(pruned.columns)
     assert not set(spec.required_columns).difference(pruned.columns)
     assert report["dataset"] == "benchmark_index_market"
+
+
+def test_csmar_benchmark_index_market_dedupes_exact_benchmark_duplicates(
+    tmp_path,
+) -> None:
+    first = tmp_path / "index_market_a.csv"
+    second = tmp_path / "index_market_b.csv"
+    _write_index_market_raw_export(
+        first,
+        index_code="000985",
+        close=100.5,
+    )
+    _write_index_market_raw_export(
+        second,
+        index_code="000985",
+        close=100.5,
+    )
+
+    frame = a_share_csmar_build_interim_frame(
+        interim_data_id="benchmark_index_market",
+        input_files=[first, second],
+        start_date=None,
+        end_date=None,
+        chunksize=1,
+    )
+
+    assert len(frame) == 1
+    assert int(frame.attrs["benchmark_exact_duplicate_count"]) == 1
+
+
+def test_csmar_benchmark_index_market_conflicts_fail_closed(tmp_path) -> None:
+    first = tmp_path / "index_market_a.csv"
+    second = tmp_path / "index_market_b.csv"
+    _write_index_market_raw_export(
+        first,
+        index_code="000985",
+        close=100.5,
+    )
+    _write_index_market_raw_export(
+        second,
+        index_code="000985",
+        close=100.6,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting_benchmark_index_market_primary_key_duplicates",
+    ):
+        a_share_csmar_build_interim_frame(
+            interim_data_id="benchmark_index_market",
+            input_files=[first, second],
+            start_date=None,
+            end_date=None,
+            chunksize=1,
+        )
+
+
+def test_csmar_non_benchmark_index_conflicts_do_not_block_benchmark_artifact(
+    tmp_path,
+) -> None:
+    first = tmp_path / "index_market_a.csv"
+    second = tmp_path / "index_market_b.csv"
+    _write_index_market_raw_export(
+        first,
+        index_code="999999",
+        close=100.5,
+    )
+    _write_index_market_raw_export(
+        second,
+        index_code="999999",
+        close=100.6,
+    )
+
+    frame = a_share_csmar_build_interim_frame(
+        interim_data_id="benchmark_index_market",
+        input_files=[first, second],
+        start_date=None,
+        end_date=None,
+        chunksize=1,
+    )
+
+    assert frame.empty
 
 
 def test_csmar_index_metadata_interim_allows_missing_time_column() -> None:
@@ -1090,6 +1165,30 @@ def _write_daily_market_raw_export(path) -> None:
                 "LimitUp": 22.0,
                 "LimitStatus": 0,
             },
+        ]
+    ).to_csv(path, index=False)
+
+
+def _write_index_market_raw_export(
+    path,
+    *,
+    index_code: str,
+    close: float,
+) -> None:
+    pd.DataFrame(
+        [
+            {
+                "Indexcd": index_code,
+                "Idxtrd01": "2014-01-02",
+                "Idxtrd02": 100.0,
+                "Idxtrd03": 101.0,
+                "Idxtrd04": 99.0,
+                "Idxtrd05": close,
+                "Idxtrd06": 10.0,
+                "Idxtrd07": 1000.0,
+                "Idxtrd08": 0.01,
+                "Idxtrd09": "benchmark",
+            }
         ]
     ).to_csv(path, index=False)
 

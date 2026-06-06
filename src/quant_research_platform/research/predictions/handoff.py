@@ -9,12 +9,13 @@ import pandas as pd
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
+from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.research.datasets import (
     read_research_dataset,
     validate_prediction_input,
 )
-from quant_research_platform.research.models import fit_linear_baseline
+from quant_research_platform.research.models import fit_linear_baseline_result
 from quant_research_platform.research.predictions.bundle import (
     build_prediction_bundle,
     write_prediction_bundle,
@@ -34,10 +35,16 @@ def run_prediction_from_research_dataset(
     prediction_spec = prediction_catalog.get(prediction_id)
     model_spec = model_catalog.get(prediction_spec.model_id)
     dataset_spec = dataset_catalog.get(prediction_spec.research_dataset_id)
-    read_columns = (
-        *prediction_spec.primary_key,
-        *model_spec.feature_columns,
-        model_spec.label_column,
+    read_columns = tuple(
+        dict.fromkeys(
+            (
+                *prediction_spec.primary_key,
+                *model_spec.feature_columns,
+                model_spec.label_column,
+                *required_filter_columns(model_spec.sample_filter_mode),
+                *required_filter_columns(prediction_spec.sample_filter_mode),
+            )
+        )
     )
     frame = read_research_dataset(
         processed_root,
@@ -54,20 +61,21 @@ def run_prediction_from_research_dataset(
     test_start = pd.Timestamp(prediction_spec.test_start)
     if train_end >= test_start:
         raise ValueError("prediction_train_end_must_precede_test_start")
-    train_frame = frame.loc[frame["timestamp"] <= train_end].dropna()
+    train_frame = frame.loc[frame["timestamp"] <= train_end].copy()
     test_mask = frame["timestamp"] >= test_start
     if prediction_spec.test_end is not None:
         test_mask &= frame["timestamp"] <= pd.Timestamp(prediction_spec.test_end)
     test_frame = frame.loc[test_mask]
     if train_frame.empty or test_frame.empty:
         raise ValueError("prediction_oos_split_has_empty_side")
-    coefficients = fit_linear_baseline(train_frame, model_spec)
+    model_result = fit_linear_baseline_result(train_frame, model_spec)
     prediction = build_prediction_bundle(
         frame,
         prediction_spec,
-        coefficients,
+        model_result.coefficients,
         model_spec.feature_columns,
     )
+    prediction.attrs["model_metadata"] = model_result.metadata
     layout = layout_from_processed_market_root(processed_root)
     report_spec = ReportSpec(
         report_id="prediction_bundle",
