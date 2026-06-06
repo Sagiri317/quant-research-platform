@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.runtime.privacy import sanitize_public_object
 
 
 class WorkflowCheckpointPolicy(StrEnum):
@@ -100,8 +98,8 @@ class WorkflowRunSummary:
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)
 
-    def to_public_record(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    def to_record(self) -> dict[str, object]:
+        payload: dict[str, object] = {
             "workflow_id": self.workflow_id,
             "workflow_version": self.workflow_version,
             "execution_mode": self.execution_mode.value,
@@ -119,7 +117,7 @@ class WorkflowRunSummary:
         }
         if self.failure_code is not None:
             payload["failure_code"] = self.failure_code
-        return sanitize_public_object(payload)
+        return payload
 
 
 __all__ = [

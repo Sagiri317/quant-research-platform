@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.workflows import WorkflowSpec
-from quant_research_platform.runtime.privacy import sanitize_public_object
+from quant_research_platform.runtime.workflow_records import (
+    workflow_run_summary_to_public_record,
+)
 from quant_research_platform.workflows.executor import execute_workflow
 from quant_research_platform.workflows.registry import WorkflowNodeRegistry
 
@@ -26,12 +28,11 @@ def execute_registered_workflow(
         execution_mode=mode,
         run_id=run_id,
     )
-    return sanitize_public_object(
-        {
-            **summary.to_public_record(),
-            "status": "executed" if mode is ExecutionMode.EXECUTE else "validated",
-        }
-    )
+    public_record = workflow_run_summary_to_public_record(summary)
+    return {
+        **public_record,
+        "status": "executed" if mode is ExecutionMode.EXECUTE else "validated",
+    }
 
 
 __all__ = ["execute_registered_workflow"]

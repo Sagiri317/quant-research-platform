@@ -13,6 +13,9 @@ from quant_research_platform.contracts.workflows import (
     WorkflowRunSummary,
     WorkflowSpec,
 )
+from quant_research_platform.runtime.workflow_records import (
+    workflow_run_summary_to_public_record,
+)
 from quant_research_platform.workflows.checkpoints import InMemoryCheckpointStore
 from quant_research_platform.workflows.executor import (
     execute_workflow,
@@ -190,7 +193,7 @@ def test_handler_map_execution_is_not_public_executor_surface() -> None:
 
 def test_workflow_summary_is_sanitized() -> None:
     spec = WorkflowSpec(
-        workflow_id=r"C:\Users\DELL\private\workflow",
+        workflow_id="vendor-source-marker-workflow",
         market_id=MarketId("a_share"),
         output_spec_ids=("daily_panel",),
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
@@ -205,10 +208,9 @@ def test_workflow_summary_is_sanitized() -> None:
     )
 
     assert isinstance(summary, WorkflowRunSummary)
-    public_record = summary.to_public_record()
-    assert "C:" not in str(public_record)
-    assert "/mnt/" not in str(public_record)
-    assert "000001" not in str(public_record)
+    public_record = workflow_run_summary_to_public_record(summary)
+    assert "vendor" not in str(public_record).lower()
+    assert "source" not in str(public_record).lower()
 
 
 def test_registered_workflow_rejects_unknown_node() -> None:
