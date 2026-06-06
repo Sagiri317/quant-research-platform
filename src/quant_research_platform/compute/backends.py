@@ -1,4 +1,4 @@
-"""提供 evaluation compute backend registry。"""
+"""Compute backend registry."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ SUPPORTED_BACKENDS = {DATAFRAME_BACKEND, TENSOR_BACKEND}
 
 @dataclass(frozen=True)
 class BackendDescriptor:
-    """描述一个可用 evaluation compute backend。"""
+    """Describe an available compute backend."""
 
     name: str
     label: str
@@ -54,7 +54,5 @@ def normalize_backend_name(backend: str | None) -> str:
         raise UnsupportedKernelError("backend must be a non-empty string.")
     normalized = backend.lower()
     if normalized not in SUPPORTED_BACKENDS:
-        raise UnsupportedKernelError(
-            f"unsupported evaluation compute backend: {backend}"
-        )
+        raise UnsupportedKernelError(f"unsupported compute backend: {backend}")
     return normalized

@@ -164,15 +164,10 @@ def build_research_panel(
     grouped = panel.groupby("asset_id", sort=False)
     # 入场和出场标记基于下一交易日，因为 label 使用下一次可执行开盘。
     # 涨停阻断新开仓，跌停阻断退出。
-    panel["next_day_is_trading"] = grouped["is_trading"].shift(-1).fillna(False)
-    panel["next_day_is_trading"] = panel["next_day_is_trading"].astype(bool)
+    panel["next_day_is_trading"] = _shifted_bool_mask(grouped["is_trading"])
     panel["next_day_limit_status"] = grouped["limit_status"].shift(-1)
-    next_one_word_limit_up = (
-        grouped["one_word_limit_up"].shift(-1).fillna(False).astype(bool)
-    )
-    next_one_word_limit_down = (
-        grouped["one_word_limit_down"].shift(-1).fillna(False).astype(bool)
-    )
+    next_one_word_limit_up = _shifted_bool_mask(grouped["one_word_limit_up"])
+    next_one_word_limit_down = _shifted_bool_mask(grouped["one_word_limit_down"])
     panel["can_enter"] = (
         panel["eligible"]
         & panel["next_day_is_trading"].astype(bool)
@@ -232,6 +227,10 @@ def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
     result["one_word_limit_up"] = status.eq(1) & equal_prices
     result["one_word_limit_down"] = status.eq(-1) & equal_prices
     return result
+
+
+def _shifted_bool_mask(series: pd.core.groupby.SeriesGroupBy) -> pd.Series:
+    return series.shift(-1).fillna(False).astype(bool)
 
 
 def _bool_like_column(frame: pd.DataFrame, column: str) -> pd.Series:

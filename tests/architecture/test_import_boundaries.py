@@ -17,17 +17,14 @@ FORBIDDEN_CONTRACT_IMPORT_PREFIXES = (
     "quant_research_platform.reports",
 )
 
-# Batch 2: catalog/defaults.py is the platform composition root.
 DEFAULTS_A_SHARE_CATALOG_FACTORIES = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.markets.implementations.a_share.catalog",
 )
-# Batch 2: catalog/defaults.py may use concrete market ids.
 DEFAULTS_A_SHARE_IDS = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.markets.implementations.a_share.ids",
 )
-# Batch 2: catalog/defaults.py may compose default source catalogs.
 DEFAULTS_CSMAR_CATALOG = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.sources.csmar.catalog",
@@ -36,18 +33,33 @@ DEFAULTS_A_SHARE_CSMAR_BINDING = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.markets.implementations.a_share.source_bindings",
 )
-# Batch 3: catalog/defaults.py may compose report owner definitions.
 DEFAULTS_REPORT_CATALOG = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.reports.catalog",
 )
-KNOWN_IMPORT_BOUNDARY_ALLOWLIST = {
-    DEFAULTS_A_SHARE_CATALOG_FACTORIES,
-    DEFAULTS_A_SHARE_IDS,
-    DEFAULTS_CSMAR_CATALOG,
-    DEFAULTS_A_SHARE_CSMAR_BINDING,
-    DEFAULTS_REPORT_CATALOG,
+KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
+    DEFAULTS_A_SHARE_CATALOG_FACTORIES: (
+        "catalog/defaults.py is the explicit platform composition root for "
+        "default A-share factor/label/universe definitions."
+    ),
+    DEFAULTS_A_SHARE_IDS: (
+        "catalog/defaults.py binds the current default market id in the "
+        "single-market 0.1 profile; QRP-ISSUE-024 tracks later profiles."
+    ),
+    DEFAULTS_CSMAR_CATALOG: (
+        "catalog/defaults.py composes the current default source catalog; "
+        "QRP-ISSUE-024 tracks later multi-source profiles."
+    ),
+    DEFAULTS_A_SHARE_CSMAR_BINDING: (
+        "catalog/defaults.py composes the explicit A-share CSMAR binding; "
+        "this remains the current 0.1 provider binding boundary."
+    ),
+    DEFAULTS_REPORT_CATALOG: (
+        "catalog/defaults.py composes report owner definitions into the "
+        "default catalog set."
+    ),
 }
+KNOWN_IMPORT_BOUNDARY_ALLOWLIST = set(KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS)
 
 
 def test_contracts_do_not_import_upper_layers() -> None:
@@ -71,6 +83,18 @@ def test_known_cross_layer_imports_are_explicitly_allowlisted() -> None:
 
     assert not unclassified, "unclassified_cross_layer_import: " + repr(unclassified)
     assert not stale, "stale_cross_layer_import_allowlist_entry: " + repr(stale)
+
+
+def test_known_cross_layer_import_allowlist_entries_have_reasons() -> None:
+    missing_reason = sorted(
+        entry
+        for entry, reason in KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS.items()
+        if not reason.strip()
+    )
+
+    assert not missing_reason, "missing_cross_layer_import_reason: " + repr(
+        missing_reason
+    )
 
 
 def test_catalog_defaults_is_the_only_interface_composition_root() -> None:

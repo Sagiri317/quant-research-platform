@@ -12,6 +12,19 @@ WORKFLOW_INTERFACE_ROOTS = (
     PROJECT_SRC / "interfaces",
 )
 OLD_PRIVATE_HELPER = "private" + "_interim_root_for_data_product"
+FORBIDDEN_PROVIDER_BINDING_IMPORT_PREFIXES = (
+    "quant_research_platform.storage",
+    "quant_research_platform.sources",
+    "quant_research_platform.markets",
+)
+FORBIDDEN_PROVIDER_BINDING_HELPERS = {
+    OLD_PRIVATE_HELPER,
+    "raw_source_root",
+    "interim_source_root",
+    "processed_market_root",
+    "layout_from_processed_market_root",
+    "layout_from_processed_root",
+}
 
 
 def test_agents_do_not_import_market_implementations() -> None:
@@ -35,10 +48,19 @@ def test_provider_bindings_catalog_remains_pure_container() -> None:
     top_level_functions = {
         node.name for node in tree.body if isinstance(node, ast.FunctionDef)
     }
+    forbidden_imports = sorted(
+        module
+        for module in imported_modules
+        if module.startswith(FORBIDDEN_PROVIDER_BINDING_IMPORT_PREFIXES)
+    )
+    referenced_helpers = sorted(
+        FORBIDDEN_PROVIDER_BINDING_HELPERS.intersection(_referenced_names(tree))
+    )
 
     assert "quant_research_platform.catalog.defaults" not in imported_modules
+    assert forbidden_imports == []
     assert OLD_PRIVATE_HELPER not in top_level_functions
-    assert "data" not in source or "interim" not in source
+    assert referenced_helpers == []
 
 
 def test_storage_parquet_uses_data_spec_provider_protocol() -> None:
@@ -81,3 +103,15 @@ def _iter_imports(root: Path) -> tuple[tuple[Path, int, str], ...]:
             elif isinstance(node, ast.Import):
                 imports.extend((path, node.lineno, alias.name) for alias in node.names)
     return tuple(imports)
+
+
+def _referenced_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names.add(node.value)
+    return names

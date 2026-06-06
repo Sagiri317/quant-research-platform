@@ -26,7 +26,7 @@ def test_backend_registry_normalizes_backend_names() -> None:
 def test_backend_registry_rejects_unknown_backend() -> None:
     with pytest.raises(
         UnsupportedKernelError,
-        match="unsupported evaluation compute backend",
+        match="unsupported compute backend",
     ):
         normalize_backend_name("gpu")
 
