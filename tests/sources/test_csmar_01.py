@@ -17,6 +17,7 @@ from quant_research_platform.markets.implementations.a_share.source_bindings imp
 from quant_research_platform.sources.csmar import (
     checksums,
     field_mappings,
+    fields,
     raw_exports,
     raw_schemas,
 )
@@ -408,6 +409,51 @@ def test_csmar_stock_master_reference_duplicates_are_deduped_or_rejected(
         )
 
 
+def test_csmar_index_info_reference_duplicates_are_deduped_or_rejected(
+    tmp_path,
+) -> None:
+    exact_a = pd.DataFrame([_index_info_raw_row("2014-01-02", "2013-12-31", "broad")])
+    exact_b = pd.DataFrame([_index_info_raw_row("2014-01-02", "2013-12-31", "broad")])
+    conflict = pd.DataFrame(
+        [
+            _index_info_raw_row("2014-01-02", "2013-12-31", "broad"),
+            _index_info_raw_row("2014-01-02", "2013-12-31", "style"),
+        ]
+    )
+    exact_path_a = tmp_path / "index_info_exact_a.csv"
+    exact_path_b = tmp_path / "index_info_exact_b.csv"
+    conflict_path = tmp_path / "index_info_conflict.csv"
+    exact_a.to_csv(exact_path_a, index=False)
+    exact_b.to_csv(exact_path_b, index=False)
+    conflict.to_csv(conflict_path, index=False)
+
+    pruning_reports: list[dict[str, object]] = []
+    deduped = a_share_csmar_build_interim_frame(
+        interim_data_id="index_info",
+        input_files=[exact_path_a, exact_path_b],
+        start_date=None,
+        end_date=None,
+        pruning_reports=pruning_reports,
+    )
+
+    assert len(deduped) == 1
+    assert [
+        report["reference_exact_duplicate_count"]
+        for report in pruning_reports
+        if report.get("report_type") == "reference_duplicate_summary"
+    ] == [1]
+    with pytest.raises(
+        ValueError,
+        match="conflicting_reference_primary_key_duplicates: index_info",
+    ):
+        a_share_csmar_build_interim_frame(
+            interim_data_id="index_info",
+            input_files=[conflict_path],
+            start_date=None,
+            end_date=None,
+        )
+
+
 def test_csmar_index_interim_uses_index_asset_namespace() -> None:
     frame = pd.DataFrame(
         {
@@ -533,6 +579,7 @@ def test_csmar_index_info_timestamp_uses_start_date_without_release_date() -> No
     assert result.loc[0, "index_class"] == "broad"
     assert str(result.loc[0, "timestamp"].date()) == "2014-01-02"
     assert "release_date" not in result.columns
+    assert "release_date" not in fields.SOURCE_IDENTIFIER_FIELDS
 
 
 def test_csmar_index_info_timestamp_falls_back_to_base_date() -> None:
@@ -650,6 +697,22 @@ def test_csmar_trading_calendar_raw_export_inspection(tmp_path) -> None:
     assert inspection.table_code == "TRDNEW_Cale"
     assert inspection.columns == ("Markettype", "Clddt", "Daywk", "State")
     assert inspection.missing_required_columns == []
+
+
+def test_csmar_raw_schema_uses_expected_metadata_sidecar_path(tmp_path) -> None:
+    export = tmp_path / (
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.csv"
+    )
+    sidecar = export.with_suffix(".metadata.json")
+    _write_trading_calendar_raw_export(export)
+    sidecar.write_text("{}", encoding="utf-8")
+
+    inspection = raw_schemas.inspect_raw_export_file(export)
+
+    assert not hasattr(raw_schemas, "default_metadata_path")
+    assert raw_schemas.expected_metadata_sidecar_path(export) == sidecar
+    assert inspection.has_metadata is True
 
 
 def test_csmar_trading_calendar_inspection_reports_missing_required_columns(
@@ -1029,6 +1092,21 @@ def _write_daily_market_raw_export(path) -> None:
             },
         ]
     ).to_csv(path, index=False)
+
+
+def _index_info_raw_row(
+    start_date: str,
+    base_date: str,
+    index_class: str,
+) -> dict[str, object]:
+    return {
+        "Indexcd": "000985",
+        "Idxinfo01": "benchmark",
+        "Idxinfo11": start_date,
+        "Idxinfo02": base_date,
+        "Idxinfo07": index_class,
+        "Idxinfo10": "formula",
+    }
 
 
 def _stock_master_raw_row(

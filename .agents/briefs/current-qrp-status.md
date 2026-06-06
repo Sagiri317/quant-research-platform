@@ -39,6 +39,9 @@ replacement for `PROJECT_STATUS.md`.
   `2014-01-01` through `2025-12-31` without committed row-level output.
 - Evaluation and prediction evidence is 2014 smoke scope only; it is not a
   2014-2025 full historical evaluation or prediction run.
+- Before the next PE/full-data run, processed panel as-of joins should fail
+  closed on conflicting duplicate `stock_master` and `market_cap` keys while
+  exact duplicate rows are deterministically deduped.
 - A-share is the first enabled market. Other markets are future design only.
 - `agents/` is proposal-only in this phase; it does not call external LLM APIs
   and does not write private row-level data.

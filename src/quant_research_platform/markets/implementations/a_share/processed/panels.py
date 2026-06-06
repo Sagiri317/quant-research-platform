@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -71,7 +72,9 @@ def build_research_panel(
     stocks = _ensure_datetime(
         stock_master, ["listing_date", "delisting_date", "status_change_date"]
     )
-    cap = _ensure_datetime(market_cap, ["share_change_date"])
+    cap = _ensure_datetime(market_cap, ["timestamp", "share_change_date"])
+    if "timestamp" not in cap or cap["timestamp"].isna().any():
+        raise ValueError("missing_market_cap_panel_timestamp")
 
     keep_stock_columns = [
         column
@@ -102,9 +105,13 @@ def build_research_panel(
         if column in cap.columns
     ]
     cap = (
-        cap[cap_columns]
-        .sort_values(["asset_id", "timestamp"])
-        .drop_duplicates(["asset_id", "timestamp"], keep="last")
+        _dedupe_exact_key_duplicates_or_raise_conflict(
+            cap[cap_columns],
+            key_columns=("asset_id", "timestamp"),
+            dataset="market_cap",
+        )
+        .sort_values(["asset_id", "timestamp"], kind="mergesort")
+        .reset_index(drop=True)
     )
     merged_groups = []
     for asset_id, stock_frame in panel.groupby("asset_id", sort=False):
@@ -180,16 +187,19 @@ def build_research_panel(
 
 def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
     stock_rows = stocks.copy()
-    stock_rows["_stock_master_row_order"] = range(len(stock_rows))
     stock_rows["stock_effective_date"] = _stock_master_effective_date(stock_rows)
+    if stock_rows["stock_effective_date"].isna().any():
+        raise ValueError("missing_stock_master_panel_effective_timestamp")
+    stock_rows = _dedupe_exact_key_duplicates_or_raise_conflict(
+        stock_rows,
+        key_columns=("asset_id", "stock_effective_date"),
+        dataset="stock_master",
+    )
+    stock_rows["_stock_master_row_order"] = range(len(stock_rows))
     static_listing_date = _first_static_stock_value(stock_rows, "listing_date")
-    stock_rows = (
-        stock_rows.dropna(subset=["stock_effective_date"])
-        .sort_values(
-            ["asset_id", "stock_effective_date", "_stock_master_row_order"],
-            kind="mergesort",
-        )
-        .drop_duplicates(["asset_id", "stock_effective_date"], keep="last")
+    stock_rows = stock_rows.sort_values(
+        ["asset_id", "stock_effective_date", "_stock_master_row_order"],
+        kind="mergesort",
     )
     merged_groups = []
     stock_output_columns = [
@@ -236,15 +246,28 @@ def _stock_master_effective_date(stocks: pd.DataFrame) -> pd.Series:
         if "status_change_date" in stocks
         else pd.Series(pd.NaT, index=stocks.index)
     )
-    if "timestamp" in stocks:
-        effective = effective.combine_first(
-            pd.to_datetime(stocks["timestamp"], errors="coerce")
-        )
     if "listing_date" in stocks:
         effective = effective.combine_first(
             pd.to_datetime(stocks["listing_date"], errors="coerce")
         )
     return effective
+
+
+def _dedupe_exact_key_duplicates_or_raise_conflict(
+    frame: pd.DataFrame,
+    *,
+    key_columns: Sequence[str],
+    dataset: str,
+) -> pd.DataFrame:
+    missing = [column for column in key_columns if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"missing_panel_join_key_columns: {dataset}: {', '.join(missing)}"
+        )
+    exact_deduped = frame.drop_duplicates(keep="first").copy()
+    if exact_deduped.duplicated(list(key_columns)).any():
+        raise ValueError(f"conflicting_panel_join_duplicate_keys: {dataset}")
+    return exact_deduped
 
 
 def _first_static_stock_value(

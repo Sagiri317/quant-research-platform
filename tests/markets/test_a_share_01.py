@@ -692,22 +692,14 @@ def test_a_share_panel_joins_stock_master_as_of_timestamp() -> None:
     assert by_date["listing_date"].eq(pd.Timestamp("2010-01-01")).all()
 
 
-def test_a_share_panel_stock_master_duplicate_effective_date_keeps_last() -> None:
+def test_a_share_panel_stock_master_exact_duplicate_effective_date_is_deduped() -> None:
     daily = pd.DataFrame([_daily_market_row("2020-07-02")])
-    stock_master = pd.DataFrame(
-        [
-            _stock_master_row(
-                status_change_date="2020-07-01",
-                company_status="older_duplicate",
-                industry_code="I1",
-            ),
-            _stock_master_row(
-                status_change_date="2020-07-01",
-                company_status="newer_duplicate",
-                industry_code="I2",
-            ),
-        ]
+    row = _stock_master_row(
+        status_change_date="2020-07-01",
+        company_status="normal_duplicate",
+        industry_code="I1",
     )
+    stock_master = pd.DataFrame([row, row.copy()])
 
     panel = panels.build_research_panel(
         daily,
@@ -719,8 +711,96 @@ def test_a_share_panel_stock_master_duplicate_effective_date_keeps_last() -> Non
 
     assert len(panel) == 1
     assert not panel.duplicated(["asset_id", "timestamp"]).any()
-    assert panel.loc[0, "company_status"] == "newer_duplicate"
-    assert panel.loc[0, "csrc_2012_industry_code"] == "I2"
+    assert panel.loc[0, "company_status"] == "normal_duplicate"
+    assert panel.loc[0, "csrc_2012_industry_code"] == "I1"
+
+
+def test_a_share_panel_stock_master_conflicting_duplicate_effective_date_fails_closed(
+) -> None:
+    daily = pd.DataFrame([_daily_market_row("2020-07-02")])
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                status_change_date="2020-07-01",
+                company_status="first_duplicate",
+                industry_code="I1",
+            ),
+            _stock_master_row(
+                status_change_date="2020-07-01",
+                company_status="second_duplicate",
+                industry_code="I2",
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting_panel_join_duplicate_keys: stock_master",
+    ):
+        panels.build_research_panel(
+            daily,
+            stock_master=stock_master,
+            market_cap=pd.DataFrame([_market_cap_row()]),
+            trading_calendar=_basic_trading_calendar(),
+            min_listing_trading_days=1,
+        )
+
+
+def test_a_share_panel_market_cap_exact_duplicate_timestamp_is_deduped() -> None:
+    daily = pd.DataFrame([_daily_market_row("2020-07-02")])
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I1",
+            )
+        ]
+    )
+    row = _market_cap_row(share_change_date="2020-01-01")
+    market_cap = pd.DataFrame([row, row.copy()])
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=stock_master,
+        market_cap=market_cap,
+        trading_calendar=_basic_trading_calendar(),
+        min_listing_trading_days=1,
+    )
+
+    assert len(panel) == 1
+    assert not panel.duplicated(["asset_id", "timestamp"]).any()
+    assert panel.loc[0, "total_shares"] == 1000.0
+    assert panel.loc[0, "a_float_shares"] == 500.0
+
+
+def test_a_share_panel_market_cap_conflicting_duplicate_timestamp_fails_closed(
+) -> None:
+    daily = pd.DataFrame([_daily_market_row("2020-07-02")])
+    stock_master = pd.DataFrame(
+        [
+            _stock_master_row(
+                status_change_date="2020-01-01",
+                company_status="normal",
+                industry_code="I1",
+            )
+        ]
+    )
+    first = _market_cap_row(share_change_date="2020-01-01")
+    second = {**first, "a_float_shares": 600.0}
+    market_cap = pd.DataFrame([first, second])
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting_panel_join_duplicate_keys: market_cap",
+    ):
+        panels.build_research_panel(
+            daily,
+            stock_master=stock_master,
+            market_cap=market_cap,
+            trading_calendar=_basic_trading_calendar(),
+            min_listing_trading_days=1,
+        )
 
 
 def test_a_share_panel_stock_master_does_not_use_future_status() -> None:

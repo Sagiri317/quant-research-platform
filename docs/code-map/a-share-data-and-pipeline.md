@@ -87,8 +87,9 @@ processed canonical key.
 
 ## Narrow Follow-up Notes
 
-- Future `stock_master` conflict policy should detect non-identical duplicate
-  records for the same `stock_code + effective_date` and decide whether to
-  reject, quarantine, or require explicit source-cleaning approval. The current
-  `0.1.0` fix uses deterministic `keep="last"` to avoid row explosion without
-  introducing a broader data-quality workflow.
+- `stock_master` panel as-of joins use processed keys
+  `asset_id + stock_effective_date`. Exact duplicate rows are deduped
+  deterministically and conflicting duplicate keys fail closed.
+- `market_cap` panel as-of joins use processed keys `asset_id + timestamp`.
+  Exact duplicate rows are deduped deterministically and conflicting duplicate
+  keys fail closed.

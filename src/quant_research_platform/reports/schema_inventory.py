@@ -230,15 +230,24 @@ def _logical_identifiers(logical_root: str) -> tuple[str, str, str]:
 
 
 def _infer_primary_key(columns: tuple[str, ...]) -> tuple[str, ...]:
+    reference_timestamp_key = (
+        "market_id",
+        "asset_id",
+        "source_id",
+        "source_asset_id",
+        "timestamp",
+    )
     canonical_key = ("market_id", "asset_id", "timestamp")
-    if all(column in columns for column in canonical_key):
-        return canonical_key
     reference_key = ("market_id", "asset_id", "source_id", "source_asset_id")
-    if all(column in columns for column in reference_key):
-        return reference_key
     calendar_key = ("market_id", "source_id", "timestamp")
-    if all(column in columns for column in calendar_key):
-        return calendar_key
+    for candidate in (
+        reference_timestamp_key,
+        canonical_key,
+        reference_key,
+        calendar_key,
+    ):
+        if all(column in columns for column in candidate):
+            return candidate
     return ()
 
 

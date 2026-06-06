@@ -214,7 +214,7 @@ def read_export_header(path: str | Path) -> tuple[str, ...]:
     return tuple(str(column) for column in frame.columns)
 
 
-def default_metadata_path(path: str | Path) -> Path:
+def expected_metadata_sidecar_path(path: str | Path) -> Path:
     """返回原始 export 推荐的 sidecar metadata path。"""
 
     export_path = Path(path)
@@ -243,5 +243,5 @@ def inspect_raw_export_file(path: str | Path) -> RawExportInspection:
         table_code=contract.table_code,
         columns=columns,
         missing_required_columns=missing,
-        has_metadata=default_metadata_path(export_path).exists(),
+        has_metadata=expected_metadata_sidecar_path(export_path).exists(),
     )

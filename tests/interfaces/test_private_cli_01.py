@@ -91,6 +91,34 @@ def test_schema_inventory_scans_only_interim_and_processed_roots(tmp_path) -> No
     assert "raw_ignored_value" not in combined
 
 
+def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> None:
+    index_info_root = tmp_path / "data" / "interim" / "csmar" / "index_info" / "data"
+    year_root = index_info_root / "year=2020"
+    year_root.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["index_a"],
+            "source_id": ["csmar"],
+            "source_asset_id": ["source_index_a"],
+            "timestamp": pd.to_datetime(["2020-01-01"]),
+            "index_name": ["Synthetic Index"],
+        }
+    ).to_parquet(year_root / "part-000.parquet", index=False)
+
+    inventory = build_schema_inventory(tmp_path)
+    item = _inventory_item(inventory, "data/interim/csmar/index_info/data")
+
+    assert item["primary_key"] == [
+        "market_id",
+        "asset_id",
+        "source_id",
+        "source_asset_id",
+        "timestamp",
+    ]
+    assert "primary_key_inferred" in item["warnings"]
+
+
 def test_qrp_private_schema_inventory_requires_output_and_refuses_overwrite(
     tmp_path,
 ) -> None:
