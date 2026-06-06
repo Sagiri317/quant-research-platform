@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.compute.config import (
+    CostConfig,
+    WeightConfig,
+)
 from quant_research_platform.compute.dataframe.construction import _validate_positions
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -12,10 +16,6 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _cost_components,
     _normalize_group_key,
-)
-from quant_research_platform.compute.protocols import (
-    CostConfig,
-    WeightConfig,
 )
 
 

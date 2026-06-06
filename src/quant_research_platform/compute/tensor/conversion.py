@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.protocols import (
-    PanelSpec,
-    validate_panel,
+from quant_research_platform.compute.panels import (
+    ComputePanelSpec,
+    validate_compute_panel,
 )
 from quant_research_platform.compute.tensor.layout import (
     PanelTensor,
@@ -19,14 +19,14 @@ from quant_research_platform.compute.tensor.layout import (
 
 def panel_to_tensor(
     frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     *,
     value_dtype: str = "float64",
 ) -> PanelTensor:
     """把 long panel 转为 time x asset x feature arrays。"""
 
     dtype = _validate_value_dtype(value_dtype)
-    panel = validate_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec)
     timestamps = tuple(
         pd.Timestamp(value) for value in panel[spec.timestamp_column].unique()
     )

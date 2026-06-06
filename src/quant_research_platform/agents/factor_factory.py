@@ -2,9 +2,7 @@
 
 from quant_research_platform.agents.proposals import FactorProposal
 from quant_research_platform.agents.safety import assert_proposal_is_public_safe
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_field_catalog,
-)
+from quant_research_platform.catalog.defaults import default_field_catalog
 
 
 def propose_factor(
@@ -36,7 +34,7 @@ def propose_factor(
 
 
 def _validate_input_columns(input_columns: tuple[str, ...]) -> None:
-    fields = a_share_field_catalog()
+    fields = default_field_catalog()
     unknown = sorted(set(input_columns).difference(fields.list_names()))
     if unknown:
         raise ValueError(f"unknown_factor_input_columns: {', '.join(unknown)}")

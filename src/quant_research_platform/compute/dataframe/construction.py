@@ -5,6 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.config import (
+    TradabilityConfig,
+    WeightConfig,
+)
 from quant_research_platform.compute.dataframe.constraints import (
     _apply_tradability_constraints,
     _build_tradability_context,
@@ -25,17 +29,15 @@ from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _validate_segment_columns,
     _validate_weight_columns,
 )
-from quant_research_platform.compute.protocols import (
-    PanelSpec,
-    TradabilityConfig,
-    WeightConfig,
-    validate_panel,
+from quant_research_platform.compute.panels import (
+    ComputePanelSpec,
+    validate_compute_panel,
 )
 
 
 def build_weighted_positions(
     frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
@@ -44,7 +46,7 @@ def build_weighted_positions(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """为每个请求的 signal feature 构造 timestamp-level positions。"""
 
-    panel = validate_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec)
     return _build_weighted_positions_from_validated_panel(
         panel,
         spec,
@@ -56,7 +58,7 @@ def build_weighted_positions(
 
 def _build_weighted_positions_from_validated_panel(
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
@@ -118,7 +120,7 @@ def _build_weighted_positions_from_validated_panel(
 
 def build_long_short_positions(
     frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     top_quantile: float = 0.2,
     bottom_quantile: float | None = None,
     feature_column: str | None = None,
@@ -142,7 +144,7 @@ def build_long_short_positions(
 def _build_feature_positions(
     *,
     timestamp_frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     feature: str,
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,

@@ -7,11 +7,11 @@ from math import floor
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.protocols import (
+from quant_research_platform.compute.config import (
     CostConfig,
-    PanelSpec,
     WeightConfig,
 )
+from quant_research_platform.compute.panels import ComputePanelSpec
 
 
 def _cost_components(
@@ -95,7 +95,7 @@ def _risk_values(
 
 
 def _select_features(
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     portfolio_features: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
     if portfolio_features is None:
@@ -108,7 +108,7 @@ def _select_features(
     return portfolio_features
 
 
-def _select_feature(spec: PanelSpec, feature_column: str | None) -> str:
+def _select_feature(spec: ComputePanelSpec, feature_column: str | None) -> str:
     feature = spec.feature_columns[0] if feature_column is None else feature_column
     if feature not in spec.feature_columns:
         raise ValueError(f"feature_column {feature!r} is not in the panel spec.")

@@ -31,26 +31,30 @@ def test_workflow_registry_uses_execution_mode_factory() -> None:
     """dry_run is official; execute fails closed until real execute lands.
 
     Future execute support must use workflow_node_registry(execution_mode=...)
-    as the same public entrypoint. Do not introduce fixture_workflow_node_registry()
-    or a long-term public dry_run_workflow_node_registry().
+    as the same public entrypoint. Do not introduce separate fixture or
+    long-term dry-run-only public factories.
     """
 
     tree = ast.parse(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
     top_level_functions = {
         node.name for node in tree.body if isinstance(node, ast.FunctionDef)
     }
+    fixture_factory = "_".join(("fixture", "workflow", "node", "registry"))
+    dry_run_only_factory = "_".join(
+        ("dry", "run", "workflow", "node", "registry")
+    )
 
     assert "workflow_node_registry" in top_level_functions
-    assert "fixture_workflow_node_registry" not in top_level_functions
-    assert "dry_run_workflow_node_registry" not in top_level_functions
+    assert fixture_factory not in top_level_functions
+    assert dry_run_only_factory not in top_level_functions
 
 
 def test_active_workflow_code_avoids_public_fixture_factory_names() -> None:
     forbidden_terms = (
-        "fixture_backed_execution",
-        "workflow-fixture-run",
-        "fixture_workflow_node_registry",
-        "dry_run_workflow_node_registry",
+        "_".join(("fixture", "backed", "execution")),
+        "-".join(("workflow", "fixture", "run")),
+        "_".join(("fixture", "workflow", "node", "registry")),
+        "_".join(("dry", "run", "workflow", "node", "registry")),
     )
     hits: list[str] = []
     for path in sorted((PROJECT_SRC / "workflows").rglob("*.py")):

@@ -3,6 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from quant_research_platform.compute.config import (
+    CostConfig,
+    TradabilityConfig,
+    WeightConfig,
+)
 from quant_research_platform.compute.dataframe import (
     constraints as dataframe_constraints,
 )
@@ -32,12 +37,7 @@ from quant_research_platform.compute.dataframe.portfolio import (
     summarize_exposure,
     summarize_performance,
 )
-from quant_research_platform.compute.protocols import (
-    CostConfig,
-    PanelSpec,
-    TradabilityConfig,
-    WeightConfig,
-)
+from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.compute.tensor import construction as tensor_construction
 from quant_research_platform.compute.tensor import exposure as tensor_exposure
 from quant_research_platform.compute.tensor import reporting as tensor_reporting
@@ -74,7 +74,7 @@ def _ranking_panel() -> pd.DataFrame:
 
 
 def test_build_long_short_positions_creates_equal_weight_legs() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions = build_long_short_positions(_ranking_panel(), spec, top_quantile=1 / 3)
 
@@ -86,7 +86,7 @@ def test_build_long_short_positions_creates_equal_weight_legs() -> None:
 
 
 def test_build_weighted_positions_outputs_nonzero_rows_only() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         _ranking_panel(),
@@ -106,7 +106,7 @@ def test_tensor_weighted_positions_builds_artifacts_from_execution_path() -> Non
     panel = _ranking_panel().assign(
         timestamp=lambda frame: pd.to_datetime(frame["timestamp"])
     )
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     artifacts = tensor_construction.build_tensor_portfolio_artifacts(
         panel,
@@ -157,7 +157,7 @@ def test_tensor_weighted_positions_builds_artifacts_from_execution_path() -> Non
 
 def test_tensor_weighted_positions_accepts_string_timestamps_like_dataframe() -> None:
     panel = _ranking_panel()
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
     weight_config = WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3)
 
     dataframe_positions, _ = build_weighted_positions(panel, spec, weight_config)
@@ -173,7 +173,7 @@ def test_tensor_weighted_positions_accepts_string_timestamps_like_dataframe() ->
 
 def test_tensor_weighted_positions_rejects_duplicate_keys_like_dataframe() -> None:
     panel = pd.concat([_ranking_panel(), _ranking_panel().iloc[[0]]], ignore_index=True)
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
     weight_config = WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3)
 
     with pytest.raises(ValueError, match="unique timestamp-asset keys"):
@@ -187,7 +187,7 @@ def test_tensor_weighted_positions_rejects_duplicate_keys_like_dataframe() -> No
 
 
 def test_build_weighted_positions_supports_long_only_top_leg() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, diagnostics = build_weighted_positions(
         _ranking_panel(),
@@ -214,7 +214,7 @@ def test_build_weighted_positions_keeps_stable_tie_order() -> None:
             "forward_return": [0.01, 0.02, 0.03],
         }
     )
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         panel,
@@ -239,7 +239,7 @@ def test_weighted_position_ranking_avoids_dataframe_signal_sort(
         return original_sort_values(frame, by, *args, **kwargs)
 
     monkeypatch.setattr(pd.DataFrame, "sort_values", fail_directed_signal_sort)
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         _ranking_panel(),
@@ -278,7 +278,7 @@ def test_weighted_positions_pass_sparse_targets_to_tradability(monkeypatch) -> N
 
     positions, _diagnostics = build_weighted_positions(
         panel,
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 6, bottom_quantile=1 / 6),
         tradability_config=TradabilityConfig(can_exit_column="can_exit"),
     )
@@ -287,7 +287,7 @@ def test_weighted_positions_pass_sparse_targets_to_tradability(monkeypatch) -> N
 
 
 def test_build_weighted_positions_keeps_flat_timestamp_marker() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         _ranking_panel().iloc[:1],
@@ -304,7 +304,7 @@ def test_eligible_column_excludes_asset_from_selection_universe() -> None:
     panel = _ranking_panel().assign(
         eligible=[True, True, False, True, True, True],
     )
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         panel,
@@ -326,7 +326,7 @@ def test_weight_diagnostics_report_filter_counts() -> None:
         can_enter=[True, False, False, True, True, True],
         can_exit=[True, True, True, True, False, True],
     )
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     _positions, diagnostics = build_weighted_positions(
         panel,
@@ -352,7 +352,7 @@ def test_can_enter_column_blocks_new_positions_without_redistribution() -> None:
     panel = _ranking_panel().assign(
         can_enter=[True, True, False, True, True, True],
     )
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         panel,
@@ -374,7 +374,7 @@ def test_can_exit_column_carries_forward_blocked_old_positions() -> None:
     panel = _ranking_panel().assign(
         can_exit=[True, True, True, True, True, False],
     )
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         panel,
@@ -405,7 +405,10 @@ def test_tradability_ignores_previous_assets_missing_from_timestamp() -> None:
     adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
-        spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        spec=ComputePanelSpec(
+            feature_columns=("factor",),
+            label_column="forward_return",
+        ),
         tradability_config=TradabilityConfig(can_exit_column="can_exit"),
         previous_positions={"C": -1.0},
     )
@@ -427,7 +430,7 @@ def test_tradability_constraints_avoid_asset_set_index(monkeypatch) -> None:
         can_enter=[True, True, False, True, True, True],
         can_exit=[True, True, True, True, True, False],
     )
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         panel,
@@ -456,7 +459,7 @@ def test_tradability_constraints_skip_asset_loop_when_all_flags_true(
     monkeypatch.setattr(dataframe_constraints, "_is_entry_blocked", fail_block_check)
     monkeypatch.setattr(dataframe_constraints, "_is_exit_blocked", fail_block_check)
     panel = _ranking_panel().assign(can_enter=True, can_exit=True)
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     positions, _diagnostics = build_weighted_positions(
         panel,
@@ -490,7 +493,10 @@ def test_tradability_constraints_adjust_positions_in_place() -> None:
     adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
-        spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        spec=ComputePanelSpec(
+            feature_columns=("factor",),
+            label_column="forward_return",
+        ),
         tradability_config=TradabilityConfig(can_enter_column="can_enter"),
         previous_positions={},
     )
@@ -520,7 +526,10 @@ def test_tradability_constraints_skip_entry_check_for_zero_targets(
     adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
-        spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        spec=ComputePanelSpec(
+            feature_columns=("factor",),
+            label_column="forward_return",
+        ),
         tradability_config=TradabilityConfig(can_enter_column="can_enter"),
         previous_positions={},
     )
@@ -549,7 +558,10 @@ def test_tradability_constraints_skip_entry_check_for_same_sign_positions(
     adjusted = dataframe_constraints._apply_tradability_constraints(
         positions=positions,
         timestamp_frame=panel,
-        spec=PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        spec=ComputePanelSpec(
+            feature_columns=("factor",),
+            label_column="forward_return",
+        ),
         tradability_config=TradabilityConfig(can_enter_column="can_enter"),
         previous_positions={"A": 0.5},
     )
@@ -573,7 +585,7 @@ def test_calculate_turnover_uses_absolute_position_changes() -> None:
 
 
 def test_simulate_long_short_returns_applies_turnover_costs() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     result = simulate_long_short_returns(
         _ranking_panel(),
@@ -590,7 +602,7 @@ def test_simulate_long_short_returns_applies_turnover_costs() -> None:
 
 
 def test_simulate_weighted_returns_keeps_long_only_rows_without_short_leg() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     _positions, turnover, returns, diagnostics = simulate_weighted_long_short_returns(
         _ranking_panel(),
@@ -611,7 +623,7 @@ def test_simulate_weighted_returns_keeps_long_only_rows_without_short_leg() -> N
 
 
 def test_detailed_cost_config_splits_buy_sell_slippage_and_spread_costs() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
     positions, _diagnostics = build_weighted_positions(
         _ranking_panel(),
         spec,
@@ -639,7 +651,7 @@ def test_detailed_cost_config_splits_buy_sell_slippage_and_spread_costs() -> Non
 
 
 def test_simulation_uses_detailed_cost_config_when_provided() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
         _ranking_panel(),
@@ -676,7 +688,7 @@ def test_simulation_does_not_build_timestamp_asset_label_lookup(monkeypatch) -> 
 
     simulate_weighted_long_short_returns(
         _ranking_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 
@@ -697,7 +709,7 @@ def test_simulation_does_not_join_timestamp_asset_labels(monkeypatch) -> None:
 
     simulate_weighted_long_short_returns(
         _ranking_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 
@@ -712,7 +724,7 @@ def test_simulation_does_not_scan_turnover_and_cost_per_return_group(
 
     simulate_weighted_long_short_returns(
         _ranking_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 
@@ -733,7 +745,7 @@ def test_simulation_streams_portfolio_path_without_rebuilding_from_positions(
 
     _positions, turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
         _ranking_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 
@@ -754,7 +766,7 @@ def test_simulation_calculates_long_short_legs_without_dataframe_dropna(
 
     _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(
         _ranking_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 

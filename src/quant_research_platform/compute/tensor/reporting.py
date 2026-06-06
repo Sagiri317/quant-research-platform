@@ -5,17 +5,17 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.config import (
+    CostConfig,
+    WeightConfig,
+)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     RETURNS_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _normalize_group_key,
 )
-from quant_research_platform.compute.protocols import (
-    CostConfig,
-    PanelSpec,
-    WeightConfig,
-)
+from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.compute.tensor.exposure import _exposure_record_from_arrays
 from quant_research_platform.compute.tensor.portfolio_helpers import (
     _filter_panel_group,
@@ -30,7 +30,7 @@ from quant_research_platform.runtime.profiling import measure_stage
 def calculate_tensor_long_short(
     *,
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     positions: pd.DataFrame,
     turnover: pd.DataFrame,
     cost_breakdown: pd.DataFrame,

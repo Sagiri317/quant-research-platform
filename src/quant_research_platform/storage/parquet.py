@@ -28,7 +28,7 @@ from quant_research_platform.storage.partitions import add_year_partition
 from quant_research_platform.storage.privacy import is_private_boundary_path
 
 
-class DataSpecCatalog(Protocol):
+class DataSpecProvider(Protocol):
     def get(self, data_id: str) -> DataSpec: ...
 
 
@@ -36,7 +36,7 @@ def write_interim_data(
     frame: pd.DataFrame,
     *,
     layout: StorageLayout,
-    catalog: DataSpecCatalog,
+    catalog: DataSpecProvider,
     interim_data_id: str,
 ) -> Path:
     spec = catalog.get(interim_data_id)
@@ -62,7 +62,7 @@ def write_processed_data(
     frame: pd.DataFrame,
     *,
     layout: StorageLayout,
-    catalog: DataSpecCatalog,
+    catalog: DataSpecProvider,
     processed_data_id: str,
 ) -> Path:
     spec = catalog.get(processed_data_id)
@@ -92,7 +92,7 @@ def write_research_dataset(
     frame: pd.DataFrame,
     *,
     layout: StorageLayout,
-    catalog: DataSpecCatalog,
+    catalog: DataSpecProvider,
     dataset_id: str,
 ) -> Path:
     spec = catalog.get(dataset_id)
@@ -118,7 +118,7 @@ def write_partitioned_parquet_dataset(
     frame: pd.DataFrame,
     root: Path,
     *,
-    catalog: DataSpecCatalog,
+    catalog: DataSpecProvider,
     data_id: str,
 ) -> Path:
     spec = catalog.get(data_id)
@@ -140,7 +140,7 @@ def _write_partitioned_parquet_dataset_contents(
     frame: pd.DataFrame,
     root: Path,
     *,
-    catalog: DataSpecCatalog,
+    catalog: DataSpecProvider,
     data_id: str,
 ) -> Path:
     spec = catalog.get(data_id)
@@ -432,7 +432,7 @@ def _data_spec_payload(spec: DataSpec) -> dict[str, object]:
 
 
 __all__ = [
-    "DataSpecCatalog",
+    "DataSpecProvider",
     "parquet_dataset_columns",
     "read_partitioned_parquet_dataset",
     "validate_parquet_dataset_write",

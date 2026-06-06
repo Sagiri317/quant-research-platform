@@ -5,10 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.protocols import (
-    PanelSpec,
-    TradabilityConfig,
-)
+from quant_research_platform.compute.config import TradabilityConfig
+from quant_research_platform.compute.panels import ComputePanelSpec
 
 
 def _validate_tradability_columns(
@@ -46,7 +44,7 @@ def _filter_eligible_assets(
 def _filter_new_entry_blocked_assets(
     ranked: pd.DataFrame,
     *,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     tradability_config: TradabilityConfig,
     previous_positions: dict[str, float],
 ) -> pd.DataFrame:
@@ -65,7 +63,7 @@ def _tradability_diagnostic_counts(
     *,
     timestamp_frame: pd.DataFrame,
     feature: str,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     tradability_config: TradabilityConfig,
 ) -> dict[str, int]:
     signal_available = timestamp_frame[feature].notna()
@@ -96,7 +94,7 @@ def _apply_tradability_constraints(
     *,
     positions: dict[str, float],
     timestamp_frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     tradability_config: TradabilityConfig,
     previous_positions: dict[str, float],
     tradability_context: dict[str, object] | None = None,
@@ -166,7 +164,7 @@ def _apply_tradability_constraints(
 def _build_tradability_context(
     *,
     timestamp_frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     tradability_config: TradabilityConfig,
 ) -> dict[str, object]:
     asset_values = timestamp_frame[spec.asset_column].astype(str).to_numpy()

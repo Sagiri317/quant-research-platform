@@ -5,6 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.config import (
+    CostConfig,
+    TradabilityConfig,
+    WeightConfig,
+)
 from quant_research_platform.compute.dataframe.constraints import (
     _build_tradability_context,
     _validate_tradability_columns,
@@ -31,19 +36,16 @@ from quant_research_platform.compute.dataframe.turnover import (
     _active_position_map,
     _position_change_turnover,
 )
-from quant_research_platform.compute.protocols import (
-    CostConfig,
-    PanelSpec,
-    TradabilityConfig,
-    WeightConfig,
-    validate_panel,
+from quant_research_platform.compute.panels import (
+    ComputePanelSpec,
+    validate_compute_panel,
 )
 from quant_research_platform.runtime.profiling import measure_stage
 
 
 def simulate_weighted_long_short_returns(
     frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
@@ -54,7 +56,7 @@ def simulate_weighted_long_short_returns(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """基于 weighted positions 评估 portfolio returns。"""
 
-    panel = validate_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec)
     return _simulate_weighted_long_short_returns_from_validated_panel(
         panel,
         spec,
@@ -68,7 +70,7 @@ def simulate_weighted_long_short_returns(
 
 def _simulate_weighted_long_short_returns_from_validated_panel(
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
@@ -95,7 +97,7 @@ def _simulate_weighted_long_short_returns_from_validated_panel(
 
 def _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
@@ -123,7 +125,7 @@ def _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
 
 def _stream_weighted_portfolio_from_validated_panel(
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
@@ -243,7 +245,7 @@ def _stream_weighted_portfolio_from_validated_panel(
 
 def simulate_long_short_returns(
     frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     top_quantile: float = 0.2,
     bottom_quantile: float = 0.2,
     cost_bps: float = 0.0,
@@ -268,7 +270,7 @@ def simulate_long_short_returns(
 def _calculate_long_short_from_positions(
     *,
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     positions: pd.DataFrame,
     turnover: pd.DataFrame,
     cost_breakdown: pd.DataFrame,
@@ -358,7 +360,7 @@ def _calculate_long_short_from_positions(
 
 def _timestamp_label_lookup(
     timestamp_frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     label_column: str,
 ) -> dict[str, float]:
     assets = timestamp_frame[spec.asset_column].astype(str).to_numpy(copy=False)

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from quant_research_platform.compute.protocols import (
-    DATAFRAME_BACKEND,
-    SUPPORTED_BACKENDS,
-    TENSOR_BACKEND,
-)
 from quant_research_platform.runtime.errors import UnsupportedKernelError
+
+DATAFRAME_BACKEND = "dataframe"
+TENSOR_BACKEND = "tensor"
+SUPPORTED_BACKENDS = {DATAFRAME_BACKEND, TENSOR_BACKEND}
 
 
 @dataclass(frozen=True)

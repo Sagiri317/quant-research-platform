@@ -133,7 +133,7 @@ def _response(**payload: object) -> dict[str, object]:
 
 
 def _resolve_run_id(run_id: str | None, *, prefix: str) -> str:
-    resolved = run_id or f"{prefix}-fixture"
+    resolved = run_id or f"{prefix}-dry-run"
     return validate_run_id(resolved)
 
 

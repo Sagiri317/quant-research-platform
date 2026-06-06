@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.protocols import (
+from quant_research_platform.compute.config import (
     TradabilityConfig,
     WeightConfig,
 )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 
 
 class BindingVisibility(StrEnum):
@@ -41,23 +40,8 @@ class ProviderBindingRegistry:
             raise KeyError(f"unknown_provider_binding: {data_product_id}") from exc
 
 
-def private_interim_root_for_data_product(
-    project_root: Path,
-    data_product_id: str,
-) -> Path:
-    """Return the local private interim root for an internal binding."""
-
-    from quant_research_platform.catalog.defaults import (
-        default_provider_binding_registry,
-    )
-
-    binding = default_provider_binding_registry().get(data_product_id)
-    return Path(project_root) / "data" / "interim" / binding.provider_id
-
-
 __all__ = [
     "BindingVisibility",
     "ProviderBinding",
     "ProviderBindingRegistry",
-    "private_interim_root_for_data_product",
 ]

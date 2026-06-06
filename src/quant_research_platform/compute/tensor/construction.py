@@ -8,6 +8,11 @@ from operator import itemgetter
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.config import (
+    CostConfig,
+    TradabilityConfig,
+    WeightConfig,
+)
 from quant_research_platform.compute.dataframe.constraints import (
     _validate_tradability_columns,
 )
@@ -25,12 +30,9 @@ from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _validate_segment_columns,
     _validate_weight_columns,
 )
-from quant_research_platform.compute.protocols import (
-    CostConfig,
-    PanelSpec,
-    TradabilityConfig,
-    WeightConfig,
-    validate_panel,
+from quant_research_platform.compute.panels import (
+    ComputePanelSpec,
+    validate_compute_panel,
 )
 from quant_research_platform.compute.tensor.constraints import (
     _apply_array_tradability_constraints,
@@ -76,7 +78,7 @@ class TensorPortfolioArtifacts:
 
 def build_tensor_weighted_positions(
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
@@ -105,7 +107,7 @@ def build_tensor_weighted_positions(
 
 def build_tensor_portfolio_artifacts(
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     weight_config: WeightConfig,
     cost_config: CostConfig | None = None,
     *,
@@ -118,7 +120,7 @@ def build_tensor_portfolio_artifacts(
     """构造 tensor portfolio artifacts，同时不保留 dense path matrices。"""
 
     dtype = _validate_value_dtype(value_dtype)
-    panel = validate_panel(panel, spec)
+    panel = validate_compute_panel(panel, spec)
     _validate_segment_columns(panel, segment_columns)
     _validate_weight_columns(panel, weight_config)
     if cost_config is None:
@@ -528,7 +530,7 @@ def _selected_assets(assets: tuple[str, ...], offsets: np.ndarray) -> list[str]:
 def _prepare_timestamp_position_input(
     *,
     timestamp_frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     features: tuple[str, ...],
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,

@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.protocols import (
-    PanelSpec,
-    validate_panel,
+from quant_research_platform.compute.panels import (
+    ComputePanelSpec,
+    validate_compute_panel,
 )
 
 IC_RESULT_COLUMNS = ["timestamp", "feature", "label", "ic", "rankic", "n_obs"]
@@ -42,10 +42,13 @@ GROUP_SPREAD_SUMMARY_COLUMNS = [
 ]
 
 
-def evaluate_ic_by_timestamp(frame: pd.DataFrame, spec: PanelSpec) -> pd.DataFrame:
+def evaluate_ic_by_timestamp(
+    frame: pd.DataFrame,
+    spec: ComputePanelSpec,
+) -> pd.DataFrame:
     """按 timestamp 和 feature 计算 cross-sectional IC 与 RankIC。"""
 
-    panel = validate_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec)
     records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
         for feature in spec.feature_columns:
@@ -75,13 +78,13 @@ def evaluate_ic_by_timestamp(frame: pd.DataFrame, spec: PanelSpec) -> pd.DataFra
 
 def evaluate_ic_and_grouped_returns(
     frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """在一次 timestamp/feature 扫描中计算 IC 和 grouped returns。"""
 
-    panel = validate_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec)
     return evaluate_ic_and_grouped_returns_from_validated_panel(
         panel,
         spec,
@@ -91,7 +94,7 @@ def evaluate_ic_and_grouped_returns(
 
 def evaluate_ic_and_grouped_returns_from_validated_panel(
     panel: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -160,7 +163,7 @@ def evaluate_ic_and_grouped_returns_from_validated_panel(
 
 def analyze_grouped_returns(
     frame: pd.DataFrame,
-    spec: PanelSpec,
+    spec: ComputePanelSpec,
     n_groups: int = 5,
 ) -> pd.DataFrame:
     """按 feature rank group 计算 timestamp-level mean forward return。"""
@@ -170,7 +173,7 @@ def analyze_grouped_returns(
     if n_groups < 2:
         raise ValueError("n_groups must be at least 2.")
 
-    panel = validate_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec)
     records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
         for feature in spec.feature_columns:

@@ -3,13 +3,21 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from quant_research_platform.compute.backends import (
+    DATAFRAME_BACKEND,
+    SUPPORTED_BACKENDS,
+    TENSOR_BACKEND,
+)
 from quant_research_platform.compute.dataframe.cross_section import (
     analyze_grouped_returns,
     evaluate_ic_by_timestamp,
     summarize_group_spread,
     summarize_ic,
 )
-from quant_research_platform.compute.protocols import PanelSpec
+from quant_research_platform.compute.panels import (
+    ComputePanelSpec,
+    validate_compute_panel,
+)
 
 
 def _perfect_panel() -> pd.DataFrame:
@@ -30,8 +38,38 @@ def _perfect_panel() -> pd.DataFrame:
     )
 
 
+def test_backend_constants_import_from_backend_owner() -> None:
+    assert DATAFRAME_BACKEND == "dataframe"
+    assert TENSOR_BACKEND == "tensor"
+    assert SUPPORTED_BACKENDS == {DATAFRAME_BACKEND, TENSOR_BACKEND}
+
+
+def test_validate_compute_panel_normalizes_and_sorts_valid_panel() -> None:
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+
+    result = validate_compute_panel(_perfect_panel().iloc[::-1], spec)
+
+    assert result["timestamp"].tolist()[0] == pd.Timestamp("2026-01-01")
+    assert result["asset"].tolist()[:3] == ["A", "B", "C"]
+
+
+def test_validate_compute_panel_rejects_missing_feature_column() -> None:
+    spec = ComputePanelSpec(feature_columns=("missing",), label_column="forward_return")
+
+    with pytest.raises(ValueError, match="panel is missing columns"):
+        validate_compute_panel(_perfect_panel(), spec)
+
+
+def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None:
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+    panel = pd.concat([_perfect_panel(), _perfect_panel().head(1)], ignore_index=True)
+
+    with pytest.raises(ValueError, match="unique timestamp-asset keys"):
+        validate_compute_panel(panel, spec)
+
+
 def test_evaluate_ic_by_timestamp_computes_pearson_and_rankic() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     result = evaluate_ic_by_timestamp(_perfect_panel(), spec)
 
@@ -52,7 +90,7 @@ def test_evaluate_ic_by_timestamp_does_not_call_pandas_series_corr(
 
     result = evaluate_ic_by_timestamp(
         _perfect_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
     )
 
     assert result["ic"].round(6).tolist() == [1.0, 1.0]
@@ -60,7 +98,7 @@ def test_evaluate_ic_by_timestamp_does_not_call_pandas_series_corr(
 
 
 def test_analyze_grouped_returns_assigns_timestamp_level_groups() -> None:
-    spec = PanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     result = analyze_grouped_returns(_perfect_panel(), spec, n_groups=3)
 
@@ -83,7 +121,7 @@ def test_analyze_grouped_returns_does_not_call_pandas_qcut(monkeypatch) -> None:
 
     result = analyze_grouped_returns(
         _perfect_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         n_groups=3,
     )
 
@@ -100,7 +138,7 @@ def test_analyze_grouped_returns_does_not_group_assigned_pairs(
 
     result = analyze_grouped_returns(
         _perfect_panel(),
-        PanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         n_groups=3,
     )
 

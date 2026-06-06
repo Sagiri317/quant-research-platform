@@ -17,11 +17,6 @@ FORBIDDEN_CONTRACT_IMPORT_PREFIXES = (
     "quant_research_platform.reports",
 )
 
-# P2, Batch 4: agent proposal validation is currently scoped to A-share fields.
-AGENT_A_SHARE_FIELD_VALIDATION = (
-    "src/quant_research_platform/agents/factor_factory.py",
-    "quant_research_platform.markets.implementations.a_share.catalog",
-)
 # Batch 2: catalog/defaults.py is the platform composition root.
 DEFAULTS_A_SHARE_CATALOG_FACTORIES = (
     "src/quant_research_platform/catalog/defaults.py",
@@ -64,7 +59,6 @@ CSMAR_A_SHARE_ADAPTER = (
 )
 
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST = {
-    AGENT_A_SHARE_FIELD_VALIDATION,
     DEFAULTS_A_SHARE_CATALOG_FACTORIES,
     DEFAULTS_A_SHARE_IDS,
     DEFAULTS_CSMAR_CATALOG,

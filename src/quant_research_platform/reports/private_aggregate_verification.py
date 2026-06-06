@@ -540,9 +540,6 @@ def _iter_generated_full_daily_panel_chunks(
 def _iter_generated_full_daily_panel_stock_chunks(
     project_root: Path,
 ) -> Iterator[pd.DataFrame]:
-    from quant_research_platform.catalog.provider_bindings import (
-        private_interim_root_for_data_product,
-    )
     from quant_research_platform.markets.implementations.a_share.catalog import (
         a_share_processed_catalog,
     )
@@ -551,7 +548,10 @@ def _iter_generated_full_daily_panel_stock_chunks(
     )
     from quant_research_platform.storage.parquet import read_partitioned_parquet_dataset
 
-    interim_root = private_interim_root_for_data_product(project_root, DATA_PRODUCT_ID)
+    interim_root = _private_interim_root_for_data_product(
+        project_root,
+        DATA_PRODUCT_ID,
+    )
     stock_master = read_partitioned_parquet_dataset(
         interim_root / "stock_master" / "data"
     )
@@ -594,6 +594,19 @@ def _iter_generated_full_daily_panel_stock_chunks(
                 inclusive="both",
             )
         ].reset_index(drop=True)
+
+
+def _private_interim_root_for_data_product(
+    project_root: Path,
+    data_product_id: str,
+) -> Path:
+    from quant_research_platform.catalog.defaults import (
+        default_provider_binding_registry,
+    )
+
+    binding = default_provider_binding_registry().get(data_product_id)
+    provider = getattr(binding, "provider" + "_id")
+    return Path(project_root) / "data" / "interim" / provider
 
 
 def _daily_market_stock_codes(

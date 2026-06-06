@@ -5,9 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.protocols import (
-    WeightConfig,
-)
+from quant_research_platform.compute.config import WeightConfig
 
 
 def _directed_signal_values(values: np.ndarray, direction: str) -> np.ndarray:
