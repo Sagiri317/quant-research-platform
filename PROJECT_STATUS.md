@@ -1,5 +1,8 @@
 # Quant Research Platform 项目状态
 
+P0/P1/P2/P3 architecture and rebuild follow-ups are tracked in
+`docs/architecture/open-issues-register.md`.
+
 本文只记录当前 operational truth、当前 blocker / next steps、以及需要同步到
 workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 run 细节和
 一次性调试证据不写入本文。

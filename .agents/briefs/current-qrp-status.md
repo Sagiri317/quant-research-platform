@@ -1,5 +1,8 @@
 # Current QRP Status
 
+P0/P1/P2/P3 architecture and rebuild follow-ups are tracked in
+`docs/architecture/open-issues-register.md`.
+
 This is a short current task context primer. It is not a Git log, changelog, or
 replacement for `PROJECT_STATUS.md`.
 
