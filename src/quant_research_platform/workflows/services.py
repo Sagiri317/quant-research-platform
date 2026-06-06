@@ -8,7 +8,10 @@ from quant_research_platform.runtime.workflow_records import (
     workflow_run_summary_to_public_record,
 )
 from quant_research_platform.workflows.executor import execute_workflow
-from quant_research_platform.workflows.registry import WorkflowNodeRegistry
+from quant_research_platform.workflows.registry import (
+    WorkflowNodeRegistry,
+    workflow_node_registry,
+)
 
 
 def execute_registered_workflow(
@@ -17,10 +20,10 @@ def execute_registered_workflow(
     registry: WorkflowNodeRegistry | None = None,
     allowed_spec_ids: set[str] | None = None,
     execution_mode: ExecutionMode | str | None = None,
-    run_id: str = "workflow-fixture-run",
+    run_id: str = "workflow-dry-run",
 ) -> dict[str, object]:
-    node_registry = registry or WorkflowNodeRegistry.bootstrap_default()
-    mode = ExecutionMode.normalize(execution_mode)
+    mode = _normalize_workflow_execution_mode(execution_mode)
+    node_registry = registry or workflow_node_registry(execution_mode=mode)
     summary = execute_workflow(
         spec,
         registry=node_registry,
@@ -36,3 +39,11 @@ def execute_registered_workflow(
 
 
 __all__ = ["execute_registered_workflow"]
+
+
+def _normalize_workflow_execution_mode(
+    execution_mode: ExecutionMode | str | None,
+) -> ExecutionMode:
+    if execution_mode is None:
+        return ExecutionMode.DRY_RUN
+    return ExecutionMode.normalize(execution_mode)

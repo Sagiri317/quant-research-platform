@@ -40,6 +40,9 @@ def _run_cli(operation: Callable[[], object]) -> None:
     except (KeyError, ValueError) as exc:
         _echo_safe(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    except NotImplementedError as exc:
+        _echo_safe(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
     except Exception as exc:
         _echo_safe("internal_error", err=True)
         raise typer.Exit(code=2) from exc

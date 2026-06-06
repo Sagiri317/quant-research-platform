@@ -98,7 +98,7 @@ def run_data_product_interim(
         mode=(
             "dry_run_spec_validation"
             if mode is ExecutionMode.DRY_RUN
-            else "fixture_backed_execution"
+            else "workflow_execute_not_implemented"
         ),
         data_product_id=data_product.data_product_id,
         market_id=str(data_product.market_id),

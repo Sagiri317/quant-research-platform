@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import quant_research_platform.workflows.executor as executor_module
+from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
@@ -24,11 +25,32 @@ from quant_research_platform.workflows.executor import (
 from quant_research_platform.workflows.registry import (
     WorkflowNodeDefinition,
     WorkflowNodeRegistry,
+    workflow_node_registry,
 )
 from quant_research_platform.workflows.services import execute_registered_workflow
 
 
-def test_workflow_executor_runs_registered_nodes_in_topological_order() -> None:
+def test_workflow_node_registry_factory_supports_dry_run_modes() -> None:
+    for execution_mode in (None, "dry_run", ExecutionMode.DRY_RUN):
+        registry = workflow_node_registry(execution_mode=execution_mode)
+
+        assert isinstance(registry, WorkflowNodeRegistry)
+        assert (
+            registry.get("validate_inputs").handler()
+            == "validate_inputs:validated"
+        )
+
+
+def test_workflow_node_registry_factory_execute_fails_closed() -> None:
+    for execution_mode in ("execute", ExecutionMode.EXECUTE):
+        with pytest.raises(
+            NotImplementedError,
+            match="workflow_execute_not_implemented",
+        ):
+            workflow_node_registry(execution_mode=execution_mode)
+
+
+def test_workflow_executor_default_dry_run_validates_only() -> None:
     spec = WorkflowSpec(
         workflow_id="executor_smoke",
         nodes=(
@@ -58,10 +80,11 @@ def test_workflow_executor_runs_registered_nodes_in_topological_order() -> None:
         registry=registry,
     )
 
-    assert calls == ["panel", "factors", "labels", "dataset"]
+    assert calls == []
     assert isinstance(summary, WorkflowRunSummary)
-    assert summary.status == "executed"
-    assert summary.completed_nodes == ("dataset", "factors", "labels", "panel")
+    assert summary.execution_mode is ExecutionMode.DRY_RUN
+    assert summary.status == "validated"
+    assert summary.completed_nodes == ()
 
 
 def test_workflow_executor_records_memory_checkpoints_only() -> None:
@@ -85,13 +108,10 @@ def test_workflow_executor_records_memory_checkpoints_only() -> None:
         spec,
         registry=registry,
         checkpoints=checkpoints,
+        execution_mode="dry_run",
     )
 
-    assert checkpoints.list() == (
-        ("panel", "completed"),
-        ("factors", "completed"),
-    )
-    assert checkpoints.get("panel").status == "completed"
+    assert checkpoints.list() == ()
 
 
 def test_workflow_dry_run_does_not_call_handlers_or_write_checkpoints() -> None:
@@ -115,18 +135,20 @@ def test_workflow_dry_run_does_not_call_handlers_or_write_checkpoints() -> None:
         checkpoints=checkpoints,
         execution_mode="dry_run",
     )
-    execute_summary = execute_workflow(
-        spec,
-        registry=registry,
-        execution_mode="execute",
-    )
+    with pytest.raises(
+        NotImplementedError,
+        match="workflow_execute_not_implemented",
+    ):
+        execute_workflow(
+            spec,
+            registry=registry,
+            execution_mode="execute",
+        )
 
-    assert calls == ["panel"]
+    assert calls == []
     assert checkpoints.list() == ()
     assert dry_run_summary.status == "validated"
     assert dry_run_summary.completed_nodes == ()
-    assert execute_summary.status == "executed"
-    assert execute_summary.completed_nodes == ("panel",)
 
 
 def test_workflow_dry_run_rejects_unknown_registered_node() -> None:
@@ -153,7 +175,7 @@ def test_workflow_executor_rejects_unknown_spec_id() -> None:
     with pytest.raises(ValueError, match="unknown_workflow_spec_id"):
         execute_workflow(
             spec,
-            registry=WorkflowNodeRegistry.bootstrap_default(),
+            registry=workflow_node_registry(),
             allowed_spec_ids={"known_spec"},
         )
 
@@ -166,7 +188,7 @@ def test_workflow_executor_requires_output_spec_for_spec_driven_writer() -> None
     )
 
     with pytest.raises(ValueError, match="workflow_output_spec_required"):
-        execute_workflow(spec, registry=WorkflowNodeRegistry.bootstrap_default())
+        execute_workflow(spec, registry=workflow_node_registry())
 
 
 def test_workflow_executor_does_not_accept_arbitrary_output_root() -> None:
@@ -204,7 +226,7 @@ def test_workflow_summary_is_sanitized() -> None:
         spec,
         completed_nodes=("node",),
         execution_mode="execute",
-        run_id="workflow-fixture-run",
+        run_id="workflow-dry-run",
     )
 
     assert isinstance(summary, WorkflowRunSummary)
@@ -251,8 +273,8 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
         allowed_spec_ids={"daily_panel"},
     )
 
-    assert summary["status"] == "executed"
-    assert summary["execution_mode"] == "execute"
+    assert summary["status"] == "validated"
+    assert summary["execution_mode"] == "dry_run"
     assert "results" not in summary
     assert "C:" not in str(summary)
     assert "/mnt/" not in str(summary)

@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from quant_research_platform.contracts.execution import ExecutionMode
+
 NodeHandler = Callable[[], Any]
 
 
@@ -37,22 +39,46 @@ class WorkflowNodeRegistry:
         except KeyError as exc:
             raise ValueError(f"unknown_workflow_node: {node_id}") from exc
 
-    @classmethod
-    def bootstrap_default(cls) -> WorkflowNodeRegistry:
-        registry = cls()
-        for node_id in (
-            "validate_interim_spec",
-            "validate_processed_specs",
-            "validate_inputs",
-            "validate_outputs",
-        ):
-            registry.register(
-                WorkflowNodeDefinition(
-                    node_id=node_id,
-                    handler=lambda node_id=node_id: f"{node_id}:validated",
-                )
+
+
+def workflow_node_registry(
+    *,
+    execution_mode: ExecutionMode | str | None = None,
+) -> WorkflowNodeRegistry:
+    mode = _normalize_workflow_execution_mode(execution_mode)
+    if mode is ExecutionMode.EXECUTE:
+        raise NotImplementedError("workflow_execute_not_implemented")
+    return _build_workflow_node_registry_for_dry_run()
+
+
+def _normalize_workflow_execution_mode(
+    execution_mode: ExecutionMode | str | None,
+) -> ExecutionMode:
+    if execution_mode is None:
+        return ExecutionMode.DRY_RUN
+    return ExecutionMode.normalize(execution_mode)
+
+
+def _build_workflow_node_registry_for_dry_run() -> WorkflowNodeRegistry:
+    registry = WorkflowNodeRegistry()
+    for node_id in (
+        "validate_interim_spec",
+        "validate_processed_specs",
+        "validate_inputs",
+        "validate_outputs",
+    ):
+        registry.register(
+            WorkflowNodeDefinition(
+                node_id=node_id,
+                handler=lambda node_id=node_id: f"{node_id}:validated",
             )
-        return registry
+        )
+    return registry
 
 
-__all__ = ["NodeHandler", "WorkflowNodeDefinition", "WorkflowNodeRegistry"]
+__all__ = [
+    "NodeHandler",
+    "WorkflowNodeDefinition",
+    "WorkflowNodeRegistry",
+    "workflow_node_registry",
+]

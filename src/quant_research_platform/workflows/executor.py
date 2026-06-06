@@ -10,7 +10,10 @@ from quant_research_platform.contracts.workflows import (
 )
 from quant_research_platform.workflows.checkpoints import InMemoryCheckpointStore
 from quant_research_platform.workflows.planner import plan_topological_steps
-from quant_research_platform.workflows.registry import WorkflowNodeRegistry
+from quant_research_platform.workflows.registry import (
+    WorkflowNodeRegistry,
+    workflow_node_registry,
+)
 
 
 def _execute_registered_steps(
@@ -40,21 +43,24 @@ def _validate_registered_steps(
 
 def execute_workflow(
     spec: WorkflowSpec,
-    registry: WorkflowNodeRegistry,
+    registry: WorkflowNodeRegistry | None = None,
     checkpoints: InMemoryCheckpointStore | None = None,
     *,
     allowed_spec_ids: set[str] | None = None,
     execution_mode: ExecutionMode | str | None = None,
-    run_id: str = "workflow-fixture-run",
+    run_id: str = "workflow-dry-run",
 ) -> WorkflowRunSummary:
-    mode = ExecutionMode.normalize(execution_mode)
+    mode = _normalize_workflow_execution_mode(execution_mode)
+    if mode is ExecutionMode.EXECUTE:
+        raise NotImplementedError("workflow_execute_not_implemented")
+    node_registry = registry or workflow_node_registry(execution_mode=mode)
     _validate_workflow_execution(
         spec,
         allowed_spec_ids=allowed_spec_ids,
     )
     step_ids = plan_topological_steps(spec)
     if mode is ExecutionMode.DRY_RUN:
-        _validate_registered_steps(step_ids, registry)
+        _validate_registered_steps(step_ids, node_registry)
         return workflow_run_summary(
             spec,
             completed_nodes=(),
@@ -62,17 +68,7 @@ def execute_workflow(
             run_id=run_id,
             status="validated",
         )
-    completed_nodes = _execute_registered_steps(
-        step_ids,
-        registry,
-        checkpoints=checkpoints,
-    )
-    return workflow_run_summary(
-        spec,
-        completed_nodes=completed_nodes,
-        execution_mode=mode,
-        run_id=run_id,
-    )
+    raise NotImplementedError("workflow_execute_not_implemented")
 
 
 def _validate_workflow_execution(
@@ -96,7 +92,7 @@ def workflow_run_summary(
     *,
     completed_nodes: tuple[str, ...],
     execution_mode: ExecutionMode | str | None = None,
-    run_id: str = "workflow-fixture-run",
+    run_id: str = "workflow-dry-run",
     status: str = "executed",
 ) -> WorkflowRunSummary:
     return WorkflowRunSummary(
@@ -115,6 +111,14 @@ def workflow_run_summary(
         private_boundary_required=spec.requires_private_boundary,
         artifact_writer_policy=spec.artifact_writer_policy.value,
     )
+
+
+def _normalize_workflow_execution_mode(
+    execution_mode: ExecutionMode | str | None,
+) -> ExecutionMode:
+    if execution_mode is None:
+        return ExecutionMode.DRY_RUN
+    return ExecutionMode.normalize(execution_mode)
 
 
 __all__ = [

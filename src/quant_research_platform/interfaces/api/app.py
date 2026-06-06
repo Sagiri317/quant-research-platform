@@ -127,6 +127,13 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
                 message=exc.error_code,
                 status_code=500,
             ) from exc
+        except NotImplementedError as exc:
+            raise ApiError(
+                error_code=str(exc),
+                message=str(exc),
+                status_code=501,
+                field="execution_mode",
+            ) from exc
         except ValueError as exc:
             raise ApiError(
                 error_code="invalid_execution_mode",

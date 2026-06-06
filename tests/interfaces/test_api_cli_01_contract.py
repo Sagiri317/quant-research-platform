@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -129,7 +130,10 @@ def test_api_01_endpoints_execute_without_private_markers_or_planned_status() ->
         client.get("/api/0.1/catalog/labels"),
         client.get("/api/0.1/catalog/universes"),
         client.get("/api/0.1/catalog/data-products"),
-        client.post("/api/0.1/data-products/a_share_daily_bar/interim-runs"),
+        client.post(
+            "/api/0.1/data-products/a_share_daily_bar/interim-runs",
+            json={"execution_mode": "dry_run"},
+        ),
         client.get(
             "/api/0.1/research-datasets/"
             "a_share_price_volume_forward_returns/requirements"
@@ -169,16 +173,40 @@ def test_execution_mode_contract_uses_execute_default_and_dry_run_field() -> Non
     assert ExecutionMode.DRY_RUN == "dry_run"
     assert ExecutionMode.default() is ExecutionMode.EXECUTE
 
-    default_payload = services_module.run_data_product_interim("a_share_daily_bar")
+    with pytest.raises(
+        NotImplementedError,
+        match="workflow_execute_not_implemented",
+    ):
+        services_module.run_data_product_interim("a_share_daily_bar")
     dry_run_payload = services_module.run_data_product_interim(
         "a_share_daily_bar",
         execution_mode=ExecutionMode.DRY_RUN,
     )
 
-    assert default_payload["execution_mode"] == "execute"
-    assert default_payload["status"] == "executed"
     assert dry_run_payload["execution_mode"] == "dry_run"
     assert dry_run_payload["status"] == "validated"
+
+
+def test_data_product_interim_execute_fails_closed_in_api_and_cli() -> None:
+    client = TestClient(create_app())
+    runner = CliRunner()
+
+    api_response = client.post(
+        "/api/0.1/data-products/a_share_daily_bar/interim-runs"
+    )
+    cli_result = runner.invoke(
+        app, ["data-products", "run-interim", "a_share_daily_bar"]
+    )
+
+    assert api_response.status_code == 501
+    assert api_response.json()["error"]["error_code"] == (
+        "workflow_execute_not_implemented"
+    )
+    assert api_response.json()["error"]["field"] == "execution_mode"
+    assert cli_result.exit_code == 2
+    assert "workflow_execute_not_implemented" in cli_result.output
+    _assert_public_text_has_no_private_markers(str(api_response.json()))
+    _assert_public_text_has_no_private_markers(cli_result.output)
 
 
 def test_data_product_interim_dry_run_hides_provider_binding_details() -> None:
@@ -290,9 +318,15 @@ def test_cli_exposes_only_clean_rewrite_public_commands() -> None:
         ["catalog", "labels"],
         ["catalog", "universes"],
         ["catalog", "data-products"],
-        ["data-products", "run-interim", "a_share_daily_bar"],
         ["data-products", "run-interim", "a_share_daily_bar", "--dry-run"],
-        ["data-products", "run-interim", "a_share_daily_bar", "--run-id", "run_01"],
+        [
+            "data-products",
+            "run-interim",
+            "a_share_daily_bar",
+            "--dry-run",
+            "--run-id",
+            "run_01",
+        ],
         [
             "research-datasets",
             "requirements",
