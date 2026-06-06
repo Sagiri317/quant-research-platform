@@ -261,7 +261,7 @@ def _market_cap_row(
 
 def _index_info_row(
     asset_id: str,
-    release_date: str,
+    start_date: str,
     base_date: str,
     index_class: str,
 ) -> dict[str, object]:
@@ -270,10 +270,10 @@ def _index_info_row(
         "asset_id": asset_id,
         "source_id": "csmar",
         "source_asset_id": asset_id,
-        "timestamp": pd.Timestamp(release_date),
+        "timestamp": pd.Timestamp(start_date),
         "index_name": asset_id,
         "calculation_formula": "synthetic formula",
         "index_class": index_class,
-        "release_date": pd.Timestamp(release_date),
+        "start_date": pd.Timestamp(start_date),
         "base_date": pd.Timestamp(base_date),
     }

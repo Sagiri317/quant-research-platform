@@ -158,6 +158,21 @@ def test_csmar_index_info_synthetic_reference_classification() -> None:
     assert dynamic_spec.partition_columns == ("year",)
 
 
+def test_csmar_default_index_info_spec_is_time_aware_reference_history() -> None:
+    spec = a_share_csmar.a_share_csmar_interim_catalog().get("index_info")
+
+    assert spec.grain is DataGrain.ASSET_REFERENCE_TIMESTAMP
+    assert spec.primary_key == (
+        "market_id",
+        "asset_id",
+        "source_id",
+        "source_asset_id",
+        "timestamp",
+    )
+    assert spec.partition_columns == ("year",)
+    assert "release_date" not in spec.required_columns
+
+
 def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
     assert raw_schemas.parse_raw_filename.__module__.endswith(".raw_schemas")
     assert field_mappings.map_csmar_columns.__module__.endswith(".field_mappings")
@@ -335,11 +350,11 @@ def test_csmar_stock_master_column_rules_preserve_reference_timestamp() -> None:
 def test_csmar_stock_master_reference_duplicates_are_deduped_or_rejected(
     tmp_path,
 ) -> None:
-    exact_duplicate = pd.DataFrame(
-        [
-            _stock_master_raw_row("normal", "I1", "2020-01-01"),
-            _stock_master_raw_row("normal", "I1", "2020-01-01"),
-        ]
+    exact_duplicate_a = pd.DataFrame(
+        [_stock_master_raw_row("normal", "I1", "2020-01-01")]
+    )
+    exact_duplicate_b = pd.DataFrame(
+        [_stock_master_raw_row("normal", "I1", "2020-01-01")]
     )
     conflicting_duplicate = pd.DataFrame(
         [
@@ -347,20 +362,40 @@ def test_csmar_stock_master_reference_duplicates_are_deduped_or_rejected(
             _stock_master_raw_row("renamed", "I2", "2020-01-01"),
         ]
     )
-    exact_path = tmp_path / "stock_master_exact.csv"
+    exact_path_a = tmp_path / "stock_master_exact_a.csv"
+    exact_path_b = tmp_path / "stock_master_exact_b.csv"
     conflict_path = tmp_path / "stock_master_conflict.csv"
-    exact_duplicate.to_csv(exact_path, index=False)
+    exact_duplicate_a.to_csv(exact_path_a, index=False)
+    exact_duplicate_b.to_csv(exact_path_b, index=False)
     conflicting_duplicate.to_csv(conflict_path, index=False)
 
+    pruning_reports: list[dict[str, object]] = []
     deduped = a_share_csmar_build_interim_frame(
         interim_data_id="stock_master",
-        input_files=[exact_path],
+        input_files=[exact_path_a, exact_path_b],
         start_date=None,
         end_date=None,
+        pruning_reports=pruning_reports,
     )
 
     assert len(deduped) == 1
     assert int(deduped.attrs["reference_exact_duplicate_count"]) == 1
+    assert [
+        report["reference_exact_duplicate_count"]
+        for report in pruning_reports
+        if report.get("report_type") == "reference_duplicate_summary"
+    ] == [1]
+    assert all(
+        "reference_exact_duplicate_count" not in report
+        for report in pruning_reports
+        if report.get("report_type") != "reference_duplicate_summary"
+    )
+    assert pruning_reports[-1]["report_type"] == "reference_duplicate_summary"
+    assert pruning_reports[-1]["reference_exact_duplicate_count"] == 1
+    report_text = a_share_csmar.a_share_csmar_render_column_pruning_report(
+        pruning_reports
+    )
+    assert "exact duplicate primary-key rows deduped: 1" in report_text
     with pytest.raises(
         ValueError,
         match="conflicting_reference_primary_key_duplicates: stock_master",
@@ -480,7 +515,7 @@ def test_csmar_index_metadata_interim_allows_missing_time_column() -> None:
     assert pd.isna(result.loc[0, "available_at"])
 
 
-def test_csmar_index_info_mapper_satisfies_interim_spec_fields() -> None:
+def test_csmar_index_info_timestamp_uses_start_date_without_release_date() -> None:
     raw = pd.DataFrame(
         {
             "Indexcd": ["000985"],
@@ -495,10 +530,27 @@ def test_csmar_index_info_mapper_satisfies_interim_spec_fields() -> None:
     result = a_share_csmar_normalize_private_export_frame(raw, "index_info")
 
     assert "index_class" in result.columns
-    assert "release_date" in result.columns
     assert result.loc[0, "index_class"] == "broad"
-    assert str(result.loc[0, "release_date"].date()) == "2014-01-02"
     assert str(result.loc[0, "timestamp"].date()) == "2014-01-02"
+    assert "release_date" not in result.columns
+
+
+def test_csmar_index_info_timestamp_falls_back_to_base_date() -> None:
+    raw = pd.DataFrame(
+        {
+            "Indexcd": ["000985"],
+            "Idxinfo01": ["benchmark"],
+            "Idxinfo11": [""],
+            "Idxinfo02": ["2013-12-31"],
+            "Idxinfo07": ["broad"],
+            "Idxinfo10": ["formula"],
+        }
+    )
+
+    result = a_share_csmar_normalize_private_export_frame(raw, "index_info")
+
+    assert str(result.loc[0, "timestamp"].date()) == "2013-12-31"
+    assert "release_date" not in result.columns
 
 
 def test_csmar_index_info_mapper_uses_export_date_fallback_for_missing_time() -> None:
@@ -522,6 +574,7 @@ def test_csmar_index_info_mapper_uses_export_date_fallback_for_missing_time() ->
     assert str(result.loc[0, "timestamp"].date()) == "2026-05-15"
     assert str(result.loc[0, "session_date"].date()) == "2026-05-15"
     assert str(result.loc[0, "available_at"].date()) == "2026-05-15"
+    assert "release_date" not in result.columns
 
 
 def test_csmar_index_info_reader_preserves_formula_commas_and_empty_na(

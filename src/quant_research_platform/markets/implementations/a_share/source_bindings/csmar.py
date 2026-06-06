@@ -43,7 +43,6 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.parquet import write_interim_data
 
 INDEX_METADATA_TIME_COLUMNS: tuple[str, ...] = (
-    "release_date",
     "start_date",
     "base_date",
 )
@@ -128,7 +127,6 @@ INDEX_INFO_INTERIM_KEEP_COLUMNS: tuple[str, ...] = (
     "index_name",
     "calculation_formula",
     "index_class",
-    "release_date",
     "start_date",
     "base_date",
 )
@@ -350,6 +348,17 @@ def a_share_csmar_render_column_pruning_report(
         "",
     ]
     for report in reports:
+        if report.get("report_type") == "reference_duplicate_summary":
+            lines.extend(
+                [
+                    f"## {report['dataset']} reference duplicate summary",
+                    "",
+                    "- exact duplicate primary-key rows deduped: "
+                    f"{report['reference_exact_duplicate_count']}",
+                    "",
+                ]
+            )
+            continue
         lines.extend(
             [
                 f"## {report['dataset']}",
@@ -396,7 +405,13 @@ def a_share_csmar_reference_spec_for_frame(
     *,
     force_time_aware: bool = False,
 ) -> InterimDataSpec:
-    """Return the reference spec implied by one normalized reference frame."""
+    """Return the reference spec implied by one normalized reference frame.
+
+    The static branch is kept for synthetic classification tests and future
+    provider reuse. The active A-share CSMAR index_info catalog policy is
+    forced time-aware in _interim_spec so imports do not silently change schema
+    based on local file state.
+    """
 
     if interim_data_id not in ASSET_REFERENCE_INTERIM_DATASETS:
         raise ValueError(f"unsupported_reference_interim_data_id: {interim_data_id}")
@@ -597,9 +612,7 @@ def a_share_csmar_normalize_private_export_frame(
         result = mapped.copy()
         if "index_class" not in result.columns and "index_category" in result.columns:
             result["index_class"] = result["index_category"]
-        if "release_date" not in result.columns and "start_date" in result.columns:
-            result["release_date"] = result["start_date"]
-        for column in ("release_date", "base_date", "start_date"):
+        for column in ("base_date", "start_date"):
             if column in result.columns:
                 result[column] = pd.to_datetime(result[column], errors="coerce")
         result = a_share_csmar_normalize_index_metadata_frame(result)
@@ -716,6 +729,12 @@ def a_share_csmar_build_interim_frame(
     result = pd.concat(frames, ignore_index=True)
     if interim_data_id in ASSET_REFERENCE_INTERIM_DATASETS:
         result = _dedupe_reference_primary_key_rows(result, interim_data_id)
+        if pruning_reports is not None:
+            _append_reference_duplicate_summary(
+                pruning_reports,
+                interim_data_id,
+                int(result.attrs["reference_exact_duplicate_count"]),
+            )
     return result
 
 
@@ -818,6 +837,20 @@ def _dedupe_reference_primary_key_rows(
     )
     result.attrs["reference_exact_duplicate_count"] = int(exact_duplicate_count)
     return result
+
+
+def _append_reference_duplicate_summary(
+    reports: list[dict[str, object]],
+    interim_data_id: str,
+    exact_duplicate_count: int,
+) -> None:
+    reports.append(
+        {
+            "dataset": interim_data_id,
+            "report_type": "reference_duplicate_summary",
+            "reference_exact_duplicate_count": int(exact_duplicate_count),
+        }
+    )
 
 
 def _has_multiple_effective_reference_records(frame: pd.DataFrame) -> bool:
