@@ -11,7 +11,7 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.fields import FieldCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.markets import MarketDefinition, MarketRegistry
+from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import (
@@ -25,29 +25,21 @@ from quant_research_platform.catalog.provider_bindings import (
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.catalog.universes import UniverseCatalog
-from quant_research_platform.contracts.data import DataGrain
-from quant_research_platform.contracts.data_products import DataProductDefinition
-from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_daily_bar_data_product_definition,
+    a_share_default_universe_definition,
     a_share_evaluation_catalog,
     a_share_factor_catalog,
     a_share_field_catalog,
     a_share_label_catalog,
+    a_share_market_definition,
     a_share_model_catalog,
     a_share_prediction_catalog,
     a_share_processed_catalog,
     a_share_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_AS_OF_MASK_ID,
-    A_SHARE_DEFAULT_UNIVERSE_ID,
-    A_SHARE_EVALUATION_MASK_ID,
-    A_SHARE_EXECUTION_MASK_ID,
-    A_SHARE_MARKET_ID,
-    DAILY_CONTEXT_PROCESSED_DATA_ID,
-    DAILY_PANEL_PROCESSED_DATA_ID,
-    FORWARD_RETURNS_PROCESSED_DATA_ID,
-    PRICE_VOLUME_PROCESSED_DATA_ID,
+    A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
 )
 from quant_research_platform.reports.catalog import report_catalog
 from quant_research_platform.sources.csmar.catalog import (
@@ -109,7 +101,7 @@ def default_prediction_catalog() -> PredictionCatalog:
 
 def default_data_product_registry() -> DataProductRegistry:
     registry = DataProductRegistry()
-    _register_default_data_products(registry)
+    registry.register(a_share_daily_bar_data_product_definition())
     return registry
 
 
@@ -127,7 +119,7 @@ def default_source_registry() -> SourceRegistry:
 
 def default_market_registry() -> MarketRegistry:
     registry = MarketRegistry()
-    _register_default_markets(registry)
+    registry.register(a_share_market_definition())
     return registry
 
 
@@ -141,13 +133,7 @@ def default_source_interim_catalogs() -> dict[str, InterimDataCatalog]:
 
 def default_universe_catalog() -> UniverseCatalog:
     catalog = UniverseCatalog()
-    catalog.register(
-        UniverseDefinition(
-            universe_id=A_SHARE_DEFAULT_UNIVERSE_ID,
-            market_id=A_SHARE_MARKET_ID,
-            membership_column="in_universe",
-        )
-    )
+    catalog.register(a_share_default_universe_definition())
     return catalog
 
 
@@ -171,23 +157,12 @@ def default_catalogs() -> PlatformCatalogs:
     )
 
 
-def _register_default_data_products(registry: DataProductRegistry) -> None:
-    registry.register(
-        DataProductDefinition(
-            data_product_id="a_share_daily_bar",
-            market_id=A_SHARE_MARKET_ID,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            interim_spec_ids=("a_share_daily_bar_interim",),
-        )
-    )
-
-
 def _register_default_provider_bindings(
     registry: ProviderBindingRegistry,
 ) -> None:
     registry.register(
         ProviderBinding(
-            data_product_id="a_share_daily_bar",
+            data_product_id=A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
             provider_id="csmar",
             source_id="csmar",
             implementation_package="quant_research_platform.sources.csmar",
@@ -199,25 +174,6 @@ def _register_default_provider_bindings(
                 "index_info",
                 "benchmark_index_market",
                 "trading_calendar",
-            ),
-        )
-    )
-
-
-def _register_default_markets(registry: MarketRegistry) -> None:
-    registry.register(
-        MarketDefinition(
-            market_id=A_SHARE_MARKET_ID,
-            display_name="A-share market implementation",
-            processed_spec_ids=(
-                DAILY_PANEL_PROCESSED_DATA_ID,
-                DAILY_CONTEXT_PROCESSED_DATA_ID,
-                A_SHARE_DEFAULT_UNIVERSE_ID,
-                A_SHARE_AS_OF_MASK_ID,
-                A_SHARE_EXECUTION_MASK_ID,
-                A_SHARE_EVALUATION_MASK_ID,
-                PRICE_VOLUME_PROCESSED_DATA_ID,
-                FORWARD_RETURNS_PROCESSED_DATA_ID,
             ),
         )
     )

@@ -68,6 +68,57 @@ def test_catalog_defaults_does_not_call_bootstrap_default() -> None:
     assert ".bootstrap_default(" not in source
 
 
+def test_catalog_defaults_delegates_concrete_definitions_to_owners() -> None:
+    source = CATALOG_DEFAULTS.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(CATALOG_DEFAULTS))
+    forbidden_names = {
+        "DataProductDefinition",
+        "MarketDefinition",
+        "UniverseDefinition",
+    }
+    imported_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    instantiated_names = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    violations = sorted(
+        forbidden_names & (imported_names | instantiated_names)
+    )
+
+    assert not violations, (
+        "defaults_must_delegate_concrete_definitions_to_owners: "
+        + ", ".join(violations)
+    )
+    assert "ProviderBinding" in instantiated_names
+
+
+def test_a_share_owner_does_not_define_registry_factories() -> None:
+    forbidden = {
+        "_".join(parts)
+        for parts in (
+            ("a", "share", "data", "product", "registry"),
+            ("a", "share", "market", "registry"),
+            ("a", "share", "universe", "catalog"),
+        )
+    }
+    hits: list[str] = []
+    for path in (PROJECT_SRC / "markets" / "implementations" / "a_share").rglob(
+        "*.py"
+    ):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in forbidden:
+                hits.append(f"{path}:{node.lineno}:{node.name}")
+
+    assert not hits, "a_share_registry_factory_forbidden: " + "; ".join(hits)
+
+
 def _module_all_names(tree: ast.AST) -> tuple[str, ...]:
     names: list[str] = []
     for node in ast.iter_child_nodes(tree):

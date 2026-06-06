@@ -11,6 +11,7 @@ from quant_research_platform.catalog.fields import (
     platform_field_catalog,
 )
 from quant_research_platform.catalog.labels import LabelCatalog
+from quant_research_platform.catalog.markets import MarketDefinition
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import (
     PredictionCatalog,
@@ -23,14 +24,18 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     ProcessedDataSpec,
 )
+from quant_research_platform.contracts.data_products import DataProductDefinition
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_AS_OF_MASK_ID,
+    A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
+    A_SHARE_DAILY_BAR_INTERIM_DATA_PRODUCT_ID,
     A_SHARE_DEFAULT_UNIVERSE_ID,
     A_SHARE_EVALUATION_MASK_ID,
     A_SHARE_EXECUTION_MASK_ID,
@@ -231,6 +236,40 @@ A_SHARE_MASK_ALLOWED_USES: dict[str, tuple[str, ...]] = {
     "a_share_execution": ("label_alignment", "execution_feasibility"),
     "a_share_evaluation": ("evaluation_filter", "diagnostics"),
 }
+
+
+def a_share_daily_bar_data_product_definition() -> DataProductDefinition:
+    return DataProductDefinition(
+        data_product_id=A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
+        market_id=A_SHARE_MARKET_ID,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        interim_spec_ids=(A_SHARE_DAILY_BAR_INTERIM_DATA_PRODUCT_ID,),
+    )
+
+
+def a_share_market_definition() -> MarketDefinition:
+    return MarketDefinition(
+        market_id=A_SHARE_MARKET_ID,
+        display_name="A-share market implementation",
+        processed_spec_ids=(
+            DAILY_PANEL_PROCESSED_DATA_ID,
+            DAILY_CONTEXT_PROCESSED_DATA_ID,
+            A_SHARE_DEFAULT_UNIVERSE_ID,
+            A_SHARE_AS_OF_MASK_ID,
+            A_SHARE_EXECUTION_MASK_ID,
+            A_SHARE_EVALUATION_MASK_ID,
+            PRICE_VOLUME_PROCESSED_DATA_ID,
+            FORWARD_RETURNS_PROCESSED_DATA_ID,
+        ),
+    )
+
+
+def a_share_default_universe_definition() -> UniverseDefinition:
+    return UniverseDefinition(
+        universe_id=A_SHARE_DEFAULT_UNIVERSE_ID,
+        market_id=A_SHARE_MARKET_ID,
+        membership_column="in_universe",
+    )
 
 
 def a_share_field_catalog() -> FieldCatalog:
@@ -576,10 +615,13 @@ __all__ = [
     "A_SHARE_FIELD_SPECS",
     "A_SHARE_MARKET_ID",
     "A_SHARE_MASK_ALLOWED_USES",
+    "a_share_daily_bar_data_product_definition",
+    "a_share_default_universe_definition",
     "a_share_evaluation_catalog",
     "a_share_factor_catalog",
     "a_share_field_catalog",
     "a_share_label_catalog",
+    "a_share_market_definition",
     "a_share_model_catalog",
     "a_share_price_volume_factor_columns",
     "a_share_price_volume_factor_definitions",
