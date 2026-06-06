@@ -230,7 +230,8 @@ def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
 
 
 def _shifted_bool_mask(series: pd.core.groupby.SeriesGroupBy) -> pd.Series:
-    return series.shift(-1).fillna(False).astype(bool)
+    shifted = series.shift(-1)
+    return shifted.where(shifted.notna(), False).astype(bool)
 
 
 def _bool_like_column(frame: pd.DataFrame, column: str) -> pd.Series:
