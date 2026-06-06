@@ -5,31 +5,34 @@ from pathlib import Path
 
 PROJECT_SRC = Path("src/quant_research_platform")
 WORKFLOW_REGISTRY = PROJECT_SRC / "workflows" / "registry.py"
+BATCH_3_BOOTSTRAP_TARGET = (
+    "Batch 3: move concrete bootstrap payloads into owner/default composition."
+)
 
 KNOWN_BOOTSTRAP_DEFAULTS = {
     "src/quant_research_platform/catalog/data_products.py": {
         "owner": "P1",
-        "target": "catalog/defaults.py platform composition root",
+        "target": BATCH_3_BOOTSTRAP_TARGET,
     },
     "src/quant_research_platform/catalog/labels.py": {
         "owner": "P1",
-        "target": "catalog/defaults.py platform composition root",
+        "target": BATCH_3_BOOTSTRAP_TARGET,
     },
     "src/quant_research_platform/catalog/markets.py": {
         "owner": "P1",
-        "target": "catalog/defaults.py platform composition root",
+        "target": BATCH_3_BOOTSTRAP_TARGET,
     },
     "src/quant_research_platform/catalog/provider_bindings.py": {
         "owner": "P1",
-        "target": "catalog/defaults.py platform composition root",
+        "target": BATCH_3_BOOTSTRAP_TARGET,
     },
     "src/quant_research_platform/catalog/reports.py": {
         "owner": "P1",
-        "target": "catalog/defaults.py platform composition root",
+        "target": BATCH_3_BOOTSTRAP_TARGET,
     },
     "src/quant_research_platform/catalog/sources.py": {
         "owner": "P1",
-        "target": "catalog/defaults.py platform composition root",
+        "target": BATCH_3_BOOTSTRAP_TARGET,
     },
 }
 

@@ -39,10 +39,10 @@ def validate_data_product_source_graph(
 ) -> RegistryGraphValidationResult:
     """Validate the internal product -> source dataset graph."""
 
-    data_product_registry = data_products or DataProductRegistry.bootstrap_default()
-    binding_registry = provider_bindings or ProviderBindingRegistry.bootstrap_default()
-    source_registry = sources or SourceRegistry.bootstrap_default()
-    catalogs = source_catalogs or {}
+    data_product_registry = data_products or _default_data_product_registry()
+    binding_registry = provider_bindings or _default_provider_binding_registry()
+    source_registry = sources or _default_source_registry()
+    catalogs = source_catalogs if source_catalogs is not None else _default_catalogs()
 
     try:
         data_product = data_product_registry.get(data_product_id)
@@ -99,6 +99,34 @@ def _load_interim_catalog(
     if not isinstance(catalog, InterimDataCatalog):
         raise CatalogConsistencyError()
     return catalog
+
+
+def _default_data_product_registry() -> DataProductRegistry:
+    from quant_research_platform.catalog.defaults import (
+        default_data_product_registry,
+    )
+
+    return default_data_product_registry()
+
+
+def _default_provider_binding_registry() -> ProviderBindingRegistry:
+    from quant_research_platform.catalog.defaults import (
+        default_provider_binding_registry,
+    )
+
+    return default_provider_binding_registry()
+
+
+def _default_source_registry() -> SourceRegistry:
+    from quant_research_platform.catalog.defaults import default_source_registry
+
+    return default_source_registry()
+
+
+def _default_catalogs() -> dict[str, InterimDataCatalog]:
+    from quant_research_platform.catalog.defaults import default_source_interim_catalogs
+
+    return default_source_interim_catalogs()
 
 
 __all__ = [

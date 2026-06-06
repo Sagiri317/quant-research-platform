@@ -411,6 +411,9 @@ def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
 
 
 def test_platform_core_does_not_import_csmar_source_modules() -> None:
+    allowed_composition_roots = {
+        SOURCE_ROOT / "catalog" / "defaults.py",
+    }
     checked_roots = (
         SOURCE_ROOT / "interfaces/api",
         SOURCE_ROOT / "interfaces/cli",
@@ -423,6 +426,8 @@ def test_platform_core_does_not_import_csmar_source_modules() -> None:
     )
     hits: list[str] = []
     for path in _python_files(checked_roots):
+        if path in allowed_composition_roots:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             module = None

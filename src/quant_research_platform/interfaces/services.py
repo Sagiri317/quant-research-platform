@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
-from quant_research_platform.catalog.data_products import DataProductRegistry
-from quant_research_platform.catalog.labels import LabelCatalog
+from quant_research_platform.catalog.defaults import (
+    default_data_product_registry,
+    default_factor_catalog,
+    default_label_catalog,
+    default_provider_binding_registry,
+    default_research_dataset_catalog,
+    default_source_interim_catalogs,
+    default_source_registry,
+    default_universe_catalog,
+)
 from quant_research_platform.catalog.registry_validation import (
     validate_data_product_source_graph,
 )
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.universes import UniverseDefinition
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowNode,
     WorkflowSpec,
-)
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_factor_catalog,
-    a_share_research_dataset_catalog,
 )
 from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.workflows.services import execute_registered_workflow
@@ -28,22 +31,17 @@ API_VERSION = "0.1"
 
 def list_factors() -> dict[str, object]:
     return _response(
-        items=[item.to_manifest() for item in a_share_factor_catalog().list()]
+        items=[item.to_manifest() for item in default_factor_catalog().list()]
     )
 
 
 def list_labels() -> dict[str, object]:
     return _response(
-        items=[item.to_manifest() for item in LabelCatalog.bootstrap_default().list()]
+        items=[item.to_manifest() for item in default_label_catalog().list()]
     )
 
 
 def list_universes() -> dict[str, object]:
-    universe = UniverseDefinition(
-        universe_id="a_share_default",
-        market_id=MarketId("a_share"),
-        membership_column="in_universe",
-    )
     return _response(
         items=[
             {
@@ -52,6 +50,7 @@ def list_universes() -> dict[str, object]:
                 "market_id": str(universe.market_id),
                 "membership_column": universe.membership_column,
             }
+            for universe in default_universe_catalog().list()
         ]
     )
 
@@ -60,7 +59,7 @@ def list_data_products() -> dict[str, object]:
     return _response(
         items=[
             item.to_public_record()
-            for item in DataProductRegistry.bootstrap_default().list()
+            for item in default_data_product_registry().list()
         ]
     )
 
@@ -73,8 +72,15 @@ def run_data_product_interim(
 ) -> dict[str, object]:
     mode = ExecutionMode.normalize(execution_mode)
     resolved_run_id = _resolve_run_id(run_id, prefix=f"{data_product_id}-interim")
-    data_product = DataProductRegistry.bootstrap_default().get(data_product_id)
-    validate_data_product_source_graph(data_product.data_product_id)
+    data_product_registry = default_data_product_registry()
+    data_product = data_product_registry.get(data_product_id)
+    validate_data_product_source_graph(
+        data_product.data_product_id,
+        data_products=data_product_registry,
+        provider_bindings=default_provider_binding_registry(),
+        sources=default_source_registry(),
+        source_catalogs=default_source_interim_catalogs(),
+    )
     spec = WorkflowSpec(
         workflow_id="data_product_interim_validation",
         market_id=MarketId(str(data_product.market_id)),
@@ -108,7 +114,7 @@ def run_data_product_interim(
 
 
 def describe_research_dataset_requirements(dataset_id: str) -> dict[str, object]:
-    spec = a_share_research_dataset_catalog().get(dataset_id)
+    spec = default_research_dataset_catalog().get(dataset_id)
     return _response(
         status="available",
         mode="requirements_query_only",

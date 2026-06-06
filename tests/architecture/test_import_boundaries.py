@@ -27,10 +27,20 @@ CATALOG_A_SHARE_MARKET_DEFAULTS = (
     "src/quant_research_platform/catalog/markets.py",
     "quant_research_platform.markets.implementations.a_share.ids",
 )
-# P1, Batch 2: services will route through catalog/defaults.py.
-INTERFACE_A_SHARE_CATALOG_FACTORIES = (
-    "src/quant_research_platform/interfaces/services.py",
+# Batch 2: catalog/defaults.py is the platform composition root.
+DEFAULTS_A_SHARE_CATALOG_FACTORIES = (
+    "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.markets.implementations.a_share.catalog",
+)
+# Batch 2: catalog/defaults.py may use concrete market ids.
+DEFAULTS_A_SHARE_IDS = (
+    "src/quant_research_platform/catalog/defaults.py",
+    "quant_research_platform.markets.implementations.a_share.ids",
+)
+# Batch 2: catalog/defaults.py may compose default source catalogs.
+DEFAULTS_CSMAR_CATALOG = (
+    "src/quant_research_platform/catalog/defaults.py",
+    "quant_research_platform.sources.csmar.catalog",
 )
 # P2, Batch 4: private aggregate verification is temporarily report-local.
 REPORT_A_SHARE_IDS = (
@@ -56,7 +66,9 @@ CSMAR_A_SHARE_ADAPTER = (
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST = {
     AGENT_A_SHARE_FIELD_VALIDATION,
     CATALOG_A_SHARE_MARKET_DEFAULTS,
-    INTERFACE_A_SHARE_CATALOG_FACTORIES,
+    DEFAULTS_A_SHARE_CATALOG_FACTORIES,
+    DEFAULTS_A_SHARE_IDS,
+    DEFAULTS_CSMAR_CATALOG,
     REPORT_A_SHARE_IDS,
     REPORT_A_SHARE_CATALOG,
     REPORT_A_SHARE_PROCESSED,
@@ -87,6 +99,35 @@ def test_known_cross_layer_imports_are_explicitly_allowlisted() -> None:
     assert not stale, "stale_cross_layer_import_allowlist_entry: " + repr(stale)
 
 
+def test_catalog_defaults_is_the_only_interface_composition_root() -> None:
+    defaults_path = PROJECT_SRC / "catalog" / "defaults.py"
+    services_path = PROJECT_SRC / "interfaces" / "services.py"
+
+    assert defaults_path.exists(), "catalog_defaults_missing"
+    assert {
+        module
+        for _path, _lineno, module in _iter_imports(defaults_path)
+    }.issuperset(
+        {
+            "quant_research_platform.markets.implementations.a_share.catalog",
+            "quant_research_platform.markets.implementations.a_share.ids",
+            "quant_research_platform.sources.csmar.catalog",
+        }
+    )
+    assert "default_catalogs" in defaults_path.read_text(encoding="utf-8")
+    interface_market_imports = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(PROJECT_SRC / "interfaces")
+        if module.startswith("quant_research_platform.markets.implementations")
+    ]
+
+    assert services_path.exists()
+    assert not interface_market_imports, (
+        "interfaces_market_implementation_import: "
+        + "; ".join(interface_market_imports)
+    )
+
+
 def _iter_imports(root: Path) -> tuple[tuple[Path, int, str], ...]:
     imports: list[tuple[Path, int, str]] = []
     paths = (root,) if root.is_file() else tuple(sorted(root.rglob("*.py")))
@@ -105,7 +146,12 @@ def _is_selected_boundary(path: Path, module: str) -> bool:
     if path_text.startswith("src/quant_research_platform/contracts/"):
         return module.startswith(FORBIDDEN_CONTRACT_IMPORT_PREFIXES)
     if path_text.startswith("src/quant_research_platform/catalog/"):
-        return module.startswith("quant_research_platform.markets.implementations")
+        return module.startswith(
+            (
+                "quant_research_platform.markets.implementations",
+                "quant_research_platform.sources",
+            )
+        )
     if path_text.startswith("src/quant_research_platform/interfaces/"):
         return module.startswith("quant_research_platform.markets.implementations")
     if path_text.startswith("src/quant_research_platform/reports/"):

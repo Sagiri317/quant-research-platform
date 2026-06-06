@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.catalog.data_products import DataProductRegistry
+from quant_research_platform.catalog.defaults import (
+    default_data_product_registry,
+    default_provider_binding_registry,
+    default_source_interim_catalogs,
+    default_source_registry,
+)
 from quant_research_platform.catalog.provider_bindings import (
     BindingVisibility,
     ProviderBinding,
@@ -10,7 +15,6 @@ from quant_research_platform.catalog.provider_bindings import (
 )
 from quant_research_platform.catalog.sources import SourceDefinition, SourceRegistry
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
 
 EXPECTED_CSMAR_SOURCE_DATASET_IDS = (
     "daily_market",
@@ -24,11 +28,9 @@ EXPECTED_CSMAR_SOURCE_DATASET_IDS = (
 
 
 def test_data_product_provider_source_registry_graph_closes() -> None:
-    data_product = DataProductRegistry.bootstrap_default().get("a_share_daily_bar")
-    binding = ProviderBindingRegistry.bootstrap_default().get(
-        data_product.data_product_id
-    )
-    source = SourceRegistry.bootstrap_default().get(binding.source_id)
+    data_product = default_data_product_registry().get("a_share_daily_bar")
+    binding = default_provider_binding_registry().get(data_product.data_product_id)
+    source = default_source_registry().get(binding.source_id)
 
     assert data_product.interim_spec_ids == ("a_share_daily_bar_interim",)
     assert binding.provider_id == "csmar"
@@ -89,10 +91,10 @@ def test_registry_graph_validation_rejects_unknown_source_dataset_id() -> None:
     with pytest.raises(CatalogConsistencyError) as exc_info:
         validate_data_product_source_graph(
             "a_share_daily_bar",
-            data_products=DataProductRegistry.bootstrap_default(),
+            data_products=default_data_product_registry(),
             provider_bindings=bindings,
             sources=sources,
-            source_catalogs={"csmar": csmar_interim_catalog()},
+            source_catalogs=default_source_interim_catalogs(),
         )
 
     assert exc_info.value.error_code == "catalog_registry_graph_invalid"
@@ -100,7 +102,7 @@ def test_registry_graph_validation_rejects_unknown_source_dataset_id() -> None:
 
 
 def test_source_registry_declares_source_identity_not_internal_dataset_list() -> None:
-    source = SourceRegistry.bootstrap_default().get("csmar")
+    source = default_source_registry().get("csmar")
 
     assert str(source.source_id) == "csmar"
     assert source.provider_id == "csmar"
@@ -112,8 +114,8 @@ def test_source_registry_declares_source_identity_not_internal_dataset_list() ->
 
 def test_registry_graph_does_not_depend_on_stale_source_dataset_id() -> None:
     stale_id = "_".join(("csmar", "daily", "market", "interim"))
-    binding = ProviderBindingRegistry.bootstrap_default().get("a_share_daily_bar")
-    source = SourceRegistry.bootstrap_default().get("csmar")
+    binding = default_provider_binding_registry().get("a_share_daily_bar")
+    source = default_source_registry().get("csmar")
 
     assert stale_id not in binding.required_source_dataset_ids
     assert not hasattr(source, "interim_spec_ids")
@@ -128,4 +130,7 @@ def test_csmar_catalog_retains_direct_index_market_source_dataset() -> None:
 
 
 def _csmar_catalog_ids() -> set[str]:
-    return {spec.interim_data_id for spec in csmar_interim_catalog().list()}
+    return {
+        spec.interim_data_id
+        for spec in default_source_interim_catalogs()["csmar"].list()
+    }
