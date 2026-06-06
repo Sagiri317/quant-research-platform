@@ -17,6 +17,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.runtime.privacy import is_private_boundary_path
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
 )
@@ -25,7 +26,6 @@ from quant_research_platform.storage.manifests import (
     write_internal_artifact_manifest,
 )
 from quant_research_platform.storage.partitions import add_year_partition
-from quant_research_platform.storage.privacy import is_private_boundary_path
 
 
 class DataSpecProvider(Protocol):
@@ -130,6 +130,7 @@ def write_partitioned_parquet_dataset(
             frame,
             temp_root,
             timestamp_column=timestamp_column,
+            partition_columns=spec.partition_columns,
         )
 
     atomic_write_directory(final_root, _write)
@@ -149,6 +150,7 @@ def _write_partitioned_parquet_dataset_contents(
         frame,
         Path(root),
         timestamp_column=timestamp_column,
+        partition_columns=spec.partition_columns,
     )
     return root
 
@@ -184,6 +186,11 @@ def parquet_dataset_columns(root: Path) -> tuple[str, ...]:
 
 def _parquet_part_paths(root: Path, *, years: tuple[int, ...] | None) -> list[Path]:
     data_root = Path(root)
+    unpartitioned = data_root / "part-000.parquet"
+    if unpartitioned.exists():
+        if years is not None:
+            return []
+        return [unpartitioned]
     if years is None:
         return sorted(data_root.glob("year=*/*.parquet"))
     paths: list[Path] = []
@@ -196,14 +203,14 @@ def validate_parquet_dataset_write(
     frame: pd.DataFrame,
     root: Path,
     spec: DataSpec,
-) -> str:
+) -> str | None:
     if spec.schema_version != "0.1":
         raise ValueError("unsupported_schema_version")
     if not isinstance(spec.grain, DataGrain):
         raise ValueError("invalid_grain")
     if not spec.primary_key:
         raise ValueError("missing_primary_key")
-    if spec.partition_columns != ("year",):
+    if spec.partition_columns not in {("year",), ()}:
         raise ValueError("unsupported_partitioning")
     if not is_private_boundary_path(root):
         raise ValueError("outside_private_boundary")
@@ -229,6 +236,10 @@ def validate_parquet_dataset_write(
         for column in spec.primary_key
         if spec.column_roles[column] is ColumnRole.TIMESTAMP
     ]
+    if spec.partition_columns == ():
+        if timestamp_columns:
+            raise ValueError("unpartitioned_data_must_not_use_timestamp_key")
+        return None
     if len(timestamp_columns) != 1:
         raise ValueError("invalid_timestamp_primary_key")
     return timestamp_columns[0]
@@ -368,8 +379,14 @@ def _write_partitioned_parquet_files(
     frame: pd.DataFrame,
     root: Path,
     *,
-    timestamp_column: str,
+    timestamp_column: str | None,
+    partition_columns: tuple[str, ...],
 ) -> None:
+    if partition_columns == ():
+        _write_parquet_file(frame, root / "part-000.parquet")
+        return
+    if timestamp_column is None:
+        raise ValueError("missing_partition_timestamp_column")
     partitioned = add_year_partition(frame, timestamp_column=timestamp_column)
     for year, year_frame in partitioned.groupby("year", sort=True):
         partition_root = root / f"year={int(year)}"

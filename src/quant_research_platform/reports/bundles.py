@@ -11,6 +11,11 @@ from quant_research_platform.catalog.defaults import default_report_catalog
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.runtime.privacy import (
+    is_private_boundary_path,
+    sanitize_public_object,
+    sanitize_public_text,
+)
 from quant_research_platform.storage.atomic import (
     atomic_write_csv,
     atomic_write_directory,
@@ -20,11 +25,6 @@ from quant_research_platform.storage.atomic import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
-from quant_research_platform.storage.privacy import (
-    is_private_boundary_path,
-    sanitize_public_object,
-    sanitize_public_text,
-)
 
 
 @dataclass(frozen=True)

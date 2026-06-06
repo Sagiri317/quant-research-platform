@@ -14,7 +14,7 @@ REQUIRED_AREAS = {
     "research_dataset_parity",
     "evaluation_parity",
     "prediction_oos_smoke_parity",
-    "supporting_layers_migration_2014_2025",
+    "supporting_layers_coverage_2014_2025",
     "full_historical_daily_panel_status",
 }
 
@@ -193,7 +193,9 @@ def test_full_historical_daily_panel_covers_full_2014_2025_period() -> None:
 def test_full_historical_daily_panel_summary_streams_generated_chunks(
     monkeypatch,
 ) -> None:
-    from quant_research_platform.reports import private_aggregate_verification
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
 
     frames = (
         pd.DataFrame(
@@ -217,12 +219,12 @@ def test_full_historical_daily_panel_summary_streams_generated_chunks(
         return iter(frames)
 
     monkeypatch.setattr(
-        private_aggregate_verification,
+        private_aggregate,
         "_iter_generated_full_daily_panel_chunks",
         iter_chunks,
     )
 
-    summary = private_aggregate_verification._summarize_generated_full_daily_panel(
+    summary = private_aggregate._summarize_generated_full_daily_panel(
         Path(".")
     )
 
@@ -234,7 +236,9 @@ def test_full_historical_daily_panel_summary_streams_generated_chunks(
 def test_full_historical_daily_panel_generation_always_uses_chunks(
     monkeypatch,
 ) -> None:
-    from quant_research_platform.reports import private_aggregate_verification
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
 
     chunk = pd.DataFrame(
         {
@@ -244,18 +248,18 @@ def test_full_historical_daily_panel_generation_always_uses_chunks(
         }
     )
 
-    def iter_stock_chunks(project_root: Path):
+    def iter_asset_chunks(project_root: Path):
         assert project_root == Path(".")
         return iter((chunk,))
 
     monkeypatch.setattr(
-        private_aggregate_verification,
-        "_iter_generated_full_daily_panel_stock_chunks",
-        iter_stock_chunks,
+        private_aggregate,
+        "_iter_generated_full_daily_panel_asset_chunks",
+        iter_asset_chunks,
     )
 
     frames = list(
-        private_aggregate_verification._iter_generated_full_daily_panel_chunks(
+        private_aggregate._iter_generated_full_daily_panel_chunks(
             Path(".")
         )
     )
@@ -265,16 +269,20 @@ def test_full_historical_daily_panel_generation_always_uses_chunks(
 
 
 def test_generated_panel_memory_budget_uses_70_percent_available_memory() -> None:
-    from quant_research_platform.reports import private_aggregate_verification
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
 
-    assert private_aggregate_verification.GENERATED_PANEL_MEMORY_FRACTION == 0.7
+    assert private_aggregate.GENERATED_PANEL_MEMORY_FRACTION == 0.7
 
 
-def test_dynamic_stock_chunk_size_uses_one_chunk_when_memory_fits() -> None:
-    from quant_research_platform.reports import private_aggregate_verification
+def test_dynamic_asset_chunk_size_uses_one_chunk_when_memory_fits() -> None:
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
 
-    chunk_size = private_aggregate_verification._dynamic_stock_chunk_size(
-        total_stock_count=1200,
+    chunk_size = private_aggregate._dynamic_asset_chunk_size(
+        total_asset_count=1200,
         estimated_full_frame_bytes=10_000,
         available_memory_bytes=100_000,
         memory_fraction=0.5,
@@ -283,11 +291,13 @@ def test_dynamic_stock_chunk_size_uses_one_chunk_when_memory_fits() -> None:
     assert chunk_size == 1200
 
 
-def test_dynamic_stock_chunk_size_splits_when_memory_is_constrained() -> None:
-    from quant_research_platform.reports import private_aggregate_verification
+def test_dynamic_asset_chunk_size_splits_when_memory_is_constrained() -> None:
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
 
-    chunk_size = private_aggregate_verification._dynamic_stock_chunk_size(
-        total_stock_count=1200,
+    chunk_size = private_aggregate._dynamic_asset_chunk_size(
+        total_asset_count=1200,
         estimated_full_frame_bytes=120_000,
         available_memory_bytes=10_000,
         memory_fraction=0.5,
@@ -297,20 +307,24 @@ def test_dynamic_stock_chunk_size_splits_when_memory_is_constrained() -> None:
 
 
 def test_generated_panel_memory_budget_allows_current_full_frame_scale() -> None:
-    from quant_research_platform.reports import private_aggregate_verification
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
 
-    chunk_size = private_aggregate_verification._dynamic_stock_chunk_size(
-        total_stock_count=5420,
+    chunk_size = private_aggregate._dynamic_asset_chunk_size(
+        total_asset_count=5420,
         estimated_full_frame_bytes=4_378_832_336,
         available_memory_bytes=8_961_126_400,
-        memory_fraction=private_aggregate_verification.GENERATED_PANEL_MEMORY_FRACTION,
+        memory_fraction=private_aggregate.GENERATED_PANEL_MEMORY_FRACTION,
     )
 
     assert chunk_size == 5420
 
 
 def test_aggregate_summary_checksum_is_invariant_to_chunking() -> None:
-    from quant_research_platform.reports import private_aggregate_verification
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
 
     combined = pd.DataFrame(
         {
@@ -325,8 +339,8 @@ def test_aggregate_summary_checksum_is_invariant_to_chunking() -> None:
         for start in range(0, len(combined), 3)
     )
 
-    full_summary = private_aggregate_verification._summarize_frames((combined,))
-    chunk_summary = private_aggregate_verification._summarize_frames(chunks)
+    full_summary = private_aggregate._summarize_frames((combined,))
+    chunk_summary = private_aggregate._summarize_frames(chunks)
 
     assert "numeric_sum" not in full_summary.content_summary["timestamp"]
     assert "numeric_sum" not in full_summary.content_summary["value"]

@@ -1,5 +1,8 @@
 """提供内部 tensor compute backend 基础能力。"""
 
+from quant_research_platform.compute.tensor.construction import (
+    build_tensor_weighted_positions,
+)
 from quant_research_platform.compute.tensor.conversion import (
     panel_to_tensor,
     panel_to_tensor_batch,
@@ -16,9 +19,10 @@ from quant_research_platform.compute.tensor.layout import (
     TensorLayout,
 )
 from quant_research_platform.compute.tensor.masks import valid_observation_mask
-from quant_research_platform.compute.tensor.portfolio import (
-    build_tensor_weighted_positions,
+from quant_research_platform.compute.tensor.reporting import (
     calculate_tensor_long_short,
+)
+from quant_research_platform.compute.tensor.turnover import (
     calculate_tensor_turnover_and_cost,
 )
 

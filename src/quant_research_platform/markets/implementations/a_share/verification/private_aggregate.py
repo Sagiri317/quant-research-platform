@@ -19,6 +19,10 @@ import pandas as pd
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
+from quant_research_platform.reports.evidence_rendering import (
+    render_private_verification_summary_markdown,
+    render_public_safe_evidence_markdown,
+)
 
 CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
@@ -26,7 +30,10 @@ PRIVACY_LEVEL = "public_safe_aggregate"
 DATA_PRODUCT_ID = "a_share_daily_bar"
 MARKET_ID = "a_share"
 FULL_HISTORY_PERIOD = "2014-01-01 through 2025-12-31"
-GENERATED_BY = "quant_research_platform.reports.private_aggregate_verification"
+GENERATED_BY = (
+    "quant_research_platform.markets.implementations.a_share.verification."
+    "private_aggregate"
+)
 HASH_MODULUS = 1 << 64
 FULL_HISTORY_START_YEAR = 2014
 FULL_HISTORY_END_YEAR = 2025
@@ -46,9 +53,7 @@ PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/masks/as_of/a_share_as_of": "masks_universes_parity",
     "processed/a_share/masks/execution/a_share_execution": "masks_universes_parity",
     "processed/a_share/masks/evaluation/a_share_evaluation": "masks_universes_parity",
-    "processed/a_share/contexts/daily_context": (
-        "supporting_layers_migration_2014_2025"
-    ),
+    "processed/a_share/contexts/daily_context": "supporting_layers_coverage_2014_2025",
     "processed/a_share/research_datasets/"
     "a_share_price_volume_forward_returns": "research_dataset_parity",
 }
@@ -146,70 +151,6 @@ def generate_public_safe_aggregate_evidence(
     }
 
 
-def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
-    """Render the public-safe evidence payload as Markdown."""
-
-    lines = [
-        "# Clean Rewrite 0.1 Public-Safe Parity Evidence",
-        "",
-        (
-            "This evidence records public-safe aggregate validation for QRP "
-            "Clean Rewrite `0.1.0`. Public identifiers are "
-            "`data_product_id=a_share_daily_bar`, `market_id=a_share`, and "
-            "contract version `0.1`."
-        ),
-        "",
-        (
-            "Machine-readable evidence lives in "
-            "`docs/reports/clean-rewrite-0.1-parity-evidence.json`."
-        ),
-        "",
-        "| Area | Rows | Columns | Period | Status |",
-        "| --- | ---: | ---: | --- | --- |",
-    ]
-    for area in payload["areas"]:
-        status = (
-            "human approval required"
-            if area["human_approval_required"]
-            else "verified aggregate"
-        )
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    str(area["area"]).replace("_", " "),
-                    str(area["row_count"]),
-                    str(area["column_count"]),
-                    str(area["period"]),
-                    status,
-                ]
-            )
-            + " |"
-        )
-    lines.extend(
-        [
-            "",
-            "Public-safe status:",
-            "",
-            f"- `privacy_level | {payload['privacy_level']}`",
-            f"- `contract_version | {payload['contract_version']}`",
-            f"- `verification_kind | {payload['verification_kind']}`",
-            f"- `verification_scope | {payload['verification_scope']}`",
-            f"- `evidence_generation_mode | {payload['evidence_generation_mode']}`",
-            f"- `source_data_visibility | {payload['source_data_visibility']}`",
-            "- `row_level_output_committed | false`",
-            f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
-            (
-                "- private local aggregate run completed without committed "
-                "row-level artifacts"
-            ),
-        ]
-    )
-    if not payload["merge_ready"]:
-        lines.append("- human approval required before merge-ready status")
-    return "\n".join(lines) + "\n"
-
-
 def generate_private_verification_summary(
     project_root: Path = Path("."),
     *,
@@ -259,63 +200,6 @@ def generate_private_verification_summary(
         "allowed_unverified_roots": allowed_unverified_roots,
         "merge_ready": merge_ready,
     }
-
-
-def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str:
-    """Render the processed inventory summary as public-safe Markdown."""
-
-    lines = [
-        "# Clean Rewrite 0.1 Private Verification Summary",
-        "",
-        (
-            "This summary records aggregate-only processed artifact inventory "
-            "for QRP Clean Rewrite `0.1.0`."
-        ),
-        "",
-        (
-            "Machine-readable summary lives in "
-            "`docs/reports/clean-rewrite-0.1-private-verification-summary.json`."
-        ),
-        "",
-        "| Logical Root | Area | Rows | Columns | Period |",
-        "| --- | --- | ---: | ---: | --- |",
-    ]
-    for item in payload["processed_inventory"]:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    item["logical_root"],
-                    item["covered_by_evidence_area"] or "uncovered",
-                    str(item["row_count"]),
-                    str(item["column_count"]),
-                    str(item["period"]),
-                ]
-            )
-            + " |"
-        )
-    lines.extend(
-        [
-            "",
-            "Public-safe status:",
-            "",
-            f"- `privacy_level | {payload['privacy_level']}`",
-            f"- `contract_version | {payload['contract_version']}`",
-            f"- `verification_kind | {payload['verification_kind']}`",
-            f"- `source_data_visibility | {payload['source_data_visibility']}`",
-            "- `row_level_output_committed | false`",
-            f"- `covered_roots | {len(payload['covered_roots'])}`",
-            f"- `uncovered_roots | {len(payload['uncovered_roots'])}`",
-            (
-                "- `allowed_unverified_roots | "
-                f"{len(payload['allowed_unverified_roots'])}`"
-            ),
-            f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
-        ]
-    )
-    if payload["uncovered_roots"]:
-        lines.append("- uncovered processed roots require review before merge-ready")
-    return "\n".join(lines) + "\n"
 
 
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
@@ -388,10 +272,10 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             "prediction OOS smoke",
         ),
         AggregateInput(
-            "supporting_layers_migration_2014_2025",
+            "supporting_layers_coverage_2014_2025",
             (context, factor, label, universe, *masks),
             FULL_HISTORY_PERIOD,
-            "supporting layers migration",
+            "supporting layers coverage",
         ),
         AggregateInput(
             "full_historical_daily_panel_status",
@@ -534,10 +418,10 @@ def _summarize_generated_full_daily_panel(project_root: Path) -> AggregateSummar
 def _iter_generated_full_daily_panel_chunks(
     project_root: Path,
 ) -> Iterator[pd.DataFrame]:
-    yield from _iter_generated_full_daily_panel_stock_chunks(project_root)
+    yield from _iter_generated_full_daily_panel_asset_chunks(project_root)
 
 
-def _iter_generated_full_daily_panel_stock_chunks(
+def _iter_generated_full_daily_panel_asset_chunks(
     project_root: Path,
 ) -> Iterator[pd.DataFrame]:
     from quant_research_platform.markets.implementations.a_share.catalog import (
@@ -561,9 +445,9 @@ def _iter_generated_full_daily_panel_stock_chunks(
     )
     spec = a_share_processed_catalog().get("daily_panel")
     years = tuple(range(FULL_HISTORY_START_YEAR, FULL_HISTORY_END_YEAR + 1))
-    stock_codes = _daily_market_stock_codes(interim_root, years=years)
-    chunk_size = _dynamic_stock_chunk_size(
-        total_stock_count=len(stock_codes),
+    asset_ids = _daily_market_asset_ids(interim_root, years=years)
+    chunk_size = _dynamic_asset_chunk_size(
+        total_asset_count=len(asset_ids),
         estimated_full_frame_bytes=_estimate_generated_full_panel_memory_bytes(
             interim_root,
             years=years,
@@ -571,18 +455,18 @@ def _iter_generated_full_daily_panel_stock_chunks(
         available_memory_bytes=_available_memory_bytes(),
         memory_fraction=GENERATED_PANEL_MEMORY_FRACTION,
     )
-    for code_chunk in _chunked(stock_codes, chunk_size):
-        daily = _read_daily_market_stock_chunk(
+    for asset_id_chunk in _chunked(asset_ids, chunk_size):
+        daily = _read_daily_market_asset_chunk(
             interim_root,
             years=years,
-            stock_codes=code_chunk,
+            asset_ids=asset_id_chunk,
         )
         if daily.empty:
             continue
         panel = panels.build_research_panel(
             daily,
-            stock_master=_filter_stock_frame(stock_master, code_chunk),
-            market_cap=_filter_stock_frame(market_cap, code_chunk),
+            stock_master=_filter_asset_frame(stock_master, asset_id_chunk),
+            market_cap=_filter_asset_frame(market_cap, asset_id_chunk),
             trading_calendar=trading_calendar,
         )
         output = panel[list(spec.required_columns)].copy()
@@ -605,39 +489,38 @@ def _private_interim_root_for_data_product(
     )
 
     binding = default_provider_binding_registry().get(data_product_id)
-    provider = getattr(binding, "provider" + "_id")
-    return Path(project_root) / "data" / "interim" / provider
+    return Path(project_root) / "data" / "interim" / binding.provider_id
 
 
-def _daily_market_stock_codes(
+def _daily_market_asset_ids(
     interim_root: Path,
     *,
     years: tuple[int, ...],
 ) -> tuple[str, ...]:
-    codes: set[str] = set()
+    asset_ids: set[str] = set()
     for file in _partitioned_parquet_parts(
         interim_root / "daily_market" / "data",
         years=years,
     ):
-        frame = pd.read_parquet(file, columns=["stock_code"])
-        codes.update(str(value) for value in frame["stock_code"].dropna().unique())
-    return tuple(sorted(codes))
+        frame = pd.read_parquet(file, columns=["asset_id"])
+        asset_ids.update(str(value) for value in frame["asset_id"].dropna().unique())
+    return tuple(sorted(asset_ids))
 
 
-def _read_daily_market_stock_chunk(
+def _read_daily_market_asset_chunk(
     interim_root: Path,
     *,
     years: tuple[int, ...],
-    stock_codes: Sequence[str],
+    asset_ids: Sequence[str],
 ) -> pd.DataFrame:
-    code_set = set(stock_codes)
+    asset_id_set = set(asset_ids)
     frames: list[pd.DataFrame] = []
     for file in _partitioned_parquet_parts(
         interim_root / "daily_market" / "data",
         years=years,
     ):
         frame = pd.read_parquet(file)
-        filtered = frame.loc[frame["stock_code"].isin(code_set)]
+        filtered = frame.loc[frame["asset_id"].isin(asset_id_set)]
         if not filtered.empty:
             frames.append(filtered)
     if not frames:
@@ -645,13 +528,13 @@ def _read_daily_market_stock_chunk(
     return pd.concat(frames, ignore_index=True)
 
 
-def _filter_stock_frame(
+def _filter_asset_frame(
     frame: pd.DataFrame,
-    stock_codes: Sequence[str],
+    asset_ids: Sequence[str],
 ) -> pd.DataFrame:
-    if "stock_code" not in frame.columns:
+    if "asset_id" not in frame.columns:
         return frame.copy()
-    return frame.loc[frame["stock_code"].isin(set(stock_codes))].copy()
+    return frame.loc[frame["asset_id"].isin(set(asset_ids))].copy()
 
 
 def _partitioned_parquet_parts(
@@ -723,20 +606,20 @@ def _sysconf_value(name: str) -> int | None:
         return None
 
 
-def _dynamic_stock_chunk_size(
+def _dynamic_asset_chunk_size(
     *,
-    total_stock_count: int,
+    total_asset_count: int,
     estimated_full_frame_bytes: int,
     available_memory_bytes: int,
     memory_fraction: float,
 ) -> int:
-    if total_stock_count <= 0:
+    if total_asset_count <= 0:
         return 1
     target_bytes = max(1, int(available_memory_bytes * memory_fraction))
     if estimated_full_frame_bytes <= target_bytes:
-        return total_stock_count
-    bytes_per_stock = max(1, ceil(estimated_full_frame_bytes / total_stock_count))
-    return max(1, min(total_stock_count, target_bytes // bytes_per_stock))
+        return total_asset_count
+    bytes_per_asset = max(1, ceil(estimated_full_frame_bytes / total_asset_count))
+    return max(1, min(total_asset_count, target_bytes // bytes_per_asset))
 
 
 def _chunked(values: Sequence[str], size: int) -> Iterator[tuple[str, ...]]:
@@ -974,7 +857,7 @@ def _available_key_columns(frame: pd.DataFrame) -> list[str]:
 
 
 def _date_column(frame: pd.DataFrame) -> str | None:
-    for column in ("timestamp", "session_date", "trade_date"):
+    for column in ("timestamp", "session_date"):
         if column in frame.columns:
             return column
     return None

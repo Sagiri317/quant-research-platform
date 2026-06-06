@@ -12,13 +12,8 @@ from quant_research_platform.contracts.ids import MarketId, SourceId
 class StorageLayout:
     project_root: Path = Path(".")
 
-    @property
-    def raw_csmar_root(self) -> Path:
-        return self.project_root / "data/raw/csmar"
-
-    @property
-    def interim_csmar_root(self) -> Path:
-        return self.project_root / "data/interim/csmar"
+    def raw_source_root(self, source_id: SourceId) -> Path:
+        return self.project_root / "data/raw" / str(source_id)
 
     def interim_source_root(self, source_id: SourceId) -> Path:
         return self.project_root / "data/interim" / str(source_id)

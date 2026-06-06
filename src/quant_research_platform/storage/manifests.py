@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.storage.atomic import atomic_write_text
-from quant_research_platform.storage.privacy import sanitize_public_object
 
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")

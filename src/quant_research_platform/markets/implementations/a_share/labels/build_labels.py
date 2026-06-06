@@ -13,24 +13,18 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
 from quant_research_platform.markets.implementations.a_share.processed.io import (
     layout_from_processed_root,
 )
+from quant_research_platform.research.labels.forward_returns import (
+    add_forward_return_labels,
+)
 from quant_research_platform.storage.parquet import (
     parquet_dataset_columns,
     write_processed_data,
 )
 
-from .forward_returns import add_forward_return_labels
-
 LABEL_BASE_COLUMNS: tuple[str, ...] = (
     "market_id",
     "asset_id",
     "timestamp",
-    "session_date",
-    "available_at",
-    "stock_code",
-    "trade_date",
-    "eligible",
-    "can_enter",
-    "can_exit",
 )
 
 
@@ -45,8 +39,9 @@ def calculate_panel_labels(
     return add_forward_return_labels(
         panel,
         horizons=label_horizons,
-        asset_column="stock_code",
-        date_column="trade_date",
+        asset_column="asset_id",
+        date_column="timestamp",
+        execution_price_column="adj_open",
     )
 
 
@@ -68,13 +63,12 @@ def write_forward_labels(
     end_year: int,
 ) -> tuple[Path, int]:
     labels = select_label_columns(frame)
-    if "trade_date" in labels.columns:
-        labels["trade_date"] = pd.to_datetime(labels["trade_date"])
-        mask = labels["trade_date"].dt.year.between(start_year, end_year)
-        labels = labels.loc[mask].copy()
-    labels = labels.sort_values(
-        [column for column in ("stock_code", "trade_date") if column in labels.columns]
-    ).reset_index(drop=True)
+    labels["timestamp"] = pd.to_datetime(labels["timestamp"])
+    mask = labels["timestamp"].dt.year.between(start_year, end_year)
+    labels = labels.loc[mask].copy()
+    labels = labels.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+        drop=True
+    )
     catalog = a_share_processed_catalog()
     data_root = write_processed_data(
         labels,

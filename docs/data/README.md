@@ -61,7 +61,7 @@ available_at
 ```
 
 Provider fields such as `stock_code` and `trade_date` may be retained only as
-internal source/migration fields.
+source-local transient aliases before persisted interim output.
 
 ## Run Outputs
 

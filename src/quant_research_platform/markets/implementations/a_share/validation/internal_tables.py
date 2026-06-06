@@ -18,8 +18,9 @@ from .quality_report import (
 )
 
 DAILY_MARKET_REQUIRED_COLUMNS = (
-    "stock_code",
-    "trade_date",
+    "market_id",
+    "asset_id",
+    "timestamp",
     "open",
     "high",
     "low",
@@ -36,8 +37,9 @@ DAILY_MARKET_REQUIRED_COLUMNS = (
 )
 
 BENCHMARK_INDEX_REQUIRED_COLUMNS = (
-    "index_code",
-    "trade_date",
+    "market_id",
+    "asset_id",
+    "timestamp",
     "open",
     "high",
     "low",
@@ -52,7 +54,7 @@ def check_daily_market(
     """检查单个标准化 daily market interim frame。"""
 
     result = frame.copy()
-    result["trade_date"] = to_datetime(result["trade_date"])
+    result["timestamp"] = to_datetime(result["timestamp"])
     issues = [
         issue
         for issue in (
@@ -61,8 +63,12 @@ def check_daily_market(
                 "daily_market",
                 DAILY_MARKET_REQUIRED_COLUMNS,
             ),
-            duplicate_issue(result, "daily_market", ["stock_code", "trade_date"]),
-            expected_year_issue(result["trade_date"], "daily_market", expected_year),
+            duplicate_issue(
+                result,
+                "daily_market",
+                ["market_id", "asset_id", "timestamp"],
+            ),
+            expected_year_issue(result["timestamp"], "daily_market", expected_year),
             ohlc_issue(result, "daily_market"),
             negative_value_issue(
                 result,
@@ -86,7 +92,7 @@ def check_daily_market(
                 )
             )
 
-    min_date, max_date = date_bounds(result["trade_date"])
+    min_date, max_date = date_bounds(result["timestamp"])
     return QualityReport(
         dataset="daily_market",
         file=file,
@@ -112,7 +118,7 @@ def check_benchmark_index_market(
     """检查单个标准化 benchmark index interim frame。"""
 
     result = frame.copy()
-    result["trade_date"] = to_datetime(result["trade_date"])
+    result["timestamp"] = to_datetime(result["timestamp"])
     ohlc_validation_issue = None
     if "ohlc_valid" in result.columns:
         invalid_count = int((~result["ohlc_valid"].astype(bool)).sum())
@@ -138,10 +144,10 @@ def check_benchmark_index_market(
             duplicate_issue(
                 result,
                 "benchmark_index_market",
-                ["index_code", "trade_date"],
+                ["market_id", "asset_id", "timestamp"],
             ),
             expected_year_issue(
-                result["trade_date"], "benchmark_index_market", expected_year
+                result["timestamp"], "benchmark_index_market", expected_year
             ),
             ohlc_validation_issue,
             negative_value_issue(
@@ -153,7 +159,7 @@ def check_benchmark_index_market(
         )
         if issue is not None
     ]
-    min_date, max_date = date_bounds(result["trade_date"])
+    min_date, max_date = date_bounds(result["timestamp"])
     return QualityReport(
         dataset="benchmark_index_market",
         file=file,

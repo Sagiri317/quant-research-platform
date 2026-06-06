@@ -51,8 +51,13 @@ qrp research-datasets requirements <dataset_id>
 ```
 
 Future-only public contract items: `processed-data-runs`, `workflow-runs`,
-`report index/show`, `RunRepository`, `ReportRepository`, `private plugin`, and
-`qrp-private`.
+`report index/show`, `RunRepository`, `ReportRepository`, and `private plugin`.
+
+Private local schema inventory is exposed only as:
+
+```text
+qrp-private schema-inventory --project-root . --output <path>
+```
 
 ## Private Roots
 

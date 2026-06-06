@@ -15,7 +15,6 @@ class FactorSet(StrEnum):
     CORE = "core"
     SMOKE = "smoke"
     EXPERIMENTAL = "experimental"
-    DEPRECATED = "deprecated"
 
 
 @dataclass(frozen=True)

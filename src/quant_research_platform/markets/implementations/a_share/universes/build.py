@@ -18,10 +18,6 @@ UNIVERSE_COLUMNS: tuple[str, ...] = (
     "market_id",
     "asset_id",
     "timestamp",
-    "session_date",
-    "available_at",
-    "stock_code",
-    "trade_date",
     "eligible",
 )
 
@@ -53,12 +49,9 @@ def write_universe(
 
 def _filter_years(frame: pd.DataFrame, start_year: int, end_year: int) -> pd.DataFrame:
     result = frame.copy()
-    if "trade_date" in result.columns:
-        result["trade_date"] = pd.to_datetime(result["trade_date"])
-        result = result.loc[result["trade_date"].dt.year.between(start_year, end_year)]
-    sort_columns = [
-        column for column in ("stock_code", "trade_date") if column in result.columns
-    ]
+    result["timestamp"] = pd.to_datetime(result["timestamp"])
+    result = result.loc[result["timestamp"].dt.year.between(start_year, end_year)]
+    sort_columns = ["market_id", "asset_id", "timestamp"]
     return result.sort_values(sort_columns).reset_index(drop=True)
 
 

@@ -43,10 +43,10 @@ asset_id
 timestamp
 ```
 
-`stock_code` and `trade_date` are internal source/migration fields, not the
+`stock_code` and `trade_date` are source-local transient aliases, not the
 processed canonical key.
 
-## Current Migration Targets
+## Current Clean-Rewrite Owners
 
 | Capability | Target owner |
 |---|---|
@@ -71,11 +71,11 @@ processed canonical key.
 - 2014 evaluation and prediction smoke parity only.
 - Private boundary and sanitizer tests.
 
-## Current Local Migration Status
+## Current Local Coverage Status
 
 - 2014 processed-layer parity-or-explained-delta completed.
 - 2014 ResearchDataset, evaluation, and prediction smoke parity completed.
-- 2014-2025 factor/label-supporting processed layers migrated through
+- 2014-2025 factor/label-supporting processed layers were verified through
   spec-driven writers.
 - 2014-2025 `a_share_price_volume_forward_returns` ResearchDataset materialized
   through the ResearchDataset assembler.

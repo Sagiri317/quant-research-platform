@@ -1,16 +1,16 @@
-"""Validation checks for split A-share factor processed data."""
+"""Validation checks for split A-share factor and label processed data."""
 
 from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_factor_catalog,
     a_share_label_catalog,
     a_share_processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 
@@ -22,10 +22,19 @@ from .quality_report import (
     expected_year_issue,
     missing_columns_issue,
     to_datetime,
-    value_counts,
 )
 
 FORBIDDEN_FACTOR_TABLE_COLUMNS = (
+    "stock_code",
+    "trade_date",
+    "index_code",
+    "source_id",
+    "source_asset_id",
+    "session_date",
+    "available_at",
+    "eligible",
+    "can_enter",
+    "can_exit",
     "open",
     "high",
     "low",
@@ -63,15 +72,23 @@ def check_factor_table(
 
     spec = a_share_processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
     result = frame.copy()
-    result["timestamp"] = to_datetime(result["timestamp"])
+    timestamps = _timestamp_series(result)
+    if "timestamp" in result:
+        result["timestamp"] = timestamps
     factors = factor_columns(result)
     labels = label_columns(result)
     issues = [
         issue
         for issue in (
-            missing_columns_issue(result, "factor_table", _factor_base_columns()),
+            missing_columns_issue(result, "factor_table", spec.required_columns),
             duplicate_issue(result, "factor_table", list(spec.primary_key)),
-            expected_year_issue(result["timestamp"], "factor_table", expected_year),
+            expected_year_issue(timestamps, "factor_table", expected_year),
+            _unexpected_columns_issue(
+                result,
+                dataset="factor_table",
+                expected_columns=spec.required_columns,
+                check="unexpected_columns_in_factor_table",
+            ),
         )
         if issue is not None
     ]
@@ -111,7 +128,7 @@ def check_factor_table(
                 ),
             )
         )
-    min_date, max_date = date_bounds(result["timestamp"])
+    min_date, max_date = date_bounds(timestamps)
     rows = len(result)
     non_null_rates = {
         column: float(result[column].notna().mean()) if rows else 0.0
@@ -129,18 +146,92 @@ def check_factor_table(
         stats={
             "factor_count": len(factors),
             "label_count": len(labels),
-            "eligible_counts": value_counts(result, "eligible"),
-            "can_enter_counts": value_counts(result, "can_enter"),
-            "can_exit_counts": value_counts(result, "can_exit"),
             "non_null_rates": non_null_rates,
         },
     )
 
 
-def _factor_base_columns() -> tuple[str, ...]:
-    spec = a_share_processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
-    return tuple(
-        column
-        for column in spec.required_columns
-        if spec.column_roles[column] is not ColumnRole.FACTOR
+def check_label_table(
+    frame: pd.DataFrame, *, expected_year: int | None = None, file: str = ""
+) -> QualityReport:
+    """Validate a split forward-return label table against catalog/spec columns."""
+
+    spec = a_share_processed_catalog().get(FORWARD_RETURNS_PROCESSED_DATA_ID)
+    result = frame.copy()
+    timestamps = _timestamp_series(result)
+    if "timestamp" in result:
+        result["timestamp"] = timestamps
+    labels = label_columns(result)
+    factors = factor_columns(result)
+    issues = [
+        issue
+        for issue in (
+            missing_columns_issue(result, "label_table", spec.required_columns),
+            duplicate_issue(result, "label_table", list(spec.primary_key)),
+            expected_year_issue(timestamps, "label_table", expected_year),
+            _unexpected_columns_issue(
+                result,
+                dataset="label_table",
+                expected_columns=spec.required_columns,
+                check="unexpected_columns_in_label_table",
+            ),
+        )
+        if issue is not None
+    ]
+    if factors:
+        issues.append(
+            QualityIssue(
+                dataset="label_table",
+                check="factor_columns_in_label_table",
+                severity="blocking",
+                count=len(factors),
+                message="Label table contains split factor columns.",
+            )
+        )
+    min_date, max_date = date_bounds(timestamps)
+    rows = len(result)
+    present_labels = [column for column in labels if column in spec.required_columns]
+    non_null_rates = {
+        column: float(result[column].notna().mean()) if rows else 0.0
+        for column in present_labels
+    }
+    return QualityReport(
+        dataset="label_table",
+        file=file,
+        row_count=rows,
+        column_count=len(result.columns),
+        expected_year=expected_year,
+        min_date=min_date,
+        max_date=max_date,
+        issues=issues,
+        stats={
+            "label_count": len(present_labels),
+            "factor_count": len(factors),
+            "non_null_rates": non_null_rates,
+        },
+    )
+
+
+def _timestamp_series(frame: pd.DataFrame) -> pd.Series:
+    if "timestamp" not in frame:
+        return pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+    return to_datetime(frame["timestamp"])
+
+
+def _unexpected_columns_issue(
+    frame: pd.DataFrame,
+    *,
+    dataset: str,
+    expected_columns: tuple[str, ...],
+    check: str,
+) -> QualityIssue | None:
+    unexpected = sorted(set(frame.columns) - set(expected_columns))
+    if not unexpected:
+        return None
+    return QualityIssue(
+        dataset=dataset,
+        check=check,
+        severity="blocking",
+        count=len(unexpected),
+        message=f"Unexpected columns: {unexpected}.",
     )

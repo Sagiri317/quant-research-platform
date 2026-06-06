@@ -16,6 +16,7 @@ EXCLUDED_PARTS = {
     (".git",),
     (".run",),
     ("__pycache__",),
+    ("docs", "architecture", "open-issues-register.md"),
     ("docs", "archive"),
     ("reports", "private_real"),
 }

@@ -17,7 +17,7 @@ merge-ready evidence for the catalog-driven `price_volume` artifact.
 | research dataset parity | 12231140 | 75 | 2014-01-01 through 2025-12-31 | verified aggregate |
 | evaluation parity | 1446 | 7 | 2014-01-29 through 2014-12-31 | verified aggregate |
 | prediction oos smoke parity | 660416 | 4 | 2014-01-01 through 2014-12-31 | verified aggregate |
-| supporting layers migration 2014 2025 | 85617980 | 79 | 2014-01-01 through 2025-12-31 | verified aggregate |
+| supporting layers coverage 2014 2025 | 85617980 | 79 | 2014-01-01 through 2025-12-31 | verified aggregate |
 | full historical daily panel status | 12231140 | 48 | 2014-01-01 through 2025-12-31 | verified aggregate |
 
 Public-safe status:

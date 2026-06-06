@@ -77,13 +77,13 @@ def compute_listing_age_trading_days(
     frame: pd.DataFrame,
     calendar: pd.DataFrame,
     *,
-    trade_date_column: str,
+    observation_date_column: str,
     listing_date_column: str,
     market_type_column: str | None = None,
 ) -> pd.Series:
-    """Count open trading sessions from listing date through trade date."""
+    """Count open trading sessions from listing date through observation date."""
 
-    for column in (trade_date_column, listing_date_column):
+    for column in (observation_date_column, listing_date_column):
         if column not in frame.columns:
             raise ValueError(f"missing_listing_age_column: {column}")
     normalized = _require_normalized_calendar(calendar)
@@ -92,15 +92,19 @@ def compute_listing_age_trading_days(
     ):
         raise ValueError("duplicate_trading_calendar_key")
 
-    trade_dates = pd.to_datetime(
-        frame[trade_date_column],
+    observation_dates = pd.to_datetime(
+        frame[observation_date_column],
         errors="coerce",
     ).dt.normalize()
     listing_dates = pd.to_datetime(
         frame[listing_date_column],
         errors="coerce",
     ).dt.normalize()
-    valid = listing_dates.notna() & trade_dates.notna() & trade_dates.ge(listing_dates)
+    valid = (
+        listing_dates.notna()
+        & observation_dates.notna()
+        & observation_dates.ge(listing_dates)
+    )
     result = pd.Series(0, index=frame.index, dtype="int64")
     if not bool(valid.any()):
         return result
@@ -126,7 +130,7 @@ def compute_listing_age_trading_days(
         result.loc[market_mask] = _count_sessions_between(
             sessions,
             listing_dates.loc[market_mask],
-            trade_dates.loc[market_mask],
+            observation_dates.loc[market_mask],
         )
         assigned.loc[market_mask] = True
 
@@ -137,7 +141,7 @@ def compute_listing_age_trading_days(
             result.loc[fallback_mask] = _count_sessions_between(
                 unified_sessions,
                 listing_dates.loc[fallback_mask],
-                trade_dates.loc[fallback_mask],
+                observation_dates.loc[fallback_mask],
             )
     return result
 
@@ -160,10 +164,13 @@ def _sorted_unique_sessions(values: pd.Series) -> pd.DatetimeIndex:
 def _count_sessions_between(
     sessions: pd.DatetimeIndex,
     listing_dates: pd.Series,
-    trade_dates: pd.Series,
+    observation_dates: pd.Series,
 ) -> pd.Series:
     left = sessions.searchsorted(listing_dates.to_numpy(dtype="datetime64[ns]"), "left")
-    right = sessions.searchsorted(trade_dates.to_numpy(dtype="datetime64[ns]"), "right")
+    right = sessions.searchsorted(
+        observation_dates.to_numpy(dtype="datetime64[ns]"),
+        "right",
+    )
     ages = (right - left).clip(min=0)
     return pd.Series(ages, index=listing_dates.index, dtype="int64")
 

@@ -85,24 +85,8 @@ PRICE_VOLUME_FACTOR_PREFIXES: tuple[str, ...] = (
 )
 PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS: frozenset[str] = frozenset(
     {
-        "stock_code",
-        "trade_date",
         "timestamp",
         "asset",
-        "market_type",
-        "eligible",
-        "eligible_base",
-        "can_enter",
-        "can_exit",
-        "is_a_share_scope",
-        "is_trading",
-        "is_st",
-        "is_pt",
-        "is_limit_up",
-        "is_limit_down",
-        "limit_status",
-        "trading_status_code",
-        "filling_flag",
     }
 )
 BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
@@ -130,7 +114,7 @@ BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _price_volume_factor_columns_for_windows(
+def price_volume_factor_columns_for_windows(
     windows: Iterable[int],
 ) -> tuple[str, ...]:
     columns: list[str] = ["rev_1d"]
@@ -168,7 +152,7 @@ def _price_volume_factor_columns_for_windows(
 
 
 STANDARD_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
-    _price_volume_factor_columns_for_windows(_PRICE_VOLUME_STANDARD_WINDOWS)
+    price_volume_factor_columns_for_windows(_PRICE_VOLUME_STANDARD_WINDOWS)
 )
 
 PRICE_VOLUME_FACTOR_PRESETS: dict[str, tuple[str, ...]] = {
@@ -618,6 +602,7 @@ __all__ = [
     "calculate_price_volume_factors",
     "largest_price_volume_lookback_days",
     "price_volume_factor_columns",
+    "price_volume_factor_columns_for_windows",
     "price_volume_factor_definitions",
     "price_volume_factor_input_columns",
     "select_price_volume_feature_columns_from_schema",

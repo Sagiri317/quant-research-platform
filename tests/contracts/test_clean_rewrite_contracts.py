@@ -15,18 +15,24 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.data_products import DataProductDefinition
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
-from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.masks import MaskDefinition
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
-from quant_research_platform.sources.csmar.interim import normalize_daily_market_frame
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.privacy import (
+from quant_research_platform.markets.implementations.a_share.source_bindings import (
+    csmar as a_share_csmar,
+)
+from quant_research_platform.runtime.privacy import (
     PRIVATE_BOUNDARY_ROOTS,
     is_private_boundary_path,
     sanitize_public_text,
+)
+from quant_research_platform.storage.layout import StorageLayout
+
+a_share_csmar_normalize_daily_market_frame = (
+    a_share_csmar.a_share_csmar_normalize_daily_market_frame
 )
 
 
@@ -122,7 +128,12 @@ def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
     )
 
     assert catalog.get("rev_1d").factor_set == FactorSet.STANDARD
-    retired_values = ("full", "core" + "_long_period", "smoke" + "_minimal")
+    retired_values = (
+        "full",
+        "core" + "_long_period",
+        "smoke" + "_minimal",
+        "deprecated",
+    )
     for value in retired_values:
         with pytest.raises(ValueError, match="invalid_factor_set"):
             catalog.resolve_factor_set(value)
@@ -131,8 +142,10 @@ def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
 def test_storage_layout_uses_goal_private_roots_without_private_suffix() -> None:
     layout = StorageLayout(project_root=Path("/repo"))
 
-    assert layout.raw_csmar_root == Path("/repo/data/raw/csmar")
-    assert layout.interim_csmar_root == Path("/repo/data/interim/csmar")
+    assert layout.raw_source_root(SourceId("csmar")) == Path("/repo/data/raw/csmar")
+    assert layout.interim_source_root(SourceId("csmar")) == Path(
+        "/repo/data/interim/csmar"
+    )
     assert layout.processed_market_root(MarketId("a_share")) == Path(
         "/repo/data/processed/a_share"
     )
@@ -169,7 +182,7 @@ def test_csmar_daily_market_normalization_adds_canonical_interim_keys() -> None:
         }
     )
 
-    result = normalize_daily_market_frame(frame)
+    result = a_share_csmar_normalize_daily_market_frame(frame)
 
     assert list(result["market_id"]) == ["a_share"]
     assert list(result["asset_id"]) == ["000001"]

@@ -26,16 +26,22 @@ from quant_research_platform.compute.dataframe import (
 from quant_research_platform.compute.dataframe import (
     turnover as dataframe_turnover,
 )
-from quant_research_platform.compute.dataframe.portfolio import (
+from quant_research_platform.compute.dataframe.construction import (
     build_long_short_positions,
     build_weighted_positions,
-    calculate_cost_breakdown,
+)
+from quant_research_platform.compute.dataframe.exposure import summarize_exposure
+from quant_research_platform.compute.dataframe.performance import (
     calculate_cumulative_returns,
-    calculate_turnover,
+    summarize_performance,
+)
+from quant_research_platform.compute.dataframe.reporting import (
     simulate_long_short_returns,
     simulate_weighted_long_short_returns,
-    summarize_exposure,
-    summarize_performance,
+)
+from quant_research_platform.compute.dataframe.turnover import (
+    calculate_cost_breakdown,
+    calculate_turnover,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.compute.tensor import construction as tensor_construction
@@ -44,7 +50,7 @@ from quant_research_platform.compute.tensor import reporting as tensor_reporting
 from quant_research_platform.compute.tensor import turnover as tensor_turnover
 
 
-def test_portfolio_split_modules_preserve_public_imports() -> None:
+def test_portfolio_split_modules_are_direct_owners() -> None:
     assert dataframe_construction.build_weighted_positions is build_weighted_positions
     assert dataframe_turnover.calculate_turnover is calculate_turnover
     assert dataframe_exposure.summarize_exposure is summarize_exposure

@@ -29,6 +29,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
+from quant_research_platform.runtime.privacy import is_private_boundary_path
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -41,7 +42,6 @@ from quant_research_platform.storage.parquet import (
     write_processed_data,
     write_research_dataset,
 )
-from quant_research_platform.storage.privacy import is_private_boundary_path
 
 
 def test_partitioned_parquet_and_manifest_contract(tmp_path: Path) -> None:

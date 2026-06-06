@@ -48,7 +48,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
@@ -84,7 +84,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
@@ -118,7 +118,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
@@ -152,7 +152,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
@@ -186,7 +186,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
@@ -220,7 +220,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
@@ -254,13 +254,13 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
     },
     {
-      "area": "supporting_layers_migration_2014_2025",
+      "area": "supporting_layers_coverage_2014_2025",
       "contract_version": "0.1",
       "privacy_level": "public_safe_aggregate",
       "period": "2014-01-01 through 2025-12-31",
@@ -276,7 +276,7 @@
       "mean_abs_delta": 0.0,
       "tolerance": 0.0,
       "accepted_explained_delta": false,
-      "explanation": "Exact aggregate parity verified for supporting layers migration from local private artifacts, without row-level output.",
+      "explanation": "Exact aggregate parity verified for supporting layers coverage from local private artifacts, without row-level output.",
       "explanation_details": {
         "expected_period": "2014-01-01 through 2025-12-31",
         "observed_period": "2014-01-01 through 2025-12-31",
@@ -288,7 +288,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false
@@ -322,7 +322,7 @@
       "evidence_generation_mode": "local_private_data_public_safe_aggregate",
       "tolerance_owner": "project_contract_0.1",
       "downstream_impact": "no downstream parity impact detected from aggregate fields",
-      "generated_by": "quant_research_platform.reports.private_aggregate_verification",
+      "generated_by": "quant_research_platform.markets.implementations.a_share.verification.private_aggregate",
       "source_data_visibility": "private_local_only",
       "row_level_output_committed": false,
       "human_approval_required": false

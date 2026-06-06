@@ -51,18 +51,8 @@ def _metadata_frequency(dataset: str) -> str:
     return "event_or_static"
 
 
-def _default_metadata_filters(dataset: str) -> dict[str, object]:
-    if dataset == "trading_calendar":
-        return {
-            "market_types": [1, 2, 4, 8, 16, 32, 64],
-            "state_values": ["O", "C"],
-            "calendar_scope": "all_market_types",
-        }
-    return {
-        "share_class": "A-share",
-        "boards": ["main", "chinext", "star"],
-        "bjse": "excluded_in_first_version",
-    }
+def _default_metadata_filters(dataset: str, market_scope: str) -> dict[str, object]:
+    return {"dataset": dataset, "market_scope": market_scope}
 
 
 def build_raw_export_metadata(
@@ -95,7 +85,7 @@ def build_raw_export_metadata(
         "part": filename_metadata.part,
         "filters": dict(filters)
         if filters is not None
-        else _default_metadata_filters(dataset),
+        else _default_metadata_filters(dataset, filename_metadata.market_scope),
         "fields_zh": {column: field_descriptions.get(column, "") for column in columns},
         "fields_raw": list(columns),
         "row_count": row_count,

@@ -77,7 +77,6 @@ def test_clean_rewrite_target_files_exist() -> None:
         "storage/manifests.py",
         "storage/partitions.py",
         "storage/checksums.py",
-        "storage/privacy.py",
         "catalog/processed.py",
         "catalog/factors.py",
         "catalog/labels.py",
@@ -90,7 +89,6 @@ def test_clean_rewrite_target_files_exist() -> None:
         "catalog/workflows.py",
         "markets/base.py",
         "markets/calendars.py",
-        "workflows/specs.py",
         "workflows/planner.py",
         "workflows/executor.py",
         "workflows/checkpoints.py",
@@ -103,8 +101,9 @@ def test_clean_rewrite_target_files_exist() -> None:
         "reports/bundles.py",
         "reports/manifests.py",
         "reports/summaries.py",
+        "reports/schema_inventory.py",
+        "reports/evidence_rendering.py",
         "runtime/privacy.py",
-        "runtime/sanitization.py",
         "runtime/logging.py",
         "runtime/profiling.py",
         "runtime/errors.py",
@@ -113,17 +112,19 @@ def test_clean_rewrite_target_files_exist() -> None:
         "compute/dataframe/turnover.py",
         "compute/dataframe/exposure.py",
         "compute/dataframe/reporting.py",
-        "compute/dataframe/portfolio.py",
         "compute/tensor/construction.py",
         "compute/tensor/constraints.py",
         "compute/tensor/turnover.py",
         "compute/tensor/exposure.py",
         "compute/tensor/reporting.py",
-        "compute/tensor/portfolio.py",
-        "sources/csmar/dataset_contracts.py",
+        "sources/csmar/ids.py",
         "sources/csmar/raw_schemas.py",
         "sources/csmar/field_mappings.py",
         "sources/csmar/checksums.py",
+        "markets/implementations/a_share/source_bindings/csmar.py",
+        "markets/implementations/a_share/verification/private_aggregate.py",
+        "research/labels/forward_returns.py",
+        "interfaces/private_cli.py",
     }
 
     missing = [
@@ -140,18 +141,14 @@ def test_removed_root_directories_are_absent() -> None:
     assert existing.isdisjoint(retired_roots)
 
 
-def test_compute_portfolio_modules_are_facades_only() -> None:
-    hits: list[str] = []
-    for path in (
+def test_compute_portfolio_compatibility_facades_are_absent() -> None:
+    retired = (
         SOURCE_ROOT / "compute/dataframe/portfolio.py",
+        SOURCE_ROOT / "compute/dataframe/helpers.py",
         SOURCE_ROOT / "compute/tensor/portfolio.py",
-    ):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in tree.body:
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                hits.append(f"{path}:{node.lineno}: {node.name}")
+    )
 
-    assert hits == []
+    assert [str(path) for path in retired if path.exists()] == []
 
 
 def test_compute_split_modules_own_implementations() -> None:
@@ -218,9 +215,28 @@ def test_retired_csmar_compatibility_entrypoints_are_absent() -> None:
     retired = (
         SOURCE_ROOT / "sources/csmar/contracts.py",
         SOURCE_ROOT / "sources/csmar" / ("build" + "_interim.py"),
+        SOURCE_ROOT / "sources/csmar/columns.py",
+        SOURCE_ROOT / "sources/csmar/importer.py",
+        SOURCE_ROOT / "sources/csmar/interim.py",
+        SOURCE_ROOT / "sources/csmar/mappers.py",
+        SOURCE_ROOT / "sources/csmar/dataset_contracts.py",
+        SOURCE_ROOT / "markets/implementations/a_share/processed/migration.py",
+        SOURCE_ROOT / "reports/private_aggregate_verification.py",
+        SOURCE_ROOT / "research/evaluations/parity.py",
+        SOURCE_ROOT / "runtime/sanitization.py",
+        SOURCE_ROOT / "storage/privacy.py",
+        SOURCE_ROOT / "workflows/specs.py",
     )
 
     assert [str(path) for path in retired if path.exists()] == []
+
+
+def test_a_share_factor_builder_has_no_legacy_partition_fallback() -> None:
+    path = SOURCE_ROOT / "markets/implementations/a_share/factors/build_factors.py"
+    text = path.read_text(encoding="utf-8")
+
+    assert "legacy_path" not in text
+    assert "year={start_year}_{end_year}" not in text
 
 
 def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
@@ -241,23 +257,33 @@ def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
         if isinstance(node, ast.ImportFrom):
             imported_names.update(alias.asname or alias.name for alias in node.names)
 
-    forbidden = {
-        "build" + "_interim_frame",
-        "import_interim_data",
-        "normalize_daily_market_frame",
-    }
+    forbidden = {"build" + "_interim_frame", "import_interim_data"}
     assert exported_names.isdisjoint(forbidden)
     assert imported_names.isdisjoint(forbidden)
 
 
-def test_csmar_dataset_contracts_are_owned_by_dataset_contracts_module() -> None:
-    raw_path = SOURCE_ROOT / "sources/csmar/raw_schemas.py"
-    dataset_path = SOURCE_ROOT / "sources/csmar/dataset_contracts.py"
-    raw_tree = ast.parse(raw_path.read_text(encoding="utf-8"), filename=str(raw_path))
-    dataset_tree = ast.parse(
-        dataset_path.read_text(encoding="utf-8"),
-        filename=str(dataset_path),
-    )
+def test_package_inits_do_not_forward_storage_or_cli_owner_symbols() -> None:
+    hits: list[str] = []
+    for path in (
+        SOURCE_ROOT / "storage/__init__.py",
+        SOURCE_ROOT / "interfaces/cli/__init__.py",
+    ):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom | ast.Import):
+                hits.append(f"{path}:{node.lineno}: import")
+            elif isinstance(node, ast.FunctionDef) and node.name == "__getattr__":
+                hits.append(f"{path}:{node.lineno}: __getattr__")
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "__all__":
+                        hits.append(f"{path}:{node.lineno}: __all__")
+
+    assert hits == []
+
+
+def test_csmar_source_package_does_not_own_market_interim_contracts() -> None:
+    source_root = SOURCE_ROOT / "sources/csmar"
     forbidden_raw_names = {
         "DatasetContract",
         "DATASET_CONTRACTS",
@@ -267,11 +293,67 @@ def test_csmar_dataset_contracts_are_owned_by_dataset_contracts_module() -> None
         "ohlc_violations",
         "negative_liquidity_rows",
     }
-    raw_defined = _top_level_defined_names(raw_tree)
-    dataset_defined = _top_level_defined_names(dataset_tree)
+    hits: list[str] = []
+    for path in source_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        defined = _top_level_defined_names(tree)
+        overlap = sorted(forbidden_raw_names & defined)
+        hits.extend(f"{path}: {name}" for name in overlap)
 
-    assert raw_defined.isdisjoint(forbidden_raw_names)
-    assert forbidden_raw_names.issubset(dataset_defined)
+    assert hits == []
+
+
+def test_csmar_source_package_does_not_own_a_share_interim_pruning() -> None:
+    source_root = SOURCE_ROOT / "sources/csmar"
+    forbidden_tokens = {
+        "ASSET_TIME_INTERIM_KEEP_COLUMNS",
+        "ASSET_REFERENCE_INTERIM_KEEP_COLUMNS",
+        "INTERIM_KEEP_COLUMNS",
+        "apply_interim_column_rules",
+        "is_a_share_scope",
+        "eligible_base",
+    }
+    hits: list[str] = []
+    for path in source_root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for token in sorted(forbidden_tokens):
+            if token in text:
+                hits.append(f"{path}: {token}")
+
+    assert hits == []
+
+
+def test_a_share_csmar_binding_does_not_export_unprefixed_behavior() -> None:
+    path = SOURCE_ROOT / "markets/implementations/a_share/source_bindings/csmar.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    forbidden = {
+        "filter_by_date_range",
+        "normalize_asset_time_frame",
+        "normalize_daily_market_frame",
+        "normalize_index_metadata_frame",
+        "normalize_index_time_frame",
+        "normalize_private_export_frame",
+        "with_benchmark_index_fields",
+        "with_ohlc_valid",
+    }
+    defined = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    exported = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name) or target.id != "__all__":
+                continue
+            exported.update(
+                item.value
+                for item in node.value.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            )
+
+    assert defined.isdisjoint(forbidden)
+    assert exported.isdisjoint(forbidden)
 
 
 def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
@@ -501,13 +583,19 @@ def test_csmar_data_additions_are_source_local_by_default() -> None:
     source_local_change_policy = {
         "same table same schema new files": "sources/csmar",
         "same table new fields": "sources/csmar + tests",
-        "new CSMAR interim product": "sources/csmar/catalog.py + catalog registration",
+        "new A-share CSMAR interim product": (
+            "markets/implementations/a_share/source_bindings/csmar.py "
+            "+ catalog registration"
+        ),
         "public route additions": "forbidden",
         "public CLI group additions": "forbidden",
     }
 
     assert source_local_change_policy["public route additions"] == "forbidden"
     assert source_local_change_policy["public CLI group additions"] == "forbidden"
+    assert source_local_change_policy["new A-share CSMAR interim product"].startswith(
+        "markets/implementations/a_share/source_bindings/csmar.py"
+    )
 
 
 def _top_level_defined_names(tree: ast.Module) -> set[str]:

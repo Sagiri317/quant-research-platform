@@ -43,7 +43,7 @@ def test_default_catalogs_returns_platform_catalog_bundle() -> None:
     assert catalogs.data_products is not None
     assert catalogs.source_interim_catalogs["csmar"] is not None
     assert catalogs.universes.get("a_share_default").membership_column == (
-        "in_universe"
+        "eligible"
     )
 
 
@@ -107,7 +107,7 @@ def test_default_source_and_universe_catalogs_are_platform_composed() -> None:
 
     assert set(source_catalogs) == {"csmar"}
     assert isinstance(source_catalogs["csmar"], InterimDataCatalog)
-    assert universe.membership_column == "in_universe"
+    assert universe.membership_column == "eligible"
 
 
 def test_registry_graph_validation_uses_default_catalogs() -> None:

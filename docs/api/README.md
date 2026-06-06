@@ -82,8 +82,20 @@ Retired legacy command names are not public clean-rewrite contracts.
 ## Future-Only Items
 
 The following are not active `0.1.0` public contracts: `processed-data-runs`,
-`workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`,
-`private plugin`, and `qrp-private`.
+`workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`, and
+`private plugin`.
+
+## Private Local CLI
+
+The only active private local-data CLI command is:
+
+```text
+qrp-private schema-inventory --project-root . --output <path>
+```
+
+It writes sanitized aggregate schema metadata for `data/interim` and
+`data/processed`. It does not scan `data/raw` or `reports/private_real`, and it
+does not run private import, private rebuild, or private evidence regeneration.
 
 ## Privacy
 

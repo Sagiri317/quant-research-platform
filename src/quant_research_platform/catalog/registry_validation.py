@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
 from dataclasses import dataclass
 
@@ -62,10 +61,10 @@ def validate_data_product_source_graph(
     if not binding.required_source_dataset_ids:
         raise CatalogConsistencyError()
 
-    source_catalog = catalogs.get(binding.source_id) or _load_interim_catalog(
-        binding.source_id,
-        source.implementation_package,
-    )
+    try:
+        source_catalog = catalogs[binding.source_id]
+    except KeyError as exc:
+        raise CatalogConsistencyError() from exc
     source_dataset_ids = {spec.interim_data_id for spec in source_catalog.list()}
     if not set(binding.required_source_dataset_ids).issubset(source_dataset_ids):
         raise CatalogConsistencyError()
@@ -84,21 +83,6 @@ def validate_data_product_source_graph(
 
 def _is_importable(package: str) -> bool:
     return importlib.util.find_spec(package) is not None
-
-
-def _load_interim_catalog(
-    source_id: str,
-    implementation_package: str,
-) -> InterimDataCatalog:
-    try:
-        module = importlib.import_module(f"{implementation_package}.catalog")
-        factory = getattr(module, f"{source_id}_interim_catalog")
-        catalog = factory()
-    except (AttributeError, ModuleNotFoundError) as exc:
-        raise CatalogConsistencyError() from exc
-    if not isinstance(catalog, InterimDataCatalog):
-        raise CatalogConsistencyError()
-    return catalog
 
 
 def _default_data_product_registry() -> DataProductRegistry:

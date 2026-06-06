@@ -43,11 +43,6 @@ from quant_research_platform.research.evaluations import (
     evaluate_factor_frame,
     run_evaluation_from_research_dataset,
 )
-from quant_research_platform.research.evaluations.parity import (
-    DeltaClassification,
-    classify_parity_delta,
-    ensure_no_unexplained_regression,
-)
 from quant_research_platform.research.models import fit_linear_baseline
 from quant_research_platform.research.predictions import (
     build_prediction_bundle,
@@ -460,56 +455,3 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     assert (run_root / "metrics.parquet").is_file()
     assert (run_root / "grouped_returns.parquet").is_file()
     assert (run_root / "manifest.json").is_file()
-
-
-def test_parity_gate_classifies_tolerance_and_explained_delta() -> None:
-    reference = _research_frame()
-    candidate = reference.copy()
-    candidate.loc[0, "mom_20d"] += 0.000001
-
-    tolerance_result = classify_parity_delta(
-        reference,
-        candidate,
-        key_columns=("market_id", "asset_id", "timestamp"),
-        value_columns=("mom_20d", "forward_return_20d"),
-        tolerance=0.00001,
-    )
-    expected_result = classify_parity_delta(
-        reference,
-        candidate,
-        key_columns=("market_id", "asset_id", "timestamp"),
-        value_columns=("mom_20d",),
-        tolerance=0.0,
-        expected_delta_reason="canonical_asset_id_migration",
-    )
-
-    assert (
-        tolerance_result.classification
-        is DeltaClassification.NUMERIC_TOLERANCE_DELTA
-    )
-    assert tolerance_result.stop_required is False
-    assert expected_result.classification is DeltaClassification.EXPECTED_DELTA
-    assert expected_result.stop_required is False
-
-
-def test_parity_gate_stops_on_unexplained_regression() -> None:
-    reference = _research_frame()
-    candidate = reference.copy()
-    candidate.loc[0, "forward_return_20d"] += 0.5
-
-    result = classify_parity_delta(
-        reference,
-        candidate,
-        key_columns=("market_id", "asset_id", "timestamp"),
-        value_columns=("forward_return_20d",),
-        tolerance=0.00001,
-    )
-
-    assert result.classification is DeltaClassification.UNEXPLAINED_REGRESSION
-    assert result.stop_required is True
-    try:
-        ensure_no_unexplained_regression(result)
-    except RuntimeError as exc:
-        assert str(exc) == "unexplained_regression"
-    else:
-        raise AssertionError("expected unexplained_regression")

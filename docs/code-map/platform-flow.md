@@ -76,7 +76,11 @@ Retired commands and endpoints are not current clean-rewrite contracts.
 
 Future-only items remain outside the active surface: `processed-data-runs`,
 `workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`,
-`private plugin`, and `qrp-private`.
+and `private plugin`.
+
+Private local schema inventory is exposed separately through
+`qrp-private schema-inventory --project-root . --output <path>`. It scans only
+`data/interim` and `data/processed` and emits sanitized aggregate metadata.
 
 ## Narrow Follow-up Notes
 

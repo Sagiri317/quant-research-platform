@@ -26,7 +26,7 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 
 Current clean-rewrite verification is code/test based. Private generated
 artifacts remain local evidence only. The previous public-safe aggregate parity
-and migration evidence in `docs/reports/` is
+and coverage evidence in `docs/reports/` is
 `superseded_by_factor_catalog_refactor` and
 `evidence_pending_regeneration` until the next private rebuild.
 
@@ -39,11 +39,11 @@ Current public-safe anchors:
 - Public-safe parity-or-explained-delta evidence for processed panel, factor
   values, labels, masks/universes, ResearchDataset, evaluation, and prediction
   smoke is superseded pending regeneration after the factor catalog refactor.
-- P2 compute portfolio and internal provider contract split modules exist with
-  compatibility facades.
+- P2 compute portfolio and internal provider contract split modules use direct
+  owner modules only.
 - Report writers derive paths through `ReportSpec`, `ReportCatalog`,
   `StorageLayout`, and `run_id`.
-- 2014-2025 historical migration completed locally for the new processed
+- 2014-2025 historical coverage was verified locally for the new processed
   factor/label-supporting layout and ResearchDataset layout.
 - Public-safe aggregate evidence verifies full historical `daily_panel`
   coverage for `2014-01-01` through `2025-12-31` without committing row-level
@@ -54,7 +54,10 @@ Current public-safe anchors:
 1. This branch is not merged to `main`.
 2. Future-only items remain out of the active public contract:
    `processed-data-runs`, `workflow-runs`, `report index/show`,
-   `RunRepository`, `ReportRepository`, `private plugin`, and `qrp-private`.
+   `RunRepository`, `ReportRepository`, and `private plugin`.
+3. Active private local-data CLI is limited to
+   `qrp-private schema-inventory --project-root . --output <path>`; private
+   import, rebuild, and evidence regeneration remain out of scope.
 
 ## 下一步
 

@@ -32,41 +32,21 @@ DEFAULTS_CSMAR_CATALOG = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.sources.csmar.catalog",
 )
+DEFAULTS_A_SHARE_CSMAR_BINDING = (
+    "src/quant_research_platform/catalog/defaults.py",
+    "quant_research_platform.markets.implementations.a_share.source_bindings",
+)
 # Batch 3: catalog/defaults.py may compose report owner definitions.
 DEFAULTS_REPORT_CATALOG = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.reports.catalog",
 )
-# P2, Batch 4: private aggregate verification is temporarily report-local.
-REPORT_A_SHARE_IDS = (
-    "src/quant_research_platform/reports/private_aggregate_verification.py",
-    "quant_research_platform.markets.implementations.a_share.ids",
-)
-# P2, Batch 4: private aggregate verification assembles A-share catalogs.
-REPORT_A_SHARE_CATALOG = (
-    "src/quant_research_platform/reports/private_aggregate_verification.py",
-    "quant_research_platform.markets.implementations.a_share.catalog",
-)
-# P2, Batch 4: private aggregate verification reads A-share processed helpers.
-REPORT_A_SHARE_PROCESSED = (
-    "src/quant_research_platform/reports/private_aggregate_verification.py",
-    "quant_research_platform.markets.implementations.a_share.processed",
-)
-# P1, Batch 4 decision: source normalization currently reuses A-share adapter.
-CSMAR_A_SHARE_ADAPTER = (
-    "src/quant_research_platform/sources/csmar/interim.py",
-    "quant_research_platform.markets.implementations.a_share.adapter",
-)
-
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST = {
     DEFAULTS_A_SHARE_CATALOG_FACTORIES,
     DEFAULTS_A_SHARE_IDS,
     DEFAULTS_CSMAR_CATALOG,
+    DEFAULTS_A_SHARE_CSMAR_BINDING,
     DEFAULTS_REPORT_CATALOG,
-    REPORT_A_SHARE_IDS,
-    REPORT_A_SHARE_CATALOG,
-    REPORT_A_SHARE_PROCESSED,
-    CSMAR_A_SHARE_ADAPTER,
 }
 
 
@@ -105,6 +85,7 @@ def test_catalog_defaults_is_the_only_interface_composition_root() -> None:
         {
             "quant_research_platform.markets.implementations.a_share.catalog",
             "quant_research_platform.markets.implementations.a_share.ids",
+            "quant_research_platform.markets.implementations.a_share.source_bindings",
             "quant_research_platform.sources.csmar.catalog",
         }
     )

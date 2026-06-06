@@ -87,8 +87,16 @@ through API/CLI.
 
 Removed public placeholders are not compatibility requirements. Future-only
 work remains explicit: `processed-data-runs`, `workflow-runs`, `report
-index/show`, `RunRepository`, `ReportRepository`, `private plugin`, and
-`qrp-private`.
+index/show`, `RunRepository`, `ReportRepository`, and `private plugin`.
+
+Private local-data CLI:
+
+```text
+qrp-private schema-inventory --project-root . --output <path>
+```
+
+`qrp-private` currently exposes only sanitized schema inventory. It does not run
+private import, private rebuild, or private evidence regeneration.
 
 ## Development Checks
 

@@ -30,7 +30,9 @@ replacement for `PROJECT_STATUS.md`.
   not exposed through API/CLI in `0.1.0`.
 - Future-only public-contract work remains outside this slice:
   `processed-data-runs`, `workflow-runs`, `report index/show`,
-  `RunRepository`, `ReportRepository`, `private plugin`, and `qrp-private`.
+  `RunRepository`, `ReportRepository`, and `private plugin`.
+- Active private local-data CLI is limited to
+  `qrp-private schema-inventory --project-root . --output <path>`.
 - Report writers derive paths from `StorageLayout + ReportSpec + run_id`.
 - Public-safe aggregate evidence is generated from local private aggregate
   verification; full historical `daily_panel` aggregate coverage now spans

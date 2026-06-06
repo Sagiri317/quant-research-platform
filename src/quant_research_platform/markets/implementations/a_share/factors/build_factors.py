@@ -25,9 +25,9 @@ from quant_research_platform.markets.implementations.a_share.processed.io import
     layout_from_processed_root,
 )
 from quant_research_platform.research.factors.price_volume import (
-    _price_volume_factor_columns_for_windows,
     calculate_price_volume_factors,
     largest_price_volume_lookback_days,
+    price_volume_factor_columns_for_windows,
 )
 from quant_research_platform.storage.layout import processed_data_parquet_root
 from quant_research_platform.storage.parquet import (
@@ -44,12 +44,9 @@ def read_panel(
     columns: tuple[str, ...] | list[str] | None = None,
     years: tuple[int, ...] | None = None,
 ) -> pd.DataFrame:
-    """读取一个 panel 文件并保留六位 stock codes。"""
+    """Read one panel dataset for factor construction."""
 
-    result = read_partitioned_parquet_dataset(path, years=years, columns=columns)
-    if "stock_code" in result.columns:
-        result["stock_code"] = result["stock_code"].astype(str).str.zfill(6)
-    return result
+    return read_partitioned_parquet_dataset(path, years=years, columns=columns)
 
 
 def select_slim_factor_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -73,7 +70,7 @@ def calculate_panel_factors(
 
     return calculate_price_volume_factors(
         panel,
-        factor_columns=_price_volume_factor_columns_for_windows(windows),
+        factor_columns=price_volume_factor_columns_for_windows(windows),
     )
 
 
@@ -254,11 +251,6 @@ def _panel_part_paths(
     ]
     if paths:
         return paths
-    legacy_path = (
-        data_root / f"year={start_year}_{end_year}" / "part-000.parquet"
-    )
-    if legacy_path.exists():
-        return [legacy_path]
     raise FileNotFoundError(data_root)
 
 

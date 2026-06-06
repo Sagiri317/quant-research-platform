@@ -21,8 +21,9 @@ from .quality_report import (
 )
 
 PANEL_REQUIRED_COLUMNS = (
-    "stock_code",
-    "trade_date",
+    "market_id",
+    "asset_id",
+    "timestamp",
     "eligible",
     "can_enter",
     "can_exit",
@@ -38,13 +39,17 @@ def check_research_panel(
     """检查单个 yearly research panel。"""
 
     result = frame.copy()
-    result["trade_date"] = to_datetime(result["trade_date"])
+    result["timestamp"] = to_datetime(result["timestamp"])
     issues = [
         issue
         for issue in (
             missing_columns_issue(result, "research_panel", PANEL_REQUIRED_COLUMNS),
-            duplicate_issue(result, "research_panel", ["stock_code", "trade_date"]),
-            expected_year_issue(result["trade_date"], "research_panel", expected_year),
+            duplicate_issue(
+                result,
+                "research_panel",
+                ["market_id", "asset_id", "timestamp"],
+            ),
+            expected_year_issue(result["timestamp"], "research_panel", expected_year),
             ohlc_issue(result, "research_panel"),
             negative_value_issue(
                 result,
@@ -67,7 +72,7 @@ def check_research_panel(
                     message="Rows cannot be matched to stock_master listing_date.",
                 )
             )
-    min_date, max_date = date_bounds(result["trade_date"])
+    min_date, max_date = date_bounds(result["timestamp"])
     return QualityReport(
         dataset="research_panel",
         file=file,

@@ -16,7 +16,6 @@ import quant_research_platform.interfaces.cli.commands as cli_commands_module
 import quant_research_platform.interfaces.services as services_module
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
-from quant_research_platform.interfaces.cli import app
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_DEFAULT_UNIVERSE_ID,
     A_SHARE_EXECUTION_MASK_ID,
@@ -28,6 +27,8 @@ from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_columns,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
+
+app = cli_commands_module.app
 
 create_app = api_app_module.create_app
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -543,7 +544,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
                 {
                     "universe_id": "sentinel_universe",
                     "market_id": "a_share",
-                    "membership_column": "in_universe",
+                    "membership_column": "eligible",
                     "definition_version": "0.1",
                 }
             ],
@@ -833,6 +834,8 @@ def test_run_id_sanitizer_rejects_api_body_and_cli_option_markers() -> None:
 def test_clean_rewrite_cli_does_not_expose_retired_commands() -> None:
     runner = CliRunner()
     retired = [
+        ["private", "--help"],
+        ["diagnostics", "--help"],
         ["a-share", "--help"],
         ["ml", "baseline", "train", "--help"],
         ["evaluate" + "-parquet", "--help"],

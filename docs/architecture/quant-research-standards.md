@@ -8,7 +8,7 @@ These standards keep QRP research outputs defensible during Clean Rewrite
 - Processed canonical key is `market_id`, `asset_id`, `timestamp`.
 - Use `session_date` for market-local trading sessions.
 - Use `available_at` for point-in-time availability.
-- `stock_code` and `trade_date` are source or migration fields only.
+- `stock_code` and `trade_date` are source-local transient aliases only.
 - `ProcessedDataSpec.grain` declares row meaning and drives duplicate checks,
   joins, partitioning, and evaluation semantics.
 
@@ -19,12 +19,12 @@ These standards keep QRP research outputs defensible during Clean Rewrite
   and exit rule.
 - Masks may be as-of, execution, or evaluation masks; future-dependent masks
   must not enter feature sets.
-- Current allowed factor sets are `standard`, `core`, `smoke`, `experimental`,
-  and `deprecated`.
+- Current allowed factor sets are `standard`, `core`, `smoke`, and
+  `experimental`.
 
 ## Evaluation
 
-- Use parity-or-explained-delta for migration validation.
+- Use parity-or-explained-delta for clean-rewrite validation.
 - Classify deltas as expected, numeric tolerance, old bug fixed, or unexplained
   regression.
 - Stop on unexplained regression.

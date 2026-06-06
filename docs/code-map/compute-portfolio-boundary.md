@@ -1,8 +1,6 @@
 # Compute Portfolio Boundary
 
-`compute/dataframe/portfolio.py` and `compute/tensor/portfolio.py` remain
-compatibility facades for QRP `0.1` public imports. Focused portfolio compute
-entry points are split into:
+Focused portfolio compute entry points are split into owner modules:
 
 - `compute/dataframe/construction.py`
 - `compute/dataframe/constraints.py`
@@ -17,5 +15,6 @@ entry points are split into:
 
 These modules must not gain storage, catalog, API, workflow, market,
 broker/exchange, paper trading, or live trading responsibilities. New portfolio
-logic should be assigned to the focused module that owns the behavior while the
-facade preserves public import compatibility.
+logic should be assigned to the focused module that owns the behavior. The old
+`compute/dataframe/portfolio.py` and `compute/tensor/portfolio.py` facade modules
+are retired clean-rewrite entrypoints.

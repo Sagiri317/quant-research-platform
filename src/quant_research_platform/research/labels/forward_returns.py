@@ -1,4 +1,4 @@
-"""A-share forward-return label helpers."""
+"""Generic forward-return label helpers."""
 
 from __future__ import annotations
 
@@ -13,11 +13,7 @@ def add_forward_return_labels(
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
 ) -> pd.DataFrame:
-    """Add next-open to horizon-open forward return labels.
-
-    The entry price is the next tradable open. A horizon-N label exits at the
-    open after N holding sessions, so signal rows never use same-session fills.
-    """
+    """Add next-open to horizon-open forward return labels."""
 
     result = frame.sort_values([asset_column, date_column]).copy()
     grouped = result.groupby(asset_column, sort=False)

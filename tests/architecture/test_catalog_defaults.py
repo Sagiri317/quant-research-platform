@@ -57,8 +57,14 @@ def test_catalog_defaults_remains_platform_composition_root() -> None:
     all_names = _module_all_names(tree)
 
     assert "quant_research_platform.markets.implementations.a_share.catalog" in modules
+    assert (
+        "quant_research_platform.markets.implementations.a_share.source_bindings"
+        in modules
+    )
     assert "quant_research_platform.sources.csmar.catalog" in modules
     assert "quant_research_platform.reports.catalog" in modules
+    assert "a_share_csmar_binding.a_share_csmar_interim_catalog(" in source
+    assert "a_share_csmar_binding.a_share_csmar_provider_binding(" in source
     assert "default_catalogs" in all_names
 
 
@@ -74,6 +80,7 @@ def test_catalog_defaults_delegates_concrete_definitions_to_owners() -> None:
     forbidden_names = {
         "DataProductDefinition",
         "MarketDefinition",
+        "ProviderBinding",
         "UniverseDefinition",
     }
     imported_names = {
@@ -95,7 +102,7 @@ def test_catalog_defaults_delegates_concrete_definitions_to_owners() -> None:
         "defaults_must_delegate_concrete_definitions_to_owners: "
         + ", ".join(violations)
     )
-    assert "ProviderBinding" in instantiated_names
+    assert "ProviderBinding" not in instantiated_names
 
 
 def test_a_share_owner_does_not_define_registry_factories() -> None:

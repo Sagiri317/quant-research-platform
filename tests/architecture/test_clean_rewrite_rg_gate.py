@@ -34,7 +34,9 @@ PUBLIC_SURFACE_SCAN_ROOTS = (
 )
 
 INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
+    ("docs", "architecture", "open-issues-register.md"),
     ("docs", "code-map", "source-csmar-contracts.md"),
+    ("src", "quant_research_platform", "reports", "schema_inventory.py"),
 }
 
 APPROVED_FIELD_SPEC_FILES = {
@@ -98,7 +100,9 @@ FUTURE_PUBLIC_TODO_TERMS = (
     "RunRepository",
     "ReportRepository",
     "private plugin",
-    "qrp-private",
+)
+PRIVATE_LOCAL_CLI_LINES = (
+    "qrp-private schema-inventory --project-root . --output <path>",
 )
 
 FORBIDDEN_WRITER_METHODS = {
@@ -321,9 +325,13 @@ def test_public_docs_capture_naming_rules_and_future_only_items() -> None:
     missing_future = [
         term for term in FUTURE_PUBLIC_TODO_TERMS if term not in combined
     ]
+    missing_private_cli = [
+        line for line in PRIVATE_LOCAL_CLI_LINES if line not in combined
+    ]
 
     assert missing == []
     assert missing_future == []
+    assert missing_private_cli == []
 
 
 def test_factor_and_label_definitions_do_not_use_future_data_token() -> None:

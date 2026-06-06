@@ -52,18 +52,6 @@ from quant_research_platform.research.factors.price_volume import (
 )
 
 A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
-    FieldSpec(
-        name="stock_code",
-        role=ColumnRole.SOURCE,
-        dtype="string",
-        description="A-share six-digit stock code.",
-    ),
-    FieldSpec(
-        name="trade_date",
-        role=ColumnRole.TIMESTAMP,
-        dtype="date",
-        description="A-share trading session date.",
-    ),
     FieldSpec(name="stock_name", role=ColumnRole.CONTEXT, dtype="string"),
     FieldSpec(name="market_type", role=ColumnRole.CONTEXT, dtype="string"),
     FieldSpec(name="trading_status_code", role=ColumnRole.CONTEXT, dtype="string"),
@@ -133,8 +121,6 @@ _PANEL_COLUMNS: tuple[str, ...] = (
     "timestamp",
     "session_date",
     "available_at",
-    "stock_code",
-    "trade_date",
     "stock_name",
     "market_type",
     "trading_status_code",
@@ -182,11 +168,11 @@ _CONTEXT_COLUMNS: tuple[str, ...] = (
     "market_id",
     "asset_id",
     "timestamp",
-    "session_date",
-    "available_at",
-    "stock_code",
-    "trade_date",
     "market_type",
+    "is_st",
+    "is_pt",
+    "limit_status",
+    "listing_age_trading_days",
     "csrc_2012_industry_code",
     "csrc_2012_industry_name",
     "total_market_cap",
@@ -199,8 +185,6 @@ _UNIVERSE_COLUMNS: tuple[str, ...] = (
     "market_id",
     "asset_id",
     "timestamp",
-    "stock_code",
-    "trade_date",
     "eligible",
 )
 
@@ -208,14 +192,9 @@ _LABEL_CONTROL_COLUMNS: tuple[str, ...] = (
     "market_id",
     "asset_id",
     "timestamp",
-    "stock_code",
-    "trade_date",
-    "eligible",
-    "can_enter",
-    "can_exit",
 )
 
-_RESEARCH_DATASET_SOURCE_COLUMNS: tuple[str, ...] = ("stock_code", "trade_date")
+_RESEARCH_DATASET_SOURCE_COLUMNS: tuple[str, ...] = ()
 
 _RESEARCH_DATASET_FILTER_COLUMNS: tuple[str, ...] = (
     "eligible",
@@ -268,7 +247,7 @@ def a_share_default_universe_definition() -> UniverseDefinition:
     return UniverseDefinition(
         universe_id=A_SHARE_DEFAULT_UNIVERSE_ID,
         market_id=A_SHARE_MARKET_ID,
-        membership_column="in_universe",
+        membership_column="eligible",
     )
 
 
@@ -478,8 +457,6 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
                 "market_id",
                 "asset_id",
                 "timestamp",
-                "stock_code",
-                "trade_date",
                 "eligible",
             ),
             role_overrides={"eligible": ColumnRole.MASK},
@@ -491,8 +468,6 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
                 "market_id",
                 "asset_id",
                 "timestamp",
-                "stock_code",
-                "trade_date",
                 "can_enter",
                 "can_exit",
             ),
@@ -508,8 +483,6 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
                 "market_id",
                 "asset_id",
                 "timestamp",
-                "stock_code",
-                "trade_date",
                 "eligible",
                 "can_exit",
             ),
@@ -607,7 +580,11 @@ def _registered_factor_columns() -> tuple[str, ...]:
 
 def _registered_label_columns() -> tuple[str, ...]:
     return tuple(
-        definition.output_column for definition in a_share_label_catalog().list()
+        definition.output_column
+        for definition in sorted(
+            a_share_label_catalog().list(),
+            key=lambda item: item.horizon,
+        )
     )
 
 

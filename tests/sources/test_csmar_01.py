@@ -11,35 +11,46 @@ from quant_research_platform.catalog.fields import (
     platform_interim_column_names,
 )
 from quant_research_platform.contracts.data import DataGrain
+from quant_research_platform.markets.implementations.a_share.source_bindings import (
+    csmar as a_share_csmar,
+)
 from quant_research_platform.sources.csmar import (
     checksums,
-    dataset_contracts,
     field_mappings,
     raw_exports,
     raw_schemas,
 )
-from quant_research_platform.sources.csmar.catalog import csmar_interim_catalog
-from quant_research_platform.sources.csmar.columns import apply_interim_column_rules
-from quant_research_platform.sources.csmar.importer import (
-    build_csmar_interim_frame,
-    import_interim_data,
-)
-from quant_research_platform.sources.csmar.interim import (
-    normalize_asset_time_frame,
-    normalize_daily_market_frame,
-    normalize_index_metadata_frame,
-    normalize_index_time_frame,
-)
-from quant_research_platform.sources.csmar.mappers import (
-    normalize_private_export_frame,
-    read_private_export_file,
-    with_benchmark_index_fields,
-)
+from quant_research_platform.sources.csmar.raw_exports import read_private_export_file
 from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.parquet import (
     read_partitioned_parquet_dataset,
     write_interim_data,
+)
+
+a_share_csmar_apply_interim_column_rules = (
+    a_share_csmar.a_share_csmar_apply_interim_column_rules
+)
+a_share_csmar_build_interim_frame = a_share_csmar.a_share_csmar_build_interim_frame
+csmar_interim_catalog = a_share_csmar.a_share_csmar_interim_catalog
+a_share_csmar_import_interim_data = a_share_csmar.a_share_csmar_import_interim_data
+a_share_csmar_normalize_asset_time_frame = (
+    a_share_csmar.a_share_csmar_normalize_asset_time_frame
+)
+a_share_csmar_normalize_daily_market_frame = (
+    a_share_csmar.a_share_csmar_normalize_daily_market_frame
+)
+a_share_csmar_normalize_index_metadata_frame = (
+    a_share_csmar.a_share_csmar_normalize_index_metadata_frame
+)
+a_share_csmar_normalize_index_time_frame = (
+    a_share_csmar.a_share_csmar_normalize_index_time_frame
+)
+a_share_csmar_normalize_private_export_frame = (
+    a_share_csmar.a_share_csmar_normalize_private_export_frame
+)
+a_share_csmar_with_benchmark_index_fields = (
+    a_share_csmar.a_share_csmar_with_benchmark_index_fields
 )
 
 
@@ -69,6 +80,15 @@ def test_csmar_interim_catalog_registers_real_source_dataset_ids() -> None:
     assert "benchmark_index_market" not in RAW_TABLE_CONTRACTS
 
 
+def test_a_share_csmar_default_import_datasets_cover_required_binding_inputs() -> None:
+    binding = a_share_csmar.a_share_csmar_provider_binding()
+
+    assert set(a_share_csmar.DEFAULT_INTERIM_DATASETS) == set(
+        binding.required_source_dataset_ids
+    )
+    assert "trading_calendar" in a_share_csmar.DEFAULT_INTERIM_DATASETS
+
+
 def test_csmar_trading_calendar_interim_spec_uses_calendar_grain() -> None:
     catalog = csmar_interim_catalog()
     spec = catalog.get("trading_calendar")
@@ -77,32 +97,35 @@ def test_csmar_trading_calendar_interim_spec_uses_calendar_grain() -> None:
     assert spec.primary_key == (
         "market_id",
         "source_id",
+        "timestamp",
         "source_market_type",
-        "calendar_date",
     )
     assert spec.partition_columns == ("year",)
     assert "asset_id" not in spec.required_columns
     assert "stock_code" not in spec.required_columns
     assert "index_code" not in spec.required_columns
 
-    for interim_data_id in ("daily_market", "stock_master"):
-        existing = catalog.get(interim_data_id)
-        assert existing.grain is DataGrain.ASSET_TIMESTAMP
-        assert existing.primary_key == platform_entity_time_key()
-        assert existing.partition_columns == ("year",)
+    daily_market = catalog.get("daily_market")
+    assert daily_market.grain is DataGrain.ASSET_TIMESTAMP
+    assert daily_market.primary_key == platform_entity_time_key()
+    assert daily_market.partition_columns == ("year",)
+
+    stock_master = catalog.get("stock_master")
+    assert stock_master.primary_key == (
+        "market_id",
+        "asset_id",
+        "source_id",
+        "source_asset_id",
+    )
+    assert stock_master.partition_columns == ()
 
 
 def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
     assert raw_schemas.parse_raw_filename.__module__.endswith(".raw_schemas")
     assert field_mappings.map_csmar_columns.__module__.endswith(".field_mappings")
-    assert dataset_contracts.DatasetContract.__module__.endswith(
-        ".dataset_contracts"
-    )
-    assert dataset_contracts.missing_required_columns.__module__.endswith(
-        ".dataset_contracts"
-    )
     assert field_mappings.map_csmar_columns.__module__.endswith(".field_mappings")
     assert checksums.build_raw_export_metadata.__module__.endswith(".checksums")
+    assert raw_exports.read_private_export_file.__module__.endswith(".raw_exports")
     assert hasattr(checksums, "raw_export_sha256")
 
 
@@ -115,7 +138,7 @@ def test_csmar_daily_interim_adds_canonical_keys() -> None:
         }
     )
 
-    result = normalize_daily_market_frame(frame)
+    result = a_share_csmar_normalize_daily_market_frame(frame)
 
     assert result.loc[0, "market_id"] == "a_share"
     assert result.loc[0, "asset_id"] == "000001"
@@ -135,7 +158,10 @@ def test_csmar_stock_level_interim_uses_uniform_canonical_fields() -> None:
         }
     )
 
-    result = normalize_asset_time_frame(frame, time_column="share_change_date")
+    result = a_share_csmar_normalize_asset_time_frame(
+        frame,
+        time_column="share_change_date",
+    )
 
     assert list(result.columns[:7]) == [
         "market_id",
@@ -165,7 +191,7 @@ def test_csmar_stock_master_uses_status_change_date_as_effective_date() -> None:
         }
     )
 
-    result = normalize_private_export_frame(raw, "stock_master")
+    result = a_share_csmar_normalize_private_export_frame(raw, "stock_master")
 
     assert result["asset_record_date"].tolist() == [
         pd.Timestamp("2020-01-01"),
@@ -197,7 +223,7 @@ def test_csmar_stock_master_effective_date_falls_back_to_listing_date() -> None:
         }
     )
 
-    result = normalize_private_export_frame(raw, "stock_master")
+    result = a_share_csmar_normalize_private_export_frame(raw, "stock_master")
 
     assert result.loc[0, "asset_record_date"] == pd.Timestamp("2010-01-01")
     assert result.loc[0, "timestamp"] == pd.Timestamp("2010-01-01")
@@ -213,7 +239,7 @@ def test_csmar_index_interim_uses_index_asset_namespace() -> None:
         }
     )
 
-    result = normalize_index_time_frame(frame)
+    result = a_share_csmar_normalize_index_time_frame(frame)
 
     assert result.loc[0, "market_id"] == "a_share"
     assert result.loc[0, "asset_id"] == "index:000985"
@@ -236,9 +262,12 @@ def test_csmar_direct_index_market_contract_does_not_require_benchmark_fields() 
             "Idxtrd09": ["benchmark"],
         }
     )
-    normalized = normalize_private_export_frame(raw, "index_market")
+    normalized = a_share_csmar_normalize_private_export_frame(raw, "index_market")
 
-    pruned, report = apply_interim_column_rules(normalized, "index_market")
+    pruned, report = a_share_csmar_apply_interim_column_rules(
+        normalized,
+        "index_market",
+    )
     spec = csmar_interim_catalog().get("index_market")
 
     benchmark_only = {"benchmark_name", "benchmark_tier", "ohlc_valid"}
@@ -263,11 +292,11 @@ def test_csmar_benchmark_index_market_contract_keeps_benchmark_fields() -> None:
             "Idxtrd09": ["benchmark"],
         }
     )
-    normalized = with_benchmark_index_fields(
-        normalize_private_export_frame(raw, "index_market")
+    normalized = a_share_csmar_with_benchmark_index_fields(
+        a_share_csmar_normalize_private_export_frame(raw, "index_market")
     )
 
-    pruned, report = apply_interim_column_rules(
+    pruned, report = a_share_csmar_apply_interim_column_rules(
         normalized,
         "benchmark_index_market",
     )
@@ -288,7 +317,7 @@ def test_csmar_index_metadata_interim_allows_missing_time_column() -> None:
         }
     )
 
-    result = normalize_index_metadata_frame(frame)
+    result = a_share_csmar_normalize_index_metadata_frame(frame)
 
     assert list(result.columns[:7]) == [
         "market_id",
@@ -320,7 +349,7 @@ def test_csmar_index_info_mapper_satisfies_interim_spec_fields() -> None:
         }
     )
 
-    result = normalize_private_export_frame(raw, "index_info")
+    result = a_share_csmar_normalize_private_export_frame(raw, "index_info")
 
     assert "index_class" in result.columns
     assert "release_date" in result.columns
@@ -341,7 +370,7 @@ def test_csmar_index_info_mapper_uses_export_date_fallback_for_missing_time() ->
         }
     )
 
-    result = normalize_private_export_frame(
+    result = a_share_csmar_normalize_private_export_frame(
         raw,
         "index_info",
         fallback_timestamp="2026-05-15",
@@ -468,16 +497,34 @@ def test_csmar_trading_calendar_metadata_uses_reference_calendar_filters(
     assert payload["row_count"] == 3
     assert re.fullmatch(r"[0-9a-f]{64}", str(payload["file_sha256"]))
     assert payload["filters"] == {
-        "market_types": [1, 2, 4, 8, 16, 32, 64],
-        "state_values": ["O", "C"],
-        "calendar_scope": "all_market_types",
+        "dataset": "trading_calendar",
+        "market_scope": "all_market_types",
     }
+    assert "market_types" not in payload["filters"]
     assert "bjse" not in payload["filters"]
     assert metadata_path == export.with_suffix(".metadata.json")
     assert sidecar["dataset"] == payload["dataset"]
     assert sidecar["table_code"] == payload["table_code"]
     assert sidecar["frequency"] == payload["frequency"]
     assert sidecar["filters"] == payload["filters"]
+
+
+def test_csmar_raw_export_metadata_defaults_are_source_neutral(tmp_path) -> None:
+    export = tmp_path / (
+        "csmar__daily_market__all_a_ex_bjse__20240101_20251231__"
+        "export-20260515.csv"
+    )
+    _write_daily_market_raw_export(export)
+
+    payload = checksums.build_raw_export_metadata(export)
+
+    assert payload["filters"] == {
+        "dataset": "daily_market",
+        "market_scope": "all_a_ex_bjse",
+    }
+    assert not {"share_class", "boards", "bjse", "market_types"}.intersection(
+        payload["filters"]
+    )
 
 
 def test_csmar_trading_calendar_field_mapping_and_missing_columns() -> None:
@@ -516,7 +563,7 @@ def test_csmar_trading_calendar_normalizer_outputs_internal_contract() -> None:
         }
     )
 
-    result = normalize_private_export_frame(raw, "trading_calendar")
+    result = a_share_csmar_normalize_private_export_frame(raw, "trading_calendar")
 
     assert result.columns.tolist() == [
         "market_id",
@@ -543,7 +590,7 @@ def test_csmar_trading_calendar_normalizer_outputs_internal_contract() -> None:
 
 
 def test_csmar_trading_calendar_interim_column_rules() -> None:
-    normalized = normalize_private_export_frame(
+    normalized = a_share_csmar_normalize_private_export_frame(
         pd.DataFrame(
             {
                 "Markettype": [1],
@@ -555,7 +602,10 @@ def test_csmar_trading_calendar_interim_column_rules() -> None:
         "trading_calendar",
     )
 
-    pruned, report = apply_interim_column_rules(normalized, "trading_calendar")
+    pruned, report = a_share_csmar_apply_interim_column_rules(
+        normalized,
+        "trading_calendar",
+    )
     spec = csmar_interim_catalog().get("trading_calendar")
 
     assert tuple(pruned.columns) == spec.required_columns
@@ -574,8 +624,14 @@ def test_csmar_trading_calendar_interim_write_roundtrip(tmp_path) -> None:
             "State": ["O", "C"],
         }
     )
-    normalized = normalize_private_export_frame(raw, "trading_calendar")
-    frame, _ = apply_interim_column_rules(normalized, "trading_calendar")
+    normalized = a_share_csmar_normalize_private_export_frame(
+        raw,
+        "trading_calendar",
+    )
+    frame, _ = a_share_csmar_apply_interim_column_rules(
+        normalized,
+        "trading_calendar",
+    )
     catalog = csmar_interim_catalog()
 
     data_root = write_interim_data(
@@ -609,8 +665,14 @@ def test_csmar_trading_calendar_interim_writer_rejects_duplicate_key(
             "State": ["O"],
         }
     )
-    normalized = normalize_private_export_frame(raw, "trading_calendar")
-    frame, _ = apply_interim_column_rules(normalized, "trading_calendar")
+    normalized = a_share_csmar_normalize_private_export_frame(
+        raw,
+        "trading_calendar",
+    )
+    frame, _ = a_share_csmar_apply_interim_column_rules(
+        normalized,
+        "trading_calendar",
+    )
     duplicate = pd.concat([frame, frame], ignore_index=True)
 
     with pytest.raises(ValueError, match="duplicate_primary_key"):
@@ -633,7 +695,7 @@ def test_csmar_trading_calendar_normalizer_rejects_duplicate_keys() -> None:
     )
 
     with pytest.raises(ValueError, match="duplicate_trading_calendar_key"):
-        normalize_private_export_frame(raw, "trading_calendar")
+        a_share_csmar_normalize_private_export_frame(raw, "trading_calendar")
 
 
 def test_csmar_trading_calendar_normalizer_rejects_invalid_state() -> None:
@@ -647,7 +709,7 @@ def test_csmar_trading_calendar_normalizer_rejects_invalid_state() -> None:
     )
 
     with pytest.raises(ValueError, match="invalid_trading_calendar_state"):
-        normalize_private_export_frame(raw, "trading_calendar")
+        a_share_csmar_normalize_private_export_frame(raw, "trading_calendar")
 
 
 def test_csmar_importer_builds_canonical_interim_frame(tmp_path) -> None:
@@ -657,7 +719,7 @@ def test_csmar_importer_builds_canonical_interim_frame(tmp_path) -> None:
     )
     _write_daily_market_raw_export(export)
 
-    frame = build_csmar_interim_frame(
+    frame = a_share_csmar_build_interim_frame(
         interim_data_id="daily_market",
         input_files=[export],
         start_date="2024-01-01",
@@ -681,7 +743,7 @@ def test_csmar_importer_writes_interim_parquet_through_catalog(tmp_path) -> None
     )
     _write_daily_market_raw_export(export)
 
-    result = import_interim_data(
+    result = a_share_csmar_import_interim_data(
         layout=StorageLayout(project_root=tmp_path),
         interim_data_ids=("daily_market",),
         start_date="2024-01-01",

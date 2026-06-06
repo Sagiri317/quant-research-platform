@@ -57,7 +57,10 @@ def build_research_panel(
     latest known capital structure, not a future share-change record.
     """
 
-    daily = _ensure_datetime(daily_market, ["trade_date", "timestamp"]).copy()
+    daily = _ensure_datetime(
+        daily_market,
+        ["timestamp", "session_date", "available_at"],
+    ).copy()
     missing_canonical = [
         column for column in CANONICAL_DAILY_COLUMNS if column not in daily.columns
     ]
@@ -74,7 +77,7 @@ def build_research_panel(
     keep_stock_columns = [
         column
         for column in (
-            "stock_code",
+            "asset_id",
             "stock_name",
             "listing_date",
             "delisting_date",
@@ -86,12 +89,13 @@ def build_research_panel(
         if column in stocks.columns
     ]
     panel = _asof_join_stock_master(daily, stocks[keep_stock_columns])
-    panel["listing_age_days"] = (panel["trade_date"] - panel["listing_date"]).dt.days
+    panel["listing_age_days"] = (panel["timestamp"] - panel["listing_date"]).dt.days
 
     cap_columns = [
         column
         for column in (
-            "stock_code",
+            "asset_id",
+            "timestamp",
             "share_change_date",
             "total_shares",
             "a_float_shares",
@@ -100,12 +104,12 @@ def build_research_panel(
     ]
     cap = (
         cap[cap_columns]
-        .sort_values(["stock_code", "share_change_date"])
-        .drop_duplicates(["stock_code", "share_change_date"], keep="last")
+        .sort_values(["asset_id", "timestamp"])
+        .drop_duplicates(["asset_id", "timestamp"], keep="last")
     )
     merged_groups = []
-    for stock_code, stock_frame in panel.groupby("stock_code", sort=False):
-        cap_frame = cap[cap["stock_code"] == stock_code]
+    for asset_id, stock_frame in panel.groupby("asset_id", sort=False):
+        cap_frame = cap[cap["asset_id"] == asset_id]
         if cap_frame.empty:
             stock_result = stock_frame.copy()
             stock_result["share_change_date"] = pd.NaT
@@ -113,26 +117,27 @@ def build_research_panel(
             stock_result["a_float_shares"] = pd.NA
         else:
             stock_result = pd.merge_asof(
-                stock_frame.sort_values("trade_date"),
-                cap_frame.sort_values("share_change_date"),
-                left_on="trade_date",
-                right_on="share_change_date",
+                stock_frame.sort_values("timestamp"),
+                cap_frame.sort_values("timestamp"),
+                on="timestamp",
                 direction="backward",
                 suffixes=("", "_capchg"),
             )
-            if "stock_code_capchg" in stock_result.columns:
-                stock_result = stock_result.drop(columns=["stock_code_capchg"])
+            if "asset_id_capchg" in stock_result.columns:
+                stock_result = stock_result.drop(columns=["asset_id_capchg"])
         merged_groups.append(stock_result)
     panel = pd.concat(merged_groups, ignore_index=True)
     panel["turnover"] = pd.to_numeric(panel["volume"], errors="coerce") / pd.to_numeric(
         panel["a_float_shares"], errors="coerce"
     )
-    panel = panel.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
+    panel = panel.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+        drop=True
+    )
     market_type_column = "market_type" if "market_type" in panel.columns else None
     panel["listing_age_trading_days"] = compute_listing_age_trading_days(
         panel,
         trading_calendar,
-        trade_date_column="trade_date",
+        observation_date_column="timestamp",
         listing_date_column="listing_date",
         market_type_column=market_type_column,
     )
@@ -148,7 +153,7 @@ def build_research_panel(
     panel["eligible"] = (
         base & panel["eligible_after_listing_age"] & panel["eligible_liquidity"]
     )
-    grouped = panel.groupby("stock_code", sort=False)
+    grouped = panel.groupby("asset_id", sort=False)
     # 入场和出场标记基于下一交易日，因为 label 使用下一次可执行开盘。
     # 涨停阻断新开仓，跌停阻断退出。
     panel["next_day_is_trading"] = grouped["is_trading"].shift(-1).fillna(False)
@@ -167,8 +172,6 @@ def build_research_panel(
         "timestamp",
         "session_date",
         "available_at",
-        "stock_code",
-        "trade_date",
     ]
     ordered = [column for column in leading if column in panel.columns]
     ordered.extend(column for column in panel.columns if column not in ordered)
@@ -184,19 +187,19 @@ def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
     stock_rows = (
         stock_rows.dropna(subset=["stock_effective_date"])
         .sort_values(
-            ["stock_code", "stock_effective_date", "_stock_master_row_order"],
+            ["asset_id", "stock_effective_date", "_stock_master_row_order"],
             kind="mergesort",
         )
-        .drop_duplicates(["stock_code", "stock_effective_date"], keep="last")
+        .drop_duplicates(["asset_id", "stock_effective_date"], keep="last")
     )
     merged_groups = []
     stock_output_columns = [
         column
         for column in stocks.columns
-        if column not in {"stock_code", "stock_effective_date"}
+        if column not in {"asset_id", "stock_effective_date"}
     ]
-    for stock_code, daily_stock_frame in daily.groupby("stock_code", sort=False):
-        stock_frame = stock_rows[stock_rows["stock_code"] == stock_code]
+    for asset_id, daily_stock_frame in daily.groupby("asset_id", sort=False):
+        stock_frame = stock_rows[stock_rows["asset_id"] == asset_id]
         if stock_frame.empty:
             stock_result = daily_stock_frame.copy()
             for column in stock_output_columns:
@@ -204,15 +207,15 @@ def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
                     stock_result[column] = pd.NA
         else:
             stock_result = pd.merge_asof(
-                daily_stock_frame.sort_values("trade_date"),
+                daily_stock_frame.sort_values("timestamp"),
                 stock_frame.sort_values("stock_effective_date"),
-                left_on="trade_date",
+                left_on="timestamp",
                 right_on="stock_effective_date",
                 direction="backward",
                 suffixes=("", "_stock_master"),
             )
-            if "stock_code_stock_master" in stock_result.columns:
-                stock_result = stock_result.drop(columns=["stock_code_stock_master"])
+            if "asset_id_stock_master" in stock_result.columns:
+                stock_result = stock_result.drop(columns=["asset_id_stock_master"])
             stock_result = stock_result.drop(
                 columns=[
                     column
@@ -220,9 +223,9 @@ def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
                     if column in stock_result.columns
                 ]
             )
-        if "listing_date" in stock_result.columns and stock_code in static_listing_date:
+        if "listing_date" in stock_result.columns and asset_id in static_listing_date:
             stock_result["listing_date"] = stock_result["listing_date"].fillna(
-                static_listing_date[stock_code]
+                static_listing_date[asset_id]
             )
         merged_groups.append(stock_result)
     return pd.concat(merged_groups, ignore_index=True)
@@ -253,9 +256,9 @@ def _first_static_stock_value(
         return {}
     values = (
         stocks.dropna(subset=[column])
-        .sort_values(["stock_code", "_stock_master_row_order"], kind="mergesort")
-        .drop_duplicates(["stock_code"], keep="first")
-        .set_index("stock_code")[column]
+        .sort_values(["asset_id", "_stock_master_row_order"], kind="mergesort")
+        .drop_duplicates(["asset_id"], keep="first")
+        .set_index("asset_id")[column]
     )
     return values.to_dict()
 
@@ -328,8 +331,10 @@ def build_panel_frame_from_interim(
         trading_calendar=trading_calendar,
         min_listing_trading_days=min_listing_trading_days,
     )
-    panel["trade_date"] = pd.to_datetime(panel["trade_date"])
-    panel = panel.sort_values(["stock_code", "trade_date"]).reset_index(drop=True)
+    panel["timestamp"] = pd.to_datetime(panel["timestamp"])
+    panel = panel.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+        drop=True
+    )
     return panel
 
 
@@ -350,16 +355,16 @@ def _filter_panel_years(
     end_year: int,
 ) -> pd.DataFrame:
     result = frame.copy()
-    result["trade_date"] = pd.to_datetime(result["trade_date"])
+    result["timestamp"] = pd.to_datetime(result["timestamp"])
     return result.loc[
-        result["trade_date"].dt.year.between(start_year, end_year)
+        result["timestamp"].dt.year.between(start_year, end_year)
     ].reset_index(drop=True)
 
 
 def _filter_panel_end_date(frame: pd.DataFrame, *, end_date: str) -> pd.DataFrame:
     result = frame.copy()
-    result["trade_date"] = pd.to_datetime(result["trade_date"])
-    return result.loc[result["trade_date"] <= pd.Timestamp(end_date)].reset_index(
+    result["timestamp"] = pd.to_datetime(result["timestamp"])
+    return result.loc[result["timestamp"] <= pd.Timestamp(end_date)].reset_index(
         drop=True
     )
 
