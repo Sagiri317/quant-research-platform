@@ -366,7 +366,11 @@ def _is_research_dataset_output_suffix(
 
 
 def _matches_artifact_segment(segment: str, expected: str) -> bool:
-    return segment == expected or segment.startswith(f".{expected}.tmp-")
+    return (
+        segment == expected
+        or segment.startswith(f".{expected}.tmp-")
+        or segment.startswith(".tmp-")
+    )
 
 
 def _write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:

@@ -24,7 +24,7 @@ _REPO_PRIVATE_PATH_RE = re.compile(
     r"(?:/[^\s,;\"'<>|]+)?|reports/private_real(?:/[^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(
-    r"\b(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?\b",
+    r"(?<![.\d])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?!\d)",
     re.IGNORECASE,
 )
 _PRIVATE_MARKER_RE = re.compile(

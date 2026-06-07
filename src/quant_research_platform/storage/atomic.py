@@ -98,7 +98,7 @@ def atomic_write_directory(root: Path, writer: Callable[[Path], T]) -> T:
 
 
 def _temp_sibling(path: Path) -> Path:
-    return path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+    return path.with_name(f".tmp-{uuid4().hex[:12]}")
 
 
 def _remove_path(path: Path) -> None:

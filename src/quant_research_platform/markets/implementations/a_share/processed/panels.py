@@ -217,8 +217,10 @@ def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
     if prices.isna().any(axis=None):
         raise ValueError("invalid_one_word_limit_inference_values")
     status = pd.to_numeric(result["limit_status"], errors="coerce")
-    if status.isna().any():
+    invalid_non_null = status.isna() & result["limit_status"].notna()
+    if invalid_non_null.any():
         raise ValueError("invalid_one_word_limit_status")
+    status = status.fillna(0)
     equal_prices = (
         np.isclose(prices["open"], prices["high"], rtol=1e-7, atol=1e-8)
         & np.isclose(prices["open"], prices["low"], rtol=1e-7, atol=1e-8)

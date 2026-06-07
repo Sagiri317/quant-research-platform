@@ -1032,6 +1032,43 @@ def test_a_share_panel_masks_use_explicit_one_word_fields_when_available() -> No
     assert bool(panel.loc[0, "can_enter"]) is False
 
 
+def test_a_share_panel_missing_limit_status_does_not_imply_one_word_limit() -> None:
+    daily = pd.DataFrame(
+        [
+            _daily_market_row("2020-01-01", market_type=1),
+            {
+                **_daily_market_row("2020-01-02", market_type=1),
+                "limit_status": None,
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+            },
+        ]
+    )
+
+    panel = panels.build_research_panel(
+        daily,
+        stock_master=pd.DataFrame(
+            [
+                _stock_master_row(
+                    status_change_date="2010-01-01",
+                    company_status="normal",
+                    industry_code="I1",
+                )
+            ]
+        ),
+        market_cap=pd.DataFrame([_market_cap_row(share_change_date="2010-01-01")]),
+        trading_calendar=_trading_calendar_frame(
+            pd.to_datetime(["2020-01-01", "2020-01-02"]),
+            market_type=1,
+        ),
+        min_listing_trading_days=1,
+    )
+
+    assert bool(panel.loc[0, "can_enter"]) is True
+
+
 def test_a_share_panel_shifted_masks_do_not_emit_futurewarning() -> None:
     daily = pd.DataFrame(
         [

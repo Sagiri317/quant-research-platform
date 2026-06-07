@@ -190,12 +190,68 @@ def test_qrp_private_schema_inventory_help_exposes_only_schema_inventory() -> No
 
     assert root_help.exit_code == 0
     assert "schema-inventory" in root_help.output
+    assert "evidence" in root_help.output
     assert "private-rebuild" not in root_help.output
-    assert "evidence" not in root_help.output
     assert command_help.exit_code == 0
     assert "--project-root" in command_help.output
     assert "--output" in command_help.output
     assert "--overwrite" not in command_help.output
+
+
+def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(config):
+        calls.append(config)
+        return type(
+            "Result",
+            (),
+            {
+                "status": "PASS",
+                "run_id": "private-evidence",
+                "output_root": ".run/s1",
+                "summary": {"status": "PASS", "output_root": ".run/s1"},
+            },
+        )()
+
+    monkeypatch.setattr(
+        "quant_research_platform.interfaces.private_cli.run_private_evidence",
+        fake_run,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        private_app,
+        [
+            "evidence",
+            "run",
+            "--output-root",
+            ".run/s1",
+            "--start-date",
+            "2014-01-01",
+            "--end-date",
+            "2016-12-31",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls[0].output_root == Path(".run/s1")
+    assert calls[0].start_date == "2014-01-01"
+    assert calls[0].end_date == "2016-12-31"
+    assert "PASS" in result.output
+
+
+def test_qrp_private_evidence_run_rejects_missing_required_options() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(private_app, ["evidence", "run"])
+    help_result = runner.invoke(private_app, ["evidence", "run", "--help"])
+
+    assert result.exit_code != 0
+    assert help_result.exit_code == 0
+    assert "--output-root" in help_result.output
+    assert "--start-date" in help_result.output
+    assert "--end-date" in help_result.output
 
 
 def _write_inventory_fixture(project_root: Path) -> None:

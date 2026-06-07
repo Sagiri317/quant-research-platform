@@ -9,10 +9,18 @@ from typing import Annotated
 import typer
 
 from quant_research_platform.reports.schema_inventory import build_schema_inventory
+from quant_research_platform.runtime.privacy import sanitize_public_text
 from quant_research_platform.storage.atomic import atomic_write_text
+from quant_research_platform.workflows.private_evidence import (
+    PrivateEvidenceRunConfig,
+    run_private_evidence,
+)
 
 app = typer.Typer(add_completion=False)
+evidence_app = typer.Typer(add_completion=False, help="Private evidence commands.")
 PROJECT_ROOT_DEFAULT = Path(".")
+
+app.add_typer(evidence_app, name="evidence")
 
 
 @app.callback()
@@ -53,6 +61,47 @@ def schema_inventory(
         output,
         json.dumps(inventory, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+    )
+
+
+@evidence_app.command("run")
+def evidence_run(
+    output_root: Annotated[
+        Path,
+        typer.Option("--output-root", help="Attempt output root under .run/."),
+    ] = ...,
+    start_date: Annotated[
+        str,
+        typer.Option("--start-date", help="Inclusive evidence start date."),
+    ] = ...,
+    end_date: Annotated[
+        str,
+        typer.Option("--end-date", help="Inclusive evidence end date."),
+    ] = ...,
+    replace_output: Annotated[
+        bool,
+        typer.Option("--replace-output", help="Replace exact output root under .run."),
+    ] = False,
+) -> None:
+    """Run the private evidence verification harness."""
+
+    try:
+        result = run_private_evidence(
+            PrivateEvidenceRunConfig(
+                output_root=output_root,
+                start_date=start_date,
+                end_date=end_date,
+                replace_output=replace_output,
+            )
+        )
+    except Exception as exc:
+        typer.echo(sanitize_public_text(str(exc)), err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(
+        sanitize_public_text(
+            f"status={result.status} output_root={result.output_root} "
+            f"run_id={result.run_id}"
+        )
     )
 
 

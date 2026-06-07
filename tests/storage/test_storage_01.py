@@ -33,8 +33,11 @@ from quant_research_platform.runtime.privacy import is_private_boundary_path
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
+    write_dataset_manifest,
     write_internal_artifact_manifest,
+    write_layer_manifest,
     write_manifest,
+    write_run_manifest,
 )
 from quant_research_platform.storage.parquet import (
     write_interim_data,
@@ -122,6 +125,142 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
         write_manifest(manifest, {"schema_version": "0.1"})
 
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
+
+
+def test_private_evidence_dataset_manifest_is_aggregate_only(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "demo"
+
+    manifest = write_dataset_manifest(
+        dataset_root,
+        {
+            "run_id": "run",
+            "logical_layer": "processed",
+            "dataset_id": "demo",
+            "primary_key": ["market_id", "asset_id", "timestamp"],
+            "columns": ["market_id", "asset_id", "timestamp", "factor"],
+            "row_count": 2,
+            "partition_count": 1,
+            "date_min": "2014-01-02",
+            "date_max": "2014-01-03",
+            "validation_status": "pass",
+        },
+    )
+    text = manifest.read_text(encoding="utf-8")
+    payload = json.loads(text)
+
+    assert payload["dataset_id"] == "demo"
+    assert payload["row_count"] == 2
+    assert "source_asset_id" not in text
+    assert "row_sample" not in text
+    assert "000001" not in text
+
+
+def test_private_evidence_dataset_manifest_replace_is_limited_to_run_root(
+    tmp_path: Path,
+) -> None:
+    run_dataset_root = (
+        tmp_path / ".run" / "s1" / "data" / "processed" / "a_share" / "factors" / "x"
+    )
+    manifest_path = run_dataset_root / "_manifest" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text('{"existing": true}\n', encoding="utf-8")
+
+    replaced = write_dataset_manifest(
+        run_dataset_root,
+        {
+            "run_id": "run",
+            "logical_layer": "processed",
+            "dataset_id": "x",
+            "row_count": 1,
+            "validation_status": "pass",
+        },
+        replace=True,
+    )
+
+    assert replaced == manifest_path
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["row_count"] == 1
+
+    outside_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
+    outside_manifest = outside_root / "_manifest" / "manifest.json"
+    outside_manifest.parent.mkdir(parents=True)
+    outside_manifest.write_text('{"existing": true}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dataset_manifest_replace_must_be_under_run"):
+        write_dataset_manifest(
+            outside_root,
+            {"run_id": "run", "dataset_id": "x"},
+            replace=True,
+        )
+
+    assert outside_manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
+
+
+def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> None:
+    layer_root = tmp_path / "data" / "processed"
+    present = layer_root / "a_share" / "factors" / "present"
+    missing = layer_root / "a_share" / "labels" / "missing"
+    write_dataset_manifest(
+        present,
+        {
+            "run_id": "run",
+            "logical_layer": "processed",
+            "dataset_id": "present",
+            "row_count": 3,
+            "date_min": "2014-01-02",
+            "date_max": "2014-01-03",
+            "validation_status": "pass",
+        },
+    )
+
+    manifest = write_layer_manifest(
+        layer_root=layer_root,
+        logical_layer="processed",
+        run_id="run",
+        dataset_roots=(present, missing),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    assert payload["dataset_count"] == 1
+    assert payload["total_rows"] == 3
+    assert payload["missing_dataset_manifests"] == [
+        "data/processed/a_share/labels/missing/_manifest/manifest.json"
+    ]
+    assert payload["layer_validation_status"] == "fail"
+
+
+def test_run_manifest_aggregates_layers(tmp_path: Path) -> None:
+    processed = tmp_path / "data" / "processed"
+    evidence = tmp_path / "data" / "evidence"
+    processed.mkdir(parents=True)
+    evidence.mkdir(parents=True)
+    write_layer_manifest(
+        layer_root=processed,
+        logical_layer="processed",
+        run_id="run",
+        dataset_roots=(),
+    )
+    write_layer_manifest(
+        layer_root=evidence,
+        logical_layer="evidence",
+        run_id="run",
+        dataset_roots=(),
+    )
+
+    manifest = write_run_manifest(
+        manifests_root=tmp_path / "manifests",
+        run_id="run",
+        output_root=Path(".run") / "s1",
+        layer_manifest_paths=(
+            processed / "_manifests" / "layer_manifest.json",
+            evidence / "_manifests" / "layer_manifest.json",
+        ),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    assert payload["run_id"] == "run"
+    assert payload["output_root"] == ".run/s1"
+    assert payload["layer_count"] == 2
+    assert payload["run_validation_status"] == "pass"
 
 
 def test_processed_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
