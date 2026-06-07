@@ -109,7 +109,7 @@ def test_clean_rewrite_target_files_exist() -> None:
         "runtime/logging.py",
         "runtime/profiling.py",
         "runtime/errors.py",
-        "runtime/timing.py",
+        "runtime/execution_metrics.py",
         "compute/dataframe/construction.py",
         "compute/dataframe/constraints.py",
         "compute/dataframe/turnover.py",

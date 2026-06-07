@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
@@ -52,7 +53,7 @@ def write_interim_data(
             data_id=interim_data_id,
         )
         _write_data_spec(temp_root / "spec.json", spec)
-        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec)
+        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec, frame)
 
     atomic_write_directory(artifact_root, _write)
     return artifact_root / "data"
@@ -82,7 +83,7 @@ def write_processed_data(
             data_id=processed_data_id,
         )
         _write_data_spec(temp_root / "spec.json", spec)
-        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec)
+        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec, frame)
 
     atomic_write_directory(artifact_root, _write)
     return artifact_root / "data"
@@ -108,7 +109,7 @@ def write_research_dataset(
             data_id=dataset_id,
         )
         _write_data_spec(temp_root / "spec.json", spec)
-        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec)
+        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec, frame)
 
     atomic_write_directory(artifact_root, _write)
     return artifact_root / "data"
@@ -400,8 +401,11 @@ def _write_partitioned_parquet_files(
         )
 
 
-def _write_data_manifest(path: Path, spec: DataSpec) -> Path:
-    return write_internal_artifact_manifest(path, _data_spec_payload(spec))
+def _write_data_manifest(path: Path, spec: DataSpec, frame: pd.DataFrame) -> Path:
+    return write_internal_artifact_manifest(
+        path,
+        _data_artifact_payload(spec, path.parent.parent / "data", frame),
+    )
 
 
 def _write_data_spec(path: Path, spec: DataSpec) -> Path:
@@ -450,6 +454,135 @@ def _data_spec_payload(spec: DataSpec) -> dict[str, object]:
             }
         )
     return payload
+
+
+def _data_artifact_payload(
+    spec: DataSpec,
+    data_root: Path,
+    frame: pd.DataFrame,
+) -> dict[str, object]:
+    payload = _data_spec_payload(spec)
+    payload.update(_artifact_stats_from_frame(data_root, spec, frame))
+    return payload
+
+
+def _artifact_stats_from_frame(
+    root: Path,
+    spec: DataSpec,
+    frame: pd.DataFrame,
+) -> dict[str, object]:
+    paths = _parquet_part_paths(root, years=None)
+    file_count = len(paths)
+    file_size_bytes = sum(path.stat().st_size for path in paths)
+    row_count = len(frame)
+    partition_count = len({path.parent.as_posix() for path in paths})
+    timestamp_column = _timestamp_primary_key_column(spec)
+    date_min, date_max = _date_range_from_frame(frame, timestamp_column)
+    key_stats = _primary_key_stats_from_frame(frame, spec.primary_key)
+    numeric_profiles = _numeric_profiles_from_frame(frame, spec)
+    has_failures = (
+        any(count > 0 for count in key_stats["null_count_summary"].values())
+        or key_stats["duplicate_primary_key_count"] > 0
+        or any(count > 0 for count in numeric_profiles["non_finite"].values())
+    )
+    return {
+        "row_count": int(row_count),
+        "file_count": int(file_count),
+        "file_size_bytes": int(file_size_bytes),
+        "partition_count": int(partition_count),
+        "date_min": date_min,
+        "date_max": date_max,
+        "null_count_summary": key_stats["null_count_summary"],
+        "non_finite_count_summary": numeric_profiles["non_finite"],
+        "duplicate_primary_key_count": int(key_stats["duplicate_primary_key_count"]),
+        "factor_nan_profile": numeric_profiles["factor_nan_profile"],
+        "label_nan_profile": numeric_profiles["label_nan_profile"],
+        "validation_status": "fail" if has_failures else "pass",
+    }
+
+
+def _timestamp_primary_key_column(spec: DataSpec) -> str | None:
+    timestamp_columns = [
+        column
+        for column in spec.primary_key
+        if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
+    ]
+    return timestamp_columns[0] if timestamp_columns else None
+
+
+def _date_range_from_frame(
+    frame: pd.DataFrame,
+    timestamp_column: str | None,
+) -> tuple[str | None, str | None]:
+    if timestamp_column is None or timestamp_column not in frame or frame.empty:
+        return None, None
+    series = pd.to_datetime(frame[timestamp_column], errors="coerce").dropna()
+    if series.empty:
+        return None, None
+    return _date_string(series.min()), _date_string(series.max())
+
+
+def _primary_key_stats_from_frame(
+    frame: pd.DataFrame,
+    primary_key: tuple[str, ...],
+) -> dict[str, object]:
+    null_counts = {column: 0 for column in primary_key}
+    if frame.empty or not primary_key:
+        return {
+            "null_count_summary": null_counts,
+            "duplicate_primary_key_count": 0,
+        }
+    keys = frame.loc[:, list(primary_key)]
+    for column in primary_key:
+        null_counts[column] = int(keys[column].isna().sum())
+    return {
+        "null_count_summary": null_counts,
+        "duplicate_primary_key_count": int(keys.duplicated(list(primary_key)).sum()),
+    }
+
+
+def _numeric_profiles_from_frame(
+    frame: pd.DataFrame,
+    spec: DataSpec,
+) -> dict[str, dict[str, int]]:
+    columns = tuple(
+        column
+        for column, column_role in spec.column_roles.items()
+        if column not in spec.primary_key and column_role is not ColumnRole.TIMESTAMP
+    )
+    non_finite: dict[str, int] = {}
+    factor_nan: dict[str, int] = {}
+    label_nan: dict[str, int] = {}
+    if frame.empty or not columns:
+        return {
+            "non_finite": non_finite,
+            "factor_nan_profile": factor_nan,
+            "label_nan_profile": label_nan,
+        }
+    for column in columns:
+        series = frame[column]
+        role = spec.column_roles[column]
+        nan_count = int(series.isna().sum())
+        if role is ColumnRole.FACTOR and nan_count:
+            factor_nan[column] = factor_nan.get(column, 0) + nan_count
+        if role is ColumnRole.LABEL and nan_count:
+            label_nan[column] = label_nan.get(column, 0) + nan_count
+        if not pd.api.types.is_numeric_dtype(series):
+            continue
+        numeric = pd.to_numeric(series, errors="coerce")
+        values = numeric.to_numpy(dtype="float64", na_value=np.nan)
+        inf_count = int(np.isinf(values).sum())
+        if inf_count:
+            non_finite[column] = non_finite.get(column, 0) + inf_count
+    return {
+        "non_finite": dict(sorted(non_finite.items())),
+        "factor_nan_profile": dict(sorted(factor_nan.items())),
+        "label_nan_profile": dict(sorted(label_nan.items())),
+    }
+
+
+def _date_string(value: pd.Timestamp) -> str:
+    return pd.Timestamp(value).date().isoformat()
 
 
 __all__ = [

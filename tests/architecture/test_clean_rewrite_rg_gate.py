@@ -51,7 +51,7 @@ APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/reports/bundles.py"),
     Path("src/quant_research_platform/reports/manifests.py"),
     Path("src/quant_research_platform/reports/private_evidence.py"),
-    Path("src/quant_research_platform/runtime/timing.py"),
+    Path("src/quant_research_platform/runtime/execution_metrics.py"),
 }
 
 PUBLIC_CONTRACT_DOCS = (

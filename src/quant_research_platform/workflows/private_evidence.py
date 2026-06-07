@@ -44,10 +44,10 @@ from quant_research_platform.research.evaluations.runner import (
 from quant_research_platform.research.predictions.handoff import (
     run_prediction_from_research_dataset,
 )
-from quant_research_platform.runtime.timing import (
-    TimingRecorder,
-    write_timings_csv,
-    write_timings_json,
+from quant_research_platform.runtime.execution_metrics import (
+    ExecutionMetricsRecorder,
+    write_execution_metrics_csv,
+    write_execution_metrics_json,
 )
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.layout import PrivateEvidenceLayout, StorageLayout
@@ -104,7 +104,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         },
     )
 
-    recorder = TimingRecorder()
+    recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=output_root)
     start_year = int(start.year)
     end_year = int(end.year)
@@ -123,6 +123,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             start_year=start_year,
             end_year=end_year,
             end_date=config.end_date,
+            metrics_recorder=recorder,
         )
         record.output_rows = sum(processed_result.row_counts.values())
     with recorder.record("research_generation", logical_layer="research"):
@@ -198,18 +199,21 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             ),
         ),
     )
-    run_manifest_path = write_run_manifest(
-        manifests_root=layout.manifests_root,
-        run_id=run_id,
-        output_root=output_root,
-        layer_manifest_paths=layer_manifest_paths,
-    )
-    timings_json = write_timings_json(
+    with recorder.record("manifest_generation") as record:
+        run_manifest_path = write_run_manifest(
+            manifests_root=layout.manifests_root,
+            run_id=run_id,
+            output_root=output_root,
+            layer_manifest_paths=layer_manifest_paths,
+        )
+        record.file_count = 1
+    timings_json = write_execution_metrics_json(
         layout.timings_root / "timings.json",
         recorder.records,
         run_id=run_id,
+        memory_sampler_unavailable=recorder.memory_sampler.unavailable,
     )
-    write_timings_csv(layout.timings_root / "timings.csv", recorder.records)
+    write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder.records)
     run_manifest = read_manifest(run_manifest_path)
     generated_paths = (
         layout.config_root / "run_config.json",
@@ -217,13 +221,14 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         *layer_manifest_paths,
         timings_json,
     )
-    validation_summary = build_validation_summary(
-        run_id=run_id,
-        output_root=output_root,
-        dataset_manifest_paths=dataset_manifest_paths,
-        layer_manifest_paths=layer_manifest_paths,
-        generated_text_paths=generated_paths,
-    )
+    with recorder.record("validation_summary"):
+        validation_summary = build_validation_summary(
+            run_id=run_id,
+            output_root=output_root,
+            dataset_manifest_paths=dataset_manifest_paths,
+            layer_manifest_paths=layer_manifest_paths,
+            generated_text_paths=generated_paths,
+        )
     write_validation_summary(
         layout.validations_root / "validation_summary.json",
         validation_summary,

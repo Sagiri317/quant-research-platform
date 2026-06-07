@@ -300,6 +300,113 @@ def test_processed_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
     assert manifest["primary_key"] == ["market_id", "asset_id", "timestamp"]
 
 
+def test_processed_writer_manifest_records_targeted_parquet_stats(
+    tmp_path: Path,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "asset_id": ["asset_a", "asset_b"],
+            "timestamp": pd.to_datetime(["2014-01-02", "2015-01-05"]),
+            "factor_a": [1.0, float("nan")],
+            "factor_b": [float("inf"), 2.0],
+        }
+    )
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            market_id=MarketId("a_share"),
+            category="factors",
+            processed_data_id="x",
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "factor_a": ColumnRole.FACTOR,
+                "factor_b": ColumnRole.FACTOR,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+
+    data_root = write_processed_data(
+        frame,
+        layout=StorageLayout(project_root=tmp_path),
+        catalog=catalog,
+        processed_data_id="x",
+    )
+    manifest = json.loads(
+        (data_root.parent / "_manifest" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert manifest["row_count"] == 2
+    assert manifest["file_count"] == 2
+    assert manifest["file_size_bytes"] > 0
+    assert manifest["partition_count"] == 2
+    assert manifest["date_min"] == "2014-01-02"
+    assert manifest["date_max"] == "2015-01-05"
+    assert manifest["duplicate_primary_key_count"] == 0
+    assert manifest["null_count_summary"] == {
+        "market_id": 0,
+        "asset_id": 0,
+        "timestamp": 0,
+    }
+    assert manifest["non_finite_count_summary"] == {"factor_b": 1}
+    assert manifest["factor_nan_profile"] == {"factor_a": 1}
+    assert manifest["validation_status"] == "fail"
+
+
+def test_layer_manifest_surfaces_dataset_validation_failure_from_targeted_stats(
+    tmp_path: Path,
+) -> None:
+    layer_root = tmp_path / "data" / "processed"
+    dataset = layer_root / "a_share" / "factors" / "bad_factor"
+    write_internal_artifact_manifest(
+        dataset / "_manifest" / "manifest.json",
+        {
+            "schema_version": "0.1",
+            "run_id": "artifact-writer",
+            "logical_layer": "processed",
+            "dataset_id": "bad_factor",
+            "primary_key": ["market_id", "asset_id", "timestamp"],
+            "row_count": 2,
+            "date_min": "2014-01-02",
+            "date_max": "2014-01-03",
+            "null_count_summary": {
+                "market_id": 0,
+                "asset_id": 0,
+                "timestamp": 1,
+            },
+            "non_finite_count_summary": {"factor_a": 1},
+            "duplicate_primary_key_count": 1,
+            "validation_status": "fail",
+        },
+    )
+
+    manifest = write_layer_manifest(
+        layer_root=layer_root,
+        logical_layer="processed",
+        run_id="run",
+        dataset_roots=(dataset,),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    assert payload["layer_validation_status"] == "fail"
+    assert payload["failed_dataset_validations"] == ["bad_factor"]
+    assert payload["datasets"][0]["manifest_summary"] == {
+        "row_count": 2,
+        "date_min": "2014-01-02",
+        "date_max": "2014-01-03",
+        "duplicate_primary_key_count": 1,
+        "validation_status": "fail",
+    }
+
+
 def test_interim_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
     frame = pd.DataFrame(
         {

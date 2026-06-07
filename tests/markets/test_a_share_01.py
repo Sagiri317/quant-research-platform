@@ -507,6 +507,115 @@ def test_a_share_factor_builder_reads_available_warmup_years_when_present(
     )
 
 
+def test_a_share_factor_builder_panel_frame_fast_path_matches_parquet_path(
+    tmp_path,
+) -> None:
+    dates = pd.bdate_range("2013-12-20", "2014-01-15")
+    panel = _factor_panel_for_dates(dates)
+    original = panel.copy(deep=True)
+    interim_root = tmp_path / "interim" / "data" / "interim" / "csmar"
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(dates, market_type=1),
+    )
+
+    standalone_root = tmp_path / "standalone" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(standalone_root, panel)
+    standalone_path, standalone_rows = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
+        processed_root=standalone_root,
+        start_year=2014,
+        end_year=2014,
+    )
+
+    fast_root = tmp_path / "fast" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(fast_root, panel)
+    fast_path, fast_rows = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
+        processed_root=fast_root,
+        start_year=2014,
+        end_year=2014,
+        panel_frame=panel,
+    )
+
+    standalone = read_partitioned_parquet_dataset(standalone_path, years=(2014,))
+    fast = read_partitioned_parquet_dataset(fast_path, years=(2014,))
+    pd.testing.assert_frame_equal(fast, standalone)
+    pd.testing.assert_frame_equal(panel, original)
+    assert fast_rows == standalone_rows == len(fast)
+
+
+def test_a_share_factor_builder_panel_frame_fails_closed_for_missing_input(
+    tmp_path,
+) -> None:
+    dates = pd.bdate_range("2014-01-02", periods=5)
+    panel = _factor_panel_for_dates(dates).drop(columns=["amount"])
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(dates, market_type=1),
+    )
+
+    with pytest.raises(ValueError, match="missing_factor_panel_input_columns: amount"):
+        build_factors.calculate_price_volume_factor_full(
+            interim_root=interim_root,
+            processed_root=processed_root,
+            start_year=2014,
+            end_year=2014,
+            panel_frame=panel,
+        )
+
+
+def test_a_share_label_builder_panel_frame_fast_path_matches_standalone_path(
+    tmp_path,
+) -> None:
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-12-29", "2015-01-05"))
+    original = panel.copy(deep=True)
+
+    standalone_root = tmp_path / "standalone" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(standalone_root, panel)
+    standalone_path, standalone_rows = build_labels.calculate_forward_returns_full(
+        processed_root=standalone_root,
+        start_year=2014,
+        end_year=2014,
+    )
+
+    fast_root = tmp_path / "fast" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(fast_root, panel)
+    fast_path, fast_rows = build_labels.calculate_forward_returns_full(
+        processed_root=fast_root,
+        start_year=2014,
+        end_year=2014,
+        panel_frame=panel,
+    )
+
+    standalone = read_partitioned_parquet_dataset(standalone_path, years=(2014,))
+    fast = read_partitioned_parquet_dataset(fast_path, years=(2014,))
+    pd.testing.assert_frame_equal(fast, standalone)
+    pd.testing.assert_frame_equal(panel, original)
+    assert fast_rows == standalone_rows == len(fast)
+
+
+def test_a_share_label_builder_panel_frame_fails_closed_for_missing_input(
+    tmp_path,
+) -> None:
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5)).drop(
+        columns=["adj_open"]
+    )
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+
+    with pytest.raises(ValueError, match="missing_label_panel_input_columns: adj_open"):
+        build_labels.calculate_forward_returns_full(
+            processed_root=processed_root,
+            start_year=2014,
+            end_year=2014,
+            panel_frame=panel,
+        )
+
+
 def test_a_share_factor_builder_requires_trading_calendar(tmp_path) -> None:
     processed_root = tmp_path / "data" / "processed" / "a_share"
     interim_root = tmp_path / "data" / "interim" / "csmar"

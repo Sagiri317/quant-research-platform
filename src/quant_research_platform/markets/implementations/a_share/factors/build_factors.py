@@ -103,6 +103,7 @@ def calculate_price_volume_factor_full(
     processed_root: Path,
     start_year: int,
     end_year: int,
+    panel_frame: pd.DataFrame | None = None,
 ) -> tuple[Path, int]:
     """Calculate and write split price-volume factor processed data."""
 
@@ -118,19 +119,12 @@ def calculate_price_volume_factor_full(
         start_date=requested_start_date,
         max_window=max_window,
     )
-    _assert_requested_panel_partitions_present(
+    panel = _panel_frame_for_factor_build(
         processed_root=processed_root,
         start_year=start_year,
         end_year=end_year,
-    )
-    input_years = _available_panel_years(
-        processed_root=processed_root,
-        start_year=warmup_start_date.year,
-        end_year=end_year,
-    )
-    panel = read_full_panel_for_factor_build(
-        processed_root=processed_root,
-        years=input_years,
+        warmup_start_year=warmup_start_date.year,
+        panel_frame=panel_frame,
     )
     panel["timestamp"] = pd.to_datetime(panel["timestamp"])
     panel = panel.loc[
@@ -255,3 +249,39 @@ def _panel_part_paths(
 
 def _factor_panel_input_columns() -> tuple[str, ...]:
     return a_share_price_volume_panel_input_columns()
+
+
+def _panel_frame_for_factor_build(
+    *,
+    processed_root: Path,
+    start_year: int,
+    end_year: int,
+    warmup_start_year: int,
+    panel_frame: pd.DataFrame | None,
+) -> pd.DataFrame:
+    read_columns = _factor_panel_input_columns()
+    if panel_frame is None:
+        _assert_requested_panel_partitions_present(
+            processed_root=processed_root,
+            start_year=start_year,
+            end_year=end_year,
+        )
+        input_years = _available_panel_years(
+            processed_root=processed_root,
+            start_year=warmup_start_year,
+            end_year=end_year,
+        )
+        return read_full_panel_for_factor_build(
+            processed_root=processed_root,
+            years=input_years,
+        )
+    missing = [column for column in read_columns if column not in panel_frame.columns]
+    if missing:
+        raise ValueError(
+            "missing_factor_panel_input_columns: " + ", ".join(missing)
+        )
+    panel = panel_frame.loc[:, list(read_columns)].copy()
+    panel["timestamp"] = pd.to_datetime(panel["timestamp"])
+    return panel.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+        drop=True
+    )
