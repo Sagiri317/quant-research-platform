@@ -84,26 +84,36 @@ class TimingRecorder:
                 item.unavailable_reason = "row_counts_unavailable"
             self.records.append(item)
 
-    def payload(self) -> dict[str, object]:
+    def payload(self, *, run_id: str | None = None) -> dict[str, object]:
         total = sum(record.duration_seconds or 0.0 for record in self.records)
-        return {
+        payload = {
             "total_duration_seconds": round(total, 6),
             "records": [record.to_payload() for record in self.records],
         }
+        if run_id is not None:
+            payload["run_id"] = run_id
+        return payload
 
-    def write_json(self, path: Path) -> Path:
-        return write_timings_json(path, self.records)
+    def write_json(self, path: Path, *, run_id: str | None = None) -> Path:
+        return write_timings_json(path, self.records, run_id=run_id)
 
     def write_csv(self, path: Path) -> Path:
         return write_timings_csv(path, self.records)
 
 
-def write_timings_json(path: Path, records: list[TimingRecord]) -> Path:
+def write_timings_json(
+    path: Path,
+    records: list[TimingRecord],
+    *,
+    run_id: str | None = None,
+) -> Path:
     total = sum(record.duration_seconds or 0.0 for record in records)
     payload = {
         "total_duration_seconds": round(total, 6),
         "records": [record.to_payload() for record in records],
     }
+    if run_id is not None:
+        payload["run_id"] = run_id
     return atomic_write_json(path, payload)
 
 

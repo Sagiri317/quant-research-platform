@@ -33,7 +33,6 @@ from quant_research_platform.runtime.privacy import is_private_boundary_path
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
-    write_dataset_manifest,
     write_internal_artifact_manifest,
     write_layer_manifest,
     write_manifest,
@@ -127,89 +126,25 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
 
 
-def test_private_evidence_dataset_manifest_is_aggregate_only(tmp_path: Path) -> None:
-    dataset_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "demo"
+def test_private_evidence_has_no_dataset_manifest_writer_api() -> None:
+    import quant_research_platform.storage.manifests as manifests
 
-    manifest = write_dataset_manifest(
-        dataset_root,
-        {
-            "run_id": "run",
-            "logical_layer": "processed",
-            "dataset_id": "demo",
-            "primary_key": ["market_id", "asset_id", "timestamp"],
-            "columns": ["market_id", "asset_id", "timestamp", "factor"],
-            "row_count": 2,
-            "partition_count": 1,
-            "date_min": "2014-01-02",
-            "date_max": "2014-01-03",
-            "validation_status": "pass",
-        },
-    )
-    text = manifest.read_text(encoding="utf-8")
-    payload = json.loads(text)
-
-    assert payload["dataset_id"] == "demo"
-    assert payload["row_count"] == 2
-    assert "source_asset_id" not in text
-    assert "row_sample" not in text
-    assert "000001" not in text
-
-
-def test_private_evidence_dataset_manifest_replace_is_limited_to_run_root(
-    tmp_path: Path,
-) -> None:
-    run_dataset_root = (
-        tmp_path / ".run" / "s1" / "data" / "processed" / "a_share" / "factors" / "x"
-    )
-    manifest_path = run_dataset_root / "_manifest" / "manifest.json"
-    manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text('{"existing": true}\n', encoding="utf-8")
-
-    replaced = write_dataset_manifest(
-        run_dataset_root,
-        {
-            "run_id": "run",
-            "logical_layer": "processed",
-            "dataset_id": "x",
-            "row_count": 1,
-            "validation_status": "pass",
-        },
-        replace=True,
-    )
-
-    assert replaced == manifest_path
-    assert json.loads(manifest_path.read_text(encoding="utf-8"))["row_count"] == 1
-
-    outside_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
-    outside_manifest = outside_root / "_manifest" / "manifest.json"
-    outside_manifest.parent.mkdir(parents=True)
-    outside_manifest.write_text('{"existing": true}\n', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="dataset_manifest_replace_must_be_under_run"):
-        write_dataset_manifest(
-            outside_root,
-            {"run_id": "run", "dataset_id": "x"},
-            replace=True,
-        )
-
-    assert outside_manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
+    assert not hasattr(manifests, "write_dataset_manifest")
 
 
 def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> None:
     layer_root = tmp_path / "data" / "processed"
     present = layer_root / "a_share" / "factors" / "present"
     missing = layer_root / "a_share" / "labels" / "missing"
-    write_dataset_manifest(
-        present,
-        {
-            "run_id": "run",
-            "logical_layer": "processed",
-            "dataset_id": "present",
-            "row_count": 3,
-            "date_min": "2014-01-02",
-            "date_max": "2014-01-03",
-            "validation_status": "pass",
-        },
+    write_internal_artifact_manifest(
+        present / "_manifest" / "manifest.json",
+        _artifact_manifest_payload(
+            dataset_id="present",
+            logical_layer="processed",
+            row_count=3,
+            date_min="2014-01-02",
+            date_max="2014-01-03",
+        ),
     )
 
     manifest = write_layer_manifest(
@@ -222,10 +157,64 @@ def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> Non
 
     assert payload["dataset_count"] == 1
     assert payload["total_rows"] == 3
+    assert payload["datasets"] == [
+        {
+            "dataset_id": "present",
+            "manifest_path": (
+                "data/processed/a_share/factors/present/_manifest/manifest.json"
+            ),
+            "manifest_summary": {
+                "row_count": 3,
+                "date_min": "2014-01-02",
+                "date_max": "2014-01-03",
+                "duplicate_primary_key_count": None,
+                "validation_status": "pass",
+            },
+        }
+    ]
     assert payload["missing_dataset_manifests"] == [
         "data/processed/a_share/labels/missing/_manifest/manifest.json"
     ]
     assert payload["layer_validation_status"] == "fail"
+
+
+def test_layer_manifest_accepts_artifact_writer_schema_manifest(
+    tmp_path: Path,
+) -> None:
+    layer_root = tmp_path / "data" / "processed"
+    dataset = layer_root / "a_share" / "factors" / "price_volume"
+    write_internal_artifact_manifest(
+        dataset / "_manifest" / "manifest.json",
+        {
+            "schema_version": "0.1",
+            "market_id": "a_share",
+            "category": "factors",
+            "processed_data_id": "price_volume",
+            "primary_key": ["market_id", "asset_id", "timestamp"],
+            "partition_columns": ["year"],
+            "required_columns": ["market_id", "asset_id", "timestamp", "mom_20d"],
+            "column_roles": {
+                "market_id": "key",
+                "asset_id": "key",
+                "timestamp": "timestamp",
+                "mom_20d": "factor",
+            },
+        },
+    )
+
+    manifest = write_layer_manifest(
+        layer_root=layer_root,
+        logical_layer="processed",
+        run_id="s8",
+        dataset_roots=(dataset,),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    assert payload["dataset_count"] == 1
+    assert payload["datasets"][0]["dataset_id"] == "price_volume"
+    assert payload["datasets"][0]["manifest_summary"]["validation_status"] is None
+    assert payload["failed_dataset_validations"] == []
+    assert payload["layer_validation_status"] == "pass"
 
 
 def test_run_manifest_aggregates_layers(tmp_path: Path) -> None:
@@ -1057,6 +1046,37 @@ def _processed_writer_case() -> tuple[pd.DataFrame, ProcessedDataCatalog]:
         )
     )
     return frame, catalog
+
+
+def _artifact_manifest_payload(
+    *,
+    dataset_id: str,
+    logical_layer: str,
+    row_count: int,
+    date_min: str | None = None,
+    date_max: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": "0.1",
+        "run_id": "artifact-writer",
+        "logical_layer": logical_layer,
+        "dataset_id": dataset_id,
+        "primary_key": ["market_id", "asset_id", "timestamp"],
+        "partition_columns": ["year"],
+        "columns": ["market_id", "asset_id", "timestamp", "value"],
+        "row_count": row_count,
+        "partition_count": 0,
+        "date_min": date_min,
+        "date_max": date_max,
+        "null_count_summary": {
+            "market_id": 0,
+            "asset_id": 0,
+            "timestamp": 0,
+        },
+        "non_finite_count_summary": {},
+        "duplicate_primary_key_count": None,
+        "validation_status": "pass",
+    }
 
 
 def _interim_writer_case() -> tuple[pd.DataFrame, InterimDataCatalog]:

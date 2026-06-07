@@ -10,14 +10,15 @@ from quant_research_platform.reports.private_evidence import (
     write_run_summary_md,
 )
 from quant_research_platform.storage.atomic import atomic_write_json
-from quant_research_platform.storage.manifests import write_dataset_manifest
+from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 
 
 def test_validation_summary_detects_manifest_failures_and_private_safety(tmp_path):
     dataset_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "demo"
-    write_dataset_manifest(
-        dataset_root,
+    write_internal_artifact_manifest(
+        dataset_root / "_manifest" / "manifest.json",
         {
+            "schema_version": "0.1",
             "run_id": "run",
             "logical_layer": "processed",
             "dataset_id": "demo",
@@ -45,6 +46,39 @@ def test_validation_summary_detects_manifest_failures_and_private_safety(tmp_pat
     assert summary["status"] == "FAIL"
     assert "dataset_validation_failed" in summary["failure_codes"]
     assert "private_safety_scan_failed" in summary["failure_codes"]
+
+
+def test_validation_summary_accepts_schema_only_dataset_manifest(tmp_path):
+    dataset_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "demo"
+    write_internal_artifact_manifest(
+        dataset_root / "_manifest" / "manifest.json",
+        {
+            "schema_version": "0.1",
+            "market_id": "a_share",
+            "category": "factors",
+            "processed_data_id": "demo",
+            "primary_key": ["market_id", "asset_id", "timestamp"],
+            "partition_columns": ["year"],
+            "required_columns": ["market_id", "asset_id", "timestamp", "factor"],
+            "column_roles": {
+                "market_id": "key",
+                "asset_id": "key",
+                "timestamp": "timestamp",
+                "factor": "factor",
+            },
+        },
+    )
+
+    summary = build_validation_summary(
+        run_id="s8",
+        output_root=tmp_path / ".run" / "s8",
+        dataset_manifest_paths=(dataset_root / "_manifest" / "manifest.json",),
+        layer_manifest_paths=(),
+        generated_text_paths=(),
+    )
+
+    assert summary["status"] == "PASS"
+    assert "dataset_validation_failed" not in summary["failure_codes"]
 
 
 def test_private_evidence_summary_and_md_avoid_absolute_paths(tmp_path):

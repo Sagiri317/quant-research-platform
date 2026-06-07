@@ -25,10 +25,6 @@ _CREDENTIAL_RE = re.compile(
     r"[A-Za-z0-9._~+/=-]{8,}"
 )
 _ROW_SAMPLE_KEYS = {"row", "rows", "sample", "samples", "row_sample", "row_samples"}
-_STOCK_CODE_RE = re.compile(
-    r"(?<![.\d])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?!\d)",
-    re.I,
-)
 
 
 def read_manifest(path: Path) -> dict[str, Any]:
@@ -56,26 +52,6 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     return atomic_write_text(path, text, encoding="utf-8")
 
 
-def write_dataset_manifest(
-    dataset_root: Path,
-    payload: dict[str, Any],
-    *,
-    replace: bool = False,
-) -> Path:
-    """Write an aggregate-only private evidence dataset manifest."""
-
-    _assert_private_evidence_manifest_safe(payload)
-    manifest_path = Path(dataset_root) / "_manifest" / "manifest.json"
-    if replace and manifest_path.exists():
-        _assert_replaceable_run_manifest(manifest_path)
-        manifest_path.unlink()
-    normalized = {
-        "created_at": _utc_now(),
-        **payload,
-    }
-    return write_internal_artifact_manifest(manifest_path, normalized)
-
-
 def write_layer_manifest(
     *,
     layer_root: Path,
@@ -96,12 +72,20 @@ def write_layer_manifest(
             missing.append(_logical_path(path))
             continue
         payload = read_manifest(path)
+        summary = {
+            "row_count": payload.get("row_count"),
+            "date_min": payload.get("date_min"),
+            "date_max": payload.get("date_max"),
+            "duplicate_primary_key_count": payload.get(
+                "duplicate_primary_key_count"
+            ),
+            "validation_status": payload.get("validation_status"),
+        }
         datasets.append(
             {
-                "dataset_id": payload.get("dataset_id"),
+                "dataset_id": _dataset_id_from_manifest(payload, dataset_root),
                 "manifest_path": _logical_path(path),
-                "row_count": payload.get("row_count"),
-                "validation_status": payload.get("validation_status"),
+                "manifest_summary": summary,
             }
         )
         total_rows += int(payload.get("row_count") or 0)
@@ -109,8 +93,12 @@ def write_layer_manifest(
             date_min_values.append(str(payload["date_min"]))
         if payload.get("date_max"):
             date_max_values.append(str(payload["date_max"]))
-        if str(payload.get("validation_status", "")).lower() not in {"pass", "ok"}:
-            failed.append(str(payload.get("dataset_id") or _logical_path(dataset_root)))
+        validation_status = payload.get("validation_status")
+        if validation_status is not None and str(validation_status).lower() not in {
+            "pass",
+            "ok",
+        }:
+            failed.append(_dataset_id_from_manifest(payload, dataset_root))
     status = "pass" if not missing and not failed else "fail"
     payload = {
         "run_id": run_id,
@@ -165,47 +153,6 @@ def _assert_internal_artifact_metadata_safe(value: Any) -> None:
         raise ValueError(f"unsafe_internal_artifact_metadata: {unsafe}")
 
 
-def _assert_private_evidence_manifest_safe(payload: dict[str, Any]) -> None:
-    reason = _unsafe_private_evidence_manifest_reason(payload)
-    if reason is not None:
-        raise ValueError(f"unsafe_private_evidence_manifest: {reason}")
-
-
-def _assert_replaceable_run_manifest(path: Path) -> None:
-    if ".run" not in Path(path).parts:
-        raise ValueError("dataset_manifest_replace_must_be_under_run")
-
-
-def _unsafe_private_evidence_manifest_reason(
-    value: Any,
-    *,
-    key: str | None = None,
-) -> str | None:
-    if key is not None and key.lower() in _ROW_SAMPLE_KEYS and value:
-        return "row_sample"
-    if isinstance(value, dict):
-        for item_key, item in value.items():
-            if str(item_key).lower() == "source_asset_id":
-                return "source_asset_id"
-            reason = _unsafe_private_evidence_manifest_reason(item, key=str(item_key))
-            if reason is not None:
-                return reason
-        return None
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            reason = _unsafe_private_evidence_manifest_reason(item)
-            if reason is not None:
-                return reason
-        return None
-    if isinstance(value, Path):
-        value = str(value)
-    if isinstance(value, str):
-        if _STOCK_CODE_RE.search(value):
-            return "stock_sample"
-        return _unsafe_internal_artifact_reason(value)
-    return None
-
-
 def _unsafe_internal_artifact_reason(
     value: Any,
     *,
@@ -244,6 +191,14 @@ def _unsafe_internal_artifact_reason(
     return None
 
 
+def _dataset_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
+    for key in ("dataset_id", "processed_data_id", "interim_data_id"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return _logical_path(Path(dataset_root))
+
+
 def _logical_path(path: Path) -> str:
     parts = Path(path).parts
     for marker in (".run", "data", "manifests", "validations", "timings"):
@@ -259,7 +214,6 @@ def _utc_now() -> str:
 
 __all__ = [
     "read_manifest",
-    "write_dataset_manifest",
     "write_internal_artifact_manifest",
     "write_layer_manifest",
     "write_manifest",

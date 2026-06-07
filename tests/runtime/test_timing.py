@@ -13,12 +13,13 @@ def test_timing_recorder_writes_json_and_csv(tmp_path) -> None:
         record.output_rows = 3
         record.partitions = 1
 
-    json_path = recorder.write_json(tmp_path / "timings.json")
+    json_path = recorder.write_json(tmp_path / "timings.json", run_id="s8")
     csv_path = recorder.write_csv(tmp_path / "timings.csv")
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8").splitlines()))
 
+    assert payload["run_id"] == "s8"
     assert payload["records"][0]["step_name"] == "build_processed"
     assert payload["records"][0]["duration_seconds"] >= 0
     assert payload["records"][0]["output_rows"] == 3

@@ -54,8 +54,17 @@ def build_validation_summary(
         if not path.is_file():
             continue
         manifest = read_manifest(path)
-        dataset_id = str(manifest.get("dataset_id") or _logical_path(path))
-        if str(manifest.get("validation_status", "")).lower() not in {"pass", "ok"}:
+        dataset_id = str(
+            manifest.get("dataset_id")
+            or manifest.get("processed_data_id")
+            or manifest.get("interim_data_id")
+            or _logical_path(path)
+        )
+        validation_status = manifest.get("validation_status")
+        if validation_status is not None and str(validation_status).lower() not in {
+            "pass",
+            "ok",
+        }:
             dataset_failures.append(dataset_id)
         null_summary = _int_mapping(manifest.get("null_count_summary"))
         key_columns = tuple(str(item) for item in manifest.get("primary_key") or ())

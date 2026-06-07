@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.defaults import (
@@ -54,7 +53,6 @@ from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.layout import PrivateEvidenceLayout, StorageLayout
 from quant_research_platform.storage.manifests import (
     read_manifest,
-    write_dataset_manifest,
     write_layer_manifest,
     write_run_manifest,
 )
@@ -72,7 +70,7 @@ class PrivateEvidenceRunConfig:
     start_date: str
     end_date: str
     replace_output: bool = False
-    run_id: str = "private-evidence"
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,12 +89,13 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     output_root = Path(config.output_root)
     _assert_output_root_under_run(output_root)
     _prepare_output_root(output_root, replace_output=config.replace_output)
+    run_id = config.run_id or output_root.name
     layout = PrivateEvidenceLayout.from_output_root(output_root)
     _create_layout_directories(layout)
     atomic_write_json(
         layout.config_root / "run_config.json",
         {
-            "run_id": config.run_id,
+            "run_id": run_id,
             "start_date": config.start_date,
             "end_date": config.end_date,
             "output_root": _logical_path(output_root),
@@ -154,18 +153,14 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
 
     dataset_roots = _dataset_roots(layout)
     dataset_manifest_paths = tuple(
-        _write_dataset_manifest_from_root(
-            dataset_root,
-            output_root=output_root,
-            run_id=config.run_id,
-        )
+        dataset_root / "_manifest" / "manifest.json"
         for dataset_root in dataset_roots
     )
     layer_manifest_paths = (
         write_layer_manifest(
             layer_root=layout.interim_root,
             logical_layer="interim",
-            run_id=config.run_id,
+            run_id=run_id,
             dataset_roots=tuple(
                 root
                 for root in dataset_roots
@@ -175,7 +170,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         write_layer_manifest(
             layer_root=layout.processed_root,
             logical_layer="processed",
-            run_id=config.run_id,
+            run_id=run_id,
             dataset_roots=tuple(
                 root
                 for root in dataset_roots
@@ -185,7 +180,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         write_layer_manifest(
             layer_root=layout.research_root,
             logical_layer="research",
-            run_id=config.run_id,
+            run_id=run_id,
             dataset_roots=tuple(
                 root
                 for root in dataset_roots
@@ -195,7 +190,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         write_layer_manifest(
             layer_root=layout.evidence_root,
             logical_layer="evidence",
-            run_id=config.run_id,
+            run_id=run_id,
             dataset_roots=tuple(
                 root
                 for root in dataset_roots
@@ -205,13 +200,14 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     )
     run_manifest_path = write_run_manifest(
         manifests_root=layout.manifests_root,
-        run_id=config.run_id,
+        run_id=run_id,
         output_root=output_root,
         layer_manifest_paths=layer_manifest_paths,
     )
     timings_json = write_timings_json(
         layout.timings_root / "timings.json",
         recorder.records,
+        run_id=run_id,
     )
     write_timings_csv(layout.timings_root / "timings.csv", recorder.records)
     run_manifest = read_manifest(run_manifest_path)
@@ -222,15 +218,19 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         timings_json,
     )
     validation_summary = build_validation_summary(
-        run_id=config.run_id,
+        run_id=run_id,
         output_root=output_root,
         dataset_manifest_paths=dataset_manifest_paths,
         layer_manifest_paths=layer_manifest_paths,
         generated_text_paths=generated_paths,
     )
+    write_validation_summary(
+        layout.validations_root / "validation_summary.json",
+        validation_summary,
+    )
     timings_payload = read_manifest(timings_json)
     evidence_summary = build_private_evidence_summary(
-        run_id=config.run_id,
+        run_id=run_id,
         date_range={"start_date": config.start_date, "end_date": config.end_date},
         manifests={
             "dataset_count": len(dataset_manifest_paths),
@@ -258,26 +258,9 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     }
     write_run_summary_json(layout.summary_json_path, summary)
     write_run_summary_md(layout.summary_md_path, summary)
-    validation_summary = build_validation_summary(
-        run_id=config.run_id,
-        output_root=output_root,
-        dataset_manifest_paths=dataset_manifest_paths,
-        layer_manifest_paths=layer_manifest_paths,
-        generated_text_paths=(
-            *generated_paths,
-            layout.evidence_root / "evidence_summary.json",
-            layout.evidence_root / "evidence_summary.md",
-            layout.summary_json_path,
-            layout.summary_md_path,
-        ),
-    )
-    write_validation_summary(
-        layout.validations_root / "validation_summary.json",
-        validation_summary,
-    )
     return PrivateEvidenceRunResult(
         status=str(validation_summary["status"]),
-        run_id=config.run_id,
+        run_id=run_id,
         output_root=output_root.as_posix(),
         summary=summary,
     )
@@ -317,108 +300,7 @@ def _dataset_roots(layout: PrivateEvidenceLayout) -> tuple[Path, ...]:
     for data_root in sorted(layout.data_root.rglob("data")):
         if data_root.is_dir() and data_root.parts[-1] == "data":
             roots.add(data_root.parent)
-    for report_root in sorted((layout.output_root / "reports").rglob("*")):
-        if report_root.is_dir() and any(report_root.glob("*.parquet")):
-            roots.add(report_root)
     return tuple(sorted(roots, key=lambda item: item.as_posix()))
-
-
-def _write_dataset_manifest_from_root(
-    dataset_root: Path,
-    *,
-    output_root: Path,
-    run_id: str,
-) -> Path:
-    data_root = dataset_root / "data"
-    if not data_root.is_dir():
-        data_root = dataset_root
-    spec = _spec_payload(dataset_root)
-    frame = _read_dataset_frame(data_root)
-    primary_key = tuple(str(item) for item in spec.get("primary_key") or ())
-    safe_primary_key = [column for column in primary_key if column != "source_asset_id"]
-    safe_columns = [
-        str(column) for column in frame.columns if column != "source_asset_id"
-    ]
-    timestamp = _timestamp_series(frame)
-    duplicate_count = (
-        int(frame.duplicated(list(primary_key)).sum()) if primary_key else 0
-    )
-    non_finite = {
-        column: int(np.isinf(pd.to_numeric(frame[column], errors="coerce")).sum())
-        for column in frame.columns
-        if pd.api.types.is_numeric_dtype(frame[column])
-    }
-    payload = {
-        "run_id": run_id,
-        "date_range": None,
-        "logical_layer": _logical_layer(dataset_root, output_root),
-        "dataset_id": _dataset_id(dataset_root),
-        "schema_version": spec.get("schema_version"),
-        "primary_key": safe_primary_key,
-        "partition_columns": spec.get("partition_columns"),
-        "columns": safe_columns,
-        "row_count": int(len(frame)),
-        "partition_count": len(
-            {path.parent.name for path in data_root.rglob("*.parquet")}
-        ),
-        "date_min": str(timestamp.min().date()) if timestamp is not None else None,
-        "date_max": str(timestamp.max().date()) if timestamp is not None else None,
-        "null_count_summary": {
-            str(column): int(frame[column].isna().sum())
-            for column in frame.columns
-            if str(column) != "source_asset_id"
-        },
-        "non_finite_count_summary": non_finite,
-        "duplicate_primary_key_count": duplicate_count,
-        "file_count": len(tuple(data_root.rglob("*.parquet"))),
-        "file_size_bytes": sum(
-            path.stat().st_size for path in data_root.rglob("*.parquet")
-        ),
-        "validation_status": "pass" if duplicate_count == 0 else "fail",
-        "git_sha": None,
-        "config_hash": None,
-        "omitted_fields": {
-            "git_sha": "not_collected_by_private_evidence_harness",
-            "config_hash": "not_collected_by_private_evidence_harness",
-            "source_local_asset_key": "omitted_to_keep_private_evidence_manifest_safe",
-        },
-        "factor_nan_profile": _nan_profile(frame, prefixes=("mom_", "rev_", "vol_")),
-        "label_nan_profile": _nan_profile(frame, prefixes=("forward_return_",)),
-    }
-    return write_dataset_manifest(dataset_root, payload, replace=True)
-
-
-def _spec_payload(dataset_root: Path) -> dict[str, Any]:
-    spec_path = dataset_root / "spec.json"
-    if spec_path.is_file():
-        return read_manifest(spec_path)
-    manifest_path = dataset_root / "_manifest" / "manifest.json"
-    if manifest_path.is_file():
-        return read_manifest(manifest_path)
-    return {}
-
-
-def _read_dataset_frame(data_root: Path) -> pd.DataFrame:
-    files = tuple(sorted(data_root.rglob("*.parquet")))
-    if not files:
-        return pd.DataFrame()
-    return pd.concat((pd.read_parquet(path) for path in files), ignore_index=True)
-
-
-def _timestamp_series(frame: pd.DataFrame) -> pd.Series | None:
-    for column in ("timestamp", "session_date"):
-        if column in frame:
-            values = pd.to_datetime(frame[column], errors="coerce").dropna()
-            return values if not values.empty else None
-    return None
-
-
-def _nan_profile(frame: pd.DataFrame, *, prefixes: tuple[str, ...]) -> dict[str, int]:
-    return {
-        str(column): int(frame[column].isna().sum())
-        for column in frame.columns
-        if any(str(column).startswith(prefix) for prefix in prefixes)
-    }
 
 
 def _logical_layer(dataset_root: Path, output_root: Path) -> str:

@@ -208,7 +208,7 @@ def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
             (),
             {
                 "status": "PASS",
-                "run_id": "private-evidence",
+                "run_id": "s1",
                 "output_root": ".run/s1",
                 "summary": {"status": "PASS", "output_root": ".run/s1"},
             },
@@ -238,7 +238,9 @@ def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
     assert calls[0].output_root == Path(".run/s1")
     assert calls[0].start_date == "2014-01-01"
     assert calls[0].end_date == "2016-12-31"
+    assert calls[0].run_id is None
     assert "PASS" in result.output
+    assert "run_id=s1" in result.output
 
 
 def test_qrp_private_evidence_run_rejects_missing_required_options() -> None:
