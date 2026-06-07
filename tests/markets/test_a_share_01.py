@@ -311,6 +311,57 @@ def test_a_share_factor_build_passes_spec_columns_to_price_volume_helper(
     assert set(a_share_price_volume_factor_columns()).issubset(output.columns)
 
 
+def test_a_share_factor_builder_prunes_to_spec_columns_before_copy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
+    _write_processed_panel_fixture(processed_root, panel)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(panel["timestamp"], market_type=1),
+    )
+    expected_columns = tuple(
+        build_factors.a_share_processed_catalog()
+        .get(PRICE_VOLUME_PROCESSED_DATA_ID)
+        .required_columns
+    )
+
+    def fake_price_volume_helper(frame, **kwargs):
+        result = frame.copy()
+        result["extra_internal_work_column"] = 1.0
+        for column in a_share_price_volume_factor_columns():
+            result[column] = 0.0
+        return result
+
+    def fake_select_slim_factor_columns(frame):
+        assert tuple(frame.columns) == expected_columns
+        return frame.copy()
+
+    monkeypatch.setattr(
+        build_factors,
+        "calculate_price_volume_factors",
+        fake_price_volume_helper,
+    )
+    monkeypatch.setattr(
+        build_factors,
+        "select_slim_factor_columns",
+        fake_select_slim_factor_columns,
+    )
+
+    _, rows = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
+        processed_root=processed_root,
+        start_year=2014,
+        end_year=2014,
+    )
+
+    assert rows == len(panel)
+
+
 def test_price_volume_helper_prunes_contract_extra_outputs() -> None:
     contract_columns = price_volume_factor_columns()
     panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=260))

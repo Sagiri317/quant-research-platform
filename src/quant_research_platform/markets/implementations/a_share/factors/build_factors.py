@@ -151,7 +151,9 @@ def calculate_price_volume_factor_full(
         requested_end_date,
         inclusive="both",
     )
-    output = select_slim_factor_columns(factored.loc[mask].copy())
+    output = select_slim_factor_columns(
+        factored.loc[mask, list(spec.required_columns)]
+    )
     output = output.sort_values(list(spec.primary_key)).reset_index(drop=True)
     data_root = write_processed_data(
         output,

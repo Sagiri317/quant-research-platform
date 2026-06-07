@@ -284,11 +284,17 @@ def calculate_price_volume_factors(
     requested_set = set(requested)
     required_windows = _windows_from_requested_factors(requested_set)
     result = panel.sort_values([asset_column, date_column]).copy()
+    group_keys = result[asset_column]
     grouped = result.groupby(asset_column, sort=False)
+    group_positions = tuple(grouped.indices.values())
     price = pd.to_numeric(result[price_column], errors="coerce")
     returns = pd.to_numeric(result[return_column], errors="coerce")
     amount = pd.to_numeric(result[amount_column], errors="coerce")
     turnover = pd.to_numeric(result[turnover_column], errors="coerce")
+    price_grouped = price.groupby(group_keys, sort=False)
+    returns_grouped = returns.groupby(group_keys, sort=False)
+    amount_grouped = amount.groupby(group_keys, sort=False)
+    turnover_grouped = turnover.groupby(group_keys, sort=False)
 
     if "rev_1d" in requested_set:
         result["rev_1d"] = -returns
@@ -298,9 +304,7 @@ def calculate_price_volume_factors(
         needs_momentum = f"mom_{window}d" in requested_set
         needs_reversal = f"rev_{window}d" in requested_set
         if needs_momentum or needs_reversal:
-            shifted_price = price.groupby(result[asset_column], sort=False).shift(
-                window
-            )
+            shifted_price = price_grouped.shift(window)
             denominator = _valid_denominator(shifted_price)
             trailing_return = _finite_or_nan(price / denominator - 1.0)
         if needs_momentum:
@@ -310,40 +314,57 @@ def calculate_price_volume_factors(
 
     for window in required_windows:
         if f"vol_{window}d" in requested_set:
-            result[f"vol_{window}d"] = returns.groupby(
-                result[asset_column], sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).std()
+            result[f"vol_{window}d"] = _rolling_aggregate(
+                returns,
+                returns_grouped,
+                group_positions,
+                window,
+                "std",
             )
         if f"downside_vol_{window}d" in requested_set:
             result[f"downside_vol_{window}d"] = _rolling_rms(
                 returns.clip(upper=0.0),
-                result[asset_column],
+                group_keys,
+                group_positions,
                 window,
             )
         if f"upside_vol_{window}d" in requested_set:
             result[f"upside_vol_{window}d"] = _rolling_rms(
                 returns.clip(lower=0.0),
-                result[asset_column],
+                group_keys,
+                group_positions,
                 window,
             )
         if f"max_return_{window}d" in requested_set:
-            result[f"max_return_{window}d"] = grouped[return_column].transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).max()
+            result[f"max_return_{window}d"] = _rolling_aggregate(
+                result[return_column],
+                grouped[return_column],
+                group_positions,
+                window,
+                "max",
             )
         if f"min_return_{window}d" in requested_set:
-            result[f"min_return_{window}d"] = grouped[return_column].transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).min()
+            result[f"min_return_{window}d"] = _rolling_aggregate(
+                result[return_column],
+                grouped[return_column],
+                group_positions,
+                window,
+                "min",
             )
         if f"drawdown_{window}d" in requested_set:
             result[f"drawdown_{window}d"] = _rolling_drawdown(
-                pd.to_numeric(result[price_column], errors="coerce"),
-                result[asset_column],
+                price,
+                group_keys,
+                group_positions,
                 window,
             )
         if f"skew_{window}d" in requested_set:
-            result[f"skew_{window}d"] = grouped[return_column].transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).skew()
+            result[f"skew_{window}d"] = _rolling_aggregate(
+                result[return_column],
+                grouped[return_column],
+                group_positions,
+                window,
+                "skew",
             )
         if f"kurt_{window}d" in requested_set:
             result[f"kurt_{window}d"] = grouped[return_column].transform(
@@ -352,37 +373,41 @@ def calculate_price_volume_factors(
 
     for window in required_windows:
         if f"avg_amount_{window}d" in requested_set:
-            result[f"avg_amount_{window}d"] = amount.groupby(
-                result[asset_column], sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            result[f"avg_amount_{window}d"] = _rolling_aggregate(
+                amount,
+                amount_grouped,
+                group_positions,
+                window,
+                "mean",
             )
         if f"turnover_{window}d" in requested_set:
-            result[f"turnover_{window}d"] = turnover.groupby(
-                result[asset_column], sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            result[f"turnover_{window}d"] = _rolling_aggregate(
+                turnover,
+                turnover_grouped,
+                group_positions,
+                window,
+                "mean",
             )
         if f"turnover_chg_{window}d" in requested_set:
-            shifted_turnover = turnover.groupby(result[asset_column], sort=False).shift(
-                window
-            )
+            shifted_turnover = turnover_grouped.shift(window)
             denominator = _valid_denominator(shifted_turnover)
             result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
         if f"turnover_vol_{window}d" in requested_set:
-            result[f"turnover_vol_{window}d"] = turnover.groupby(
-                result[asset_column], sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).std()
+            result[f"turnover_vol_{window}d"] = _rolling_aggregate(
+                turnover,
+                turnover_grouped,
+                group_positions,
+                window,
+                "std",
             )
         if f"zero_volume_ratio_{window}d" in requested_set:
-            result[f"zero_volume_ratio_{window}d"] = (
-                (pd.to_numeric(result[amount_column], errors="coerce") <= 0.0)
-                .astype(float)
-                .groupby(result[asset_column], sort=False)
-                .transform(
-                    lambda series, w=window: series.rolling(w, min_periods=w).mean()
-                )
+            zero_volume = (amount <= 0.0).astype(float)
+            result[f"zero_volume_ratio_{window}d"] = _rolling_aggregate(
+                zero_volume,
+                zero_volume.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
             )
 
     denominator = _valid_denominator(amount)
@@ -394,16 +419,20 @@ def calculate_price_volume_factors(
     amplitude = _finite_or_nan(amplitude)
     for window in required_windows:
         if f"amihud_{window}d" in requested_set:
-            result[f"amihud_{window}d"] = illiquidity.groupby(
-                result[asset_column], sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            result[f"amihud_{window}d"] = _rolling_aggregate(
+                illiquidity,
+                illiquidity.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
             )
         if f"amplitude_{window}d" in requested_set:
-            result[f"amplitude_{window}d"] = amplitude.groupby(
-                result[asset_column], sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            result[f"amplitude_{window}d"] = _rolling_aggregate(
+                amplitude,
+                amplitude.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
             )
 
     intraday_range = (
@@ -413,10 +442,12 @@ def calculate_price_volume_factors(
     intraday_range = _finite_or_nan(intraday_range)
     for window in required_windows:
         if f"intraday_range_{window}d" in requested_set:
-            result[f"intraday_range_{window}d"] = intraday_range.groupby(
-                result[asset_column], sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).mean()
+            result[f"intraday_range_{window}d"] = _rolling_aggregate(
+                intraday_range,
+                intraday_range.groupby(group_keys, sort=False),
+                group_positions,
+                window,
+                "mean",
             )
 
     if "log_float_market_cap" in requested_set:
@@ -424,11 +455,8 @@ def calculate_price_volume_factors(
     if "log_total_market_cap" in requested_set:
         result["log_total_market_cap"] = _safe_log(result[total_market_cap_column])
     output_columns = [column for column in requested if column in result.columns]
-    if output_columns:
-        result.loc[:, output_columns] = result.loc[:, output_columns].replace(
-            [np.inf, -np.inf],
-            np.nan,
-        )
+    for column in output_columns:
+        result[column] = _finite_or_nan(result[column])
     return result
 
 
@@ -539,28 +567,82 @@ def _lookback_window(factor_id: str) -> int | None:
     return max(windows)
 
 
-def _rolling_rms(values: pd.Series, group_keys: pd.Series, window: int) -> pd.Series:
-    squared = values.pow(2)
-    return squared.groupby(group_keys, sort=False).transform(
-        lambda series, w=window: np.sqrt(series.rolling(w, min_periods=w).mean())
+def _rolling_aggregate(
+    values: pd.Series,
+    grouped_values: pd.core.groupby.SeriesGroupBy,
+    group_positions: tuple[np.ndarray, ...],
+    window: int,
+    aggregation: str,
+) -> pd.Series:
+    rolled = grouped_values.rolling(window, min_periods=window)
+    rolled_values = getattr(rolled, aggregation)().to_numpy(
+        dtype="float64",
+        copy=False,
     )
+    output = np.full(len(values), np.nan, dtype="float64")
+    offset = 0
+    for positions in group_positions:
+        next_offset = offset + len(positions)
+        output[positions] = rolled_values[offset:next_offset]
+        offset = next_offset
+    return pd.Series(output, index=values.index, name=values.name)
+
+
+def _rolling_rms(
+    values: pd.Series,
+    group_keys: pd.Series,
+    group_positions: tuple[np.ndarray, ...],
+    window: int,
+) -> pd.Series:
+    squared = values.pow(2)
+    mean_squared = _rolling_aggregate(
+        squared,
+        squared.groupby(group_keys, sort=False),
+        group_positions,
+        window,
+        "mean",
+    )
+    return np.sqrt(mean_squared)
 
 
 def _rolling_drawdown(
     values: pd.Series,
     group_keys: pd.Series,
+    group_positions: tuple[np.ndarray, ...],
     window: int,
 ) -> pd.Series:
-    def drawdown(series: pd.Series) -> float:
-        peak = series.cummax()
-        return float(_finite_or_nan(series / peak.replace(0.0, np.nan) - 1.0).min())
+    numeric = pd.to_numeric(values, errors="coerce")
+    source = numeric.to_numpy(dtype="float64", copy=False)
+    output = np.full(len(numeric), np.nan, dtype="float64")
+    for positions in group_positions:
+        output[positions] = _rolling_drawdown_array(source[positions], window)
+    return pd.Series(output, index=values.index, name=values.name)
 
-    return values.groupby(group_keys, sort=False).transform(
-        lambda series, w=window: series.rolling(w, min_periods=w).apply(
-            drawdown,
-            raw=False,
-        )
-    )
+
+def _rolling_drawdown_array(values: np.ndarray, window: int) -> np.ndarray:
+    output = np.full(len(values), np.nan, dtype="float64")
+    if window <= 0:
+        return output
+    if len(values) < window:
+        return output
+    windows = np.lib.stride_tricks.sliding_window_view(values, window_shape=window)
+    valid_windows = ~np.isnan(windows).any(axis=1)
+    if not valid_windows.any():
+        return output
+    valid_values = windows[valid_windows]
+    peaks = np.maximum.accumulate(valid_values, axis=1)
+    denominators = np.where(peaks == 0.0, np.nan, peaks)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        drawdowns = valid_values / denominators - 1.0
+    drawdowns[~np.isfinite(drawdowns)] = np.nan
+    all_nan = np.isnan(drawdowns).all(axis=1)
+    minima = np.full(len(drawdowns), np.nan, dtype="float64")
+    if (~all_nan).any():
+        minima[~all_nan] = np.nanmin(drawdowns[~all_nan], axis=1)
+    window_values = np.full(len(windows), np.nan, dtype="float64")
+    window_values[valid_windows] = minima
+    output[window - 1 :] = window_values
+    return output
 
 
 def _safe_log(values: pd.Series) -> pd.Series:
