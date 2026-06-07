@@ -10,6 +10,8 @@ from quant_research_platform.runtime.execution_metrics import (
     write_execution_metrics_json,
 )
 
+LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
+
 
 def test_execution_metrics_recorder_writes_timings_json_and_csv(tmp_path) -> None:
     recorder = ExecutionMetricsRecorder(memory_sampler=ProcessMemorySampler.disabled())
@@ -34,10 +36,13 @@ def test_execution_metrics_recorder_writes_timings_json_and_csv(tmp_path) -> Non
     assert payload["records"][0]["file_size_bytes"] == 123
     assert payload["records"][0]["rss_start_mb"] is None
     assert payload["records"][0]["rss_end_mb"] is None
-    assert payload["records"][0]["rss_peak_mb"] is None
+    assert payload["records"][0]["rss_start_end_max_mb"] is None
+    assert LEGACY_RSS_PEAK_FIELD not in payload["records"][0]
     assert payload["records"][0]["rows_per_second"] is not None
     assert rows[0]["step_name"] == "build_processed"
     assert rows[0]["status"] == "success"
+    assert "rss_start_end_max_mb" in rows[0]
+    assert LEGACY_RSS_PEAK_FIELD not in rows[0]
 
 
 def test_execution_metrics_records_optional_rss_fields(tmp_path) -> None:
@@ -52,7 +57,8 @@ def test_execution_metrics_records_optional_rss_fields(tmp_path) -> None:
     assert payload["summary"]["memory_sampler_unavailable"] is False
     assert payload["records"][0]["rss_start_mb"] == 128.0
     assert payload["records"][0]["rss_end_mb"] == 128.0
-    assert payload["records"][0]["rss_peak_mb"] == 128.0
+    assert payload["records"][0]["rss_start_end_max_mb"] == 128.0
+    assert LEGACY_RSS_PEAK_FIELD not in payload["records"][0]
 
 
 def test_execution_metrics_writer_functions_keep_timings_output_names(tmp_path) -> None:
@@ -107,4 +113,5 @@ def test_execution_metrics_sampler_exception_degrades_to_null_rss() -> None:
     assert payload["summary"]["memory_sampler_unavailable"] is True
     assert record["rss_start_mb"] is None
     assert record["rss_end_mb"] is None
-    assert record["rss_peak_mb"] is None
+    assert record["rss_start_end_max_mb"] is None
+    assert LEGACY_RSS_PEAK_FIELD not in record

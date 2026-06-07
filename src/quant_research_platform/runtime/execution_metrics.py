@@ -23,7 +23,7 @@ class ExecutionStepMetric:
     duration_seconds: float | None = None
     rss_start_mb: float | None = None
     rss_end_mb: float | None = None
-    rss_peak_mb: float | None = None
+    rss_start_end_max_mb: float | None = None
     input_rows: int | None = None
     output_rows: int | None = None
     file_count: int | None = None
@@ -44,7 +44,7 @@ class ExecutionStepMetric:
             "duration_seconds": self.duration_seconds,
             "rss_start_mb": self.rss_start_mb,
             "rss_end_mb": self.rss_end_mb,
-            "rss_peak_mb": self.rss_peak_mb,
+            "rss_start_end_max_mb": self.rss_start_end_max_mb,
             "input_rows": self.input_rows,
             "output_rows": self.output_rows,
             "file_count": self.file_count,
@@ -123,7 +123,7 @@ class ExecutionMetricsRecorder:
             dataset_id=dataset_id,
             start_time=_format_time(started),
             rss_start_mb=rss_start,
-            rss_peak_mb=rss_start,
+            rss_start_end_max_mb=rss_start,
         )
         try:
             yield item
@@ -145,7 +145,7 @@ class ExecutionMetricsRecorder:
                 for value in (item.rss_start_mb, item.rss_end_mb)
                 if value is not None
             ]
-            item.rss_peak_mb = max(rss_values) if rss_values else None
+            item.rss_start_end_max_mb = max(rss_values) if rss_values else None
             rows = item.output_rows if item.output_rows is not None else item.input_rows
             if rows is not None and item.duration_seconds is not None:
                 divisor = item.duration_seconds or 1e-9

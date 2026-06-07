@@ -12,6 +12,8 @@ from quant_research_platform.workflows.private_evidence import (
     run_private_evidence,
 )
 
+LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
+
 
 def test_private_evidence_workflow_rejects_output_root_outside_run(tmp_path):
     config = PrivateEvidenceRunConfig(
@@ -179,9 +181,29 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
             encoding="utf-8"
         )
     )
+    timings = json.loads(
+        (output_root / "timings" / "timings.json").read_text(encoding="utf-8")
+    )
+    timings_csv = (output_root / "timings" / "timings.csv").read_text(
+        encoding="utf-8"
+    )
     assert summary["status"] == "PASS"
     assert summary["status"] == validation["status"]
     assert summary["run_id"] == "s1"
+    timing_steps = [record["step_name"] for record in timings["records"]]
+    summary_timing_steps = [
+        record["step_name"] for record in summary["timings"]["records"]
+    ]
+    validation_record = next(
+        record
+        for record in timings["records"]
+        if record["step_name"] == "validation_summary"
+    )
+    assert "validation_summary" in timing_steps
+    assert "validation_summary" in summary_timing_steps
+    assert "validation_summary" in timings_csv
+    assert "rss_start_end_max_mb" in validation_record
+    assert LEGACY_RSS_PEAK_FIELD not in validation_record
 
 
 def test_private_evidence_workflow_preserves_dataset_manifests(

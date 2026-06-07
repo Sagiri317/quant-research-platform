@@ -207,14 +207,8 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             layer_manifest_paths=layer_manifest_paths,
         )
         record.file_count = 1
-    timings_json = write_execution_metrics_json(
-        layout.timings_root / "timings.json",
-        recorder.records,
-        run_id=run_id,
-        memory_sampler_unavailable=recorder.memory_sampler.unavailable,
-    )
-    write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder.records)
     run_manifest = read_manifest(run_manifest_path)
+    timings_json = layout.timings_root / "timings.json"
     generated_paths = (
         layout.config_root / "run_config.json",
         run_manifest_path,
@@ -233,6 +227,13 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         layout.validations_root / "validation_summary.json",
         validation_summary,
     )
+    timings_json = write_execution_metrics_json(
+        timings_json,
+        recorder.records,
+        run_id=run_id,
+        memory_sampler_unavailable=recorder.memory_sampler.unavailable,
+    )
+    write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder.records)
     timings_payload = read_manifest(timings_json)
     evidence_summary = build_private_evidence_summary(
         run_id=run_id,
