@@ -149,3 +149,26 @@ def test_private_safety_scan_does_not_treat_json_numbers_as_stock_samples(tmp_pa
 
     assert safe_summary["status"] == "PASS"
     assert unsafe_summary["status"] == "FAIL"
+
+
+def test_private_safety_scan_counts_only_existing_scanned_paths(tmp_path):
+    run_root = tmp_path / ".run" / "s1"
+    run_root.mkdir(parents=True)
+    safe = run_root / "safe.json"
+    missing = run_root / "timings" / "timings.json"
+    atomic_write_json(safe, {"status": "PASS"})
+
+    summary = build_validation_summary(
+        run_id="s1",
+        output_root=run_root,
+        dataset_manifest_paths=(),
+        layer_manifest_paths=(),
+        generated_text_paths=(safe, missing),
+    )
+
+    scan = summary["private_safety_scan"]
+    assert summary["status"] == "PASS"
+    assert scan["requested_count"] == 2
+    assert scan["checked_count"] == 1
+    assert scan["existing_scanned_count"] == 1
+    assert scan["missing_count"] == 1

@@ -217,9 +217,8 @@ def write_run_summary_md(path: Path, payload: dict[str, Any]) -> Path:
 
 def _private_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
     failures: list[dict[str, str]] = []
-    for path in paths:
-        if not path.is_file():
-            continue
+    existing_paths = tuple(path for path in paths if path.is_file())
+    for path in existing_paths:
         text = path.read_text(encoding="utf-8")
         reason = _unsafe_json_reason(text) if path.suffix == ".json" else None
         if reason is None and path.suffix != ".json":
@@ -229,7 +228,10 @@ def _private_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
     return {
         "status": "PASS" if not failures else "FAIL",
         "failures": failures,
-        "checked_count": len(paths),
+        "checked_count": len(existing_paths),
+        "requested_count": len(paths),
+        "existing_scanned_count": len(existing_paths),
+        "missing_count": len(paths) - len(existing_paths),
     }
 
 
