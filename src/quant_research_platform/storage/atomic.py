@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -34,7 +35,7 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
             handle.flush()
             os.fsync(handle.fileno())
         reject_if_exists(final_path)
-        temp_path.rename(final_path)
+        _rename_with_transient_permission_retry(temp_path, final_path)
     except Exception:
         _remove_path(temp_path)
         raise
@@ -58,7 +59,7 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
     try:
         frame.to_csv(temp_path, **kwargs)
         reject_if_exists(final_path)
-        temp_path.rename(final_path)
+        _rename_with_transient_permission_retry(temp_path, final_path)
     except Exception:
         _remove_path(temp_path)
         raise
@@ -74,7 +75,7 @@ def atomic_write_parquet(frame: pd.DataFrame, path: Path, **kwargs: object) -> P
     try:
         frame.to_parquet(temp_path, **kwargs)
         reject_if_exists(final_path)
-        temp_path.rename(final_path)
+        _rename_with_transient_permission_retry(temp_path, final_path)
     except Exception:
         _remove_path(temp_path)
         raise
@@ -90,7 +91,7 @@ def atomic_write_directory(root: Path, writer: Callable[[Path], T]) -> T:
         temp_root.mkdir()
         result = writer(temp_root)
         reject_if_exists(final_root)
-        temp_root.rename(final_root)
+        _rename_with_transient_permission_retry(temp_root, final_root)
     except Exception:
         _remove_path(temp_root)
         raise
@@ -106,6 +107,23 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
     elif path.exists():
         path.unlink()
+
+
+def _rename_with_transient_permission_retry(
+    source: Path,
+    target: Path,
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 0.10,
+) -> None:
+    for attempt in range(1, attempts + 1):
+        try:
+            source.rename(target)
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            time.sleep(delay_seconds)
 
 
 __all__ = [

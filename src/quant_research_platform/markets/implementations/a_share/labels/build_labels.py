@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,17 @@ from quant_research_platform.markets.implementations.a_share.processed.io import
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
+from quant_research_platform.runtime.resources import (
+    ChunkAxis,
+    ChunkPlanner,
+    RuntimeResourcePolicy,
+)
+from quant_research_platform.storage.datasets import (
+    DatasetAccessMode,
+    read_dataset,
+    write_dataset_artifact,
+)
+from quant_research_platform.storage.layout import processed_data_parquet_root
 from quant_research_platform.storage.parquet import (
     parquet_dataset_columns,
     read_partitioned_parquet_dataset,
@@ -91,6 +103,13 @@ def calculate_forward_returns_full(
     end_year: int,
     panel_frame: pd.DataFrame | None = None,
 ) -> tuple[Path, int]:
+    if panel_frame is None:
+        return calculate_forward_returns_asset_batches(
+            processed_root=processed_root,
+            start_year=start_year,
+            end_year=end_year,
+        )
+
     panel = _panel_frame_for_label_build(
         processed_root=processed_root,
         start_year=start_year,
@@ -104,6 +123,78 @@ def calculate_forward_returns_full(
         start_year=start_year,
         end_year=end_year,
     )
+
+
+def calculate_forward_returns_asset_batches(
+    *,
+    processed_root: Path,
+    start_year: int,
+    end_year: int,
+    asset_chunk_size: int | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> tuple[Path, int]:
+    """Calculate forward-return labels in asset batches with future context."""
+
+    catalog = a_share_processed_catalog()
+    spec = catalog.get("forward_returns")
+    data_root = processed_data_parquet_root(
+        processed_root,
+        "panels",
+        DAILY_PANEL_PROCESSED_DATA_ID,
+    )
+    available_columns = set(parquet_dataset_columns(data_root))
+    missing = [
+        column
+        for column in LABEL_PANEL_INPUT_COLUMNS
+        if column not in available_columns
+    ]
+    if missing:
+        raise ValueError("missing_label_panel_input_columns: " + ", ".join(missing))
+    input_years = _available_panel_years(
+        data_root=data_root,
+        start_year=start_year,
+        end_year=end_year + 1,
+    )
+    asset_ids = _panel_asset_ids(data_root, years=input_years)
+    chunk_size = asset_chunk_size or _planned_asset_chunk_size(
+        asset_ids=asset_ids,
+        data_root=data_root,
+        years=input_years,
+        resource_policy=resource_policy,
+    )
+    row_count = 0
+
+    def _output_chunks() -> Iterator[pd.DataFrame]:
+        nonlocal row_count
+        for asset_chunk in _chunked(asset_ids, chunk_size):
+            panel = _read_panel_asset_chunk(
+                data_root,
+                years=input_years,
+                asset_ids=asset_chunk,
+            )
+            if panel.empty:
+                continue
+            labels = calculate_panel_labels(panel)
+            output = select_label_columns(labels)
+            output["timestamp"] = pd.to_datetime(output["timestamp"])
+            mask = output["timestamp"].dt.year.between(start_year, end_year)
+            output = output.loc[mask].copy()
+            output = output.sort_values(list(spec.primary_key)).reset_index(drop=True)
+            if output.empty:
+                continue
+            row_count += len(output)
+            yield output
+
+    artifact_root = Path(processed_root) / "labels" / "forward_returns"
+    data_root = write_dataset_artifact(
+        _output_chunks(),
+        artifact_root,
+        catalog=catalog,
+        data_id="forward_returns",
+        access_mode=DatasetAccessMode.STREAMING,
+        resource_policy=resource_policy,
+    )
+    return data_root, row_count
 
 
 def select_existing_columns(path: Path, wanted: tuple[str, ...]) -> list[str]:
@@ -176,10 +267,96 @@ def _available_panel_years(
     return years
 
 
+def _panel_asset_ids(data_root: Path, *, years: tuple[int, ...]) -> tuple[str, ...]:
+    asset_ids: set[str] = set()
+    chunks = read_dataset(
+        data_root,
+        years=years,
+        columns=["asset_id"],
+        access_mode=DatasetAccessMode.STREAMING,
+    )
+    for chunk in chunks:
+        asset_ids.update(str(value) for value in chunk["asset_id"].dropna().unique())
+    if not asset_ids:
+        raise ValueError("missing_requested_processed_input")
+    return tuple(sorted(asset_ids))
+
+
+def _read_panel_asset_chunk(
+    data_root: Path,
+    *,
+    years: tuple[int, ...],
+    asset_ids: tuple[str, ...],
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    asset_id_set = set(asset_ids)
+    chunks = read_dataset(
+        data_root,
+        years=years,
+        columns=list(LABEL_PANEL_INPUT_COLUMNS),
+        access_mode=DatasetAccessMode.STREAMING,
+    )
+    for chunk in chunks:
+        filtered = chunk.loc[chunk["asset_id"].isin(asset_id_set)]
+        if not filtered.empty:
+            frames.append(filtered)
+    if not frames:
+        return pd.DataFrame(columns=list(LABEL_PANEL_INPUT_COLUMNS))
+    return pd.concat(frames, ignore_index=True).sort_values(
+        ["market_id", "asset_id", "timestamp"],
+        kind="mergesort",
+    )
+
+
+def _planned_asset_chunk_size(
+    *,
+    asset_ids: tuple[str, ...],
+    data_root: Path,
+    years: tuple[int, ...],
+    resource_policy: RuntimeResourcePolicy | None,
+) -> int:
+    total_rows = _panel_row_count(data_root, years=years)
+    rows_per_asset = max(1, total_rows // max(1, len(asset_ids)))
+    output_width = len(
+        a_share_processed_catalog().get("forward_returns").required_columns
+    )
+    working_width = len(LABEL_PANEL_INPUT_COLUMNS) + (output_width * 2)
+    estimated_bytes_per_asset = max(
+        1,
+        rows_per_asset * working_width * 16,
+    )
+    label_horizons = tuple(
+        definition.horizon for definition in a_share_label_catalog().list()
+    )
+    plan = ChunkPlanner(resource_policy).plan(
+        axis=ChunkAxis.ASSET,
+        item_count=len(asset_ids),
+        estimated_bytes_per_item=estimated_bytes_per_asset,
+        lookahead_window=max(label_horizons) + 1,
+        output_width=output_width,
+        disjoint=True,
+    )
+    return plan.chunk_size
+
+
+def _panel_row_count(data_root: Path, *, years: tuple[int, ...]) -> int:
+    total = 0
+    for year in years:
+        for path in sorted((data_root / f"year={year}").glob("*.parquet")):
+            total += int(pd.read_parquet(path, columns=["asset_id"]).shape[0])
+    return total
+
+
+def _chunked(values: tuple[str, ...], size: int) -> Iterator[tuple[str, ...]]:
+    for index in range(0, len(values), max(1, size)):
+        yield values[index : index + max(1, size)]
+
+
 __all__ = [
     "LABEL_BASE_COLUMNS",
     "LABEL_PANEL_INPUT_COLUMNS",
     "calculate_panel_labels",
+    "calculate_forward_returns_asset_batches",
     "calculate_forward_returns_full",
     "select_existing_columns",
     "select_label_columns",

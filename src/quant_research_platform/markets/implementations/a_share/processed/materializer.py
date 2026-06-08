@@ -15,14 +15,11 @@ from quant_research_platform.storage.parquet import read_partitioned_parquet_dat
 from ..factors.build_factors import calculate_price_volume_factor_full
 from ..ids import PRICE_VOLUME_PROCESSED_DATA_ID
 from ..labels.build_labels import calculate_forward_returns_full
-from ..masks.build import write_masks
-from ..universes.build import write_universe
-from .contexts import write_contexts
+from ..masks.build import write_masks_from_panel_dataset
+from ..universes.build import write_universe_from_panel_dataset
+from .contexts import write_contexts_from_panel_dataset
 from .panels import (
-    _filter_panel_end_date,
-    _filter_panel_years,
-    build_panel_frame_from_interim,
-    write_panel_processed_data,
+    build_panel_asset_batches_from_interim,
 )
 
 
@@ -58,20 +55,15 @@ def build_a_share_processed_layers(
         logical_layer="processed",
         dataset_id="daily_panel",
     ) as record:
-        full_panel = build_panel_frame_from_interim(
+        panel_root, panel_rows = build_panel_asset_batches_from_interim(
             interim_root=interim_root,
-            start_year=start_year,
-            end_year=calculation_end_year,
-            min_listing_trading_days=min_listing_trading_days,
-        )
-        panel = _filter_panel_years(
-            full_panel,
+            processed_root=processed_root,
             start_year=start_year,
             end_year=end_year,
+            end_date=end_date,
+            calculation_end_year=calculation_end_year,
+            min_listing_trading_days=min_listing_trading_days,
         )
-        panel = _filter_panel_end_date(panel, end_date=end_date)
-        panel_root = write_panel_processed_data(panel, processed_root=processed_root)
-        panel_rows = len(panel)
         record.output_rows = panel_rows
     with _record_step(
         metrics_recorder,
@@ -79,13 +71,12 @@ def build_a_share_processed_layers(
         logical_layer="processed",
         dataset_id="daily_context",
     ) as record:
-        context_root, context_rows = write_contexts(
-            panel,
+        context_root, context_rows = write_contexts_from_panel_dataset(
             processed_root=processed_root,
             start_year=start_year,
             end_year=end_year,
         )
-        record.input_rows = len(panel)
+        record.input_rows = panel_rows
         record.output_rows = context_rows
     with _record_step(
         metrics_recorder,
@@ -93,26 +84,24 @@ def build_a_share_processed_layers(
         logical_layer="processed",
         dataset_id="a_share_default",
     ) as record:
-        universe_root, universe_rows = write_universe(
-            panel,
+        universe_root, universe_rows = write_universe_from_panel_dataset(
             processed_root=processed_root,
             start_year=start_year,
             end_year=end_year,
         )
-        record.input_rows = len(panel)
+        record.input_rows = panel_rows
         record.output_rows = universe_rows
     with _record_step(
         metrics_recorder,
         "build_masks",
         logical_layer="processed",
     ) as record:
-        mask_outputs = write_masks(
-            panel,
+        mask_outputs = write_masks_from_panel_dataset(
             processed_root=processed_root,
             start_year=start_year,
             end_year=end_year,
         )
-        record.input_rows = len(panel)
+        record.input_rows = panel_rows
         record.output_rows = sum(rows for _, rows in mask_outputs.values())
     with _record_step(
         metrics_recorder,
@@ -125,9 +114,8 @@ def build_a_share_processed_layers(
             processed_root=processed_root,
             start_year=start_year,
             end_year=end_year,
-            panel_frame=panel,
         )
-        record.input_rows = len(panel)
+        record.input_rows = panel_rows
         record.output_rows = factor_rows
     with _record_step(
         metrics_recorder,
@@ -139,9 +127,8 @@ def build_a_share_processed_layers(
             processed_root=processed_root,
             start_year=start_year,
             end_year=end_year,
-            panel_frame=full_panel,
         )
-        record.input_rows = len(full_panel)
+        record.input_rows = panel_rows
         record.output_rows = label_rows
     data_roots = {
         "daily_panel": panel_root,

@@ -558,6 +558,50 @@ def test_a_share_factor_builder_reads_available_warmup_years_when_present(
     )
 
 
+def test_a_share_factor_builder_asset_batches_match_full_frame_output(
+    tmp_path,
+) -> None:
+    dates = pd.bdate_range("2013-01-01", "2014-12-31")
+    panel = pd.concat(
+        [
+            _factor_panel_for_dates(dates).assign(asset_id="asset_a"),
+            _factor_panel_for_dates(dates).assign(asset_id="asset_b"),
+        ],
+        ignore_index=True,
+    )
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    _write_processed_panel_fixture(processed_root, panel)
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(dates, market_type=1),
+    )
+
+    full_path, _ = build_factors.calculate_price_volume_factor_full(
+        interim_root=interim_root,
+        processed_root=processed_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    expected = read_partitioned_parquet_dataset(full_path, years=(2014,))
+    chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(chunked_root, panel)
+    actual_path, actual_rows = (
+        build_factors.calculate_price_volume_factor_asset_batches(
+            interim_root=interim_root,
+            processed_root=chunked_root,
+            start_year=2014,
+            end_year=2014,
+            asset_chunk_size=1,
+        )
+    )
+    actual = read_partitioned_parquet_dataset(actual_path, years=(2014,))
+
+    assert actual_rows == len(actual)
+    pd.testing.assert_frame_equal(actual, expected)
+
+
 def test_a_share_factor_builder_panel_frame_fast_path_matches_parquet_path(
     tmp_path,
 ) -> None:
@@ -747,6 +791,41 @@ def test_a_share_label_builder_uses_future_lookahead_when_available(
     assert tail_with_future.isna().sum() < tail_without_future.isna().sum()
 
 
+def test_a_share_label_builder_asset_batches_preserve_year_boundary_lookahead(
+    tmp_path,
+) -> None:
+    dates = pd.bdate_range("2014-12-01", "2015-06-30")
+    panel = pd.concat(
+        [
+            _factor_panel_for_dates(dates).assign(asset_id="asset_a"),
+            _factor_panel_for_dates(dates).assign(asset_id="asset_b"),
+        ],
+        ignore_index=True,
+    )
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(processed_root, panel)
+
+    full_path, _ = build_labels.calculate_forward_returns_full(
+        processed_root=processed_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    expected = read_partitioned_parquet_dataset(full_path, years=(2014,))
+    chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(chunked_root, panel)
+    actual_path, actual_rows = build_labels.calculate_forward_returns_asset_batches(
+        processed_root=chunked_root,
+        start_year=2014,
+        end_year=2014,
+        asset_chunk_size=1,
+    )
+    actual = read_partitioned_parquet_dataset(actual_path, years=(2014,))
+
+    assert actual_rows == len(actual)
+    assert actual["forward_return_1d"].notna().any()
+    pd.testing.assert_frame_equal(actual, expected)
+
+
 def test_a_share_factor_builder_does_not_depend_on_raw_calendar() -> None:
     source = Path(build_factors.__file__).read_text(encoding="utf-8")
 
@@ -803,6 +882,76 @@ def test_a_share_context_universe_and_mask_builders_write_split_layers(
             processed_root, "masks/execution", "a_share_execution"
         ).read_text(encoding="utf-8")
     )["schema_version"] == "0.1"
+
+
+def test_context_universe_and_mask_panel_dataset_writers_match_frame_writers(
+    tmp_path,
+) -> None:
+    panel = pd.concat(
+        [
+            _panel().assign(asset_id="asset_a"),
+            _panel().assign(asset_id="asset_b"),
+        ],
+        ignore_index=True,
+    )
+    full_root = tmp_path / "full" / "data" / "processed" / "a_share"
+    streaming_root = tmp_path / "streaming" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(streaming_root, panel)
+
+    expected_context_root, _ = contexts.write_contexts(
+        panel,
+        processed_root=full_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    expected_universe_root, _ = build_universes.write_universe(
+        panel,
+        processed_root=full_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    expected_masks = build_masks.write_masks(
+        panel,
+        processed_root=full_root,
+        start_year=2014,
+        end_year=2014,
+    )
+
+    actual_context_root, _ = contexts.write_contexts_from_panel_dataset(
+        streaming_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    actual_universe_root, _ = build_universes.write_universe_from_panel_dataset(
+        streaming_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    actual_masks = build_masks.write_masks_from_panel_dataset(
+        streaming_root,
+        start_year=2014,
+        end_year=2014,
+    )
+
+    pd.testing.assert_frame_equal(
+        read_partitioned_parquet_dataset(actual_context_root, years=(2014,)),
+        read_partitioned_parquet_dataset(expected_context_root, years=(2014,)),
+    )
+    pd.testing.assert_frame_equal(
+        read_partitioned_parquet_dataset(actual_universe_root, years=(2014,)),
+        read_partitioned_parquet_dataset(expected_universe_root, years=(2014,)),
+    )
+    for mask_kind in sorted(expected_masks):
+        pd.testing.assert_frame_equal(
+            read_partitioned_parquet_dataset(
+                actual_masks[mask_kind][0],
+                years=(2014,),
+            ),
+            read_partitioned_parquet_dataset(
+                expected_masks[mask_kind][0],
+                years=(2014,),
+            ),
+        )
 
 
 def test_a_share_panel_joins_stock_master_as_of_timestamp() -> None:
@@ -1538,6 +1687,88 @@ def test_a_share_panel_from_interim_applies_exact_end_date(tmp_path) -> None:
 
     assert rows == 1
     assert written["timestamp"].tolist() == [pd.Timestamp("2024-06-28")]
+
+
+def test_a_share_panel_asset_batches_preserve_next_session_boundary(
+    tmp_path,
+) -> None:
+    interim_root = tmp_path / "data" / "interim" / "csmar"
+    processed_root = tmp_path / "data" / "processed" / "a_share"
+    dates = pd.to_datetime(["2014-12-30", "2014-12-31", "2015-01-02"])
+    daily = pd.DataFrame(
+        [
+            _daily_market_row(str(date.date()), asset_id=asset_id, market_type=1)
+            for asset_id in ("000001", "000002")
+            for date in dates
+        ]
+    )
+    _write_interim_fixture(interim_root, "daily_market", daily)
+    _write_interim_fixture(
+        interim_root,
+        "stock_master",
+        pd.DataFrame(
+            [
+                _stock_master_row(
+                    asset_id=asset_id,
+                    listing_date="2010-01-01",
+                    status_change_date="2010-01-01",
+                    company_status="active",
+                    industry_code="I",
+                )
+                for asset_id in ("000001", "000002")
+            ]
+        ),
+    )
+    _write_interim_fixture(
+        interim_root,
+        "market_cap",
+        pd.DataFrame(
+            [
+                _market_cap_row(asset_id=asset_id, share_change_date="2010-01-01")
+                for asset_id in ("000001", "000002")
+            ]
+        ),
+    )
+    _write_interim_fixture(
+        interim_root,
+        "trading_calendar",
+        _trading_calendar_frame(
+            pd.date_range("2010-01-01", "2015-01-02"),
+            market_type=1,
+        ),
+    )
+
+    full_panel = panels.build_panel_frame_from_interim(
+        interim_root=interim_root,
+        start_year=2014,
+        end_year=2015,
+        min_listing_trading_days=1,
+    )
+    expected = panels._filter_panel_years(full_panel, start_year=2014, end_year=2014)
+    expected = panels._filter_panel_end_date(expected, end_date="2014-12-31")
+    expected = expected[
+        list(panels.a_share_processed_catalog().get("daily_panel").required_columns)
+    ].reset_index(drop=True)
+
+    output_root, rows = panels.build_panel_asset_batches_from_interim(
+        interim_root=interim_root,
+        processed_root=processed_root,
+        start_year=2014,
+        end_year=2014,
+        end_date="2014-12-31",
+        calculation_end_year=2015,
+        min_listing_trading_days=1,
+        asset_chunk_size=1,
+    )
+    actual = read_partitioned_parquet_dataset(output_root, years=(2014,))
+
+    assert rows == len(actual)
+    assert actual["timestamp"].max() == pd.Timestamp("2014-12-31")
+    assert actual.loc[
+        actual["timestamp"].eq(pd.Timestamp("2014-12-31")),
+        "can_enter",
+    ].all()
+    pd.testing.assert_frame_equal(actual, expected)
 
 
 def _daily_market_row(

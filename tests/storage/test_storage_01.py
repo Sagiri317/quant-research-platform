@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import quant_research_platform.storage.parquet as parquet_module
+import quant_research_platform.storage.datasets as datasets_module
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.fields import (
     platform_entity_time_key,
@@ -300,7 +300,7 @@ def test_processed_writer_resolves_spec_and_layout(tmp_path: Path) -> None:
     assert manifest["primary_key"] == ["market_id", "asset_id", "timestamp"]
 
 
-def test_processed_writer_manifest_records_targeted_parquet_stats(
+def test_processed_writer_rejects_non_finite_factor_values(
     tmp_path: Path,
 ) -> None:
     frame = pd.DataFrame(
@@ -332,33 +332,16 @@ def test_processed_writer_manifest_records_targeted_parquet_stats(
         )
     )
 
-    data_root = write_processed_data(
-        frame,
-        layout=StorageLayout(project_root=tmp_path),
-        catalog=catalog,
-        processed_data_id="x",
-    )
-    manifest = json.loads(
-        (data_root.parent / "_manifest" / "manifest.json").read_text(
-            encoding="utf-8"
+    with pytest.raises(ValueError, match="non_finite_columns: factor_b"):
+        write_processed_data(
+            frame,
+            layout=StorageLayout(project_root=tmp_path),
+            catalog=catalog,
+            processed_data_id="x",
         )
-    )
 
-    assert manifest["row_count"] == 2
-    assert manifest["file_count"] == 2
-    assert manifest["file_size_bytes"] > 0
-    assert manifest["partition_count"] == 2
-    assert manifest["date_min"] == "2014-01-02"
-    assert manifest["date_max"] == "2015-01-05"
-    assert manifest["duplicate_primary_key_count"] == 0
-    assert manifest["null_count_summary"] == {
-        "market_id": 0,
-        "asset_id": 0,
-        "timestamp": 0,
-    }
-    assert manifest["non_finite_count_summary"] == {"factor_b": 1}
-    assert manifest["factor_nan_profile"] == {"factor_a": 1}
-    assert manifest["validation_status"] == "fail"
+    artifact_root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
+    assert not artifact_root.exists()
 
 
 def test_layer_manifest_surfaces_dataset_validation_failure_from_targeted_stats(
@@ -1057,7 +1040,7 @@ def test_processed_writer_cleans_artifact_temp_root_after_parquet_failure(
         (path.parent / "partial.txt").write_text("partial\n", encoding="utf-8")
         raise RuntimeError("simulated_parquet_failure")
 
-    monkeypatch.setattr(parquet_module, "_write_parquet_file", fail_parquet_write)
+    monkeypatch.setattr(datasets_module, "_write_parquet_file", fail_parquet_write)
 
     with pytest.raises(RuntimeError, match="simulated_parquet_failure"):
         write_processed_data(
@@ -1083,7 +1066,7 @@ def test_interim_writer_cleans_artifact_temp_root_after_parquet_failure(
         (path.parent / "partial.txt").write_text("partial\n", encoding="utf-8")
         raise RuntimeError("simulated_parquet_failure")
 
-    monkeypatch.setattr(parquet_module, "_write_parquet_file", fail_parquet_write)
+    monkeypatch.setattr(datasets_module, "_write_parquet_file", fail_parquet_write)
 
     with pytest.raises(RuntimeError, match="simulated_parquet_failure"):
         write_interim_data(
@@ -1111,7 +1094,7 @@ def test_research_dataset_writer_cleans_artifact_temp_root_after_parquet_failure
         (path.parent / "partial.txt").write_text("partial\n", encoding="utf-8")
         raise RuntimeError("simulated_parquet_failure")
 
-    monkeypatch.setattr(parquet_module, "_write_parquet_file", fail_parquet_write)
+    monkeypatch.setattr(datasets_module, "_write_parquet_file", fail_parquet_write)
 
     with pytest.raises(RuntimeError, match="simulated_parquet_failure"):
         write_research_dataset(

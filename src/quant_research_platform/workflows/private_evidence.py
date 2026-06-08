@@ -273,7 +273,11 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
 
 
 def _assert_output_root_under_run(path: Path) -> None:
-    if ".run" not in Path(path).parts:
+    raw_parts = Path(path).parts
+    if ".." in raw_parts:
+        raise ValueError("output_root_must_be_under_run")
+    resolved_parts = Path(path).resolve(strict=False).parts
+    if ".run" not in resolved_parts:
         raise ValueError("output_root_must_be_under_run")
 
 

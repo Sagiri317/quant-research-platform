@@ -28,6 +28,32 @@ def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -
     assert list(final_root.parent.glob(".run.tmp-*")) == []
 
 
+def test_atomic_write_directory_retries_transient_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_root = tmp_path / "reports" / "private_real" / "a_share" / "run"
+    original_rename = Path.rename
+    calls = 0
+
+    def flaky_rename(self: Path, target: Path) -> Path:
+        nonlocal calls
+        if self.name.startswith(".tmp-") and Path(target) == final_root and calls == 0:
+            calls += 1
+            raise PermissionError(5, "Access is denied")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+    atomic_write_directory(
+        final_root,
+        lambda temp_root: (temp_root / "done.txt").write_text("ok\n", encoding="utf-8"),
+    )
+
+    assert calls == 1
+    assert (final_root / "done.txt").read_text(encoding="utf-8") == "ok\n"
+    assert list(final_root.parent.glob(".tmp-*")) == []
+
+
 def test_atomic_write_text_creates_nested_temp_parent(tmp_path: Path) -> None:
     final_path = tmp_path / "root" / "year=2014" / "part.txt"
 

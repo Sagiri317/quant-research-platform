@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 REQUIRED_AREAS = {
     "processed_panel_parity",
@@ -345,6 +346,67 @@ def test_aggregate_summary_checksum_is_invariant_to_chunking() -> None:
     assert "numeric_sum" not in full_summary.content_summary["timestamp"]
     assert "numeric_sum" not in full_summary.content_summary["value"]
     assert chunk_summary.aggregate_checksum == full_summary.aggregate_checksum
+
+
+def test_aggregate_summary_detects_duplicate_keys_across_chunks() -> None:
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
+
+    first = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset-01"],
+            "timestamp": [pd.Timestamp("2025-12-31")],
+            "value": [1.0],
+        }
+    )
+    second = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset-01"],
+            "timestamp": [pd.Timestamp("2025-12-31")],
+            "value": [2.0],
+        }
+    )
+
+    summary = private_aggregate._summarize_frames((first, second))
+
+    assert summary.row_count == 2
+    assert summary.key_count == 1
+    assert summary.duplicate_key_count == 1
+
+
+def test_parquet_root_summary_uses_streaming_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
+
+    data_root = tmp_path / "data"
+    year_root = data_root / "year=2025"
+    year_root.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "asset_id": ["asset-01", "asset-02"],
+            "timestamp": pd.to_datetime(["2025-01-02", "2025-01-03"]),
+            "value": [1.0, 2.0],
+        }
+    ).to_parquet(year_root / "part-000.parquet", index=False)
+    monkeypatch.setattr(
+        private_aggregate.pd,
+        "read_parquet",
+        lambda *args, **kwargs: pytest.fail("full_parquet_read"),
+    )
+
+    summary = private_aggregate._summarize_parquet_root(data_root, years=(2025,))
+
+    assert summary.row_count == 2
+    assert summary.key_count == 2
+    assert summary.period == "2025-01-02 through 2025-01-03"
 
 
 def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> None:

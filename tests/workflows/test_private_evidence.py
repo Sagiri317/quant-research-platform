@@ -26,6 +26,11 @@ def test_private_evidence_workflow_rejects_output_root_outside_run(tmp_path):
         run_private_evidence(config)
 
 
+def test_private_evidence_output_root_rejects_traversal_outside_run(tmp_path):
+    with pytest.raises(ValueError, match="output_root_must_be_under_run"):
+        module._assert_output_root_under_run(tmp_path / ".run" / ".." / "outside")
+
+
 def test_private_evidence_workflow_rejects_existing_output_root(tmp_path):
     output_root = tmp_path / ".run" / "s1"
     output_root.mkdir(parents=True)

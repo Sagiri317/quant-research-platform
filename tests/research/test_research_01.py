@@ -39,6 +39,7 @@ from quant_research_platform.research.datasets import (
     validate_evaluation_input,
     validate_prediction_input,
 )
+from quant_research_platform.research.datasets import assembler as assembler_module
 from quant_research_platform.research.evaluations.engine import evaluate_factor_frame
 from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
@@ -129,7 +130,10 @@ def test_research_dataset_assemble_read_validate(tmp_path: Path) -> None:
     }
 
 
-def test_research_dataset_assembles_from_processed_specs(tmp_path: Path) -> None:
+def test_research_dataset_assembles_from_processed_specs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     processed_root = tmp_path / "data" / "processed" / "a_share"
     processed_catalog = ProcessedDataCatalog()
     processed_catalog.register(
@@ -202,6 +206,12 @@ def test_research_dataset_assembles_from_processed_specs(tmp_path: Path) -> None
         layout=layout,
         catalog=processed_catalog,
         processed_data_id="demo_labels",
+    )
+    monkeypatch.setattr(
+        assembler_module,
+        "read_partitioned_parquet_dataset",
+        lambda *args, **kwargs: pytest.fail("research_dataset_full_read"),
+        raising=False,
     )
 
     assemble_research_dataset_from_processed(

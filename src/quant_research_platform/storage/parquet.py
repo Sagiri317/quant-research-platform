@@ -8,7 +8,6 @@ from typing import Protocol
 
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -21,6 +20,15 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.runtime.privacy import is_private_boundary_path
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
+)
+from quant_research_platform.storage.datasets import (
+    DatasetAccessMode,
+    read_dataset,
+    write_dataset,
+    write_dataset_contents,
+)
+from quant_research_platform.storage.datasets import (
+    parquet_dataset_columns as _dataset_columns,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -46,14 +54,17 @@ def write_interim_data(
     artifact_root = layout.interim_data_root(spec.source_id, spec.interim_data_id)
 
     def _write(temp_root: Path) -> None:
-        _write_partitioned_parquet_dataset_contents(
+        accumulator = write_dataset_contents(
             frame,
             temp_root / "data",
             catalog=catalog,
             data_id=interim_data_id,
         )
         _write_data_spec(temp_root / "spec.json", spec)
-        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec, frame)
+        write_internal_artifact_manifest(
+            temp_root / "_manifest" / "manifest.json",
+            accumulator.payload(),
+        )
 
     atomic_write_directory(artifact_root, _write)
     return artifact_root / "data"
@@ -76,14 +87,17 @@ def write_processed_data(
     )
 
     def _write(temp_root: Path) -> None:
-        _write_partitioned_parquet_dataset_contents(
+        accumulator = write_dataset_contents(
             frame,
             temp_root / "data",
             catalog=catalog,
             data_id=processed_data_id,
         )
         _write_data_spec(temp_root / "spec.json", spec)
-        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec, frame)
+        write_internal_artifact_manifest(
+            temp_root / "_manifest" / "manifest.json",
+            accumulator.payload(),
+        )
 
     atomic_write_directory(artifact_root, _write)
     return artifact_root / "data"
@@ -102,14 +116,17 @@ def write_research_dataset(
     artifact_root = layout.research_dataset_root(spec.market_id, spec.dataset_id)
 
     def _write(temp_root: Path) -> None:
-        _write_partitioned_parquet_dataset_contents(
+        accumulator = write_dataset_contents(
             frame,
             temp_root / "data",
             catalog=catalog,
             data_id=dataset_id,
         )
         _write_data_spec(temp_root / "spec.json", spec)
-        _write_data_manifest(temp_root / "_manifest" / "manifest.json", spec, frame)
+        write_internal_artifact_manifest(
+            temp_root / "_manifest" / "manifest.json",
+            accumulator.payload(),
+        )
 
     atomic_write_directory(artifact_root, _write)
     return artifact_root / "data"
@@ -122,20 +139,13 @@ def write_partitioned_parquet_dataset(
     catalog: DataSpecProvider,
     data_id: str,
 ) -> Path:
-    spec = catalog.get(data_id)
-    timestamp_column = validate_parquet_dataset_write(frame, root, spec)
-    final_root = Path(root)
-
-    def _write(temp_root: Path) -> None:
-        _write_partitioned_parquet_files(
-            frame,
-            temp_root,
-            timestamp_column=timestamp_column,
-            partition_columns=spec.partition_columns,
-        )
-
-    atomic_write_directory(final_root, _write)
-    return root
+    return write_dataset(
+        frame,
+        root,
+        catalog=catalog,
+        data_id=data_id,
+        access_mode=DatasetAccessMode.MATERIALIZED,
+    )
 
 
 def _write_partitioned_parquet_dataset_contents(
@@ -164,25 +174,19 @@ def read_partitioned_parquet_dataset(
 ) -> pd.DataFrame:
     """Read a partitioned parquet dataset written by QRP storage helpers."""
 
-    paths = _parquet_part_paths(root, years=years)
-    if not paths:
-        raise FileNotFoundError(root)
-    return pd.concat(
-        [
-            pd.read_parquet(path, columns=columns, engine="pyarrow")
-            for path in paths
-        ],
-        ignore_index=True,
+    result = read_dataset(
+        root,
+        years=years,
+        columns=columns,
+        access_mode=DatasetAccessMode.MATERIALIZED,
     )
+    return result
 
 
 def parquet_dataset_columns(root: Path) -> tuple[str, ...]:
     """Return columns from the first parquet part in a partitioned dataset."""
 
-    paths = _parquet_part_paths(root, years=None)
-    if not paths:
-        raise FileNotFoundError(root)
-    return tuple(pq.ParquetFile(paths[0]).schema.names)
+    return _dataset_columns(root)
 
 
 def _parquet_part_paths(root: Path, *, years: tuple[int, ...] | None) -> list[Path]:

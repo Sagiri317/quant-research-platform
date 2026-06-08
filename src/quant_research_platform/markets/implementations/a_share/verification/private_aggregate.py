@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
@@ -644,7 +645,7 @@ def _summarize_parquet_root(
     files = _parquet_files_for_summary(root, years=years)
     if not files:
         raise FileNotFoundError("private_aggregate_input_missing")
-    return _summarize_frames(pd.read_parquet(file) for file in files)
+    return _summarize_frames(_iter_parquet_batches(files))
 
 
 def _parquet_files_for_summary(
@@ -661,10 +662,18 @@ def _parquet_files_for_summary(
     return tuple(paths)
 
 
+def _iter_parquet_batches(files: Iterable[Path]) -> Iterator[pd.DataFrame]:
+    for file in files:
+        parquet_file = pq.ParquetFile(file)
+        for batch in parquet_file.iter_batches():
+            yield batch.to_pandas()
+
+
 def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
     row_count = 0
     key_count = 0
     duplicate_key_count = 0
+    seen_key_hashes: set[int] = set()
     columns: set[str] = set()
     dtype_summary: dict[str, set[str]] = {}
     null_summary: dict[str, int] = {}
@@ -683,8 +692,17 @@ def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
             _update_content_summary(content_summary, column_name, frame[column])
         key_columns = _available_key_columns(frame)
         if key_columns:
-            duplicate_key_count += int(frame.duplicated(key_columns).sum())
-            key_count += int(len(frame.drop_duplicates(key_columns)))
+            key_hashes = pd.util.hash_pandas_object(
+                frame.loc[:, key_columns],
+                index=False,
+            ).to_numpy(dtype="uint64")
+            for key_hash in key_hashes:
+                value = int(key_hash)
+                if value in seen_key_hashes:
+                    duplicate_key_count += 1
+                else:
+                    seen_key_hashes.add(value)
+            key_count = len(seen_key_hashes)
         else:
             key_count += int(len(frame))
         date_column = _date_column(frame)
