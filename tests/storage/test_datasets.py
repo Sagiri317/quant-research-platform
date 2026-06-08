@@ -345,22 +345,74 @@ def test_read_dataset_corrupt_manifest_fails_closed(tmp_path: Path) -> None:
         read_dataset(root)
 
 
-def test_read_dataset_new_manifest_runtime_path_avoids_schema_scan(
+def test_read_dataset_new_manifest_runtime_path_validates_footer_schema(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _artifact_root(tmp_path)
     write_dataset(root, _frame(), spec=_spec())
+    calls = {"validated_schema": 0}
+    original = datasets._validated_schema
 
-    def schema_scan_blocked(paths):
-        raise AssertionError("read_dataset runtime path must not full-scan schema")
+    def counting_validated_schema(paths):
+        calls["validated_schema"] += 1
+        return original(paths)
 
-    monkeypatch.setattr(datasets, "_validated_schema", schema_scan_blocked)
+    monkeypatch.setattr(datasets, "_validated_schema", counting_validated_schema)
 
     frame = read_dataset(root)
 
+    assert calls["validated_schema"] == 1
     assert len(frame) == 3
     assert list(frame.columns) == ["market_id", "asset_id", "timestamp", "value"]
+
+
+def test_read_dataset_manifest_schema_hash_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_hash"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest_schema_hash_mismatch"):
+        read_dataset(root)
+
+
+def test_read_dataset_manifest_columns_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["columns"] = ["market_id", "asset_id", "timestamp", "bogus"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest_columns_mismatch"):
+        read_dataset(root)
+
+
+def test_read_dataset_runtime_path_detects_actual_parquet_schema_mismatch(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+    mismatch_frame = _frame().assign(extra=1)
+    mismatch_path = root / "data" / "year=2016" / "part-000.parquet"
+    mismatch_path.parent.mkdir(parents=True)
+    mismatch_frame.to_parquet(mismatch_path, index=False)
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_count"] = int(manifest["file_count"]) + 1
+    manifest["row_count"] = int(manifest["row_count"]) + len(mismatch_frame)
+    manifest["partition_row_counts"]["year=2016"] = len(mismatch_frame)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dataset_schema_mismatch"):
+        read_dataset(root)
 
 
 def test_read_dataset_manifest_row_count_mismatch_fails_closed(

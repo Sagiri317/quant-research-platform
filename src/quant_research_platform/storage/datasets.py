@@ -708,12 +708,19 @@ def _runtime_inspection(root: Path) -> DatasetInspection:
         paths=paths,
         validate_row_counts=True,
     )
+    schema = _validated_schema(paths)
+    columns = tuple(name for name, _ in schema)
+    schema_hash = _sha256_json(schema)
+    if tuple(str(column) for column in manifest["columns"]) != columns:
+        raise ValueError("manifest_columns_mismatch")
+    if str(manifest["schema_hash"]) != schema_hash:
+        raise ValueError("manifest_schema_hash_mismatch")
     return DatasetInspection(
         root=root,
         data_root=data_root,
         spec=spec_payload,
-        columns=tuple(str(column) for column in manifest["columns"]),
-        schema_hash=str(manifest["schema_hash"]),
+        columns=columns,
+        schema_hash=schema_hash,
         file_count=int(manifest["file_count"]),
         manifest=manifest,
     )
