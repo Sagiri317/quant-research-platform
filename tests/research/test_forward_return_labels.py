@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.markets.implementations.a_share.labels import (
-    build_labels,
+from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_label_catalog,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -82,12 +82,18 @@ def test_forward_return_labels_treat_non_finite_prices_as_invalid() -> None:
     assert not np.isinf(result[["forward_return_1d"]].to_numpy(dtype="float64")).any()
 
 
-def test_a_share_label_wrapper_uses_official_horizons_and_masks_invalid_entry() -> None:
+def test_a_share_label_catalog_horizons_mask_invalid_entry() -> None:
     panel = make_synthetic_daily_panel(sessions=130, assets=("asset_a",))
     ordered_dates = panel.sort_values("timestamp")["timestamp"].tolist()
     panel.loc[panel["timestamp"].eq(ordered_dates[1]), "adj_open"] = 0.0
 
-    result = build_labels.calculate_panel_labels(panel.sample(frac=1.0, random_state=3))
+    horizons = tuple(
+        definition.horizon for definition in a_share_label_catalog().list()
+    )
+    result = add_forward_return_labels(
+        panel.sample(frac=1.0, random_state=3),
+        horizons=horizons,
+    )
     result = result.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
     expected = result.loc[3, "adj_open"] / result.loc[2, "adj_open"] - 1.0
     label_columns = [

@@ -271,7 +271,7 @@ def read_dataset(
     partition_filter: Mapping[str, object] | None = None,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
     root = _require_artifact_root(Path(dataset_root))
-    inspection = _runtime_inspection(root)
+    inspection = inspect_dataset(root)
     selected_columns = _resolve_columns(inspection, columns)
 
     chunks = _read_dataset_chunks(
@@ -300,31 +300,34 @@ def inspect_dataset(dataset_root: Path) -> DatasetInspection:
     if not data_root.is_dir():
         raise ValueError("dataset_data_dir_missing")
     spec_payload = read_manifest(spec_path)
-    manifest = read_manifest(manifest_path) if manifest_path.is_file() else {}
+    if not manifest_path.is_file():
+        raise ValueError("dataset_manifest_missing")
+    manifest = read_manifest(manifest_path)
+    if not _manifest_has_runtime_metadata(manifest):
+        raise ValueError("manifest_runtime_metadata_missing")
     paths = _parquet_part_paths(data_root, partition_filter=None, spec=spec_payload)
     if not paths:
         raise ValueError("dataset_data_dir_missing")
     schema = _validated_schema(paths)
     columns = tuple(name for name, _ in schema)
     schema_hash = _sha256_json(schema)
-    if _manifest_has_runtime_metadata(manifest):
-        _validate_manifest_runtime_metadata(
-            manifest,
-            data_root=data_root,
-            paths=paths,
-            validate_row_counts=True,
-        )
-        if tuple(str(column) for column in manifest["columns"]) != columns:
-            raise ValueError("manifest_columns_mismatch")
-        if str(manifest["schema_hash"]) != schema_hash:
-            raise ValueError("manifest_schema_hash_mismatch")
+    _validate_manifest_runtime_metadata(
+        manifest,
+        data_root=data_root,
+        paths=paths,
+        validate_row_counts=True,
+    )
+    if tuple(str(column) for column in manifest["columns"]) != columns:
+        raise ValueError("manifest_columns_mismatch")
+    if str(manifest["schema_hash"]) != schema_hash:
+        raise ValueError("manifest_schema_hash_mismatch")
     return DatasetInspection(
         root=root,
         data_root=data_root,
         spec=spec_payload,
         columns=columns,
         schema_hash=schema_hash,
-        file_count=len(paths),
+        file_count=int(manifest["file_count"]),
         manifest=manifest,
     )
 
@@ -343,32 +346,11 @@ def _dataset_planning_metadata(
     if not data_root.is_dir():
         raise ValueError("dataset_data_dir_missing")
     spec_payload = read_manifest(spec_path)
-    if manifest_path.is_file():
-        manifest = read_manifest(manifest_path)
-        if _manifest_has_runtime_metadata(manifest):
-            paths = _parquet_part_paths(
-                data_root,
-                partition_filter=partition_filter,
-                spec=spec_payload,
-            )
-            if not paths:
-                raise ValueError("dataset_data_dir_missing")
-            _, _, partition_counts = _validate_manifest_runtime_metadata_shape(manifest)
-            partitions = tuple(
-                sorted({_relative_partition_label(data_root, path) for path in paths})
-            )
-            missing_counts = [
-                partition
-                for partition in partitions
-                if partition not in partition_counts
-            ]
-            if missing_counts:
-                raise ValueError("manifest_partition_row_counts_mismatch")
-            return _DatasetPlanningMetadata(
-                row_count=sum(partition_counts[partition] for partition in partitions),
-                file_count=len(paths),
-                partitions=partitions,
-            )
+    if not manifest_path.is_file():
+        raise ValueError("dataset_manifest_missing")
+    manifest = read_manifest(manifest_path)
+    if not _manifest_has_runtime_metadata(manifest):
+        raise ValueError("manifest_runtime_metadata_missing")
     paths = _parquet_part_paths(
         data_root,
         partition_filter=partition_filter,
@@ -376,21 +358,19 @@ def _dataset_planning_metadata(
     )
     if not paths:
         raise ValueError("dataset_data_dir_missing")
-    row_count = 0
-    schemas: list[tuple[tuple[str, str], ...]] = []
-    partitions: set[str] = set()
-    for path in paths:
-        parquet_file = pq.ParquetFile(path)
-        schemas.append(_canonical_schema_from_file(parquet_file))
-        row_count += int(parquet_file.metadata.num_rows)
-        partitions.add(_relative_partition_label(data_root, path))
-    first_schema = schemas[0]
-    if any(schema != first_schema for schema in schemas[1:]):
-        raise ValueError("dataset_schema_mismatch")
+    _, _, partition_counts = _validate_manifest_runtime_metadata_shape(manifest)
+    partitions = tuple(
+        sorted({_relative_partition_label(data_root, path) for path in paths})
+    )
+    missing_counts = [
+        partition for partition in partitions if partition not in partition_counts
+    ]
+    if missing_counts:
+        raise ValueError("manifest_partition_row_counts_mismatch")
     return _DatasetPlanningMetadata(
-        row_count=row_count,
+        row_count=sum(partition_counts[partition] for partition in partitions),
         file_count=len(paths),
-        partitions=tuple(sorted(partitions)),
+        partitions=partitions,
     )
 
 
@@ -683,47 +663,6 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
         raise ValueError("dataset_primary_key_null")
     if any(int(count) > 0 for count in accumulator.non_finite_count_summary.values()):
         raise ValueError("dataset_infinite_value")
-
-
-def _runtime_inspection(root: Path) -> DatasetInspection:
-    spec_path = root / "spec.json"
-    data_root = root / "data"
-    manifest_path = root / "_manifest" / "manifest.json"
-    if not spec_path.is_file():
-        raise ValueError("dataset_spec_missing")
-    if not data_root.is_dir():
-        raise ValueError("dataset_data_dir_missing")
-    spec_payload = read_manifest(spec_path)
-    if not manifest_path.is_file():
-        return inspect_dataset(root)
-    manifest = read_manifest(manifest_path)
-    if not _manifest_has_runtime_metadata(manifest):
-        return inspect_dataset(root)
-    paths = _parquet_part_paths(data_root, partition_filter=None, spec=spec_payload)
-    if not paths:
-        raise ValueError("dataset_data_dir_missing")
-    _validate_manifest_runtime_metadata(
-        manifest,
-        data_root=data_root,
-        paths=paths,
-        validate_row_counts=True,
-    )
-    schema = _validated_schema(paths)
-    columns = tuple(name for name, _ in schema)
-    schema_hash = _sha256_json(schema)
-    if tuple(str(column) for column in manifest["columns"]) != columns:
-        raise ValueError("manifest_columns_mismatch")
-    if str(manifest["schema_hash"]) != schema_hash:
-        raise ValueError("manifest_schema_hash_mismatch")
-    return DatasetInspection(
-        root=root,
-        data_root=data_root,
-        spec=spec_payload,
-        columns=columns,
-        schema_hash=schema_hash,
-        file_count=int(manifest["file_count"]),
-        manifest=manifest,
-    )
 
 
 def _validate_written_artifact(root: Path, accumulator: _WriteStats) -> None:

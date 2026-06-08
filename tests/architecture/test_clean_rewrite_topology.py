@@ -242,6 +242,61 @@ def test_a_share_factor_builder_has_no_legacy_partition_fallback() -> None:
     assert "year={start_year}_{end_year}" not in text
 
 
+def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
+    retired_functions = {
+        SOURCE_ROOT / "markets/implementations/a_share/processed/panels.py": {
+            "_legacy_build_panel_frame_from_interim",
+            "build_panel_frame_from_interim",
+            "write_panel_processed_data",
+            "build_panel_from_interim",
+            "_filter_panel_years",
+            "_filter_panel_end_date",
+        },
+        SOURCE_ROOT / "markets/implementations/a_share/processed/contexts.py": {
+            "select_context_columns",
+            "write_contexts",
+        },
+        SOURCE_ROOT / "markets/implementations/a_share/universes/build.py": {
+            "select_universe_columns",
+            "write_universe",
+        },
+        SOURCE_ROOT / "markets/implementations/a_share/masks/build.py": {
+            "write_masks",
+        },
+        SOURCE_ROOT / "markets/implementations/a_share/factors/build_factors.py": {
+            "calculate_panel_factors",
+            "calculate_price_volume_factor_full",
+            "_factor_output_frame",
+            "_factor_panel_input_columns",
+            "read_panel",
+            "read_full_panel_for_factor_build",
+            "select_slim_factor_columns",
+        },
+        SOURCE_ROOT / "markets/implementations/a_share/labels/build_labels.py": {
+            "calculate_forward_returns_full",
+            "calculate_panel_labels",
+            "_label_frame_with_forward_returns",
+            "_label_output_frame",
+            "select_existing_columns",
+            "select_label_columns",
+            "write_forward_labels",
+        },
+        SOURCE_ROOT / "markets/implementations/a_share/processed/materializer.py": {
+            "_read_processed_panel",
+        },
+    }
+    hits: list[str] = []
+    for path, names in retired_functions.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        hits.extend(
+            f"{path}:{node.lineno}: {node.name}"
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in names
+        )
+
+    assert hits == []
+
+
 def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
     path = SOURCE_ROOT / "sources/csmar/__init__.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

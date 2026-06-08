@@ -26,11 +26,17 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
 )
 from quant_research_platform.storage.datasets import (
-    DatasetReadMode,
-    _dataset_planning_metadata,
     inspect_dataset,
     read_dataset,
     write_dataset,
+)
+
+from ._dataset_helpers import (
+    chunked_values,
+    dataset_asset_ids,
+    dataset_row_count,
+    read_dataset_asset_chunk,
+    year_partition_filter,
 )
 
 _CANONICAL_NAMES = canonical_field_names()
@@ -356,48 +362,6 @@ def _first_static_stock_value(
     return values.to_dict()
 
 
-def write_panel_processed_data(
-    frame: pd.DataFrame,
-    *,
-    processed_root: Path,
-) -> Path:
-    """Persist the A-share daily panel through the processed-data catalog."""
-
-    catalog = a_share_processed_catalog()
-    spec = catalog.get("daily_panel")
-    output = frame[list(spec.required_columns)].copy()
-    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
-        spec.market_id,
-        spec.category,
-        spec.processed_data_id,
-    )
-    write_dataset(artifact_root, output, spec=spec)
-    return artifact_root
-
-
-def build_panel_from_interim(
-    *,
-    interim_root: Path,
-    processed_root: Path,
-    start_year: int,
-    end_year: int,
-    end_date: str,
-    calculation_end_year: int | None = None,
-    min_listing_trading_days: int = 120,
-) -> tuple[Path, int]:
-    """Build a partitioned 0.1 panel from canonical interim parquet data."""
-
-    return build_panel_asset_batches_from_interim(
-        interim_root=interim_root,
-        processed_root=processed_root,
-        start_year=start_year,
-        end_year=end_year,
-        end_date=end_date,
-        calculation_end_year=calculation_end_year,
-        min_listing_trading_days=min_listing_trading_days,
-    )
-
-
 def build_panel_asset_batches_from_interim(
     *,
     interim_root: Path,
@@ -423,7 +387,12 @@ def build_panel_asset_batches_from_interim(
         raise
     daily_root = Path(interim_root) / "daily_market"
     years = tuple(range(start_year, output_end_year + 1))
-    asset_ids = _daily_market_asset_ids(daily_root, years=years)
+    asset_ids = dataset_asset_ids(
+        daily_root,
+        years=years,
+        error_code="missing_daily_market_interim",
+    )
+    daily_columns = tuple(inspect_dataset(daily_root).columns)
     chunk_size = asset_chunk_size or _planned_daily_panel_asset_chunk_size(
         daily_root=daily_root,
         years=years,
@@ -436,10 +405,11 @@ def build_panel_asset_batches_from_interim(
 
     def _output_chunks() -> Iterator[pd.DataFrame]:
         nonlocal row_count
-        for asset_chunk in _chunked(asset_ids, chunk_size):
-            daily = _read_daily_market_asset_chunk(
+        for asset_chunk in chunked_values(asset_ids, chunk_size):
+            daily = read_dataset_asset_chunk(
                 daily_root,
                 years=years,
+                columns=daily_columns,
                 asset_ids=asset_chunk,
             )
             if daily.empty:
@@ -452,12 +422,12 @@ def build_panel_asset_batches_from_interim(
                 min_listing_trading_days=min_listing_trading_days,
             )
             panel["timestamp"] = pd.to_datetime(panel["timestamp"])
-            output = _filter_panel_years(
-                panel,
-                start_year=start_year,
-                end_year=end_year,
-            )
-            output = _filter_panel_end_date(output, end_date=end_date)
+            output = panel.loc[
+                panel["timestamp"].dt.year.between(start_year, end_year)
+            ].reset_index(drop=True)
+            output = output.loc[
+                output["timestamp"] <= pd.Timestamp(end_date)
+            ].reset_index(drop=True)
             output = output.loc[:, list(spec.required_columns)].copy()
             output = output.sort_values(list(spec.primary_key)).reset_index(drop=True)
             if output.empty:
@@ -478,59 +448,6 @@ def build_panel_asset_batches_from_interim(
     return artifact_root, row_count
 
 
-def build_panel_frame_from_interim(
-    *,
-    interim_root: Path,
-    start_year: int,
-    end_year: int,
-    min_listing_trading_days: int = 120,
-) -> pd.DataFrame:
-    """Build an in-memory A-share panel from canonical interim parquet data."""
-
-    return _legacy_build_panel_frame_from_interim(
-        interim_root=interim_root,
-        start_year=start_year,
-        end_year=end_year,
-        min_listing_trading_days=min_listing_trading_days,
-    )
-
-
-def _legacy_build_panel_frame_from_interim(
-    *,
-    interim_root: Path,
-    start_year: int,
-    end_year: int,
-    min_listing_trading_days: int = 120,
-) -> pd.DataFrame:
-    """Build an in-memory A-share panel from canonical interim parquet data."""
-
-    stock_master = _read_interim_data(interim_root, "stock_master")
-    market_cap = _read_interim_data(interim_root, "market_cap")
-    try:
-        trading_calendar = _read_interim_data(interim_root, "trading_calendar")
-    except (FileNotFoundError, ValueError) as exc:
-        if _is_missing_dataset_artifact_error(exc):
-            raise ValueError("missing_trading_calendar_interim") from exc
-        raise
-    daily = _read_interim_data(
-        interim_root,
-        "daily_market",
-        years=tuple(range(start_year, end_year + 1)),
-    )
-    panel = build_research_panel(
-        daily,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=trading_calendar,
-        min_listing_trading_days=min_listing_trading_days,
-    )
-    panel["timestamp"] = pd.to_datetime(panel["timestamp"])
-    panel = panel.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
-        drop=True
-    )
-    return panel
-
-
 def _read_interim_data(
     interim_root: Path,
     interim_data_id: str,
@@ -538,7 +455,7 @@ def _read_interim_data(
     years: tuple[int, ...] | None = None,
 ) -> pd.DataFrame:
     artifact_root = interim_root / interim_data_id
-    return read_dataset(artifact_root, partition_filter=_year_filter(years))
+    return read_dataset(artifact_root, partition_filter=year_partition_filter(years))
 
 
 def _is_missing_dataset_artifact_error(exc: Exception) -> bool:
@@ -547,50 +464,6 @@ def _is_missing_dataset_artifact_error(exc: Exception) -> bool:
         "dataset_spec_missing",
         "dataset_data_dir_missing",
     }
-
-
-def _daily_market_asset_ids(
-    data_root: Path,
-    *,
-    years: tuple[int, ...],
-) -> tuple[str, ...]:
-    asset_ids: set[str] = set()
-    chunks = read_dataset(
-        data_root,
-        partition_filter=_year_filter(years),
-        columns=["asset_id"],
-        mode=DatasetReadMode.CHUNKED,
-    )
-    for chunk in chunks:
-        asset_ids.update(str(value) for value in chunk["asset_id"].dropna().unique())
-    if not asset_ids:
-        raise ValueError("missing_daily_market_interim")
-    return tuple(sorted(asset_ids))
-
-
-def _read_daily_market_asset_chunk(
-    data_root: Path,
-    *,
-    years: tuple[int, ...],
-    asset_ids: tuple[str, ...],
-) -> pd.DataFrame:
-    frames: list[pd.DataFrame] = []
-    asset_id_set = set(asset_ids)
-    chunks = read_dataset(
-        data_root,
-        partition_filter=_year_filter(years),
-        mode=DatasetReadMode.CHUNKED,
-    )
-    for chunk in chunks:
-        filtered = chunk.loc[chunk["asset_id"].isin(asset_id_set)]
-        if not filtered.empty:
-            frames.append(filtered)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True).sort_values(
-        ["market_id", "asset_id", "timestamp"],
-        kind="mergesort",
-    )
 
 
 def _filter_asset_frame(
@@ -609,7 +482,7 @@ def _planned_daily_panel_asset_chunk_size(
     asset_ids: tuple[str, ...],
     resource_policy: RuntimeResourcePolicy | None,
 ) -> int:
-    total_rows = _interim_row_count(daily_root, years=years)
+    total_rows = dataset_row_count(daily_root, years=years)
     rows_per_asset = max(1, total_rows // max(1, len(asset_ids)))
     input_width = max(1, len(inspect_dataset(daily_root).columns))
     output_width = len(a_share_processed_catalog().get("daily_panel").required_columns)
@@ -624,42 +497,3 @@ def _planned_daily_panel_asset_chunk_size(
         disjoint=True,
     )
     return plan.chunk_size
-
-
-def _interim_row_count(data_root: Path, *, years: tuple[int, ...]) -> int:
-    return _dataset_planning_metadata(
-        data_root,
-        partition_filter=_year_filter(years),
-    ).row_count
-
-
-def _chunked(values: tuple[str, ...], size: int) -> Iterator[tuple[str, ...]]:
-    for index in range(0, len(values), max(1, size)):
-        yield values[index : index + max(1, size)]
-
-
-def _filter_panel_years(
-    frame: pd.DataFrame,
-    *,
-    start_year: int,
-    end_year: int,
-) -> pd.DataFrame:
-    result = frame.copy()
-    result["timestamp"] = pd.to_datetime(result["timestamp"])
-    return result.loc[
-        result["timestamp"].dt.year.between(start_year, end_year)
-    ].reset_index(drop=True)
-
-
-def _filter_panel_end_date(frame: pd.DataFrame, *, end_date: str) -> pd.DataFrame:
-    result = frame.copy()
-    result["timestamp"] = pd.to_datetime(result["timestamp"])
-    return result.loc[result["timestamp"] <= pd.Timestamp(end_date)].reset_index(
-        drop=True
-    )
-
-
-def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
-    if years is None:
-        return None
-    return {"year": years}

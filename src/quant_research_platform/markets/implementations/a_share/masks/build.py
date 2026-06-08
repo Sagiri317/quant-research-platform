@@ -18,6 +18,10 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 
+from ..processed._dataset_helpers import (
+    filter_years_sorted,
+)
+
 MASK_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     "as_of": ("a_share_as_of", ("eligible",)),
     "execution": ("a_share_execution", ("can_enter", "can_exit")),
@@ -28,33 +32,6 @@ MASK_KEY_COLUMNS: tuple[str, ...] = (
     "asset_id",
     "timestamp",
 )
-
-
-def write_masks(
-    frame: pd.DataFrame,
-    *,
-    processed_root: Path,
-    start_year: int,
-    end_year: int,
-) -> dict[str, tuple[Path, int]]:
-    outputs: dict[str, tuple[Path, int]] = {}
-    for mask_kind, (processed_data_id, mask_columns) in MASK_SPECS.items():
-        mask_frame = _filter_years(
-            _select_mask_columns(frame, mask_columns),
-            start_year,
-            end_year,
-        )
-        catalog = a_share_processed_catalog()
-        spec = catalog.get(processed_data_id)
-        mask_frame = mask_frame[list(spec.required_columns)].copy()
-        artifact_root = layout_from_processed_root(processed_root).processed_data_root(
-            spec.market_id,
-            spec.category,
-            spec.processed_data_id,
-        )
-        write_dataset(artifact_root, mask_frame, spec=spec)
-        outputs[mask_kind] = (artifact_root, len(mask_frame))
-    return outputs
 
 
 def write_masks_from_panel_dataset(
@@ -102,12 +79,13 @@ def _write_mask_from_panel_dataset(
             mode=DatasetReadMode.CHUNKED,
         )
         for frame in frames:
-            mask_frame = _filter_years(
-                _select_mask_columns(frame, mask_columns),
-                start_year,
-                end_year,
+            mask_frame = _mask_frame_from_panel(
+                frame,
+                processed_data_id=processed_data_id,
+                mask_columns=mask_columns,
+                start_year=start_year,
+                end_year=end_year,
             )
-            mask_frame = mask_frame[list(spec.required_columns)].copy()
             if mask_frame.empty:
                 continue
             row_count += len(mask_frame)
@@ -126,6 +104,23 @@ def _write_mask_from_panel_dataset(
     return artifact_root, row_count
 
 
+def _mask_frame_from_panel(
+    frame: pd.DataFrame,
+    *,
+    processed_data_id: str,
+    mask_columns: tuple[str, ...],
+    start_year: int,
+    end_year: int,
+) -> pd.DataFrame:
+    spec = a_share_processed_catalog().get(processed_data_id)
+    mask_frame = filter_years_sorted(
+        _select_mask_columns(frame, mask_columns),
+        start_year=start_year,
+        end_year=end_year,
+    )
+    return mask_frame[list(spec.required_columns)].copy()
+
+
 def _select_mask_columns(
     frame: pd.DataFrame,
     mask_columns: tuple[str, ...],
@@ -138,17 +133,8 @@ def _select_mask_columns(
     return frame[columns].copy()
 
 
-def _filter_years(frame: pd.DataFrame, start_year: int, end_year: int) -> pd.DataFrame:
-    result = frame.copy()
-    result["timestamp"] = pd.to_datetime(result["timestamp"])
-    result = result.loc[result["timestamp"].dt.year.between(start_year, end_year)]
-    sort_columns = ["market_id", "asset_id", "timestamp"]
-    return result.sort_values(sort_columns).reset_index(drop=True)
-
-
 __all__ = [
     "MASK_KEY_COLUMNS",
     "MASK_SPECS",
-    "write_masks",
     "write_masks_from_panel_dataset",
 ]

@@ -10,7 +10,6 @@ from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_factor_catalog,
     a_share_price_volume_factor_columns,
-    a_share_price_volume_panel_input_columns,
     a_share_processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.factors import (
@@ -255,16 +254,15 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
         "trading_calendar",
         _trading_calendar_frame(panel["timestamp"], market_type=1),
     )
-    factored = build_factors.calculate_panel_factors(panel, windows=(2,))
-    labels = build_labels.calculate_panel_labels(panel)
-    factor_path, factor_rows = build_factors.calculate_price_volume_factor_full(
-        interim_root=interim_root,
-        processed_root=processed_root,
-        start_year=2014,
-        end_year=2014,
+    factor_path, factor_rows = (
+        build_factors.calculate_price_volume_factor_asset_batches(
+            interim_root=interim_root,
+            processed_root=processed_root,
+            start_year=2014,
+            end_year=2014,
+        )
     )
-    label_path, label_rows = build_labels.write_forward_labels(
-        labels,
+    label_path, label_rows = build_labels.calculate_forward_returns_asset_batches(
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
@@ -276,10 +274,8 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
         processed_root, "labels", FORWARD_RETURNS_PROCESSED_DATA_ID
     )
     factor_output = _read_artifact(factor_path, years=(2014,))
+    label_output = _read_artifact(label_path, years=(2014,))
 
-    assert "mom_2d" in factored.columns
-    assert not any(column.startswith("forward_return_") for column in factored)
-    assert "forward_return_1d" in labels.columns
     assert factor_rows == len(panel)
     assert label_rows == len(panel)
     assert factor_path.as_posix().endswith("processed/a_share/factors/price_volume")
@@ -290,6 +286,10 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
         *platform_entity_time_key(),
         *a_share_price_volume_factor_columns(),
     )
+    assert tuple(label_output.columns) == tuple(
+        a_share_processed_catalog().get(FORWARD_RETURNS_PROCESSED_DATA_ID).required_columns
+    )
+    assert "forward_return_1d" in label_output.columns
     assert factor_manifest["schema_version"] == "0.1"
     assert label_manifest["schema_version"] == "0.1"
 
@@ -322,7 +322,7 @@ def test_a_share_factor_build_passes_spec_columns_to_price_volume_helper(
         fake_price_volume_helper,
     )
 
-    output_root, rows = build_factors.calculate_price_volume_factor_full(
+    output_root, rows = build_factors.calculate_price_volume_factor_asset_batches(
         interim_root=interim_root,
         processed_root=processed_root,
         start_year=2014,
@@ -364,29 +364,23 @@ def test_a_share_factor_builder_prunes_to_spec_columns_before_copy(
             result[column] = 0.0
         return result
 
-    def fake_select_slim_factor_columns(frame):
-        assert tuple(frame.columns) == expected_columns
-        return frame.copy()
-
     monkeypatch.setattr(
         build_factors,
         "calculate_price_volume_factors",
         fake_price_volume_helper,
     )
-    monkeypatch.setattr(
-        build_factors,
-        "select_slim_factor_columns",
-        fake_select_slim_factor_columns,
-    )
 
-    _, rows = build_factors.calculate_price_volume_factor_full(
+    output_root, rows = build_factors.calculate_price_volume_factor_asset_batches(
         interim_root=interim_root,
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
     )
+    output = _read_artifact(output_root, years=(2014,))
 
     assert rows == len(panel)
+    assert tuple(output.columns) == expected_columns
+    assert "extra_internal_work_column" not in output.columns
 
 
 def test_price_volume_helper_prunes_contract_extra_outputs() -> None:
@@ -397,7 +391,6 @@ def test_price_volume_helper_prunes_contract_extra_outputs() -> None:
         panel,
         factor_columns=contract_columns,
     )
-    slim = build_factors.select_slim_factor_columns(result)
     extra_factor_columns = {
         column
         for column in result.columns
@@ -426,25 +419,6 @@ def test_price_volume_helper_prunes_contract_extra_outputs() -> None:
         "intraday_range_252d",
     }.intersection(result.columns)
     assert extra_factor_columns == set()
-    assert tuple(slim.columns) == tuple(
-        build_factors.a_share_processed_catalog()
-        .get(PRICE_VOLUME_PROCESSED_DATA_ID)
-        .required_columns
-    )
-    assert tuple(slim.columns) == (
-        *platform_entity_time_key(),
-        *a_share_price_volume_factor_columns(),
-    )
-
-
-def test_factor_builder_reads_inputs_from_factor_definitions() -> None:
-    source = Path(build_factors.__file__).read_text(encoding="utf-8")
-
-    assert build_factors._factor_panel_input_columns() == (
-        a_share_price_volume_panel_input_columns()
-    )
-    assert "FACTOR" + "_INPUT_COLUMNS" not in source
-    assert "select_existing_columns" not in source
 
 
 def test_factor_builder_fails_closed_when_registered_input_column_missing(
@@ -468,7 +442,7 @@ def test_factor_builder_fails_closed_when_registered_input_column_missing(
     )
 
     with pytest.raises(ValueError, match="missing_factor_panel_input_columns: amount"):
-        build_factors.calculate_price_volume_factor_full(
+        build_factors.calculate_price_volume_factor_asset_batches(
             interim_root=interim_root,
             processed_root=processed_root,
             start_year=2014,
@@ -490,7 +464,7 @@ def test_a_share_factor_builder_reads_calendar_warmup_and_writes_requested_windo
         _trading_calendar_frame(dates, market_type=1),
     )
 
-    output_root, rows = build_factors.calculate_price_volume_factor_full(
+    output_root, rows = build_factors.calculate_price_volume_factor_asset_batches(
         interim_root=interim_root,
         processed_root=processed_root,
         start_year=2020,
@@ -519,7 +493,7 @@ def test_a_share_factor_builder_allows_missing_pre_start_warmup_years(
         _trading_calendar_frame(calendar_dates, market_type=1),
     )
 
-    output_root, rows = build_factors.calculate_price_volume_factor_full(
+    output_root, rows = build_factors.calculate_price_volume_factor_asset_batches(
         interim_root=interim_root,
         processed_root=processed_root,
         start_year=2014,
@@ -549,11 +523,13 @@ def test_a_share_factor_builder_reads_available_warmup_years_when_present(
         "trading_calendar",
         _trading_calendar_frame(calendar_dates, market_type=1),
     )
-    no_warmup_output_root, _ = build_factors.calculate_price_volume_factor_full(
-        interim_root=no_warmup_interim,
-        processed_root=no_warmup_root,
-        start_year=2014,
-        end_year=2014,
+    no_warmup_output_root, _ = (
+        build_factors.calculate_price_volume_factor_asset_batches(
+            interim_root=no_warmup_interim,
+            processed_root=no_warmup_root,
+            start_year=2014,
+            end_year=2014,
+        )
     )
     no_warmup_output = _read_artifact(
         no_warmup_output_root,
@@ -571,11 +547,13 @@ def test_a_share_factor_builder_reads_available_warmup_years_when_present(
         "trading_calendar",
         _trading_calendar_frame(calendar_dates, market_type=1),
     )
-    warmup_output_root, _ = build_factors.calculate_price_volume_factor_full(
-        interim_root=warmup_interim,
-        processed_root=warmup_root,
-        start_year=2014,
-        end_year=2014,
+    warmup_output_root, _ = (
+        build_factors.calculate_price_volume_factor_asset_batches(
+            interim_root=warmup_interim,
+            processed_root=warmup_root,
+            start_year=2014,
+            end_year=2014,
+        )
     )
     warmup_output = _read_artifact(
         warmup_output_root,
@@ -590,7 +568,7 @@ def test_a_share_factor_builder_reads_available_warmup_years_when_present(
     )
 
 
-def test_a_share_factor_builder_asset_batches_match_full_frame_output(
+def test_a_share_factor_builder_asset_batches_match_default_dataset_output(
     tmp_path,
 ) -> None:
     dates = pd.bdate_range("2013-01-01", "2014-12-31")
@@ -610,13 +588,13 @@ def test_a_share_factor_builder_asset_batches_match_full_frame_output(
         _trading_calendar_frame(dates, market_type=1),
     )
 
-    full_path, _ = build_factors.calculate_price_volume_factor_full(
+    default_path, _ = build_factors.calculate_price_volume_factor_asset_batches(
         interim_root=interim_root,
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
     )
-    expected = _read_artifact(full_path, years=(2014,))
+    expected = _read_artifact(default_path, years=(2014,))
     chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
     _write_processed_panel_fixture(chunked_root, panel)
     actual_path, actual_rows = (
@@ -634,112 +612,44 @@ def test_a_share_factor_builder_asset_batches_match_full_frame_output(
     pd.testing.assert_frame_equal(actual, expected)
 
 
-def test_a_share_factor_builder_panel_frame_fast_path_matches_parquet_path(
-    tmp_path,
-) -> None:
-    dates = pd.bdate_range("2013-12-20", "2014-01-15")
-    panel = _factor_panel_for_dates(dates)
-    original = panel.copy(deep=True)
-    interim_root = tmp_path / "interim" / "data" / "interim" / "csmar"
-    _write_interim_fixture(
-        interim_root,
-        "trading_calendar",
-        _trading_calendar_frame(dates, market_type=1),
-    )
-
-    standalone_root = tmp_path / "standalone" / "data" / "processed" / "a_share"
-    _write_processed_panel_fixture(standalone_root, panel)
-    standalone_path, standalone_rows = build_factors.calculate_price_volume_factor_full(
-        interim_root=interim_root,
-        processed_root=standalone_root,
-        start_year=2014,
-        end_year=2014,
-    )
-
-    fast_root = tmp_path / "fast" / "data" / "processed" / "a_share"
-    _write_processed_panel_fixture(fast_root, panel)
-    fast_path, fast_rows = build_factors.calculate_price_volume_factor_full(
-        interim_root=interim_root,
-        processed_root=fast_root,
-        start_year=2014,
-        end_year=2014,
-        panel_frame=panel,
-    )
-
-    standalone = _read_artifact(standalone_path, years=(2014,))
-    fast = _read_artifact(fast_path, years=(2014,))
-    pd.testing.assert_frame_equal(fast, standalone)
-    pd.testing.assert_frame_equal(panel, original)
-    assert fast_rows == standalone_rows == len(fast)
-
-
-def test_a_share_factor_builder_panel_frame_fails_closed_for_missing_input(
-    tmp_path,
-) -> None:
-    dates = pd.bdate_range("2014-01-02", periods=5)
-    panel = _factor_panel_for_dates(dates).drop(columns=["amount"])
-    processed_root = tmp_path / "data" / "processed" / "a_share"
-    interim_root = tmp_path / "data" / "interim" / "csmar"
-    _write_interim_fixture(
-        interim_root,
-        "trading_calendar",
-        _trading_calendar_frame(dates, market_type=1),
-    )
-
-    with pytest.raises(ValueError, match="missing_factor_panel_input_columns: amount"):
-        build_factors.calculate_price_volume_factor_full(
-            interim_root=interim_root,
-            processed_root=processed_root,
-            start_year=2014,
-            end_year=2014,
-            panel_frame=panel,
-        )
-
-
-def test_a_share_label_builder_panel_frame_fast_path_matches_standalone_path(
+def test_a_share_label_builder_asset_batches_keep_future_lookahead_boundary(
     tmp_path,
 ) -> None:
     panel = _factor_panel_for_dates(pd.bdate_range("2014-12-29", "2015-01-05"))
-    original = panel.copy(deep=True)
-
-    standalone_root = tmp_path / "standalone" / "data" / "processed" / "a_share"
-    _write_processed_panel_fixture(standalone_root, panel)
-    standalone_path, standalone_rows = build_labels.calculate_forward_returns_full(
-        processed_root=standalone_root,
+    chunked_root = tmp_path / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(chunked_root, panel)
+    label_root, rows = build_labels.calculate_forward_returns_asset_batches(
+        processed_root=chunked_root,
         start_year=2014,
         end_year=2014,
+        asset_chunk_size=1,
     )
 
-    fast_root = tmp_path / "fast" / "data" / "processed" / "a_share"
-    _write_processed_panel_fixture(fast_root, panel)
-    fast_path, fast_rows = build_labels.calculate_forward_returns_full(
-        processed_root=fast_root,
-        start_year=2014,
-        end_year=2014,
-        panel_frame=panel,
-    )
-
-    standalone = _read_artifact(standalone_path, years=(2014,))
-    fast = _read_artifact(fast_path, years=(2014,))
-    pd.testing.assert_frame_equal(fast, standalone)
-    pd.testing.assert_frame_equal(panel, original)
-    assert fast_rows == standalone_rows == len(fast)
+    labels = _read_artifact(label_root, years=(2014,))
+    assert rows == len(labels)
+    assert labels["timestamp"].dt.year.tolist() == [2014, 2014, 2014]
+    assert labels["forward_return_1d"].notna().all()
 
 
-def test_a_share_label_builder_panel_frame_fails_closed_for_missing_input(
+def test_a_share_label_builder_dataset_path_fails_closed_for_missing_input(
     tmp_path,
 ) -> None:
     panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5)).drop(
         columns=["adj_open"]
     )
     processed_root = tmp_path / "data" / "processed" / "a_share"
+    write_low_level_parquet_artifact(
+        _processed_artifact_root(processed_root, "panels", "daily_panel"),
+        panel,
+        primary_key=platform_entity_time_key(),
+        partition_columns=("year",),
+    )
 
     with pytest.raises(ValueError, match="missing_label_panel_input_columns: adj_open"):
-        build_labels.calculate_forward_returns_full(
+        build_labels.calculate_forward_returns_asset_batches(
             processed_root=processed_root,
             start_year=2014,
             end_year=2014,
-            panel_frame=panel,
         )
 
 
@@ -750,7 +660,7 @@ def test_a_share_factor_builder_requires_trading_calendar(tmp_path) -> None:
     _write_processed_panel_fixture(processed_root, panel)
 
     with pytest.raises(ValueError, match="missing_trading_calendar_interim"):
-        build_factors.calculate_price_volume_factor_full(
+        build_factors.calculate_price_volume_factor_asset_batches(
             interim_root=interim_root,
             processed_root=processed_root,
             start_year=2020,
@@ -773,7 +683,7 @@ def test_a_share_factor_builder_requires_requested_output_partition(
     )
 
     with pytest.raises(ValueError, match="missing_requested_processed_input"):
-        build_factors.calculate_price_volume_factor_full(
+        build_factors.calculate_price_volume_factor_asset_batches(
             interim_root=interim_root,
             processed_root=processed_root,
             start_year=2020,
@@ -784,10 +694,9 @@ def test_a_share_factor_builder_requires_requested_output_partition(
 def test_a_share_label_builder_allows_missing_future_lookahead_year(tmp_path) -> None:
     processed_root = tmp_path / "data" / "processed" / "a_share"
     panel = _factor_panel_for_dates(pd.bdate_range("2014-12-29", "2014-12-31"))
-    labels = build_labels.calculate_panel_labels(panel)
+    _write_processed_panel_fixture(processed_root, panel)
 
-    label_path, label_rows = build_labels.write_forward_labels(
-        labels,
+    label_path, label_rows = build_labels.calculate_forward_returns_asset_batches(
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
@@ -805,12 +714,28 @@ def test_a_share_label_builder_uses_future_lookahead_when_available(
     panel_without_future = _factor_panel_for_dates(
         pd.bdate_range("2014-12-29", "2014-12-31")
     )
-    labels_without_future = build_labels.calculate_panel_labels(panel_without_future)
+    without_future_root = tmp_path / "without_future" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(without_future_root, panel_without_future)
+    labels_without_future_root, _ = (
+        build_labels.calculate_forward_returns_asset_batches(
+            processed_root=without_future_root,
+            start_year=2014,
+            end_year=2014,
+        )
+    )
+    labels_without_future = _read_artifact(labels_without_future_root, years=(2014,))
 
     panel_with_future = _factor_panel_for_dates(
         pd.bdate_range("2014-12-29", "2015-01-02")
     )
-    labels_with_future = build_labels.calculate_panel_labels(panel_with_future)
+    with_future_root = tmp_path / "with_future" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(with_future_root, panel_with_future)
+    labels_with_future_root, _ = build_labels.calculate_forward_returns_asset_batches(
+        processed_root=with_future_root,
+        start_year=2014,
+        end_year=2014,
+    )
+    labels_with_future = _read_artifact(labels_with_future_root, years=(2014,))
 
     tail_without_future = labels_without_future.loc[
         labels_without_future["timestamp"].dt.year == 2014,
@@ -837,12 +762,12 @@ def test_a_share_label_builder_asset_batches_preserve_year_boundary_lookahead(
     processed_root = tmp_path / "data" / "processed" / "a_share"
     _write_processed_panel_fixture(processed_root, panel)
 
-    full_path, _ = build_labels.calculate_forward_returns_full(
+    default_path, _ = build_labels.calculate_forward_returns_asset_batches(
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
     )
-    expected = _read_artifact(full_path, years=(2014,))
+    expected = _read_artifact(default_path, years=(2014,))
     chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
     _write_processed_panel_fixture(chunked_root, panel)
     actual_path, actual_rows = build_labels.calculate_forward_returns_asset_batches(
@@ -877,25 +802,26 @@ def test_a_share_context_universe_and_mask_builders_write_split_layers(
 ) -> None:
     panel = _panel()
     processed_root = tmp_path / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(processed_root, panel)
 
-    context_path, context_rows = contexts.write_contexts(
-        panel,
+    context_path, context_rows = contexts.write_contexts_from_panel_dataset(
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
     )
-    universe_path, universe_rows = build_universes.write_universe(
-        panel,
+    universe_path, universe_rows = build_universes.write_universe_from_panel_dataset(
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
     )
-    mask_outputs = build_masks.write_masks(
-        panel,
+    mask_outputs = build_masks.write_masks_from_panel_dataset(
         processed_root=processed_root,
         start_year=2014,
         end_year=2014,
     )
+    context_output = _read_artifact(context_path, years=(2014,))
+    universe_output = _read_artifact(universe_path, years=(2014,))
+    execution_mask = _read_artifact(mask_outputs["execution"][0], years=(2014,))
 
     assert context_rows == len(panel)
     assert universe_rows == len(panel)
@@ -913,9 +839,21 @@ def test_a_share_context_universe_and_mask_builders_write_split_layers(
         )["schema_version"]
         == "0.1"
     )
+    assert tuple(context_output.columns) == tuple(
+        a_share_processed_catalog().get("daily_context").required_columns
+    )
+    assert tuple(universe_output.columns) == tuple(
+        a_share_processed_catalog().get("a_share_default").required_columns
+    )
+    assert tuple(execution_mask.columns) == tuple(
+        a_share_processed_catalog().get("a_share_execution").required_columns
+    )
+    assert context_output["timestamp"].dt.year.tolist() == [2014] * len(panel)
+    assert universe_output["eligible"].tolist() == [True] * len(panel)
+    assert execution_mask[["can_enter", "can_exit"]].all().all()
 
 
-def test_context_universe_and_mask_panel_dataset_writers_match_frame_writers(
+def test_context_universe_and_mask_panel_dataset_writers_handle_chunked_panels(
     tmp_path,
 ) -> None:
     panel = pd.concat(
@@ -925,35 +863,18 @@ def test_context_universe_and_mask_panel_dataset_writers_match_frame_writers(
         ],
         ignore_index=True,
     )
-    full_root = tmp_path / "full" / "data" / "processed" / "a_share"
     chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
     _write_processed_panel_fixture(chunked_root, panel)
 
-    expected_context_root, _ = contexts.write_contexts(
-        panel,
-        processed_root=full_root,
-        start_year=2014,
-        end_year=2014,
-    )
-    expected_universe_root, _ = build_universes.write_universe(
-        panel,
-        processed_root=full_root,
-        start_year=2014,
-        end_year=2014,
-    )
-    expected_masks = build_masks.write_masks(
-        panel,
-        processed_root=full_root,
-        start_year=2014,
-        end_year=2014,
-    )
-
-    actual_context_root, _ = contexts.write_contexts_from_panel_dataset(
+    actual_context_root, context_rows = contexts.write_contexts_from_panel_dataset(
         chunked_root,
         start_year=2014,
         end_year=2014,
     )
-    actual_universe_root, _ = build_universes.write_universe_from_panel_dataset(
+    (
+        actual_universe_root,
+        universe_rows,
+    ) = build_universes.write_universe_from_panel_dataset(
         chunked_root,
         start_year=2014,
         end_year=2014,
@@ -963,26 +884,23 @@ def test_context_universe_and_mask_panel_dataset_writers_match_frame_writers(
         start_year=2014,
         end_year=2014,
     )
+    context = _read_artifact(actual_context_root, years=(2014,))
+    universe = _read_artifact(actual_universe_root, years=(2014,))
 
-    pd.testing.assert_frame_equal(
-        _read_artifact(actual_context_root, years=(2014,)),
-        _read_artifact(expected_context_root, years=(2014,)),
-    )
-    pd.testing.assert_frame_equal(
-        _read_artifact(actual_universe_root, years=(2014,)),
-        _read_artifact(expected_universe_root, years=(2014,)),
-    )
-    for mask_kind in sorted(expected_masks):
-        pd.testing.assert_frame_equal(
-            _read_artifact(
-                actual_masks[mask_kind][0],
-                years=(2014,),
-            ),
-            _read_artifact(
-                expected_masks[mask_kind][0],
-                years=(2014,),
-            ),
-        )
+    assert context_rows == len(panel)
+    assert universe_rows == len(panel)
+    assert context["asset_id"].tolist() == sorted(context["asset_id"].tolist())
+    assert universe["asset_id"].value_counts().to_dict() == {
+        "asset_a": len(_panel()),
+        "asset_b": len(_panel()),
+    }
+    for mask_kind, (mask_root, mask_rows) in sorted(actual_masks.items()):
+        mask = _read_artifact(mask_root, years=(2014,))
+        assert mask_rows == len(panel)
+        assert mask["asset_id"].value_counts().to_dict() == {
+            "asset_a": len(_panel()),
+            "asset_b": len(_panel()),
+        }, mask_kind
 
 
 def test_a_share_panel_joins_stock_master_as_of_timestamp() -> None:
@@ -1614,7 +1532,7 @@ def test_a_share_panel_from_interim_requires_trading_calendar(tmp_path) -> None:
     _write_minimal_panel_interim_fixture(interim_root)
 
     with pytest.raises(ValueError, match="missing_trading_calendar_interim"):
-        panels.build_panel_from_interim(
+        panels.build_panel_asset_batches_from_interim(
             interim_root=interim_root,
             processed_root=processed_root,
             start_year=2024,
@@ -1710,7 +1628,7 @@ def test_a_share_panel_from_interim_applies_exact_end_date(tmp_path) -> None:
         ),
     )
 
-    output_root, rows = panels.build_panel_from_interim(
+    output_root, rows = panels.build_panel_asset_batches_from_interim(
         interim_root=interim_root,
         processed_root=processed_root,
         start_year=2024,
@@ -1773,18 +1691,6 @@ def test_a_share_panel_asset_batches_preserve_next_session_boundary(
         ),
     )
 
-    full_panel = panels.build_panel_frame_from_interim(
-        interim_root=interim_root,
-        start_year=2014,
-        end_year=2015,
-        min_listing_trading_days=1,
-    )
-    expected = panels._filter_panel_years(full_panel, start_year=2014, end_year=2014)
-    expected = panels._filter_panel_end_date(expected, end_date="2014-12-31")
-    expected = expected[
-        list(panels.a_share_processed_catalog().get("daily_panel").required_columns)
-    ].reset_index(drop=True)
-
     output_root, rows = panels.build_panel_asset_batches_from_interim(
         interim_root=interim_root,
         processed_root=processed_root,
@@ -1798,12 +1704,21 @@ def test_a_share_panel_asset_batches_preserve_next_session_boundary(
     actual = _read_artifact(output_root, years=(2014,))
 
     assert rows == len(actual)
+    assert rows == 4
+    assert tuple(actual.columns) == tuple(
+        panels.a_share_processed_catalog().get("daily_panel").required_columns
+    )
+    assert list(zip(actual["asset_id"], actual["timestamp"], strict=True)) == [
+        ("000001", pd.Timestamp("2014-12-30")),
+        ("000001", pd.Timestamp("2014-12-31")),
+        ("000002", pd.Timestamp("2014-12-30")),
+        ("000002", pd.Timestamp("2014-12-31")),
+    ]
     assert actual["timestamp"].max() == pd.Timestamp("2014-12-31")
     assert actual.loc[
         actual["timestamp"].eq(pd.Timestamp("2014-12-31")),
         "can_enter",
     ].all()
-    pd.testing.assert_frame_equal(actual, expected)
 
 
 def _daily_market_row(

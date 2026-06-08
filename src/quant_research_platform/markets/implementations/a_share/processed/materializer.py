@@ -6,14 +6,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-import pandas as pd
-
 from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
-from quant_research_platform.storage.datasets import read_dataset
 
-from ..factors.build_factors import calculate_price_volume_factor_full
+from ..factors.build_factors import calculate_price_volume_factor_asset_batches
 from ..ids import PRICE_VOLUME_PROCESSED_DATA_ID
-from ..labels.build_labels import calculate_forward_returns_full
+from ..labels.build_labels import calculate_forward_returns_asset_batches
 from ..masks.build import write_masks_from_panel_dataset
 from ..universes.build import write_universe_from_panel_dataset
 from .contexts import write_contexts_from_panel_dataset
@@ -108,7 +105,7 @@ def build_a_share_processed_layers(
         logical_layer="processed",
         dataset_id=PRICE_VOLUME_PROCESSED_DATA_ID,
     ) as record:
-        factor_root, factor_rows = calculate_price_volume_factor_full(
+        factor_root, factor_rows = calculate_price_volume_factor_asset_batches(
             interim_root=interim_root,
             processed_root=processed_root,
             start_year=start_year,
@@ -122,7 +119,7 @@ def build_a_share_processed_layers(
         logical_layer="processed",
         dataset_id="forward_returns",
     ) as record:
-        label_root, label_rows = calculate_forward_returns_full(
+        label_root, label_rows = calculate_forward_returns_asset_batches(
             processed_root=processed_root,
             start_year=start_year,
             end_year=end_year,
@@ -149,19 +146,6 @@ def build_a_share_processed_layers(
     return AShareProcessedBuildResult(
         row_counts=row_counts,
         artifact_roots=artifact_roots,
-    )
-
-
-def _read_processed_panel(
-    *,
-    processed_root: Path,
-    start_year: int,
-    end_year: int,
-) -> pd.DataFrame:
-    panel_root = processed_root / "panels" / "daily_panel"
-    return read_dataset(
-        panel_root,
-        partition_filter={"year": tuple(range(start_year, end_year + 1))},
     )
 
 

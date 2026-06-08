@@ -26,6 +26,7 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
+from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
 
 def _spec(processed_data_id: str = "x") -> ProcessedDataSpec:
@@ -279,20 +280,11 @@ def test_read_dataset_accepts_canonical_artifact_not_created_by_writer(
     tmp_path: Path,
 ) -> None:
     root = _artifact_root(tmp_path)
-    spec = _spec()
-    part = root / "data" / "year=2014" / "part-000.parquet"
-    part.parent.mkdir(parents=True)
-    _frame().iloc[[1]].to_parquet(part, index=False)
-    write_internal_artifact_manifest(root / "spec.json", _spec_payload(spec))
-    write_internal_artifact_manifest(
-        root / "_manifest" / "manifest.json",
-        {
-            "schema_version": spec.schema_version,
-            "dataset_id": spec.processed_data_id,
-            "row_count": 1,
-            "file_count": 1,
-            "validation_status": "pass",
-        },
+    write_low_level_parquet_artifact(
+        root,
+        _frame().iloc[[1]],
+        primary_key=platform_entity_time_key(),
+        partition_columns=("year",),
     )
 
     frame = read_dataset(root)
@@ -301,9 +293,8 @@ def test_read_dataset_accepts_canonical_artifact_not_created_by_writer(
     assert frame["asset_id"].tolist() == ["000001"]
 
 
-def test_read_dataset_old_manifest_missing_runtime_metadata_falls_back_to_scan(
+def test_read_dataset_manifest_missing_runtime_metadata_fails_closed(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _artifact_root(tmp_path)
     spec = _spec()
@@ -321,19 +312,9 @@ def test_read_dataset_old_manifest_missing_runtime_metadata_falls_back_to_scan(
             "validation_status": "pass",
         },
     )
-    calls = {"validated_schema": 0}
-    original = datasets._validated_schema
 
-    def counting_validated_schema(paths):
-        calls["validated_schema"] += 1
-        return original(paths)
-
-    monkeypatch.setattr(datasets, "_validated_schema", counting_validated_schema)
-
-    frame = read_dataset(root)
-
-    assert calls["validated_schema"] == 1
-    assert frame["asset_id"].tolist() == ["000001"]
+    with pytest.raises(ValueError, match="manifest_runtime_metadata_missing"):
+        read_dataset(root)
 
 
 def test_read_dataset_corrupt_manifest_fails_closed(tmp_path: Path) -> None:

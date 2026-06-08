@@ -29,6 +29,13 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
 )
 
+from ..processed._dataset_helpers import (
+    chunked_values,
+    dataset_asset_ids,
+    read_dataset_asset_chunk,
+    year_partition_filter,
+)
+
 CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
 PRIVACY_LEVEL = "public_safe_aggregate"
@@ -455,7 +462,8 @@ def _iter_generated_full_daily_panel_asset_chunks(
     trading_calendar = read_dataset(interim_root / "trading_calendar")
     spec = a_share_processed_catalog().get("daily_panel")
     years = tuple(range(FULL_HISTORY_START_YEAR, FULL_HISTORY_END_YEAR + 1))
-    asset_ids = _daily_market_asset_ids(interim_root, years=years)
+    daily_market_root = interim_root / "daily_market"
+    asset_ids = dataset_asset_ids(daily_market_root, years=years)
     chunk_size = _dynamic_asset_chunk_size(
         total_asset_count=len(asset_ids),
         estimated_full_frame_bytes=_estimate_generated_full_panel_memory_bytes(
@@ -465,10 +473,12 @@ def _iter_generated_full_daily_panel_asset_chunks(
         available_memory_bytes=_available_memory_bytes(),
         memory_fraction=GENERATED_PANEL_MEMORY_FRACTION,
     )
-    for asset_id_chunk in _chunked(asset_ids, chunk_size):
-        daily = _read_daily_market_asset_chunk(
-            interim_root,
+    daily_market_columns = tuple(inspect_dataset(daily_market_root).columns)
+    for asset_id_chunk in chunked_values(asset_ids, chunk_size):
+        daily = read_dataset_asset_chunk(
+            daily_market_root,
             years=years,
+            columns=daily_market_columns,
             asset_ids=asset_id_chunk,
         )
         if daily.empty:
@@ -500,45 +510,6 @@ def _private_interim_root_for_data_product(
 
     binding = default_provider_binding_registry().get(data_product_id)
     return Path(project_root) / "data" / "interim" / binding.provider_id
-
-
-def _daily_market_asset_ids(
-    interim_root: Path,
-    *,
-    years: tuple[int, ...],
-) -> tuple[str, ...]:
-    asset_ids: set[str] = set()
-    chunks = read_dataset(
-        interim_root / "daily_market",
-        partition_filter=_year_filter(years),
-        columns=["asset_id"],
-        mode=DatasetReadMode.CHUNKED,
-    )
-    for frame in chunks:
-        asset_ids.update(str(value) for value in frame["asset_id"].dropna().unique())
-    return tuple(sorted(asset_ids))
-
-
-def _read_daily_market_asset_chunk(
-    interim_root: Path,
-    *,
-    years: tuple[int, ...],
-    asset_ids: Sequence[str],
-) -> pd.DataFrame:
-    asset_id_set = set(asset_ids)
-    frames: list[pd.DataFrame] = []
-    chunks = read_dataset(
-        interim_root / "daily_market",
-        partition_filter=_year_filter(years),
-        mode=DatasetReadMode.CHUNKED,
-    )
-    for frame in chunks:
-        filtered = frame.loc[frame["asset_id"].isin(asset_id_set)]
-        if not filtered.empty:
-            frames.append(filtered)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
 
 
 def _filter_asset_frame(
@@ -622,17 +593,6 @@ def _dynamic_asset_chunk_size(
     return max(1, min(total_asset_count, target_bytes // bytes_per_asset))
 
 
-def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
-    if years is None:
-        return None
-    return {"year": years}
-
-
-def _chunked(values: Sequence[str], size: int) -> Iterator[tuple[str, ...]]:
-    for index in range(0, len(values), size):
-        yield tuple(values[index : index + size])
-
-
 def _summarize_roots(
     roots: tuple[Path, ...],
     *,
@@ -660,7 +620,7 @@ def _summarize_dataset_root(
 ) -> AggregateSummary:
     chunks = read_dataset(
         root,
-        partition_filter=_year_filter(years),
+        partition_filter=year_partition_filter(years),
         mode=DatasetReadMode.CHUNKED,
     )
     return _summarize_frames(chunks)
