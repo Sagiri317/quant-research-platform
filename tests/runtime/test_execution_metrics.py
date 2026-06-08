@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 
+import pytest
+
+import quant_research_platform.runtime.execution_metrics as execution_metrics
 from quant_research_platform.runtime.execution_metrics import (
     ExecutionMetricsRecorder,
     ProcessMemorySampler,
@@ -42,10 +46,43 @@ def test_execution_metrics_recorder_writes_timings_json_and_csv(tmp_path) -> Non
     assert rows[0]["step_name"] == "build_processed"
     assert rows[0]["status"] == "success"
     assert "rss_start_end_max_mb" in rows[0]
+    assert "rss_sampled_max_mb" in rows[0]
+    assert "rss_sample_interval_seconds" in rows[0]
+    assert "rss_sample_count" in rows[0]
+    assert "rss_sampler_unavailable" in rows[0]
     assert LEGACY_RSS_PEAK_FIELD not in rows[0]
 
 
-def test_execution_metrics_records_optional_rss_fields(tmp_path) -> None:
+def test_execution_metrics_records_sampled_rss_fields(monkeypatch, tmp_path) -> None:
+    values = iter([100.0, 110.0, 120.0, 130.0, 140.0])
+    sampler = ProcessMemorySampler.from_callable(lambda: next(values, 140.0))
+    monkeypatch.setenv("QRP_RSS_SAMPLE_INTERVAL_SECONDS", "0.001")
+    recorder = ExecutionMetricsRecorder(memory_sampler=sampler)
+
+    with recorder.record("build_daily_panel") as record:
+        record.input_rows = 2
+        time.sleep(0.01)
+
+    json_path = recorder.write_json(tmp_path / "timings.json", run_id="s9")
+    csv_path = recorder.write_csv(tmp_path / "timings.csv")
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8").splitlines()))
+
+    record = payload["records"][0]
+    assert payload["summary"]["memory_sampler_unavailable"] is False
+    assert record["rss_sampled_max_mb"] >= 100.0
+    assert record["rss_sample_interval_seconds"] == 0.001
+    assert record["rss_sample_count"] >= 2
+    assert record["rss_sampler_unavailable"] is False
+    assert "rss_samples_mb" not in record
+    assert rows[0]["rss_sampled_max_mb"]
+    assert rows[0]["rss_sample_interval_seconds"] == "0.001"
+    assert int(rows[0]["rss_sample_count"]) >= 2
+    assert rows[0]["rss_sampler_unavailable"] == "False"
+    assert "rss_samples_mb" not in rows[0]
+
+
+def test_execution_metrics_keeps_start_end_rss_fields() -> None:
     sampler = ProcessMemorySampler.from_callable(lambda: 128.0)
     recorder = ExecutionMetricsRecorder(memory_sampler=sampler)
 
@@ -114,4 +151,49 @@ def test_execution_metrics_sampler_exception_degrades_to_null_rss() -> None:
     assert record["rss_start_mb"] is None
     assert record["rss_end_mb"] is None
     assert record["rss_start_end_max_mb"] is None
+    assert record["rss_sampled_max_mb"] is None
+    assert record["rss_sample_interval_seconds"] is None
+    assert record["rss_sample_count"] == 0
+    assert record["rss_sampler_unavailable"] is True
     assert LEGACY_RSS_PEAK_FIELD not in record
+
+
+def test_execution_metrics_sampler_unavailable_serializes_aggregate_fields() -> None:
+    recorder = ExecutionMetricsRecorder(memory_sampler=ProcessMemorySampler.disabled())
+
+    with recorder.record("manual_comparison"):
+        pass
+
+    record = recorder.payload()["records"][0]
+
+    assert record["rss_sampled_max_mb"] is None
+    assert record["rss_sample_interval_seconds"] is None
+    assert record["rss_sample_count"] == 0
+    assert record["rss_sampler_unavailable"] is True
+    assert "rss_samples_mb" not in record
+
+
+def test_invalid_rss_sample_interval_env_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("QRP_RSS_SAMPLE_INTERVAL_SECONDS", "not-a-number")
+
+    with pytest.raises(ValueError, match="invalid_rss_sample_interval_seconds"):
+        ExecutionMetricsRecorder(memory_sampler=ProcessMemorySampler.disabled())
+
+
+def test_rss_sampler_thread_unavailable_path_serializes_true(monkeypatch) -> None:
+    class BrokenThread:
+        def __init__(self, *args, **kwargs) -> None:
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(execution_metrics.threading, "Thread", BrokenThread)
+    recorder = ExecutionMetricsRecorder(
+        memory_sampler=ProcessMemorySampler.from_callable(lambda: 128.0)
+    )
+
+    with recorder.record("manual_comparison"):
+        pass
+
+    record = recorder.payload()["records"][0]
+
+    assert record["rss_sampler_unavailable"] is True
+    assert record["rss_sample_count"] == 0

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,6 +26,10 @@ class ExecutionStepMetric:
     rss_start_mb: float | None = None
     rss_end_mb: float | None = None
     rss_start_end_max_mb: float | None = None
+    rss_sampled_max_mb: float | None = None
+    rss_sample_interval_seconds: float | None = None
+    rss_sample_count: int = 0
+    rss_sampler_unavailable: bool = False
     input_rows: int | None = None
     output_rows: int | None = None
     file_count: int | None = None
@@ -45,6 +51,10 @@ class ExecutionStepMetric:
             "rss_start_mb": self.rss_start_mb,
             "rss_end_mb": self.rss_end_mb,
             "rss_start_end_max_mb": self.rss_start_end_max_mb,
+            "rss_sampled_max_mb": self.rss_sampled_max_mb,
+            "rss_sample_interval_seconds": self.rss_sample_interval_seconds,
+            "rss_sample_count": self.rss_sample_count,
+            "rss_sampler_unavailable": self.rss_sampler_unavailable,
             "input_rows": self.input_rows,
             "output_rows": self.output_rows,
             "file_count": self.file_count,
@@ -102,10 +112,88 @@ class ProcessMemorySampler:
         return round(float(value), 6)
 
 
+@dataclass(frozen=True)
+class _RssSampleAggregate:
+    sampled_max_mb: float | None
+    sample_interval_seconds: float | None
+    sample_count: int
+    sampler_unavailable: bool
+
+
+class _StepRssSampler:
+    def __init__(
+        self,
+        memory_sampler: ProcessMemorySampler,
+        *,
+        interval_seconds: float | None,
+    ) -> None:
+        self._memory_sampler = memory_sampler
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._sampled_max_mb: float | None = None
+        self._sample_count = 0
+        self._thread_unavailable = False
+
+    def start(self) -> None:
+        if self._interval_seconds is None:
+            return
+        try:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        except Exception:
+            self._thread_unavailable = True
+
+    def stop(self) -> _RssSampleAggregate:
+        if self._interval_seconds is None:
+            return _RssSampleAggregate(
+                sampled_max_mb=None,
+                sample_interval_seconds=None,
+                sample_count=0,
+                sampler_unavailable=True,
+            )
+        if self._thread_unavailable:
+            return _RssSampleAggregate(
+                sampled_max_mb=None,
+                sample_interval_seconds=self._interval_seconds,
+                sample_count=0,
+                sampler_unavailable=True,
+            )
+        self._record_sample()
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self._interval_seconds * 2))
+        with self._lock:
+            return _RssSampleAggregate(
+                sampled_max_mb=self._sampled_max_mb,
+                sample_interval_seconds=self._interval_seconds,
+                sample_count=self._sample_count,
+                sampler_unavailable=self._memory_sampler.unavailable,
+            )
+
+    def _run(self) -> None:
+        self._record_sample()
+        while not self._stop.wait(self._interval_seconds):
+            self._record_sample()
+
+    def _record_sample(self) -> None:
+        value = self._memory_sampler.sample_mb()
+        if value is None:
+            return
+        with self._lock:
+            self._sample_count += 1
+            if self._sampled_max_mb is None:
+                self._sampled_max_mb = value
+            else:
+                self._sampled_max_mb = max(self._sampled_max_mb, value)
+
+
 class ExecutionMetricsRecorder:
     def __init__(self, memory_sampler: ProcessMemorySampler | None = None) -> None:
         self.records: list[ExecutionStepMetric] = []
         self.memory_sampler = memory_sampler or ProcessMemorySampler.create()
+        self.rss_sample_interval_seconds = _rss_sample_interval_seconds()
 
     @contextmanager
     def record(
@@ -117,6 +205,15 @@ class ExecutionMetricsRecorder:
     ) -> Iterator[ExecutionStepMetric]:
         started = datetime.now(UTC)
         rss_start = self.memory_sampler.sample_mb()
+        rss_sampler = _StepRssSampler(
+            self.memory_sampler,
+            interval_seconds=(
+                None
+                if self.memory_sampler.unavailable
+                else self.rss_sample_interval_seconds
+            ),
+        )
+        rss_sampler.start()
         item = ExecutionStepMetric(
             step_name=step_name,
             logical_layer=logical_layer,
@@ -124,6 +221,12 @@ class ExecutionMetricsRecorder:
             start_time=_format_time(started),
             rss_start_mb=rss_start,
             rss_start_end_max_mb=rss_start,
+            rss_sample_interval_seconds=(
+                None
+                if self.memory_sampler.unavailable
+                else self.rss_sample_interval_seconds
+            ),
+            rss_sampler_unavailable=self.memory_sampler.unavailable,
         )
         try:
             yield item
@@ -140,6 +243,13 @@ class ExecutionMetricsRecorder:
                 6,
             )
             item.rss_end_mb = rss_end
+            rss_aggregate = rss_sampler.stop()
+            item.rss_sampled_max_mb = rss_aggregate.sampled_max_mb
+            item.rss_sample_interval_seconds = (
+                rss_aggregate.sample_interval_seconds
+            )
+            item.rss_sample_count = rss_aggregate.sample_count
+            item.rss_sampler_unavailable = rss_aggregate.sampler_unavailable
             rss_values = [
                 value
                 for value in (item.rss_start_mb, item.rss_end_mb)
@@ -236,6 +346,19 @@ def _total_duration_seconds(records: list[ExecutionStepMetric]) -> float:
 
 def _format_time(value: datetime) -> str:
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _rss_sample_interval_seconds() -> float:
+    raw = os.environ.get("QRP_RSS_SAMPLE_INTERVAL_SECONDS")
+    if raw is None or raw == "":
+        return 0.5
+    try:
+        interval = float(raw)
+    except ValueError as exc:
+        raise ValueError("invalid_rss_sample_interval_seconds") from exc
+    if interval <= 0:
+        raise ValueError("invalid_rss_sample_interval_seconds")
+    return interval
 
 
 __all__ = [
