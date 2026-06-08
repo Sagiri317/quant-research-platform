@@ -69,6 +69,13 @@ class DatasetComparison:
     layout_delta: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _DatasetPlanningMetadata:
+    row_count: int
+    file_count: int
+    partitions: tuple[str, ...]
+
+
 @dataclass
 class _WriteStats:
     spec: DataSpec
@@ -271,6 +278,47 @@ def inspect_dataset(dataset_root: Path) -> DatasetInspection:
         schema_hash=_sha256_json(schema),
         file_count=len(paths),
         manifest=manifest,
+    )
+
+
+def _dataset_planning_metadata(
+    dataset_root: Path,
+    *,
+    partition_filter: Mapping[str, object] | None = None,
+) -> _DatasetPlanningMetadata:
+    root = _require_artifact_root(Path(dataset_root))
+    spec_path = root / "spec.json"
+    data_root = root / "data"
+    manifest_path = root / "_manifest" / "manifest.json"
+    if not spec_path.is_file():
+        raise ValueError("dataset_spec_missing")
+    if not data_root.is_dir():
+        raise ValueError("dataset_data_dir_missing")
+    spec_payload = read_manifest(spec_path)
+    if manifest_path.is_file():
+        read_manifest(manifest_path)
+    paths = _parquet_part_paths(
+        data_root,
+        partition_filter=partition_filter,
+        spec=spec_payload,
+    )
+    if not paths:
+        raise ValueError("dataset_data_dir_missing")
+    row_count = 0
+    schemas: list[tuple[tuple[str, str], ...]] = []
+    partitions: set[str] = set()
+    for path in paths:
+        parquet_file = pq.ParquetFile(path)
+        schemas.append(_canonical_schema_from_file(parquet_file))
+        row_count += int(parquet_file.metadata.num_rows)
+        partitions.add(_relative_partition_label(data_root, path))
+    first_schema = schemas[0]
+    if any(schema != first_schema for schema in schemas[1:]):
+        raise ValueError("dataset_schema_mismatch")
+    return _DatasetPlanningMetadata(
+        row_count=row_count,
+        file_count=len(paths),
+        partitions=tuple(sorted(partitions)),
     )
 
 
@@ -814,6 +862,16 @@ def _validated_schema(paths: list[Path]) -> tuple[tuple[str, str], ...]:
 
 def _canonical_schema(path: Path) -> tuple[tuple[str, str], ...]:
     schema = pq.ParquetFile(path).schema_arrow
+    return _canonical_schema_from_schema(schema)
+
+
+def _canonical_schema_from_file(
+    parquet_file: pq.ParquetFile,
+) -> tuple[tuple[str, str], ...]:
+    return _canonical_schema_from_schema(parquet_file.schema_arrow)
+
+
+def _canonical_schema_from_schema(schema: Any) -> tuple[tuple[str, str], ...]:
     return tuple((field.name, str(field.type)) for field in schema)
 
 

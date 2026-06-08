@@ -27,7 +27,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
-    fingerprint_dataset,
+    _dataset_planning_metadata,
     inspect_dataset,
     read_dataset,
     write_dataset,
@@ -627,9 +627,8 @@ def _planned_daily_panel_asset_chunk_size(
 
 
 def _interim_row_count(data_root: Path, *, years: tuple[int, ...]) -> int:
-    return fingerprint_dataset(
+    return _dataset_planning_metadata(
         data_root,
-        columns=["asset_id"],
         partition_filter=_year_filter(years),
     ).row_count
 

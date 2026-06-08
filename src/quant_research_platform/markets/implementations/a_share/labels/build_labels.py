@@ -27,7 +27,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
-    fingerprint_dataset,
+    _dataset_planning_metadata,
     inspect_dataset,
     read_dataset,
     write_dataset,
@@ -338,9 +338,8 @@ def _planned_asset_chunk_size(
 
 
 def _panel_row_count(data_root: Path, *, years: tuple[int, ...]) -> int:
-    return fingerprint_dataset(
+    return _dataset_planning_metadata(
         data_root,
-        columns=["asset_id"],
         partition_filter=_year_filter(years),
     ).row_count
 
@@ -352,14 +351,13 @@ def _chunked(values: tuple[str, ...], size: int) -> Iterator[tuple[str, ...]]:
 
 def _partition_exists(data_root: Path, year: int) -> bool:
     try:
-        fingerprint_dataset(
+        _dataset_planning_metadata(
             data_root,
-            columns=["asset_id"],
             partition_filter={"year": (year,)},
         )
         return True
     except ValueError as exc:
-        if "partition_value_not_found" in str(exc):
+        if str(exc) == "partition_value_not_found":
             return False
         raise
 

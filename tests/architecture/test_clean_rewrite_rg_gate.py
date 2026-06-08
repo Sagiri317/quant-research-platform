@@ -191,6 +191,30 @@ def test_active_tree_has_no_retired_terms() -> None:
     assert hits == []
 
 
+def test_a_share_planning_hot_paths_do_not_use_fingerprint_dataset() -> None:
+    checked = (
+        Path(
+            "src/quant_research_platform/markets/implementations/a_share/"
+            "processed/panels.py"
+        ),
+        Path(
+            "src/quant_research_platform/markets/implementations/a_share/"
+            "factors/build_factors.py"
+        ),
+        Path(
+            "src/quant_research_platform/markets/implementations/a_share/"
+            "labels/build_labels.py"
+        ),
+    )
+    hits = [
+        str(path)
+        for path in checked
+        if "fingerprint_dataset" in path.read_text(encoding="utf-8")
+    ]
+
+    assert hits == []
+
+
 def test_public_surfaces_do_not_expose_internal_provider_markers() -> None:
     forbidden_patterns = (
         ("csmar", re.compile(r"(?i)\bcsmar\b")),

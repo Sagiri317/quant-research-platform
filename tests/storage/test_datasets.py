@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.storage.datasets as datasets
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -272,6 +273,70 @@ def test_inspect_dataset_returns_minimal_metadata(tmp_path: Path) -> None:
     assert inspection.file_count == 2
     assert inspection.manifest["row_count"] == 3
     assert not hasattr(inspection, "schema")
+
+
+def test_dataset_planning_metadata_counts_rows_by_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+
+    def read_parquet_blocked(*args, **kwargs):
+        raise AssertionError("planning metadata must not read row contents")
+
+    def fingerprint_blocked(*args, **kwargs):
+        raise AssertionError("planning metadata must not fingerprint rows")
+
+    monkeypatch.setattr(datasets.pd, "read_parquet", read_parquet_blocked)
+    monkeypatch.setattr(datasets, "fingerprint_dataset", fingerprint_blocked)
+
+    metadata = datasets._dataset_planning_metadata(
+        root,
+        partition_filter={"year": (2014,)},
+    )
+
+    assert metadata.row_count == 1
+    assert metadata.file_count == 1
+    assert metadata.partitions == ("year=2014",)
+
+
+def test_dataset_planning_metadata_counts_multiple_partitions(tmp_path: Path) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+
+    metadata = datasets._dataset_planning_metadata(
+        root,
+        partition_filter={"year": (2014, 2015)},
+    )
+
+    assert metadata.row_count == 3
+    assert metadata.file_count == 2
+    assert metadata.partitions == ("year=2014", "year=2015")
+
+
+def test_dataset_planning_metadata_missing_partition_propagates_known_error(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+
+    with pytest.raises(ValueError, match="partition_value_not_found"):
+        datasets._dataset_planning_metadata(
+            root,
+            partition_filter={"year": (2020,)},
+        )
+
+
+def test_dataset_planning_metadata_corrupt_structure_does_not_return_zero(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+    (root / "spec.json").unlink()
+
+    with pytest.raises(ValueError, match="dataset_spec_missing"):
+        datasets._dataset_planning_metadata(root)
 
 
 def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
