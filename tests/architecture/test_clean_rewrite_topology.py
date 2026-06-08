@@ -251,16 +251,22 @@ def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
             "build_panel_from_interim",
             "_filter_panel_years",
             "_filter_panel_end_date",
+            "_is_missing_dataset_artifact_error",
         },
         SOURCE_ROOT / "markets/implementations/a_share/processed/contexts.py": {
+            "_context_frame_from_panel",
+            "_select_context_columns",
             "select_context_columns",
             "write_contexts",
         },
         SOURCE_ROOT / "markets/implementations/a_share/universes/build.py": {
+            "_universe_frame_from_panel",
             "select_universe_columns",
             "write_universe",
         },
         SOURCE_ROOT / "markets/implementations/a_share/masks/build.py": {
+            "_mask_frame_from_panel",
+            "_select_mask_columns",
             "write_masks",
         },
         SOURCE_ROOT / "markets/implementations/a_share/factors/build_factors.py": {
@@ -268,6 +274,7 @@ def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
             "calculate_price_volume_factor_full",
             "_factor_output_frame",
             "_factor_panel_input_columns",
+            "_is_missing_dataset_artifact_error",
             "read_panel",
             "read_full_panel_for_factor_build",
             "select_slim_factor_columns",

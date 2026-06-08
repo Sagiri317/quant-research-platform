@@ -45,6 +45,7 @@ from ..processed._dataset_helpers import (
     dataset_asset_ids,
     dataset_partition_exists,
     dataset_row_count,
+    is_missing_dataset_artifact_error,
     read_dataset_asset_chunk,
 )
 
@@ -167,17 +168,9 @@ def _read_trading_calendar_interim(interim_root: Path) -> pd.DataFrame:
     try:
         return read_dataset(Path(interim_root) / "trading_calendar")
     except (FileNotFoundError, ValueError) as exc:
-        if _is_missing_dataset_artifact_error(exc):
+        if is_missing_dataset_artifact_error(exc):
             raise ValueError("missing_trading_calendar_interim") from exc
         raise
-
-
-def _is_missing_dataset_artifact_error(exc: Exception) -> bool:
-    message = str(exc)
-    return isinstance(exc, FileNotFoundError) or message in {
-        "dataset_spec_missing",
-        "dataset_data_dir_missing",
-    }
 
 
 def _factor_output_columns() -> tuple[str, ...]:

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
-
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_processed_catalog,
 )
@@ -41,22 +39,6 @@ CONTEXT_COLUMNS: tuple[str, ...] = (
 )
 
 
-def _context_frame_from_panel(
-    frame: pd.DataFrame,
-    *,
-    start_year: int,
-    end_year: int,
-) -> pd.DataFrame:
-    catalog = a_share_processed_catalog()
-    spec = catalog.get("daily_context")
-    context = filter_years_sorted(
-        _select_context_columns(frame),
-        start_year=start_year,
-        end_year=end_year,
-    )
-    return context[list(spec.required_columns)].copy()
-
-
 def write_contexts_from_panel_dataset(
     processed_root: Path,
     *,
@@ -83,11 +65,12 @@ def write_contexts_from_panel_dataset(
             mode=DatasetReadMode.CHUNKED,
         )
         for frame in frames:
-            context = _context_frame_from_panel(
+            context = filter_years_sorted(
                 frame,
                 start_year=start_year,
                 end_year=end_year,
             )
+            context = context[list(spec.required_columns)].copy()
             if context.empty:
                 continue
             row_count += len(context)
@@ -104,12 +87,6 @@ def write_contexts_from_panel_dataset(
         spec=spec,
     )
     return artifact_root, row_count
-
-
-def _select_context_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    columns = [column for column in CONTEXT_COLUMNS if column in frame.columns]
-    return frame[columns].copy()
-
 
 __all__ = [
     "CONTEXT_COLUMNS",

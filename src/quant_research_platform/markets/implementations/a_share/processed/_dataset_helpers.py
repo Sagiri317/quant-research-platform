@@ -122,3 +122,11 @@ def filter_years_sorted(
 def chunked_values(values: tuple[str, ...], size: int) -> Iterator[tuple[str, ...]]:
     for index in range(0, len(values), max(1, size)):
         yield values[index : index + max(1, size)]
+
+
+def is_missing_dataset_artifact_error(exc: Exception) -> bool:
+    message = str(exc)
+    return isinstance(exc, FileNotFoundError) or message in {
+        "dataset_spec_missing",
+        "dataset_data_dir_missing",
+    }

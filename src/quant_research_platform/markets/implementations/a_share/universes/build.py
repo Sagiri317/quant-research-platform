@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
-
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_processed_catalog,
 )
@@ -28,23 +26,6 @@ UNIVERSE_COLUMNS: tuple[str, ...] = (
     "timestamp",
     "eligible",
 )
-
-
-def _universe_frame_from_panel(
-    frame: pd.DataFrame,
-    *,
-    start_year: int,
-    end_year: int,
-) -> pd.DataFrame:
-    catalog = a_share_processed_catalog()
-    spec = catalog.get("a_share_default")
-    columns = [column for column in UNIVERSE_COLUMNS if column in frame.columns]
-    universe = filter_years_sorted(
-        frame[columns].copy(),
-        start_year=start_year,
-        end_year=end_year,
-    )
-    return universe[list(spec.required_columns)].copy()
 
 
 def write_universe_from_panel_dataset(
@@ -71,11 +52,12 @@ def write_universe_from_panel_dataset(
             mode=DatasetReadMode.CHUNKED,
         )
         for frame in frames:
-            universe = _universe_frame_from_panel(
+            universe = filter_years_sorted(
                 frame,
                 start_year=start_year,
                 end_year=end_year,
             )
+            universe = universe[list(spec.required_columns)].copy()
             if universe.empty:
                 continue
             row_count += len(universe)

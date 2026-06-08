@@ -35,6 +35,7 @@ from ._dataset_helpers import (
     chunked_values,
     dataset_asset_ids,
     dataset_row_count,
+    is_missing_dataset_artifact_error,
     read_dataset_asset_chunk,
     year_partition_filter,
 )
@@ -382,7 +383,7 @@ def build_panel_asset_batches_from_interim(
     try:
         trading_calendar = _read_interim_data(interim_root, "trading_calendar")
     except (FileNotFoundError, ValueError) as exc:
-        if _is_missing_dataset_artifact_error(exc):
+        if is_missing_dataset_artifact_error(exc):
             raise ValueError("missing_trading_calendar_interim") from exc
         raise
     daily_root = Path(interim_root) / "daily_market"
@@ -456,14 +457,6 @@ def _read_interim_data(
 ) -> pd.DataFrame:
     artifact_root = interim_root / interim_data_id
     return read_dataset(artifact_root, partition_filter=year_partition_filter(years))
-
-
-def _is_missing_dataset_artifact_error(exc: Exception) -> bool:
-    message = str(exc)
-    return isinstance(exc, FileNotFoundError) or message in {
-        "dataset_spec_missing",
-        "dataset_data_dir_missing",
-    }
 
 
 def _filter_asset_frame(
