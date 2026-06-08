@@ -12,15 +12,12 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
 from quant_research_platform.markets.implementations.a_share.processed.io import (
     layout_from_processed_root,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import (
-    DatasetAccessMode,
-    parquet_dataset_columns,
+    DatasetReadMode,
+    inspect_dataset,
     read_dataset,
-    write_dataset_artifact,
+    write_dataset,
 )
-from quant_research_platform.storage.layout import processed_data_parquet_root
-from quant_research_platform.storage.parquet import write_processed_data
 
 CONTEXT_COLUMNS: tuple[str, ...] = (
     "market_id",
@@ -56,13 +53,13 @@ def write_contexts(
     catalog = a_share_processed_catalog()
     spec = catalog.get("daily_context")
     context = context[list(spec.required_columns)].copy()
-    data_root = write_processed_data(
-        context,
-        layout=layout_from_processed_root(processed_root),
-        catalog=catalog,
-        processed_data_id="daily_context",
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, len(context)
+    write_dataset(artifact_root, context, spec=spec)
+    return artifact_root, len(context)
 
 
 def write_contexts_from_panel_dataset(
@@ -70,12 +67,15 @@ def write_contexts_from_panel_dataset(
     *,
     start_year: int,
     end_year: int,
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[Path, int]:
     catalog = a_share_processed_catalog()
     spec = catalog.get("daily_context")
-    panel_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
-    available = set(parquet_dataset_columns(panel_root))
+    panel_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        "panels",
+        "daily_panel",
+    )
+    available = set(inspect_dataset(panel_root).columns)
     columns = [column for column in CONTEXT_COLUMNS if column in available]
     row_count = 0
 
@@ -83,9 +83,9 @@ def write_contexts_from_panel_dataset(
         nonlocal row_count
         frames = read_dataset(
             panel_root,
-            years=tuple(range(start_year, end_year + 1)),
+            partition_filter={"year": tuple(range(start_year, end_year + 1))},
             columns=columns,
-            access_mode=DatasetAccessMode.STREAMING,
+            mode=DatasetReadMode.CHUNKED,
         )
         for frame in frames:
             context = _filter_years(select_context_columns(frame), start_year, end_year)
@@ -95,15 +95,17 @@ def write_contexts_from_panel_dataset(
             row_count += len(context)
             yield context
 
-    data_root = write_dataset_artifact(
-        _chunks(),
-        Path(processed_root) / "contexts" / "daily_context",
-        catalog=catalog,
-        data_id="daily_context",
-        access_mode=DatasetAccessMode.STREAMING,
-        resource_policy=resource_policy,
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, row_count
+    write_dataset(
+        artifact_root,
+        _chunks(),
+        spec=spec,
+    )
+    return artifact_root, row_count
 
 
 def _filter_years(frame: pd.DataFrame, start_year: int, end_year: int) -> pd.DataFrame:

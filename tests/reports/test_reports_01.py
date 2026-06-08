@@ -318,7 +318,11 @@ def test_prediction_bundle_cleans_temp_root_after_mid_bundle_failure(
         (path.parent / "partial.parquet").write_text("partial\n", encoding="utf-8")
         raise RuntimeError("simulated_prediction_failure")
 
-    monkeypatch.setattr(bundles_module, "atomic_write_parquet", fail_parquet_write)
+    monkeypatch.setattr(
+        bundles_module,
+        "_atomic_write_report_parquet",
+        fail_parquet_write,
+    )
 
     with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
         write_prediction_bundle_files(
@@ -357,7 +361,7 @@ def test_evaluation_report_cleans_temp_root_after_mid_bundle_failure(
 
     monkeypatch.setattr(
         bundles_module,
-        "atomic_write_parquet",
+        "_atomic_write_report_parquet",
         fail_second_parquet_write,
     )
 

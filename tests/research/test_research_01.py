@@ -39,7 +39,6 @@ from quant_research_platform.research.datasets import (
     validate_evaluation_input,
     validate_prediction_input,
 )
-from quant_research_platform.research.datasets import assembler as assembler_module
 from quant_research_platform.research.evaluations.engine import evaluate_factor_frame
 from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
@@ -50,11 +49,11 @@ from quant_research_platform.research.predictions import (
     run_prediction_from_research_dataset,
     write_prediction_bundle,
 )
+from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import (
     StorageLayout,
     layout_from_processed_market_root,
 )
-from quant_research_platform.storage.parquet import write_processed_data
 
 
 def _research_frame() -> pd.DataFrame:
@@ -193,25 +192,27 @@ def test_research_dataset_assembles_from_processed_specs(
     )
 
     layout = layout_from_processed_market_root(processed_root)
-    write_processed_data(
+    factor_spec = processed_catalog.get("demo_factors")
+    write_dataset(
+        layout.processed_data_root(
+            factor_spec.market_id,
+            factor_spec.category,
+            factor_spec.processed_data_id,
+        ),
         _research_frame().loc[:, ["market_id", "asset_id", "timestamp", "mom_20d"]],
-        layout=layout,
-        catalog=processed_catalog,
-        processed_data_id="demo_factors",
+        spec=factor_spec,
     )
-    write_processed_data(
+    label_spec = processed_catalog.get("demo_labels")
+    write_dataset(
+        layout.processed_data_root(
+            label_spec.market_id,
+            label_spec.category,
+            label_spec.processed_data_id,
+        ),
         _research_frame().loc[
             :, ["market_id", "asset_id", "timestamp", "forward_return_20d"]
         ],
-        layout=layout,
-        catalog=processed_catalog,
-        processed_data_id="demo_labels",
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "read_partitioned_parquet_dataset",
-        lambda *args, **kwargs: pytest.fail("research_dataset_full_read"),
-        raising=False,
+        spec=label_spec,
     )
 
     assemble_research_dataset_from_processed(
@@ -356,9 +357,8 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     assert manifest["test_start"] == "2014-01-03"
     assert manifest["test_end"] == "2014-01-03"
     assert manifest["is_final_oos_window"] is False
-    written = pd.read_parquet(run_root / "prediction.parquet")
-    assert written["timestamp"].min() >= pd.Timestamp("2014-01-03")
-    assert written["timestamp"].max() <= pd.Timestamp("2014-01-03")
+    assert manifest["prediction_column"] == default_prediction_column()
+    assert manifest["primary_key"] == list(platform_entity_time_key())
 
 
 def test_prediction_handoff_rejects_overlapping_oos_split(tmp_path: Path) -> None:

@@ -3,9 +3,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
-from quant_research_platform.storage.manifests import write_internal_artifact_manifest
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    InterimDataSpec,
+    ProcessedDataSpec,
+)
+from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
+from quant_research_platform.storage.layout import PrivateEvidenceLayout
 from quant_research_platform.workflows import private_evidence as module
 from quant_research_platform.workflows.private_evidence import (
     PrivateEvidenceRunConfig,
@@ -84,27 +95,24 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
             / "csmar"
             / "daily_market"
         )
-        (artifact_root / "data").mkdir(parents=True)
-        _write_artifact_manifest(artifact_root, "daily_market", "interim")
-        return object()
+        _persist_fake_artifact(artifact_root, "daily_market", "interim")
+        return type(
+            "Result",
+            (),
+            {"artifact_roots": {"daily_market": artifact_root}},
+        )()
 
     def build_processed(**kwargs):
         calls.append("processed")
         processed = Path(kwargs["processed_root"])
         artifact_root = processed / "factors" / "price_volume"
-        (artifact_root / "data").mkdir(parents=True)
-        _write_artifact_manifest(artifact_root, "price_volume", "processed")
+        _persist_fake_artifact(artifact_root, "price_volume", "processed")
         return type(
             "Result",
             (),
             {
                 "row_counts": {"price_volume": 2},
-                "data_roots": {
-                    "price_volume": processed
-                    / "factors"
-                    / "price_volume"
-                    / "data"
-                },
+                "artifact_roots": {"price_volume": artifact_root},
             },
         )()
 
@@ -116,13 +124,12 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
             / "research_datasets"
             / "a_share_price_volume_forward_returns"
         )
-        (artifact_root / "data").mkdir(parents=True)
-        _write_artifact_manifest(
+        _persist_fake_artifact(
             artifact_root,
             "a_share_price_volume_forward_returns",
             "research",
         )
-        return artifact_root / "data"
+        return artifact_root
 
     monkeypatch.setattr(module, "a_share_csmar_import_interim_data", import_interim)
     monkeypatch.setattr(module, "build_a_share_processed_layers", build_processed)
@@ -171,15 +178,13 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
     assert (output_root / "manifests" / "run_manifest.json").is_file()
     assert (output_root / "timings" / "timings.json").is_file()
     assert (output_root / "validations" / "validation_summary.json").is_file()
-    assert (output_root / "data" / "evidence" / "evidence_summary.json").is_file()
+    layout = PrivateEvidenceLayout.from_output_root(output_root)
+    assert (layout.evidence_root / "evidence_summary.json").is_file()
     for layer in ("interim", "processed", "research", "evidence"):
-        layer_manifest = (
-            output_root / "data" / layer / "_manifests" / "layer_manifest.json"
-        )
+        layer_root = getattr(layout, f"{layer}_root")
+        layer_manifest = layer_root / "_manifests" / "layer_manifest.json"
         assert layer_manifest.is_file()
-        assert list((output_root / "data" / layer).rglob("layer_manifest.json")) == [
-            layer_manifest
-        ]
+        assert list(layer_root.rglob("layer_manifest.json")) == [layer_manifest]
     summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
     validation = json.loads(
         (output_root / "validations" / "validation_summary.json").read_text(
@@ -215,6 +220,9 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
     tmp_path,
     monkeypatch,
 ):
+    captured_roots: list[Path] = []
+    captured_manifests: list[dict[str, object]] = []
+
     def import_interim(**kwargs):
         artifact_root = (
             kwargs["layout"].project_root
@@ -223,24 +231,27 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
             / "csmar"
             / "daily_market"
         )
-        (artifact_root / "data").mkdir(parents=True)
-        _write_artifact_manifest(
-            artifact_root,
-            "daily_market",
-            "interim",
-            marker="artifact-writer-owned",
-        )
+        _persist_fake_artifact(artifact_root, "daily_market", "interim")
+        captured_roots.append(artifact_root)
+        captured_manifests.append(inspect_dataset(artifact_root).manifest)
+        return type(
+            "Result",
+            (),
+            {"artifact_roots": {"daily_market": artifact_root}},
+        )()
 
     monkeypatch.setattr(module, "a_share_csmar_import_interim_data", import_interim)
     monkeypatch.setattr(
         module,
         "build_a_share_processed_layers",
-        lambda **kwargs: type("Result", (), {"row_counts": {}})(),
+        lambda **kwargs: type("Result", (), {"row_counts": {}, "artifact_roots": {}})(),
     )
     monkeypatch.setattr(
         module,
         "assemble_research_dataset_from_processed",
-        lambda **kwargs: Path("research"),
+        lambda **kwargs: _persist_fake_research_root(
+            Path(kwargs["processed_root"])
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -261,20 +272,10 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
             end_date="2016-12-31",
         )
     )
-    manifest_path = (
-        output_root
-        / "data"
-        / "interim"
-        / "csmar"
-        / "daily_market"
-        / "_manifest"
-        / "manifest.json"
-    )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = inspect_dataset(captured_roots[0]).manifest
 
     assert result.status == "PASS"
-    assert manifest["marker"] == "artifact-writer-owned"
-    assert "factor_nan_profile" not in manifest
+    assert manifest == captured_manifests[0]
 
 
 def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
@@ -290,17 +291,24 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
             / "daily_market"
         )
         (artifact_root / "data").mkdir(parents=True)
+        return type(
+            "Result",
+            (),
+            {"artifact_roots": {"daily_market": artifact_root}},
+        )()
 
     monkeypatch.setattr(module, "a_share_csmar_import_interim_data", import_interim)
     monkeypatch.setattr(
         module,
         "build_a_share_processed_layers",
-        lambda **kwargs: type("Result", (), {"row_counts": {}})(),
+        lambda **kwargs: type("Result", (), {"row_counts": {}, "artifact_roots": {}})(),
     )
     monkeypatch.setattr(
         module,
         "assemble_research_dataset_from_processed",
-        lambda **kwargs: Path("research"),
+        lambda **kwargs: _persist_fake_research_root(
+            Path(kwargs["processed_root"])
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -331,7 +339,7 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
     assert result.status == "FAIL"
     assert "dataset_manifest_missing" in validation["failure_codes"]
     assert validation["dataset_manifest_completeness"]["missing"] == [
-        ".run/s9/data/interim/csmar/daily_market/_manifest/manifest.json"
+        ".run/s9/data/interim/csmar/daily_market"
     ]
     assert summary["status"] == validation["status"] == "FAIL"
     summary_md = (output_root / "summary.md").read_text(encoding="utf-8")
@@ -350,37 +358,78 @@ def test_no_comparison_engine_is_introduced_in_src():
     assert hits == []
 
 
-def _write_artifact_manifest(
+def _persist_fake_artifact(
     artifact_root: Path,
     dataset_id: str,
     logical_layer: str,
-    *,
-    marker: str | None = None,
 ) -> None:
-    payload = {
-        "schema_version": "0.1",
-        "run_id": "artifact-writer",
-        "logical_layer": logical_layer,
-        "dataset_id": dataset_id,
-        "primary_key": ["market_id", "asset_id", "timestamp"],
-        "partition_columns": ["year"],
-        "columns": ["market_id", "asset_id", "timestamp", "value"],
-        "row_count": 0,
-        "partition_count": 0,
-        "date_min": None,
-        "date_max": None,
-        "null_count_summary": {
-            "market_id": 0,
-            "asset_id": 0,
-            "timestamp": 0,
-        },
-        "non_finite_count_summary": {},
-        "duplicate_primary_key_count": 0,
-        "validation_status": "pass",
-    }
-    if marker is not None:
-        payload["marker"] = marker
-    write_internal_artifact_manifest(
-        artifact_root / "_manifest" / "manifest.json",
-        payload,
+    write_dataset(
+        artifact_root,
+        _dataset_frame(),
+        spec=_dataset_spec(dataset_id, logical_layer),
     )
+
+
+def _persist_fake_research_root(processed_root: Path) -> Path:
+    artifact_root = (
+        processed_root
+        / "research_datasets"
+        / "a_share_price_volume_forward_returns"
+    )
+    _persist_fake_artifact(
+        artifact_root,
+        "a_share_price_volume_forward_returns",
+        "research",
+    )
+    return artifact_root
+
+
+def _dataset_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset_a"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "value": [1.0],
+        }
+    )
+
+
+def _dataset_spec(
+    dataset_id: str,
+    logical_layer: str,
+) -> InterimDataSpec | ProcessedDataSpec | ResearchDatasetSpec:
+    base = {
+        "market_id": MarketId("a_share"),
+        "frequency": DataFrequency.DAILY,
+        "grain": DataGrain.ASSET_TIMESTAMP,
+        "column_roles": {
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.FACTOR,
+        },
+        "primary_key": ("market_id", "asset_id", "timestamp"),
+        "partition_columns": ("year",),
+    }
+    if logical_layer == "interim":
+        return InterimDataSpec(
+            **base,
+            source_id=SourceId("csmar"),
+            interim_data_id=dataset_id,
+        )
+    if logical_layer == "processed":
+        return ProcessedDataSpec(
+            **base,
+            category="factors",
+            processed_data_id=dataset_id,
+        )
+    if logical_layer == "research":
+        return ResearchDatasetSpec(
+            **base,
+            dataset_id=dataset_id,
+            processed_data_ids=("price_volume",),
+            feature_columns=("value",),
+            label_columns=(),
+        )
+    raise ValueError(f"unsupported_logical_layer: {logical_layer}")

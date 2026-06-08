@@ -7,6 +7,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.storage.datasets import DatasetReadMode
+
 REQUIRED_AREAS = {
     "processed_panel_parity",
     "factor_value_parity",
@@ -377,7 +379,7 @@ def test_aggregate_summary_detects_duplicate_keys_across_chunks() -> None:
     assert summary.duplicate_key_count == 1
 
 
-def test_parquet_root_summary_uses_streaming_batches(
+def test_dataset_root_summary_uses_dataframe_chunks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -385,24 +387,78 @@ def test_parquet_root_summary_uses_streaming_batches(
         private_aggregate,
     )
 
-    data_root = tmp_path / "data"
-    year_root = data_root / "year=2025"
-    year_root.mkdir(parents=True)
-    pd.DataFrame(
+    root = tmp_path / "data" / "processed" / "a_share" / "factors" / "fixture"
+    calls: list[dict[str, object]] = []
+
+    def fake_read_dataset(dataset_root, *, partition_filter, mode):
+        calls.append(
+            {
+                "root": dataset_root,
+                "partition_filter": partition_filter,
+                "mode": mode,
+            }
+        )
+        return iter(
+            [
+                pd.DataFrame(
+                    {
+                        "market_id": ["a_share"],
+                        "asset_id": ["asset-01"],
+                        "timestamp": pd.to_datetime(["2025-01-02"]),
+                        "value": [1.0],
+                    }
+                ),
+                pd.DataFrame(
+                    {
+                        "market_id": ["a_share"],
+                        "asset_id": ["asset-02"],
+                        "timestamp": pd.to_datetime(["2025-01-03"]),
+                        "value": [2.0],
+                    }
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
+
+    summary = private_aggregate._summarize_dataset_root(root, years=(2025,))
+
+    assert calls == [
         {
-            "market_id": ["a_share", "a_share"],
-            "asset_id": ["asset-01", "asset-02"],
-            "timestamp": pd.to_datetime(["2025-01-02", "2025-01-03"]),
-            "value": [1.0, 2.0],
+            "root": root,
+            "partition_filter": {"year": (2025,)},
+            "mode": DatasetReadMode.CHUNKED,
         }
-    ).to_parquet(year_root / "part-000.parquet", index=False)
-    monkeypatch.setattr(
-        private_aggregate.pd,
-        "read_parquet",
-        lambda *args, **kwargs: pytest.fail("full_parquet_read"),
+    ]
+    assert summary.row_count == 2
+    assert summary.key_count == 2
+    assert summary.period == "2025-01-02 through 2025-01-03"
+
+
+def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
+    tmp_path: Path,
+) -> None:
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
+    from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
+
+    root = tmp_path / "data" / "processed" / "a_share" / "factors" / "fixture"
+    write_low_level_parquet_artifact(
+        root,
+        pd.DataFrame(
+            {
+                "market_id": ["a_share", "a_share"],
+                "asset_id": ["asset-01", "asset-02"],
+                "timestamp": pd.to_datetime(["2025-01-02", "2025-01-03"]),
+                "value": [1.0, 2.0],
+            }
+        ),
+        primary_key=("market_id", "asset_id", "timestamp"),
+        partition_columns=("year",),
     )
 
-    summary = private_aggregate._summarize_parquet_root(data_root, years=(2025,))
+    summary = private_aggregate._summarize_dataset_root(root, years=(2025,))
 
     assert summary.row_count == 2
     assert summary.key_count == 2

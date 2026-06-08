@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pyarrow.parquet as pq
+
+from quant_research_platform.storage.datasets import (
+    DatasetReadMode,
+    inspect_dataset,
+    read_dataset,
+)
 
 IMPORTANT_NULL_COUNT_COLUMNS = frozenset(
     {
@@ -30,16 +35,19 @@ IMPORTANT_NULL_COUNT_COLUMNS = frozenset(
 
 
 def build_schema_inventory(project_root: Path) -> list[dict[str, Any]]:
-    """Build sanitized aggregate schema metadata for private local data roots."""
+    """Build sanitized aggregate schema metadata for private dataset artifacts."""
 
     root = Path(project_root)
-    items = [_inventory_item(root, data_root) for data_root in _iter_data_roots(root)]
+    items = [
+        _inventory_item(root, artifact_root)
+        for artifact_root in _iter_dataset_artifact_roots(root)
+    ]
     if not items:
         raise ValueError("schema_inventory_no_datasets_found")
     return sorted(items, key=lambda item: item["logical_relative_root"])
 
 
-def _iter_data_roots(project_root: Path) -> Iterable[Path]:
+def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
     allowed_roots = (
         project_root / "data" / "interim",
         project_root / "data" / "processed",
@@ -47,17 +55,16 @@ def _iter_data_roots(project_root: Path) -> Iterable[Path]:
     for layer_root in allowed_roots:
         if not layer_root.exists():
             continue
-        for data_root in layer_root.rglob("data"):
-            if data_root.is_dir() and any(data_root.rglob("*.parquet")):
-                yield data_root
+        for spec_path in sorted(layer_root.rglob("spec.json")):
+            yield spec_path.parent
 
 
-def _inventory_item(project_root: Path, data_root: Path) -> dict[str, Any]:
-    artifact_root = data_root.parent
-    logical_root = data_root.relative_to(project_root).as_posix()
-    spec_payload, warnings = _read_spec_payload(artifact_root)
-    files = tuple(sorted(data_root.rglob("*.parquet")))
-    columns, dtypes = _merged_schema(files)
+def _inventory_item(project_root: Path, artifact_root: Path) -> dict[str, Any]:
+    inspection = inspect_dataset(artifact_root)
+    logical_root = artifact_root.relative_to(project_root).as_posix()
+    spec_payload = inspection.spec
+    warnings: list[str] = []
+    columns = inspection.columns
     primary_key = tuple(str(value) for value in spec_payload.get("primary_key", ()))
     partition_columns = tuple(
         str(value) for value in spec_payload.get("partition_columns", ())
@@ -67,8 +74,7 @@ def _inventory_item(project_root: Path, data_root: Path) -> dict[str, Any]:
         warnings.append(
             "primary_key_inferred" if primary_key else "primary_key_missing"
         )
-    duplicate_count, null_key_counts = _key_stats(files, primary_key)
-    min_timestamp, max_timestamp = _timestamp_bounds(files)
+    stats = _aggregate_dataset_stats(artifact_root, columns, primary_key)
     layer, category, artifact_id = _logical_identifiers(logical_root)
     return {
         "artifact_id": artifact_id,
@@ -76,23 +82,22 @@ def _inventory_item(project_root: Path, data_root: Path) -> dict[str, Any]:
         "category": category,
         "logical_relative_root": logical_root,
         "columns": list(columns),
-        "dtypes": dtypes,
+        "dtypes": stats["dtypes"],
         "primary_key": list(primary_key),
         "partition_columns": list(partition_columns),
-        "file_count": len(files),
-        "row_count": _metadata_row_count(files),
-        "row_count_by_year": _row_count_by_year(files),
-        "min_timestamp": min_timestamp,
-        "max_timestamp": max_timestamp,
-        "duplicate_primary_key_count": duplicate_count,
-        "null_key_counts": null_key_counts,
-        "selected_important_column_null_counts": _important_null_counts(
-            files,
-            columns,
+        "file_count": inspection.file_count,
+        "row_count": stats["row_count"],
+        "row_count_by_year": stats["row_count_by_year"],
+        "min_timestamp": stats["min_timestamp"],
+        "max_timestamp": stats["max_timestamp"],
+        "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
+        "null_key_counts": stats["null_key_counts"],
+        "selected_important_column_null_counts": (
+            stats["selected_important_column_null_counts"]
         ),
         "schema_hash": _schema_hash(
             columns=columns,
-            dtypes=dtypes,
+            dtypes=stats["dtypes"],
             primary_key=primary_key,
             partition_columns=partition_columns,
         ),
@@ -100,119 +105,77 @@ def _inventory_item(project_root: Path, data_root: Path) -> dict[str, Any]:
     }
 
 
-def _read_spec_payload(artifact_root: Path) -> tuple[dict[str, Any], list[str]]:
-    spec_path = artifact_root / "spec.json"
-    if not spec_path.exists():
-        return {}, ["spec_missing"]
-    try:
-        payload = json.loads(spec_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}, ["spec_unreadable"]
-    if not isinstance(payload, dict):
-        return {}, ["spec_invalid"]
-    return payload, []
-
-
-def _merged_schema(files: tuple[Path, ...]) -> tuple[tuple[str, ...], dict[str, str]]:
-    columns: set[str] = set()
-    dtypes: dict[str, str] = {}
-    for file in files:
-        schema = pq.ParquetFile(file).schema_arrow
-        for field in schema:
-            name = str(field.name)
-            columns.add(name)
-            dtypes.setdefault(name, str(field.type))
-    ordered = tuple(sorted(columns))
-    return ordered, {column: dtypes[column] for column in ordered}
-
-
-def _metadata_row_count(files: tuple[Path, ...]) -> int:
-    return int(sum(pq.ParquetFile(file).metadata.num_rows for file in files))
-
-
-def _row_count_by_year(files: tuple[Path, ...]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for file in files:
-        year = _partition_year(file)
-        if year is None:
-            continue
-        counts[year] = counts.get(year, 0) + int(pq.ParquetFile(file).metadata.num_rows)
-    return dict(sorted(counts.items()))
-
-
-def _partition_year(file: Path) -> str | None:
-    for part in file.parts:
-        if part.startswith("year="):
-            return part.split("=", 1)[1]
-    return None
-
-
-def _key_stats(
-    files: tuple[Path, ...],
-    primary_key: tuple[str, ...],
-) -> tuple[int, dict[str, int]]:
-    if not primary_key:
-        return 0, {}
-    frames: list[pd.DataFrame] = []
-    null_counts = {column: 0 for column in primary_key}
-    for file in files:
-        frame = pd.read_parquet(file, columns=list(primary_key), engine="pyarrow")
-        for column in primary_key:
-            null_counts[column] += int(frame[column].isna().sum())
-        frames.append(frame)
-    if not frames:
-        return 0, null_counts
-    keys = pd.concat(frames, ignore_index=True)
-    return int(keys.duplicated(list(primary_key)).sum()), dict(
-        sorted(null_counts.items())
-    )
-
-
-def _timestamp_bounds(files: tuple[Path, ...]) -> tuple[str | None, str | None]:
-    min_timestamp: pd.Timestamp | None = None
-    max_timestamp: pd.Timestamp | None = None
-    for file in files:
-        if "timestamp" not in pq.ParquetFile(file).schema.names:
-            continue
-        timestamps = pd.to_datetime(
-            pd.read_parquet(file, columns=["timestamp"], engine="pyarrow")[
-                "timestamp"
-            ],
-            errors="coerce",
-        ).dropna()
-        if timestamps.empty:
-            continue
-        file_min = timestamps.min()
-        file_max = timestamps.max()
-        min_timestamp = (
-            file_min if min_timestamp is None else min(min_timestamp, file_min)
-        )
-        max_timestamp = (
-            file_max if max_timestamp is None else max(max_timestamp, file_max)
-        )
-    return _format_timestamp(min_timestamp), _format_timestamp(max_timestamp)
-
-
-def _important_null_counts(
-    files: tuple[Path, ...],
+def _aggregate_dataset_stats(
+    artifact_root: Path,
     columns: tuple[str, ...],
-) -> dict[str, int]:
-    selected = tuple(
+    primary_key: tuple[str, ...],
+) -> dict[str, Any]:
+    dtypes: dict[str, str] = {}
+    row_count = 0
+    row_count_by_year: dict[str, int] = {}
+    null_key_counts = {column: 0 for column in primary_key}
+    duplicate_primary_key_count = 0
+    seen_key_hashes: set[int] = set()
+    important_columns = tuple(
         column for column in columns if column in IMPORTANT_NULL_COUNT_COLUMNS
     )
-    if not selected:
-        return {}
-    counts = {column: 0 for column in selected}
-    for file in files:
-        available = [
-            column for column in selected if column in pq.ParquetFile(file).schema.names
-        ]
-        if not available:
-            continue
-        frame = pd.read_parquet(file, columns=available, engine="pyarrow")
-        for column in available:
-            counts[column] += int(frame[column].isna().sum())
-    return dict(sorted(counts.items()))
+    important_null_counts = {column: 0 for column in important_columns}
+    min_timestamp: pd.Timestamp | None = None
+    max_timestamp: pd.Timestamp | None = None
+
+    chunks = read_dataset(artifact_root, mode=DatasetReadMode.CHUNKED)
+    for frame in chunks:
+        row_count += int(len(frame))
+        for column in frame.columns:
+            dtypes.setdefault(str(column), str(frame[column].dtype))
+        if "timestamp" in frame.columns:
+            timestamps = pd.to_datetime(frame["timestamp"], errors="coerce").dropna()
+            if not timestamps.empty:
+                year_counts = timestamps.dt.year.astype(str).value_counts()
+                for year, count in year_counts.items():
+                    row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
+                        count
+                    )
+                chunk_min = timestamps.min()
+                chunk_max = timestamps.max()
+                min_timestamp = (
+                    chunk_min
+                    if min_timestamp is None
+                    else min(min_timestamp, chunk_min)
+                )
+                max_timestamp = (
+                    chunk_max
+                    if max_timestamp is None
+                    else max(max_timestamp, chunk_max)
+                )
+        for column in primary_key:
+            null_key_counts[column] += int(frame[column].isna().sum())
+        for column in important_columns:
+            important_null_counts[column] += int(frame[column].isna().sum())
+        if primary_key:
+            key_hashes = pd.util.hash_pandas_object(
+                frame.loc[:, list(primary_key)],
+                index=False,
+            ).to_numpy(dtype="uint64")
+            for key_hash in key_hashes:
+                value = int(key_hash)
+                if value in seen_key_hashes:
+                    duplicate_primary_key_count += 1
+                else:
+                    seen_key_hashes.add(value)
+
+    return {
+        "dtypes": {column: dtypes.get(column, "") for column in columns},
+        "row_count": row_count,
+        "row_count_by_year": dict(sorted(row_count_by_year.items())),
+        "min_timestamp": _format_timestamp(min_timestamp),
+        "max_timestamp": _format_timestamp(max_timestamp),
+        "duplicate_primary_key_count": duplicate_primary_key_count,
+        "null_key_counts": dict(sorted(null_key_counts.items())),
+        "selected_important_column_null_counts": dict(
+            sorted(important_null_counts.items())
+        ),
+    }
 
 
 def _logical_identifiers(logical_root: str) -> tuple[str, str, str]:
@@ -221,12 +184,12 @@ def _logical_identifiers(logical_root: str) -> tuple[str, str, str]:
         raise ValueError("invalid_inventory_root")
     layer = parts[1]
     if layer == "interim":
-        return layer, parts[2], parts[-2]
+        return layer, parts[2], parts[-1]
     if layer == "processed":
-        category_parts = parts[3:-2]
+        category_parts = parts[3:-1]
         category = "/".join(category_parts) if category_parts else parts[2]
-        return layer, category, parts[-2]
-    return layer, "", parts[-2]
+        return layer, category, parts[-1]
+    return layer, "", parts[-1]
 
 
 def _infer_primary_key(columns: tuple[str, ...]) -> tuple[str, ...]:

@@ -109,7 +109,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     start_year = int(start.year)
     end_year = int(end.year)
     with recorder.record("interim_generation", logical_layer="interim"):
-        a_share_csmar_import_interim_data(
+        interim_result = a_share_csmar_import_interim_data(
             layout=storage_layout,
             raw_root=Path("data") / "raw" / CSMAR_SOURCE_ID,
             start_date=config.start_date,
@@ -127,7 +127,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         )
         record.output_rows = sum(processed_result.row_counts.values())
     with recorder.record("research_generation", logical_layer="research"):
-        assemble_research_dataset_from_processed(
+        research_root = assemble_research_dataset_from_processed(
             processed_root=processed_market_root,
             dataset_catalog=default_research_dataset_catalog(),
             processed_catalog=default_processed_catalog(),
@@ -135,7 +135,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             years=tuple(range(start_year, end_year + 1)),
         )
     with recorder.record("evaluation_generation", logical_layer="evidence"):
-        run_evaluation_from_research_dataset(
+        evaluation_root = run_evaluation_from_research_dataset(
             processed_root=processed_market_root,
             dataset_catalog=default_research_dataset_catalog(),
             evaluation_catalog=default_evaluation_catalog(),
@@ -143,7 +143,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             years=(start_year,),
         )
     with recorder.record("prediction_generation", logical_layer="evidence"):
-        run_prediction_from_research_dataset(
+        prediction_root = run_prediction_from_research_dataset(
             processed_root=processed_market_root,
             dataset_catalog=default_research_dataset_catalog(),
             model_catalog=default_model_catalog(),
@@ -152,11 +152,13 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             years=(start_year,),
         )
 
-    dataset_roots = _dataset_roots(layout)
-    dataset_manifest_paths = tuple(
-        dataset_root / "_manifest" / "manifest.json"
-        for dataset_root in dataset_roots
+    dataset_roots = _dataset_roots(
+        layout,
+        interim_roots=tuple(interim_result.artifact_roots.values()),
+        processed_roots=tuple(processed_result.artifact_roots.values()),
+        research_roots=(Path(research_root),),
     )
+    report_roots = (Path(evaluation_root), Path(prediction_root))
     layer_manifest_paths = (
         write_layer_manifest(
             layer_root=layout.interim_root,
@@ -192,11 +194,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             layer_root=layout.evidence_root,
             logical_layer="evidence",
             run_id=run_id,
-            dataset_roots=tuple(
-                root
-                for root in dataset_roots
-                if _layer_for_root(root, layout) == "evidence"
-            ),
+            dataset_roots=(),
         ),
     )
     with recorder.record("manifest_generation") as record:
@@ -219,7 +217,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         validation_summary = build_validation_summary(
             run_id=run_id,
             output_root=output_root,
-            dataset_manifest_paths=dataset_manifest_paths,
+            dataset_roots=dataset_roots,
             layer_manifest_paths=layer_manifest_paths,
             generated_text_paths=generated_paths,
         )
@@ -239,9 +237,10 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         run_id=run_id,
         date_range={"start_date": config.start_date, "end_date": config.end_date},
         manifests={
-            "dataset_count": len(dataset_manifest_paths),
+            "dataset_count": len(dataset_roots),
             "layer_count": len(layer_manifest_paths),
             "run_validation_status": run_manifest["run_validation_status"],
+            "report_count": len(report_roots),
         },
         timings=timings_payload,
         validation_summary=validation_summary,
@@ -305,11 +304,19 @@ def _create_layout_directories(layout: PrivateEvidenceLayout) -> None:
         root.mkdir(parents=True, exist_ok=True)
 
 
-def _dataset_roots(layout: PrivateEvidenceLayout) -> tuple[Path, ...]:
-    roots: set[Path] = set()
-    for data_root in sorted(layout.data_root.rglob("data")):
-        if data_root.is_dir() and data_root.parts[-1] == "data":
-            roots.add(data_root.parent)
+def _dataset_roots(
+    layout: PrivateEvidenceLayout,
+    *,
+    interim_roots: tuple[Path, ...] = (),
+    processed_roots: tuple[Path, ...] = (),
+    research_roots: tuple[Path, ...] = (),
+) -> tuple[Path, ...]:
+    del layout
+    roots = {
+        Path(root)
+        for root in (*interim_roots, *processed_roots, *research_roots)
+        if root is not None
+    }
     return tuple(sorted(roots, key=lambda item: item.as_posix()))
 
 

@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.private_cli import app as private_app
 from quant_research_platform.reports.schema_inventory import build_schema_inventory
+from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
 ALLOWED_INVENTORY_FIELDS = {
     "artifact_id",
@@ -56,21 +57,21 @@ def test_schema_inventory_scans_only_interim_and_processed_roots(tmp_path) -> No
     combined = json.dumps(inventory, ensure_ascii=False)
 
     assert roots == {
-        "data/interim/csmar/daily_market/data",
-        "data/interim/csmar/stock_master/data",
-        "data/processed/a_share/factors/price_volume/data",
-        "data/processed/a_share/universes/a_share_default/data",
+        "data/interim/csmar/daily_market",
+        "data/interim/csmar/stock_master",
+        "data/processed/a_share/factors/price_volume",
+        "data/processed/a_share/universes/a_share_default",
     }
     assert all(set(item) == ALLOWED_INVENTORY_FIELDS for item in inventory)
-    daily_market = _inventory_item(inventory, "data/interim/csmar/daily_market/data")
-    stock_master = _inventory_item(inventory, "data/interim/csmar/stock_master/data")
+    daily_market = _inventory_item(inventory, "data/interim/csmar/daily_market")
+    stock_master = _inventory_item(inventory, "data/interim/csmar/stock_master")
     price_volume = _inventory_item(
         inventory,
-        "data/processed/a_share/factors/price_volume/data",
+        "data/processed/a_share/factors/price_volume",
     )
     universe = _inventory_item(
         inventory,
-        "data/processed/a_share/universes/a_share_default/data",
+        "data/processed/a_share/universes/a_share_default",
     )
 
     assert daily_market["row_count_by_year"] == {"2023": 1, "2024": 1, "2025": 2}
@@ -92,22 +93,25 @@ def test_schema_inventory_scans_only_interim_and_processed_roots(tmp_path) -> No
 
 
 def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> None:
-    index_info_root = tmp_path / "data" / "interim" / "csmar" / "index_info" / "data"
-    year_root = index_info_root / "year=2020"
-    year_root.mkdir(parents=True)
-    pd.DataFrame(
-        {
-            "market_id": ["a_share"],
-            "asset_id": ["index_a"],
-            "source_id": ["csmar"],
-            "source_asset_id": ["source_index_a"],
-            "timestamp": pd.to_datetime(["2020-01-01"]),
-            "index_name": ["Synthetic Index"],
-        }
-    ).to_parquet(year_root / "part-000.parquet", index=False)
+    index_info_root = tmp_path / "data" / "interim" / "csmar" / "index_info"
+    write_low_level_parquet_artifact(
+        index_info_root,
+        pd.DataFrame(
+            {
+                "market_id": ["a_share"],
+                "asset_id": ["index_a"],
+                "source_id": ["csmar"],
+                "source_asset_id": ["source_index_a"],
+                "timestamp": pd.to_datetime(["2020-01-01"]),
+                "index_name": ["Synthetic Index"],
+            }
+        ),
+        primary_key=[],
+        partition_columns=["year"],
+    )
 
     inventory = build_schema_inventory(tmp_path)
-    item = _inventory_item(inventory, "data/interim/csmar/index_info/data")
+    item = _inventory_item(inventory, "data/interim/csmar/index_info")
 
     assert item["primary_key"] == [
         "market_id",
@@ -280,7 +284,7 @@ def _write_inventory_fixture(project_root: Path) -> None:
         project_root / "reports" / "private_real" / "a_share" / "evaluation" / "run"
     )
 
-    _write_dataset(
+    write_low_level_parquet_artifact(
         interim_root,
         pd.DataFrame(
             {
@@ -302,7 +306,7 @@ def _write_inventory_fixture(project_root: Path) -> None:
         primary_key=["market_id", "asset_id", "timestamp"],
         partition_columns=["year"],
     )
-    _write_dataset(
+    write_low_level_parquet_artifact(
         stock_master_root,
         pd.DataFrame(
             {
@@ -323,7 +327,7 @@ def _write_inventory_fixture(project_root: Path) -> None:
         ],
         partition_columns=["year"],
     )
-    _write_dataset(
+    write_low_level_parquet_artifact(
         processed_root,
         pd.DataFrame(
             {
@@ -340,64 +344,31 @@ def _write_inventory_fixture(project_root: Path) -> None:
         primary_key=["market_id", "asset_id", "timestamp"],
         partition_columns=["year"],
     )
-    _write_dataset(
+    write_low_level_parquet_artifact(
         universe_root,
         pd.DataFrame(
             {
                 "market_id": ["a_share", "a_share"],
                 "asset_id": ["asset_a", "asset_b"],
                 "timestamp": pd.to_datetime(["2024-01-02", "2025-01-03"]),
-                "eligible": [True, None],
+                "eligible": pd.Series([True, pd.NA], dtype="boolean"),
             }
         ),
         primary_key=["market_id", "asset_id", "timestamp"],
         partition_columns=["year"],
     )
-    _write_dataset(
+    write_low_level_parquet_artifact(
         raw_root,
         pd.DataFrame({"raw_value": ["raw_ignored_value"]}),
         primary_key=[],
         partition_columns=[],
     )
-    _write_dataset(
+    write_low_level_parquet_artifact(
         report_root,
         pd.DataFrame({"asset_id": ["asset_a"], "metric": [1.0]}),
         primary_key=[],
         partition_columns=[],
     )
-
-
-def _write_dataset(
-    artifact_root: Path,
-    frame: pd.DataFrame,
-    *,
-    primary_key: list[str],
-    partition_columns: list[str],
-) -> None:
-    spec = {
-        "primary_key": primary_key,
-        "partition_columns": partition_columns,
-    }
-    artifact_root.mkdir(parents=True, exist_ok=True)
-    (artifact_root / "spec.json").write_text(
-        json.dumps(spec, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    data_root = artifact_root / "data"
-    if "timestamp" in frame:
-        result = frame.copy()
-        result["_fixture_year"] = pd.to_datetime(result["timestamp"]).dt.year
-        for year, year_frame in result.groupby("_fixture_year"):
-            year_root = data_root / f"year={int(year)}"
-            year_root.mkdir(parents=True, exist_ok=True)
-            year_frame.drop(columns=["_fixture_year"]).to_parquet(
-                year_root / "part-000.parquet",
-                index=False,
-            )
-        return
-    data_root.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(data_root / "part-000.parquet", index=False)
-
 
 def _inventory_item(
     inventory: list[dict[str, object]],

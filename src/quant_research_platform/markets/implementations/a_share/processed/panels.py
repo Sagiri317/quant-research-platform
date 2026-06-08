@@ -26,14 +26,11 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
 )
 from quant_research_platform.storage.datasets import (
-    DatasetAccessMode,
+    DatasetReadMode,
+    fingerprint_dataset,
+    inspect_dataset,
     read_dataset,
-    write_dataset_artifact,
-)
-from quant_research_platform.storage.parquet import (
-    parquet_dataset_columns,
-    read_partitioned_parquet_dataset,
-    write_processed_data,
+    write_dataset,
 )
 
 _CANONICAL_NAMES = canonical_field_names()
@@ -369,12 +366,13 @@ def write_panel_processed_data(
     catalog = a_share_processed_catalog()
     spec = catalog.get("daily_panel")
     output = frame[list(spec.required_columns)].copy()
-    return write_processed_data(
-        output,
-        layout=layout_from_processed_root(processed_root),
-        catalog=catalog,
-        processed_data_id="daily_panel",
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
+    write_dataset(artifact_root, output, spec=spec)
+    return artifact_root
 
 
 def build_panel_from_interim(
@@ -419,9 +417,11 @@ def build_panel_asset_batches_from_interim(
     market_cap = _read_interim_data(interim_root, "market_cap")
     try:
         trading_calendar = _read_interim_data(interim_root, "trading_calendar")
-    except FileNotFoundError as exc:
-        raise ValueError("missing_trading_calendar_interim") from exc
-    daily_root = Path(interim_root) / "daily_market" / "data"
+    except (FileNotFoundError, ValueError) as exc:
+        if _is_missing_dataset_artifact_error(exc):
+            raise ValueError("missing_trading_calendar_interim") from exc
+        raise
+    daily_root = Path(interim_root) / "daily_market"
     years = tuple(range(start_year, output_end_year + 1))
     asset_ids = _daily_market_asset_ids(daily_root, years=years)
     chunk_size = asset_chunk_size or _planned_daily_panel_asset_chunk_size(
@@ -465,15 +465,17 @@ def build_panel_asset_batches_from_interim(
             row_count += len(output)
             yield output
 
-    data_root = write_dataset_artifact(
-        _output_chunks(),
-        processed_root / "panels" / "daily_panel",
-        catalog=catalog,
-        data_id="daily_panel",
-        access_mode=DatasetAccessMode.STREAMING,
-        resource_policy=resource_policy,
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, row_count
+    write_dataset(
+        artifact_root,
+        _output_chunks(),
+        spec=spec,
+    )
+    return artifact_root, row_count
 
 
 def build_panel_frame_from_interim(
@@ -506,8 +508,10 @@ def _legacy_build_panel_frame_from_interim(
     market_cap = _read_interim_data(interim_root, "market_cap")
     try:
         trading_calendar = _read_interim_data(interim_root, "trading_calendar")
-    except FileNotFoundError as exc:
-        raise ValueError("missing_trading_calendar_interim") from exc
+    except (FileNotFoundError, ValueError) as exc:
+        if _is_missing_dataset_artifact_error(exc):
+            raise ValueError("missing_trading_calendar_interim") from exc
+        raise
     daily = _read_interim_data(
         interim_root,
         "daily_market",
@@ -533,8 +537,16 @@ def _read_interim_data(
     *,
     years: tuple[int, ...] | None = None,
 ) -> pd.DataFrame:
-    data_root = interim_root / interim_data_id / "data"
-    return read_partitioned_parquet_dataset(data_root, years=years)
+    artifact_root = interim_root / interim_data_id
+    return read_dataset(artifact_root, partition_filter=_year_filter(years))
+
+
+def _is_missing_dataset_artifact_error(exc: Exception) -> bool:
+    message = str(exc)
+    return isinstance(exc, FileNotFoundError) or message in {
+        "dataset_spec_missing",
+        "dataset_data_dir_missing",
+    }
 
 
 def _daily_market_asset_ids(
@@ -545,9 +557,9 @@ def _daily_market_asset_ids(
     asset_ids: set[str] = set()
     chunks = read_dataset(
         data_root,
-        years=years,
+        partition_filter=_year_filter(years),
         columns=["asset_id"],
-        access_mode=DatasetAccessMode.STREAMING,
+        mode=DatasetReadMode.CHUNKED,
     )
     for chunk in chunks:
         asset_ids.update(str(value) for value in chunk["asset_id"].dropna().unique())
@@ -566,8 +578,8 @@ def _read_daily_market_asset_chunk(
     asset_id_set = set(asset_ids)
     chunks = read_dataset(
         data_root,
-        years=years,
-        access_mode=DatasetAccessMode.STREAMING,
+        partition_filter=_year_filter(years),
+        mode=DatasetReadMode.CHUNKED,
     )
     for chunk in chunks:
         filtered = chunk.loc[chunk["asset_id"].isin(asset_id_set)]
@@ -599,7 +611,7 @@ def _planned_daily_panel_asset_chunk_size(
 ) -> int:
     total_rows = _interim_row_count(daily_root, years=years)
     rows_per_asset = max(1, total_rows // max(1, len(asset_ids)))
-    input_width = max(1, len(parquet_dataset_columns(daily_root)))
+    input_width = max(1, len(inspect_dataset(daily_root).columns))
     output_width = len(a_share_processed_catalog().get("daily_panel").required_columns)
     working_width = input_width + output_width + 16
     estimated_bytes_per_asset = max(1, rows_per_asset * working_width * 16)
@@ -615,11 +627,11 @@ def _planned_daily_panel_asset_chunk_size(
 
 
 def _interim_row_count(data_root: Path, *, years: tuple[int, ...]) -> int:
-    total = 0
-    for year in years:
-        for path in sorted((data_root / f"year={year}").glob("*.parquet")):
-            total += int(pd.read_parquet(path, columns=["asset_id"]).shape[0])
-    return total
+    return fingerprint_dataset(
+        data_root,
+        columns=["asset_id"],
+        partition_filter=_year_filter(years),
+    ).row_count
 
 
 def _chunked(values: tuple[str, ...], size: int) -> Iterator[tuple[str, ...]]:
@@ -646,3 +658,9 @@ def _filter_panel_end_date(frame: pd.DataFrame, *, end_date: str) -> pd.DataFram
     return result.loc[result["timestamp"] <= pd.Timestamp(end_date)].reset_index(
         drop=True
     )
+
+
+def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
+    if years is None:
+        return None
+    return {"year": years}

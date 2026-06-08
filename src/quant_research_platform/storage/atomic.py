@@ -66,22 +66,6 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
     return final_path
 
 
-def atomic_write_parquet(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
-    final_path = Path(path)
-    reject_if_exists(final_path)
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = _temp_sibling(final_path)
-    temp_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        frame.to_parquet(temp_path, **kwargs)
-        reject_if_exists(final_path)
-        _rename_with_transient_permission_retry(temp_path, final_path)
-    except Exception:
-        _remove_path(temp_path)
-        raise
-    return final_path
-
-
 def atomic_write_directory(root: Path, writer: Callable[[Path], T]) -> T:
     final_root = Path(root)
     reject_if_exists(final_root)
@@ -130,7 +114,6 @@ __all__ = [
     "atomic_write_csv",
     "atomic_write_directory",
     "atomic_write_json",
-    "atomic_write_parquet",
     "atomic_write_text",
     "reject_if_exists",
 ]

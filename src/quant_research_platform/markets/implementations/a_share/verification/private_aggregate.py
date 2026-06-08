@@ -15,7 +15,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
@@ -23,6 +22,11 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 from quant_research_platform.reports.evidence_rendering import (
     render_private_verification_summary_markdown,
     render_public_safe_evidence_markdown,
+)
+from quant_research_platform.storage.datasets import (
+    DatasetReadMode,
+    inspect_dataset,
+    read_dataset,
 )
 
 CONTRACT_VERSION = "0.1"
@@ -66,7 +70,7 @@ class AggregateInput:
     roots: tuple[Path, ...]
     expected_period: str | None
     explanation_name: str
-    summary_kind: str = "parquet_roots"
+    summary_kind: str = "dataset_roots"
     years: tuple[int, ...] | None = None
 
 
@@ -206,21 +210,20 @@ def generate_private_verification_summary(
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
     reports_root = root / "reports" / "private_real" / MARKET_ID
-    daily_panel = processed / "panels" / "daily_panel" / "data"
-    factor = processed / "factors" / PRICE_VOLUME_PROCESSED_DATA_ID / "data"
-    label = processed / "labels" / "forward_returns" / "data"
-    universe = processed / "universes" / "a_share_default" / "data"
+    daily_panel = processed / "panels" / "daily_panel"
+    factor = processed / "factors" / PRICE_VOLUME_PROCESSED_DATA_ID
+    label = processed / "labels" / "forward_returns"
+    universe = processed / "universes" / "a_share_default"
     masks = (
-        processed / "masks" / "as_of" / "a_share_as_of" / "data",
-        processed / "masks" / "execution" / "a_share_execution" / "data",
-        processed / "masks" / "evaluation" / "a_share_evaluation" / "data",
+        processed / "masks" / "as_of" / "a_share_as_of",
+        processed / "masks" / "execution" / "a_share_execution",
+        processed / "masks" / "evaluation" / "a_share_evaluation",
     )
-    context = processed / "contexts" / "daily_context" / "data"
+    context = processed / "contexts" / "daily_context"
     research = (
         processed
         / "research_datasets"
         / "a_share_price_volume_forward_returns"
-        / "data"
     )
     evaluation = (
         reports_root / "evaluation" / "a_share_mom_20d_forward_return_20d_2014"
@@ -265,12 +268,14 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             (evaluation,),
             "2014-01-29 through 2014-12-31",
             "evaluation",
+            summary_kind="report_bundle",
         ),
         AggregateInput(
             "prediction_oos_smoke_parity",
             (prediction,),
             "2014-01-01 through 2014-12-31",
             "prediction OOS smoke",
+            summary_kind="report_bundle",
         ),
         AggregateInput(
             "supporting_layers_coverage_2014_2025",
@@ -291,7 +296,7 @@ def _processed_inventory(root: Path) -> list[dict[str, Any]]:
     inventory: list[dict[str, Any]] = []
     for artifact_root in _official_processed_artifact_roots(root):
         logical_root = _logical_processed_root(root, artifact_root)
-        summary = _summarize_parquet_root(artifact_root / "data")
+        summary = _summarize_dataset_root(artifact_root)
         category, artifact_id = _processed_category_and_artifact_id(logical_root)
         inventory.append(
             {
@@ -321,11 +326,19 @@ def _official_processed_artifact_roots(root: Path) -> tuple[Path, ...]:
     if not processed_root.exists():
         raise FileNotFoundError("private_processed_root_missing")
     roots = [
-        path.parent
-        for path in processed_root.rglob("data")
-        if path.is_dir() and any(path.rglob("*.parquet"))
+        path
+        for path in processed_root.rglob("*")
+        if path.is_dir() and _is_dataset_artifact_root(path)
     ]
     return tuple(sorted(set(roots), key=lambda path: path.as_posix()))
+
+
+def _is_dataset_artifact_root(path: Path) -> bool:
+    try:
+        inspect_dataset(path)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _logical_processed_root(root: Path, artifact_root: Path) -> str:
@@ -409,6 +422,8 @@ def _summarize_area_input(area_input: AggregateInput) -> AggregateSummary:
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
         return _summarize_generated_full_daily_panel(area_input.roots[0])
+    if area_input.summary_kind == "report_bundle":
+        return _summarize_report_roots(area_input.roots)
     return _summarize_roots(area_input.roots, years=area_input.years)
 
 
@@ -431,19 +446,13 @@ def _iter_generated_full_daily_panel_asset_chunks(
     from quant_research_platform.markets.implementations.a_share.processed import (
         panels,
     )
-    from quant_research_platform.storage.parquet import read_partitioned_parquet_dataset
-
     interim_root = _private_interim_root_for_data_product(
         project_root,
         DATA_PRODUCT_ID,
     )
-    stock_master = read_partitioned_parquet_dataset(
-        interim_root / "stock_master" / "data"
-    )
-    market_cap = read_partitioned_parquet_dataset(interim_root / "market_cap" / "data")
-    trading_calendar = read_partitioned_parquet_dataset(
-        interim_root / "trading_calendar" / "data"
-    )
+    stock_master = read_dataset(interim_root / "stock_master")
+    market_cap = read_dataset(interim_root / "market_cap")
+    trading_calendar = read_dataset(interim_root / "trading_calendar")
     spec = a_share_processed_catalog().get("daily_panel")
     years = tuple(range(FULL_HISTORY_START_YEAR, FULL_HISTORY_END_YEAR + 1))
     asset_ids = _daily_market_asset_ids(interim_root, years=years)
@@ -499,11 +508,13 @@ def _daily_market_asset_ids(
     years: tuple[int, ...],
 ) -> tuple[str, ...]:
     asset_ids: set[str] = set()
-    for file in _partitioned_parquet_parts(
-        interim_root / "daily_market" / "data",
-        years=years,
-    ):
-        frame = pd.read_parquet(file, columns=["asset_id"])
+    chunks = read_dataset(
+        interim_root / "daily_market",
+        partition_filter=_year_filter(years),
+        columns=["asset_id"],
+        mode=DatasetReadMode.CHUNKED,
+    )
+    for frame in chunks:
         asset_ids.update(str(value) for value in frame["asset_id"].dropna().unique())
     return tuple(sorted(asset_ids))
 
@@ -516,11 +527,12 @@ def _read_daily_market_asset_chunk(
 ) -> pd.DataFrame:
     asset_id_set = set(asset_ids)
     frames: list[pd.DataFrame] = []
-    for file in _partitioned_parquet_parts(
-        interim_root / "daily_market" / "data",
-        years=years,
-    ):
-        frame = pd.read_parquet(file)
+    chunks = read_dataset(
+        interim_root / "daily_market",
+        partition_filter=_year_filter(years),
+        mode=DatasetReadMode.CHUNKED,
+    )
+    for frame in chunks:
         filtered = frame.loc[frame["asset_id"].isin(asset_id_set)]
         if not filtered.empty:
             frames.append(filtered)
@@ -538,29 +550,16 @@ def _filter_asset_frame(
     return frame.loc[frame["asset_id"].isin(set(asset_ids))].copy()
 
 
-def _partitioned_parquet_parts(
-    root: Path,
-    *,
-    years: tuple[int, ...],
-) -> tuple[Path, ...]:
-    paths: list[Path] = []
-    for year in years:
-        paths.extend(sorted((root / f"year={year}").glob("*.parquet")))
-    if not paths:
-        raise FileNotFoundError("private_aggregate_input_missing")
-    return tuple(paths)
-
-
 def _estimate_generated_full_panel_memory_bytes(
     interim_root: Path,
     *,
     years: tuple[int, ...],
 ) -> int:
-    compressed_bytes = sum(
-        file.stat().st_size
-        for file in _partitioned_parquet_parts(
-            interim_root / "daily_market" / "data",
-            years=years,
+    del years
+    compressed_bytes = int(
+        inspect_dataset(interim_root / "daily_market").manifest.get(
+            "file_size_bytes",
+            0,
         )
     )
     return max(1, compressed_bytes * GENERATED_PANEL_MEMORY_EXPANSION_FACTOR)
@@ -623,6 +622,12 @@ def _dynamic_asset_chunk_size(
     return max(1, min(total_asset_count, target_bytes // bytes_per_asset))
 
 
+def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
+    if years is None:
+        return None
+    return {"year": years}
+
+
 def _chunked(values: Sequence[str], size: int) -> Iterator[tuple[str, ...]]:
     for index in range(0, len(values), size):
         yield tuple(values[index : index + size])
@@ -633,40 +638,32 @@ def _summarize_roots(
     *,
     years: tuple[int, ...] | None = None,
 ) -> AggregateSummary:
-    summaries = [_summarize_parquet_root(root, years=years) for root in roots]
+    summaries = [_summarize_dataset_root(root, years=years) for root in roots]
     return _combine_summaries(summaries)
 
 
-def _summarize_parquet_root(
+def _summarize_report_roots(roots: tuple[Path, ...]) -> AggregateSummary:
+    frames: list[pd.DataFrame] = []
+    for root in roots:
+        files = tuple(sorted(Path(root).rglob("*.parquet")))
+        if not files:
+            raise FileNotFoundError("private_aggregate_input_missing")
+        for file in files:
+            frames.append(pd.read_parquet(file, engine="pyarrow"))
+    return _summarize_frames(frames)
+
+
+def _summarize_dataset_root(
     root: Path,
     *,
     years: tuple[int, ...] | None = None,
 ) -> AggregateSummary:
-    files = _parquet_files_for_summary(root, years=years)
-    if not files:
-        raise FileNotFoundError("private_aggregate_input_missing")
-    return _summarize_frames(_iter_parquet_batches(files))
-
-
-def _parquet_files_for_summary(
-    root: Path,
-    *,
-    years: tuple[int, ...] | None,
-) -> tuple[Path, ...]:
-    data_root = Path(root)
-    if years is None:
-        return tuple(sorted(data_root.rglob("*.parquet")))
-    paths: list[Path] = []
-    for year in years:
-        paths.extend(sorted((data_root / f"year={year}").glob("*.parquet")))
-    return tuple(paths)
-
-
-def _iter_parquet_batches(files: Iterable[Path]) -> Iterator[pd.DataFrame]:
-    for file in files:
-        parquet_file = pq.ParquetFile(file)
-        for batch in parquet_file.iter_batches():
-            yield batch.to_pandas()
+    chunks = read_dataset(
+        root,
+        partition_filter=_year_filter(years),
+        mode=DatasetReadMode.CHUNKED,
+    )
+    return _summarize_frames(chunks)
 
 
 def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:

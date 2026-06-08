@@ -47,7 +47,6 @@ APPROVED_FIELD_SPEC_FILES = {
 APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/storage/atomic.py"),
     Path("src/quant_research_platform/storage/datasets.py"),
-    Path("src/quant_research_platform/storage/parquet.py"),
     Path("src/quant_research_platform/storage/manifests.py"),
     Path("src/quant_research_platform/reports/bundles.py"),
     Path("src/quant_research_platform/reports/manifests.py"),

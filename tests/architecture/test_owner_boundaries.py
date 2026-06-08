@@ -6,7 +6,8 @@ from pathlib import Path
 PROJECT_SRC = Path("src/quant_research_platform")
 AGENTS_SRC = PROJECT_SRC / "agents"
 PROVIDER_BINDINGS = PROJECT_SRC / "catalog" / "provider_bindings.py"
-STORAGE_PARQUET = PROJECT_SRC / "storage" / "parquet.py"
+STORAGE_DATASETS = PROJECT_SRC / "storage" / "datasets.py"
+DELETED_STORAGE_PARQUET = PROJECT_SRC / "storage" / "parquet.py"
 WORKFLOW_INTERFACE_ROOTS = (
     PROJECT_SRC / "workflows",
     PROJECT_SRC / "interfaces",
@@ -63,15 +64,34 @@ def test_provider_bindings_catalog_remains_pure_container() -> None:
     assert referenced_helpers == []
 
 
-def test_storage_parquet_uses_data_spec_provider_protocol() -> None:
-    tree = ast.parse(
-        STORAGE_PARQUET.read_text(encoding="utf-8"),
-        filename=str(STORAGE_PARQUET),
-    )
-    classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+def test_storage_datasets_exposes_single_artifact_root_api() -> None:
+    import quant_research_platform.storage.datasets as datasets
 
-    assert "DataSpecProvider" in classes
-    assert "Data" + "Spec" + "Catalog" not in classes
+    source = STORAGE_DATASETS.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(STORAGE_DATASETS))
+    public_functions = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+
+    assert not DELETED_STORAGE_PARQUET.exists()
+    assert datasets.__all__ == [
+        "DatasetReadMode",
+        "DatasetInspection",
+        "DatasetFingerprint",
+        "DatasetComparison",
+        "write_dataset",
+        "read_dataset",
+        "inspect_dataset",
+        "fingerprint_dataset",
+        "compare_datasets",
+    ]
+    assert {
+        "write_dataset",
+        "read_dataset",
+        "inspect_dataset",
+        "fingerprint_dataset",
+        "compare_datasets",
+    }.issubset(public_functions)
 
 
 def test_workflow_and_interface_public_names_use_dry_run_wording() -> None:

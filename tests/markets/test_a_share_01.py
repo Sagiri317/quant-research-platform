@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import warnings
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_factor_catalog,
     a_share_price_volume_factor_columns,
     a_share_price_volume_panel_input_columns,
+    a_share_processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.factors import (
     build_factors,
@@ -30,6 +30,9 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     contexts,
     panels,
 )
+from quant_research_platform.markets.implementations.a_share.source_bindings import (
+    csmar as csmar_binding,
+)
 from quant_research_platform.markets.implementations.a_share.universes import (
     build as build_universes,
 )
@@ -40,17 +43,51 @@ from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_input_columns,
 )
 from quant_research_platform.research.labels import forward_returns
-from quant_research_platform.storage.layout import (
-    processed_data_manifest_path,
-    processed_data_parquet_root,
+from quant_research_platform.storage.datasets import (
+    inspect_dataset,
+    read_dataset,
+    write_dataset,
 )
-from quant_research_platform.storage.parquet import read_partitioned_parquet_dataset
 from tests.helpers.synthetic_a_share import (
     make_synthetic_daily_market,
     make_synthetic_market_cap,
     make_synthetic_stock_master,
     make_synthetic_trading_calendar,
 )
+from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
+
+
+def _read_artifact(
+    root: Path,
+    *,
+    years: tuple[int, ...] | None = None,
+    columns: tuple[str, ...] | list[str] | None = None,
+) -> pd.DataFrame:
+    return read_dataset(root, partition_filter=_year_filter(years), columns=columns)
+
+
+def _processed_artifact_root(
+    processed_root: Path,
+    category: str,
+    processed_data_id: str,
+) -> Path:
+    return Path(processed_root) / category / processed_data_id
+
+
+def _processed_manifest_payload(
+    processed_root: Path,
+    category: str,
+    processed_data_id: str,
+) -> dict[str, object]:
+    return inspect_dataset(
+        _processed_artifact_root(processed_root, category, processed_data_id)
+    ).manifest
+
+
+def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
+    if years is None:
+        return None
+    return {"year": years}
 
 
 def test_a_share_calendar_helper_builds_unified_and_market_sessions() -> None:
@@ -212,13 +249,7 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
     panel = _panel()
     processed_root = tmp_path / "data" / "processed" / "a_share"
     interim_root = tmp_path / "data" / "interim" / "csmar"
-    panel_path = (
-        processed_data_parquet_root(processed_root, "panels", "daily_panel")
-        / "year=2014"
-        / "part-000.parquet"
-    )
-    panel_path.parent.mkdir(parents=True)
-    panel.to_parquet(panel_path, index=False)
+    _write_processed_panel_fixture(processed_root, panel)
     _write_interim_fixture(
         interim_root,
         "trading_calendar",
@@ -238,33 +269,29 @@ def test_a_share_factor_and_label_builders_write_split_layers(tmp_path) -> None:
         start_year=2014,
         end_year=2014,
     )
-    factor_manifest = processed_data_manifest_path(
+    factor_manifest = _processed_manifest_payload(
         processed_root, "factors", PRICE_VOLUME_PROCESSED_DATA_ID
     )
-    label_manifest = processed_data_manifest_path(
+    label_manifest = _processed_manifest_payload(
         processed_root, "labels", FORWARD_RETURNS_PROCESSED_DATA_ID
     )
-    factor_output = read_partitioned_parquet_dataset(factor_path, years=(2014,))
+    factor_output = _read_artifact(factor_path, years=(2014,))
 
     assert "mom_2d" in factored.columns
     assert not any(column.startswith("forward_return_") for column in factored)
     assert "forward_return_1d" in labels.columns
     assert factor_rows == len(panel)
     assert label_rows == len(panel)
-    assert factor_path.as_posix().endswith(
-        "processed/a_share/factors/price_volume/data"
-    )
+    assert factor_path.as_posix().endswith("processed/a_share/factors/price_volume")
     assert label_path.as_posix().endswith(
-        "processed/a_share/labels/forward_returns/data"
+        "processed/a_share/labels/forward_returns"
     )
     assert tuple(factor_output.columns) == (
         *platform_entity_time_key(),
         *a_share_price_volume_factor_columns(),
     )
-    factor_payload = json.loads(factor_manifest.read_text(encoding="utf-8"))
-    label_payload = json.loads(label_manifest.read_text(encoding="utf-8"))
-    assert factor_payload["schema_version"] == "0.1"
-    assert label_payload["schema_version"] == "0.1"
+    assert factor_manifest["schema_version"] == "0.1"
+    assert label_manifest["schema_version"] == "0.1"
 
 
 def test_a_share_factor_build_passes_spec_columns_to_price_volume_helper(
@@ -301,7 +328,7 @@ def test_a_share_factor_build_passes_spec_columns_to_price_volume_helper(
         start_year=2014,
         end_year=2014,
     )
-    output = read_partitioned_parquet_dataset(output_root, years=(2014,))
+    output = _read_artifact(output_root, years=(2014,))
 
     assert captured["factor_columns"] == build_factors._factor_output_columns()
     assert set(captured["factor_columns"]) == set(
@@ -428,7 +455,12 @@ def test_factor_builder_fails_closed_when_registered_input_column_missing(
     panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5)).drop(
         columns=["amount"]
     )
-    _write_processed_panel_fixture(processed_root, panel)
+    write_low_level_parquet_artifact(
+        _processed_artifact_root(processed_root, "panels", "daily_panel"),
+        panel,
+        primary_key=platform_entity_time_key(),
+        partition_columns=("year",),
+    )
     _write_interim_fixture(
         interim_root,
         "trading_calendar",
@@ -464,7 +496,7 @@ def test_a_share_factor_builder_reads_calendar_warmup_and_writes_requested_windo
         start_year=2020,
         end_year=2020,
     )
-    output = read_partitioned_parquet_dataset(output_root, years=(2020,))
+    output = _read_artifact(output_root, years=(2020,))
 
     assert rows == len(output)
     assert output["timestamp"].min() >= pd.Timestamp("2020-01-01")
@@ -493,7 +525,7 @@ def test_a_share_factor_builder_allows_missing_pre_start_warmup_years(
         start_year=2014,
         end_year=2014,
     )
-    output = read_partitioned_parquet_dataset(output_root, years=(2014,))
+    output = _read_artifact(output_root, years=(2014,))
 
     assert rows == len(output)
     assert output["timestamp"].min() >= pd.Timestamp("2014-01-01")
@@ -523,7 +555,7 @@ def test_a_share_factor_builder_reads_available_warmup_years_when_present(
         start_year=2014,
         end_year=2014,
     )
-    no_warmup_output = read_partitioned_parquet_dataset(
+    no_warmup_output = _read_artifact(
         no_warmup_output_root,
         years=(2014,),
     )
@@ -545,7 +577,7 @@ def test_a_share_factor_builder_reads_available_warmup_years_when_present(
         start_year=2014,
         end_year=2014,
     )
-    warmup_output = read_partitioned_parquet_dataset(
+    warmup_output = _read_artifact(
         warmup_output_root,
         years=(2014,),
     )
@@ -584,7 +616,7 @@ def test_a_share_factor_builder_asset_batches_match_full_frame_output(
         start_year=2014,
         end_year=2014,
     )
-    expected = read_partitioned_parquet_dataset(full_path, years=(2014,))
+    expected = _read_artifact(full_path, years=(2014,))
     chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
     _write_processed_panel_fixture(chunked_root, panel)
     actual_path, actual_rows = (
@@ -596,7 +628,7 @@ def test_a_share_factor_builder_asset_batches_match_full_frame_output(
             asset_chunk_size=1,
         )
     )
-    actual = read_partitioned_parquet_dataset(actual_path, years=(2014,))
+    actual = _read_artifact(actual_path, years=(2014,))
 
     assert actual_rows == len(actual)
     pd.testing.assert_frame_equal(actual, expected)
@@ -634,8 +666,8 @@ def test_a_share_factor_builder_panel_frame_fast_path_matches_parquet_path(
         panel_frame=panel,
     )
 
-    standalone = read_partitioned_parquet_dataset(standalone_path, years=(2014,))
-    fast = read_partitioned_parquet_dataset(fast_path, years=(2014,))
+    standalone = _read_artifact(standalone_path, years=(2014,))
+    fast = _read_artifact(fast_path, years=(2014,))
     pd.testing.assert_frame_equal(fast, standalone)
     pd.testing.assert_frame_equal(panel, original)
     assert fast_rows == standalone_rows == len(fast)
@@ -687,8 +719,8 @@ def test_a_share_label_builder_panel_frame_fast_path_matches_standalone_path(
         panel_frame=panel,
     )
 
-    standalone = read_partitioned_parquet_dataset(standalone_path, years=(2014,))
-    fast = read_partitioned_parquet_dataset(fast_path, years=(2014,))
+    standalone = _read_artifact(standalone_path, years=(2014,))
+    fast = _read_artifact(fast_path, years=(2014,))
     pd.testing.assert_frame_equal(fast, standalone)
     pd.testing.assert_frame_equal(panel, original)
     assert fast_rows == standalone_rows == len(fast)
@@ -760,7 +792,7 @@ def test_a_share_label_builder_allows_missing_future_lookahead_year(tmp_path) ->
         start_year=2014,
         end_year=2014,
     )
-    output = read_partitioned_parquet_dataset(label_path, years=(2014,))
+    output = _read_artifact(label_path, years=(2014,))
 
     assert label_rows == len(output)
     assert output["timestamp"].dt.year.tolist() == [2014, 2014, 2014]
@@ -810,7 +842,7 @@ def test_a_share_label_builder_asset_batches_preserve_year_boundary_lookahead(
         start_year=2014,
         end_year=2014,
     )
-    expected = read_partitioned_parquet_dataset(full_path, years=(2014,))
+    expected = _read_artifact(full_path, years=(2014,))
     chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
     _write_processed_panel_fixture(chunked_root, panel)
     actual_path, actual_rows = build_labels.calculate_forward_returns_asset_batches(
@@ -819,7 +851,7 @@ def test_a_share_label_builder_asset_batches_preserve_year_boundary_lookahead(
         end_year=2014,
         asset_chunk_size=1,
     )
-    actual = read_partitioned_parquet_dataset(actual_path, years=(2014,))
+    actual = _read_artifact(actual_path, years=(2014,))
 
     assert actual_rows == len(actual)
     assert actual["forward_return_1d"].notna().any()
@@ -867,21 +899,20 @@ def test_a_share_context_universe_and_mask_builders_write_split_layers(
 
     assert context_rows == len(panel)
     assert universe_rows == len(panel)
-    assert context_path.as_posix().endswith(
-        "processed/a_share/contexts/daily_context/data"
-    )
+    assert context_path.as_posix().endswith("processed/a_share/contexts/daily_context")
     assert universe_path.as_posix().endswith(
-        "processed/a_share/universes/a_share_default/data"
+        "processed/a_share/universes/a_share_default"
     )
     assert sorted(mask_outputs) == ["as_of", "evaluation", "execution"]
     assert mask_outputs["execution"][0].as_posix().endswith(
-        "processed/a_share/masks/execution/a_share_execution/data"
+        "processed/a_share/masks/execution/a_share_execution"
     )
-    assert json.loads(
-        processed_data_manifest_path(
+    assert (
+        _processed_manifest_payload(
             processed_root, "masks/execution", "a_share_execution"
-        ).read_text(encoding="utf-8")
-    )["schema_version"] == "0.1"
+        )["schema_version"]
+        == "0.1"
+    )
 
 
 def test_context_universe_and_mask_panel_dataset_writers_match_frame_writers(
@@ -895,8 +926,8 @@ def test_context_universe_and_mask_panel_dataset_writers_match_frame_writers(
         ignore_index=True,
     )
     full_root = tmp_path / "full" / "data" / "processed" / "a_share"
-    streaming_root = tmp_path / "streaming" / "data" / "processed" / "a_share"
-    _write_processed_panel_fixture(streaming_root, panel)
+    chunked_root = tmp_path / "chunked" / "data" / "processed" / "a_share"
+    _write_processed_panel_fixture(chunked_root, panel)
 
     expected_context_root, _ = contexts.write_contexts(
         panel,
@@ -918,36 +949,36 @@ def test_context_universe_and_mask_panel_dataset_writers_match_frame_writers(
     )
 
     actual_context_root, _ = contexts.write_contexts_from_panel_dataset(
-        streaming_root,
+        chunked_root,
         start_year=2014,
         end_year=2014,
     )
     actual_universe_root, _ = build_universes.write_universe_from_panel_dataset(
-        streaming_root,
+        chunked_root,
         start_year=2014,
         end_year=2014,
     )
     actual_masks = build_masks.write_masks_from_panel_dataset(
-        streaming_root,
+        chunked_root,
         start_year=2014,
         end_year=2014,
     )
 
     pd.testing.assert_frame_equal(
-        read_partitioned_parquet_dataset(actual_context_root, years=(2014,)),
-        read_partitioned_parquet_dataset(expected_context_root, years=(2014,)),
+        _read_artifact(actual_context_root, years=(2014,)),
+        _read_artifact(expected_context_root, years=(2014,)),
     )
     pd.testing.assert_frame_equal(
-        read_partitioned_parquet_dataset(actual_universe_root, years=(2014,)),
-        read_partitioned_parquet_dataset(expected_universe_root, years=(2014,)),
+        _read_artifact(actual_universe_root, years=(2014,)),
+        _read_artifact(expected_universe_root, years=(2014,)),
     )
     for mask_kind in sorted(expected_masks):
         pd.testing.assert_frame_equal(
-            read_partitioned_parquet_dataset(
+            _read_artifact(
                 actual_masks[mask_kind][0],
                 years=(2014,),
             ),
-            read_partitioned_parquet_dataset(
+            _read_artifact(
                 expected_masks[mask_kind][0],
                 years=(2014,),
             ),
@@ -1594,25 +1625,29 @@ def test_a_share_panel_from_interim_requires_trading_calendar(tmp_path) -> None:
 
 
 def test_a_share_panel_from_interim_preserves_invalid_calendar_error(tmp_path) -> None:
-    interim_root = tmp_path / "data" / "interim" / "csmar"
-    processed_root = tmp_path / "data" / "processed" / "a_share"
-    _write_minimal_panel_interim_fixture(interim_root)
-    data_root = interim_root / "trading_calendar" / "data" / "year=2024"
-    data_root.mkdir(parents=True)
-    pd.DataFrame(
-        {
-            "calendar_date": [pd.Timestamp("2024-06-28")],
-            "is_trading_day": [True],
-        }
-    ).to_parquet(data_root / "part-000.parquet", index=False)
-
     with pytest.raises(ValueError, match="calendar_missing_normalized_columns"):
-        panels.build_panel_from_interim(
-            interim_root=interim_root,
-            processed_root=processed_root,
-            start_year=2024,
-            end_year=2024,
-            end_date="2024-06-30",
+        panels.build_research_panel(
+            pd.DataFrame([_daily_market_row("2024-06-28", market_type=1)]),
+            stock_master=pd.DataFrame(
+                [
+                    _stock_master_row(
+                        asset_id="000001",
+                        listing_date="2020-01-01",
+                        status_change_date="2020-01-01",
+                        company_status="active",
+                        industry_code="I",
+                    )
+                ]
+            ),
+            market_cap=pd.DataFrame(
+                [_market_cap_row(asset_id="000001", share_change_date="2020-01-01")]
+            ),
+            trading_calendar=pd.DataFrame(
+                {
+                    "calendar_date": [pd.Timestamp("2024-06-28")],
+                    "is_trading_day": [True],
+                }
+            ),
             min_listing_trading_days=1,
         )
 
@@ -1683,7 +1718,7 @@ def test_a_share_panel_from_interim_applies_exact_end_date(tmp_path) -> None:
         end_date="2024-06-30",
         min_listing_trading_days=1,
     )
-    written = read_partitioned_parquet_dataset(output_root, years=(2024,))
+    written = _read_artifact(output_root, years=(2024,))
 
     assert rows == 1
     assert written["timestamp"].tolist() == [pd.Timestamp("2024-06-28")]
@@ -1760,7 +1795,7 @@ def test_a_share_panel_asset_batches_preserve_next_session_boundary(
         min_listing_trading_days=1,
         asset_chunk_size=1,
     )
-    actual = read_partitioned_parquet_dataset(output_root, years=(2014,))
+    actual = _read_artifact(output_root, years=(2014,))
 
     assert rows == len(actual)
     assert actual["timestamp"].max() == pd.Timestamp("2014-12-31")
@@ -1919,16 +1954,12 @@ def _trading_calendar_rows(rows) -> pd.DataFrame:
 
 
 def _write_processed_panel_fixture(processed_root, frame: pd.DataFrame) -> None:
-    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
-    result = frame.copy()
-    result["_fixture_year"] = pd.to_datetime(result["timestamp"]).dt.year
-    for year, year_frame in result.groupby("_fixture_year"):
-        partition_root = data_root / f"year={int(year)}"
-        partition_root.mkdir(parents=True)
-        year_frame.drop(columns=["_fixture_year"]).to_parquet(
-            partition_root / "part-000.parquet",
-            index=False,
-        )
+    spec = a_share_processed_catalog().get("daily_panel")
+    write_dataset(
+        _processed_artifact_root(processed_root, spec.category, spec.processed_data_id),
+        _select_fixture_columns(frame, spec),
+        spec=spec,
+    )
 
 
 def _write_minimal_panel_interim_fixture(interim_root) -> None:
@@ -1966,25 +1997,95 @@ def _write_interim_fixture(
     interim_data_id: str,
     frame: pd.DataFrame,
 ) -> None:
-    result = frame.copy()
-    date_column = next(
-        column
-        for column in (
-            "calendar_date",
-            "timestamp",
-            "listing_date",
-            "share_change_date",
-        )
-        if column in result.columns
+    spec = csmar_binding.a_share_csmar_interim_catalog().get(interim_data_id)
+    write_dataset(
+        Path(interim_root) / interim_data_id,
+        _select_fixture_columns(frame, spec),
+        spec=spec,
     )
-    result["_fixture_year"] = pd.to_datetime(result[date_column]).dt.year
-    for year, year_frame in result.groupby("_fixture_year"):
-        data_root = interim_root / interim_data_id / "data" / f"year={int(year)}"
-        data_root.mkdir(parents=True)
-        year_frame.drop(columns=["_fixture_year"]).to_parquet(
-            data_root / "part-000.parquet",
-            index=False,
-        )
+
+
+def _select_fixture_columns(frame: pd.DataFrame, spec) -> pd.DataFrame:
+    result = frame.copy()
+    for column in spec.required_columns:
+        if column not in result:
+            result[column] = _fixture_default_value(column, result)
+    return result.loc[:, list(spec.required_columns)].copy()
+
+
+def _fixture_default_value(column: str, frame: pd.DataFrame):
+    if column == "market_id":
+        return "a_share"
+    if column == "source_id":
+        return "csmar"
+    if column == "source_asset_id":
+        if "asset_id" in frame:
+            return frame["asset_id"].astype(str)
+        return "source_asset"
+    if column in {"session_date", "available_at", "timestamp"}:
+        if "timestamp" in frame:
+            return pd.to_datetime(frame["timestamp"])
+        return pd.Timestamp("2014-01-02")
+    if column in {
+        "listing_date",
+        "status_change_date",
+        "share_change_date",
+        "calendar_date",
+    }:
+        if "timestamp" in frame:
+            return pd.to_datetime(frame["timestamp"])
+        return pd.Timestamp("2010-01-01")
+    if column == "delisting_date":
+        return pd.NaT
+    if column in {"stock_name", "company_status", "trading_status_code"}:
+        return "normal"
+    if column in {"filling_flag", "csrc_2012_industry_code"}:
+        return "I"
+    if column == "csrc_2012_industry_name":
+        return "industry"
+    if column in {
+        "is_limit_up",
+        "is_limit_down",
+        "is_st",
+        "is_pt",
+        "is_trading",
+        "is_a_share_scope",
+        "eligible_base",
+        "eligible",
+        "can_enter",
+        "can_exit",
+        "eligible_after_listing_age",
+        "eligible_liquidity",
+        "is_trading_day",
+    }:
+        return True
+    if column in {"market_type", "source_market_type", "source_day_of_week"}:
+        return 1
+    if column == "source_state":
+        return "O"
+    if column == "limit_status":
+        return 0
+    if column in {"listing_age_days", "listing_age_trading_days"}:
+        return 130
+    if column in {
+        "open",
+        "high",
+        "low",
+        "close",
+        "adj_open",
+        "adj_close",
+        "prev_close",
+        "volume",
+        "amount",
+        "turnover",
+        "return_1d",
+        "total_market_cap",
+        "float_market_cap",
+        "total_shares",
+        "a_float_shares",
+    }:
+        return 1.0
+    return pd.NA
 
 
 def _looks_like_price_volume_factor_column(column: str) -> bool:

@@ -11,7 +11,9 @@ from math import ceil
 from pathlib import Path
 
 DEFAULT_AVAILABLE_MEMORY_BYTES = 4 * 1024 * 1024 * 1024
-DEFAULT_MEMORY_BUDGET_FRACTION = 0.70
+DEFAULT_MEMORY_BUDGET_FRACTION = 0.80
+DEFAULT_CHUNK_TARGET_FRACTION = 0.30
+DEFAULT_CHUNK_TARGET_CAP_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_MEMORY_SAFETY_FACTOR = 0.60
 DEFAULT_MIN_FREE_DISK_BYTES = 0
 GIB = 1024 * 1024 * 1024
@@ -33,6 +35,8 @@ class RuntimeResourcePolicy:
 
     available_memory_bytes: int
     memory_budget_fraction: float = DEFAULT_MEMORY_BUDGET_FRACTION
+    chunk_target_fraction: float = DEFAULT_CHUNK_TARGET_FRACTION
+    chunk_target_cap_bytes: int = DEFAULT_CHUNK_TARGET_CAP_BYTES
     chunk_target_bytes: int | None = None
     memory_safety_factor: float = DEFAULT_MEMORY_SAFETY_FACTOR
     min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
@@ -57,9 +61,15 @@ class RuntimeResourcePolicy:
             DEFAULT_MEMORY_BUDGET_FRACTION,
         )
         budget = _bytes_env(env, "QRP_MEMORY_BUDGET_MB")
+        memory_budget_bytes = (
+            int(budget) if budget is not None else max(1, int(available * fraction))
+        )
         target = _bytes_env(env, "QRP_CHUNK_TARGET_MB")
         if target is None:
-            target = min(int(available * fraction * 0.30), 2 * GIB)
+            target = min(
+                int(memory_budget_bytes * DEFAULT_CHUNK_TARGET_FRACTION),
+                DEFAULT_CHUNK_TARGET_CAP_BYTES,
+            )
         safety = _float_env(
             env,
             "QRP_MEMORY_SAFETY_FACTOR",
@@ -69,22 +79,17 @@ class RuntimeResourcePolicy:
         policy = cls(
             available_memory_bytes=available,
             memory_budget_fraction=fraction,
+            chunk_target_fraction=DEFAULT_CHUNK_TARGET_FRACTION,
+            chunk_target_cap_bytes=DEFAULT_CHUNK_TARGET_CAP_BYTES,
             chunk_target_bytes=target,
             memory_safety_factor=safety,
             min_free_disk_bytes=(
                 DEFAULT_MIN_FREE_DISK_BYTES if min_disk is None else min_disk
             ),
-        )
-        if budget is None:
-            return policy
-        return cls(
-            available_memory_bytes=available,
-            memory_budget_fraction=fraction,
-            chunk_target_bytes=target,
-            memory_safety_factor=safety,
-            min_free_disk_bytes=policy.min_free_disk_bytes,
             memory_budget_bytes_override=budget,
         )
+        policy.require_valid_chunk_budget()
+        return policy
 
     @property
     def memory_budget_bytes(self) -> int:
@@ -94,10 +99,14 @@ class RuntimeResourcePolicy:
 
     @property
     def effective_chunk_bytes(self) -> int:
-        target = self.chunk_target_bytes
-        if target is None:
-            target = min(int(self.memory_budget_bytes * 0.30), 2 * GIB)
-        return max(1, int(target * self.memory_safety_factor))
+        target = self._resolved_chunk_target_bytes()
+        effective = max(1, int(target * self.memory_safety_factor))
+        if effective > self.memory_budget_bytes:
+            raise ValueError("chunk_target_exceeds_memory_budget")
+        return effective
+
+    def require_valid_chunk_budget(self) -> None:
+        _ = self.effective_chunk_bytes
 
     def has_minimum_free_disk(self, path: Path) -> bool:
         candidate = Path(path)
@@ -109,6 +118,14 @@ class RuntimeResourcePolicy:
     def require_minimum_free_disk(self, path: Path) -> None:
         if not self.has_minimum_free_disk(path):
             raise RuntimeError("insufficient_free_disk")
+
+    def _resolved_chunk_target_bytes(self) -> int:
+        if self.chunk_target_bytes is not None:
+            return self.chunk_target_bytes
+        return min(
+            int(self.memory_budget_bytes * self.chunk_target_fraction),
+            self.chunk_target_cap_bytes,
+        )
 
 
 @dataclass(frozen=True)
@@ -189,7 +206,10 @@ def _bytes_env(env: Mapping[str, str], name: str) -> int | None:
     value = env.get(name)
     if value in {None, ""}:
         return None
-    return max(1, int(float(value) * MIB))
+    parsed = float(value)
+    if parsed <= 0:
+        raise ValueError(f"invalid_runtime_resource_env: {name}")
+    return max(1, int(parsed * MIB))
 
 
 def _float_env(env: Mapping[str, str], name: str, default: float) -> float:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
+from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_manifest
 
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
@@ -35,7 +36,7 @@ def build_validation_summary(
     *,
     run_id: str,
     output_root: Path,
-    dataset_manifest_paths: tuple[Path, ...],
+    dataset_roots: tuple[Path, ...],
     layer_manifest_paths: tuple[Path, ...],
     generated_text_paths: tuple[Path, ...],
 ) -> dict[str, Any]:
@@ -47,18 +48,22 @@ def build_validation_summary(
     date_ranges: list[dict[str, object]] = []
     factor_nan_profile: dict[str, int] = {}
     label_nan_profile: dict[str, int] = {}
-    missing_dataset_manifests = [
-        _logical_path(path) for path in dataset_manifest_paths if not path.is_file()
-    ]
-    for path in dataset_manifest_paths:
-        if not path.is_file():
+    missing_dataset_manifests: list[str] = []
+    for root in dataset_roots:
+        try:
+            inspection = inspect_dataset(root)
+        except ValueError:
+            missing_dataset_manifests.append(_logical_path(root))
             continue
-        manifest = read_manifest(path)
+        manifest = inspection.manifest
+        if not manifest:
+            missing_dataset_manifests.append(_logical_path(root))
+            continue
         dataset_id = str(
             manifest.get("dataset_id")
             or manifest.get("processed_data_id")
             or manifest.get("interim_data_id")
-            or _logical_path(path)
+            or _logical_path(root)
         )
         validation_status = manifest.get("validation_status")
         if validation_status is not None and str(validation_status).lower() not in {
@@ -139,7 +144,7 @@ def build_validation_summary(
         "label_nan_profile": label_nan_profile,
         "dataset_manifest_completeness": {
             "missing": missing_dataset_manifests,
-            "checked_count": len(dataset_manifest_paths),
+            "checked_count": len(dataset_roots),
         },
         "layer_manifest_completeness": {
             "missing": missing_layer_manifests,

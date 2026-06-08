@@ -17,7 +17,7 @@ def validate_research_dataset(
     required = set(spec.required_columns if require_all_columns else spec.primary_key)
     missing = sorted(required.difference(frame.columns))
     if missing:
-        raise ValueError(f"missing_research_dataset_columns: {', '.join(missing)}")
+        raise ValueError(f"missing_research_required_fields: {', '.join(missing)}")
 
     null_key_columns = [
         column for column in spec.primary_key if bool(frame[column].isna().any())

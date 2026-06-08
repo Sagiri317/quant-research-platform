@@ -96,40 +96,6 @@ class PrivateEvidenceLayout:
         return self.output_root / "summary.md"
 
 
-def processed_data_parquet_root(
-    processed_root: Path,
-    category: str,
-    processed_data_id: str,
-) -> Path:
-    return processed_root / category / processed_data_id / "data"
-
-
-def processed_data_manifest_path(
-    processed_root: Path,
-    category: str,
-    processed_data_id: str,
-) -> Path:
-    return processed_root / category / processed_data_id / "_manifest" / "manifest.json"
-
-
-def research_dataset_data_root(processed_root: Path, dataset_id: str) -> Path:
-    return processed_root / "research_datasets" / dataset_id / "data"
-
-
-def research_dataset_manifest_path(processed_root: Path, dataset_id: str) -> Path:
-    return (
-        processed_root
-        / "research_datasets"
-        / dataset_id
-        / "_manifest"
-        / "manifest.json"
-    )
-
-
-def research_dataset_spec_path(processed_root: Path, dataset_id: str) -> Path:
-    return processed_root / "research_datasets" / dataset_id / "spec.json"
-
-
 def layout_from_processed_market_root(processed_root: Path) -> StorageLayout:
     """Resolve ``data/processed/<market>`` back to a project storage layout."""
 
@@ -145,9 +111,4 @@ __all__ = [
     "PrivateEvidenceLayout",
     "StorageLayout",
     "layout_from_processed_market_root",
-    "processed_data_manifest_path",
-    "processed_data_parquet_root",
-    "research_dataset_data_root",
-    "research_dataset_manifest_path",
-    "research_dataset_spec_path",
 ]

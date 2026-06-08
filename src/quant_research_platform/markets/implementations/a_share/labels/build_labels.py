@@ -26,15 +26,11 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
 )
 from quant_research_platform.storage.datasets import (
-    DatasetAccessMode,
+    DatasetReadMode,
+    fingerprint_dataset,
+    inspect_dataset,
     read_dataset,
-    write_dataset_artifact,
-)
-from quant_research_platform.storage.layout import processed_data_parquet_root
-from quant_research_platform.storage.parquet import (
-    parquet_dataset_columns,
-    read_partitioned_parquet_dataset,
-    write_processed_data,
+    write_dataset,
 )
 
 LABEL_BASE_COLUMNS: tuple[str, ...] = (
@@ -87,13 +83,14 @@ def write_forward_labels(
         drop=True
     )
     catalog = a_share_processed_catalog()
-    data_root = write_processed_data(
-        labels,
-        layout=layout_from_processed_root(processed_root),
-        catalog=catalog,
-        processed_data_id="forward_returns",
+    spec = catalog.get("forward_returns")
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, len(labels)
+    write_dataset(artifact_root, labels, spec=spec)
+    return artifact_root, len(labels)
 
 
 def calculate_forward_returns_full(
@@ -137,12 +134,12 @@ def calculate_forward_returns_asset_batches(
 
     catalog = a_share_processed_catalog()
     spec = catalog.get("forward_returns")
-    data_root = processed_data_parquet_root(
-        processed_root,
+    data_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
         "panels",
         DAILY_PANEL_PROCESSED_DATA_ID,
     )
-    available_columns = set(parquet_dataset_columns(data_root))
+    available_columns = set(inspect_dataset(data_root).columns)
     missing = [
         column
         for column in LABEL_PANEL_INPUT_COLUMNS
@@ -186,20 +183,22 @@ def calculate_forward_returns_asset_batches(
             yield output
 
     artifact_root = Path(processed_root) / "labels" / "forward_returns"
-    data_root = write_dataset_artifact(
-        _output_chunks(),
-        artifact_root,
-        catalog=catalog,
-        data_id="forward_returns",
-        access_mode=DatasetAccessMode.STREAMING,
-        resource_policy=resource_policy,
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, row_count
+    write_dataset(
+        artifact_root,
+        _output_chunks(),
+        spec=spec,
+    )
+    return artifact_root, row_count
 
 
 def select_existing_columns(path: Path, wanted: tuple[str, ...]) -> list[str]:
     wanted_unique = list(dict.fromkeys(wanted))
-    columns = parquet_dataset_columns(path)
+    columns = inspect_dataset(path).columns
     return [column for column in wanted_unique if column in columns]
 
 
@@ -211,13 +210,12 @@ def _panel_frame_for_label_build(
     panel_frame: pd.DataFrame | None,
 ) -> pd.DataFrame:
     if panel_frame is None:
-        data_root = (
-            Path(processed_root)
-            / "panels"
-            / DAILY_PANEL_PROCESSED_DATA_ID
-            / "data"
+        data_root = layout_from_processed_root(processed_root).processed_data_root(
+            a_share_processed_catalog().get(DAILY_PANEL_PROCESSED_DATA_ID).market_id,
+            "panels",
+            DAILY_PANEL_PROCESSED_DATA_ID,
         )
-        available_columns = set(parquet_dataset_columns(data_root))
+        available_columns = set(inspect_dataset(data_root).columns)
         missing = [
             column
             for column in LABEL_PANEL_INPUT_COLUMNS
@@ -232,9 +230,9 @@ def _panel_frame_for_label_build(
             start_year=start_year,
             end_year=end_year + 1,
         )
-        return read_partitioned_parquet_dataset(
+        return read_dataset(
             data_root,
-            years=years,
+            partition_filter=_year_filter(years),
             columns=list(LABEL_PANEL_INPUT_COLUMNS),
         )
     missing = [
@@ -260,7 +258,7 @@ def _available_panel_years(
     years = tuple(
         year
         for year in range(start_year, end_year + 1)
-        if list((data_root / f"year={year}").glob("*.parquet"))
+        if _partition_exists(data_root, year)
     )
     if not years:
         raise ValueError("missing_requested_processed_input")
@@ -271,9 +269,9 @@ def _panel_asset_ids(data_root: Path, *, years: tuple[int, ...]) -> tuple[str, .
     asset_ids: set[str] = set()
     chunks = read_dataset(
         data_root,
-        years=years,
+        partition_filter=_year_filter(years),
         columns=["asset_id"],
-        access_mode=DatasetAccessMode.STREAMING,
+        mode=DatasetReadMode.CHUNKED,
     )
     for chunk in chunks:
         asset_ids.update(str(value) for value in chunk["asset_id"].dropna().unique())
@@ -292,9 +290,9 @@ def _read_panel_asset_chunk(
     asset_id_set = set(asset_ids)
     chunks = read_dataset(
         data_root,
-        years=years,
+        partition_filter=_year_filter(years),
         columns=list(LABEL_PANEL_INPUT_COLUMNS),
-        access_mode=DatasetAccessMode.STREAMING,
+        mode=DatasetReadMode.CHUNKED,
     )
     for chunk in chunks:
         filtered = chunk.loc[chunk["asset_id"].isin(asset_id_set)]
@@ -340,16 +338,36 @@ def _planned_asset_chunk_size(
 
 
 def _panel_row_count(data_root: Path, *, years: tuple[int, ...]) -> int:
-    total = 0
-    for year in years:
-        for path in sorted((data_root / f"year={year}").glob("*.parquet")):
-            total += int(pd.read_parquet(path, columns=["asset_id"]).shape[0])
-    return total
+    return fingerprint_dataset(
+        data_root,
+        columns=["asset_id"],
+        partition_filter=_year_filter(years),
+    ).row_count
 
 
 def _chunked(values: tuple[str, ...], size: int) -> Iterator[tuple[str, ...]]:
     for index in range(0, len(values), max(1, size)):
         yield values[index : index + max(1, size)]
+
+
+def _partition_exists(data_root: Path, year: int) -> bool:
+    try:
+        fingerprint_dataset(
+            data_root,
+            columns=["asset_id"],
+            partition_filter={"year": (year,)},
+        )
+        return True
+    except ValueError as exc:
+        if "partition_value_not_found" in str(exc):
+            return False
+        raise
+
+
+def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
+    if years is None:
+        return None
+    return {"year": years}
 
 
 __all__ = [

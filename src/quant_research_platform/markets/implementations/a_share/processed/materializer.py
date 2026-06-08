@@ -9,8 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
-from quant_research_platform.storage.layout import processed_data_parquet_root
-from quant_research_platform.storage.parquet import read_partitioned_parquet_dataset
+from quant_research_platform.storage.datasets import read_dataset
 
 from ..factors.build_factors import calculate_price_volume_factor_full
 from ..ids import PRICE_VOLUME_PROCESSED_DATA_ID
@@ -28,7 +27,7 @@ class AShareProcessedBuildResult:
     """Aggregate metadata for a processed-layer build run."""
 
     row_counts: dict[str, int]
-    data_roots: dict[str, Path]
+    artifact_roots: dict[str, Path]
 
 
 def build_a_share_processed_layers(
@@ -130,7 +129,7 @@ def build_a_share_processed_layers(
         )
         record.input_rows = panel_rows
         record.output_rows = label_rows
-    data_roots = {
+    artifact_roots = {
         "daily_panel": panel_root,
         "daily_context": context_root,
         "a_share_default": universe_root,
@@ -145,9 +144,12 @@ def build_a_share_processed_layers(
         "forward_returns": label_rows,
     }
     for mask_kind, (path, rows) in mask_outputs.items():
-        data_roots[f"mask_{mask_kind}"] = path
+        artifact_roots[f"mask_{mask_kind}"] = path
         row_counts[f"mask_{mask_kind}"] = rows
-    return AShareProcessedBuildResult(row_counts=row_counts, data_roots=data_roots)
+    return AShareProcessedBuildResult(
+        row_counts=row_counts,
+        artifact_roots=artifact_roots,
+    )
 
 
 def _read_processed_panel(
@@ -156,10 +158,10 @@ def _read_processed_panel(
     start_year: int,
     end_year: int,
 ) -> pd.DataFrame:
-    data_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
-    return read_partitioned_parquet_dataset(
-        data_root,
-        years=tuple(range(start_year, end_year + 1)),
+    panel_root = processed_root / "panels" / "daily_panel"
+    return read_dataset(
+        panel_root,
+        partition_filter={"year": tuple(range(start_year, end_year + 1))},
     )
 
 

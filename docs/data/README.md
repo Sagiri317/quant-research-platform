@@ -31,24 +31,10 @@ data/processed/a_share/
   research_datasets/
 ```
 
-Each processed-data object uses:
-
-```text
-data/processed/<market>/<category>/<processed_data_id>/
-  data/
-  _manifest/
-    manifest.json
-```
-
-Each research dataset uses:
-
-```text
-data/processed/<market>/research_datasets/<dataset_id>/
-  spec.json
-  data/
-  _manifest/
-    manifest.json
-```
+Each processed-data object and research dataset is addressed by its artifact
+root. Business, research, market, workflow, and source layers must use
+`storage.datasets` APIs for dataset IO instead of manually addressing dataset
+artifact internals.
 
 ## Canonical Columns
 

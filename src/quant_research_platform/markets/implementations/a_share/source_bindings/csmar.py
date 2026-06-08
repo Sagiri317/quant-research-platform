@@ -39,8 +39,8 @@ from quant_research_platform.sources.csmar.raw_exports import (
     iter_private_export_chunks,
 )
 from quant_research_platform.sources.csmar.raw_schemas import parse_raw_filename
+from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.parquet import write_interim_data
 
 INDEX_METADATA_TIME_COLUMNS: tuple[str, ...] = (
     "start_date",
@@ -247,7 +247,7 @@ BENCHMARK_INDEX_POOL: dict[str, BenchmarkIndex] = {
 class AShareCSMARInterimImportResult:
     """Summary of an A-share CSMAR interim import run."""
 
-    written_data_roots: dict[str, Path]
+    artifact_roots: dict[str, Path]
     skipped: tuple[str, ...]
     pruning_report_text: str
 
@@ -781,15 +781,13 @@ def a_share_csmar_import_interim_data(
         if frame.empty:
             skipped.append(interim_data_id)
             continue
-        written[interim_data_id] = write_interim_data(
-            frame,
-            layout=layout,
-            catalog=catalog,
-            interim_data_id=interim_data_id,
-        )
+        spec = catalog.get(interim_data_id)
+        artifact_root = layout.interim_data_root(spec.source_id, spec.interim_data_id)
+        write_dataset(artifact_root, frame, spec=spec)
+        written[interim_data_id] = artifact_root
 
     return AShareCSMARInterimImportResult(
-        written_data_roots=written,
+        artifact_roots=written,
         skipped=tuple(skipped),
         pruning_report_text=a_share_csmar_render_column_pruning_report(
             pruning_reports,

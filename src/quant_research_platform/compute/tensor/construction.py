@@ -67,7 +67,7 @@ class _TimestampPositionInput:
 
 @dataclass(frozen=True)
 class TensorPortfolioArtifacts:
-    """一次 streaming pass 构造的内部 tensor portfolio artifacts。"""
+    """一次 chunked pass 构造的内部 tensor portfolio artifacts。"""
 
     positions: pd.DataFrame
     diagnostics: pd.DataFrame

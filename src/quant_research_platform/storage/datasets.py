@@ -1,14 +1,16 @@
-"""Unified dataset IO, manifests, fingerprints, and comparison helpers."""
+"""Dataset artifact IO, inspection, fingerprints, and comparisons."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Iterator
+import shutil
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, cast
+from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -23,19 +25,27 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.runtime.privacy import is_private_boundary_path
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
-from quant_research_platform.storage.atomic import atomic_write_directory
-from quant_research_platform.storage.manifests import write_internal_artifact_manifest
+from quant_research_platform.storage.manifests import (
+    read_manifest,
+    write_internal_artifact_manifest,
+)
 from quant_research_platform.storage.partitions import add_year_partition
 
 
-class DataSpecProvider(Protocol):
-    def get(self, data_id: str) -> DataSpec: ...
-
-
-class DatasetAccessMode(StrEnum):
+class DatasetReadMode(StrEnum):
     MATERIALIZED = "materialized"
-    STREAMING = "streaming"
+    CHUNKED = "chunked"
+
+
+@dataclass(frozen=True)
+class DatasetInspection:
+    root: Path
+    data_root: Path
+    spec: dict[str, Any]
+    columns: tuple[str, ...]
+    schema_hash: str
+    file_count: int
+    manifest: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -53,20 +63,14 @@ class DatasetFingerprint:
 @dataclass(frozen=True)
 class DatasetComparison:
     comparison_schema_version: str
+    status: str
     matches: bool
-    schema_matches: bool
-    row_count_matches: bool
-    key_columns_match: bool
-    content_matches: bool
-    partition_mismatch_count: int
-    unexplained_delta: int
     summary: dict[str, Any]
+    layout_delta: dict[str, Any]
 
 
 @dataclass
-class DatasetManifestAccumulator:
-    """Incrementally collect manifest stats over materialized or chunked writes."""
-
+class _WriteStats:
     spec: DataSpec
     data_root: Path
     row_count: int = 0
@@ -91,7 +95,7 @@ class DatasetManifestAccumulator:
     def record_file(self, path: Path) -> None:
         self.file_count += 1
         self.file_size_bytes += int(path.stat().st_size)
-        self.partitions.add(path.parent.as_posix())
+        self.partitions.add(_relative_partition_label(self.data_root, path))
 
     def payload(self) -> dict[str, Any]:
         validation_failed = (
@@ -106,6 +110,7 @@ class DatasetManifestAccumulator:
                 "file_count": int(self.file_count),
                 "file_size_bytes": int(self.file_size_bytes),
                 "partition_count": len(self.partitions),
+                "partitions": sorted(self.partitions),
                 "date_min": _date_string(self.date_min),
                 "date_max": _date_string(self.date_max),
                 "null_count_summary": dict(sorted(self.null_count_summary.items())),
@@ -141,7 +146,7 @@ class DatasetManifestAccumulator:
         self.duplicate_primary_key_count += local_duplicates + cross_duplicates
 
     def _update_dates(self, frame: pd.DataFrame) -> None:
-        timestamp_column = _timestamp_primary_key_column(self.spec)
+        timestamp_column = _timestamp_primary_key_column_from_spec(self.spec)
         if timestamp_column is None or timestamp_column not in frame or frame.empty:
             return
         values = pd.to_datetime(frame[timestamp_column], errors="coerce").dropna()
@@ -184,50 +189,23 @@ class DatasetManifestAccumulator:
 
 
 def write_dataset(
+    dataset_root: Path,
     data: pd.DataFrame | Iterable[pd.DataFrame],
-    root: Path,
     *,
-    catalog: DataSpecProvider,
-    data_id: str,
-    access_mode: DatasetAccessMode = DatasetAccessMode.MATERIALIZED,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Path:
-    spec = catalog.get(data_id)
-    final_root = Path(root)
-    policy = resource_policy or RuntimeResourcePolicy.from_environment()
-    policy.require_minimum_free_disk(final_root.parent)
-    _validate_dataset_root(final_root, spec)
-    chunks = _iter_input_chunks(data, access_mode=access_mode)
+    spec: DataSpec,
+    overwrite: bool = False,
+) -> None:
+    final_root = Path(dataset_root)
+    _validate_dataset_spec(spec)
+    _validate_dataset_artifact_root(final_root, spec)
+    if final_root.exists() and not overwrite:
+        raise ValueError("dataset_exists")
 
-    def _write(temp_root: Path) -> Path:
-        _write_dataset_contents(chunks, temp_root, spec=spec)
-        return final_root
-
-    atomic_write_directory(final_root, _write)
-    return final_root
-
-
-def write_dataset_artifact(
-    data: pd.DataFrame | Iterable[pd.DataFrame],
-    artifact_root: Path,
-    *,
-    catalog: DataSpecProvider,
-    data_id: str,
-    access_mode: DatasetAccessMode = DatasetAccessMode.MATERIALIZED,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Path:
-    final_root = Path(artifact_root)
-    policy = resource_policy or RuntimeResourcePolicy.from_environment()
-    policy.require_minimum_free_disk(final_root.parent)
-    spec = catalog.get(data_id)
-
-    def _write(temp_root: Path) -> None:
-        accumulator = write_dataset_contents(
-            data,
+    def _writer(temp_root: Path) -> None:
+        accumulator = _write_contents(
+            _iter_input_chunks(data),
             temp_root / "data",
-            catalog=catalog,
-            data_id=data_id,
-            access_mode=access_mode,
+            spec=spec,
         )
         write_internal_artifact_manifest(
             temp_root / "spec.json",
@@ -237,98 +215,100 @@ def write_dataset_artifact(
             temp_root / "_manifest" / "manifest.json",
             accumulator.payload(),
         )
+        inspect_dataset(temp_root)
 
-    atomic_write_directory(final_root, _write)
-    return final_root / "data"
-
-
-def write_dataset_contents(
-    data: pd.DataFrame | Iterable[pd.DataFrame],
-    root: Path,
-    *,
-    catalog: DataSpecProvider,
-    data_id: str,
-    access_mode: DatasetAccessMode = DatasetAccessMode.MATERIALIZED,
-) -> DatasetManifestAccumulator:
-    spec = catalog.get(data_id)
-    _validate_dataset_root(Path(root), spec)
-    return _write_dataset_contents(
-        _iter_input_chunks(data, access_mode=access_mode),
-        Path(root),
-        spec=spec,
-    )
+    _staged_write_directory(final_root, _writer, overwrite=overwrite)
 
 
 def read_dataset(
-    root: Path,
+    dataset_root: Path,
     *,
-    catalog: DataSpecProvider | None = None,
-    data_id: str | None = None,
-    access_mode: DatasetAccessMode = DatasetAccessMode.MATERIALIZED,
-    years: tuple[int, ...] | None = None,
+    mode: DatasetReadMode = DatasetReadMode.MATERIALIZED,
     columns: tuple[str, ...] | list[str] | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    partition_filter: Mapping[str, object] | None = None,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
-    del resource_policy
-    spec = catalog.get(data_id) if catalog is not None and data_id is not None else None
-    if access_mode is DatasetAccessMode.STREAMING:
-        return _read_dataset_streaming(
-            Path(root),
-            years=years,
-            columns=columns,
-            spec=spec,
-        )
-    frame = pd.concat(
-        list(
-            _read_dataset_streaming(
-                Path(root),
-                years=years,
-                columns=columns,
-                spec=spec,
-            )
-        ),
-        ignore_index=True,
+    root = _require_artifact_root(Path(dataset_root))
+    inspection = inspect_dataset(root)
+    selected_columns = _resolve_columns(inspection, columns)
+
+    chunks = _read_dataset_chunks(
+        root,
+        columns=selected_columns,
+        partition_filter=partition_filter,
+        inspection=inspection,
     )
-    return _sort_by_primary_key(frame, spec)
+    if mode is DatasetReadMode.CHUNKED:
+        return chunks
+    if mode is not DatasetReadMode.MATERIALIZED:
+        raise ValueError("unsupported_dataset_read_mode")
+    frames = list(chunks)
+    if not frames:
+        return pd.DataFrame(columns=list(selected_columns))
+    return pd.concat(frames, ignore_index=True)
+
+
+def inspect_dataset(dataset_root: Path) -> DatasetInspection:
+    root = _require_artifact_root(Path(dataset_root))
+    spec_path = root / "spec.json"
+    data_root = root / "data"
+    manifest_path = root / "_manifest" / "manifest.json"
+    if not spec_path.is_file():
+        raise ValueError("dataset_spec_missing")
+    if not data_root.is_dir():
+        raise ValueError("dataset_data_dir_missing")
+    spec_payload = read_manifest(spec_path)
+    manifest = read_manifest(manifest_path) if manifest_path.is_file() else {}
+    paths = _parquet_part_paths(data_root, partition_filter=None, spec=spec_payload)
+    if not paths:
+        raise ValueError("dataset_data_dir_missing")
+    schema = _validated_schema(paths)
+    columns = tuple(name for name, _ in schema)
+    return DatasetInspection(
+        root=root,
+        data_root=data_root,
+        spec=spec_payload,
+        columns=columns,
+        schema_hash=_sha256_json(schema),
+        file_count=len(paths),
+        manifest=manifest,
+    )
 
 
 def fingerprint_dataset(
-    root: Path,
+    dataset_root: Path,
     *,
-    catalog: DataSpecProvider,
-    data_id: str,
-    years: tuple[int, ...] | None = None,
     columns: tuple[str, ...] | list[str] | None = None,
+    partition_filter: Mapping[str, object] | None = None,
 ) -> DatasetFingerprint:
-    spec = catalog.get(data_id)
-    paths = _parquet_part_paths(Path(root), years=years)
-    if not paths:
-        raise FileNotFoundError(root)
-    schema_hash = _schema_hash(paths[0])
+    root = _require_artifact_root(Path(dataset_root))
+    inspection = inspect_dataset(root)
+    selected_columns = _resolve_columns(inspection, columns)
+    paths = _parquet_part_paths(
+        inspection.data_root,
+        partition_filter=partition_filter,
+        spec=inspection.spec,
+    )
+    schema_hash = _sha256_json(_validated_schema(paths))
+    key_columns = tuple(str(column) for column in inspection.spec["primary_key"])
     row_count = 0
     row_hash_sum = 0
     row_hash_xor = 0
     partition_rows: dict[str, int] = {}
     partition_hash_sum: dict[str, int] = {}
     partition_hash_xor: dict[str, int] = {}
-    file_count = 0
-    for chunk in _read_dataset_streaming(
-        Path(root),
-        years=years,
-        columns=columns,
-        spec=spec,
-    ):
-        file_count += 1
+
+    for path in paths:
+        chunk = pd.read_parquet(path, columns=list(selected_columns), engine="pyarrow")
         if chunk.empty:
             continue
-        row_count += int(len(chunk))
-        partition = _partition_label(chunk, spec)
         hashes = pd.util.hash_pandas_object(
-            chunk.loc[:, list(chunk.columns)],
+            chunk.loc[:, list(selected_columns)],
             index=False,
         ).to_numpy("uint64")
         chunk_sum = int(hashes.sum(dtype=np.uint64))
         chunk_xor = int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
+        partition = _relative_partition_label(inspection.data_root, path)
+        row_count += int(len(chunk))
         row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
         row_hash_xor ^= chunk_xor
         partition_rows[partition] = partition_rows.get(partition, 0) + len(chunk)
@@ -336,12 +316,13 @@ def fingerprint_dataset(
             partition_hash_sum.get(partition, 0) + chunk_sum
         ) % 2**64
         partition_hash_xor[partition] = partition_hash_xor.get(partition, 0) ^ chunk_xor
+
     content_hash = _sha256_json(
         {
             "row_hash_sum": row_hash_sum,
             "row_hash_xor": row_hash_xor,
             "row_count": row_count,
-            "columns": list(columns or spec.required_columns),
+            "columns": list(selected_columns),
         }
     )
     partition_fingerprints = tuple(
@@ -362,81 +343,136 @@ def fingerprint_dataset(
         fingerprint_schema_version="0.1",
         schema_hash=schema_hash,
         row_count=row_count,
-        key_columns=tuple(spec.primary_key),
+        key_columns=key_columns,
         content_hash=content_hash,
         partition_fingerprints=partition_fingerprints,
-        file_count=file_count,
-        column_names=tuple(columns or spec.required_columns),
+        file_count=len(paths),
+        column_names=tuple(selected_columns),
     )
 
 
-def compare_dataset_fingerprints(
-    left: DatasetFingerprint,
-    right: DatasetFingerprint,
+def compare_datasets(
+    left_root: Path,
+    right_root: Path,
+    *,
+    columns: tuple[str, ...] | list[str] | None = None,
+    partition_filter: Mapping[str, object] | None = None,
 ) -> DatasetComparison:
-    schema_matches = left.schema_hash == right.schema_hash
-    row_count_matches = left.row_count == right.row_count
-    key_columns_match = left.key_columns == right.key_columns
-    content_matches = left.content_hash == right.content_hash
-    left_partitions = {
-        str(item["partition"]): item for item in left.partition_fingerprints
+    left_path = Path(left_root)
+    right_path = Path(right_root)
+    if not left_path.exists():
+        return _comparison("MISSING_LEFT")
+    if not right_path.exists():
+        return _comparison("MISSING_RIGHT")
+    try:
+        left = fingerprint_dataset(
+            left_path,
+            columns=columns,
+            partition_filter=partition_filter,
+        )
+        right = fingerprint_dataset(
+            right_path,
+            columns=columns,
+            partition_filter=partition_filter,
+        )
+    except Exception as exc:
+        return _comparison("INSPECTION_FAILED", summary={"error": str(exc)})
+
+    layout_delta = {
+        "file_count": {"left": left.file_count, "right": right.file_count},
     }
-    right_partitions = {
-        str(item["partition"]): item for item in right.partition_fingerprints
+    summary = {
+        "schema_hash": {"left": left.schema_hash, "right": right.schema_hash},
+        "row_count": {"left": left.row_count, "right": right.row_count},
+        "key_columns": {"left": left.key_columns, "right": right.key_columns},
+        "content_hash": {"left": left.content_hash, "right": right.content_hash},
+        "partitions": {
+            "left": left.partition_fingerprints,
+            "right": right.partition_fingerprints,
+        },
     }
-    partition_keys = set(left_partitions).union(right_partitions)
-    partition_mismatches = [
-        key
-        for key in sorted(partition_keys)
-        if left_partitions.get(key) != right_partitions.get(key)
-    ]
-    matches = (
-        schema_matches
-        and row_count_matches
-        and key_columns_match
-        and content_matches
-        and not partition_mismatches
-    )
+    if left.schema_hash != right.schema_hash or left.column_names != right.column_names:
+        status = "SCHEMA_MISMATCH"
+    elif left.row_count != right.row_count:
+        status = "ROW_COUNT_MISMATCH"
+    elif left.key_columns != right.key_columns:
+        status = "KEY_MISMATCH"
+    elif _partition_keys(left) != _partition_keys(right):
+        status = "PARTITION_MISMATCH"
+    elif left.content_hash != right.content_hash:
+        status = "CONTENT_MISMATCH"
+    else:
+        status = "MATCH"
+    return _comparison(status, summary=summary, layout_delta=layout_delta)
+
+
+def _comparison(
+    status: str,
+    *,
+    summary: dict[str, Any] | None = None,
+    layout_delta: dict[str, Any] | None = None,
+) -> DatasetComparison:
     return DatasetComparison(
         comparison_schema_version="0.1",
-        matches=matches,
-        schema_matches=schema_matches,
-        row_count_matches=row_count_matches,
-        key_columns_match=key_columns_match,
-        content_matches=content_matches,
-        partition_mismatch_count=len(partition_mismatches),
-        unexplained_delta=0 if matches else len(partition_mismatches) + 1,
-        summary={
-            "schema_hash": {"left": left.schema_hash, "right": right.schema_hash},
-            "row_count": {"left": left.row_count, "right": right.row_count},
-            "key_columns": {"left": left.key_columns, "right": right.key_columns},
-            "content_hash": {
-                "left": left.content_hash,
-                "right": right.content_hash,
-            },
-            "partition_mismatches": partition_mismatches,
-        },
+        status=status,
+        matches=status == "MATCH",
+        summary={} if summary is None else summary,
+        layout_delta={} if layout_delta is None else layout_delta,
     )
 
 
-def parquet_dataset_columns(root: Path) -> tuple[str, ...]:
-    paths = _parquet_part_paths(root, years=None)
-    if not paths:
-        raise FileNotFoundError(root)
-    return tuple(pq.ParquetFile(paths[0]).schema.names)
+def _staged_write_directory(
+    final_root: Path,
+    writer: Any,
+    *,
+    overwrite: bool,
+) -> None:
+    final_root.parent.mkdir(parents=True, exist_ok=True)
+    temp_root = final_root.with_name(f".tmp-{uuid4().hex[:12]}")
+    backup_root = final_root.with_name(f".replace-{uuid4().hex[:12]}")
+    try:
+        temp_root.mkdir()
+        writer(temp_root)
+        if not overwrite:
+            if final_root.exists():
+                raise ValueError("dataset_exists")
+            temp_root.rename(final_root)
+            return
+        if final_root.exists():
+            final_root.rename(backup_root)
+        try:
+            temp_root.rename(final_root)
+        except Exception:
+            if backup_root.exists() and not final_root.exists():
+                backup_root.rename(final_root)
+            raise
+        if backup_root.exists():
+            shutil.rmtree(backup_root)
+    except Exception:
+        _remove_tree(temp_root)
+        if backup_root.exists() and not final_root.exists():
+            backup_root.rename(final_root)
+        raise
 
 
-def _write_dataset_contents(
+def _remove_tree(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _write_contents(
     chunks: Iterator[pd.DataFrame],
     root: Path,
     *,
     spec: DataSpec,
-) -> DatasetManifestAccumulator:
+) -> _WriteStats:
     timestamp_column = _validate_dataset_spec(spec)
-    accumulator = DatasetManifestAccumulator(spec=spec, data_root=root)
+    accumulator = _WriteStats(spec=spec, data_root=root)
     part_indices: dict[str, int] = {}
     for chunk in chunks:
-        frame = _validate_frame(chunk, root, spec)
+        frame = _validate_frame(chunk, spec)
         accumulator.update_frame(frame)
         _raise_accumulated_failures(accumulator)
         for partition, partition_frame in _partition_frames(
@@ -446,7 +482,7 @@ def _write_dataset_contents(
         ):
             part_index = part_indices.get(partition, 0)
             part_indices[partition] = part_index + 1
-            output_path = root / partition / f"part-{part_index:03d}.parquet"
+            output_path = _partition_part_path(root, partition, part_index)
             _write_parquet_file(partition_frame, output_path)
             accumulator.record_file(output_path)
     if accumulator.row_count == 0:
@@ -456,42 +492,44 @@ def _write_dataset_contents(
 
 def _iter_input_chunks(
     data: pd.DataFrame | Iterable[pd.DataFrame],
-    *,
-    access_mode: DatasetAccessMode,
 ) -> Iterator[pd.DataFrame]:
-    if access_mode is DatasetAccessMode.MATERIALIZED:
-        if not isinstance(data, pd.DataFrame):
-            raise TypeError("materialized_dataset_requires_dataframe")
+    if isinstance(data, pd.DataFrame):
         yield data
         return
-    if access_mode is not DatasetAccessMode.STREAMING:
-        raise ValueError("unsupported_dataset_access_mode")
-    if isinstance(data, pd.DataFrame):
-        raise TypeError("streaming_dataset_requires_iterable")
-    yield from data
+    for chunk in data:
+        if not isinstance(chunk, pd.DataFrame):
+            raise TypeError("invalid_dataset_chunk")
+        yield chunk
 
 
-def _read_dataset_streaming(
+def _read_dataset_chunks(
     root: Path,
     *,
-    years: tuple[int, ...] | None,
-    columns: tuple[str, ...] | list[str] | None,
-    spec: DataSpec | None,
+    columns: tuple[str, ...],
+    partition_filter: Mapping[str, object] | None,
+    inspection: DatasetInspection,
 ) -> Iterator[pd.DataFrame]:
-    paths = _parquet_part_paths(root, years=years)
-    if not paths:
-        raise FileNotFoundError(root)
-    for path in paths:
-        frame = pd.read_parquet(path, columns=columns, engine="pyarrow")
-        yield _sort_by_primary_key(frame, spec)
-
-
-def _sort_by_primary_key(frame: pd.DataFrame, spec: DataSpec | None) -> pd.DataFrame:
-    if spec is None or not set(spec.primary_key).issubset(frame.columns):
-        return frame.reset_index(drop=True)
-    return frame.sort_values(list(spec.primary_key), kind="mergesort").reset_index(
-        drop=True
+    paths = _parquet_part_paths(
+        inspection.data_root,
+        partition_filter=partition_filter,
+        spec=inspection.spec,
     )
+    for path in paths:
+        yield pd.read_parquet(path, columns=list(columns), engine="pyarrow")
+
+
+def _resolve_columns(
+    inspection: DatasetInspection,
+    columns: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
+    if columns is None:
+        requested = tuple(str(column) for column in inspection.spec["required_columns"])
+    else:
+        requested = tuple(str(column) for column in columns)
+    missing = [column for column in requested if column not in inspection.columns]
+    if missing:
+        raise ValueError("dataset_column_not_found")
+    return requested
 
 
 def _partition_frames(
@@ -500,9 +538,13 @@ def _partition_frames(
     timestamp_column: str | None,
     partition_columns: tuple[str, ...],
 ) -> Iterator[tuple[str, pd.DataFrame]]:
-    if partition_columns == ():
-        yield ".", frame
+    if frame.empty:
         return
+    if partition_columns == ():
+        yield "", frame
+        return
+    if partition_columns != ("year",):
+        raise ValueError("unsupported_partitioning")
     if timestamp_column is None:
         raise ValueError("missing_partition_timestamp_column")
     partitioned = add_year_partition(frame, timestamp_column=timestamp_column)
@@ -510,8 +552,13 @@ def _partition_frames(
         yield f"year={int(year)}", year_frame.drop(columns=["year"])
 
 
-def _validate_frame(frame: pd.DataFrame, root: Path, spec: DataSpec) -> pd.DataFrame:
-    del root
+def _partition_part_path(root: Path, partition: str, part_index: int) -> Path:
+    if partition:
+        return root / partition / f"part-{part_index:03d}.parquet"
+    return root / f"part-{part_index:03d}.parquet"
+
+
+def _validate_frame(frame: pd.DataFrame, spec: DataSpec) -> pd.DataFrame:
     unregistered = sorted(set(frame.columns).difference(spec.column_roles))
     if unregistered:
         raise ValueError(f"unregistered_output_columns: {', '.join(unregistered)}")
@@ -523,36 +570,25 @@ def _validate_frame(frame: pd.DataFrame, root: Path, spec: DataSpec) -> pd.DataF
         column for column in spec.primary_key if bool(output[column].isna().any())
     ]
     if null_key_columns:
-        raise ValueError(f"null_primary_key_columns: {', '.join(null_key_columns)}")
-    duplicates = output.duplicated(list(spec.primary_key))
-    if bool(duplicates.any()):
-        raise ValueError("duplicate_primary_key")
-    inf_columns = _non_finite_columns(output, spec)
+        raise ValueError("dataset_primary_key_null")
+    if bool(output.duplicated(list(spec.primary_key)).any()):
+        raise ValueError("duplicate_dataset_primary_key")
+    inf_columns = _infinite_columns(output, spec)
     if inf_columns:
-        raise ValueError(f"non_finite_columns: {', '.join(inf_columns)}")
+        raise ValueError("dataset_infinite_value")
     return output
 
 
-def _raise_accumulated_failures(accumulator: DatasetManifestAccumulator) -> None:
+def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
     if accumulator.duplicate_primary_key_count:
-        raise ValueError("duplicate_primary_key")
-    null_columns = [
-        column
-        for column, count in accumulator.null_count_summary.items()
-        if int(count) > 0
-    ]
-    if null_columns:
-        raise ValueError(f"null_primary_key_columns: {', '.join(null_columns)}")
-    non_finite = [
-        column
-        for column, count in accumulator.non_finite_count_summary.items()
-        if int(count) > 0
-    ]
-    if non_finite:
-        raise ValueError(f"non_finite_columns: {', '.join(non_finite)}")
+        raise ValueError("duplicate_dataset_primary_key")
+    if any(int(count) > 0 for count in accumulator.null_count_summary.values()):
+        raise ValueError("dataset_primary_key_null")
+    if any(int(count) > 0 for count in accumulator.non_finite_count_summary.values()):
+        raise ValueError("dataset_infinite_value")
 
 
-def _non_finite_columns(frame: pd.DataFrame, spec: DataSpec) -> list[str]:
+def _infinite_columns(frame: pd.DataFrame, spec: DataSpec) -> list[str]:
     columns: list[str] = []
     for column, role in spec.column_roles.items():
         if column in spec.primary_key or role is ColumnRole.TIMESTAMP:
@@ -601,7 +637,7 @@ def _validate_dataset_spec(spec: DataSpec) -> str | None:
     return timestamp_columns[0]
 
 
-def _validate_dataset_root(root: Path, spec: DataSpec) -> None:
+def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
     if not is_private_boundary_path(root):
         raise ValueError("outside_private_boundary")
     path_parts = _path_parts(root)
@@ -629,6 +665,13 @@ def _validate_dataset_root(root: Path, spec: DataSpec) -> None:
     raise ValueError("unsupported_data_spec_type")
 
 
+def _require_artifact_root(root: Path) -> Path:
+    candidate = Path(root)
+    if candidate.name == "data":
+        raise ValueError("dataset_root_must_be_artifact_root")
+    return candidate
+
+
 def _path_parts(path: Path) -> tuple[str, ...]:
     return tuple(part for part in PurePosixPath(path.as_posix()).parts if part != "/")
 
@@ -648,7 +691,7 @@ def _unique_matching_suffix(
     ]
     if len(matches) != 1 or storage_like_invalid:
         return None
-    return cast(tuple[str, ...], matches[0])
+    return matches[0]
 
 
 def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
@@ -658,15 +701,11 @@ def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
     }
 
 
-def _is_interim_output_suffix(
-    parts: tuple[str, ...],
-    spec: InterimDataSpec,
-) -> bool:
+def _is_interim_output_suffix(parts: tuple[str, ...], spec: InterimDataSpec) -> bool:
     return (
-        len(parts) == 5
+        len(parts) == 4
         and parts[:3] == ("data", "interim", str(spec.source_id))
         and _matches_artifact_segment(parts[3], spec.interim_data_id)
-        and parts[4] == "data"
     )
 
 
@@ -684,12 +723,12 @@ def _is_processed_output_suffix(
         *category_parts,
     )
     return (
-        len(parts) == len(expected_prefix) + 2
+        len(parts) == len(expected_prefix) + 1
         and parts[: len(expected_prefix)] == expected_prefix
         and _matches_artifact_segment(
-            parts[len(expected_prefix)], spec.processed_data_id
+            parts[len(expected_prefix)],
+            spec.processed_data_id,
         )
-        and parts[-1] == "data"
     )
 
 
@@ -698,10 +737,9 @@ def _is_research_dataset_output_suffix(
     spec: ResearchDatasetSpec,
 ) -> bool:
     return (
-        len(parts) == 6
+        len(parts) == 5
         and parts[:4] == ("data", "processed", str(spec.market_id), "research_datasets")
         and _matches_artifact_segment(parts[4], spec.dataset_id)
-        and parts[5] == "data"
     )
 
 
@@ -713,19 +751,70 @@ def _matches_artifact_segment(segment: str, expected: str) -> bool:
     )
 
 
-def _parquet_part_paths(root: Path, *, years: tuple[int, ...] | None) -> list[Path]:
-    data_root = Path(root)
-    unpartitioned = data_root / "part-000.parquet"
-    if unpartitioned.exists():
-        if years is not None:
-            return []
-        return [unpartitioned]
-    if years is None:
-        return sorted(data_root.glob("year=*/*.parquet"))
+def _parquet_part_paths(
+    data_root: Path,
+    *,
+    partition_filter: Mapping[str, object] | None,
+    spec: Mapping[str, Any],
+) -> list[Path]:
+    root = Path(data_root)
+    partition_columns = tuple(
+        str(column) for column in spec.get("partition_columns", ())
+    )
+    if partition_filter:
+        for key in partition_filter:
+            if key not in partition_columns:
+                raise ValueError("partition_key_not_found")
+    unpartitioned = sorted(root.glob("part-*.parquet"))
+    if unpartitioned:
+        if partition_filter:
+            raise ValueError("partition_key_not_found")
+        return unpartitioned
+    if partition_columns == ():
+        if partition_filter:
+            raise ValueError("partition_key_not_found")
+        return []
+    if partition_columns != ("year",):
+        raise ValueError("unsupported_partitioning")
+    available_years = {
+        path.name.split("=", 1)[1]
+        for path in root.glob("year=*")
+        if path.is_dir() and list(path.glob("*.parquet"))
+    }
+    if partition_filter is None:
+        selected_years = available_years
+    else:
+        requested = {str(value) for value in _filter_values(partition_filter["year"])}
+        selected_years = available_years.intersection(requested)
+        if not selected_years:
+            raise ValueError("partition_value_not_found")
     paths: list[Path] = []
-    for year in years:
-        paths.extend(sorted((data_root / f"year={year}").glob("*.parquet")))
+    for year in sorted(selected_years, key=lambda value: int(value)):
+        paths.extend(sorted((root / f"year={year}").glob("*.parquet")))
     return paths
+
+
+def _filter_values(value: object) -> tuple[object, ...]:
+    if isinstance(value, (str, bytes)):
+        return (value,)
+    if isinstance(value, Iterable):
+        return tuple(value)
+    return (value,)
+
+
+def _validated_schema(paths: list[Path]) -> tuple[tuple[str, str], ...]:
+    if not paths:
+        raise ValueError("dataset_data_dir_missing")
+    schemas = [_canonical_schema(path) for path in paths]
+    first = schemas[0]
+    if any(schema != first for schema in schemas[1:]):
+        raise ValueError("dataset_schema_mismatch")
+    return first
+
+
+def _canonical_schema(path: Path) -> tuple[tuple[str, str], ...]:
+    schema = pq.ParquetFile(path).schema_arrow
+    return tuple((field.name, str(field.type)) for field in schema)
 
 
 def _write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:
@@ -734,7 +823,7 @@ def _write_parquet_file(frame: pd.DataFrame, path: Path) -> Path:
     return path
 
 
-def _timestamp_primary_key_column(spec: DataSpec) -> str | None:
+def _timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:
     timestamp_columns = [
         column
         for column in spec.primary_key
@@ -743,24 +832,20 @@ def _timestamp_primary_key_column(spec: DataSpec) -> str | None:
     return timestamp_columns[0] if timestamp_columns else None
 
 
-def _partition_label(frame: pd.DataFrame, spec: DataSpec) -> str:
-    timestamp = _timestamp_primary_key_column(spec)
-    if timestamp is None or timestamp not in frame or frame.empty:
-        return "unpartitioned"
-    years = pd.to_datetime(frame[timestamp], errors="coerce").dt.year.dropna().unique()
-    if len(years) == 1:
-        return f"year={int(years[0])}"
-    return "mixed"
+def _relative_partition_label(data_root: Path, path: Path) -> str:
+    relative_parent = path.parent.relative_to(data_root)
+    label = relative_parent.as_posix()
+    return "unpartitioned" if label == "." else label
 
 
-def _schema_hash(path: Path) -> str:
-    schema = pq.ParquetFile(path).schema_arrow
-    fields = [(field.name, str(field.type)) for field in schema]
-    return _sha256_json(fields)
+def _partition_keys(fingerprint: DatasetFingerprint) -> tuple[str, ...]:
+    return tuple(
+        str(item["partition"]) for item in fingerprint.partition_fingerprints
+    )
 
 
-def _data_spec_payload(spec: DataSpec) -> dict[str, object]:
-    payload: dict[str, object] = {
+def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "schema_version": spec.schema_version,
         "market_id": str(spec.market_id),
         "frequency": spec.frequency.value,
@@ -815,16 +900,13 @@ def _sha256_json(payload: Any) -> str:
 
 
 __all__ = [
-    "DataSpecProvider",
-    "DatasetAccessMode",
-    "DatasetComparison",
+    "DatasetReadMode",
+    "DatasetInspection",
     "DatasetFingerprint",
-    "DatasetManifestAccumulator",
-    "compare_dataset_fingerprints",
-    "fingerprint_dataset",
-    "parquet_dataset_columns",
-    "read_dataset",
+    "DatasetComparison",
     "write_dataset",
-    "write_dataset_artifact",
-    "write_dataset_contents",
+    "read_dataset",
+    "inspect_dataset",
+    "fingerprint_dataset",
+    "compare_datasets",
 ]

@@ -12,14 +12,11 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
 from quant_research_platform.markets.implementations.a_share.processed.io import (
     layout_from_processed_root,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import (
-    DatasetAccessMode,
+    DatasetReadMode,
     read_dataset,
-    write_dataset_artifact,
+    write_dataset,
 )
-from quant_research_platform.storage.layout import processed_data_parquet_root
-from quant_research_platform.storage.parquet import write_processed_data
 
 MASK_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     "as_of": ("a_share_as_of", ("eligible",)),
@@ -50,13 +47,13 @@ def write_masks(
         catalog = a_share_processed_catalog()
         spec = catalog.get(processed_data_id)
         mask_frame = mask_frame[list(spec.required_columns)].copy()
-        data_root = write_processed_data(
-            mask_frame,
-            layout=layout_from_processed_root(processed_root),
-            catalog=catalog,
-            processed_data_id=processed_data_id,
+        artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+            spec.market_id,
+            spec.category,
+            spec.processed_data_id,
         )
-        outputs[mask_kind] = (data_root, len(mask_frame))
+        write_dataset(artifact_root, mask_frame, spec=spec)
+        outputs[mask_kind] = (artifact_root, len(mask_frame))
     return outputs
 
 
@@ -65,7 +62,6 @@ def write_masks_from_panel_dataset(
     *,
     start_year: int,
     end_year: int,
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> dict[str, tuple[Path, int]]:
     outputs: dict[str, tuple[Path, int]] = {}
     for mask_kind, (processed_data_id, mask_columns) in MASK_SPECS.items():
@@ -75,7 +71,6 @@ def write_masks_from_panel_dataset(
             mask_columns=mask_columns,
             start_year=start_year,
             end_year=end_year,
-            resource_policy=resource_policy,
         )
     return outputs
 
@@ -87,11 +82,14 @@ def _write_mask_from_panel_dataset(
     mask_columns: tuple[str, ...],
     start_year: int,
     end_year: int,
-    resource_policy: RuntimeResourcePolicy | None,
 ) -> tuple[Path, int]:
     catalog = a_share_processed_catalog()
     spec = catalog.get(processed_data_id)
-    panel_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    panel_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        "panels",
+        "daily_panel",
+    )
     read_columns = list(dict.fromkeys((*MASK_KEY_COLUMNS, *mask_columns)))
     row_count = 0
 
@@ -99,9 +97,9 @@ def _write_mask_from_panel_dataset(
         nonlocal row_count
         frames = read_dataset(
             panel_root,
-            years=tuple(range(start_year, end_year + 1)),
+            partition_filter={"year": tuple(range(start_year, end_year + 1))},
             columns=read_columns,
-            access_mode=DatasetAccessMode.STREAMING,
+            mode=DatasetReadMode.CHUNKED,
         )
         for frame in frames:
             mask_frame = _filter_years(
@@ -115,15 +113,17 @@ def _write_mask_from_panel_dataset(
             row_count += len(mask_frame)
             yield mask_frame
 
-    data_root = write_dataset_artifact(
-        _chunks(),
-        Path(processed_root) / spec.category / processed_data_id,
-        catalog=catalog,
-        data_id=processed_data_id,
-        access_mode=DatasetAccessMode.STREAMING,
-        resource_policy=resource_policy,
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, row_count
+    write_dataset(
+        artifact_root,
+        _chunks(),
+        spec=spec,
+    )
+    return artifact_root, row_count
 
 
 def _select_mask_columns(

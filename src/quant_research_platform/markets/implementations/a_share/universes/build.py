@@ -12,14 +12,11 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
 from quant_research_platform.markets.implementations.a_share.processed.io import (
     layout_from_processed_root,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import (
-    DatasetAccessMode,
+    DatasetReadMode,
     read_dataset,
-    write_dataset_artifact,
+    write_dataset,
 )
-from quant_research_platform.storage.layout import processed_data_parquet_root
-from quant_research_platform.storage.parquet import write_processed_data
 
 UNIVERSE_COLUMNS: tuple[str, ...] = (
     "market_id",
@@ -45,13 +42,13 @@ def write_universe(
     catalog = a_share_processed_catalog()
     spec = catalog.get("a_share_default")
     universe = universe[list(spec.required_columns)].copy()
-    data_root = write_processed_data(
-        universe,
-        layout=layout_from_processed_root(processed_root),
-        catalog=catalog,
-        processed_data_id="a_share_default",
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, len(universe)
+    write_dataset(artifact_root, universe, spec=spec)
+    return artifact_root, len(universe)
 
 
 def write_universe_from_panel_dataset(
@@ -59,20 +56,23 @@ def write_universe_from_panel_dataset(
     *,
     start_year: int,
     end_year: int,
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[Path, int]:
     catalog = a_share_processed_catalog()
     spec = catalog.get("a_share_default")
-    panel_root = processed_data_parquet_root(processed_root, "panels", "daily_panel")
+    panel_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        "panels",
+        "daily_panel",
+    )
     row_count = 0
 
     def _chunks():
         nonlocal row_count
         frames = read_dataset(
             panel_root,
-            years=tuple(range(start_year, end_year + 1)),
+            partition_filter={"year": tuple(range(start_year, end_year + 1))},
             columns=list(UNIVERSE_COLUMNS),
-            access_mode=DatasetAccessMode.STREAMING,
+            mode=DatasetReadMode.CHUNKED,
         )
         for frame in frames:
             universe = _filter_years(
@@ -86,15 +86,17 @@ def write_universe_from_panel_dataset(
             row_count += len(universe)
             yield universe
 
-    data_root = write_dataset_artifact(
-        _chunks(),
-        Path(processed_root) / "universes" / "a_share_default",
-        catalog=catalog,
-        data_id="a_share_default",
-        access_mode=DatasetAccessMode.STREAMING,
-        resource_policy=resource_policy,
+    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
+        spec.market_id,
+        spec.category,
+        spec.processed_data_id,
     )
-    return data_root, row_count
+    write_dataset(
+        artifact_root,
+        _chunks(),
+        spec=spec,
+    )
+    return artifact_root, row_count
 
 
 def _filter_years(frame: pd.DataFrame, start_year: int, end_year: int) -> pd.DataFrame:

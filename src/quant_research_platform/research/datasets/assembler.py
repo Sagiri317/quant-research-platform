@@ -14,21 +14,15 @@ from quant_research_platform.research.datasets.io import read_research_dataset
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
-from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets import (
-    DatasetAccessMode,
-    _data_spec_payload,
+    DatasetReadMode,
+    inspect_dataset,
     read_dataset,
-    write_dataset_contents,
+    write_dataset,
 )
 from quant_research_platform.storage.layout import (
     layout_from_processed_market_root,
-    processed_data_parquet_root,
 )
-from quant_research_platform.storage.manifests import (
-    write_internal_artifact_manifest,
-)
-from quant_research_platform.storage.parquet import write_research_dataset
 
 
 def assemble_research_dataset(
@@ -40,12 +34,10 @@ def assemble_research_dataset(
     spec = catalog.get(dataset_id)
     validate_research_dataset(frame, spec)
     output = frame[list(spec.required_columns)].copy()
-    return write_research_dataset(
-        output,
-        layout=layout_from_processed_market_root(processed_root),
-        catalog=catalog,
-        dataset_id=dataset_id,
-    )
+    layout = layout_from_processed_market_root(processed_root)
+    artifact_root = layout.research_dataset_root(spec.market_id, spec.dataset_id)
+    write_dataset(artifact_root, output, spec=spec)
+    return artifact_root
 
 
 def assemble_research_dataset_from_processed(
@@ -57,7 +49,8 @@ def assemble_research_dataset_from_processed(
     years: tuple[int, ...] | None = None,
 ) -> Path:
     spec = dataset_catalog.get(dataset_id)
-    artifact_root = Path(processed_root) / "research_datasets" / dataset_id
+    layout = layout_from_processed_market_root(processed_root)
+    artifact_root = layout.research_dataset_root(spec.market_id, spec.dataset_id)
     assembly_years = _assembly_years(
         processed_root=processed_root,
         dataset_spec=spec,
@@ -76,25 +69,8 @@ def assemble_research_dataset_from_processed(
             validate_research_dataset(frame, spec)
             yield frame.loc[:, list(spec.required_columns)].copy()
 
-    def _write(temp_root: Path) -> None:
-        accumulator = write_dataset_contents(
-            _chunks(),
-            temp_root / "data",
-            catalog=dataset_catalog,
-            data_id=dataset_id,
-            access_mode=DatasetAccessMode.STREAMING,
-        )
-        write_internal_artifact_manifest(
-            temp_root / "spec.json",
-            _data_spec_payload(spec),
-        )
-        write_internal_artifact_manifest(
-            temp_root / "_manifest" / "manifest.json",
-            accumulator.payload(),
-        )
-
-    atomic_write_directory(artifact_root, _write)
-    return artifact_root / "data"
+    write_dataset(artifact_root, _chunks(), spec=spec)
+    return artifact_root
 
 
 def _join_processed_inputs(
@@ -143,18 +119,16 @@ def _read_processed_input(
         processed_spec,
         existing_columns=existing_columns,
     )
-    data_root = processed_data_parquet_root(
-        processed_root,
+    data_root = layout_from_processed_market_root(processed_root).processed_data_root(
+        processed_spec.market_id,
         processed_spec.category,
         processed_spec.processed_data_id,
     )
     frame = read_dataset(
         data_root,
-        catalog=processed_catalog,
-        data_id=processed_spec.processed_data_id,
-        years=years,
+        partition_filter=_year_filter(years),
         columns=columns,
-        access_mode=DatasetAccessMode.MATERIALIZED,
+        mode=DatasetReadMode.MATERIALIZED,
     )
     if "year" in frame.columns:
         frame = frame.drop(columns=["year"])
@@ -172,15 +146,17 @@ def _assembly_years(
         return years
     first_processed_id = dataset_spec.processed_data_ids[0]
     first_spec = processed_catalog.get(first_processed_id)
-    data_root = processed_data_parquet_root(
-        processed_root,
+    data_root = layout_from_processed_market_root(processed_root).processed_data_root(
+        first_spec.market_id,
         first_spec.category,
         first_spec.processed_data_id,
     )
-    discovered = []
-    for path in sorted(data_root.glob("year=*")):
-        if path.is_dir() and list(path.glob("*.parquet")):
-            discovered.append(int(path.name.split("=", 1)[1]))
+    manifest = inspect_dataset(data_root).manifest
+    discovered = [
+        int(partition.split("=", 1)[1])
+        for partition in manifest.get("partitions", [])
+        if str(partition).startswith("year=")
+    ]
     if not discovered:
         raise FileNotFoundError(data_root)
     return tuple(discovered)
@@ -206,6 +182,12 @@ def _processed_input_columns(
             continue
         columns.append(column)
     return tuple(columns)
+
+
+def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
+    if years is None:
+        return None
+    return {"year": years}
 
 
 __all__ = [

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
@@ -20,8 +22,8 @@ from quant_research_platform.storage.atomic import (
     atomic_write_csv,
     atomic_write_directory,
     atomic_write_json,
-    atomic_write_parquet,
     atomic_write_text,
+    reject_if_exists,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -108,8 +110,9 @@ def write_prediction_bundle_files(
         raise ValueError(f"unregistered_prediction_bundle_columns: {', '.join(extra)}")
     if bool(frame.duplicated(list(spec.primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
+
     def _write(temp_root: Path) -> None:
-        atomic_write_parquet(
+        _atomic_write_report_parquet(
             frame.loc[:, list(required)],
             temp_root / "prediction.parquet",
             engine="pyarrow",
@@ -173,14 +176,14 @@ def write_evaluation_report_files(
     )
 
     def _write(temp_root: Path) -> None:
-        atomic_write_parquet(
+        _atomic_write_report_parquet(
             metrics,
             temp_root / "metrics.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
         )
-        atomic_write_parquet(
+        _atomic_write_report_parquet(
             grouped_returns,
             temp_root / "grouped_returns.parquet",
             engine="pyarrow",
@@ -251,6 +254,44 @@ def _derive_report_run_root(
     if "data/processed" in run_root.as_posix():
         raise ValueError("report_output_must_be_report_root")
     return run_root
+
+
+def _atomic_write_report_parquet(
+    frame: pd.DataFrame,
+    path: Path,
+    **kwargs: object,
+) -> Path:
+    final_path = Path(path)
+    reject_if_exists(final_path)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = final_path.with_name(f".{final_path.name}.tmp-{uuid4().hex[:12]}")
+    temp_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        frame.to_parquet(temp_path, **kwargs)
+        reject_if_exists(final_path)
+        _rename_with_transient_permission_retry(temp_path, final_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+    return final_path
+
+
+def _rename_with_transient_permission_retry(
+    source: Path,
+    target: Path,
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 0.10,
+) -> None:
+    for attempt in range(1, attempts + 1):
+        try:
+            source.rename(target)
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            time.sleep(delay_seconds)
 
 
 __all__ = [

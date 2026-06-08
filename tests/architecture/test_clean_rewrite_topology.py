@@ -73,7 +73,7 @@ def test_clean_rewrite_target_files_exist() -> None:
         "contracts/workflows.py",
         "contracts/validation.py",
         "storage/layout.py",
-        "storage/parquet.py",
+        "storage/datasets.py",
         "storage/manifests.py",
         "storage/partitions.py",
         "storage/checksums.py",

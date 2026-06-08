@@ -23,11 +23,12 @@ from quant_research_platform.sources.csmar import (
 )
 from quant_research_platform.sources.csmar.raw_exports import read_private_export_file
 from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.parquet import (
-    read_partitioned_parquet_dataset,
-    write_interim_data,
+from quant_research_platform.storage.datasets import (
+    inspect_dataset,
+    read_dataset,
+    write_dataset,
 )
+from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.synthetic_a_share import (
     make_synthetic_index_info_dynamic,
     make_synthetic_index_info_static,
@@ -964,19 +965,19 @@ def test_csmar_trading_calendar_interim_write_roundtrip(tmp_path) -> None:
     )
     catalog = csmar_interim_catalog()
 
-    data_root = write_interim_data(
-        frame,
-        layout=StorageLayout(project_root=tmp_path),
-        catalog=catalog,
-        interim_data_id="trading_calendar",
+    spec = catalog.get("trading_calendar")
+    artifact_root = StorageLayout(project_root=tmp_path).interim_data_root(
+        spec.source_id,
+        spec.interim_data_id,
     )
-    read_back = read_partitioned_parquet_dataset(data_root)
+    write_dataset(artifact_root, frame, spec=spec)
+    read_back = read_dataset(artifact_root)
+    inspection = inspect_dataset(artifact_root)
 
-    assert data_root == (
-        tmp_path / "data" / "interim" / "csmar" / "trading_calendar" / "data"
+    assert artifact_root == (
+        tmp_path / "data" / "interim" / "csmar" / "trading_calendar"
     )
-    assert (data_root / "year=2024" / "part-000.parquet").is_file()
-    assert (data_root / "year=2025" / "part-000.parquet").is_file()
+    assert inspection.file_count == 2
     assert len(read_back) == len(frame)
     assert set(read_back["calendar_date"].dt.year) == {2024, 2025}
     assert read_back.sort_values(
@@ -1005,12 +1006,15 @@ def test_csmar_trading_calendar_interim_writer_rejects_duplicate_key(
     )
     duplicate = pd.concat([frame, frame], ignore_index=True)
 
-    with pytest.raises(ValueError, match="duplicate_primary_key"):
-        write_interim_data(
+    spec = csmar_interim_catalog().get("trading_calendar")
+    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
+        write_dataset(
+            StorageLayout(project_root=tmp_path).interim_data_root(
+                spec.source_id,
+                spec.interim_data_id,
+            ),
             duplicate,
-            layout=StorageLayout(project_root=tmp_path),
-            catalog=csmar_interim_catalog(),
-            interim_data_id="trading_calendar",
+            spec=spec,
         )
 
 
@@ -1081,12 +1085,11 @@ def test_csmar_importer_writes_interim_parquet_through_catalog(tmp_path) -> None
         chunksize=1,
     )
 
-    data_root = result.written_data_roots["daily_market"]
-    assert data_root == (
-        tmp_path / "data" / "interim" / "csmar" / "daily_market" / "data"
+    artifact_root = result.artifact_roots["daily_market"]
+    assert artifact_root == (
+        tmp_path / "data" / "interim" / "csmar" / "daily_market"
     )
-    assert (data_root / "year=2024" / "part-000.parquet").is_file()
-    assert (data_root.parent / "_manifest" / "manifest.json").is_file()
+    assert inspect_dataset(artifact_root).file_count == 1
 
 
 def _write_trading_calendar_raw_export(path) -> None:
