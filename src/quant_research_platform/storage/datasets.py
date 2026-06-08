@@ -91,20 +91,50 @@ class _WriteStats:
     factor_nan_profile: dict[str, int] = field(default_factory=dict)
     label_nan_profile: dict[str, int] = field(default_factory=dict)
     duplicate_primary_key_count: int = 0
+    partition_row_counts: dict[str, int] = field(default_factory=dict)
+    columns: tuple[str, ...] | None = None
+    schema_hash: str | None = None
     _seen_key_hashes: set[int] = field(default_factory=set)
+    _schema: tuple[tuple[str, str], ...] | None = None
 
-    def update_frame(self, frame: pd.DataFrame) -> None:
-        self.row_count += int(len(frame))
-        self._update_keys(frame)
-        self._update_dates(frame)
-        self._update_numeric_profiles(frame)
+    def update_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
+        unregistered = sorted(set(frame.columns).difference(self.spec.column_roles))
+        if unregistered:
+            raise ValueError(f"unregistered_output_columns: {', '.join(unregistered)}")
+        missing = sorted(set(self.spec.required_columns).difference(frame.columns))
+        if missing:
+            raise ValueError(f"missing_required_columns: {', '.join(missing)}")
+        output = frame.loc[:, list(self.spec.required_columns)].copy()
+        self.row_count += int(len(output))
+        self._update_keys(output)
+        self._update_dates(output)
+        self._update_numeric_profiles(output)
+        _raise_accumulated_failures(self)
+        return output
 
-    def record_file(self, path: Path) -> None:
+    def record_file(self, path: Path, *, row_count: int) -> None:
+        parquet_file = pq.ParquetFile(path)
+        actual_row_count = int(parquet_file.metadata.num_rows)
+        if actual_row_count != int(row_count):
+            raise ValueError("dataset_row_count_mismatch")
+        schema = _canonical_schema_from_file(parquet_file)
+        if self._schema is None:
+            self._schema = schema
+            self.columns = tuple(name for name, _ in schema)
+            self.schema_hash = _sha256_json(schema)
+        elif schema != self._schema:
+            raise ValueError("dataset_schema_mismatch")
+        partition = _relative_partition_label(self.data_root, path)
         self.file_count += 1
         self.file_size_bytes += int(path.stat().st_size)
-        self.partitions.add(_relative_partition_label(self.data_root, path))
+        self.partitions.add(partition)
+        self.partition_row_counts[partition] = (
+            self.partition_row_counts.get(partition, 0) + actual_row_count
+        )
 
     def payload(self) -> dict[str, Any]:
+        if self.columns is None or self.schema_hash is None:
+            raise ValueError("dataset_schema_missing")
         validation_failed = (
             self.duplicate_primary_key_count > 0
             or any(value > 0 for value in self.null_count_summary.values())
@@ -116,6 +146,12 @@ class _WriteStats:
                 "row_count": int(self.row_count),
                 "file_count": int(self.file_count),
                 "file_size_bytes": int(self.file_size_bytes),
+                "columns": list(self.columns),
+                "schema_hash": self.schema_hash,
+                "partition_row_counts": {
+                    key: int(value)
+                    for key, value in sorted(self.partition_row_counts.items())
+                },
                 "partition_count": len(self.partitions),
                 "partitions": sorted(self.partitions),
                 "date_min": _date_string(self.date_min),
@@ -222,7 +258,7 @@ def write_dataset(
             temp_root / "_manifest" / "manifest.json",
             accumulator.payload(),
         )
-        inspect_dataset(temp_root)
+        _validate_written_artifact(temp_root, accumulator)
 
     _staged_write_directory(final_root, _writer, overwrite=overwrite)
 
@@ -235,7 +271,7 @@ def read_dataset(
     partition_filter: Mapping[str, object] | None = None,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
     root = _require_artifact_root(Path(dataset_root))
-    inspection = inspect_dataset(root)
+    inspection = _runtime_inspection(root)
     selected_columns = _resolve_columns(inspection, columns)
 
     chunks = _read_dataset_chunks(
@@ -270,12 +306,24 @@ def inspect_dataset(dataset_root: Path) -> DatasetInspection:
         raise ValueError("dataset_data_dir_missing")
     schema = _validated_schema(paths)
     columns = tuple(name for name, _ in schema)
+    schema_hash = _sha256_json(schema)
+    if _manifest_has_runtime_metadata(manifest):
+        _validate_manifest_runtime_metadata(
+            manifest,
+            data_root=data_root,
+            paths=paths,
+            validate_row_counts=True,
+        )
+        if tuple(str(column) for column in manifest["columns"]) != columns:
+            raise ValueError("manifest_columns_mismatch")
+        if str(manifest["schema_hash"]) != schema_hash:
+            raise ValueError("manifest_schema_hash_mismatch")
     return DatasetInspection(
         root=root,
         data_root=data_root,
         spec=spec_payload,
         columns=columns,
-        schema_hash=_sha256_json(schema),
+        schema_hash=schema_hash,
         file_count=len(paths),
         manifest=manifest,
     )
@@ -296,7 +344,31 @@ def _dataset_planning_metadata(
         raise ValueError("dataset_data_dir_missing")
     spec_payload = read_manifest(spec_path)
     if manifest_path.is_file():
-        read_manifest(manifest_path)
+        manifest = read_manifest(manifest_path)
+        if _manifest_has_runtime_metadata(manifest):
+            paths = _parquet_part_paths(
+                data_root,
+                partition_filter=partition_filter,
+                spec=spec_payload,
+            )
+            if not paths:
+                raise ValueError("dataset_data_dir_missing")
+            _, _, partition_counts = _validate_manifest_runtime_metadata_shape(manifest)
+            partitions = tuple(
+                sorted({_relative_partition_label(data_root, path) for path in paths})
+            )
+            missing_counts = [
+                partition
+                for partition in partitions
+                if partition not in partition_counts
+            ]
+            if missing_counts:
+                raise ValueError("manifest_partition_row_counts_mismatch")
+            return _DatasetPlanningMetadata(
+                row_count=sum(partition_counts[partition] for partition in partitions),
+                file_count=len(paths),
+                partitions=partitions,
+            )
     paths = _parquet_part_paths(
         data_root,
         partition_filter=partition_filter,
@@ -520,9 +592,7 @@ def _write_contents(
     accumulator = _WriteStats(spec=spec, data_root=root)
     part_indices: dict[str, int] = {}
     for chunk in chunks:
-        frame = _validate_frame(chunk, spec)
-        accumulator.update_frame(frame)
-        _raise_accumulated_failures(accumulator)
+        frame = accumulator.update_frame(chunk)
         for partition, partition_frame in _partition_frames(
             frame,
             timestamp_column=timestamp_column,
@@ -532,7 +602,7 @@ def _write_contents(
             part_indices[partition] = part_index + 1
             output_path = _partition_part_path(root, partition, part_index)
             _write_parquet_file(partition_frame, output_path)
-            accumulator.record_file(output_path)
+            accumulator.record_file(output_path, row_count=len(partition_frame))
     if accumulator.row_count == 0:
         raise ValueError("empty_dataset")
     return accumulator
@@ -606,27 +676,6 @@ def _partition_part_path(root: Path, partition: str, part_index: int) -> Path:
     return root / f"part-{part_index:03d}.parquet"
 
 
-def _validate_frame(frame: pd.DataFrame, spec: DataSpec) -> pd.DataFrame:
-    unregistered = sorted(set(frame.columns).difference(spec.column_roles))
-    if unregistered:
-        raise ValueError(f"unregistered_output_columns: {', '.join(unregistered)}")
-    missing = sorted(set(spec.required_columns).difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_required_columns: {', '.join(missing)}")
-    output = frame.loc[:, list(spec.required_columns)].copy()
-    null_key_columns = [
-        column for column in spec.primary_key if bool(output[column].isna().any())
-    ]
-    if null_key_columns:
-        raise ValueError("dataset_primary_key_null")
-    if bool(output.duplicated(list(spec.primary_key)).any()):
-        raise ValueError("duplicate_dataset_primary_key")
-    inf_columns = _infinite_columns(output, spec)
-    if inf_columns:
-        raise ValueError("dataset_infinite_value")
-    return output
-
-
 def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
     if accumulator.duplicate_primary_key_count:
         raise ValueError("duplicate_dataset_primary_key")
@@ -636,20 +685,171 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
         raise ValueError("dataset_infinite_value")
 
 
-def _infinite_columns(frame: pd.DataFrame, spec: DataSpec) -> list[str]:
-    columns: list[str] = []
-    for column, role in spec.column_roles.items():
-        if column in spec.primary_key or role is ColumnRole.TIMESTAMP:
-            continue
-        if column not in frame or not pd.api.types.is_numeric_dtype(frame[column]):
-            continue
-        values = pd.to_numeric(frame[column], errors="coerce").to_numpy(
-            dtype="float64",
-            na_value=np.nan,
+def _runtime_inspection(root: Path) -> DatasetInspection:
+    spec_path = root / "spec.json"
+    data_root = root / "data"
+    manifest_path = root / "_manifest" / "manifest.json"
+    if not spec_path.is_file():
+        raise ValueError("dataset_spec_missing")
+    if not data_root.is_dir():
+        raise ValueError("dataset_data_dir_missing")
+    spec_payload = read_manifest(spec_path)
+    if not manifest_path.is_file():
+        return inspect_dataset(root)
+    manifest = read_manifest(manifest_path)
+    if not _manifest_has_runtime_metadata(manifest):
+        return inspect_dataset(root)
+    paths = _parquet_part_paths(data_root, partition_filter=None, spec=spec_payload)
+    if not paths:
+        raise ValueError("dataset_data_dir_missing")
+    _validate_manifest_runtime_metadata(
+        manifest,
+        data_root=data_root,
+        paths=paths,
+        validate_row_counts=True,
+    )
+    return DatasetInspection(
+        root=root,
+        data_root=data_root,
+        spec=spec_payload,
+        columns=tuple(str(column) for column in manifest["columns"]),
+        schema_hash=str(manifest["schema_hash"]),
+        file_count=int(manifest["file_count"]),
+        manifest=manifest,
+    )
+
+
+def _validate_written_artifact(root: Path, accumulator: _WriteStats) -> None:
+    spec_path = root / "spec.json"
+    data_root = root / "data"
+    manifest_path = root / "_manifest" / "manifest.json"
+    if not spec_path.is_file():
+        raise ValueError("dataset_spec_missing")
+    if not data_root.is_dir():
+        raise ValueError("dataset_data_dir_missing")
+    if not manifest_path.is_file():
+        raise ValueError("dataset_manifest_missing")
+    spec_payload = read_manifest(spec_path)
+    manifest = read_manifest(manifest_path)
+    if not _manifest_has_runtime_metadata(manifest):
+        raise ValueError("manifest_runtime_metadata_missing")
+    paths = _parquet_part_paths(data_root, partition_filter=None, spec=spec_payload)
+    if len(paths) != accumulator.file_count:
+        raise ValueError("written_file_count_mismatch")
+    actual_partitions = sorted(
+        {_relative_partition_label(data_root, path) for path in paths}
+    )
+    if actual_partitions != sorted(accumulator.partition_row_counts):
+        raise ValueError("written_partition_mismatch")
+    _validate_manifest_matches_accumulator(manifest, accumulator)
+
+
+def _validate_manifest_matches_accumulator(
+    manifest: Mapping[str, Any],
+    accumulator: _WriteStats,
+) -> None:
+    if int(manifest["row_count"]) != int(accumulator.row_count):
+        raise ValueError("manifest_row_count_mismatch")
+    if int(manifest["file_count"]) != int(accumulator.file_count):
+        raise ValueError("manifest_file_count_mismatch")
+    if tuple(str(column) for column in manifest["columns"]) != accumulator.columns:
+        raise ValueError("manifest_columns_mismatch")
+    if str(manifest["schema_hash"]) != accumulator.schema_hash:
+        raise ValueError("manifest_schema_hash_mismatch")
+    if _manifest_partition_row_counts(manifest) != accumulator.partition_row_counts:
+        raise ValueError("manifest_partition_row_counts_mismatch")
+    if sum(_manifest_partition_row_counts(manifest).values()) != accumulator.row_count:
+        raise ValueError("manifest_row_count_mismatch")
+
+
+def _manifest_has_runtime_metadata(manifest: Mapping[str, Any]) -> bool:
+    return all(
+        key in manifest
+        for key in (
+            "columns",
+            "schema_hash",
+            "partition_row_counts",
+            "file_count",
+            "row_count",
         )
-        if bool(np.isinf(values).any()):
-            columns.append(column)
-    return columns
+    )
+
+
+def _validate_manifest_runtime_metadata(
+    manifest: Mapping[str, Any],
+    *,
+    data_root: Path,
+    paths: list[Path],
+    validate_row_counts: bool,
+) -> None:
+    manifest_file_count, _, partition_row_counts = (
+        _validate_manifest_runtime_metadata_shape(manifest)
+    )
+    if manifest_file_count != len(paths):
+        raise ValueError("manifest_file_count_mismatch")
+    actual_partitions = {_relative_partition_label(data_root, path) for path in paths}
+    if set(partition_row_counts) != actual_partitions:
+        raise ValueError("manifest_partition_row_counts_mismatch")
+    if validate_row_counts:
+        actual_row_counts = _parquet_row_counts_by_partition(data_root, paths)
+        if actual_row_counts != partition_row_counts:
+            raise ValueError("manifest_partition_row_counts_mismatch")
+
+
+def _validate_manifest_runtime_metadata_shape(
+    manifest: Mapping[str, Any],
+) -> tuple[int, int, dict[str, int]]:
+    columns = manifest.get("columns")
+    if (
+        not isinstance(columns, list)
+        or not columns
+        or any(not isinstance(column, str) for column in columns)
+    ):
+        raise ValueError("manifest_columns_invalid")
+    schema_hash = manifest.get("schema_hash")
+    if not isinstance(schema_hash, str) or not schema_hash:
+        raise ValueError("manifest_schema_hash_invalid")
+    try:
+        manifest_file_count = int(manifest["file_count"])
+        manifest_row_count = int(manifest["row_count"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("manifest_counts_invalid") from exc
+    if manifest_file_count < 0 or manifest_row_count < 0:
+        raise ValueError("manifest_counts_invalid")
+    partition_row_counts = _manifest_partition_row_counts(manifest)
+    if sum(partition_row_counts.values()) != manifest_row_count:
+        raise ValueError("manifest_row_count_mismatch")
+    return manifest_file_count, manifest_row_count, partition_row_counts
+
+
+def _manifest_partition_row_counts(manifest: Mapping[str, Any]) -> dict[str, int]:
+    value = manifest.get("partition_row_counts")
+    if not isinstance(value, dict) or not value:
+        raise ValueError("manifest_partition_row_counts_invalid")
+    counts: dict[str, int] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError("manifest_partition_row_counts_invalid")
+        try:
+            count = int(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("manifest_partition_row_counts_invalid") from exc
+        if count < 0:
+            raise ValueError("manifest_partition_row_counts_invalid")
+        counts[key] = count
+    return dict(sorted(counts.items()))
+
+
+def _parquet_row_counts_by_partition(
+    data_root: Path,
+    paths: list[Path],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in paths:
+        partition = _relative_partition_label(data_root, path)
+        row_count = int(pq.ParquetFile(path).metadata.num_rows)
+        counts[partition] = counts.get(partition, 0) + row_count
+    return dict(sorted(counts.items()))
 
 
 def _validate_dataset_spec(spec: DataSpec) -> str | None:

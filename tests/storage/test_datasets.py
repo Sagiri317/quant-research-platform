@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from inspect import signature
 from pathlib import Path
 
 import pandas as pd
@@ -55,8 +57,30 @@ def _frame() -> pd.DataFrame:
     )
 
 
+def _label_spec(processed_data_id: str = "label_x") -> ProcessedDataSpec:
+    return ProcessedDataSpec(
+        market_id=MarketId("a_share"),
+        category="labels",
+        processed_data_id=processed_data_id,
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "label": ColumnRole.LABEL,
+        },
+        primary_key=platform_entity_time_key(),
+        partition_columns=("year",),
+    )
+
+
 def _artifact_root(tmp_path: Path, name: str = "x") -> Path:
     return tmp_path / "data" / "processed" / "a_share" / "factors" / name
+
+
+def _label_artifact_root(tmp_path: Path, name: str = "label_x") -> Path:
+    return tmp_path / "data" / "processed" / "a_share" / "labels" / name
 
 
 def _write(root: Path, frame: pd.DataFrame | list[pd.DataFrame]) -> None:
@@ -96,6 +120,51 @@ def test_write_dataset_writes_complete_artifact_root_and_returns_none(
     assert (root / "_manifest" / "manifest.json").is_file()
     assert (root / "data" / "year=2014" / "part-000.parquet").is_file()
     assert (root / "data" / "year=2015" / "part-000.parquet").is_file()
+
+
+def test_write_dataset_writes_manifest_runtime_metadata(tmp_path: Path) -> None:
+    root = _artifact_root(tmp_path)
+
+    write_dataset(root, _frame(), spec=_spec())
+
+    manifest = json.loads(
+        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    inspection = inspect_dataset(root)
+    assert manifest["columns"] == ["market_id", "asset_id", "timestamp", "value"]
+    assert manifest["schema_hash"] == inspection.schema_hash
+    assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
+    assert manifest["file_count"] == 2
+    assert manifest["row_count"] == 3
+    manifest_text = json.dumps(manifest, sort_keys=True, ensure_ascii=True)
+    assert ":\\\\" not in manifest_text
+    assert "000001" not in manifest_text
+    assert "000002" not in manifest_text
+
+
+def test_manifest_runtime_metadata_is_deterministic(tmp_path: Path) -> None:
+    first_root = _artifact_root(tmp_path, "first")
+    second_root = _artifact_root(tmp_path, "second")
+    fields = (
+        "columns",
+        "schema_hash",
+        "partition_row_counts",
+        "file_count",
+        "row_count",
+    )
+
+    write_dataset(first_root, _frame(), spec=_spec("first"))
+    write_dataset(second_root, _frame(), spec=_spec("second"))
+
+    first_manifest = json.loads(
+        (first_root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    second_manifest = json.loads(
+        (second_root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert {field: first_manifest[field] for field in fields} == {
+        field: second_manifest[field] for field in fields
+    }
 
 
 def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) -> None:
@@ -232,6 +301,137 @@ def test_read_dataset_accepts_canonical_artifact_not_created_by_writer(
     assert frame["asset_id"].tolist() == ["000001"]
 
 
+def test_read_dataset_old_manifest_missing_runtime_metadata_falls_back_to_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path)
+    spec = _spec()
+    part = root / "data" / "year=2014" / "part-000.parquet"
+    part.parent.mkdir(parents=True)
+    _frame().iloc[[1]].to_parquet(part, index=False)
+    write_internal_artifact_manifest(root / "spec.json", _spec_payload(spec))
+    write_internal_artifact_manifest(
+        root / "_manifest" / "manifest.json",
+        {
+            "schema_version": spec.schema_version,
+            "dataset_id": spec.processed_data_id,
+            "row_count": 1,
+            "file_count": 1,
+            "validation_status": "pass",
+        },
+    )
+    calls = {"validated_schema": 0}
+    original = datasets._validated_schema
+
+    def counting_validated_schema(paths):
+        calls["validated_schema"] += 1
+        return original(paths)
+
+    monkeypatch.setattr(datasets, "_validated_schema", counting_validated_schema)
+
+    frame = read_dataset(root)
+
+    assert calls["validated_schema"] == 1
+    assert frame["asset_id"].tolist() == ["000001"]
+
+
+def test_read_dataset_corrupt_manifest_fails_closed(tmp_path: Path) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+    (root / "_manifest" / "manifest.json").write_text("{", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        read_dataset(root)
+
+
+def test_read_dataset_new_manifest_runtime_path_avoids_schema_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+
+    def schema_scan_blocked(paths):
+        raise AssertionError("read_dataset runtime path must not full-scan schema")
+
+    monkeypatch.setattr(datasets, "_validated_schema", schema_scan_blocked)
+
+    frame = read_dataset(root)
+
+    assert len(frame) == 3
+    assert list(frame.columns) == ["market_id", "asset_id", "timestamp", "value"]
+
+
+def test_read_dataset_manifest_row_count_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["row_count"] = manifest["row_count"] + 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest_row_count_mismatch"):
+        read_dataset(root)
+
+
+def test_dataset_planning_metadata_new_manifest_runtime_path_avoids_schema_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+
+    def schema_scan_blocked(paths):
+        raise AssertionError("planning metadata must not full-scan schema")
+
+    def row_count_footer_scan_blocked(data_root, paths):
+        raise AssertionError("planning metadata must not scan parquet row counts")
+
+    monkeypatch.setattr(datasets, "_validated_schema", schema_scan_blocked)
+    monkeypatch.setattr(
+        datasets,
+        "_parquet_row_counts_by_partition",
+        row_count_footer_scan_blocked,
+    )
+
+    metadata = datasets._dataset_planning_metadata(
+        root,
+        partition_filter={"year": (2015,)},
+    )
+
+    assert metadata.row_count == 2
+    assert metadata.file_count == 1
+    assert metadata.partitions == ("year=2015",)
+
+
+def test_write_dataset_post_write_check_rejects_manifest_file_count_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path)
+    original = datasets.write_internal_artifact_manifest
+
+    def write_corrupt_manifest(path: Path, payload: dict[str, object]) -> Path:
+        if path.as_posix().endswith("_manifest/manifest.json"):
+            corrupt = dict(payload)
+            corrupt["file_count"] = int(corrupt["file_count"]) + 1
+            return original(path, corrupt)
+        return original(path, payload)
+
+    monkeypatch.setattr(
+        datasets,
+        "write_internal_artifact_manifest",
+        write_corrupt_manifest,
+    )
+
+    with pytest.raises(ValueError, match="manifest_file_count_mismatch"):
+        write_dataset(root, _frame(), spec=_spec())
+    assert not root.exists()
+
+
 def test_read_dataset_rejects_data_root_missing_columns_and_partitions(
     tmp_path: Path,
 ) -> None:
@@ -273,6 +473,26 @@ def test_inspect_dataset_returns_minimal_metadata(tmp_path: Path) -> None:
     assert inspection.file_count == 2
     assert inspection.manifest["row_count"] == 3
     assert not hasattr(inspection, "schema")
+
+
+def test_write_dataset_preserves_factor_and_label_nan_profiles(tmp_path: Path) -> None:
+    factor_root = _artifact_root(tmp_path, "factor_nan")
+    label_root = _label_artifact_root(tmp_path)
+    label_frame = _frame().rename(columns={"value": "label"})
+
+    write_dataset(factor_root, _frame(), spec=_spec("factor_nan"))
+    write_dataset(label_root, label_frame, spec=_label_spec())
+
+    factor_manifest = json.loads(
+        (factor_root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    label_manifest = json.loads(
+        (label_root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert factor_manifest["factor_nan_profile"] == {"value": 1}
+    assert factor_manifest["label_nan_profile"] == {}
+    assert label_manifest["factor_nan_profile"] == {}
+    assert label_manifest["label_nan_profile"] == {"label": 1}
 
 
 def test_dataset_planning_metadata_counts_rows_by_partition(
@@ -442,3 +662,38 @@ def test_storage_datasets_public_api_is_hard_cutover() -> None:
     ):
         assert not hasattr(datasets, banned)
     assert not hasattr(storage, "write_dataset")
+
+
+def test_storage_datasets_public_signatures_do_not_gain_fast_parameters() -> None:
+    public_signatures = {
+        "write_dataset": signature(write_dataset),
+        "read_dataset": signature(read_dataset),
+        "inspect_dataset": signature(inspect_dataset),
+        "fingerprint_dataset": signature(fingerprint_dataset),
+        "compare_datasets": signature(compare_datasets),
+    }
+
+    assert list(public_signatures["write_dataset"].parameters) == [
+        "dataset_root",
+        "data",
+        "spec",
+        "overwrite",
+    ]
+    assert list(public_signatures["read_dataset"].parameters) == [
+        "dataset_root",
+        "mode",
+        "columns",
+        "partition_filter",
+    ]
+    assert list(public_signatures["inspect_dataset"].parameters) == ["dataset_root"]
+    assert list(public_signatures["fingerprint_dataset"].parameters) == [
+        "dataset_root",
+        "columns",
+        "partition_filter",
+    ]
+    assert list(public_signatures["compare_datasets"].parameters) == [
+        "left_root",
+        "right_root",
+        "columns",
+        "partition_filter",
+    ]
