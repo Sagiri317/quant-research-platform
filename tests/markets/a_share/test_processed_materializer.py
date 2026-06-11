@@ -8,6 +8,9 @@ import pytest
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_processed_catalog,
+)
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
@@ -194,6 +197,83 @@ def test_materialize_processed_data_existing_dependency_must_cover_trading_sessi
             time_window=TimeWindow("2014-01-02", "2014-01-06"),
             data_ids=("a_share_execution",),
         )
+
+
+def test_existing_dependency_coverage_rejects_missing_middle_sessions(
+    tmp_path,
+) -> None:
+    source_layout = StorageLayout(project_root=tmp_path / "source")
+    _write_interim_inputs(
+        source_layout,
+        start_date="2014-01-02",
+        end_date="2016-01-04",
+    )
+    materializer.materialize_processed_data(
+        layout=source_layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2014-01-02", "2016-01-04"),
+        data_ids=("daily_panel",),
+    )
+    source_panel_root = _processed_root(tmp_path / "source", "panel", "daily_panel")
+    panel = read_dataset(source_panel_root)
+    panel_without_2015 = panel.loc[
+        pd.to_datetime(panel["timestamp"]).dt.year.ne(2015)
+    ]
+
+    layout = StorageLayout(project_root=tmp_path / "coverage")
+    _write_interim_inputs(
+        layout,
+        start_date="2014-01-02",
+        end_date="2016-01-04",
+    )
+    panel_root = _processed_root(tmp_path / "coverage", "panel", "daily_panel")
+    write_dataset(
+        panel_root,
+        panel_without_2015,
+        spec=a_share_processed_catalog().get("daily_panel"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"insufficient_dataset_coverage: missing_sessions=",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SourceId("csmar"),
+            time_window=TimeWindow("2014-01-02", "2016-01-04"),
+            data_ids=("a_share_execution",),
+        )
+
+
+def test_existing_dependency_coverage_accepts_non_trading_end_date(
+    tmp_path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(
+        layout,
+        start_date="2016-12-29",
+        end_date="2017-01-03",
+    )
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2016-12-29", "2016-12-30"),
+        data_ids=("daily_panel",),
+    )
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2016-12-29", "2016-12-31"),
+        data_ids=("a_share_execution",),
+    )
+
+    annotation_root = _processed_root(tmp_path, "annotation", "a_share_execution")
+    annotation = read_dataset(annotation_root)
+    assert annotation["timestamp"].dt.date.astype(str).tolist() == [
+        "2016-12-29",
+        "2016-12-30",
+    ]
 
 
 def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(

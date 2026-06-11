@@ -261,7 +261,7 @@ def test_csmar_index_info_unquoted_text_newlines_recover_when_aligned(
         "000985,benchmark,2014-01-02,2013-12-31,-9666,sample scope first line\n"
         "sample scope second line,1,2,3,4,5,formula text\n"
         "000300,large,2014-01-03,2013-12-31,1000,blue chips,"
-        "W,P,C,T,M,formula first line\n"
+        "1,2,3,4,5,formula first line\n"
         "formula second line with, comma\n",
         encoding="utf-8",
     )
@@ -274,8 +274,8 @@ def test_csmar_index_info_unquoted_text_newlines_recover_when_aligned(
     )
     assert raw.loc[0, "Idxinfo05"] == "1"
     assert raw.loc[0, "Idxinfo09"] == "5"
-    assert raw.loc[1, "Idxinfo05"] == "W"
-    assert raw.loc[1, "Idxinfo09"] == "M"
+    assert raw.loc[1, "Idxinfo05"] == "1"
+    assert raw.loc[1, "Idxinfo09"] == "5"
     assert raw.loc[1, "Idxinfo10"] == (
         "formula first line\nformula second line with, comma"
     )
@@ -310,12 +310,49 @@ def test_csmar_index_info_ambiguous_long_row_fails_closed(
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
         "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
         "000985,benchmark,2014-01-02,2013-12-31,-9666,"
-        "A,B,C,D,E,1,2,3,4,5,formula text\n",
+        "1,2,3,4,1,1,2,3,4,5,formula text\n",
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
         raw_exports.read_private_export_file(index_path, "index_info")
+
+
+def test_csmar_index_info_source_category_codes_are_field_enums(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index_info_invalid_enum_long_row.csv"
+    index_path.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,benchmark,2014-01-02,2013-12-31,-9666,"
+        "sample scope, with comma,5,1,1,1,1,formula text\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"malformed_csmar_csv_row",
+    ):
+        raw_exports.read_private_export_file(index_path, "index_info")
+
+
+def test_csmar_index_info_aligned_out_of_enum_code_is_cleaned_to_missing(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index_info_out_of_enum.csv"
+    index_path.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,benchmark,2014-01-02,2013-12-31,-9666,"
+        "sample scope,5,1,1,1,1,formula text\n",
+        encoding="utf-8",
+    )
+
+    raw = raw_exports.read_private_export_file(index_path, "index_info")
+
+    assert pd.isna(raw.loc[0, "Idxinfo05"])
+    assert raw.loc[0, "Idxinfo10"] == "formula text"
 
 
 def test_csmar_index_info_dirty_csv_and_bad_dates_fail_closed(
@@ -479,24 +516,24 @@ def test_csmar_index_info_reference_interim_dedupes_and_rejects_conflicts(
     exact_b = tmp_path / "index_info_exact_b.csv"
     history = tmp_path / "index_info_history.csv"
     conflict = tmp_path / "index_info_conflict.csv"
-    pd.DataFrame([_index_info_raw_row("2014-01-02", "2013-12-31", "broad")]).to_csv(
+    pd.DataFrame([_index_info_raw_row("2014-01-02", "2013-12-31", "1")]).to_csv(
         exact_a,
         index=False,
     )
-    pd.DataFrame([_index_info_raw_row("2014-01-02", "2013-12-31", "broad")]).to_csv(
+    pd.DataFrame([_index_info_raw_row("2014-01-02", "2013-12-31", "1")]).to_csv(
         exact_b,
         index=False,
     )
     pd.DataFrame(
         [
-            _index_info_raw_row("2014-01-02", "2013-12-31", "broad"),
-            _index_info_raw_row("2014-02-03", "2013-12-31", "style"),
+            _index_info_raw_row("2014-01-02", "2013-12-31", "1"),
+            _index_info_raw_row("2014-02-03", "2013-12-31", "2"),
         ]
     ).to_csv(history, index=False)
     pd.DataFrame(
         [
-            _index_info_raw_row("2014-01-02", "2013-12-31", "broad"),
-            _index_info_raw_row("2014-01-02", "2013-12-31", "style"),
+            _index_info_raw_row("2014-01-02", "2013-12-31", "1"),
+            _index_info_raw_row("2014-01-02", "2013-12-31", "2"),
         ]
     ).to_csv(conflict, index=False)
 
@@ -549,7 +586,7 @@ def test_csmar_index_info_effective_timestamp_falls_back_to_export_date(
     export = tmp_path / (
         "csmar__index_info__all_a_ex_bjse__full__export-20260515.csv"
     )
-    pd.DataFrame([_index_info_raw_row("", "", "broad")]).to_csv(export, index=False)
+    pd.DataFrame([_index_info_raw_row("", "", "1")]).to_csv(export, index=False)
 
     frame = interim.build_interim_frame(
         data_id="index_info",

@@ -44,7 +44,7 @@ from quant_research_platform.storage.datasets import (
 CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
 PRIVACY_LEVEL = "public_safe_aggregate"
-ARTIFACT_ID = "a_share_daily_bar"
+ARTIFACT_ID = "a_share_private_aggregate_evidence"
 MARKET_ID = "a_share"
 FULL_HISTORY_PERIOD = "2014-01-01 through 2025-12-31"
 GENERATED_BY = (

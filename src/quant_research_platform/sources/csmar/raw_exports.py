@@ -15,6 +15,20 @@ from .raw_schemas import RawExportInspection, inspect_raw_export_file
 SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv", ".xlsx"}
 STRING_CODE_DTYPES = {"Stkcd": str, "Symbol": str, "Indexcd": str}
 INDEX_INFO_CODE_RE = re.compile(r"^[0-9A-Za-z_.-]{1,32}$")
+INDEX_INFO_SOURCE_CODE_ENUMS = (
+    frozenset({"1", "2", "3", "4"}),
+    frozenset({"1", "2", "3", "4"}),
+    frozenset({"1", "2", "3", "4", "5", "6", "7"}),
+    frozenset({"1", "2", "3", "4", "5"}),
+    frozenset({"1", "2", "3", "4", "5", "6", "7", "8", "9"}),
+)
+INDEX_INFO_SOURCE_CODE_COLUMNS = (
+    "Idxinfo05",
+    "Idxinfo06",
+    "Idxinfo07",
+    "Idxinfo08",
+    "Idxinfo09",
+)
 
 
 @dataclass(frozen=True)
@@ -107,7 +121,8 @@ def read_private_export_file(path: str | Path, dataset: str) -> pd.DataFrame:
             rows.append(_normalize_index_info_row(row, len(header), row_number))
         if pending_row is not None:
             raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
-    return pd.DataFrame(rows, columns=header).replace("", pd.NA)
+    frame = pd.DataFrame(rows, columns=header).replace("", pd.NA)
+    return _clean_index_info_source_codes(frame)
 
 
 def _normalize_index_info_row(
@@ -129,7 +144,14 @@ def _normalize_long_index_info_row(
     candidates: list[list[str]] = []
     for code_start in range(6, len(row) - 5):
         codes = row[code_start : code_start + 5]
-        if not all(_looks_like_source_category_code(value) for value in codes):
+        if not all(
+            _looks_like_source_category_code(value, allowed_values)
+            for value, allowed_values in zip(
+                codes,
+                INDEX_INFO_SOURCE_CODE_ENUMS,
+                strict=True,
+            )
+        ):
             continue
         sample_scope = ",".join(row[5:code_start])
         formula = ",".join(row[code_start + 5 :])
@@ -168,9 +190,27 @@ def _looks_like_index_info_record_start(row: list[str]) -> bool:
     return bool(row) and bool(INDEX_INFO_CODE_RE.fullmatch(row[0]))
 
 
-def _looks_like_source_category_code(value: str) -> bool:
+def _looks_like_source_category_code(
+    value: str,
+    allowed_values: frozenset[str],
+) -> bool:
     stripped = value.strip()
-    return stripped == "" or bool(INDEX_INFO_CODE_RE.fullmatch(stripped))
+    return stripped == "" or stripped in allowed_values
+
+
+def _clean_index_info_source_codes(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    for column, allowed_values in zip(
+        INDEX_INFO_SOURCE_CODE_COLUMNS,
+        INDEX_INFO_SOURCE_CODE_ENUMS,
+        strict=True,
+    ):
+        if column not in result.columns:
+            continue
+        values = result[column].astype("string")
+        valid = values.isna() | values.isin(allowed_values)
+        result.loc[~valid, column] = pd.NA
+    return result
 
 
 def iter_private_export_chunks(

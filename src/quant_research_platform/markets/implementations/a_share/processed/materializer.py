@@ -42,6 +42,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
+    DatasetReadMode,
     inspect_dataset,
     read_dataset,
     write_dataset,
@@ -396,16 +397,40 @@ def _require_dataset_coverage(
     *,
     sessions: tuple[pd.Timestamp, ...],
 ) -> None:
-    available = _available_window(inspect_dataset(root))
     target = _target_sessions(sessions, time_window)
-    if available.start > target[0].date() or available.end < target[-1].date():
-        raise ValueError("insufficient_dataset_coverage")
+    coverage_window = TimeWindow(target[0].date(), target[-1].date())
+    available_sessions = _dataset_session_dates(root, coverage_window)
+    missing_sessions = [
+        session.date()
+        for session in target
+        if session.date() not in available_sessions
+    ]
+    if missing_sessions:
+        raise ValueError(
+            "insufficient_dataset_coverage: "
+            f"missing_sessions={len(missing_sessions)} "
+            f"first_missing_session={missing_sessions[0]}"
+        )
 
 
-def _available_window(inspection: DatasetInspection) -> TimeWindow:
-    if inspection.date_min is None or inspection.date_max is None:
+def _dataset_session_dates(
+    root: Path,
+    time_window: TimeWindow,
+) -> set[object]:
+    inspection = inspect_dataset(root)
+    if "timestamp" not in inspection.columns:
         raise ValueError("time_window_not_supported")
-    return TimeWindow(inspection.date_min, inspection.date_max)
+    chunks = read_dataset(
+        root,
+        columns=["timestamp"],
+        time_window=time_window,
+        mode=DatasetReadMode.CHUNKED,
+    )
+    dates: set[object] = set()
+    for chunk in chunks:
+        timestamp = pd.to_datetime(chunk["timestamp"], errors="coerce")
+        dates.update(timestamp.dropna().dt.date)
+    return dates
 
 
 def _iter_sorted_output_chunks(

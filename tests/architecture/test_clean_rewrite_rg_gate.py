@@ -97,6 +97,7 @@ DATA_PRODUCT_ID_ALLOWED_NEGATIVE_TESTS = {
     Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
         "POST /api/0.1/data-products/{data_product_id}/interim-runs",
         "qrp data-products run-interim <data_product_id>",
+        "data_product_id",
     ),
     Path("tests/interfaces/test_api_cli_01_contract.py"): (
         "/api/0.1/data-products/{data_product_id}/interim-runs",
@@ -107,6 +108,10 @@ DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
     Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
         "GET  /api/0.1/catalog/data-products",
         "qrp catalog data-products",
+        "DATA_PRODUCT",
+        "DataProductId",
+        "data product id",
+        "data product",
     ),
     Path("tests/architecture/test_data_layer_boundaries.py"): (
         'SOURCE_ROOT / "catalog/data_products.py"',
@@ -120,6 +125,20 @@ DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
     ),
     Path("tests/catalog/test_catalog_defaults.py"): (
         '"data_products"',
+    ),
+}
+
+A_SHARE_DAILY_BAR_SHADOW_ALLOWED_TEXT = {
+    Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
+        "/api/0.1/data-products/a_share_daily_bar/interim",
+        "a_share_daily_bar_interim",
+        "a_share_daily_bar",
+    ),
+    Path("tests/interfaces/test_api_cli_01_contract.py"): (
+        "a_share_daily_bar",
+    ),
+    Path("tests/catalog/test_registry_graph_01.py"): (
+        "a_share_daily_bar_interim",
     ),
 }
 
@@ -221,6 +240,11 @@ def test_active_tree_has_no_retired_terms() -> None:
 
 def test_active_tree_has_no_data_product_id_vocabulary() -> None:
     current_file = Path(__file__).resolve()
+    forbidden_patterns = (
+        re.compile(r"\bdata_product_id\b"),
+        re.compile(r"\bDataProductId\b"),
+        re.compile(r"\bdata product id\b", re.IGNORECASE),
+    )
     hits: list[str] = []
     for path in _iter_text_files():
         if path.resolve() == current_file:
@@ -229,13 +253,11 @@ def test_active_tree_has_no_data_product_id_vocabulary() -> None:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        if "data_product_id" not in text:
-            continue
         allowed = DATA_PRODUCT_ID_ALLOWED_NEGATIVE_TESTS.get(path, ())
         for line_number, line in enumerate(text.splitlines(), start=1):
-            if "data_product_id" in line and not any(
-                item in line for item in allowed
-            ):
+            if any(item in line for item in allowed):
+                continue
+            if any(pattern.search(line) for pattern in forbidden_patterns):
                 hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert hits == []
@@ -246,6 +268,7 @@ def test_active_tree_has_no_data_product_current_vocabulary() -> None:
     forbidden_patterns = (
         re.compile(r"\bdata product\b", re.IGNORECASE),
         re.compile(r"\bdata products\b", re.IGNORECASE),
+        re.compile(r"\bDATA_PRODUCT[A-Z0-9_]*\b"),
         re.compile(r"catalog/data_products\.py"),
     )
     hits: list[str] = []
@@ -257,6 +280,31 @@ def test_active_tree_has_no_data_product_current_vocabulary() -> None:
         except UnicodeDecodeError:
             continue
         allowed = DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS.get(path, ())
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if any(item in line for item in allowed):
+                continue
+            if any(pattern.search(line) for pattern in forbidden_patterns):
+                hits.append(f"{path}:{line_number}: {line.strip()}")
+
+    assert hits == []
+
+
+def test_active_tree_has_no_a_share_daily_bar_shadow_ids() -> None:
+    current_file = Path(__file__).resolve()
+    forbidden_patterns = (
+        re.compile(r"\bA_SHARE_DAILY_BAR[A-Z0-9_]*\b"),
+        re.compile(r"\ba_share_daily_bar_interim\b"),
+        re.compile(r"\ba_share_daily_bar\b"),
+    )
+    hits: list[str] = []
+    for path in _iter_text_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        allowed = A_SHARE_DAILY_BAR_SHADOW_ALLOWED_TEXT.get(path, ())
         for line_number, line in enumerate(text.splitlines(), start=1):
             if any(item in line for item in allowed):
                 continue
