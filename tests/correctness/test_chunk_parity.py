@@ -11,14 +11,13 @@ from quant_research_platform.research.datasets import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.markets.a_share.test_processed_materializer import (
-    _assert_forced_tiny_chunks_match_default,
-)
-from tests.research.test_research_01 import (
-    _processed_catalog,
-    _research_dataset_catalog,
-    _research_rows_for_dates,
-    _write_processed_inputs,
+
+from ._helpers import (
+    assert_forced_tiny_processed_chunks_match_default,
+    correctness_processed_catalog,
+    correctness_research_dataset_catalog,
+    research_rows_for_dates,
+    write_correctness_processed_inputs,
 )
 
 
@@ -53,7 +52,7 @@ def test_processed_forced_tiny_session_chunks_equal_default(
     end_date: str,
     time_window: TimeWindow,
 ) -> None:
-    _assert_forced_tiny_chunks_match_default(
+    assert_forced_tiny_processed_chunks_match_default(
         tmp_path,
         data_id=data_id,
         kind=kind,
@@ -66,16 +65,24 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frame = _research_rows_for_dates(
+    frame = research_rows_for_dates(
         ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07", "2014-01-08"]
     )
     frame.loc[frame["timestamp"].eq(pd.Timestamp("2014-01-06")), "mom_20d"] = pd.NA
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
-    processed_catalog = _processed_catalog()
-    dataset_catalog = _research_dataset_catalog()
-    _write_processed_inputs(default_layout, processed_catalog, frame=frame)
-    _write_processed_inputs(tiny_layout, processed_catalog, frame=frame)
+    processed_catalog = correctness_processed_catalog()
+    dataset_catalog = correctness_research_dataset_catalog()
+    write_correctness_processed_inputs(
+        default_layout,
+        processed_catalog,
+        frame=frame,
+    )
+    write_correctness_processed_inputs(
+        tiny_layout,
+        processed_catalog,
+        frame=frame,
+    )
 
     default_root = assemble_research_dataset(
         layout=default_layout,

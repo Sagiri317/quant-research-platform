@@ -3,41 +3,105 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_research_platform.research.factors.price_volume import (
+    _rolling_aggregate,
     calculate_price_volume_factors,
+    price_volume_factor_columns,
 )
 
 from ._helpers import (
+    FLOAT_ATOL,
+    FLOAT_RTOL,
     KEY_COLUMNS,
-    reference_price_volume_factors,
+    _reference_price_volume_factors,
     synthetic_price_volume_panel,
 )
 
 
-def test_price_volume_rolling_moment_columns_match_reference() -> None:
-    panel = synthetic_price_volume_panel(sessions=180, assets=("asset_a", "asset_b"))
-    factor_columns = (
-        "vol_5d",
-        "vol_20d",
-        "skew_20d",
-        "kurt_20d",
-        "skew_60d",
-        "kurt_60d",
-        "turnover_vol_20d",
-        "turnover_vol_60d",
-    )
+def test_price_volume_all_factor_columns_match_pandas_reference() -> None:
+    panel = synthetic_price_volume_panel(sessions=280, assets=("asset_a", "asset_b"))
+    factor_columns = price_volume_factor_columns()
 
     result = calculate_price_volume_factors(
         panel.sample(frac=1.0, random_state=17),
         factor_columns=factor_columns,
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
 
     pd.testing.assert_frame_equal(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         check_exact=False,
-        rtol=0.0,
-        atol=1e-12,
+        rtol=FLOAT_RTOL,
+        atol=FLOAT_ATOL,
+    )
+
+
+def test_rolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["asset_b", "asset_a", "asset_b", "asset_a", "asset_b"],
+            "value": [1.0, 10.0, 1.0, float("nan"), 1.0],
+        },
+        index=[101, 55, 77, 8, 42],
+    )
+    group_keys = frame["asset_id"]
+    grouped = frame["value"].groupby(group_keys, sort=False)
+    group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
+
+    actual_mean = _rolling_aggregate(
+        frame["value"],
+        grouped,
+        group_positions,
+        2,
+        "mean",
+    )
+    expected_mean = grouped.transform(
+        lambda series: series.rolling(2, min_periods=2).mean()
+    )
+    actual_std = _rolling_aggregate(
+        frame["value"],
+        grouped,
+        group_positions,
+        2,
+        "std",
+    )
+    expected_std = grouped.transform(
+        lambda series: series.rolling(2, min_periods=2).std()
+    )
+
+    pd.testing.assert_series_equal(actual_mean, expected_mean)
+    pd.testing.assert_series_equal(actual_std, expected_std)
+
+
+def test_price_volume_pandas_moment_contract_edge_windows() -> None:
+    panel = synthetic_price_volume_panel(sessions=80, assets=("asset_a", "asset_b"))
+    asset_a = panel["asset_id"].eq("asset_a")
+    asset_b = panel["asset_id"].eq("asset_b")
+    panel.loc[asset_a & panel.index.to_series().between(0, 24), "return_1d"] = 0.0
+    panel.loc[asset_a & panel.index.to_series().between(25, 49), "return_1d"] = [
+        1e-12 + index * 1e-15 for index in range(25)
+    ]
+    panel.loc[asset_a & panel.index.to_series().between(50, 54), "return_1d"] = pd.NA
+    panel.loc[asset_b & panel.index.to_series().between(80, 84), "turnover"] = pd.NA
+    factor_columns = (
+        "vol_20d",
+        "skew_20d",
+        "kurt_20d",
+        "turnover_vol_20d",
+    )
+
+    result = calculate_price_volume_factors(
+        panel.sample(frac=1.0, random_state=7),
+        factor_columns=factor_columns,
+    ).loc[:, [*KEY_COLUMNS, *factor_columns]]
+    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+
+    pd.testing.assert_frame_equal(
+        result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        check_exact=False,
+        rtol=FLOAT_RTOL,
+        atol=FLOAT_ATOL,
     )
 
 
@@ -90,22 +154,22 @@ def test_price_volume_session_chunk_boundary_matches_unchunked_reference() -> No
         split_session_index=131,
         warmup_sessions=60,
     )
-    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
+    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
 
     expected = reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     pd.testing.assert_frame_equal(
         unchunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         expected,
         check_exact=False,
-        rtol=0.0,
-        atol=1e-12,
+        rtol=FLOAT_RTOL,
+        atol=FLOAT_ATOL,
     )
     pd.testing.assert_frame_equal(
         chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         expected,
         check_exact=False,
-        rtol=0.0,
-        atol=1e-12,
+        rtol=FLOAT_RTOL,
+        atol=FLOAT_ATOL,
     )
     sorted_chunked = chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     assert (

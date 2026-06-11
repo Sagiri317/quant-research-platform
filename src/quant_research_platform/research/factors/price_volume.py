@@ -706,14 +706,19 @@ def _window_skew_values(windows: np.ndarray) -> np.ndarray:
     centered = windows - windows.mean(axis=1, keepdims=True)
     moment_2 = np.mean(centered * centered, axis=1)
     moment_3 = np.mean(centered * centered * centered, axis=1)
-    denominator = np.power(moment_2, 1.5)
+    values = np.full(len(windows), np.nan, dtype="float64")
+    constant = moment_2 == 0.0
+    values[constant] = 0.0
+    stable = moment_2 >= 1e-14
+    denominator = np.power(moment_2[stable], 1.5)
     with np.errstate(divide="ignore", invalid="ignore"):
-        values = (
+        values[stable] = (
             np.sqrt(counts * (counts - 1))
             / (counts - 2)
-            * (moment_3 / denominator)
+            * (moment_3[stable] / denominator)
         )
     values[~np.isfinite(values)] = np.nan
+    values[constant] = 0.0
     return values
 
 
@@ -724,13 +729,22 @@ def _window_kurt_values(windows: np.ndarray) -> np.ndarray:
     centered = windows - windows.mean(axis=1, keepdims=True)
     moment_2 = np.mean(centered * centered, axis=1)
     moment_4 = np.mean(centered**4, axis=1)
+    values = np.full(len(windows), np.nan, dtype="float64")
+    constant = moment_2 == 0.0
+    values[constant] = -3.0
+    stable = moment_2 >= 1e-14
     with np.errstate(divide="ignore", invalid="ignore"):
-        values = (
+        values[stable] = (
             (counts - 1)
             / ((counts - 2) * (counts - 3))
-            * ((counts + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
+            * (
+                (counts + 1)
+                * (moment_4[stable] / (moment_2[stable] * moment_2[stable]) - 3.0)
+                + 6.0
+            )
         )
     values[~np.isfinite(values)] = np.nan
+    values[constant] = -3.0
     return values
 
 
