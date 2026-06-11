@@ -206,6 +206,7 @@ def test_cli_commands_module_help_invokes_existing_app() -> None:
         check=False,
         capture_output=True,
         cwd=PROJECT_ROOT,
+        encoding="utf-8",
         env=env,
         text=True,
     )

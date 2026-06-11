@@ -609,6 +609,7 @@ def _inspection_runtime_metadata(
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
     row_count = 0
+    file_count = 0
     partition_row_counts: dict[str, int] = {}
     date_min: pd.Timestamp | None = None
     date_max: pd.Timestamp | None = None
@@ -621,6 +622,7 @@ def _inspection_runtime_metadata(
         )
         if filtered.empty:
             continue
+        file_count += 1
         partition = _relative_partition_label(data_root, path)
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + len(
             filtered
@@ -633,7 +635,7 @@ def _inspection_runtime_metadata(
             date_min = current_min if date_min is None else min(date_min, current_min)
             date_max = current_max if date_max is None else max(date_max, current_max)
     return {
-        "file_count": len(paths),
+        "file_count": file_count,
         "row_count": int(row_count),
         "partitions": tuple(sorted(partition_row_counts)),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),

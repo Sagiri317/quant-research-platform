@@ -458,7 +458,7 @@ def test_manifest_and_parity_summaries_are_public_safe():
     parity = ParityEvidenceSummary(
         evidence_id="evidence",
         market_id="a_share",
-        data_product_id="a_share_daily_bar",
+        artifact_id="a_share_daily_bar",
         privacy_level="public_safe_aggregate",
         status="accepted",
         aggregate_metadata={"provider_id": "csmar"},

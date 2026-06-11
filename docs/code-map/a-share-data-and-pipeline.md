@@ -7,12 +7,11 @@ external APIs, paper trading, or live trading.
 ## Private Data Layers
 
 ```text
-data_product_id=a_share_daily_bar
--> internal provider adapter
--> data/raw/<internal-provider>/
+data/raw/<internal-provider>/
 -> data/interim/<internal-provider>/
 -> markets/implementations/a_share/
 -> data/processed/a_share/
+-> data/research/a_share/
 -> reports/private_real/a_share/
 ```
 
@@ -23,16 +22,13 @@ vendors, download vendor data, or manage credentials.
 
 ```text
 data/processed/a_share/
-  panels/
-  contexts/
-  universes/
-  masks/
-    as_of/
-    execution/
-    evaluation/
-  factors/
-  labels/
-  research_datasets/
+  panel/<data_id>/
+  annotation/<data_id>/
+  factor/<data_id>/
+  label/<data_id>/
+
+data/research/a_share/
+  <research_dataset_id>/
 ```
 
 Canonical processed key:
@@ -51,7 +47,7 @@ processed canonical key.
 | Capability | Target owner |
 |---|---|
 | Raw/interim normalization | `sources/` internal adapters |
-| A-share processed panel/context/universe/masks | `markets/implementations/a_share/processed/` |
+| A-share processed panel/context/universe/masks | `markets/implementations/a_share/processed/` with internal session windows |
 | A-share factor formulas | `markets/implementations/a_share/factors/` |
 | Forward labels | `markets/implementations/a_share/labels/` |
 | Research dataset assembly | `research/datasets` |
@@ -114,3 +110,7 @@ processed canonical key.
   row is one-word limit down or unavailable/non-trading. Non-one-word limit
   up/down rows remain tradable at the open-price abstraction used in this
   research batch.
+- Runtime resource policy controls internal processed/research chunk size.
+  A-share daily execution chunks by trading-session core windows with read halos:
+  next-session halo for panel tradability, past-session warmup for factors, and
+  future-session lookahead for labels. Only core rows are written.

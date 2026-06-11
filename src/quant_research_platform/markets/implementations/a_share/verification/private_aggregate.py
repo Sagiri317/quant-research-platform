@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import json
-import os
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
@@ -17,6 +15,10 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.calendars import (
+    SessionWindowPlanner,
+    session_dates,
+)
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
@@ -24,6 +26,11 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 from quant_research_platform.reports.evidence_rendering import (
     render_private_verification_summary_markdown,
     render_public_safe_evidence_markdown,
+)
+from quant_research_platform.runtime.resources import (
+    ChunkAxis,
+    ResourceChunkPlanner,
+    RuntimeResourcePolicy,
 )
 from quant_research_platform.sources.csmar.ids import (
     CSMAR_SOURCE_ID,
@@ -37,7 +44,7 @@ from quant_research_platform.storage.datasets import (
 CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
 PRIVACY_LEVEL = "public_safe_aggregate"
-DATA_PRODUCT_ID = "a_share_daily_bar"
+ARTIFACT_ID = "a_share_daily_bar"
 MARKET_ID = "a_share"
 FULL_HISTORY_PERIOD = "2014-01-01 through 2025-12-31"
 GENERATED_BY = (
@@ -49,9 +56,7 @@ FULL_HISTORY_START_YEAR = 2014
 FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
-GENERATED_PANEL_MEMORY_FRACTION = 0.7
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
-DEFAULT_AVAILABLE_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/panel/daily_panel": "full_historical_daily_panel_status",
@@ -145,7 +150,7 @@ def generate_public_safe_aggregate_evidence(
         "contract_version": CONTRACT_VERSION,
         "project_version": PROJECT_VERSION,
         "privacy_level": PRIVACY_LEVEL,
-        "data_product_id": DATA_PRODUCT_ID,
+        "artifact_id": ARTIFACT_ID,
         "market_id": MARKET_ID,
         "status": status,
         "merge_ready": merge_ready,
@@ -451,10 +456,10 @@ def _summarize_generated_full_daily_panel(project_root: Path) -> AggregateSummar
 def _iter_generated_full_daily_panel_chunks(
     project_root: Path,
 ) -> Iterator[pd.DataFrame]:
-    yield from _iter_generated_full_daily_panel_asset_chunks(project_root)
+    yield from _iter_generated_full_daily_panel_session_chunks(project_root)
 
 
-def _iter_generated_full_daily_panel_asset_chunks(
+def _iter_generated_full_daily_panel_session_chunks(
     project_root: Path,
 ) -> Iterator[pd.DataFrame]:
     from quant_research_platform.markets.implementations.a_share.catalog import (
@@ -463,192 +468,112 @@ def _iter_generated_full_daily_panel_asset_chunks(
     from quant_research_platform.markets.implementations.a_share.processed import (
         panels,
     )
-    interim_root = _private_interim_root_for_data_product(
-        project_root,
-        DATA_PRODUCT_ID,
-    )
+    interim_root = _private_interim_root(project_root)
     stock_master = read_dataset(interim_root / "stock_master")
     market_cap = read_dataset(interim_root / "market_cap")
     trading_calendar = read_dataset(interim_root / "trading_calendar")
     spec = a_share_processed_catalog().get("daily_panel")
-    years = tuple(range(FULL_HISTORY_START_YEAR, FULL_HISTORY_END_YEAR + 1))
     daily_market_root = interim_root / "daily_market"
-    asset_ids = dataset_asset_ids(daily_market_root, years=years)
-    chunk_size = _dynamic_asset_chunk_size(
-        total_asset_count=len(asset_ids),
-        estimated_full_frame_bytes=_estimate_generated_full_panel_memory_bytes(
-            interim_root,
-            years=years,
-        ),
-        available_memory_bytes=_available_memory_bytes(),
-        memory_fraction=GENERATED_PANEL_MEMORY_FRACTION,
+    time_window = TimeWindow(FULL_HISTORY_START_DATE, FULL_HISTORY_END_DATE)
+    sessions = _trading_sessions_from_calendar(trading_calendar)
+    target_sessions = tuple(
+        session
+        for session in sessions
+        if pd.Timestamp(FULL_HISTORY_START_DATE)
+        <= session
+        <= pd.Timestamp(FULL_HISTORY_END_DATE)
+    )
+    estimated_bytes = _estimate_generated_full_panel_memory_bytes(
+        interim_root,
+        session_count=len(target_sessions),
+    )
+    estimated_bytes_per_session = max(
+        1,
+        ceil(estimated_bytes / max(1, len(target_sessions))),
+    )
+    resource_plan = ResourceChunkPlanner(
+        RuntimeResourcePolicy.from_environment()
+    ).plan_sessions(
+        axis=ChunkAxis.TIME,
+        session_count=len(target_sessions),
+        estimated_bytes_per_session=estimated_bytes_per_session,
+    )
+    windows = SessionWindowPlanner.from_sessions(
+        sessions,
+        target_core_session_count=resource_plan.target_core_session_count,
+        lookahead_sessions=1,
+    ).windows(
+        time_window,
+        reason="private_evidence_generated_panel",
     )
     daily_market_columns = tuple(inspect_dataset(daily_market_root).columns)
-    for asset_id_chunk in chunked_values(asset_ids, chunk_size):
-        daily = read_dataset_asset_chunk(
+    for window in windows:
+        daily = read_dataset(
             daily_market_root,
-            years=years,
+            time_window=window.read,
             columns=daily_market_columns,
-            asset_ids=asset_id_chunk,
         )
         if daily.empty:
             continue
         panel = panels.compute_daily_panel(
             daily,
-            stock_master=_filter_asset_frame(stock_master, asset_id_chunk),
-            market_cap=_filter_asset_frame(market_cap, asset_id_chunk),
+            stock_master=stock_master,
+            market_cap=market_cap,
             trading_calendar=trading_calendar,
         )
         output = panel[list(spec.required_columns)].copy()
-        timestamp = pd.to_datetime(output["timestamp"], errors="coerce")
-        yield output.loc[
-            timestamp.between(
-                FULL_HISTORY_START_DATE,
-                FULL_HISTORY_END_DATE,
-                inclusive="both",
-            )
-        ].reset_index(drop=True)
+        yield _filter_output_sessions(output, window.core_sessions).reset_index(
+            drop=True
+        )
 
 
-def _private_interim_root_for_data_product(
+def _private_interim_root(
     project_root: Path,
-    data_product_id: str,
 ) -> Path:
-    del data_product_id
     return Path(project_root) / "data" / "interim" / CSMAR_SOURCE_ID
-
-
-def _filter_asset_frame(
-    frame: pd.DataFrame,
-    asset_ids: Sequence[str],
-) -> pd.DataFrame:
-    asset_column = "asset_id" if "asset_id" in frame.columns else "source_asset_id"
-    if asset_column not in frame.columns:
-        return frame.copy()
-    return frame.loc[frame[asset_column].isin(set(asset_ids))].copy()
 
 
 def _estimate_generated_full_panel_memory_bytes(
     interim_root: Path,
     *,
-    years: tuple[int, ...],
+    session_count: int,
 ) -> int:
-    del years
     compressed_bytes = int(
         inspect_dataset(interim_root / "daily_market").manifest.get(
             "file_size_bytes",
             0,
         )
     )
-    return max(1, compressed_bytes * GENERATED_PANEL_MEMORY_EXPANSION_FACTOR)
-
-
-def chunked_values(
-    values: tuple[str, ...],
-    chunk_size: int,
-) -> Iterator[tuple[str, ...]]:
-    if chunk_size <= 0:
-        raise ValueError("invalid_chunk_size")
-    for index in range(0, len(values), chunk_size):
-        yield values[index : index + chunk_size]
-
-
-def dataset_asset_ids(
-    root: Path,
-    *,
-    years: tuple[int, ...] | None = None,
-) -> tuple[str, ...]:
-    available = set(inspect_dataset(root).columns)
-    columns = ["asset_id"] if "asset_id" in available else ["source_asset_id"]
-    frame = read_dataset(
-        root,
-        time_window=_time_window_from_years(years),
-        columns=columns,
+    return max(
+        session_count,
+        compressed_bytes * GENERATED_PANEL_MEMORY_EXPANSION_FACTOR,
     )
-    column = "asset_id" if "asset_id" in frame.columns else "source_asset_id"
-    return tuple(sorted(str(value) for value in frame[column].dropna().unique()))
 
 
-def read_dataset_asset_chunk(
-    root: Path,
-    *,
-    years: tuple[int, ...] | None,
-    columns: tuple[str, ...],
-    asset_ids: tuple[str, ...],
+def _trading_sessions_from_calendar(
+    trading_calendar: pd.DataFrame,
+) -> tuple[pd.Timestamp, ...]:
+    if "timestamp" not in trading_calendar or "is_trading_day" not in trading_calendar:
+        raise ValueError("trading_calendar_columns_missing")
+    mask = trading_calendar["is_trading_day"].astype(bool)
+    return session_dates(trading_calendar.loc[mask, "timestamp"])
+
+
+def _filter_output_sessions(
+    frame: pd.DataFrame,
+    sessions: tuple[pd.Timestamp, ...],
 ) -> pd.DataFrame:
-    read_columns = tuple(dict.fromkeys((*columns, "asset_id", "source_asset_id")))
-    available = set(inspect_dataset(root).columns)
-    read_columns = tuple(column for column in read_columns if column in available)
-    frame = read_dataset(
-        root,
-        time_window=_time_window_from_years(years),
-        columns=read_columns,
-    )
-    column = "asset_id" if "asset_id" in frame.columns else "source_asset_id"
-    return frame.loc[frame[column].isin(set(asset_ids))].copy()
+    output = frame.copy()
+    output["timestamp"] = pd.to_datetime(output["timestamp"], errors="coerce")
+    session_dates_set = {session.date() for session in sessions}
+    dates = output["timestamp"].dt.date
+    return output.loc[dates.isin(session_dates_set).fillna(False)].copy()
 
 
 def _time_window_from_years(years: tuple[int, ...] | None) -> TimeWindow | None:
     if years is None:
         return None
     return TimeWindow(f"{min(years)}-01-01", f"{max(years)}-12-31")
-
-
-def _available_memory_bytes() -> int:
-    if os.name == "nt":
-        available = _windows_available_memory_bytes()
-        if available is not None:
-            return available
-    if hasattr(os, "sysconf"):
-        pages = _sysconf_value("SC_AVPHYS_PAGES")
-        page_size = _sysconf_value("SC_PAGE_SIZE")
-        if pages is not None and page_size is not None:
-            return int(pages * page_size)
-    return DEFAULT_AVAILABLE_MEMORY_BYTES
-
-
-def _windows_available_memory_bytes() -> int | None:
-    class MemoryStatusEx(ctypes.Structure):
-        _fields_ = [
-            ("dwLength", ctypes.c_ulong),
-            ("dwMemoryLoad", ctypes.c_ulong),
-            ("ullTotalPhys", ctypes.c_ulonglong),
-            ("ullAvailPhys", ctypes.c_ulonglong),
-            ("ullTotalPageFile", ctypes.c_ulonglong),
-            ("ullAvailPageFile", ctypes.c_ulonglong),
-            ("ullTotalVirtual", ctypes.c_ulonglong),
-            ("ullAvailVirtual", ctypes.c_ulonglong),
-            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-        ]
-
-    status = MemoryStatusEx()
-    status.dwLength = ctypes.sizeof(MemoryStatusEx)
-    if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-        return int(status.ullAvailPhys)
-    return None
-
-
-def _sysconf_value(name: str) -> int | None:
-    try:
-        return int(os.sysconf(name))
-    except (AttributeError, OSError, ValueError):
-        return None
-
-
-def _dynamic_asset_chunk_size(
-    *,
-    total_asset_count: int,
-    estimated_full_frame_bytes: int,
-    available_memory_bytes: int,
-    memory_fraction: float,
-) -> int:
-    if total_asset_count <= 0:
-        return 1
-    target_bytes = max(1, int(available_memory_bytes * memory_fraction))
-    if estimated_full_frame_bytes <= target_bytes:
-        return total_asset_count
-    bytes_per_asset = max(1, ceil(estimated_full_frame_bytes / total_asset_count))
-    return max(1, min(total_asset_count, target_bytes // bytes_per_asset))
 
 
 def _summarize_roots(

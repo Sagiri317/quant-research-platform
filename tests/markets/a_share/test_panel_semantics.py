@@ -103,21 +103,24 @@ def test_compute_daily_panel_filters_non_a_share_market_types() -> None:
         pd.DataFrame(
             [
                 _daily_market_row("2014-01-02", market_type=4),
-                _daily_market_row("2014-01-03", market_type=2),
-                _daily_market_row("2014-01-06", market_type=8),
+                _daily_market_row("2014-01-03", market_type=32),
+                _daily_market_row("2014-01-06", market_type=64),
+                _daily_market_row("2014-01-07", market_type=2),
             ]
         ),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(),
         trading_calendar=_trading_calendar_frame(
-            pd.to_datetime(["2014-01-02", "2014-01-03", "2014-01-06"])
+            pd.to_datetime(
+                ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07"]
+            )
         ),
         min_listing_trading_days=1,
     )
 
-    assert len(panel) == 1
-    assert panel["market_type"].tolist() == [4]
-    assert panel["is_a_share_scope"].tolist() == [True]
+    assert len(panel) == 2
+    assert panel["market_type"].tolist() == [4, 32]
+    assert panel["is_a_share_scope"].tolist() == [True, True]
 
 
 def test_compute_daily_panel_preserves_listing_age_closed_boundary() -> None:

@@ -347,8 +347,4 @@ def _validate_positions(
 __all__ = [
     "build_long_short_positions",
     "build_weighted_positions",
-    "_build_weighted_positions_from_validated_panel",
-    "_build_feature_positions",
-    "_leg_weights",
-    "_validate_positions",
 ]

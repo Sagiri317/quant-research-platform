@@ -13,7 +13,9 @@ Load this reference when changing `docs/code-map/platform-flow.md`.
 
 ## Required Relationships
 
-- Public data products map to internal provider adapters for canonical interim data.
+- Public catalog objects and workflow specs reference concrete artifacts by
+  `data_id`, research inputs by `research_dataset_id`, and workflows by
+  `workflow_id`.
 - A-share processed layers live under `markets/implementations/a_share/`.
 - Research datasets, evaluations, models, and predictions live under `research/`.
 - Run evidence writes under `reports/private_real`.

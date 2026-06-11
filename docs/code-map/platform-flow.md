@@ -7,9 +7,9 @@ current code-reading map, not a roadmap or historical closeout.
 
 ```text
 internal source adapters -> source-normalized interim artifacts
--> markets/implementations/a_share
+-> markets/implementations/a_share session-windowed processed materializer
 -> data/processed/a_share/{panel,annotation,factor,label}
--> research/datasets
+-> research/datasets session-chunked assembly
 -> data/research/a_share
 -> research/evaluations
 -> reports/private_real
@@ -21,17 +21,17 @@ internal source adapters -> source-normalized interim artifacts
 | Package | Responsibility |
 |---|---|
 | `contracts/` | Stable 0.1 definitions and specs |
-| `storage/` | Layout, parquet, manifests, partitions, checksums, privacy |
+| `storage/` | Layout, parquet, manifests, year partitions, checksums, privacy |
 | `catalog/` | Queryable source of truth for platform objects |
 | `sources/` | Internal provider adapters |
 | `markets/` | Market-specific semantics, first active market: `a_share` |
-| `research/` | Factors, labels, features, datasets, evaluations, models, predictions, portfolios |
+| `research/` | Factors, labels, features, session-chunked datasets, evaluations, models, predictions, portfolios |
 | `workflows/` | Simple DAG specs, planner, executor, checkpoints |
 | `compute/` | DataFrame and tensor compute backends |
 | `agents/` | Proposal-only factory/planner boundaries |
 | `interfaces/` | Local CLI and API adapters |
 | `reports/` | Report manifests, summaries, and bundles |
-| `runtime/` | Privacy, sanitization, logging, profiling, errors |
+| `runtime/` | Privacy, sanitization, logging, profiling, errors, resource chunk planning |
 
 ## API Flow
 

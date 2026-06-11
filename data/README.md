@@ -32,7 +32,8 @@ Rules:
 
 Public identifier policy:
 
-- Public surfaces use `data_product_id=a_share_daily_bar`.
+- Public-safe summaries use semantic identifiers such as `data_id`,
+  `artifact_id`, `workflow_id`, or `research_dataset_id`.
 - Private row-level evidence, raw file evidence, manifest summaries, report
   summaries, stdout/stderr, and API errors must not expose provider markers,
   local paths, row samples, stock-code samples, credentials, or raw values.

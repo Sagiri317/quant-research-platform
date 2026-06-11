@@ -50,9 +50,9 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 
 A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="stock_name", role=ColumnRole.CONTEXT, dtype="string"),
-    FieldSpec(name="market_type", role=ColumnRole.CONTEXT, dtype="string"),
-    FieldSpec(name="trading_status_code", role=ColumnRole.CONTEXT, dtype="string"),
-    FieldSpec(name="filling_flag", role=ColumnRole.CONTEXT, dtype="string"),
+    FieldSpec(name="market_type", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="trading_status_code", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="filling_flag", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="open", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="high", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="low", role=ColumnRole.CONTEXT, dtype="float64"),
@@ -64,7 +64,7 @@ A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="amount", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="turnover", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="return_1d", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="limit_status", role=ColumnRole.CONTEXT, dtype="int8"),
+    FieldSpec(name="limit_status", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="is_limit_up", role=ColumnRole.MASK, dtype="bool"),
     FieldSpec(name="is_limit_down", role=ColumnRole.MASK, dtype="bool"),
     FieldSpec(name="is_trading", role=ColumnRole.MASK, dtype="bool"),
@@ -109,7 +109,11 @@ A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="total_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="float_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="next_day_is_trading", role=ColumnRole.MASK, dtype="bool"),
-    FieldSpec(name="next_day_limit_status", role=ColumnRole.CONTEXT, dtype="int8"),
+    FieldSpec(
+        name="next_day_limit_status",
+        role=ColumnRole.CONTEXT,
+        dtype="float64",
+    ),
 )
 
 _PANEL_COLUMNS: tuple[str, ...] = (

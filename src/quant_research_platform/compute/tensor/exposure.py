@@ -76,5 +76,4 @@ def _exposure_record_from_arrays(
 
 __all__ = [
     "summarize_tensor_exposure_from_path",
-    "_exposure_record_from_arrays",
 ]

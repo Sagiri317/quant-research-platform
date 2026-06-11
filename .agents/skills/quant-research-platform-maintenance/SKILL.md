@@ -81,6 +81,7 @@ reports/
 runtime/
 ```
 
-The public data product is `a_share_daily_bar`. The first active market is
-`markets/implementations/a_share`. Future markets and sources must not be added
-as empty packages.
+The first active market is `markets/implementations/a_share`. Public-facing
+objects use `data_id`, `research_dataset_id`, `workflow_id`, or `artifact_id`
+according to their layer semantics. Future markets and sources must not be
+added as empty packages.

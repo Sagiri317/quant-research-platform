@@ -255,6 +255,4 @@ def _build_path_records_from_arrays(
 
 __all__ = [
     "calculate_tensor_long_short",
-    "_long_short_record_from_arrays",
-    "_build_path_records_from_arrays",
 ]

@@ -52,6 +52,7 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
     assert inspection.row_count == 1
     assert inspection.date_min == "2015-01-05"
     assert inspection.date_max == "2015-01-05"
+    assert inspection.file_count == 1
     assert inspection.partitions == ("year=2015",)
     assert inspection.partition_row_counts == {"year=2015": 1}
 

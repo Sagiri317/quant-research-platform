@@ -68,6 +68,26 @@ def _research_rows() -> pd.DataFrame:
     )
 
 
+def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for date_index, timestamp in enumerate(pd.to_datetime(dates), start=1):
+        for asset_index, asset_id in enumerate(("000001", "000002"), start=1):
+            rows.append(
+                {
+                    "market_id": "a_share",
+                    "asset_id": asset_id,
+                    "timestamp": timestamp,
+                    "mom_20d": float(date_index + asset_index),
+                    "forward_return_20d": 0.01 * (date_index + asset_index),
+                    "eligible": True,
+                    "can_enter": True,
+                    "can_exit": True,
+                    "market_type": 4,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def _processed_catalog() -> ProcessedDataCatalog:
     catalog = ProcessedDataCatalog()
     catalog.register(
@@ -208,6 +228,85 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
         dataset_catalog.get("demo"),
         feature_columns=("mom_20d",),
     )
+
+
+def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _research_rows_for_dates(
+        [
+            "2014-01-02",
+            "2014-01-03",
+            "2014-01-06",
+            "2014-01-07",
+            "2014-01-08",
+        ]
+    )
+    default_layout = StorageLayout(project_root=tmp_path / "default")
+    tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
+    processed_catalog = _processed_catalog()
+    dataset_catalog = _research_dataset_catalog()
+    _write_processed_inputs(default_layout, processed_catalog, frame=frame)
+    _write_processed_inputs(tiny_layout, processed_catalog, frame=frame)
+
+    default_root = assemble_research_dataset(
+        layout=default_layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    )
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    tiny_root = assemble_research_dataset(
+        layout=tiny_layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    )
+
+    default = read_research_dataset(
+        default_layout,
+        market_id=MarketId("a_share"),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    ).sort_values(["market_id", "asset_id", "timestamp"])
+    tiny = read_research_dataset(
+        tiny_layout,
+        market_id=MarketId("a_share"),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    ).sort_values(["market_id", "asset_id", "timestamp"])
+
+    pd.testing.assert_frame_equal(
+        default.reset_index(drop=True),
+        tiny.reset_index(drop=True),
+    )
+    assert (
+        inspect_dataset(tiny_root).file_count
+        > inspect_dataset(default_root).file_count
+    )
+
+
+def test_research_dataset_missing_expected_input_key_fails_closed(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = _research_dataset_catalog()
+    frame = _research_rows()
+    labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
+    _write_processed_inputs(layout, processed_catalog, label_frame=labels)
+
+    with pytest.raises(ValueError, match="missing_research_input_keys"):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id="demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        )
 
 
 def test_research_dataset_role_validation_rejects_wrong_factor_source(
@@ -464,16 +563,14 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
 def _write_processed_inputs(
     layout: StorageLayout,
     processed_catalog: ProcessedDataCatalog,
+    *,
+    frame: pd.DataFrame | None = None,
+    label_frame: pd.DataFrame | None = None,
 ) -> None:
-    frame = _research_rows()
+    frame = _research_rows() if frame is None else frame
+    labels = frame if label_frame is None else label_frame
     columns_by_id = {
         "demo_factors": ["market_id", "asset_id", "timestamp", "mom_20d"],
-        "demo_labels": [
-            "market_id",
-            "asset_id",
-            "timestamp",
-            "forward_return_20d",
-        ],
         "demo_annotations": [
             "market_id",
             "asset_id",
@@ -491,3 +588,12 @@ def _write_processed_inputs(
             frame.loc[:, columns],
             spec=spec,
         )
+    spec = processed_catalog.get("demo_labels")
+    write_dataset(
+        layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+        labels.loc[
+            :,
+            ["market_id", "asset_id", "timestamp", "forward_return_20d"],
+        ],
+        spec=spec,
+    )

@@ -2,7 +2,7 @@
   "contract_version": "0.1",
   "project_version": "0.1.0",
   "privacy_level": "public_safe_aggregate",
-  "data_product_id": "a_share_daily_bar",
+  "artifact_id": "a_share_daily_bar",
   "market_id": "a_share",
   "status": "superseded_by_factor_catalog_refactor",
   "evidence_status": "evidence_pending_regeneration",

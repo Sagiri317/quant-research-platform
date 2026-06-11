@@ -13,6 +13,7 @@ FORBIDDEN_PUBLIC_STORAGE_PARAMS = {
     "force",
     "overwrite",
     "dependency_policy",
+    "year_filter",
 }
 FORBIDDEN_INTERIM_FIELDS = {
     "market_id",

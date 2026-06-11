@@ -6,7 +6,8 @@ import pytest
 
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
-    ChunkPlanner,
+    ResourceChunkPlan,
+    ResourceChunkPlanner,
     RuntimeResourcePolicy,
 )
 
@@ -92,7 +93,7 @@ def test_runtime_resource_policy_falls_back_without_psutil() -> None:
     assert policy.chunk_target_bytes <= policy.memory_budget_bytes
 
 
-def test_chunk_planner_derives_asset_batches_from_policy() -> None:
+def test_resource_chunk_planner_derives_time_session_budget_from_policy() -> None:
     policy = RuntimeResourcePolicy(
         available_memory_bytes=10_000,
         memory_budget_fraction=0.80,
@@ -102,26 +103,51 @@ def test_chunk_planner_derives_asset_batches_from_policy() -> None:
         memory_safety_factor=0.50,
         min_free_disk_bytes=0,
     )
-    planner = ChunkPlanner(policy)
+    planner = ResourceChunkPlanner(policy)
 
-    plan = planner.plan(
-        axis=ChunkAxis.ASSET,
-        item_count=10,
-        estimated_bytes_per_item=500,
-        lookback_window=252,
-        lookahead_window=0,
-        output_width=56,
-        disjoint=True,
+    plan = planner.plan_sessions(
+        session_count=20,
+        estimated_bytes_per_session=500,
+        axis=ChunkAxis.TIME,
     )
 
-    assert plan.axis is ChunkAxis.ASSET
-    assert plan.chunk_size == 3
-    assert plan.chunk_count == 4
-    assert plan.lookback_window == 252
+    assert isinstance(plan, ResourceChunkPlan)
+    assert plan.axis is ChunkAxis.TIME
+    assert plan.target_core_session_count == 3
+    assert plan.chunk_count == 7
     assert plan.estimated_chunk_bytes <= policy.effective_chunk_bytes
 
 
-def test_chunk_planner_does_not_plan_with_invalid_policy() -> None:
+def test_resource_chunk_planner_clamps_dynamic_target_to_session_count() -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=10_000,
+        memory_budget_fraction=0.80,
+        chunk_target_fraction=0.30,
+        chunk_target_cap_bytes=2 * GIB,
+        chunk_target_bytes=3_000,
+        memory_safety_factor=0.50,
+        min_free_disk_bytes=0,
+    )
+    planner = ResourceChunkPlanner(policy)
+
+    plan = planner.plan_sessions(
+        session_count=3,
+        estimated_bytes_per_session=100,
+        axis=ChunkAxis.TIME,
+    )
+
+    assert plan.target_core_session_count == 3
+    assert plan.chunk_count == 1
+
+
+def test_resource_chunk_planner_does_not_require_market_calendar() -> None:
+    parameters = ResourceChunkPlanner.plan_sessions.__annotations__
+
+    assert "calendar" not in parameters
+    assert "sessions" not in parameters
+
+
+def test_resource_chunk_planner_does_not_plan_with_invalid_policy() -> None:
     policy = RuntimeResourcePolicy(
         available_memory_bytes=10_000,
         memory_budget_fraction=0.80,
@@ -131,13 +157,13 @@ def test_chunk_planner_does_not_plan_with_invalid_policy() -> None:
         memory_safety_factor=1.0,
         min_free_disk_bytes=0,
     )
-    planner = ChunkPlanner(policy)
+    planner = ResourceChunkPlanner(policy)
 
     with pytest.raises(ValueError, match="chunk_target_exceeds_memory_budget"):
-        planner.plan(
-            axis=ChunkAxis.ASSET,
-            item_count=10,
-            estimated_bytes_per_item=500,
+        planner.plan_sessions(
+            session_count=10,
+            estimated_bytes_per_session=500,
+            axis=ChunkAxis.TIME,
         )
 
 

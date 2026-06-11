@@ -129,67 +129,57 @@ class RuntimeResourcePolicy:
 
 
 @dataclass(frozen=True)
-class ChunkPlan:
-    """Concrete chunk plan for one semantic axis."""
+class ResourceChunkPlan:
+    """Resource-derived chunk target for one semantic axis."""
 
     axis: ChunkAxis
-    item_count: int
-    chunk_size: int
+    session_count: int
+    target_core_session_count: int
     chunk_count: int
-    estimated_bytes_per_item: int
+    estimated_bytes_per_session: int
     estimated_chunk_bytes: int
-    lookback_window: int = 0
-    lookahead_window: int = 0
-    output_width: int = 0
-    disjoint: bool = True
-    boundary_carry_required: bool = False
 
 
-class ChunkPlanner:
-    """Plan chunk sizes from runtime policy and data shape."""
+class ResourceChunkPlanner:
+    """Plan resource chunk sizes from runtime policy and data shape."""
 
     def __init__(self, policy: RuntimeResourcePolicy | None = None) -> None:
         self.policy = policy or RuntimeResourcePolicy.from_environment()
 
-    def plan(
+    def plan_sessions(
         self,
         *,
         axis: ChunkAxis,
-        item_count: int,
-        estimated_bytes_per_item: int,
-        lookback_window: int = 0,
-        lookahead_window: int = 0,
-        output_width: int = 0,
-        disjoint: bool = True,
-    ) -> ChunkPlan:
-        if item_count < 0:
-            raise ValueError("invalid_item_count")
-        if estimated_bytes_per_item <= 0:
-            raise ValueError("invalid_estimated_bytes_per_item")
-        if item_count == 0:
-            chunk_size = 1
+        session_count: int,
+        estimated_bytes_per_session: int,
+    ) -> ResourceChunkPlan:
+        self.policy.require_valid_chunk_budget()
+        if session_count < 0:
+            raise ValueError("invalid_session_count")
+        if estimated_bytes_per_session <= 0:
+            raise ValueError("invalid_estimated_bytes_per_session")
+        if session_count == 0:
+            target_core_session_count = 1
             chunk_count = 0
         else:
-            chunk_size = max(
+            target_core_session_count = max(
                 1,
                 min(
-                    item_count,
-                    self.policy.effective_chunk_bytes // estimated_bytes_per_item,
+                    session_count,
+                    self.policy.effective_chunk_bytes
+                    // estimated_bytes_per_session,
                 ),
             )
-            chunk_count = ceil(item_count / chunk_size)
-        return ChunkPlan(
+            chunk_count = ceil(session_count / target_core_session_count)
+        return ResourceChunkPlan(
             axis=axis,
-            item_count=item_count,
-            chunk_size=chunk_size,
+            session_count=session_count,
+            target_core_session_count=target_core_session_count,
             chunk_count=chunk_count,
-            estimated_bytes_per_item=estimated_bytes_per_item,
-            estimated_chunk_bytes=chunk_size * estimated_bytes_per_item,
-            lookback_window=lookback_window,
-            lookahead_window=lookahead_window,
-            output_width=output_width,
-            disjoint=disjoint,
-            boundary_carry_required=lookback_window > 0 or lookahead_window > 0,
+            estimated_bytes_per_session=estimated_bytes_per_session,
+            estimated_chunk_bytes=(
+                target_core_session_count * estimated_bytes_per_session
+            ),
         )
 
 
@@ -224,7 +214,7 @@ def _float_env(env: Mapping[str, str], name: str, default: float) -> float:
 
 __all__ = [
     "ChunkAxis",
-    "ChunkPlan",
-    "ChunkPlanner",
+    "ResourceChunkPlan",
+    "ResourceChunkPlanner",
     "RuntimeResourcePolicy",
 ]

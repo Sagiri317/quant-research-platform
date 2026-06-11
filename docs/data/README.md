@@ -9,6 +9,7 @@ It does not contain vendor field samples or private row-level examples.
 data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
+data/research/a_share/
 reports/private_real/
 ```
 
@@ -19,16 +20,13 @@ by approved roots and sanitizer policy, not by a suffix naming convention.
 
 ```text
 data/processed/a_share/
-  panels/
-  contexts/
-  universes/
-  masks/
-    as_of/
-    execution/
-    evaluation/
-  factors/
-  labels/
-  research_datasets/
+  panel/<data_id>/
+  annotation/<data_id>/
+  factor/<data_id>/
+  label/<data_id>/
+
+data/research/a_share/
+  <research_dataset_id>/
 ```
 
 Each processed-data object and research dataset is addressed by its artifact
@@ -64,7 +62,7 @@ and business services do not accept arbitrary public output roots.
 
 ## Public Identifier Policy
 
-Public surfaces use `data_product_id=a_share_daily_bar`. Public-safe evidence,
-manifest summaries, report summaries, stdout/stderr, and API errors must not
-expose provider markers, local paths, row samples, stock-code samples,
-credentials, or raw values.
+Public-safe evidence, manifest summaries, report summaries, stdout/stderr, and
+API errors use semantic identifiers such as `data_id`, `artifact_id`,
+`workflow_id`, or `research_dataset_id`; they must not expose provider markers,
+local paths, row samples, stock-code samples, credentials, or raw values.

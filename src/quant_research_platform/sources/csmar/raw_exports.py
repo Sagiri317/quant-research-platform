@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +12,9 @@ import pandas as pd
 
 from .raw_schemas import RawExportInspection, inspect_raw_export_file
 
-SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv", ".xlsx", ".txt"}
+SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv", ".xlsx"}
 STRING_CODE_DTYPES = {"Stkcd": str, "Symbol": str, "Indexcd": str}
+INDEX_INFO_CODE_RE = re.compile(r"^[0-9A-Za-z_.-]{1,32}$")
 
 
 @dataclass(frozen=True)
@@ -69,14 +71,106 @@ def read_private_export_file(path: str | Path, dataset: str) -> pd.DataFrame:
     with export_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle)
         header = next(reader)
-        rows = []
-        for row in reader:
-            if len(row) > len(header):
-                row = row[: len(header) - 1] + [",".join(row[len(header) - 1 :])]
+        rows: list[list[str]] = []
+        pending_row: list[str] | None = None
+        pending_start: int | None = None
+        for row_number, row in enumerate(reader, start=2):
+            if pending_row is not None:
+                if _looks_like_index_info_record_start(row):
+                    raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
+                pending_row = _merge_index_info_continuation(
+                    pending_row,
+                    row,
+                    len(header),
+                )
+                if len(pending_row) >= len(header):
+                    rows.append(
+                        _normalize_index_info_row(
+                            pending_row,
+                            len(header),
+                            pending_start,
+                        )
+                    )
+                    pending_row = None
+                    pending_start = None
+                continue
+
             if len(row) < len(header):
-                row = row + [""] * (len(header) - len(row))
-            rows.append(row)
+                if _looks_like_index_info_record_start(row):
+                    pending_row = list(row)
+                    pending_start = row_number
+                    continue
+                if rows:
+                    rows[-1][-1] = _append_text_continuation(rows[-1][-1], row)
+                    continue
+                raise ValueError(f"malformed_csmar_csv_row: {row_number}")
+            rows.append(_normalize_index_info_row(row, len(header), row_number))
+        if pending_row is not None:
+            raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
     return pd.DataFrame(rows, columns=header).replace("", pd.NA)
+
+
+def _normalize_index_info_row(
+    row: list[str],
+    column_count: int,
+    row_number: int | None,
+) -> list[str]:
+    if len(row) > column_count:
+        row = _normalize_long_index_info_row(row, row_number)
+    if len(row) != column_count or not _looks_like_index_info_record_start(row):
+        raise ValueError(f"malformed_csmar_csv_row: {row_number}")
+    return row
+
+
+def _normalize_long_index_info_row(
+    row: list[str],
+    row_number: int | None,
+) -> list[str]:
+    candidates: list[list[str]] = []
+    for code_start in range(6, len(row) - 5):
+        codes = row[code_start : code_start + 5]
+        if not all(_looks_like_source_category_code(value) for value in codes):
+            continue
+        sample_scope = ",".join(row[5:code_start])
+        formula = ",".join(row[code_start + 5 :])
+        candidates.append([*row[:5], sample_scope, *codes, formula])
+    if len(candidates) != 1:
+        raise ValueError(f"malformed_csmar_csv_row: {row_number}")
+    return candidates[0]
+
+
+def _merge_index_info_continuation(
+    pending_row: list[str],
+    row: list[str],
+    column_count: int,
+) -> list[str]:
+    merged = list(pending_row)
+    if len(merged) <= 6:
+        remaining_columns = column_count - len(merged)
+        if len(row) >= remaining_columns:
+            text_fields = row[: len(row) - remaining_columns]
+            if text_fields:
+                merged[-1] = _append_text_continuation(merged[-1], text_fields)
+            merged.extend(row[len(row) - remaining_columns :])
+            return merged
+        merged[-1] = _append_text_continuation(merged[-1], row)
+        return merged
+    merged[-1] = _append_text_continuation(merged[-1], row)
+    return merged
+
+
+def _append_text_continuation(current: str, row: list[str]) -> str:
+    continuation = ",".join(row)
+    return f"{current}\n{continuation}" if current else continuation
+
+
+def _looks_like_index_info_record_start(row: list[str]) -> bool:
+    return bool(row) and bool(INDEX_INFO_CODE_RE.fullmatch(row[0]))
+
+
+def _looks_like_source_category_code(value: str) -> bool:
+    stripped = value.strip()
+    return stripped == "" or bool(INDEX_INFO_CODE_RE.fullmatch(stripped))
 
 
 def iter_private_export_chunks(

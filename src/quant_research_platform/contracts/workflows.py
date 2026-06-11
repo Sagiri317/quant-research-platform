@@ -34,7 +34,6 @@ class WorkflowSpec:
     nodes: tuple[WorkflowNode, ...] = field(default_factory=tuple)
     workflow_version: str = "0.1"
     market_id: MarketId | None = None
-    data_product_id: str | None = None
     source_id: SourceId | None = None
     input_spec_ids: tuple[str, ...] = field(default_factory=tuple)
     output_spec_ids: tuple[str, ...] = field(default_factory=tuple)
@@ -85,7 +84,6 @@ class WorkflowRunSummary:
     run_id: str
     status: str
     market_id: str | None
-    data_product_id: str | None
     run_type: str
     input_spec_ids: tuple[str, ...]
     output_spec_ids: tuple[str, ...]
@@ -106,7 +104,6 @@ class WorkflowRunSummary:
             "run_id": self.run_id,
             "status": self.status,
             "market_id": self.market_id,
-            "data_product_id": self.data_product_id,
             "run_type": self.run_type,
             "input_spec_ids": list(self.input_spec_ids),
             "output_spec_ids": list(self.output_spec_ids),

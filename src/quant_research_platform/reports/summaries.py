@@ -41,7 +41,7 @@ class ReportSummary:
 class ParityEvidenceSummary:
     evidence_id: str
     market_id: str
-    data_product_id: str
+    artifact_id: str
     privacy_level: str
     status: str
     contract_version: str = "0.1"

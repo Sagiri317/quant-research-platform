@@ -80,7 +80,6 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
             run_id="000001.sz",
             status="failed",
             market_id="a_share",
-            data_product_id="a_share_daily_bar",
             run_type="workflow",
             input_spec_ids=(),
             output_spec_ids=(),

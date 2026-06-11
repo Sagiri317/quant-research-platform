@@ -146,7 +146,7 @@ FILENAME_RE = re.compile(
     r"(?P<market_scope>[a-z0-9_]+)__"
     r"(?:(?P<start>\d{8})_(?P<end>\d{8})|(?P<full>full))__"
     r"(?:(?:part-(?P<part>\d{2})__)?)"
-    r"export-(?P<export>\d{8})\.(?P<extension>csv|xlsx|txt)$"
+    r"export-(?P<export>\d{8})\.(?P<extension>csv|xlsx)$"
 )
 
 NATIVE_TABLE_DATASETS: dict[str, str] = {
@@ -199,14 +199,12 @@ def infer_dataset_from_native_export(path: str | Path) -> str:
 
 
 def read_export_header(path: str | Path) -> tuple[str, ...]:
-    """只读取 CSV、TXT 或 XLSX CSMAR export 的 header row。"""
+    """Read the header row from a supported CSV or XLSX raw export."""
 
     export_path = Path(path)
     suffix = export_path.suffix.lower()
     if suffix == ".csv":
         frame = pd.read_csv(export_path, nrows=0)
-    elif suffix == ".txt":
-        frame = pd.read_csv(export_path, nrows=0, sep="\t")
     elif suffix == ".xlsx":
         frame = pd.read_excel(export_path, nrows=0)
     else:

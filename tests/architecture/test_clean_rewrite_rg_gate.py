@@ -93,6 +93,36 @@ RETIRED_PUBLIC_CONTRACT_TEXT = (
     "qrp data-products run-interim <data_product_id>",
 )
 
+DATA_PRODUCT_ID_ALLOWED_NEGATIVE_TESTS = {
+    Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
+        "POST /api/0.1/data-products/{data_product_id}/interim-runs",
+        "qrp data-products run-interim <data_product_id>",
+    ),
+    Path("tests/interfaces/test_api_cli_01_contract.py"): (
+        "/api/0.1/data-products/{data_product_id}/interim-runs",
+    ),
+}
+
+DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
+    Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
+        "GET  /api/0.1/catalog/data-products",
+        "qrp catalog data-products",
+    ),
+    Path("tests/architecture/test_data_layer_boundaries.py"): (
+        'SOURCE_ROOT / "catalog/data_products.py"',
+    ),
+    Path("tests/architecture/test_registration_allowlist.py"): (
+        '"src/quant_research_platform/catalog/data_products.py"',
+    ),
+    Path("tests/interfaces/test_api_cli_01_contract.py"): (
+        "/api/0.1/catalog/data-products",
+        "data-products",
+    ),
+    Path("tests/catalog/test_catalog_defaults.py"): (
+        '"data_products"',
+    ),
+}
+
 FUTURE_PUBLIC_TODO_TERMS = (
     "processed-data-runs",
     "workflow-runs",
@@ -185,6 +215,53 @@ def test_active_tree_has_no_retired_terms() -> None:
         for name, pattern in forbidden_patterns:
             if pattern.search(text):
                 hits.append(f"{path}: {name}")
+
+    assert hits == []
+
+
+def test_active_tree_has_no_data_product_id_vocabulary() -> None:
+    current_file = Path(__file__).resolve()
+    hits: list[str] = []
+    for path in _iter_text_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        if "data_product_id" not in text:
+            continue
+        allowed = DATA_PRODUCT_ID_ALLOWED_NEGATIVE_TESTS.get(path, ())
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if "data_product_id" in line and not any(
+                item in line for item in allowed
+            ):
+                hits.append(f"{path}:{line_number}: {line.strip()}")
+
+    assert hits == []
+
+
+def test_active_tree_has_no_data_product_current_vocabulary() -> None:
+    current_file = Path(__file__).resolve()
+    forbidden_patterns = (
+        re.compile(r"\bdata product\b", re.IGNORECASE),
+        re.compile(r"\bdata products\b", re.IGNORECASE),
+        re.compile(r"catalog/data_products\.py"),
+    )
+    hits: list[str] = []
+    for path in _iter_text_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        allowed = DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS.get(path, ())
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if any(item in line for item in allowed):
+                continue
+            if any(pattern.search(line) for pattern in forbidden_patterns):
+                hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert hits == []
 
@@ -402,6 +479,25 @@ def test_concrete_field_specs_only_live_in_catalogs() -> None:
     assert hits == []
 
 
+def test_compute_modules_do_not_export_private_helpers() -> None:
+    hits: list[str] = []
+    for path in Path("src/quant_research_platform/compute").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in node.targets
+            ):
+                continue
+            for value in _literal_string_items(node.value):
+                if value.startswith("_"):
+                    hits.append(f"{path}: {value}")
+
+    assert hits == []
+
+
 def test_business_logic_does_not_bypass_persistent_writers() -> None:
     hits: list[str] = []
     for path in _iter_python_files():
@@ -474,6 +570,17 @@ def _literal_string(node: ast.expr) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
+
+
+def _literal_string_items(node: ast.expr) -> tuple[str, ...]:
+    if not isinstance(node, ast.List | ast.Tuple):
+        return ()
+    values: list[str] = []
+    for element in node.elts:
+        value = _literal_string(element)
+        if value is not None:
+            values.append(value)
+    return tuple(values)
 
 
 def _is_write_mode(mode: str) -> bool:

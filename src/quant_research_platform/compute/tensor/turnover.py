@@ -246,9 +246,4 @@ def _position_map_from_arrays(
 
 __all__ = [
     "calculate_tensor_turnover_and_cost",
-    "_path_turnover_and_cost_records",
-    "_path_turnover_and_cost_records_from_arrays",
-    "_path_current_state",
-    "_current_position_state",
-    "_position_map_from_arrays",
 ]

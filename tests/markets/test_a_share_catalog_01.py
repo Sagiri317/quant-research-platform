@@ -73,6 +73,19 @@ def test_a_share_field_catalog_owns_market_specific_fields() -> None:
             catalog.get(retired_alias)
 
 
+def test_a_share_source_code_fields_are_numeric_null_preserving() -> None:
+    catalog = a_share_field_catalog()
+
+    for field_name in (
+        "market_type",
+        "trading_status_code",
+        "filling_flag",
+        "limit_status",
+        "next_day_limit_status",
+    ):
+        assert catalog.get(field_name).dtype == "float64"
+
+
 def test_a_share_processed_specs_use_kind_and_canonical_entity_time_key() -> None:
     catalog = a_share_processed_catalog()
 

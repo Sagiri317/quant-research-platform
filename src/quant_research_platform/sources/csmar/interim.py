@@ -96,6 +96,13 @@ INDEX_INFO_INTERIM_COLUMNS: tuple[str, ...] = (
     "source_asset_id",
     "timestamp",
     "index_name",
+    "base_point",
+    "sample_scope",
+    "weighting_method",
+    "publisher",
+    "index_category",
+    "index_type",
+    "market_belonging",
     "calculation_formula",
     "index_class",
     "start_date",
@@ -341,9 +348,12 @@ def normalize_raw_frame(
         result = mapped.copy()
         if "index_class" not in result.columns and "index_category" in result.columns:
             result["index_class"] = result["index_category"]
+        if "base_point" in result.columns:
+            base_point = pd.to_numeric(result["base_point"], errors="coerce")
+            result["base_point"] = base_point.mask(base_point.eq(-9666))
         for column in ("base_date", "start_date"):
             if column in result.columns:
-                result[column] = pd.to_datetime(result[column], errors="coerce")
+                result[column] = _parse_optional_index_info_date(result[column], column)
         result["timestamp"] = result["start_date"].combine_first(result["base_date"])
         if export_date is not None:
             export_timestamp = pd.to_datetime(export_date, format="%Y%m%d")
@@ -355,6 +365,15 @@ def normalize_raw_frame(
             drop=True
         )
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
+
+
+def _parse_optional_index_info_date(series: pd.Series, column: str) -> pd.Series:
+    text = series.astype("string").str.strip()
+    parsed = pd.to_datetime(text.mask(text.eq("")), errors="coerce")
+    invalid = text.notna() & text.ne("") & parsed.isna()
+    if bool(invalid.any()):
+        raise ValueError(f"invalid_index_info_date: {column}")
+    return parsed
 
 
 def filter_by_source_date_range(

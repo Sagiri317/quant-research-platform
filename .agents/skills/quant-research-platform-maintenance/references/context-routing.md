@@ -20,7 +20,7 @@ work. It is routing guidance, not a separate approval layer.
 | Current context primer | `.agents/briefs/current-qrp-status.md` |
 | Any medium+ QRP task | `AGENTS.md`, user envelope, and the matching row below |
 | Contracts/specs/catalogs/storage | `references/contracts-and-verification.md`, `src/quant_research_platform/contracts/`, `storage/`, `catalog/` |
-| Data product/interim migration | `catalog/data_products.py`, `sources/`, `docs/data/README.md`, relevant tests |
+| Source/interim data cleanup | `sources/`, `docs/data/README.md`, relevant tests |
 | A-share market semantics | `markets/implementations/a_share/`, `docs/code-map/a-share-data-and-pipeline.md`, relevant tests |
 | Research datasets, evaluation, prediction | `research`, `reports`, `docs/code-map/reports-api.md`, relevant tests |
 | API/CLI | `interfaces/api/`, `interfaces/cli/`, `docs/api/README.md`, `tests/interfaces/` |

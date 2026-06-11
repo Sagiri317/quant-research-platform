@@ -102,7 +102,6 @@ def workflow_run_summary(
         run_id=run_id,
         status=status,
         market_id=str(spec.market_id) if spec.market_id else None,
-        data_product_id=spec.data_product_id,
         run_type=spec.run_type,
         input_spec_ids=spec.input_spec_ids,
         output_spec_ids=spec.output_spec_ids,

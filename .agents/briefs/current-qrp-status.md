@@ -31,6 +31,12 @@ replacement for `PROJECT_STATUS.md`.
 - Active private local-data CLI is limited to
   `qrp-private schema-inventory --project-root . --output <path>`.
 - Report writers derive paths from `StorageLayout + ReportSpec + run_id`.
+- Runtime resource planning is split from market-session planning:
+  `ResourceChunkPlanner` derives internal resource chunk sizes, while
+  `SessionWindowPlanner` derives trading-session core/read windows and halos.
+- Processed A-share materialization and research dataset assembly are
+  session-chunked internally; public API/CLI surfaces do not expose chunk-size,
+  year, partition, force, overwrite, or dependency-policy controls.
 - Prior local private aggregate verification covered full historical
   `daily_panel` aggregate coverage for `2014-01-01` through `2025-12-31`
   without committed row-level output; full evidence/report regeneration remains

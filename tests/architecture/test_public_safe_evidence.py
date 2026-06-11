@@ -118,7 +118,7 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
     assert payload["contract_version"] == "0.1"
     assert payload["project_version"] == "0.1.0"
     assert payload["privacy_level"] == "public_safe_aggregate"
-    assert payload["data_product_id"] == "a_share_daily_bar"
+    assert payload["artifact_id"] == "a_share_daily_bar"
     assert payload["market_id"] == "a_share"
     assert payload["verification_kind"] == "private_real_data_aggregate"
     assert payload["verification_scope"] == "aggregate_public_safe_parity"
@@ -251,14 +251,14 @@ def test_full_historical_daily_panel_generation_always_uses_chunks(
         }
     )
 
-    def iter_asset_chunks(project_root: Path):
+    def iter_session_chunks(project_root: Path):
         assert project_root == Path(".")
         return iter((chunk,))
 
     monkeypatch.setattr(
         private_aggregate,
-        "_iter_generated_full_daily_panel_asset_chunks",
-        iter_asset_chunks,
+        "_iter_generated_full_daily_panel_session_chunks",
+        iter_session_chunks,
     )
 
     frames = list(
@@ -271,57 +271,123 @@ def test_full_historical_daily_panel_generation_always_uses_chunks(
     assert frames[0].equals(chunk)
 
 
-def test_generated_panel_memory_budget_uses_70_percent_available_memory() -> None:
+def test_generated_panel_generation_uses_runtime_resource_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.markets.implementations.a_share.catalog import (
+        a_share_processed_catalog,
+    )
     from quant_research_platform.markets.implementations.a_share.verification import (
         private_aggregate,
     )
 
-    assert private_aggregate.GENERATED_PANEL_MEMORY_FRACTION == 0.7
+    class Inspection:
+        columns = ("asset_id", "timestamp")
+        manifest = {"file_size_bytes": 1000}
+
+    sessions = pd.date_range("2014-01-02", periods=6, freq="B")
+    policy = private_aggregate.RuntimeResourcePolicy(
+        available_memory_bytes=100,
+        memory_budget_fraction=1.0,
+        chunk_target_bytes=50,
+        memory_safety_factor=1.0,
+    )
+
+    def fake_from_environment():
+        return policy
+
+    def fake_read_dataset(root: Path, **kwargs) -> pd.DataFrame:
+        if root.name == "trading_calendar":
+            return pd.DataFrame(
+                {
+                    "timestamp": sessions,
+                    "is_trading_day": [True] * len(sessions),
+                }
+            )
+        if root.name in {"stock_master", "market_cap"}:
+            return pd.DataFrame({"asset_id": ["asset-a"]})
+        assert root.name == "daily_market"
+        time_window = kwargs["time_window"]
+        timestamps = [
+            session
+            for session in sessions
+            if pd.Timestamp(time_window.start)
+            <= session
+            <= pd.Timestamp(time_window.end)
+        ]
+        return pd.DataFrame(
+            {
+                "asset_id": ["asset-a"] * len(timestamps),
+                "timestamp": timestamps,
+            }
+        )
+
+    required_columns = a_share_processed_catalog().get("daily_panel").required_columns
+
+    def fake_compute_daily_panel(
+        daily: pd.DataFrame,
+        *,
+        stock_master: pd.DataFrame,
+        market_cap: pd.DataFrame,
+        trading_calendar: pd.DataFrame,
+    ) -> pd.DataFrame:
+        del stock_master, market_cap, trading_calendar
+        return pd.DataFrame(
+            {
+                column: (
+                    list(daily["asset_id"])
+                    if column == "asset_id"
+                    else list(daily["timestamp"])
+                    if column == "timestamp"
+                    else ["a_share"] * len(daily)
+                    if column == "market_id"
+                    else [0] * len(daily)
+                )
+                for column in required_columns
+            }
+        )
+
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        panels,
+    )
+
+    monkeypatch.setattr(
+        private_aggregate,
+        "inspect_dataset",
+        lambda _root: Inspection(),
+    )
+    monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
+    monkeypatch.setattr(panels, "compute_daily_panel", fake_compute_daily_panel)
+    monkeypatch.setattr(
+        private_aggregate.RuntimeResourcePolicy,
+        "from_environment",
+        staticmethod(fake_from_environment),
+    )
+
+    chunks = list(
+        private_aggregate._iter_generated_full_daily_panel_session_chunks(Path("."))
+    )
+
+    assert len(chunks) > 1
+    assert sum(len(chunk) for chunk in chunks) == len(sessions)
 
 
-def test_dynamic_asset_chunk_size_uses_one_chunk_when_memory_fits() -> None:
+def test_private_evidence_does_not_keep_legacy_chunk_policy_helpers() -> None:
     from quant_research_platform.markets.implementations.a_share.verification import (
         private_aggregate,
     )
 
-    chunk_size = private_aggregate._dynamic_asset_chunk_size(
-        total_asset_count=1200,
-        estimated_full_frame_bytes=10_000,
-        available_memory_bytes=100_000,
-        memory_fraction=0.5,
-    )
-
-    assert chunk_size == 1200
-
-
-def test_dynamic_asset_chunk_size_splits_when_memory_is_constrained() -> None:
-    from quant_research_platform.markets.implementations.a_share.verification import (
-        private_aggregate,
-    )
-
-    chunk_size = private_aggregate._dynamic_asset_chunk_size(
-        total_asset_count=1200,
-        estimated_full_frame_bytes=120_000,
-        available_memory_bytes=10_000,
-        memory_fraction=0.5,
-    )
-
-    assert 1 <= chunk_size < 1200
-
-
-def test_generated_panel_memory_budget_allows_current_full_frame_scale() -> None:
-    from quant_research_platform.markets.implementations.a_share.verification import (
-        private_aggregate,
-    )
-
-    chunk_size = private_aggregate._dynamic_asset_chunk_size(
-        total_asset_count=5420,
-        estimated_full_frame_bytes=4_378_832_336,
-        available_memory_bytes=8_961_126_400,
-        memory_fraction=private_aggregate.GENERATED_PANEL_MEMORY_FRACTION,
-    )
-
-    assert chunk_size == 5420
+    for name in (
+        "_dynamic_" + "asset_chunk_size",
+        "chunked_" + "values",
+        "read_dataset_" + "asset_chunk",
+        "_available_" + "memory_bytes",
+        "_iter_generated_full_daily_panel_" + "asset_chunks",
+        "_dataset_" + "asset_ids",
+        "_read_dataset_for_" + "assets",
+        "_filter_" + "asset_frame",
+    ):
+        assert not hasattr(private_aggregate, name)
 
 
 def test_aggregate_summary_checksum_is_invariant_to_chunking() -> None:

@@ -7,7 +7,7 @@ for code reading and onboarding, not roadmap, status, or governance.
 
 | File | Purpose |
 |---|---|
-| `platform-flow.md` | Global data product, API, CLI, and package ownership map |
+| `platform-flow.md` | Global data flow, API, CLI, and package ownership map |
 | `a-share-data-and-pipeline.md` | A-share data flow and migration targets |
 | `reports-api.md` | Evaluation/prediction report ownership and API/CLI handoff |
 | `compute-portfolio-boundary.md` | Portfolio compute split boundary and 0.1.0 limitation |

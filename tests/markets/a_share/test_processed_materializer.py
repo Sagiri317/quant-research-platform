@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -9,8 +11,13 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.csmar.interim import interim_catalog
-from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from quant_research_platform.storage.datasets import (
+    inspect_dataset,
+    read_dataset,
+    write_dataset,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -113,7 +120,7 @@ def test_materializer_reuses_same_run_dependency_for_empty_window_tail(
     }.issubset(written)
 
 
-def test_materialize_processed_data_existing_dependency_must_cover_window(
+def test_materialize_processed_data_existing_dependency_accepts_non_trading_end(
     tmp_path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -125,23 +132,177 @@ def test_materialize_processed_data_existing_dependency_must_cover_window(
         data_ids=("daily_panel",),
     )
 
+    written = materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2014-01-02", "2014-01-04"),
+        data_ids=("a_share_execution",),
+    )
+
+    assert "a_share_execution" in written
+
+
+def test_materialize_processed_data_writes_only_core_trading_sessions(
+    tmp_path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(
+        layout,
+        start_date="2017-04-28",
+        end_date="2017-05-04",
+        closed_dates=("2017-05-01",),
+    )
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2017-04-28", "2017-05-03"),
+        data_ids=("price_volume",),
+    )
+
+    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
+
+    assert panel["timestamp"].dt.date.astype(str).tolist() == [
+        "2017-04-28",
+        "2017-05-02",
+        "2017-05-03",
+    ]
+    assert factors["timestamp"].dt.date.astype(str).tolist() == [
+        "2017-04-28",
+        "2017-05-02",
+        "2017-05-03",
+    ]
+
+
+def test_materialize_processed_data_existing_dependency_must_cover_trading_sessions(
+    tmp_path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout, end_date="2014-01-06")
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        data_ids=("daily_panel",),
+    )
+
     with pytest.raises(ValueError, match="insufficient_dataset_coverage"):
         materializer.materialize_processed_data(
             layout=layout,
             source_id=SourceId("csmar"),
-            time_window=TimeWindow("2014-01-02", "2014-01-04"),
+            time_window=TimeWindow("2014-01-02", "2014-01-06"),
             data_ids=("a_share_execution",),
         )
 
 
-def _write_interim_inputs(layout: StorageLayout) -> None:
+def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
+    tmp_path,
+) -> None:
+    _assert_forced_tiny_chunks_match_default(
+        tmp_path,
+        data_id="daily_panel",
+        kind="panel",
+        end_date="2014-01-08",
+        time_window=TimeWindow("2014-01-02", "2014-01-07"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("data_id", "kind"),
+    [
+        ("a_share_execution", "annotation"),
+        ("price_volume", "factor"),
+        ("forward_returns", "label"),
+    ],
+)
+def test_materialize_processed_data_downstream_forced_tiny_chunks_equal_default_output(
+    tmp_path,
+    data_id: str,
+    kind: str,
+) -> None:
+    _assert_forced_tiny_chunks_match_default(
+        tmp_path,
+        data_id=data_id,
+        kind=kind,
+        end_date="2014-08-29",
+        time_window=TimeWindow("2014-01-02", "2014-02-28"),
+    )
+
+
+def _assert_forced_tiny_chunks_match_default(
+    tmp_path,
+    *,
+    data_id: str,
+    kind: str,
+    end_date: str,
+    time_window: TimeWindow,
+) -> None:
+    default_layout = StorageLayout(project_root=tmp_path / "default")
+    tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
+    _write_interim_inputs(default_layout, end_date=end_date)
+    _write_interim_inputs(tiny_layout, end_date=end_date)
+
+    materializer.materialize_processed_data(
+        layout=default_layout,
+        source_id=SourceId("csmar"),
+        time_window=time_window,
+        data_ids=(data_id,),
+    )
+    materializer.materialize_processed_data(
+        layout=tiny_layout,
+        source_id=SourceId("csmar"),
+        time_window=time_window,
+        data_ids=(data_id,),
+        resource_policy=RuntimeResourcePolicy(
+            available_memory_bytes=1_000,
+            memory_budget_fraction=1.0,
+            chunk_target_bytes=250,
+            memory_safety_factor=1.0,
+        ),
+    )
+
+    default_root = _processed_root(tmp_path / "default", kind, data_id)
+    tiny_root = _processed_root(tmp_path / "tiny", kind, data_id)
+    default = read_dataset(default_root).sort_values(
+        ["market_id", "asset_id", "timestamp"]
+    )
+    tiny = read_dataset(tiny_root).sort_values(["market_id", "asset_id", "timestamp"])
+
+    pd.testing.assert_frame_equal(
+        default.reset_index(drop=True),
+        tiny.reset_index(drop=True),
+    )
+    assert (
+        inspect_dataset(tiny_root).file_count
+        > inspect_dataset(default_root).file_count
+    )
+
+
+def _processed_root(project_root: Path, kind: str, data_id: str) -> Path:
+    return project_root / "data" / "processed" / "a_share" / kind / data_id
+
+
+def _write_interim_inputs(
+    layout: StorageLayout,
+    *,
+    start_date: str = "2014-01-02",
+    end_date: str = "2014-01-03",
+    closed_dates: tuple[str, ...] = (),
+) -> None:
     catalog = interim_catalog()
     source_id = SourceId("csmar")
     frames = {
-        "daily_market": _daily_market_frame(),
+        "daily_market": _daily_market_frame(
+            start_date=start_date,
+            end_date=end_date,
+        ),
         "stock_master": _stock_master_frame(),
         "market_cap": _market_cap_frame(),
-        "trading_calendar": _trading_calendar_frame(),
+        "trading_calendar": _trading_calendar_frame(
+            end_date=end_date,
+            closed_dates=closed_dates,
+        ),
     }
     for data_id, frame in frames.items():
         spec = catalog.get(data_id)
@@ -152,10 +313,16 @@ def _write_interim_inputs(layout: StorageLayout) -> None:
         )
 
 
-def _daily_market_frame() -> pd.DataFrame:
+def _daily_market_frame(
+    *,
+    start_date: str = "2014-01-02",
+    end_date: str = "2014-01-03",
+) -> pd.DataFrame:
     rows = []
-    for offset, value in enumerate(["2014-01-02", "2014-01-03"], start=1):
-        timestamp = pd.Timestamp(value)
+    for offset, timestamp in enumerate(
+        pd.bdate_range(start_date, end_date),
+        start=1,
+    ):
         rows.append(
             {
                 "source_asset_id": "000001",
@@ -215,17 +382,28 @@ def _market_cap_frame() -> pd.DataFrame:
     )
 
 
-def _trading_calendar_frame() -> pd.DataFrame:
+def _trading_calendar_frame(
+    *,
+    end_date: str = "2014-01-03",
+    closed_dates: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    closed = {pd.Timestamp(date).date() for date in closed_dates}
     return pd.DataFrame(
         [
             {
                 "timestamp": pd.Timestamp(date),
                 "calendar_date": pd.Timestamp(date),
                 "source_market_type": 4,
-                "is_trading_day": True,
+                "is_trading_day": pd.Timestamp(date).weekday() < 5
+                and pd.Timestamp(date).date() not in closed,
                 "source_day_of_week": pd.Timestamp(date).dayofweek + 1,
-                "source_state": "O",
+                "source_state": (
+                    "O"
+                    if pd.Timestamp(date).weekday() < 5
+                    and pd.Timestamp(date).date() not in closed
+                    else "C"
+                ),
             }
-            for date in pd.date_range("2010-01-01", "2014-01-03", freq="D")
+            for date in pd.date_range("2010-01-01", end_date, freq="D")
         ]
     )

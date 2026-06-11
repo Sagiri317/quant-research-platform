@@ -114,6 +114,8 @@ def test_csmar_raw_schema_sidecar_and_missing_columns_are_reported(
     inspection = raw_schemas.inspect_raw_export_file(export)
     assert raw_schemas.expected_metadata_sidecar_path(export) == sidecar
     assert inspection.has_metadata is True
+    sidecar.unlink()
+    assert raw_schemas.inspect_raw_export_file(export).has_metadata is False
 
     broken = tmp_path / "TRDNEW_Cale.csv"
     pd.DataFrame({"Markettype": [1], "Daywk": [1]}).to_csv(broken, index=False)
@@ -121,6 +123,28 @@ def test_csmar_raw_schema_sidecar_and_missing_columns_are_reported(
 
     assert broken_inspection.dataset == "trading_calendar"
     assert broken_inspection.missing_required_columns == ["Clddt", "State"]
+
+
+def test_csmar_txt_field_description_is_not_raw_export_table(
+    tmp_path: Path,
+) -> None:
+    csv_export = tmp_path / (
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.csv"
+    )
+    txt_description = tmp_path / (
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.txt"
+    )
+    _write_trading_calendar_raw_export(csv_export)
+    txt_description.write_text("字段\t说明\nClddt\t交易日期\n", encoding="utf-8")
+
+    exports = raw_exports.iter_raw_export_files(tmp_path)
+
+    assert exports == [csv_export]
+    assert not raw_exports.is_raw_export_file(txt_description)
+    with pytest.raises(ValueError, match="Cannot infer CSMAR dataset"):
+        raw_schemas.inspect_raw_export_file(txt_description)
 
 
 def test_csmar_field_mappings_describe_source_local_aliases() -> None:
@@ -188,6 +212,138 @@ def test_csmar_raw_reader_preserves_code_strings_and_index_formula_commas(
     assert index_info.loc[0, "Indexcd"] == "000985"
     assert index_info.loc[0, "Idxinfo10"] == "a,b,c"
     assert pd.isna(index_info.loc[1, "Idxinfo11"])
+
+
+def test_csmar_dirty_index_info_csv_preserves_alignment_and_raw_semantics(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index_info_dirty.csv"
+    index_path.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,benchmark,2014-01-02,2013-12-31,-9666,all shares,"
+        "1,2,3,4,5,weighted formula, with English comma，中文标点\n"
+        "000300,large,2014-01-03,2013-12-31,1000,blue chips,"
+        "W,P,C,T,M,\"formula with embedded line\nbreak and \"\"quotes\"\"\"\n",
+        encoding="utf-8",
+    )
+
+    raw = raw_exports.read_private_export_file(index_path, "index_info")
+    normalized = interim.normalize_raw_frame(raw, "index_info")
+    pruned, _ = interim.apply_output_column_rules(normalized, "index_info")
+
+    assert len(raw) == 2
+    assert raw.loc[0, "Idxinfo10"] == (
+        "weighted formula, with English comma，中文标点"
+    )
+    assert "embedded line\nbreak" in raw.loc[1, "Idxinfo10"].replace("\r\n", "\n")
+    benchmark = pruned.set_index("source_asset_id").loc["000985"]
+    large = pruned.set_index("source_asset_id").loc["000300"]
+    assert pd.isna(benchmark["base_point"])
+    assert large["base_point"] == 1000.0
+    assert benchmark["start_date"] == pd.Timestamp("2014-01-02")
+    assert benchmark["base_date"] == pd.Timestamp("2013-12-31")
+    assert benchmark["weighting_method"] == "1"
+    assert benchmark["publisher"] == "2"
+    assert benchmark["index_category"] == "3"
+    assert benchmark["index_type"] == "4"
+    assert benchmark["market_belonging"] == "5"
+    assert benchmark["calculation_formula"].endswith("中文标点")
+
+
+def test_csmar_index_info_unquoted_text_newlines_recover_when_aligned(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index_info_unquoted_newlines.csv"
+    index_path.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,benchmark,2014-01-02,2013-12-31,-9666,sample scope first line\n"
+        "sample scope second line,1,2,3,4,5,formula text\n"
+        "000300,large,2014-01-03,2013-12-31,1000,blue chips,"
+        "W,P,C,T,M,formula first line\n"
+        "formula second line with, comma\n",
+        encoding="utf-8",
+    )
+
+    raw = raw_exports.read_private_export_file(index_path, "index_info")
+
+    assert len(raw) == 2
+    assert raw.loc[0, "Idxinfo04"] == (
+        "sample scope first line\nsample scope second line"
+    )
+    assert raw.loc[0, "Idxinfo05"] == "1"
+    assert raw.loc[0, "Idxinfo09"] == "5"
+    assert raw.loc[1, "Idxinfo05"] == "W"
+    assert raw.loc[1, "Idxinfo09"] == "M"
+    assert raw.loc[1, "Idxinfo10"] == (
+        "formula first line\nformula second line with, comma"
+    )
+
+
+def test_csmar_index_info_sample_scope_and_formula_commas_preserve_alignment(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index_info_commas.csv"
+    index_path.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,benchmark,2014-01-02,2013-12-31,-9666,"
+        "sample scope, with comma,1,2,3,4,5,formula text, with comma\n",
+        encoding="utf-8",
+    )
+
+    raw = raw_exports.read_private_export_file(index_path, "index_info")
+
+    assert len(raw) == 1
+    assert raw.loc[0, "Idxinfo04"] == "sample scope, with comma"
+    assert raw.loc[0, "Idxinfo05"] == "1"
+    assert raw.loc[0, "Idxinfo09"] == "5"
+    assert raw.loc[0, "Idxinfo10"] == "formula text, with comma"
+
+
+def test_csmar_index_info_ambiguous_long_row_fails_closed(
+    tmp_path: Path,
+) -> None:
+    index_path = tmp_path / "index_info_ambiguous.csv"
+    index_path.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,benchmark,2014-01-02,2013-12-31,-9666,"
+        "A,B,C,D,E,1,2,3,4,5,formula text\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
+        raw_exports.read_private_export_file(index_path, "index_info")
+
+
+def test_csmar_index_info_dirty_csv_and_bad_dates_fail_closed(
+    tmp_path: Path,
+) -> None:
+    short_row = tmp_path / "index_info_short.csv"
+    short_row.write_text(
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo10\n"
+        "000985,benchmark,2014-01-02\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
+        raw_exports.read_private_export_file(short_row, "index_info")
+
+    bad_date = pd.DataFrame(
+        {
+            "Indexcd": ["000985"],
+            "Idxinfo01": ["benchmark"],
+            "Idxinfo11": ["bad-date"],
+            "Idxinfo02": ["2013-12-31"],
+        }
+    )
+    with pytest.raises(ValueError, match="invalid_index_info_date"):
+        interim.normalize_raw_frame(
+            bad_date,
+            "index_info",
+            export_date="20260515",
+        )
 
 
 def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
