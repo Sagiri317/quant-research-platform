@@ -17,14 +17,14 @@ from quant_research_platform.catalog.defaults import (
     default_processed_catalog,
     default_research_dataset_catalog,
 )
+from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as a_share_materializer,
-)
-from quant_research_platform.markets.implementations.a_share.source_bindings import (
-    csmar as a_share_csmar_binding,
 )
 from quant_research_platform.reports.private_evidence import (
     build_private_evidence_summary,
@@ -36,7 +36,7 @@ from quant_research_platform.reports.private_evidence import (
     write_validation_summary,
 )
 from quant_research_platform.research.datasets import (
-    assemble_research_dataset_from_processed,
+    assemble_research_dataset,
 )
 from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
@@ -49,6 +49,8 @@ from quant_research_platform.runtime.execution_metrics import (
     write_execution_metrics_csv,
     write_execution_metrics_json,
 )
+from quant_research_platform.sources.csmar.ids import CSMAR_SOURCE_ID
+from quant_research_platform.sources.csmar.interim import materialize_interim_data
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.layout import PrivateEvidenceLayout, StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -56,12 +58,6 @@ from quant_research_platform.storage.manifests import (
     write_layer_manifest,
     write_run_manifest,
 )
-
-CSMAR_SOURCE_ID = a_share_csmar_binding.CSMAR_SOURCE_ID
-a_share_csmar_import_interim_data = (
-    a_share_csmar_binding.a_share_csmar_import_interim_data
-)
-build_a_share_processed_layers = a_share_materializer.build_a_share_processed_layers
 
 
 @dataclass(frozen=True)
@@ -106,56 +102,59 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
 
     recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=output_root)
-    start_year = int(start.year)
-    end_year = int(end.year)
+    time_window = TimeWindow(config.start_date, config.end_date)
     with recorder.record("interim_generation", logical_layer="interim"):
-        interim_result = a_share_csmar_import_interim_data(
+        interim_result = materialize_interim_data(
             layout=storage_layout,
             raw_root=Path("data") / "raw" / CSMAR_SOURCE_ID,
             start_date=config.start_date,
             end_date=config.end_date,
         )
-    processed_market_root = layout.processed_root / "a_share"
     with recorder.record("processed_generation", logical_layer="processed") as record:
-        processed_result = build_a_share_processed_layers(
-            interim_root=layout.interim_root / CSMAR_SOURCE_ID,
-            processed_root=processed_market_root,
-            start_year=start_year,
-            end_year=end_year,
-            end_date=config.end_date,
-            metrics_recorder=recorder,
+        processed_result = a_share_materializer.materialize_processed_data(
+            layout=storage_layout,
+            source_id=SourceId(CSMAR_SOURCE_ID),
+            time_window=time_window,
+            kinds=frozenset(
+                {
+                    ProcessedDataKind.PANEL,
+                    ProcessedDataKind.ANNOTATION,
+                    ProcessedDataKind.FACTOR,
+                    ProcessedDataKind.LABEL,
+                }
+            ),
         )
-        record.output_rows = sum(processed_result.row_counts.values())
+        record.output_rows = sum(item.row_count for item in processed_result.values())
     with recorder.record("research_generation", logical_layer="research"):
-        research_root = assemble_research_dataset_from_processed(
-            processed_root=processed_market_root,
+        research_root = assemble_research_dataset(
+            layout=storage_layout,
             dataset_catalog=default_research_dataset_catalog(),
             processed_catalog=default_processed_catalog(),
             dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            years=tuple(range(start_year, end_year + 1)),
+            time_window=time_window,
         )
     with recorder.record("evaluation_generation", logical_layer="evidence"):
         evaluation_root = run_evaluation_from_research_dataset(
-            processed_root=processed_market_root,
+            layout=storage_layout,
             dataset_catalog=default_research_dataset_catalog(),
             evaluation_catalog=default_evaluation_catalog(),
             run_id="a_share_mom_20d_forward_return_20d_2014",
-            years=(start_year,),
+            time_window=time_window,
         )
     with recorder.record("prediction_generation", logical_layer="evidence"):
         prediction_root = run_prediction_from_research_dataset(
-            processed_root=processed_market_root,
+            layout=storage_layout,
             dataset_catalog=default_research_dataset_catalog(),
             model_catalog=default_model_catalog(),
             prediction_catalog=default_prediction_catalog(),
             prediction_id="a_share_linear_mom_20d_prediction_2014",
-            years=(start_year,),
+            time_window=time_window,
         )
 
     dataset_roots = _dataset_roots(
         layout,
         interim_roots=tuple(interim_result.artifact_roots.values()),
-        processed_roots=tuple(processed_result.artifact_roots.values()),
+        processed_roots=tuple(item.root for item in processed_result.values()),
         research_roots=(Path(research_root),),
     )
     report_roots = (Path(evaluation_root), Path(prediction_root))
@@ -324,7 +323,7 @@ def _logical_layer(dataset_root: Path, output_root: Path) -> str:
     relative = dataset_root.relative_to(output_root).as_posix()
     if relative.startswith("data/interim/"):
         return "interim"
-    if "/research_datasets/" in relative:
+    if relative.startswith("data/research/"):
         return "research"
     if relative.startswith("reports/") or relative.startswith("data/evidence/"):
         return "evidence"
@@ -336,9 +335,6 @@ def _layer_for_root(dataset_root: Path, layout: PrivateEvidenceLayout) -> str:
 
 
 def _dataset_id(dataset_root: Path) -> str:
-    parts = dataset_root.parts
-    if "research_datasets" in parts:
-        return parts[parts.index("research_datasets") + 1]
     return dataset_root.name
 
 

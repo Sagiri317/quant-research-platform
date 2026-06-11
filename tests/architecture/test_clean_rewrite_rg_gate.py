@@ -63,22 +63,14 @@ PUBLIC_CONTRACT_DOCS = (
 )
 
 APPROVED_API_LINES = (
-    "GET  /api/0.1/catalog/data-products",
     "GET  /api/0.1/catalog/factors",
     "GET  /api/0.1/catalog/labels",
-    "GET  /api/0.1/catalog/universes",
-    "POST /api/0.1/data-products/{data_product_id}/interim-runs",
     "GET  /api/0.1/research-datasets/{dataset_id}/requirements",
 )
 
 APPROVED_CLI_LINES = (
-    "qrp catalog data-products",
     "qrp catalog factors",
     "qrp catalog labels",
-    "qrp catalog universes",
-    "qrp data-products run-interim <data_product_id>",
-    "qrp data-products run-interim <data_product_id> --dry-run",
-    "qrp data-products run-interim <data_product_id> --run-id <run_id>",
     "qrp research-datasets requirements <dataset_id>",
 )
 
@@ -93,6 +85,12 @@ RETIRED_PUBLIC_CONTRACT_TEXT = (
     "qrp research build-dataset",
     "qrp workflow run",
     "qrp report show",
+    "GET  /api/0.1/catalog/data-products",
+    "GET  /api/0.1/catalog/universes",
+    "POST /api/0.1/data-products/{data_product_id}/interim-runs",
+    "qrp catalog data-products",
+    "qrp catalog universes",
+    "qrp data-products run-interim <data_product_id>",
 )
 
 FUTURE_PUBLIC_TODO_TERMS = (
@@ -209,7 +207,7 @@ def test_a_share_planning_hot_paths_do_not_use_fingerprint_dataset() -> None:
     hits = [
         str(path)
         for path in checked
-        if "fingerprint_dataset" in path.read_text(encoding="utf-8")
+        if path.exists() and "fingerprint_dataset" in path.read_text(encoding="utf-8")
     ]
 
     assert hits == []

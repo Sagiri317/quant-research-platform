@@ -16,24 +16,22 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 from quant_research_platform.reports.evidence_rendering import (
     render_private_verification_summary_markdown,
     render_public_safe_evidence_markdown,
 )
+from quant_research_platform.sources.csmar.ids import (
+    CSMAR_SOURCE_ID,
+)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
     read_dataset,
-)
-
-from ..processed._dataset_helpers import (
-    chunked_values,
-    dataset_asset_ids,
-    read_dataset_asset_chunk,
-    year_partition_filter,
 )
 
 CONTRACT_VERSION = "0.1"
@@ -56,17 +54,19 @@ GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 DEFAULT_AVAILABLE_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 
 PROCESSED_ROOT_AREA_COVERAGE = {
-    "processed/a_share/panels/daily_panel": "full_historical_daily_panel_status",
-    f"processed/a_share/factors/{PRICE_VOLUME_PROCESSED_DATA_ID}": (
+    "processed/a_share/panel/daily_panel": "full_historical_daily_panel_status",
+    f"processed/a_share/factor/{PRICE_VOLUME_PROCESSED_DATA_ID}": (
         "factor_value_parity"
     ),
-    "processed/a_share/labels/forward_returns": "label_value_parity",
-    "processed/a_share/universes/a_share_default": "masks_universes_parity",
-    "processed/a_share/masks/as_of/a_share_as_of": "masks_universes_parity",
-    "processed/a_share/masks/execution/a_share_execution": "masks_universes_parity",
-    "processed/a_share/masks/evaluation/a_share_evaluation": "masks_universes_parity",
-    "processed/a_share/contexts/daily_context": "supporting_layers_coverage_2014_2025",
-    "processed/a_share/research_datasets/"
+    "processed/a_share/label/forward_returns": "label_value_parity",
+    "processed/a_share/annotation/a_share_default": "masks_universes_parity",
+    "processed/a_share/annotation/a_share_as_of": "masks_universes_parity",
+    "processed/a_share/annotation/a_share_execution": "masks_universes_parity",
+    "processed/a_share/annotation/a_share_evaluation": "masks_universes_parity",
+    "processed/a_share/annotation/daily_context": (
+        "supporting_layers_coverage_2014_2025"
+    ),
+    "research/a_share/"
     "a_share_price_volume_forward_returns": "research_dataset_parity",
 }
 
@@ -169,7 +169,7 @@ def generate_private_verification_summary(
     evidence_payload: dict[str, Any] | None = None,
     generated_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Generate a public-safe inventory summary for processed artifacts."""
+    """Generate a public-safe inventory summary for sealed dataset artifacts."""
 
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
@@ -178,7 +178,7 @@ def generate_private_verification_summary(
             root,
             generated_at=generated_at,
         )
-    inventory = _processed_inventory(root)
+    inventory = _dataset_inventory(root)
     covered_roots = [
         item["logical_root"]
         for item in inventory
@@ -206,7 +206,7 @@ def generate_private_verification_summary(
         "privacy_level": PRIVACY_LEVEL,
         "source_data_visibility": "private_local_only",
         "row_level_output_committed": False,
-        "processed_inventory": inventory,
+        "dataset_inventory": inventory,
         "covered_roots": covered_roots,
         "uncovered_roots": uncovered_roots,
         "allowed_unverified_roots": allowed_unverified_roots,
@@ -217,20 +217,22 @@ def generate_private_verification_summary(
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
     reports_root = root / "reports" / "private_real" / MARKET_ID
-    daily_panel = processed / "panels" / "daily_panel"
-    factor = processed / "factors" / PRICE_VOLUME_PROCESSED_DATA_ID
-    label = processed / "labels" / "forward_returns"
-    universe = processed / "universes" / "a_share_default"
+    daily_panel = processed / "panel" / "daily_panel"
+    factor = processed / "factor" / PRICE_VOLUME_PROCESSED_DATA_ID
+    label = processed / "label" / "forward_returns"
+    universe = processed / "annotation" / "a_share_default"
     masks = (
-        processed / "masks" / "as_of" / "a_share_as_of",
-        processed / "masks" / "execution" / "a_share_execution",
-        processed / "masks" / "evaluation" / "a_share_evaluation",
+        processed / "annotation" / "a_share_as_of",
+        processed / "annotation" / "a_share_execution",
+        processed / "annotation" / "a_share_evaluation",
     )
-    context = processed / "contexts" / "daily_context"
+    context = processed / "annotation" / "daily_context"
     research = (
-        processed
-        / "research_datasets"
-        / "a_share_price_volume_forward_returns"
+        root
+        / "data"
+        / "research"
+        / MARKET_ID
+        / A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
     evaluation = (
         reports_root / "evaluation" / "a_share_mom_20d_forward_return_20d_2014"
@@ -299,15 +301,15 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     )
 
 
-def _processed_inventory(root: Path) -> list[dict[str, Any]]:
+def _dataset_inventory(root: Path) -> list[dict[str, Any]]:
     inventory: list[dict[str, Any]] = []
-    for artifact_root in _official_processed_artifact_roots(root):
-        logical_root = _logical_processed_root(root, artifact_root)
+    for artifact_root in _official_dataset_artifact_roots(root):
+        logical_root = _logical_dataset_root(root, artifact_root)
         summary = _summarize_dataset_root(artifact_root)
-        category, artifact_id = _processed_category_and_artifact_id(logical_root)
+        kind, artifact_id = _dataset_kind_and_artifact_id(logical_root)
         inventory.append(
             {
-                "category": category,
+                "kind": kind,
                 "artifact_id": artifact_id,
                 "logical_root": logical_root,
                 "period": summary.period,
@@ -328,13 +330,16 @@ def _processed_inventory(root: Path) -> list[dict[str, Any]]:
     return sorted(inventory, key=lambda item: item["logical_root"])
 
 
-def _official_processed_artifact_roots(root: Path) -> tuple[Path, ...]:
+def _official_dataset_artifact_roots(root: Path) -> tuple[Path, ...]:
     processed_root = Path(root) / "data" / "processed" / MARKET_ID
-    if not processed_root.exists():
-        raise FileNotFoundError("private_processed_root_missing")
+    research_root = Path(root) / "data" / "research" / MARKET_ID
+    if not processed_root.exists() and not research_root.exists():
+        raise FileNotFoundError("private_dataset_roots_missing")
     roots = [
         path
-        for path in processed_root.rglob("*")
+        for layer_root in (processed_root, research_root)
+        if layer_root.exists()
+        for path in layer_root.rglob("*")
         if path.is_dir() and _is_dataset_artifact_root(path)
     ]
     return tuple(sorted(set(roots), key=lambda path: path.as_posix()))
@@ -348,17 +353,22 @@ def _is_dataset_artifact_root(path: Path) -> bool:
         return False
 
 
-def _logical_processed_root(root: Path, artifact_root: Path) -> str:
-    relative = artifact_root.relative_to(Path(root) / "data" / "processed")
-    return "processed/" + relative.as_posix()
+def _logical_dataset_root(root: Path, artifact_root: Path) -> str:
+    data_root = Path(root) / "data"
+    relative = artifact_root.relative_to(data_root)
+    return relative.as_posix()
 
 
-def _processed_category_and_artifact_id(logical_root: str) -> tuple[str, str]:
+def _dataset_kind_and_artifact_id(logical_root: str) -> tuple[str, str]:
     parts = logical_root.split("/")
-    if len(parts) < 4 or parts[:2] != ["processed", MARKET_ID]:
-        raise ValueError("invalid_processed_logical_root")
-    category_parts = parts[2:-1]
-    return "/".join(category_parts), parts[-1]
+    if len(parts) < 3:
+        raise ValueError("invalid_dataset_logical_root")
+    if parts[:2] == ["processed", MARKET_ID]:
+        kind_parts = parts[2:-1]
+        return "/".join(kind_parts), parts[-1]
+    if parts[:2] == ["research", MARKET_ID]:
+        return "research_dataset", parts[-1]
+    raise ValueError("invalid_dataset_logical_root")
 
 
 def _area_record(area_input: AggregateInput) -> dict[str, Any]:
@@ -483,7 +493,7 @@ def _iter_generated_full_daily_panel_asset_chunks(
         )
         if daily.empty:
             continue
-        panel = panels.build_research_panel(
+        panel = panels.compute_daily_panel(
             daily,
             stock_master=_filter_asset_frame(stock_master, asset_id_chunk),
             market_cap=_filter_asset_frame(market_cap, asset_id_chunk),
@@ -504,21 +514,18 @@ def _private_interim_root_for_data_product(
     project_root: Path,
     data_product_id: str,
 ) -> Path:
-    from quant_research_platform.catalog.defaults import (
-        default_provider_binding_registry,
-    )
-
-    binding = default_provider_binding_registry().get(data_product_id)
-    return Path(project_root) / "data" / "interim" / binding.provider_id
+    del data_product_id
+    return Path(project_root) / "data" / "interim" / CSMAR_SOURCE_ID
 
 
 def _filter_asset_frame(
     frame: pd.DataFrame,
     asset_ids: Sequence[str],
 ) -> pd.DataFrame:
-    if "asset_id" not in frame.columns:
+    asset_column = "asset_id" if "asset_id" in frame.columns else "source_asset_id"
+    if asset_column not in frame.columns:
         return frame.copy()
-    return frame.loc[frame["asset_id"].isin(set(asset_ids))].copy()
+    return frame.loc[frame[asset_column].isin(set(asset_ids))].copy()
 
 
 def _estimate_generated_full_panel_memory_bytes(
@@ -534,6 +541,57 @@ def _estimate_generated_full_panel_memory_bytes(
         )
     )
     return max(1, compressed_bytes * GENERATED_PANEL_MEMORY_EXPANSION_FACTOR)
+
+
+def chunked_values(
+    values: tuple[str, ...],
+    chunk_size: int,
+) -> Iterator[tuple[str, ...]]:
+    if chunk_size <= 0:
+        raise ValueError("invalid_chunk_size")
+    for index in range(0, len(values), chunk_size):
+        yield values[index : index + chunk_size]
+
+
+def dataset_asset_ids(
+    root: Path,
+    *,
+    years: tuple[int, ...] | None = None,
+) -> tuple[str, ...]:
+    available = set(inspect_dataset(root).columns)
+    columns = ["asset_id"] if "asset_id" in available else ["source_asset_id"]
+    frame = read_dataset(
+        root,
+        time_window=_time_window_from_years(years),
+        columns=columns,
+    )
+    column = "asset_id" if "asset_id" in frame.columns else "source_asset_id"
+    return tuple(sorted(str(value) for value in frame[column].dropna().unique()))
+
+
+def read_dataset_asset_chunk(
+    root: Path,
+    *,
+    years: tuple[int, ...] | None,
+    columns: tuple[str, ...],
+    asset_ids: tuple[str, ...],
+) -> pd.DataFrame:
+    read_columns = tuple(dict.fromkeys((*columns, "asset_id", "source_asset_id")))
+    available = set(inspect_dataset(root).columns)
+    read_columns = tuple(column for column in read_columns if column in available)
+    frame = read_dataset(
+        root,
+        time_window=_time_window_from_years(years),
+        columns=read_columns,
+    )
+    column = "asset_id" if "asset_id" in frame.columns else "source_asset_id"
+    return frame.loc[frame[column].isin(set(asset_ids))].copy()
+
+
+def _time_window_from_years(years: tuple[int, ...] | None) -> TimeWindow | None:
+    if years is None:
+        return None
+    return TimeWindow(f"{min(years)}-01-01", f"{max(years)}-12-31")
 
 
 def _available_memory_bytes() -> int:
@@ -620,7 +678,7 @@ def _summarize_dataset_root(
 ) -> AggregateSummary:
     chunks = read_dataset(
         root,
-        partition_filter=year_partition_filter(years),
+        time_window=_time_window_from_years(years),
         mode=DatasetReadMode.CHUNKED,
     )
     return _summarize_frames(chunks)

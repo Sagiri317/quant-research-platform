@@ -14,6 +14,8 @@ def validate_research_dataset(
     *,
     require_all_columns: bool = True,
 ) -> None:
+    if spec.primary_key != ("market_id", "asset_id", "timestamp"):
+        raise ValueError("invalid_research_dataset_primary_key")
     required = set(spec.required_columns if require_all_columns else spec.primary_key)
     missing = sorted(required.difference(frame.columns))
     if missing:
@@ -33,7 +35,7 @@ def validate_research_dataset(
     invalid_features = [
         column
         for column in spec.feature_columns
-        if spec.column_roles.get(column) is not ColumnRole.FEATURE
+        if spec.column_roles.get(column) not in {ColumnRole.FEATURE, ColumnRole.FACTOR}
     ]
     if invalid_features:
         joined = ", ".join(invalid_features)
@@ -55,6 +57,24 @@ def validate_research_dataset(
     ]
     if mask_features:
         raise ValueError(f"mask_column_in_feature_set: {', '.join(mask_features)}")
+
+    invalid_filters = [
+        column
+        for column in spec.filter_columns
+        if spec.column_roles.get(column) not in {ColumnRole.MASK, ColumnRole.UNIVERSE}
+    ]
+    if invalid_filters:
+        joined = ", ".join(invalid_filters)
+        raise ValueError(f"invalid_research_dataset_filters: {joined}")
+
+    invalid_context = [
+        column
+        for column in spec.context_columns
+        if spec.column_roles.get(column) is not ColumnRole.CONTEXT
+    ]
+    if invalid_context:
+        joined = ", ".join(invalid_context)
+        raise ValueError(f"invalid_research_dataset_context: {joined}")
 
 
 def validate_evaluation_input(

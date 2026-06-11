@@ -57,14 +57,12 @@ def test_catalog_defaults_remains_platform_composition_root() -> None:
     all_names = _module_all_names(tree)
 
     assert "quant_research_platform.markets.implementations.a_share.catalog" in modules
-    assert (
-        "quant_research_platform.markets.implementations.a_share.source_bindings"
-        in modules
-    )
     assert "quant_research_platform.sources.csmar.catalog" in modules
+    assert "quant_research_platform.sources.csmar.interim" in modules
     assert "quant_research_platform.reports.catalog" in modules
-    assert "a_share_csmar_binding.a_share_csmar_interim_catalog(" in source
-    assert "a_share_csmar_binding.a_share_csmar_provider_binding(" in source
+    assert "csmar_interim_catalog(" in source
+    assert "source_bindings" not in source
+    assert "provider_binding" not in source
     assert "default_catalogs" in all_names
 
 

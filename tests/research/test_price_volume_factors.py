@@ -48,7 +48,7 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
 def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
     definitions = price_volume_factor_definitions(
         market_id=MarketId("a_share"),
-        required_processed_data_id="daily_panel",
+        required_input_data_id="daily_panel",
     )
     columns = price_volume_factor_columns()
     by_id = {definition.factor_id: definition for definition in definitions}
@@ -61,7 +61,7 @@ def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
             definition.factor_id
         )
         assert definition.base_input_columns == definition.input_columns
-        assert definition.required_processed_data_id == "daily_panel"
+        assert definition.required_input_data_id == "daily_panel"
         assert definition.family == "price_volume"
         if definition.factor_id in SMOKE_PRICE_VOLUME_FACTORS:
             assert definition.factor_set is FactorSet.SMOKE

@@ -8,6 +8,7 @@ from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.reports.bundles import write_evaluation_report_files
 from quant_research_platform.research.datasets import (
     read_research_dataset,
@@ -17,16 +18,16 @@ from quant_research_platform.research.evaluations.engine import (
     EvaluationResult,
     evaluate_factor_frame,
 )
-from quant_research_platform.storage.layout import layout_from_processed_market_root
+from quant_research_platform.storage.layout import StorageLayout
 
 
 def run_evaluation_from_research_dataset(
     *,
-    processed_root: Path,
+    layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
     evaluation_catalog: EvaluationCatalog,
     run_id: str,
-    years: tuple[int, ...] | None = None,
+    time_window: TimeWindow | None = None,
     n_groups: int = 5,
 ) -> Path:
     spec = evaluation_catalog.get(run_id)
@@ -38,9 +39,10 @@ def run_evaluation_from_research_dataset(
         *required_filter_columns(spec.filter_mode),
     )
     frame = read_research_dataset(
-        processed_root,
-        spec.research_dataset_id,
-        years=years,
+        layout,
+        market_id=dataset_spec.market_id,
+        dataset_id=dataset_spec.data_id,
+        time_window=time_window,
         columns=read_columns,
     )
     validate_evaluation_input(
@@ -50,17 +52,13 @@ def run_evaluation_from_research_dataset(
         label_columns=spec.label_columns,
     )
     result = evaluate_factor_frame(frame, spec, n_groups=n_groups)
-    layout = layout_from_processed_market_root(processed_root)
-    return write_evaluation_result(
-        result,
-        layout=layout,
-    )
+    return write_evaluation_result(result, layout=layout)
 
 
 def write_evaluation_result(
     result: EvaluationResult,
     *,
-    layout,
+    layout: StorageLayout,
 ) -> Path:
     report_spec = ReportSpec(
         report_id="evaluation_report",

@@ -26,9 +26,16 @@ class DataGrain(StrEnum):
     RESEARCH_ROW = "research_row"
 
 
+class ProcessedDataKind(StrEnum):
+    PANEL = "panel"
+    ANNOTATION = "annotation"
+    FACTOR = "factor"
+    LABEL = "label"
+
+
 @dataclass(frozen=True, kw_only=True)
 class DataSpec:
-    market_id: MarketId
+    data_id: str
     frequency: DataFrequency
     grain: DataGrain
     column_roles: dict[str, ColumnRole]
@@ -51,13 +58,12 @@ class DataSpec:
 @dataclass(frozen=True, kw_only=True)
 class InterimDataSpec(DataSpec):
     source_id: SourceId
-    interim_data_id: str
 
 
 @dataclass(frozen=True, kw_only=True)
 class ProcessedDataSpec(DataSpec):
-    category: str
-    processed_data_id: str
+    market_id: MarketId
+    kind: ProcessedDataKind
 
 
 __all__ = [
@@ -65,5 +71,6 @@ __all__ = [
     "DataGrain",
     "DataSpec",
     "InterimDataSpec",
+    "ProcessedDataKind",
     "ProcessedDataSpec",
 ]

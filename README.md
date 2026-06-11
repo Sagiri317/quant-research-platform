@@ -13,7 +13,8 @@ manage credentials, or connect external market-data APIs.
 - Project version: `0.1.0`.
 - Public API/spec/contract version: `0.1`.
 - Current enabled market module: A-share.
-- Public data product id: `a_share_daily_bar`.
+- Public user-facing data objects: cataloged factors, labels, and research
+  dataset requirements.
 - Current website UI work: out of scope for this clean rewrite slice.
 - Current deployment/scheduler/worker/model-registry/feature-store scope: out
   of scope.
@@ -24,6 +25,7 @@ Private boundaries:
 data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
+data/research/a_share/
 reports/private_real/
 ```
 
@@ -60,9 +62,6 @@ The clean API uses `/api/0.1/...`, without a `v` prefix:
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
-GET  /api/0.1/catalog/universes
-GET  /api/0.1/catalog/data-products
-POST /api/0.1/data-products/{data_product_id}/interim-runs
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```
 
@@ -71,19 +70,12 @@ The clean CLI surface is:
 ```text
 qrp catalog factors
 qrp catalog labels
-qrp catalog universes
-qrp catalog data-products
-qrp data-products run-interim <data_product_id>
-qrp data-products run-interim <data_product_id> --dry-run
-qrp data-products run-interim <data_product_id> --run-id <run_id>
 qrp research-datasets requirements <dataset_id>
 ```
 
-`execution_mode` defaults to `execute`. API requests use the JSON field
-`execution_mode`; CLI exposes optional `--dry-run` and `--run-id` and does not
-expose `--execute` or private-source path flags. `execute` is fixture-backed
-registered execution for `0.1.0`; private real-data execution is not exposed
-through API/CLI.
+These public routes are read-only. Source/interim/processed materialization and
+private real-data execution are internal workflows and are not exposed through
+the API/CLI.
 
 Removed public placeholders are not compatibility requirements. Future-only
 work remains explicit: `processed-data-runs`, `workflow-runs`, `report

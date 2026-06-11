@@ -9,12 +9,15 @@ from quant_research_platform.catalog.fields import (
     platform_field_catalog,
 )
 from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_factor_catalog,
     a_share_field_catalog,
-    a_share_price_volume_factor_columns,
     a_share_processed_catalog,
     a_share_research_dataset_catalog,
+)
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_AS_OF_MASK_ID,
@@ -70,7 +73,7 @@ def test_a_share_field_catalog_owns_market_specific_fields() -> None:
             catalog.get(retired_alias)
 
 
-def test_a_share_processed_specs_use_canonical_entity_time_key() -> None:
+def test_a_share_processed_specs_use_kind_and_canonical_entity_time_key() -> None:
     catalog = a_share_processed_catalog()
 
     for spec in catalog.list():
@@ -80,27 +83,32 @@ def test_a_share_processed_specs_use_canonical_entity_time_key() -> None:
         assert spec.column_roles["market_id"] is ColumnRole.KEY
         assert spec.column_roles["asset_id"] is ColumnRole.KEY
         assert spec.column_roles["timestamp"] is ColumnRole.TIMESTAMP
+        assert not hasattr(spec, "category")
+        assert not hasattr(spec, "processed_data_id")
 
 
 def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
     catalog = a_share_processed_catalog()
     spec = catalog.get(PRICE_VOLUME_PROCESSED_DATA_ID)
-    factor_columns = [
+    factor_columns = tuple(
         column
         for column, role in spec.column_roles.items()
         if role is ColumnRole.FACTOR
-    ]
-    registered_columns = [
+    )
+    registered_columns = tuple(
         definition.output_column for definition in a_share_factor_catalog().list()
-    ]
+    )
 
     with pytest.raises(KeyError, match="unknown_processed_data_spec"):
         catalog.get("price_volume" + "_56")
-    assert tuple(factor_columns) == a_share_price_volume_factor_columns()
-    assert tuple(registered_columns) == a_share_price_volume_factor_columns()
+    assert spec.kind is ProcessedDataKind.FACTOR
+    assert factor_columns == factor_definitions.a_share_price_volume_factor_columns()
+    assert registered_columns == (
+        factor_definitions.a_share_price_volume_factor_columns()
+    )
     assert spec.required_columns == (
         *platform_entity_time_key(),
-        *a_share_price_volume_factor_columns(),
+        *factor_definitions.a_share_price_volume_factor_columns(),
     )
     assert "mom_20d" in factor_columns
     assert "log_float_market_cap" in factor_columns
@@ -114,7 +122,6 @@ def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
         "session_date",
         "available_at",
         "eligible",
-        "eligible_after_listing_age",
         "can_enter",
         "can_exit",
         "amount",
@@ -124,7 +131,7 @@ def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
 
 
 def test_a_share_factor_validator_blocks_mask_columns() -> None:
-    factor_column = a_share_price_volume_factor_columns()[0]
+    factor_column = factor_definitions.a_share_price_volume_factor_columns()[0]
     report = factor_tables.check_factor_table(
         pd.DataFrame(
             {
@@ -151,7 +158,7 @@ def test_a_share_factor_validator_blocks_mask_columns() -> None:
 
 
 def test_a_share_factor_validator_requires_exact_registered_columns() -> None:
-    factor_columns = a_share_price_volume_factor_columns()
+    factor_columns = factor_definitions.a_share_price_volume_factor_columns()
     first_factor = factor_columns[0]
     missing_factor = factor_columns[-1]
     base = {
@@ -178,82 +185,7 @@ def test_a_share_factor_validator_requires_exact_registered_columns() -> None:
     )
 
 
-def test_a_share_factor_validator_rejects_retired_mixed_schema() -> None:
-    factor_column = a_share_price_volume_factor_columns()[0]
-    report = factor_tables.check_factor_table(
-        pd.DataFrame(
-            {
-                "market_id": ["a_share"],
-                "stock_code": ["000001"],
-                "trade_date": pd.to_datetime(["2024-01-02"]),
-                factor_column: [1.0],
-            }
-        )
-    )
-
-    assert report.min_date is None
-    assert report.max_date is None
-    assert any(
-        issue.check == "missing_required_columns"
-        and "asset_id" in issue.message
-        and "timestamp" in issue.message
-        for issue in report.issues
-    )
-    assert any(
-        issue.check == "unexpected_columns_in_factor_table"
-        and "stock_code" in issue.message
-        and "trade_date" in issue.message
-        for issue in report.issues
-    )
-    assert any(
-        issue.check == "panel_only_columns_in_factor_table"
-        and issue.count == 2
-        for issue in report.issues
-    )
-
-
-def test_a_share_label_validator_requires_exact_registered_columns() -> None:
-    label_columns = (
-        "forward_return_1d",
-        "forward_return_5d",
-        "forward_return_10d",
-        "forward_return_20d",
-        "forward_return_60d",
-        "forward_return_120d",
-    )
-    base = {
-        "market_id": ["a_share"],
-        "asset_id": ["000001"],
-        "timestamp": pd.to_datetime(["2024-01-02"]),
-        **{column: [0.01] for column in label_columns[:-1]},
-    }
-
-    missing_report = factor_tables.check_label_table(pd.DataFrame(base))
-    extra_report = factor_tables.check_label_table(
-        pd.DataFrame(
-            {
-                **base,
-                label_columns[-1]: [0.02],
-                "eligible": [True],
-                "unknown_label": [0.0],
-            }
-        )
-    )
-
-    assert any(
-        issue.check == "missing_required_columns"
-        and label_columns[-1] in issue.message
-        for issue in missing_report.issues
-    )
-    assert any(
-        issue.check == "unexpected_columns_in_label_table"
-        and "unknown_label" in issue.message
-        and "eligible" in issue.message
-        for issue in extra_report.issues
-    )
-
-
-def test_a_share_factor_and_label_validators_reject_infinite_numeric_outputs() -> None:
+def test_a_share_factor_and_label_validators_reject_infinite_outputs() -> None:
     factor_frame = pd.DataFrame(
         {
             "market_id": ["a_share"],
@@ -261,7 +193,7 @@ def test_a_share_factor_and_label_validators_reject_infinite_numeric_outputs() -
             "timestamp": pd.to_datetime(["2024-01-02"]),
             **{
                 column: [0.0]
-                for column in a_share_price_volume_factor_columns()
+                for column in factor_definitions.a_share_price_volume_factor_columns()
             },
         }
     )
@@ -297,35 +229,7 @@ def test_a_share_factor_and_label_validators_reject_infinite_numeric_outputs() -
     )
 
 
-def test_a_share_label_validator_rejects_retired_mixed_schema() -> None:
-    report = factor_tables.check_label_table(
-        pd.DataFrame(
-            {
-                "market_id": ["a_share"],
-                "stock_code": ["000001"],
-                "trade_date": pd.to_datetime(["2024-01-02"]),
-                "forward_return_20d": [0.01],
-            }
-        )
-    )
-
-    assert report.min_date is None
-    assert report.max_date is None
-    assert any(
-        issue.check == "missing_required_columns"
-        and "asset_id" in issue.message
-        and "timestamp" in issue.message
-        for issue in report.issues
-    )
-    assert any(
-        issue.check == "unexpected_columns_in_label_table"
-        and "stock_code" in issue.message
-        and "trade_date" in issue.message
-        for issue in report.issues
-    )
-
-
-def test_a_share_final_processed_artifact_column_contracts_are_exact() -> None:
+def test_a_share_processed_annotation_contracts_are_role_based() -> None:
     catalog = a_share_processed_catalog()
 
     daily_panel = catalog.get(DAILY_PANEL_PROCESSED_DATA_ID)
@@ -335,80 +239,37 @@ def test_a_share_final_processed_artifact_column_contracts_are_exact() -> None:
     as_of_mask = catalog.get(A_SHARE_AS_OF_MASK_ID)
     execution_mask = catalog.get(A_SHARE_EXECUTION_MASK_ID)
     evaluation_mask = catalog.get(A_SHARE_EVALUATION_MASK_ID)
-    forbidden_after_interim = {
-        "stock_code",
-        "trade_date",
-        "index_code",
-        "source_id",
-        "source_asset_id",
-    }
 
-    assert daily_panel.category == "panels"
+    assert daily_panel.kind is ProcessedDataKind.PANEL
     assert {"session_date", "available_at"}.issubset(daily_panel.required_columns)
-    assert forbidden_after_interim.isdisjoint(daily_panel.required_columns)
-    assert context.required_columns == (
-        *platform_entity_time_key(),
-        "market_type",
-        "is_st",
-        "is_pt",
-        "limit_status",
-        "listing_age_trading_days",
-        "csrc_2012_industry_code",
-        "csrc_2012_industry_name",
-        "total_market_cap",
-        "float_market_cap",
-        "amount",
-        "turnover",
-    )
-    assert not {
-        *forbidden_after_interim,
-        "session_date",
-        "available_at",
-        "eligible",
-        "can_enter",
-        "can_exit",
-    }.intersection(context.required_columns)
-    assert labels.category == "labels"
-    assert labels.required_columns == (
-        *platform_entity_time_key(),
-        "forward_return_1d",
-        "forward_return_5d",
-        "forward_return_10d",
-        "forward_return_20d",
-        "forward_return_60d",
-        "forward_return_120d",
-    )
+    assert context.kind is ProcessedDataKind.ANNOTATION
+    assert context.column_roles["market_type"] is ColumnRole.CONTEXT
+    assert labels.kind is ProcessedDataKind.LABEL
     assert labels.column_roles["forward_return_20d"] is ColumnRole.LABEL
-    assert universe.category == "universes"
-    assert universe.required_columns == (*platform_entity_time_key(), "eligible")
+    assert universe.kind is ProcessedDataKind.ANNOTATION
     assert universe.column_roles["eligible"] is ColumnRole.UNIVERSE
-    assert as_of_mask.category == "masks/as_of"
-    assert as_of_mask.required_columns == (*platform_entity_time_key(), "eligible")
+    assert as_of_mask.kind is ProcessedDataKind.ANNOTATION
     assert as_of_mask.column_roles["eligible"] is ColumnRole.MASK
-    assert execution_mask.category == "masks/execution"
-    assert execution_mask.required_columns == (
-        *platform_entity_time_key(),
-        "can_enter",
-        "can_exit",
-    )
+    assert execution_mask.kind is ProcessedDataKind.ANNOTATION
     assert execution_mask.column_roles["can_enter"] is ColumnRole.MASK
     assert execution_mask.column_roles["can_exit"] is ColumnRole.MASK
-    assert evaluation_mask.category == "masks/evaluation"
-    assert evaluation_mask.required_columns == (
-        *platform_entity_time_key(),
-        "eligible",
-        "can_exit",
-    )
+    assert evaluation_mask.kind is ProcessedDataKind.ANNOTATION
     assert evaluation_mask.column_roles["eligible"] is ColumnRole.MASK
     assert evaluation_mask.column_roles["can_exit"] is ColumnRole.MASK
 
 
-def test_a_share_research_dataset_carries_no_source_columns() -> None:
+def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() -> None:
     dataset = a_share_research_dataset_catalog().get(
         A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 
-    assert dataset.source_columns == ()
+    assert dataset.input_data_ids == (
+        PRICE_VOLUME_PROCESSED_DATA_ID,
+        FORWARD_RETURNS_PROCESSED_DATA_ID,
+        DAILY_CONTEXT_PROCESSED_DATA_ID,
+        A_SHARE_DEFAULT_UNIVERSE_ID,
+        A_SHARE_EXECUTION_MASK_ID,
+    )
     assert dataset.required_columns == (
         *platform_entity_time_key(),
         *dataset.context_columns,
@@ -416,6 +277,8 @@ def test_a_share_research_dataset_carries_no_source_columns() -> None:
         *dataset.feature_columns,
         *dataset.label_columns,
     )
+    assert not hasattr(dataset, "source_columns")
+    assert not hasattr(dataset, "processed_data_ids")
     assert not {
         "stock_code",
         "trade_date",

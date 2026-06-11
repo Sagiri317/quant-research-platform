@@ -59,34 +59,29 @@ def build_validation_summary(
         if not manifest:
             missing_dataset_manifests.append(_logical_path(root))
             continue
-        dataset_id = str(
-            manifest.get("dataset_id")
-            or manifest.get("processed_data_id")
-            or manifest.get("interim_data_id")
-            or _logical_path(root)
-        )
+        data_id = str(manifest.get("data_id") or _logical_path(root))
         validation_status = manifest.get("validation_status")
         if validation_status is not None and str(validation_status).lower() not in {
             "pass",
             "ok",
         }:
-            dataset_failures.append(dataset_id)
+            dataset_failures.append(data_id)
         null_summary = _int_mapping(manifest.get("null_count_summary"))
         key_columns = tuple(str(item) for item in manifest.get("primary_key") or ())
         if any(null_summary.get(column, 0) > 0 for column in key_columns):
-            null_failures.append(dataset_id)
+            null_failures.append(data_id)
         if int(manifest.get("duplicate_primary_key_count") or 0) > 0:
-            duplicate_failures.append(dataset_id)
+            duplicate_failures.append(data_id)
         non_finite = _int_mapping(manifest.get("non_finite_count_summary"))
         if any(count > 0 for count in non_finite.values()):
-            non_finite_failures.append(dataset_id)
+            non_finite_failures.append(data_id)
         if str(manifest).find("source_asset_id") >= 0 and str(
             manifest.get("logical_layer", "")
         ) in {"processed", "research"}:
-            source_local_leaks.append(dataset_id)
+            source_local_leaks.append(data_id)
         date_ranges.append(
             {
-                "dataset_id": dataset_id,
+                "data_id": data_id,
                 "date_min": manifest.get("date_min"),
                 "date_max": manifest.get("date_max"),
                 "partition_count": manifest.get("partition_count"),

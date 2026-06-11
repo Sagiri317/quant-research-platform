@@ -1,43 +1,19 @@
-"""从 interim CSMAR tables 构建私有 A-share research panel 文件。"""
-
-# ruff: noqa: E402
+"""Pure A-share daily panel calculations from source-normalized interim frames."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-from pathlib import Path
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
 from quant_research_platform.markets.implementations.a_share.calendar import (
+    CURRENT_A_SHARE_MARKET_TYPES,
     compute_listing_age_trading_days,
 )
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_processed_catalog,
-)
-from quant_research_platform.markets.implementations.a_share.processed.io import (
-    layout_from_processed_root,
-)
-from quant_research_platform.runtime.resources import (
-    ChunkAxis,
-    ChunkPlanner,
-    RuntimeResourcePolicy,
-)
-from quant_research_platform.storage.datasets import (
-    inspect_dataset,
-    read_dataset,
-    write_dataset,
-)
-
-from ._dataset_helpers import (
-    chunked_values,
-    dataset_asset_ids,
-    dataset_row_count,
-    is_missing_dataset_artifact_error,
-    read_dataset_asset_chunk,
-    year_partition_filter,
+from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_MARKET_ID,
 )
 
 _CANONICAL_NAMES = canonical_field_names()
@@ -48,17 +24,10 @@ CANONICAL_DAILY_COLUMNS: tuple[str, ...] = (
     _CANONICAL_NAMES.session_date,
     _CANONICAL_NAMES.available_at,
 )
+DAILY_ST_STATUS_CODES = {2, 3, 5, 6, 8, 9, 11, 12, 14, 15}
 
 
-def _ensure_datetime(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    result = frame.copy()
-    for column in columns:
-        if column in result.columns:
-            result[column] = pd.to_datetime(result[column], errors="coerce")
-    return result
-
-
-def build_research_panel(
+def compute_daily_panel(
     daily_market: pd.DataFrame,
     *,
     stock_master: pd.DataFrame,
@@ -66,17 +35,14 @@ def build_research_panel(
     trading_calendar: pd.DataFrame,
     min_listing_trading_days: int = 120,
 ) -> pd.DataFrame:
-    """从 interim tables 构建第一版 A-share research panel。
-
-    The panel stays at the stock-date grain. Static stock attributes are joined
-    directly, while share counts use an as-of join so each trading date sees the
-    latest known capital structure, not a future share-change record.
-    """
+    """Compute the A-share processed daily panel from source interim frames."""
 
     daily = _ensure_datetime(
-        daily_market,
+        _with_a_share_time_fields(_with_a_share_asset_keys(daily_market)),
         ["timestamp", "session_date", "available_at"],
     ).copy()
+    daily = _with_a_share_market_semantics(daily)
+    daily = daily.loc[daily["is_a_share_scope"].astype(bool)].copy()
     missing_canonical = [
         column for column in CANONICAL_DAILY_COLUMNS if column not in daily.columns
     ]
@@ -86,9 +52,13 @@ def build_research_panel(
             + ", ".join(missing_canonical)
         )
     stocks = _ensure_datetime(
-        stock_master, ["listing_date", "delisting_date", "status_change_date"]
+        _with_a_share_asset_keys(stock_master),
+        ["listing_date", "delisting_date", "status_change_date"],
     )
-    cap = _ensure_datetime(market_cap, ["timestamp", "share_change_date"])
+    cap = _ensure_datetime(
+        _with_a_share_asset_keys(market_cap),
+        ["timestamp", "share_change_date"],
+    )
     if "timestamp" not in cap or cap["timestamp"].isna().any():
         raise ValueError("missing_market_cap_panel_timestamp")
 
@@ -149,9 +119,9 @@ def build_research_panel(
                 stock_result = stock_result.drop(columns=["asset_id_capchg"])
         merged_groups.append(stock_result)
     panel = pd.concat(merged_groups, ignore_index=True)
-    panel["turnover"] = pd.to_numeric(panel["volume"], errors="coerce") / pd.to_numeric(
-        panel["a_float_shares"], errors="coerce"
-    )
+    volume = pd.to_numeric(panel["volume"], errors="coerce")
+    a_float_shares = pd.to_numeric(panel["a_float_shares"], errors="coerce")
+    panel["turnover"] = volume.div(a_float_shares.where(a_float_shares.gt(0)))
     panel = panel.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
         drop=True
     )
@@ -171,14 +141,19 @@ def build_research_panel(
         & pd.to_numeric(panel["volume"], errors="coerce").gt(0)
         & pd.to_numeric(panel["turnover"], errors="coerce").ge(0)
     )
-    base = panel["eligible_base"].astype(bool) if "eligible_base" in panel else True
+    panel["eligible_base"] = (
+        panel["is_a_share_scope"]
+        & panel["is_trading"]
+        & ~panel["is_st"]
+        & ~panel["is_pt"]
+    )
     panel["eligible"] = (
-        base & panel["eligible_after_listing_age"] & panel["eligible_liquidity"]
+        panel["eligible_base"]
+        & panel["eligible_after_listing_age"]
+        & panel["eligible_liquidity"]
     )
     panel = _add_one_word_limit_masks(panel)
     grouped = panel.groupby("asset_id", sort=False)
-    # 入场和出场标记基于下一交易日，因为 label 使用下一次可执行开盘。
-    # 涨停阻断新开仓，跌停阻断退出。
     panel["next_day_is_trading"] = _shifted_bool_mask(grouped["is_trading"])
     panel["next_day_limit_status"] = grouped["limit_status"].shift(-1)
     next_one_word_limit_up = _shifted_bool_mask(grouped["one_word_limit_up"])
@@ -198,10 +173,69 @@ def build_research_panel(
         "session_date",
         "available_at",
     ]
+    panel = panel.drop(
+        columns=[
+            column
+            for column in ("source_asset_id", "stock_code", "index_code")
+            if column in panel.columns
+        ]
+    )
     ordered = [column for column in leading if column in panel.columns]
     ordered.extend(column for column in panel.columns if column not in ordered)
-    panel = panel[ordered]
-    return panel
+    return panel[ordered]
+
+
+def _with_a_share_asset_keys(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "asset_id" not in result.columns:
+        if "source_asset_id" not in result.columns:
+            raise ValueError("missing_source_asset_id")
+        result["asset_id"] = result["source_asset_id"].astype(str)
+    result["market_id"] = A_SHARE_MARKET_ID
+    return result
+
+
+def _with_a_share_time_fields(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "timestamp" not in result.columns:
+        raise ValueError("missing_source_timestamp")
+    timestamp = pd.to_datetime(result["timestamp"], errors="coerce")
+    result["timestamp"] = timestamp
+    result["session_date"] = timestamp
+    result["available_at"] = timestamp
+    return result
+
+
+def _with_a_share_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    result["trading_status_code"] = pd.to_numeric(
+        result["trading_status_code"],
+        errors="coerce",
+    )
+    result["filling_flag"] = pd.to_numeric(result["filling_flag"], errors="coerce")
+    result["market_type"] = pd.to_numeric(result["market_type"], errors="coerce")
+    result["limit_status"] = pd.to_numeric(
+        result["limit_status"],
+        errors="coerce",
+    )
+    filled_limit_status = result["limit_status"].fillna(0)
+    result["is_limit_up"] = filled_limit_status.eq(1)
+    result["is_limit_down"] = filled_limit_status.eq(-1)
+    result["is_trading"] = result["filling_flag"].eq(0)
+    result["is_st"] = result["trading_status_code"].isin(DAILY_ST_STATUS_CODES)
+    result["is_pt"] = result["trading_status_code"].eq(16)
+    result["is_a_share_scope"] = result["market_type"].isin(
+        CURRENT_A_SHARE_MARKET_TYPES
+    )
+    return result
+
+
+def _ensure_datetime(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    result = frame.copy()
+    for column in columns:
+        if column in result.columns:
+            result[column] = pd.to_datetime(result[column], errors="coerce")
+    return result
 
 
 def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
@@ -363,130 +397,4 @@ def _first_static_stock_value(
     return values.to_dict()
 
 
-def build_panel_asset_batches_from_interim(
-    *,
-    interim_root: Path,
-    processed_root: Path,
-    start_year: int,
-    end_year: int,
-    end_date: str,
-    calculation_end_year: int | None = None,
-    min_listing_trading_days: int = 120,
-    asset_chunk_size: int | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> tuple[Path, int]:
-    """Build and write the A-share daily panel in asset batches."""
-
-    output_end_year = calculation_end_year or end_year
-    stock_master = _read_interim_data(interim_root, "stock_master")
-    market_cap = _read_interim_data(interim_root, "market_cap")
-    try:
-        trading_calendar = _read_interim_data(interim_root, "trading_calendar")
-    except (FileNotFoundError, ValueError) as exc:
-        if is_missing_dataset_artifact_error(exc):
-            raise ValueError("missing_trading_calendar_interim") from exc
-        raise
-    daily_root = Path(interim_root) / "daily_market"
-    years = tuple(range(start_year, output_end_year + 1))
-    asset_ids = dataset_asset_ids(
-        daily_root,
-        years=years,
-        error_code="missing_daily_market_interim",
-    )
-    daily_columns = tuple(inspect_dataset(daily_root).columns)
-    chunk_size = asset_chunk_size or _planned_daily_panel_asset_chunk_size(
-        daily_root=daily_root,
-        years=years,
-        asset_ids=asset_ids,
-        resource_policy=resource_policy,
-    )
-    catalog = a_share_processed_catalog()
-    spec = catalog.get("daily_panel")
-    row_count = 0
-
-    def _output_chunks() -> Iterator[pd.DataFrame]:
-        nonlocal row_count
-        for asset_chunk in chunked_values(asset_ids, chunk_size):
-            daily = read_dataset_asset_chunk(
-                daily_root,
-                years=years,
-                columns=daily_columns,
-                asset_ids=asset_chunk,
-            )
-            if daily.empty:
-                continue
-            panel = build_research_panel(
-                daily,
-                stock_master=_filter_asset_frame(stock_master, asset_chunk),
-                market_cap=_filter_asset_frame(market_cap, asset_chunk),
-                trading_calendar=trading_calendar,
-                min_listing_trading_days=min_listing_trading_days,
-            )
-            panel["timestamp"] = pd.to_datetime(panel["timestamp"])
-            output = panel.loc[
-                panel["timestamp"].dt.year.between(start_year, end_year)
-            ].reset_index(drop=True)
-            output = output.loc[
-                output["timestamp"] <= pd.Timestamp(end_date)
-            ].reset_index(drop=True)
-            output = output.loc[:, list(spec.required_columns)].copy()
-            output = output.sort_values(list(spec.primary_key)).reset_index(drop=True)
-            if output.empty:
-                continue
-            row_count += len(output)
-            yield output
-
-    artifact_root = layout_from_processed_root(processed_root).processed_data_root(
-        spec.market_id,
-        spec.category,
-        spec.processed_data_id,
-    )
-    write_dataset(
-        artifact_root,
-        _output_chunks(),
-        spec=spec,
-    )
-    return artifact_root, row_count
-
-
-def _read_interim_data(
-    interim_root: Path,
-    interim_data_id: str,
-    *,
-    years: tuple[int, ...] | None = None,
-) -> pd.DataFrame:
-    artifact_root = interim_root / interim_data_id
-    return read_dataset(artifact_root, partition_filter=year_partition_filter(years))
-
-
-def _filter_asset_frame(
-    frame: pd.DataFrame,
-    asset_ids: tuple[str, ...],
-) -> pd.DataFrame:
-    if "asset_id" not in frame:
-        return frame.copy()
-    return frame.loc[frame["asset_id"].isin(set(asset_ids))].copy()
-
-
-def _planned_daily_panel_asset_chunk_size(
-    *,
-    daily_root: Path,
-    years: tuple[int, ...],
-    asset_ids: tuple[str, ...],
-    resource_policy: RuntimeResourcePolicy | None,
-) -> int:
-    total_rows = dataset_row_count(daily_root, years=years)
-    rows_per_asset = max(1, total_rows // max(1, len(asset_ids)))
-    input_width = max(1, len(inspect_dataset(daily_root).columns))
-    output_width = len(a_share_processed_catalog().get("daily_panel").required_columns)
-    working_width = input_width + output_width + 16
-    estimated_bytes_per_asset = max(1, rows_per_asset * working_width * 16)
-    plan = ChunkPlanner(resource_policy).plan(
-        axis=ChunkAxis.ASSET,
-        item_count=len(asset_ids),
-        estimated_bytes_per_item=estimated_bytes_per_asset,
-        lookahead_window=1,
-        output_width=output_width,
-        disjoint=True,
-    )
-    return plan.chunk_size
+__all__ = ["CANONICAL_DAILY_COLUMNS", "compute_daily_panel"]

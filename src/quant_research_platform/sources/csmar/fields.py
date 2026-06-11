@@ -5,6 +5,7 @@ from __future__ import annotations
 from quant_research_platform.contracts.columns import ColumnRole
 
 SOURCE_IDENTIFIER_FIELDS = {
+    "source_asset_id",
     "stock_code",
     "index_code",
     "trade_date",

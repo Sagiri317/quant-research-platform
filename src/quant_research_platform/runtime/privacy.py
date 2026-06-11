@@ -12,6 +12,7 @@ PRIVATE_DATA_LAYERS: tuple[str, ...] = (
     "raw",
     "interim",
     "processed",
+    "research",
     "reference_docs",
 )
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
@@ -20,7 +21,7 @@ _POSIX_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?<!\w)/(?:mnt|home|Users|tmp|var/tmp|private/tmp)/[^\r\n\t\"'<>|]+"
 )
 _REPO_PRIVATE_PATH_RE = re.compile(
-    r"(?i)\b(?:data/(?:raw|interim|processed|reference_docs)"
+    r"(?i)\b(?:data/(?:raw|interim|processed|research|reference_docs)"
     r"(?:/[^\s,;\"'<>|]+)?|reports/private_real(?:/[^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(

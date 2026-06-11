@@ -1,177 +1,296 @@
-"""A-share processed layer materialization orchestration."""
+"""A-share processed dataset materialization."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
-from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
+import pandas as pd
 
-from ..factors.build_factors import calculate_price_volume_factor_asset_batches
-from ..ids import PRICE_VOLUME_PROCESSED_DATA_ID
-from ..labels.build_labels import calculate_forward_returns_asset_batches
-from ..masks.build import write_masks_from_panel_dataset
-from ..universes.build import write_universe_from_panel_dataset
-from .contexts import write_contexts_from_panel_dataset
-from .panels import (
-    build_panel_asset_batches_from_interim,
+from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
+from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share.catalog import (
+    a_share_processed_catalog,
 )
+from quant_research_platform.markets.implementations.a_share.factors import (
+    calculations as factor_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.labels import (
+    calculations as label_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    annotations,
+    panels,
+)
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.storage.datasets import (
+    DatasetInspection,
+    inspect_dataset,
+    read_dataset,
+    write_dataset,
+)
+from quant_research_platform.storage.layout import StorageLayout
 
 
-@dataclass(frozen=True)
-class AShareProcessedBuildResult:
-    """Aggregate metadata for a processed-layer build run."""
-
-    row_counts: dict[str, int]
-    artifact_roots: dict[str, Path]
-
-
-def build_a_share_processed_layers(
+def materialize_processed_data(
     *,
-    interim_root: Path,
-    processed_root: Path,
-    start_year: int,
-    end_year: int,
-    end_date: str,
-    label_calculation_end_year: int | None = None,
-    min_listing_trading_days: int = 120,
-    metrics_recorder: ExecutionMetricsRecorder | None = None,
-) -> AShareProcessedBuildResult:
-    """Build panel, contexts, universes, masks, factors, and labels.
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    data_ids: tuple[str, ...] | None = None,
+    kinds: frozenset[ProcessedDataKind] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> dict[str, DatasetInspection]:
+    """Materialize registered A-share processed datasets."""
 
-    This orchestrator owns sequencing only. Persisted outputs remain owned by
-    spec-driven storage writers called inside each layer builder.
-    """
+    del resource_policy
+    if (data_ids is None) == (kinds is None):
+        raise ValueError("data_ids_xor_kinds_required")
+    catalog = a_share_processed_catalog()
+    if data_ids is not None:
+        targets = tuple(catalog.get(data_id) for data_id in data_ids)
+    else:
+        assert kinds is not None
+        targets = tuple(spec for spec in catalog.list() if spec.kind in kinds)
+    if not targets:
+        raise ValueError("no_processed_targets")
+    written: dict[str, DatasetInspection] = {}
+    for spec in targets:
+        _materialize_one(
+            spec,
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            written=written,
+            requested=True,
+        )
+    return written
 
-    calculation_end_year = label_calculation_end_year or end_year
-    with _record_step(
-        metrics_recorder,
-        "build_daily_panel",
-        logical_layer="processed",
-        dataset_id="daily_panel",
-    ) as record:
-        panel_root, panel_rows = build_panel_asset_batches_from_interim(
-            interim_root=interim_root,
-            processed_root=processed_root,
-            start_year=start_year,
-            end_year=end_year,
-            end_date=end_date,
-            calculation_end_year=calculation_end_year,
-            min_listing_trading_days=min_listing_trading_days,
+
+def _materialize_one(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    written: dict[str, DatasetInspection],
+    requested: bool,
+) -> DatasetInspection:
+    root = _processed_root(layout, spec)
+    if spec.data_id in written:
+        return written[spec.data_id]
+    if root.exists():
+        if requested:
+            raise ValueError("dataset_exists")
+        _require_dataset_coverage(root, time_window)
+        return inspect_dataset(root, time_window=time_window)
+    if spec.kind is ProcessedDataKind.PANEL:
+        return _write_panel(
+            spec,
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            written=written,
         )
-        record.output_rows = panel_rows
-    with _record_step(
-        metrics_recorder,
-        "build_context",
-        logical_layer="processed",
-        dataset_id="daily_context",
-    ) as record:
-        context_root, context_rows = write_contexts_from_panel_dataset(
-            processed_root=processed_root,
-            start_year=start_year,
-            end_year=end_year,
+    panel_spec = _catalog_get("daily_panel")
+    panel_root = _processed_root(layout, panel_spec)
+    if not panel_root.exists():
+        _materialize_one(
+            panel_spec,
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            written=written,
+            requested=False,
         )
-        record.input_rows = panel_rows
-        record.output_rows = context_rows
-    with _record_step(
-        metrics_recorder,
-        "build_universe",
-        logical_layer="processed",
-        dataset_id="a_share_default",
-    ) as record:
-        universe_root, universe_rows = write_universe_from_panel_dataset(
-            processed_root=processed_root,
-            start_year=start_year,
-            end_year=end_year,
+    elif panel_spec.data_id not in written:
+        _require_dataset_coverage(panel_root, time_window)
+    if spec.kind is ProcessedDataKind.ANNOTATION:
+        return _write_annotation(
+            spec,
+            layout=layout,
+            time_window=time_window,
+            written=written,
         )
-        record.input_rows = panel_rows
-        record.output_rows = universe_rows
-    with _record_step(
-        metrics_recorder,
-        "build_masks",
-        logical_layer="processed",
-    ) as record:
-        mask_outputs = write_masks_from_panel_dataset(
-            processed_root=processed_root,
-            start_year=start_year,
-            end_year=end_year,
+    if spec.kind is ProcessedDataKind.FACTOR:
+        return _write_factors(
+            spec,
+            layout=layout,
+            time_window=time_window,
+            written=written,
         )
-        record.input_rows = panel_rows
-        record.output_rows = sum(rows for _, rows in mask_outputs.values())
-    with _record_step(
-        metrics_recorder,
-        "build_factor_price_volume",
-        logical_layer="processed",
-        dataset_id=PRICE_VOLUME_PROCESSED_DATA_ID,
-    ) as record:
-        factor_root, factor_rows = calculate_price_volume_factor_asset_batches(
-            interim_root=interim_root,
-            processed_root=processed_root,
-            start_year=start_year,
-            end_year=end_year,
+    if spec.kind is ProcessedDataKind.LABEL:
+        return _write_labels(
+            spec,
+            layout=layout,
+            time_window=time_window,
+            written=written,
         )
-        record.input_rows = panel_rows
-        record.output_rows = factor_rows
-    with _record_step(
-        metrics_recorder,
-        "build_label_forward_returns",
-        logical_layer="processed",
-        dataset_id="forward_returns",
-    ) as record:
-        label_root, label_rows = calculate_forward_returns_asset_batches(
-            processed_root=processed_root,
-            start_year=start_year,
-            end_year=end_year,
-        )
-        record.input_rows = panel_rows
-        record.output_rows = label_rows
-    artifact_roots = {
-        "daily_panel": panel_root,
-        "daily_context": context_root,
-        "a_share_default": universe_root,
-        PRICE_VOLUME_PROCESSED_DATA_ID: factor_root,
-        "forward_returns": label_root,
-    }
-    row_counts = {
-        "daily_panel": panel_rows,
-        "daily_context": context_rows,
-        "a_share_default": universe_rows,
-        PRICE_VOLUME_PROCESSED_DATA_ID: factor_rows,
-        "forward_returns": label_rows,
-    }
-    for mask_kind, (path, rows) in mask_outputs.items():
-        artifact_roots[f"mask_{mask_kind}"] = path
-        row_counts[f"mask_{mask_kind}"] = rows
-    return AShareProcessedBuildResult(
-        row_counts=row_counts,
-        artifact_roots=artifact_roots,
+    raise ValueError(f"unsupported_processed_kind: {spec.kind}")
+
+
+def _write_panel(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    written: dict[str, DatasetInspection],
+) -> DatasetInspection:
+    daily_market = read_dataset(
+        layout.interim_data_root(source_id, "daily_market"),
+        time_window=time_window,
+    )
+    stock_master = read_dataset(layout.interim_data_root(source_id, "stock_master"))
+    market_cap = read_dataset(layout.interim_data_root(source_id, "market_cap"))
+    trading_calendar = read_dataset(
+        layout.interim_data_root(source_id, "trading_calendar")
+    )
+    panel = panels.compute_daily_panel(
+        daily_market,
+        stock_master=stock_master,
+        market_cap=market_cap,
+        trading_calendar=trading_calendar,
+    )
+    panel = _filter_output_window(panel, time_window)
+    output = panel.loc[:, list(spec.required_columns)].copy()
+    return _write_and_inspect(
+        spec,
+        output,
+        layout=layout,
+        time_window=time_window,
+        written=written,
     )
 
 
-@contextmanager
-def _record_step(
-    recorder: ExecutionMetricsRecorder | None,
-    step_name: str,
+def _write_annotation(
+    spec: ProcessedDataSpec,
     *,
-    logical_layer: str | None = None,
-    dataset_id: str | None = None,
-):
-    if recorder is None:
-        yield _NoopMetric()
-        return
-    with recorder.record(
-        step_name,
-        logical_layer=logical_layer,
-        dataset_id=dataset_id,
-    ) as metric:
-        yield metric
+    layout: StorageLayout,
+    time_window: TimeWindow,
+    written: dict[str, DatasetInspection],
+) -> DatasetInspection:
+    panel = read_dataset(
+        _processed_root(layout, _catalog_get("daily_panel")),
+        time_window=time_window,
+    )
+    outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
+    return _write_and_inspect(
+        spec,
+        outputs[spec.data_id],
+        layout=layout,
+        time_window=time_window,
+        written=written,
+    )
 
 
-@dataclass
-class _NoopMetric:
-    input_rows: int | None = None
-    output_rows: int | None = None
+def _write_factors(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    time_window: TimeWindow,
+    written: dict[str, DatasetInspection],
+) -> DatasetInspection:
+    panel_root = _processed_root(layout, _catalog_get("daily_panel"))
+    available = inspect_dataset(panel_root)
+    available_window = _available_window(available)
+    lookback_days = factor_calculations.price_volume_lookback_days()
+    read_window = TimeWindow(
+        max(
+            available_window.start,
+            time_window.start - timedelta(days=lookback_days * 3),
+        ),
+        min(available_window.end, time_window.end),
+    )
+    panel = read_dataset(panel_root, time_window=read_window)
+    factors = factor_calculations.calculate_price_volume_factors_for_panel(
+        panel,
+    )
+    output = _filter_output_window(factors, time_window)
+    output = output.loc[:, list(spec.required_columns)].copy()
+    return _write_and_inspect(
+        spec,
+        output,
+        layout=layout,
+        time_window=time_window,
+        written=written,
+    )
 
 
-__all__ = ["AShareProcessedBuildResult", "build_a_share_processed_layers"]
+def _write_labels(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    time_window: TimeWindow,
+    written: dict[str, DatasetInspection],
+) -> DatasetInspection:
+    panel_root = _processed_root(layout, _catalog_get("daily_panel"))
+    available = inspect_dataset(panel_root)
+    available_window = _available_window(available)
+    read_window = TimeWindow(
+        max(available_window.start, time_window.start),
+        available_window.end,
+    )
+    panel = read_dataset(panel_root, time_window=read_window)
+    labels = label_calculations.calculate_forward_return_labels_for_panel(
+        panel,
+    )
+    output = _filter_output_window(labels, time_window)
+    output = output.loc[:, list(spec.required_columns)].copy()
+    return _write_and_inspect(
+        spec,
+        output,
+        layout=layout,
+        time_window=time_window,
+        written=written,
+    )
+
+
+def _write_and_inspect(
+    spec: ProcessedDataSpec,
+    frame: pd.DataFrame,
+    *,
+    layout: StorageLayout,
+    time_window: TimeWindow,
+    written: dict[str, DatasetInspection],
+) -> DatasetInspection:
+    root = _processed_root(layout, spec)
+    if root.exists():
+        raise ValueError("dataset_exists")
+    output = frame.sort_values(list(spec.primary_key)).reset_index(drop=True)
+    write_dataset(root, output, spec=spec)
+    inspection = inspect_dataset(root, time_window=time_window)
+    written[spec.data_id] = inspection
+    return inspection
+
+
+def _processed_root(layout: StorageLayout, spec: ProcessedDataSpec) -> Path:
+    return layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+
+
+def _catalog_get(data_id: str) -> ProcessedDataSpec:
+    return a_share_processed_catalog().get(data_id)
+
+
+def _filter_output_window(frame: pd.DataFrame, time_window: TimeWindow) -> pd.DataFrame:
+    output = frame.copy()
+    output["timestamp"] = pd.to_datetime(output["timestamp"], errors="coerce")
+    dates = output["timestamp"].dt.date
+    mask = (dates >= time_window.start) & (dates <= time_window.end)
+    return output.loc[mask.fillna(False)].copy()
+
+
+def _require_dataset_coverage(root: Path, time_window: TimeWindow) -> None:
+    available = _available_window(inspect_dataset(root))
+    if available.start > time_window.start or available.end < time_window.end:
+        raise ValueError("insufficient_dataset_coverage")
+
+
+def _available_window(inspection: DatasetInspection) -> TimeWindow:
+    if inspection.date_min is None or inspection.date_max is None:
+        raise ValueError("time_window_not_supported")
+    return TimeWindow(inspection.date_min, inspection.date_max)
+
+
+__all__ = ["materialize_processed_data"]

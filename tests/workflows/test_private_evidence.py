@@ -11,6 +11,7 @@ from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
     InterimDataSpec,
+    ProcessedDataKind,
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
@@ -104,24 +105,25 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
 
     def build_processed(**kwargs):
         calls.append("processed")
-        processed = Path(kwargs["processed_root"])
-        artifact_root = processed / "factors" / "price_volume"
+        artifact_root = (
+            kwargs["layout"].project_root
+            / "data"
+            / "processed"
+            / "a_share"
+            / "factor"
+            / "price_volume"
+        )
         _persist_fake_artifact(artifact_root, "price_volume", "processed")
-        return type(
-            "Result",
-            (),
-            {
-                "row_counts": {"price_volume": 2},
-                "artifact_roots": {"price_volume": artifact_root},
-            },
-        )()
+        inspection = inspect_dataset(artifact_root)
+        return {"price_volume": inspection}
 
     def assemble_dataset(**kwargs):
         calls.append("research")
-        processed = Path(kwargs["processed_root"])
         artifact_root = (
-            processed
-            / "research_datasets"
+            kwargs["layout"].project_root
+            / "data"
+            / "research"
+            / "a_share"
             / "a_share_price_volume_forward_returns"
         )
         _persist_fake_artifact(
@@ -131,19 +133,19 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
         )
         return artifact_root
 
-    monkeypatch.setattr(module, "a_share_csmar_import_interim_data", import_interim)
-    monkeypatch.setattr(module, "build_a_share_processed_layers", build_processed)
+    monkeypatch.setattr(module, "materialize_interim_data", import_interim)
     monkeypatch.setattr(
-        module,
-        "assemble_research_dataset_from_processed",
-        assemble_dataset,
+        module.a_share_materializer,
+        "materialize_processed_data",
+        build_processed,
     )
+    monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
     monkeypatch.setattr(
         module,
         "run_evaluation_from_research_dataset",
         lambda **kwargs: (
             calls.append("evaluation")
-            or evidence_years.append(kwargs["years"])
+            or evidence_years.append((kwargs["time_window"].start.year,))
             or evaluation_run_ids.append(kwargs["run_id"])
             or Path("evaluation")
         ),
@@ -153,7 +155,7 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
         "run_prediction_from_research_dataset",
         lambda **kwargs: (
             calls.append("prediction")
-            or evidence_years.append(kwargs["years"])
+            or evidence_years.append((kwargs["time_window"].start.year,))
             or prediction_ids.append(kwargs["prediction_id"])
             or Path("prediction")
         ),
@@ -240,18 +242,16 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
             {"artifact_roots": {"daily_market": artifact_root}},
         )()
 
-    monkeypatch.setattr(module, "a_share_csmar_import_interim_data", import_interim)
+    monkeypatch.setattr(module, "materialize_interim_data", import_interim)
     monkeypatch.setattr(
-        module,
-        "build_a_share_processed_layers",
-        lambda **kwargs: type("Result", (), {"row_counts": {}, "artifact_roots": {}})(),
+        module.a_share_materializer,
+        "materialize_processed_data",
+        lambda **kwargs: {},
     )
     monkeypatch.setattr(
         module,
-        "assemble_research_dataset_from_processed",
-        lambda **kwargs: _persist_fake_research_root(
-            Path(kwargs["processed_root"])
-        ),
+        "assemble_research_dataset",
+        _persist_fake_research_root,
     )
     monkeypatch.setattr(
         module,
@@ -297,18 +297,16 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
             {"artifact_roots": {"daily_market": artifact_root}},
         )()
 
-    monkeypatch.setattr(module, "a_share_csmar_import_interim_data", import_interim)
+    monkeypatch.setattr(module, "materialize_interim_data", import_interim)
     monkeypatch.setattr(
-        module,
-        "build_a_share_processed_layers",
-        lambda **kwargs: type("Result", (), {"row_counts": {}, "artifact_roots": {}})(),
+        module.a_share_materializer,
+        "materialize_processed_data",
+        lambda **kwargs: {},
     )
     monkeypatch.setattr(
         module,
-        "assemble_research_dataset_from_processed",
-        lambda **kwargs: _persist_fake_research_root(
-            Path(kwargs["processed_root"])
-        ),
+        "assemble_research_dataset",
+        _persist_fake_research_root,
     )
     monkeypatch.setattr(
         module,
@@ -363,17 +361,20 @@ def _persist_fake_artifact(
     dataset_id: str,
     logical_layer: str,
 ) -> None:
+    frame = _interim_frame() if logical_layer == "interim" else _dataset_frame()
     write_dataset(
         artifact_root,
-        _dataset_frame(),
+        frame,
         spec=_dataset_spec(dataset_id, logical_layer),
     )
 
 
-def _persist_fake_research_root(processed_root: Path) -> Path:
+def _persist_fake_research_root(**kwargs) -> Path:
     artifact_root = (
-        processed_root
-        / "research_datasets"
+        kwargs["layout"].project_root
+        / "data"
+        / "research"
+        / "a_share"
         / "a_share_price_volume_forward_returns"
     )
     _persist_fake_artifact(
@@ -395,12 +396,32 @@ def _dataset_frame() -> pd.DataFrame:
     )
 
 
+def _interim_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "source_asset_id": ["asset_a"],
+            "timestamp": pd.to_datetime(["2014-01-02"]),
+            "value": [1.0],
+        }
+    )
+
+
 def _dataset_spec(
     dataset_id: str,
     logical_layer: str,
 ) -> InterimDataSpec | ProcessedDataSpec | ResearchDatasetSpec:
-    base = {
-        "market_id": MarketId("a_share"),
+    source_base = {
+        "frequency": DataFrequency.DAILY,
+        "grain": DataGrain.ASSET_TIMESTAMP,
+        "column_roles": {
+            "source_asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.FACTOR,
+        },
+        "primary_key": ("source_asset_id", "timestamp"),
+        "partition_columns": ("year",),
+    }
+    market_base = {
         "frequency": DataFrequency.DAILY,
         "grain": DataGrain.ASSET_TIMESTAMP,
         "column_roles": {
@@ -414,21 +435,23 @@ def _dataset_spec(
     }
     if logical_layer == "interim":
         return InterimDataSpec(
-            **base,
+            **source_base,
+            data_id=dataset_id,
             source_id=SourceId("csmar"),
-            interim_data_id=dataset_id,
         )
     if logical_layer == "processed":
         return ProcessedDataSpec(
-            **base,
-            category="factors",
-            processed_data_id=dataset_id,
+            **market_base,
+            data_id=dataset_id,
+            market_id=MarketId("a_share"),
+            kind=ProcessedDataKind.FACTOR,
         )
     if logical_layer == "research":
         return ResearchDatasetSpec(
-            **base,
-            dataset_id=dataset_id,
-            processed_data_ids=("price_volume",),
+            **market_base,
+            data_id=dataset_id,
+            market_id=MarketId("a_share"),
+            input_data_ids=("price_volume",),
             feature_columns=("value",),
             label_columns=(),
         )

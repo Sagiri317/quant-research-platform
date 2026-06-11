@@ -1,6 +1,6 @@
 # Clean Rewrite 0.1 Private Verification Summary
 
-This summary records aggregate-only processed artifact inventory for QRP Clean Rewrite `0.1.0`.
+This summary records aggregate-only sealed dataset inventory for QRP Clean Rewrite `0.1.0`.
 
 Machine-readable summary lives in `docs/reports/clean-rewrite-0.1-private-verification-summary.json`.
 
@@ -10,15 +10,15 @@ merge-ready evidence for the catalog-driven `price_volume` artifact.
 
 | Logical Root | Area | Rows | Columns | Period |
 | --- | --- | ---: | ---: | --- |
-| processed/a_share/contexts/daily_context | supporting_layers_coverage_2014_2025 | 12231140 | 14 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/factors/(superseded count-based factor artifact) | factor_value_parity_superseded | 12231140 | 69 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/labels/forward_returns | label_value_parity | 12231140 | 14 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/masks/as_of/a_share_as_of | masks_universes_parity | 12231140 | 6 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/masks/evaluation/a_share_evaluation | masks_universes_parity | 12231140 | 7 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/masks/execution/a_share_execution | masks_universes_parity | 12231140 | 7 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/panels/daily_panel | full_historical_daily_panel_status | 12231140 | 48 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/research_datasets/a_share_price_volume_forward_returns | research_dataset_parity | 12231140 | 75 | 2014-01-01 through 2025-12-31 |
-| processed/a_share/universes/a_share_default | masks_universes_parity | 12231140 | 6 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/annotation/daily_context | supporting_layers_coverage_2014_2025 | 12231140 | 14 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/factor/price_volume | factor_value_parity_superseded | 12231140 | 69 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/label/forward_returns | label_value_parity | 12231140 | 14 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/annotation/a_share_as_of | masks_universes_parity | 12231140 | 6 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/annotation/a_share_evaluation | masks_universes_parity | 12231140 | 7 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/annotation/a_share_execution | masks_universes_parity | 12231140 | 7 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/panel/daily_panel | full_historical_daily_panel_status | 12231140 | 48 | 2014-01-01 through 2025-12-31 |
+| research/a_share/a_share_price_volume_forward_returns | research_dataset_parity | 12231140 | 75 | 2014-01-01 through 2025-12-31 |
+| processed/a_share/annotation/a_share_default | masks_universes_parity | 12231140 | 6 | 2014-01-01 through 2025-12-31 |
 
 Public-safe status:
 

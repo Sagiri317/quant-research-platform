@@ -6,16 +6,14 @@ current code-reading map, not a roadmap or historical closeout.
 ## Flow
 
 ```text
-catalog/data_products -> data_product_id=a_share_daily_bar
--> internal provider adapter
--> private raw/interim data roots
+internal source adapters -> source-normalized interim artifacts
 -> markets/implementations/a_share
--> data/processed/a_share
--> ResearchDatasetSpec -> research/datasets
+-> data/processed/a_share/{panel,annotation,factor,label}
+-> research/datasets
+-> data/research/a_share
 -> research/evaluations
 -> reports/private_real
--> WorkflowSpec -> workflows
--> interfaces/api and interfaces/cli
+-> interfaces/api and interfaces/cli read research/catalog surfaces
 ```
 
 ## Package Ownership
@@ -40,17 +38,13 @@ catalog/data_products -> data_product_id=a_share_daily_bar
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
-GET  /api/0.1/catalog/universes
-GET  /api/0.1/catalog/data-products
-POST /api/0.1/data-products/{data_product_id}/interim-runs
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```
 
-The API is local-only. Catalog routes return registered metadata. The data
-product POST route accepts `execution_mode`, defaults to `execute`, and runs the
-minimal fixture-backed registered path; `dry_run` performs sanitized
-catalog/spec/writer validation without row-level writes. The research dataset
-requirements route is read-only and does not build artifacts. The API does not
+The API is local-only. Catalog routes return registered factor and label
+metadata. The research dataset requirements route is read-only and does not
+build artifacts. Source/interim/processed materialization is internal. The API
+does not
 expose private real-data execution, deployment, scheduler, worker, paper/live
 trading, external data, broker/exchange, or website UI contracts.
 
@@ -59,18 +53,11 @@ trading, external data, broker/exchange, or website UI contracts.
 ```text
 qrp catalog factors
 qrp catalog labels
-qrp catalog universes
-qrp catalog data-products
-qrp data-products run-interim <data_product_id>
-qrp data-products run-interim <data_product_id> --dry-run
-qrp data-products run-interim <data_product_id> --run-id <run_id>
 qrp research-datasets requirements <dataset_id>
 ```
 
-`qrp data-products run-interim ...` defaults to `execution_mode=execute`;
-`--dry-run` maps to `execution_mode=dry_run`, and `--run-id` is validated by the
-shared public-safe run id contract. No private-source root flags are part of the
-`0.1.0` CLI contract.
+No private-source root flags, materialization commands, or overwrite/force
+controls are part of the `0.1.0` CLI contract.
 
 Retired commands and endpoints are not current clean-rewrite contracts.
 
@@ -80,9 +67,9 @@ and `private plugin`.
 
 Private local schema inventory is exposed separately through
 `qrp-private schema-inventory --project-root . --output <path>`. It scans only
-`data/interim` and `data/processed` and emits private aggregate schema
-inventory metadata. This inventory may include logical source paths or source
-field names, so it is not the same thing as public-safe aggregate evidence.
+sealed dataset roots and emits private aggregate schema inventory metadata. This
+inventory may include logical source paths or source field names, so it is not
+the same thing as public-safe aggregate evidence.
 
 ## Narrow Follow-up Notes
 

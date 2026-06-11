@@ -175,7 +175,7 @@ def price_volume_factor_columns(*, preset: str = "standard") -> tuple[str, ...]:
 def price_volume_factor_definitions(
     *,
     market_id: MarketId,
-    required_processed_data_id: str,
+    required_input_data_id: str,
     preset: str = "standard",
 ) -> tuple[FactorDefinition, ...]:
     """Return factor definitions for one market binding."""
@@ -205,7 +205,7 @@ def price_volume_factor_definitions(
                 timing_semantics="same_session_close_available_at_next_session",
                 null_policy="preserve_nulls_after_min_periods",
                 source_layer="processed",
-                required_processed_data_id=required_processed_data_id,
+                required_input_data_id=required_input_data_id,
                 window=lookback_window,
             )
         )

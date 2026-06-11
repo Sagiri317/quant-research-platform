@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from quant_research_platform.catalog.data_products import DataProductRegistry
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
@@ -18,13 +17,9 @@ from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
 )
-from quant_research_platform.catalog.provider_bindings import ProviderBindingRegistry
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
-from quant_research_platform.catalog.universes import UniverseCatalog
 from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_daily_bar_data_product_definition,
-    a_share_default_universe_definition,
     a_share_evaluation_catalog,
     a_share_factor_catalog,
     a_share_field_catalog,
@@ -35,14 +30,11 @@ from quant_research_platform.markets.implementations.a_share.catalog import (
     a_share_processed_catalog,
     a_share_research_dataset_catalog,
 )
-from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
-)
-from quant_research_platform.markets.implementations.a_share.source_bindings import (
-    csmar as a_share_csmar_binding,
-)
 from quant_research_platform.reports.catalog import report_catalog
 from quant_research_platform.sources.csmar.catalog import csmar_source_definition
+from quant_research_platform.sources.csmar.interim import (
+    interim_catalog as csmar_interim_catalog,
+)
 
 
 @dataclass(frozen=True)
@@ -55,13 +47,10 @@ class PlatformCatalogs:
     evaluations: EvaluationCatalog
     models: ModelCatalog
     predictions: PredictionCatalog
-    data_products: DataProductRegistry
-    provider_bindings: ProviderBindingRegistry
     sources: SourceRegistry
     markets: MarketRegistry
     reports: ReportCatalog
     source_interim_catalogs: Mapping[str, InterimDataCatalog]
-    universes: UniverseCatalog
 
 
 def default_field_catalog() -> FieldCatalog:
@@ -96,18 +85,6 @@ def default_prediction_catalog() -> PredictionCatalog:
     return a_share_prediction_catalog()
 
 
-def default_data_product_registry() -> DataProductRegistry:
-    registry = DataProductRegistry()
-    registry.register(a_share_daily_bar_data_product_definition())
-    return registry
-
-
-def default_provider_binding_registry() -> ProviderBindingRegistry:
-    registry = ProviderBindingRegistry()
-    _register_default_provider_bindings(registry)
-    return registry
-
-
 def default_source_registry() -> SourceRegistry:
     registry = SourceRegistry()
     registry.register(csmar_source_definition())
@@ -125,17 +102,11 @@ def default_report_catalog() -> ReportCatalog:
 
 
 def default_source_interim_catalogs() -> dict[str, InterimDataCatalog]:
-    catalog = a_share_csmar_binding.a_share_csmar_interim_catalog()
+    catalog = csmar_interim_catalog()
     source_ids = {str(spec.source_id) for spec in catalog.list()}
     if len(source_ids) != 1:
         raise ValueError("unexpected_source_interim_catalog_sources")
     return {next(iter(source_ids)): catalog}
-
-
-def default_universe_catalog() -> UniverseCatalog:
-    catalog = UniverseCatalog()
-    catalog.register(a_share_default_universe_definition())
-    return catalog
 
 
 def default_catalogs() -> PlatformCatalogs:
@@ -148,29 +119,16 @@ def default_catalogs() -> PlatformCatalogs:
         evaluations=default_evaluation_catalog(),
         models=default_model_catalog(),
         predictions=default_prediction_catalog(),
-        data_products=default_data_product_registry(),
-        provider_bindings=default_provider_binding_registry(),
         sources=default_source_registry(),
         markets=default_market_registry(),
         reports=default_report_catalog(),
         source_interim_catalogs=default_source_interim_catalogs(),
-        universes=default_universe_catalog(),
     )
-
-
-def _register_default_provider_bindings(
-    registry: ProviderBindingRegistry,
-) -> None:
-    binding = a_share_csmar_binding.a_share_csmar_provider_binding()
-    if binding.data_product_id != A_SHARE_DAILY_BAR_DATA_PRODUCT_ID:
-        raise ValueError("unexpected_a_share_csmar_binding")
-    registry.register(binding)
 
 
 __all__ = [
     "PlatformCatalogs",
     "default_catalogs",
-    "default_data_product_registry",
     "default_evaluation_catalog",
     "default_factor_catalog",
     "default_field_catalog",
@@ -179,10 +137,8 @@ __all__ = [
     "default_model_catalog",
     "default_prediction_catalog",
     "default_processed_catalog",
-    "default_provider_binding_registry",
     "default_report_catalog",
     "default_research_dataset_catalog",
     "default_source_interim_catalogs",
     "default_source_registry",
-    "default_universe_catalog",
 ]

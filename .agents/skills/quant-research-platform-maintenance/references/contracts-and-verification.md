@@ -15,7 +15,6 @@ This is the change-prone contract map for QRP Clean Rewrite `0.1.0`.
 | Stable definitions/specs | `src/quant_research_platform/contracts/` |
 | Storage layout/manifests/privacy | `src/quant_research_platform/storage/` |
 | Catalog registries | `src/quant_research_platform/catalog/` |
-| Public data product registry | `src/quant_research_platform/catalog/data_products.py` |
 | Internal provider adapters | `src/quant_research_platform/sources/` |
 | A-share semantics | `src/quant_research_platform/markets/implementations/a_share/` |
 | Research domain | `src/quant_research_platform/research/` |
@@ -31,9 +30,6 @@ This is the change-prone contract map for QRP Clean Rewrite `0.1.0`.
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
-GET  /api/0.1/catalog/universes
-GET  /api/0.1/catalog/data-products
-POST /api/0.1/data-products/{data_product_id}/interim-runs
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```
 
@@ -42,11 +38,6 @@ GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```text
 qrp catalog factors
 qrp catalog labels
-qrp catalog universes
-qrp catalog data-products
-qrp data-products run-interim <data_product_id>
-qrp data-products run-interim <data_product_id> --dry-run
-qrp data-products run-interim <data_product_id> --run-id <run_id>
 qrp research-datasets requirements <dataset_id>
 ```
 

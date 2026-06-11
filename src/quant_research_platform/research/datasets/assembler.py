@@ -1,95 +1,81 @@
-"""Minimal ResearchDataset assembly for QRP 0.1."""
+"""Research dataset assembly from processed datasets."""
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
-from quant_research_platform.contracts.data import ProcessedDataSpec
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.research.datasets.io import read_research_dataset
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
 from quant_research_platform.storage.datasets import (
-    DatasetReadMode,
-    inspect_dataset,
+    fingerprint_dataset,
     read_dataset,
     write_dataset,
 )
-from quant_research_platform.storage.layout import (
-    layout_from_processed_market_root,
+from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import (
+    read_manifest,
+    replace_internal_artifact_manifest,
 )
 
 
 def assemble_research_dataset(
-    frame: pd.DataFrame,
-    catalog: ResearchDatasetCatalog,
-    dataset_id: str,
-    processed_root: Path,
-) -> Path:
-    spec = catalog.get(dataset_id)
-    validate_research_dataset(frame, spec)
-    output = frame[list(spec.required_columns)].copy()
-    layout = layout_from_processed_market_root(processed_root)
-    artifact_root = layout.research_dataset_root(spec.market_id, spec.dataset_id)
-    write_dataset(artifact_root, output, spec=spec)
-    return artifact_root
-
-
-def assemble_research_dataset_from_processed(
     *,
-    processed_root: Path,
+    layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
     processed_catalog: ProcessedDataCatalog,
     dataset_id: str,
-    years: tuple[int, ...] | None = None,
+    time_window: TimeWindow,
 ) -> Path:
+    """Assemble one registered research dataset from processed inputs."""
+
     spec = dataset_catalog.get(dataset_id)
-    layout = layout_from_processed_market_root(processed_root)
-    artifact_root = layout.research_dataset_root(spec.market_id, spec.dataset_id)
-    assembly_years = _assembly_years(
-        processed_root=processed_root,
+    _validate_research_input_specs(spec, processed_catalog)
+    input_fingerprints = _input_fingerprints(
+        layout=layout,
         dataset_spec=spec,
         processed_catalog=processed_catalog,
-        years=years,
+        time_window=time_window,
     )
-
-    def _chunks():
-        for year in assembly_years:
-            frame = _join_processed_inputs(
-                processed_root=processed_root,
-                dataset_spec=spec,
-                processed_catalog=processed_catalog,
-                years=(year,),
-            )
-            validate_research_dataset(frame, spec)
-            yield frame.loc[:, list(spec.required_columns)].copy()
-
-    write_dataset(artifact_root, _chunks(), spec=spec)
+    frame = _join_processed_inputs(
+        layout=layout,
+        dataset_spec=spec,
+        processed_catalog=processed_catalog,
+        time_window=time_window,
+    )
+    validate_research_dataset(frame, spec)
+    output = frame.loc[:, list(spec.required_columns)].copy()
+    artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
+    write_dataset(artifact_root, output, spec=spec)
+    _write_input_fingerprints(artifact_root, input_fingerprints)
     return artifact_root
 
 
 def _join_processed_inputs(
     *,
-    processed_root: Path,
+    layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
-    years: tuple[int, ...] | None,
+    time_window: TimeWindow,
 ) -> pd.DataFrame:
     assembled: pd.DataFrame | None = None
-    for processed_data_id in dataset_spec.processed_data_ids:
-        processed_spec = processed_catalog.get(processed_data_id)
+    for input_data_id in dataset_spec.input_data_ids:
+        processed_spec = processed_catalog.get(input_data_id)
         input_frame = _read_processed_input(
-            processed_root=processed_root,
+            layout=layout,
             dataset_spec=dataset_spec,
-            processed_catalog=processed_catalog,
             processed_spec=processed_spec,
             existing_columns=tuple(assembled.columns) if assembled is not None else (),
-            years=years,
+            time_window=time_window,
         )
         if assembled is None:
             assembled = input_frame
@@ -107,59 +93,27 @@ def _join_processed_inputs(
 
 def _read_processed_input(
     *,
-    processed_root: Path,
+    layout: StorageLayout,
     dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
     processed_spec: ProcessedDataSpec,
     existing_columns: tuple[str, ...],
-    years: tuple[int, ...] | None,
+    time_window: TimeWindow,
 ) -> pd.DataFrame:
     columns = _processed_input_columns(
         dataset_spec,
         processed_spec,
         existing_columns=existing_columns,
     )
-    data_root = layout_from_processed_market_root(processed_root).processed_data_root(
+    data_root = layout.processed_data_root(
         processed_spec.market_id,
-        processed_spec.category,
-        processed_spec.processed_data_id,
+        processed_spec.kind,
+        processed_spec.data_id,
     )
-    frame = read_dataset(
+    return read_dataset(
         data_root,
-        partition_filter=_year_filter(years),
+        time_window=time_window,
         columns=columns,
-        mode=DatasetReadMode.MATERIALIZED,
     )
-    if "year" in frame.columns:
-        frame = frame.drop(columns=["year"])
-    return frame
-
-
-def _assembly_years(
-    *,
-    processed_root: Path,
-    dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
-    years: tuple[int, ...] | None,
-) -> tuple[int, ...]:
-    if years is not None:
-        return years
-    first_processed_id = dataset_spec.processed_data_ids[0]
-    first_spec = processed_catalog.get(first_processed_id)
-    data_root = layout_from_processed_market_root(processed_root).processed_data_root(
-        first_spec.market_id,
-        first_spec.category,
-        first_spec.processed_data_id,
-    )
-    manifest = inspect_dataset(data_root).manifest
-    discovered = [
-        int(partition.split("=", 1)[1])
-        for partition in manifest.get("partitions", [])
-        if str(partition).startswith("year=")
-    ]
-    if not discovered:
-        raise FileNotFoundError(data_root)
-    return tuple(discovered)
 
 
 def _processed_input_columns(
@@ -184,15 +138,103 @@ def _processed_input_columns(
     return tuple(columns)
 
 
-def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
-    if years is None:
-        return None
-    return {"year": years}
+def _validate_research_input_specs(
+    dataset_spec: ResearchDatasetSpec,
+    processed_catalog: ProcessedDataCatalog,
+) -> None:
+    processed_specs = {
+        data_id: processed_catalog.get(data_id)
+        for data_id in dataset_spec.input_data_ids
+    }
+    role_by_column: dict[str, set[ColumnRole]] = {}
+    kind_by_column: dict[str, set[ProcessedDataKind]] = {}
+    for processed_spec in processed_specs.values():
+        for column, role in processed_spec.column_roles.items():
+            role_by_column.setdefault(column, set()).add(role)
+            kind_by_column.setdefault(column, set()).add(processed_spec.kind)
+
+    _require_columns_from_roles_or_kinds(
+        dataset_spec.feature_columns,
+        role_by_column=role_by_column,
+        kind_by_column=kind_by_column,
+        allowed_roles={ColumnRole.FEATURE, ColumnRole.FACTOR},
+        allowed_kinds={ProcessedDataKind.FACTOR},
+        error_name="invalid_research_feature_columns",
+    )
+    _require_columns_from_roles_or_kinds(
+        dataset_spec.label_columns,
+        role_by_column=role_by_column,
+        kind_by_column=kind_by_column,
+        allowed_roles={ColumnRole.LABEL},
+        allowed_kinds=set(),
+        error_name="invalid_research_label_columns",
+    )
+    _require_columns_from_roles_or_kinds(
+        dataset_spec.filter_columns,
+        role_by_column=role_by_column,
+        kind_by_column=kind_by_column,
+        allowed_roles={ColumnRole.MASK, ColumnRole.UNIVERSE},
+        allowed_kinds=set(),
+        error_name="invalid_research_filter_columns",
+    )
+    _require_columns_from_roles_or_kinds(
+        dataset_spec.context_columns,
+        role_by_column=role_by_column,
+        kind_by_column=kind_by_column,
+        allowed_roles={ColumnRole.CONTEXT},
+        allowed_kinds=set(),
+        error_name="invalid_research_context_columns",
+    )
 
 
-__all__ = [
-    "assemble_research_dataset",
-    "assemble_research_dataset_from_processed",
-    "read_research_dataset",
-    "validate_research_dataset",
-]
+def _require_columns_from_roles_or_kinds(
+    columns: tuple[str, ...],
+    *,
+    role_by_column: dict[str, set[ColumnRole]],
+    kind_by_column: dict[str, set[ProcessedDataKind]],
+    allowed_roles: set[ColumnRole],
+    allowed_kinds: set[ProcessedDataKind],
+    error_name: str,
+) -> None:
+    invalid = [
+        column
+        for column in columns
+        if not role_by_column.get(column, set()).intersection(allowed_roles)
+        and not kind_by_column.get(column, set()).intersection(allowed_kinds)
+    ]
+    if invalid:
+        raise ValueError(f"{error_name}: {', '.join(invalid)}")
+
+
+def _input_fingerprints(
+    *,
+    layout: StorageLayout,
+    dataset_spec: ResearchDatasetSpec,
+    processed_catalog: ProcessedDataCatalog,
+    time_window: TimeWindow,
+) -> dict[str, dict[str, object]]:
+    fingerprints: dict[str, dict[str, object]] = {}
+    for data_id in dataset_spec.input_data_ids:
+        processed_spec = processed_catalog.get(data_id)
+        root = layout.processed_data_root(
+            processed_spec.market_id,
+            processed_spec.kind,
+            processed_spec.data_id,
+        )
+        fingerprints[data_id] = asdict(
+            fingerprint_dataset(root, time_window=time_window)
+        )
+    return fingerprints
+
+
+def _write_input_fingerprints(
+    artifact_root: Path,
+    input_fingerprints: dict[str, dict[str, object]],
+) -> None:
+    manifest_path = artifact_root / "_manifest" / "manifest.json"
+    manifest = read_manifest(manifest_path)
+    manifest["input_fingerprints"] = input_fingerprints
+    replace_internal_artifact_manifest(manifest_path, manifest)
+
+
+__all__ = ["assemble_research_dataset"]

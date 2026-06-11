@@ -11,6 +11,7 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
+    ProcessedDataKind,
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
@@ -24,11 +25,11 @@ from quant_research_platform.storage.manifests import (
 )
 
 
-def _processed_spec(processed_data_id: str = "x") -> ProcessedDataSpec:
+def _processed_spec(data_id: str = "x") -> ProcessedDataSpec:
     return ProcessedDataSpec(
+        data_id=data_id,
         market_id=MarketId("a_share"),
-        category="factors",
-        processed_data_id=processed_data_id,
+        kind=ProcessedDataKind.FACTOR,
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles={
@@ -46,7 +47,7 @@ def _frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "market_id": ["a_share"],
-            "asset_id": ["000001"],
+            "asset_id": ["asset_001"],
             "timestamp": pd.to_datetime(["2014-01-02"]),
             "value": [1.0],
         }
@@ -71,7 +72,7 @@ def test_dataset_writer_rejects_public_output_before_iterating_chunks(
 
 
 def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) -> None:
-    root = tmp_path / "data" / "processed" / "a_share" / "factors" / "x"
+    root = tmp_path / "data" / "processed" / "a_share" / "factor" / "x"
 
     write_dataset(root, _frame(), spec=_processed_spec())
 
@@ -124,12 +125,12 @@ def test_output_already_exists_error_public_summary() -> None:
 
 def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> None:
     layer_root = tmp_path / "data" / "processed"
-    present = layer_root / "a_share" / "factors" / "present"
-    missing = layer_root / "a_share" / "labels" / "missing"
+    present = layer_root / "a_share" / "factor" / "present"
+    missing = layer_root / "a_share" / "label" / "missing"
     write_internal_artifact_manifest(
         present / "_manifest" / "manifest.json",
         _artifact_manifest_payload(
-            dataset_id="present",
+            data_id="present",
             row_count=3,
             date_min="2014-01-02",
             date_max="2014-01-03",
@@ -147,7 +148,7 @@ def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> Non
     assert payload["dataset_count"] == 1
     assert payload["total_rows"] == 3
     assert payload["missing_dataset_manifests"] == [
-        "data/processed/a_share/labels/missing/_manifest/manifest.json"
+        "data/processed/a_share/label/missing/_manifest/manifest.json"
     ]
     assert payload["layer_validation_status"] == "fail"
 
@@ -189,14 +190,14 @@ def test_run_manifest_aggregates_layers(tmp_path: Path) -> None:
 
 def _artifact_manifest_payload(
     *,
-    dataset_id: str,
+    data_id: str,
     row_count: int,
     date_min: str,
     date_max: str,
 ) -> dict[str, object]:
     return {
         "schema_version": "0.1",
-        "processed_data_id": dataset_id,
+        "data_id": data_id,
         "row_count": row_count,
         "date_min": date_min,
         "date_max": date_max,

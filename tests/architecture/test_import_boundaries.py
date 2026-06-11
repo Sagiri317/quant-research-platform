@@ -21,17 +21,13 @@ DEFAULTS_A_SHARE_CATALOG_FACTORIES = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.markets.implementations.a_share.catalog",
 )
-DEFAULTS_A_SHARE_IDS = (
-    "src/quant_research_platform/catalog/defaults.py",
-    "quant_research_platform.markets.implementations.a_share.ids",
-)
 DEFAULTS_CSMAR_CATALOG = (
     "src/quant_research_platform/catalog/defaults.py",
     "quant_research_platform.sources.csmar.catalog",
 )
-DEFAULTS_A_SHARE_CSMAR_BINDING = (
+DEFAULTS_CSMAR_INTERIM = (
     "src/quant_research_platform/catalog/defaults.py",
-    "quant_research_platform.markets.implementations.a_share.source_bindings",
+    "quant_research_platform.sources.csmar.interim",
 )
 DEFAULTS_REPORT_CATALOG = (
     "src/quant_research_platform/catalog/defaults.py",
@@ -40,19 +36,14 @@ DEFAULTS_REPORT_CATALOG = (
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
     DEFAULTS_A_SHARE_CATALOG_FACTORIES: (
         "catalog/defaults.py is the explicit platform composition root for "
-        "default A-share factor/label/universe definitions."
-    ),
-    DEFAULTS_A_SHARE_IDS: (
-        "catalog/defaults.py binds the current default market id in the "
-        "single-market 0.1 profile; QRP-ISSUE-024 tracks later profiles."
+        "default A-share factor/label/processed/research definitions."
     ),
     DEFAULTS_CSMAR_CATALOG: (
         "catalog/defaults.py composes the current default source catalog; "
         "QRP-ISSUE-024 tracks later multi-source profiles."
     ),
-    DEFAULTS_A_SHARE_CSMAR_BINDING: (
-        "catalog/defaults.py composes the explicit A-share CSMAR binding; "
-        "this remains the current 0.1 provider binding boundary."
+    DEFAULTS_CSMAR_INTERIM: (
+        "catalog/defaults.py composes the source-owned CSMAR interim catalog."
     ),
     DEFAULTS_REPORT_CATALOG: (
         "catalog/defaults.py composes report owner definitions into the "
@@ -108,9 +99,8 @@ def test_catalog_defaults_is_the_only_interface_composition_root() -> None:
     }.issuperset(
         {
             "quant_research_platform.markets.implementations.a_share.catalog",
-            "quant_research_platform.markets.implementations.a_share.ids",
-            "quant_research_platform.markets.implementations.a_share.source_bindings",
             "quant_research_platform.sources.csmar.catalog",
+            "quant_research_platform.sources.csmar.interim",
         }
     )
     assert "default_catalogs" in defaults_path.read_text(encoding="utf-8")

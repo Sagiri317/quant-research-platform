@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -11,36 +12,51 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
+    DataSpec,
+    InterimDataSpec,
+    ProcessedDataKind,
     ProcessedDataSpec,
 )
-from quant_research_platform.contracts.data_products import DataProductDefinition
+from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.masks import MaskDefinition
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
-)
-from quant_research_platform.markets.implementations.a_share.source_bindings import (
-    csmar as a_share_csmar,
 )
 from quant_research_platform.runtime.privacy import (
     PRIVATE_BOUNDARY_ROOTS,
     is_private_boundary_path,
     sanitize_public_text,
 )
+from quant_research_platform.sources.csmar import interim as csmar_interim
 from quant_research_platform.storage.layout import StorageLayout
 
-a_share_csmar_normalize_daily_market_frame = (
-    a_share_csmar.a_share_csmar_normalize_daily_market_frame
-)
+
+def test_dataspec_hierarchy_uses_data_id_without_retired_id_fields() -> None:
+    base_fields = DataSpec.__dataclass_fields__
+    interim_fields = InterimDataSpec.__dataclass_fields__
+    processed_fields = ProcessedDataSpec.__dataclass_fields__
+    research_fields = ResearchDatasetSpec.__dataclass_fields__
+
+    assert "data_id" in base_fields
+    assert "market_id" not in base_fields
+    assert "market_id" not in interim_fields
+    assert "source_id" in interim_fields
+    assert "kind" in processed_fields
+    assert "category" not in processed_fields
+    assert "input_data_ids" in research_fields
+    assert "interim_data_id" not in interim_fields
+    assert "processed_data_id" not in processed_fields
+    assert "dataset_id" not in research_fields
 
 
-def test_contract_versions_and_canonical_processed_key() -> None:
+def test_processed_spec_uses_kind_and_canonical_key() -> None:
     spec = ProcessedDataSpec(
+        data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
         market_id=MarketId("a_share"),
-        category="factors",
-        processed_data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
+        kind=ProcessedDataKind.FACTOR,
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles={
@@ -54,23 +70,20 @@ def test_contract_versions_and_canonical_processed_key() -> None:
     )
 
     assert spec.schema_version == "0.1"
-    assert spec.primary_key == platform_entity_time_key()
-    assert spec.partition_columns == ("year",)
+    assert spec.data_id == PRICE_VOLUME_PROCESSED_DATA_ID
+    assert spec.kind is ProcessedDataKind.FACTOR
+    assert spec.primary_key == ("market_id", "asset_id", "timestamp")
+    assert not hasattr(spec, "category")
+    assert not hasattr(spec, "processed_data_id")
 
 
-def test_data_product_contract_does_not_own_provider_binding() -> None:
-    import quant_research_platform.contracts as contracts
-    import quant_research_platform.contracts.data_products as data_products
+def test_time_window_is_required_closed_interval() -> None:
+    window = TimeWindow("2014-01-01", "2014-12-31")
 
-    assert "ProviderBinding" not in data_products.__all__
-    assert "BindingVisibility" not in data_products.__all__
-    assert not hasattr(data_products, "ProviderBinding")
-    assert not hasattr(data_products, "BindingVisibility")
-    assert "ProviderBinding" not in contracts.__all__
-    assert "BindingVisibility" not in contracts.__all__
-    assert not hasattr(contracts, "ProviderBinding")
-    assert not hasattr(contracts, "BindingVisibility")
-    assert "provider_binding" not in DataProductDefinition.__dataclass_fields__
+    assert window.start == date(2014, 1, 1)
+    assert window.end == date(2014, 12, 31)
+    with pytest.raises(ValueError, match="invalid_time_window"):
+        TimeWindow("2014-12-31", "2014-01-01")
 
 
 def test_factor_and_label_definitions_keep_future_flags_out() -> None:
@@ -80,7 +93,7 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
         factor_set=FactorSet.CORE,
         input_columns=("adj_close",),
         output_column="mom_20d",
-        required_processed_data_id="daily_panel",
+        required_input_data_id="daily_panel",
         window=20,
     )
     label = LabelDefinition(
@@ -102,18 +115,6 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
     assert label.to_manifest()["lookahead"] == 21
 
 
-def test_mask_definition_explicitly_tracks_future_usage() -> None:
-    mask = MaskDefinition(
-        mask_id="evaluation_can_exit",
-        market_id=MarketId("a_share"),
-        output_column="can_exit",
-        mask_type="evaluation",
-        uses_future_data=True,
-    )
-
-    assert mask.to_manifest()["uses_future_data"] is True
-
-
 def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
     catalog = FactorCatalog()
     catalog.register(
@@ -123,7 +124,7 @@ def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
             factor_set=FactorSet.STANDARD,
             input_columns=("return_1d",),
             output_column="rev_1d",
-            required_processed_data_id="daily_panel",
+            required_input_data_id="daily_panel",
         )
     )
 
@@ -139,15 +140,20 @@ def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
             catalog.resolve_factor_set(value)
 
 
-def test_storage_layout_uses_goal_private_roots_without_private_suffix() -> None:
+def test_storage_layout_uses_sealed_data_roots() -> None:
     layout = StorageLayout(project_root=Path("/repo"))
 
     assert layout.raw_source_root(SourceId("csmar")) == Path("/repo/data/raw/csmar")
-    assert layout.interim_source_root(SourceId("csmar")) == Path(
-        "/repo/data/interim/csmar"
+    assert layout.interim_data_root(SourceId("csmar"), "daily_market") == Path(
+        "/repo/data/interim/csmar/daily_market"
     )
-    assert layout.processed_market_root(MarketId("a_share")) == Path(
-        "/repo/data/processed/a_share"
+    assert layout.processed_data_root(
+        MarketId("a_share"),
+        ProcessedDataKind.FACTOR,
+        "price_volume",
+    ) == Path("/repo/data/processed/a_share/factor/price_volume")
+    assert layout.research_dataset_root(MarketId("a_share"), "demo") == Path(
+        "/repo/data/research/a_share/demo"
     )
     assert layout.private_report_root(MarketId("a_share"), "evaluation") == Path(
         "/repo/reports/private_real/a_share/evaluation"
@@ -172,22 +178,49 @@ def test_sanitizer_removes_local_paths_private_markers_and_stock_codes() -> None
     assert "CSMAR" not in sanitized
 
 
-def test_csmar_daily_market_normalization_adds_canonical_interim_keys() -> None:
-    frame = pd.DataFrame(
+def test_csmar_daily_market_normalization_stays_source_local() -> None:
+    raw = pd.DataFrame(
         {
-            "stock_code": ["000001"],
-            "trade_date": ["2014-01-02"],
-            "open": [10.0],
-            "close": [11.0],
+            "Stkcd": ["1"],
+            "Trddt": ["2014-01-02"],
+            "Markettype": [4],
+            "Trdsta": [1],
+            "Filling": ["0"],
+            "Opnprc": [10.0],
+            "Hiprc": [10.5],
+            "Loprc": [9.8],
+            "Clsprc": [10.2],
+            "Dnshrtrd": [1000],
+            "Dnvaltrd": [10200.0],
+            "Dsmvosd": [100.0],
+            "Dsmvtll": [200.0],
+            "Dretwd": [0.03],
+            "Dretnd": [0.028],
+            "Adjprcwd": [10.2],
+            "Adjprcnd": [10.1],
+            "PreClosePrice": [9.9],
+            "ChangeRatio": [0.0303],
+            "LimitDown": [8.91],
+            "LimitUp": [10.89],
+            "LimitStatus": [0],
         }
     )
 
-    result = a_share_csmar_normalize_daily_market_frame(frame)
+    normalized = csmar_interim.normalize_raw_frame(raw, "daily_market")
+    pruned, _ = csmar_interim.apply_output_column_rules(
+        normalized,
+        "daily_market",
+    )
 
-    assert list(result["market_id"]) == ["a_share"]
-    assert list(result["asset_id"]) == ["000001"]
-    assert str(result.loc[0, "timestamp"].date()) == "2014-01-02"
-    assert str(result.loc[0, "session_date"].date()) == "2014-01-02"
-    assert str(result.loc[0, "available_at"].date()) == "2014-01-02"
-    assert list(result["source_id"]) == ["csmar"]
-    assert list(result["source_asset_id"]) == ["000001"]
+    assert pruned.loc[0, "source_asset_id"] == "000001"
+    assert str(pruned.loc[0, "timestamp"].date()) == "2014-01-02"
+    assert not {
+        "market_id",
+        "asset_id",
+        "source_id",
+        "eligible",
+        "can_enter",
+        "can_exit",
+        "available_at",
+        "source_exchange",
+    }.intersection(pruned.columns)

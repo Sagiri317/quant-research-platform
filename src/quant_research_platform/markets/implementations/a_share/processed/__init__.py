@@ -1,5 +1,5 @@
-"""A-share processed-data builders."""
+"""A-share processed data calculations and materialization."""
 
-from . import contexts
+from . import annotations, materializer, panels
 
-__all__ = ["contexts"]
+__all__ = ["annotations", "materializer", "panels"]

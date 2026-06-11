@@ -22,20 +22,18 @@ from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
+    ProcessedDataKind,
     ProcessedDataSpec,
 )
-from quant_research_platform.contracts.data_products import DataProductDefinition
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.factors import FactorDefinition
-from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.universes import UniverseDefinition
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
+)
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_AS_OF_MASK_ID,
-    A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
-    A_SHARE_DAILY_BAR_INTERIM_SPEC_ID,
     A_SHARE_DEFAULT_UNIVERSE_ID,
     A_SHARE_EVALUATION_MASK_ID,
     A_SHARE_EXECUTION_MASK_ID,
@@ -46,9 +44,8 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
-from quant_research_platform.research.factors.price_volume import (
-    PRICE_VOLUME_STANDARD_PRESET,
-    price_volume_factor_definitions,
+from quant_research_platform.markets.implementations.a_share.labels import (
+    definitions as label_definitions,
 )
 
 A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
@@ -217,15 +214,6 @@ A_SHARE_MASK_ALLOWED_USES: dict[str, tuple[str, ...]] = {
 }
 
 
-def a_share_daily_bar_data_product_definition() -> DataProductDefinition:
-    return DataProductDefinition(
-        data_product_id=A_SHARE_DAILY_BAR_DATA_PRODUCT_ID,
-        market_id=A_SHARE_MARKET_ID,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        interim_spec_ids=(A_SHARE_DAILY_BAR_INTERIM_SPEC_ID,),
-    )
-
-
 def a_share_market_definition() -> MarketDefinition:
     return MarketDefinition(
         market_id=A_SHARE_MARKET_ID,
@@ -243,14 +231,6 @@ def a_share_market_definition() -> MarketDefinition:
     )
 
 
-def a_share_default_universe_definition() -> UniverseDefinition:
-    return UniverseDefinition(
-        universe_id=A_SHARE_DEFAULT_UNIVERSE_ID,
-        market_id=A_SHARE_MARKET_ID,
-        membership_column="eligible",
-    )
-
-
 def a_share_field_catalog() -> FieldCatalog:
     """Return platform canonical fields plus A-share-only processed fields."""
 
@@ -264,65 +244,21 @@ def a_share_factor_catalog() -> FactorCatalog:
     """Return the A-share factor registry used by processed factor specs."""
 
     catalog = FactorCatalog()
-    for definition in a_share_price_volume_factor_definitions():
+    for definition in (
+        factor_definitions.a_share_price_volume_factor_definitions()
+    ):
         catalog.register(definition)
     return catalog
-
-
-def a_share_price_volume_factor_definitions() -> tuple[FactorDefinition, ...]:
-    """Return standard A-share price-volume factor definitions."""
-
-    return price_volume_factor_definitions(
-        market_id=A_SHARE_MARKET_ID,
-        required_processed_data_id=DAILY_PANEL_PROCESSED_DATA_ID,
-        preset=PRICE_VOLUME_STANDARD_PRESET,
-    )
-
-
-def a_share_price_volume_factor_columns() -> tuple[str, ...]:
-    """Return A-share price-volume output columns from registered definitions."""
-
-    return tuple(
-        definition.output_column
-        for definition in a_share_price_volume_factor_definitions()
-    )
-
-
-def a_share_price_volume_panel_input_columns() -> tuple[str, ...]:
-    """Return required daily panel columns for standard price-volume factors."""
-
-    factor_inputs = tuple(
-        column
-        for definition in a_share_price_volume_factor_definitions()
-        for column in definition.input_columns
-    )
-    return tuple(
-        dict.fromkeys(
-            (
-                *platform_entity_time_key(),
-                *factor_inputs,
-            )
-        )
-    )
 
 
 def a_share_label_catalog() -> LabelCatalog:
     """Return the A-share forward-return label registry."""
 
     catalog = LabelCatalog()
-    for horizon in (1, 5, 10, 20, 60, 120):
-        catalog.register(
-            LabelDefinition(
-                label_id=f"forward_return_{horizon}d",
-                market_id=A_SHARE_MARKET_ID,
-                output_column=f"forward_return_{horizon}d",
-                label_timing="next_open_to_horizon_open",
-                horizon=horizon,
-                lookahead=horizon + 1,
-                entry_rule="next_session_open",
-                exit_rule="horizon_session_open",
-            )
-        )
+    for definition in (
+        label_definitions.a_share_forward_return_label_definitions()
+    ):
+        catalog.register(definition)
     return catalog
 
 
@@ -351,9 +287,9 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
     catalog = ResearchDatasetCatalog()
     catalog.register(
         ResearchDatasetSpec(
-            dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+            data_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             market_id=A_SHARE_MARKET_ID,
-            processed_data_ids=(
+            input_data_ids=(
                 PRICE_VOLUME_PROCESSED_DATA_ID,
                 FORWARD_RETURNS_PROCESSED_DATA_ID,
                 DAILY_CONTEXT_PROCESSED_DATA_ID,
@@ -364,9 +300,6 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
             label_columns=label_columns,
             filter_columns=_RESEARCH_DATASET_FILTER_COLUMNS,
             context_columns=_RESEARCH_DATASET_CONTEXT_COLUMNS,
-            source_columns=_RESEARCH_DATASET_SOURCE_COLUMNS,
-            universe_id=A_SHARE_DEFAULT_UNIVERSE_ID,
-            mask_ids=(A_SHARE_EXECUTION_MASK_ID,),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.RESEARCH_ROW,
             column_roles=_research_dataset_column_roles(
@@ -435,24 +368,24 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
     label_columns = _registered_label_columns()
     return (
         _processed_spec(
-            category="panels",
-            processed_data_id=DAILY_PANEL_PROCESSED_DATA_ID,
+            kind=ProcessedDataKind.PANEL,
+            data_id=DAILY_PANEL_PROCESSED_DATA_ID,
             columns=_PANEL_COLUMNS,
         ),
         _processed_spec(
-            category="contexts",
-            processed_data_id=DAILY_CONTEXT_PROCESSED_DATA_ID,
+            kind=ProcessedDataKind.ANNOTATION,
+            data_id=DAILY_CONTEXT_PROCESSED_DATA_ID,
             columns=_CONTEXT_COLUMNS,
         ),
         _processed_spec(
-            category="universes",
-            processed_data_id=A_SHARE_DEFAULT_UNIVERSE_ID,
+            kind=ProcessedDataKind.ANNOTATION,
+            data_id=A_SHARE_DEFAULT_UNIVERSE_ID,
             columns=_UNIVERSE_COLUMNS,
             role_overrides={"eligible": ColumnRole.UNIVERSE},
         ),
         _processed_spec(
-            category="masks/as_of",
-            processed_data_id=A_SHARE_AS_OF_MASK_ID,
+            kind=ProcessedDataKind.ANNOTATION,
+            data_id=A_SHARE_AS_OF_MASK_ID,
             columns=(
                 "market_id",
                 "asset_id",
@@ -462,8 +395,8 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
             role_overrides={"eligible": ColumnRole.MASK},
         ),
         _processed_spec(
-            category="masks/execution",
-            processed_data_id=A_SHARE_EXECUTION_MASK_ID,
+            kind=ProcessedDataKind.ANNOTATION,
+            data_id=A_SHARE_EXECUTION_MASK_ID,
             columns=(
                 "market_id",
                 "asset_id",
@@ -477,8 +410,8 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
             },
         ),
         _processed_spec(
-            category="masks/evaluation",
-            processed_data_id=A_SHARE_EVALUATION_MASK_ID,
+            kind=ProcessedDataKind.ANNOTATION,
+            data_id=A_SHARE_EVALUATION_MASK_ID,
             columns=(
                 "market_id",
                 "asset_id",
@@ -492,14 +425,14 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
             },
         ),
         _processed_spec(
-            category="factors",
-            processed_data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
+            kind=ProcessedDataKind.FACTOR,
+            data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
             columns=(*platform_entity_time_key(), *factor_columns),
             role_overrides={column: ColumnRole.FACTOR for column in factor_columns},
         ),
         _processed_spec(
-            category="labels",
-            processed_data_id=FORWARD_RETURNS_PROCESSED_DATA_ID,
+            kind=ProcessedDataKind.LABEL,
+            data_id=FORWARD_RETURNS_PROCESSED_DATA_ID,
             columns=(*_LABEL_CONTROL_COLUMNS, *label_columns),
             role_overrides={column: ColumnRole.LABEL for column in label_columns},
         ),
@@ -508,15 +441,15 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
 
 def _processed_spec(
     *,
-    category: str,
-    processed_data_id: str,
+    kind: ProcessedDataKind,
+    data_id: str,
     columns: tuple[str, ...],
     role_overrides: dict[str, ColumnRole] | None = None,
 ) -> ProcessedDataSpec:
     return ProcessedDataSpec(
+        data_id=data_id,
         market_id=A_SHARE_MARKET_ID,
-        category=category,
-        processed_data_id=processed_data_id,
+        kind=kind,
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles=_column_roles(columns, role_overrides=role_overrides),
@@ -592,17 +525,12 @@ __all__ = [
     "A_SHARE_FIELD_SPECS",
     "A_SHARE_MARKET_ID",
     "A_SHARE_MASK_ALLOWED_USES",
-    "a_share_daily_bar_data_product_definition",
-    "a_share_default_universe_definition",
     "a_share_evaluation_catalog",
     "a_share_factor_catalog",
     "a_share_field_catalog",
     "a_share_label_catalog",
     "a_share_market_definition",
     "a_share_model_catalog",
-    "a_share_price_volume_factor_columns",
-    "a_share_price_volume_factor_definitions",
-    "a_share_price_volume_panel_input_columns",
     "a_share_prediction_catalog",
     "a_share_processed_catalog",
     "a_share_research_dataset_catalog",

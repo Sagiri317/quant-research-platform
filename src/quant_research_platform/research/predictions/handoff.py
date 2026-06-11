@@ -11,6 +11,7 @@ from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import (
     read_research_dataset,
     validate_prediction_input,
@@ -20,17 +21,17 @@ from quant_research_platform.research.predictions.bundle import (
     build_prediction_bundle,
     write_prediction_bundle,
 )
-from quant_research_platform.storage.layout import layout_from_processed_market_root
+from quant_research_platform.storage.layout import StorageLayout
 
 
 def run_prediction_from_research_dataset(
     *,
-    processed_root: Path,
+    layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
     model_catalog: ModelCatalog,
     prediction_catalog: PredictionCatalog,
     prediction_id: str,
-    years: tuple[int, ...] | None = None,
+    time_window: TimeWindow | None = None,
 ) -> Path:
     prediction_spec = prediction_catalog.get(prediction_id)
     model_spec = model_catalog.get(prediction_spec.model_id)
@@ -47,9 +48,10 @@ def run_prediction_from_research_dataset(
         )
     )
     frame = read_research_dataset(
-        processed_root,
-        prediction_spec.research_dataset_id,
-        years=years,
+        layout,
+        market_id=dataset_spec.market_id,
+        dataset_id=dataset_spec.data_id,
+        time_window=time_window,
         columns=read_columns,
     )
     validate_prediction_input(
@@ -76,7 +78,6 @@ def run_prediction_from_research_dataset(
         model_spec.feature_columns,
     )
     prediction.attrs["model_metadata"] = model_result.metadata
-    layout = layout_from_processed_market_root(processed_root)
     report_spec = ReportSpec(
         report_id="prediction_bundle",
         report_definition_id="prediction_bundle_private",

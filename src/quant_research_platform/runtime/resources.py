@@ -24,7 +24,7 @@ class ChunkAxis(StrEnum):
     """Semantic axis used to split a dataset or build operation."""
 
     ASSET = "asset"
-    YEAR = "year"
+    TIME = "time"
     PARTITION = "partition"
     ROW_GROUP = "row_group"
 

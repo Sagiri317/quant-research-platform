@@ -12,15 +12,15 @@ class ResearchDatasetCatalog:
     _items: dict[str, ResearchDatasetSpec] = field(default_factory=dict)
 
     def register(self, spec: ResearchDatasetSpec) -> None:
-        if spec.dataset_id in self._items:
-            raise ValueError(f"duplicate_research_dataset_spec: {spec.dataset_id}")
-        self._items[spec.dataset_id] = spec
+        if spec.data_id in self._items:
+            raise ValueError(f"duplicate_research_dataset_spec: {spec.data_id}")
+        self._items[spec.data_id] = spec
 
-    def get(self, dataset_id: str) -> ResearchDatasetSpec:
+    def get(self, data_id: str) -> ResearchDatasetSpec:
         try:
-            return self._items[dataset_id]
+            return self._items[data_id]
         except KeyError as exc:
-            raise KeyError(f"unknown_research_dataset_spec: {dataset_id}") from exc
+            raise KeyError(f"unknown_research_dataset_spec: {data_id}") from exc
 
     def list(self) -> tuple[ResearchDatasetSpec, ...]:
         return tuple(self._items[key] for key in sorted(self._items))

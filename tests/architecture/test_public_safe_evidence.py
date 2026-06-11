@@ -87,14 +87,14 @@ SUMMARY_TOP_LEVEL_FIELDS = {
     "privacy_level",
     "source_data_visibility",
     "row_level_output_committed",
-    "processed_inventory",
+    "dataset_inventory",
     "covered_roots",
     "uncovered_roots",
     "allowed_unverified_roots",
     "merge_ready",
 }
 INVENTORY_FIELDS = {
-    "category",
+    "kind",
     "artifact_id",
     "logical_root",
     "period",
@@ -387,14 +387,14 @@ def test_dataset_root_summary_uses_dataframe_chunks(
         private_aggregate,
     )
 
-    root = tmp_path / "data" / "processed" / "a_share" / "factors" / "fixture"
+    root = tmp_path / "data" / "processed" / "a_share" / "factor" / "fixture"
     calls: list[dict[str, object]] = []
 
-    def fake_read_dataset(dataset_root, *, partition_filter, mode):
+    def fake_read_dataset(dataset_root, *, time_window, mode):
         calls.append(
             {
                 "root": dataset_root,
-                "partition_filter": partition_filter,
+                "time_window": time_window,
                 "mode": mode,
             }
         )
@@ -426,7 +426,10 @@ def test_dataset_root_summary_uses_dataframe_chunks(
     assert calls == [
         {
             "root": root,
-            "partition_filter": {"year": (2025,)},
+            "time_window": private_aggregate.TimeWindow(
+                "2025-01-01",
+                "2025-12-31",
+            ),
             "mode": DatasetReadMode.CHUNKED,
         }
     ]
@@ -443,7 +446,7 @@ def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
     )
     from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
-    root = tmp_path / "data" / "processed" / "a_share" / "factors" / "fixture"
+    root = tmp_path / "data" / "processed" / "a_share" / "factor" / "fixture"
     write_low_level_parquet_artifact(
         root,
         pd.DataFrame(
@@ -505,13 +508,16 @@ def test_private_verification_summary_json_schema_and_coverage() -> None:
     assert payload["uncovered_roots"] == []
     assert payload["allowed_unverified_roots"] == []
     assert payload["covered_roots"] == [
-        item["logical_root"] for item in payload["processed_inventory"]
+        item["logical_root"] for item in payload["dataset_inventory"]
     ]
 
-    for item in payload["processed_inventory"]:
+    for item in payload["dataset_inventory"]:
         assert INVENTORY_FIELDS.issubset(item)
-        assert item["logical_root"].startswith("processed/a_share/")
+        assert item["logical_root"].startswith(
+            ("processed/a_share/", "research/a_share/")
+        )
         assert "data/processed" not in item["logical_root"]
+        assert "data/research" not in item["logical_root"]
         assert item["row_count"] > 0
         assert item["column_count"] > 0
         assert item["key_count"] > 0
@@ -526,8 +532,8 @@ def test_private_verification_summary_covers_full_historical_panel() -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     daily_panel = next(
         item
-        for item in payload["processed_inventory"]
-        if item["logical_root"] == "processed/a_share/panels/daily_panel"
+        for item in payload["dataset_inventory"]
+        if item["logical_root"] == "processed/a_share/panel/daily_panel"
     )
 
     assert daily_panel["period"] == "2014-01-01 through 2025-12-31"

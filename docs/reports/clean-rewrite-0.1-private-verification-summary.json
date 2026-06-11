@@ -8,11 +8,11 @@
   "privacy_level": "public_safe_aggregate",
   "source_data_visibility": "private_local_only",
   "row_level_output_committed": false,
-  "processed_inventory": [
+  "dataset_inventory": [
     {
-      "category": "contexts",
+      "kind": "annotation",
       "artifact_id": "daily_context",
-      "logical_root": "processed/a_share/contexts/daily_context",
+      "logical_root": "processed/a_share/annotation/daily_context",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 14,
@@ -25,9 +25,9 @@
       "covered_by_evidence_area": "supporting_layers_coverage_2014_2025"
     },
     {
-      "category": "factors",
-      "artifact_id": "superseded_count_based_factor_artifact",
-      "logical_root": "processed/a_share/factors/superseded_count_based_factor_artifact",
+      "kind": "factor",
+      "artifact_id": "price_volume",
+      "logical_root": "processed/a_share/factor/price_volume",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 69,
@@ -42,9 +42,9 @@
       "evidence_status": "evidence_pending_regeneration"
     },
     {
-      "category": "labels",
+      "kind": "label",
       "artifact_id": "forward_returns",
-      "logical_root": "processed/a_share/labels/forward_returns",
+      "logical_root": "processed/a_share/label/forward_returns",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 14,
@@ -57,9 +57,9 @@
       "covered_by_evidence_area": "label_value_parity"
     },
     {
-      "category": "masks/as_of",
+      "kind": "annotation",
       "artifact_id": "a_share_as_of",
-      "logical_root": "processed/a_share/masks/as_of/a_share_as_of",
+      "logical_root": "processed/a_share/annotation/a_share_as_of",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 6,
@@ -72,9 +72,9 @@
       "covered_by_evidence_area": "masks_universes_parity"
     },
     {
-      "category": "masks/evaluation",
+      "kind": "annotation",
       "artifact_id": "a_share_evaluation",
-      "logical_root": "processed/a_share/masks/evaluation/a_share_evaluation",
+      "logical_root": "processed/a_share/annotation/a_share_evaluation",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 7,
@@ -87,9 +87,9 @@
       "covered_by_evidence_area": "masks_universes_parity"
     },
     {
-      "category": "masks/execution",
+      "kind": "annotation",
       "artifact_id": "a_share_execution",
-      "logical_root": "processed/a_share/masks/execution/a_share_execution",
+      "logical_root": "processed/a_share/annotation/a_share_execution",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 7,
@@ -102,9 +102,9 @@
       "covered_by_evidence_area": "masks_universes_parity"
     },
     {
-      "category": "panels",
+      "kind": "panel",
       "artifact_id": "daily_panel",
-      "logical_root": "processed/a_share/panels/daily_panel",
+      "logical_root": "processed/a_share/panel/daily_panel",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 48,
@@ -117,9 +117,9 @@
       "covered_by_evidence_area": "full_historical_daily_panel_status"
     },
     {
-      "category": "research_datasets",
+      "kind": "research_dataset",
       "artifact_id": "a_share_price_volume_forward_returns",
-      "logical_root": "processed/a_share/research_datasets/a_share_price_volume_forward_returns",
+      "logical_root": "research/a_share/a_share_price_volume_forward_returns",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 75,
@@ -132,9 +132,9 @@
       "covered_by_evidence_area": "research_dataset_parity"
     },
     {
-      "category": "universes",
+      "kind": "annotation",
       "artifact_id": "a_share_default",
-      "logical_root": "processed/a_share/universes/a_share_default",
+      "logical_root": "processed/a_share/annotation/a_share_default",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 6,
@@ -148,15 +148,15 @@
     }
   ],
   "covered_roots": [
-    "processed/a_share/contexts/daily_context",
-    "processed/a_share/factors/superseded_count_based_factor_artifact",
-    "processed/a_share/labels/forward_returns",
-    "processed/a_share/masks/as_of/a_share_as_of",
-    "processed/a_share/masks/evaluation/a_share_evaluation",
-    "processed/a_share/masks/execution/a_share_execution",
-    "processed/a_share/panels/daily_panel",
-    "processed/a_share/research_datasets/a_share_price_volume_forward_returns",
-    "processed/a_share/universes/a_share_default"
+    "processed/a_share/annotation/daily_context",
+    "processed/a_share/factor/price_volume",
+    "processed/a_share/label/forward_returns",
+    "processed/a_share/annotation/a_share_as_of",
+    "processed/a_share/annotation/a_share_evaluation",
+    "processed/a_share/annotation/a_share_execution",
+    "processed/a_share/panel/daily_panel",
+    "research/a_share/a_share_price_volume_forward_returns",
+    "processed/a_share/annotation/a_share_default"
   ],
   "uncovered_roots": [],
   "allowed_unverified_roots": [],

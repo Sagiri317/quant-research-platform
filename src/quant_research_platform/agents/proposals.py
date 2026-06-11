@@ -23,7 +23,7 @@ class FactorProposal(ProposalPayloadMixin):
     base_input_columns: tuple[str, ...] = ()
     derived_input_columns: tuple[str, ...] = ()
     derived_input_producers: dict[str, str] = field(default_factory=dict)
-    required_processed_data_id: str = ""
+    required_input_data_id: str = ""
     contract_version: str = "0.1"
     approved: bool = False
 
@@ -49,8 +49,8 @@ class LabelProposal(ProposalPayloadMixin):
 @dataclass(frozen=True)
 class ResearchDatasetProposal(ProposalPayloadMixin):
     proposal_id: str
-    dataset_id: str
-    processed_data_ids: tuple[str, ...]
+    data_id: str
+    input_data_ids: tuple[str, ...]
     contract_version: str = "0.1"
     approved: bool = False
 

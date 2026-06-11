@@ -35,7 +35,7 @@ class FactorDefinition:
     timing_semantics: str = "as_of_timestamp"
     null_policy: str = "preserve_nulls"
     source_layer: str = "processed"
-    required_processed_data_id: str = ""
+    required_input_data_id: str = ""
     window: int | None = None
     definition_version: str = "0.1"
 
@@ -51,8 +51,8 @@ class FactorDefinition:
             raise ValueError("factor_input_columns_must_match_base_and_derived")
         object.__setattr__(self, "base_input_columns", base_inputs)
         object.__setattr__(self, "derived_input_columns", derived_inputs)
-        if not self.required_processed_data_id:
-            raise ValueError("factor_required_processed_data_id_required")
+        if not self.required_input_data_id:
+            raise ValueError("factor_required_input_data_id_required")
 
     def to_manifest(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -73,7 +73,7 @@ class FactorDefinition:
             "timing_semantics": self.timing_semantics,
             "null_policy": self.null_policy,
             "source_layer": self.source_layer,
-            "required_processed_data_id": self.required_processed_data_id,
+            "required_input_data_id": self.required_input_data_id,
         }
         if self.window is not None:
             payload["window"] = self.window

@@ -70,13 +70,13 @@ def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
 
 
 def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str:
-    """Render the processed inventory summary as public-safe Markdown."""
+    """Render the sealed dataset inventory summary as public-safe Markdown."""
 
     lines = [
         "# Clean Rewrite 0.1 Private Verification Summary",
         "",
         (
-            "This summary records aggregate-only processed artifact inventory "
+            "This summary records aggregate-only sealed dataset inventory "
             "for QRP Clean Rewrite `0.1.0`."
         ),
         "",
@@ -88,7 +88,7 @@ def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str
         "| Logical Root | Area | Rows | Columns | Period |",
         "| --- | --- | ---: | ---: | --- |",
     ]
-    for item in payload["processed_inventory"]:
+    for item in payload["dataset_inventory"]:
         lines.append(
             "| "
             + " | ".join(
@@ -122,7 +122,7 @@ def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str
         ]
     )
     if payload["uncovered_roots"]:
-        lines.append("- uncovered processed roots require review before merge-ready")
+        lines.append("- uncovered dataset roots require review before merge-ready")
     return "\n".join(lines) + "\n"
 
 

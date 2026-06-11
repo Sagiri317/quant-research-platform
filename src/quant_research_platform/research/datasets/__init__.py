@@ -2,9 +2,9 @@
 
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
-    assemble_research_dataset_from_processed,
 )
 from quant_research_platform.research.datasets.io import (
+    inspect_research_dataset,
     read_research_dataset,
     read_research_dataset_manifest,
     read_research_dataset_spec_payload,
@@ -17,7 +17,7 @@ from quant_research_platform.research.datasets.validation import (
 
 __all__ = [
     "assemble_research_dataset",
-    "assemble_research_dataset_from_processed",
+    "inspect_research_dataset",
     "read_research_dataset",
     "read_research_dataset_manifest",
     "read_research_dataset_spec_payload",

@@ -8,7 +8,6 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.workflows import WorkflowRunSummary
-from quant_research_platform.interfaces import services
 
 
 def test_run_id_accepts_public_safe_lowercase_identifiers() -> None:
@@ -91,9 +90,3 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
             artifact_writer_policy="none",
             failure_code="invalid_run_id",
         )
-
-
-@pytest.mark.parametrize("run_id", ["run 01", "csmar-run", "600000.sh"])
-def test_data_product_interim_uses_shared_run_id_validation(run_id: str) -> None:
-    with pytest.raises(ValueError, match="invalid_run_id"):
-        services.run_data_product_interim("a_share_daily_bar", run_id=run_id)

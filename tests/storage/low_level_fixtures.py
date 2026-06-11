@@ -1,17 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pyarrow.parquet as pq
-
-from quant_research_platform.storage.datasets import (
-    _canonical_schema_from_file,
-    _relative_partition_label,
-    _sha256_json,
-)
 
 
 def write_low_level_parquet_artifact(
@@ -24,9 +20,12 @@ def write_low_level_parquet_artifact(
     """Construct low-level parquet fixtures for storage-adjacent tests."""
 
     spec = {
+        "schema_version": "0.1",
+        "data_id": Path(artifact_root).name,
         "primary_key": list(primary_key),
         "partition_columns": list(partition_columns),
         "required_columns": [str(column) for column in frame.columns],
+        "column_roles": _column_roles(frame.columns, primary_key),
     }
     root = Path(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -80,3 +79,42 @@ def _write_runtime_manifest(root: Path, data_root: Path, paths: list[Path]) -> N
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _column_roles(
+    columns: Sequence[object],
+    primary_key: Sequence[str],
+) -> dict[str, str]:
+    primary_key_set = {str(column) for column in primary_key}
+    roles = {}
+    for column in columns:
+        name = str(column)
+        if name == "timestamp":
+            roles[name] = "timestamp"
+        elif name in primary_key_set:
+            roles[name] = "key"
+        else:
+            roles[name] = "feature"
+    return roles
+
+
+def _canonical_schema_from_file(
+    parquet_file: pq.ParquetFile,
+) -> tuple[tuple[str, str], ...]:
+    return tuple((field.name, str(field.type)) for field in parquet_file.schema_arrow)
+
+
+def _relative_partition_label(data_root: Path, path: Path) -> str:
+    label = path.parent.relative_to(data_root).as_posix()
+    return "unpartitioned" if label == "." else label
+
+
+def _sha256_json(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

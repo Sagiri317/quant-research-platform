@@ -14,13 +14,20 @@ from quant_research_platform.catalog.predictions import (
     PredictionCatalog,
     default_prediction_column,
 )
+from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import DataFrequency, DataGrain
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    ProcessedDataKind,
+    ProcessedDataSpec,
+)
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.evaluations.engine import evaluate_factor_frame
 from quant_research_platform.research.models import fit_linear_baseline_result
@@ -28,6 +35,8 @@ from quant_research_platform.research.predictions import (
     build_prediction_bundle,
     run_prediction_from_research_dataset,
 )
+from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.layout import StorageLayout
 
 
 def _filter_frame() -> pd.DataFrame:
@@ -49,9 +58,9 @@ def _dataset_catalog() -> ResearchDatasetCatalog:
     catalog = ResearchDatasetCatalog()
     catalog.register(
         ResearchDatasetSpec(
-            dataset_id="demo_filter",
+            data_id="demo_filter",
             market_id=MarketId("a_share"),
-            processed_data_ids=("demo_factor", "demo_label"),
+            input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
             feature_columns=("factor",),
             label_columns=("label",),
             filter_columns=("eligible", "can_enter", "can_exit"),
@@ -64,6 +73,64 @@ def _dataset_catalog() -> ResearchDatasetCatalog:
                 "factor": ColumnRole.FEATURE,
                 "label": ColumnRole.LABEL,
                 "eligible": ColumnRole.MASK,
+                "can_enter": ColumnRole.MASK,
+                "can_exit": ColumnRole.MASK,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    return catalog
+
+
+def _processed_catalog() -> ProcessedDataCatalog:
+    catalog = ProcessedDataCatalog()
+    catalog.register(
+        ProcessedDataSpec(
+            data_id="demo_factor",
+            market_id=MarketId("a_share"),
+            kind=ProcessedDataKind.FACTOR,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "factor": ColumnRole.FACTOR,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    catalog.register(
+        ProcessedDataSpec(
+            data_id="demo_label",
+            market_id=MarketId("a_share"),
+            kind=ProcessedDataKind.LABEL,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "label": ColumnRole.LABEL,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    catalog.register(
+        ProcessedDataSpec(
+            data_id="demo_annotation",
+            market_id=MarketId("a_share"),
+            kind=ProcessedDataKind.ANNOTATION,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "eligible": ColumnRole.UNIVERSE,
                 "can_enter": ColumnRole.MASK,
                 "can_exit": ColumnRole.MASK,
             },
@@ -295,9 +362,17 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         default_prediction_column(),
     }
 
-    processed_root = tmp_path / "data" / "processed" / "a_share"
+    layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = _dataset_catalog()
-    assemble_research_dataset(frame, dataset_catalog, "demo_filter", processed_root)
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog, frame)
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo_filter",
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+    )
     model_catalog = ModelCatalog()
     model_catalog.register(
         ModelSpec(
@@ -311,7 +386,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     prediction_catalog.register(spec)
 
     run_root = run_prediction_from_research_dataset(
-        processed_root=processed_root,
+        layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
@@ -322,6 +397,32 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     assert manifest["model_metadata"]["rows_after_feature_label_dropna"] == 4
     assert manifest["prediction_metadata"]["sample_filter_mode"] == "eligible"
     assert manifest["prediction_metadata"]["rows_after_feature_dropna"] == 10
+
+
+def _write_processed_inputs(
+    layout: StorageLayout,
+    processed_catalog: ProcessedDataCatalog,
+    frame: pd.DataFrame,
+) -> None:
+    columns_by_id = {
+        "demo_factor": ["market_id", "asset_id", "timestamp", "factor"],
+        "demo_label": ["market_id", "asset_id", "timestamp", "label"],
+        "demo_annotation": [
+            "market_id",
+            "asset_id",
+            "timestamp",
+            "eligible",
+            "can_enter",
+            "can_exit",
+        ],
+    }
+    for data_id, columns in columns_by_id.items():
+        spec = processed_catalog.get(data_id)
+        write_dataset(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            frame.loc[:, columns],
+            spec=spec,
+        )
 
 
 def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:

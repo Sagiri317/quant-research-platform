@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.storage.atomic import atomic_write_text
@@ -52,6 +54,27 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     return atomic_write_text(path, text, encoding="utf-8")
 
 
+def replace_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
+    """Atomically replace an existing private artifact manifest."""
+
+    _assert_internal_artifact_metadata_safe(payload)
+    final_path = Path(path)
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = final_path.with_name(f".tmp-{uuid4().hex[:12]}")
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(final_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+    return final_path
+
+
 def write_layer_manifest(
     *,
     layer_root: Path,
@@ -83,7 +106,7 @@ def write_layer_manifest(
         }
         datasets.append(
             {
-                "dataset_id": _dataset_id_from_manifest(payload, dataset_root),
+                "data_id": _data_id_from_manifest(payload, dataset_root),
                 "manifest_path": _logical_path(path),
                 "manifest_summary": summary,
             }
@@ -98,7 +121,7 @@ def write_layer_manifest(
             "pass",
             "ok",
         }:
-            failed.append(_dataset_id_from_manifest(payload, dataset_root))
+            failed.append(_data_id_from_manifest(payload, dataset_root))
     status = "pass" if not missing and not failed else "fail"
     payload = {
         "run_id": run_id,
@@ -191,11 +214,10 @@ def _unsafe_internal_artifact_reason(
     return None
 
 
-def _dataset_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
-    for key in ("dataset_id", "processed_data_id", "interim_data_id"):
-        value = payload.get(key)
-        if value:
-            return str(value)
+def _data_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
+    value = payload.get("data_id")
+    if value:
+        return str(value)
     return _logical_path(Path(dataset_root))
 
 
@@ -214,6 +236,7 @@ def _utc_now() -> str:
 
 __all__ = [
     "read_manifest",
+    "replace_internal_artifact_manifest",
     "write_internal_artifact_manifest",
     "write_layer_manifest",
     "write_manifest",

@@ -39,29 +39,7 @@ def test_agents_do_not_import_market_implementations() -> None:
 
 
 def test_provider_bindings_catalog_remains_pure_container() -> None:
-    source = PROVIDER_BINDINGS.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(PROVIDER_BINDINGS))
-    imported_modules = {
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module is not None
-    }
-    top_level_functions = {
-        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
-    }
-    forbidden_imports = sorted(
-        module
-        for module in imported_modules
-        if module.startswith(FORBIDDEN_PROVIDER_BINDING_IMPORT_PREFIXES)
-    )
-    referenced_helpers = sorted(
-        FORBIDDEN_PROVIDER_BINDING_HELPERS.intersection(_referenced_names(tree))
-    )
-
-    assert "quant_research_platform.catalog.defaults" not in imported_modules
-    assert forbidden_imports == []
-    assert OLD_PRIVATE_HELPER not in top_level_functions
-    assert referenced_helpers == []
+    assert not PROVIDER_BINDINGS.exists()
 
 
 def test_storage_datasets_exposes_single_artifact_root_api() -> None:

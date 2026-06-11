@@ -16,10 +16,10 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 | Conda 环境 | `analysis` |
 | 版本边界 | project `0.1.0`; API/contracts use `0.1` |
 | 源码拓扑 | `contracts`, `storage`, `catalog`, `sources`, `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`, `reports`, `runtime` |
-| 当前 API/CLI | `/api/0.1/...` catalog routes, data product interim runs, research dataset requirements; `qrp catalog`, `qrp data-products`, `qrp research-datasets` |
-| 执行边界 | API/CLI `execution_mode` defaults to `execute`; `--dry-run` maps to `dry_run`; private real-data execution is not exposed through API/CLI |
+| 当前 API/CLI | `/api/0.1/...` factor/label catalog routes and research dataset requirements; `qrp catalog factors`, `qrp catalog labels`, `qrp research-datasets requirements` |
+| 执行边界 | API/CLI is read-only for current public users; source/interim/processed materialization and private real-data execution are internal |
 | 市场范围 | A-share enabled; other markets are future design only, with no empty implementation packages |
-| 私有边界 | `data/raw/<internal-provider>`, `data/interim/<internal-provider>`, `data/processed/a_share`, `reports/private_real` |
+| 私有边界 | `data/raw/<internal-provider>`, `data/interim/<internal-provider>`, `data/processed/a_share`, `data/research/a_share`, `reports/private_real` |
 | 交易边界 | No investment advice, paper/live trading, broker/exchange connector, deployment, scheduler, worker, or external data API |
 
 ## 当前有效样例

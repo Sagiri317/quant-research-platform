@@ -63,8 +63,8 @@ class FactorCatalog:
                 "unresolved_factor_derived_input: "
                 + ", ".join(sorted(unresolved_derived))
             )
-        if not proposal.required_processed_data_id:
-            raise ValueError("factor_required_processed_data_id_required")
+        if not proposal.required_input_data_id:
+            raise ValueError("factor_required_input_data_id_required")
 
         definition = FactorDefinition(
             factor_id=proposal.factor_id,
@@ -77,7 +77,7 @@ class FactorCatalog:
             display_name=proposal.factor_id,
             description=proposal.rationale,
             family="proposal",
-            required_processed_data_id=proposal.required_processed_data_id,
+            required_input_data_id=proposal.required_input_data_id,
         )
         self.register(definition)
         return definition

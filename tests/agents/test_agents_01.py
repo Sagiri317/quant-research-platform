@@ -41,8 +41,8 @@ def test_agent_proposals_start_unapproved() -> None:
         ),
         ResearchDatasetProposal(
             proposal_id="dataset-proposal-001",
-            dataset_id="a_share_daily_research_dataset",
-            processed_data_ids=("a_share_daily_0_1",),
+            data_id="a_share_daily_research_dataset",
+            input_data_ids=("a_share_daily_0_1",),
         ),
         WorkflowProposal(
             proposal_id="workflow-proposal-001",
@@ -105,8 +105,8 @@ def test_factories_return_only_public_safe_unapproved_proposals() -> None:
     )
     dataset = plan_research_dataset(
         proposal_id="dataset-proposal-002",
-        dataset_id="daily_factor_dataset",
-        processed_data_ids=("a_share_daily_0_1",),
+        data_id="daily_factor_dataset",
+        input_data_ids=("a_share_daily_0_1",),
     )
     workflow = plan_workflow(
         proposal_id="workflow-proposal-002",
@@ -141,7 +141,7 @@ def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() 
         rationale="Candidate for catalog review only.",
         input_columns=("close",),
         output_columns=("candidate_factor",),
-        required_processed_data_id="daily_panel",
+        required_input_data_id="daily_panel",
     )
 
     assert not hasattr(proposal, "execute")
@@ -156,7 +156,7 @@ def test_factor_catalog_registers_valid_factor_proposal() -> None:
         rationale="Candidate based on registered close field.",
         input_columns=("close",),
         output_columns=("candidate_factor",),
-        required_processed_data_id="daily_panel",
+        required_input_data_id="daily_panel",
     )
     catalog = FactorCatalog()
 
@@ -179,7 +179,7 @@ def test_factor_proposal_registration_rejects_duplicate_output_columns() -> None
         rationale="Invalid duplicate output candidate.",
         input_columns=("close",),
         output_columns=("candidate_factor", "candidate_factor"),
-        required_processed_data_id="daily_panel",
+        required_input_data_id="daily_panel",
     )
 
     with pytest.raises(ValueError, match="duplicate_factor_output_column"):
@@ -199,7 +199,7 @@ def test_factor_proposal_registration_rejects_unresolved_derived_input() -> None
         base_input_columns=("close",),
         derived_input_columns=("candidate_derived",),
         output_columns=("candidate_factor",),
-        required_processed_data_id="daily_panel",
+        required_input_data_id="daily_panel",
     )
 
     with pytest.raises(ValueError, match="unresolved_factor_derived_input"):

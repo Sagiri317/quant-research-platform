@@ -51,6 +51,7 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
     allowed_roots = (
         project_root / "data" / "interim",
         project_root / "data" / "processed",
+        project_root / "data" / "research",
     )
     for layer_root in allowed_roots:
         if not layer_root.exists():
@@ -75,11 +76,11 @@ def _inventory_item(project_root: Path, artifact_root: Path) -> dict[str, Any]:
             "primary_key_inferred" if primary_key else "primary_key_missing"
         )
     stats = _aggregate_dataset_stats(artifact_root, columns, primary_key)
-    layer, category, artifact_id = _logical_identifiers(logical_root)
+    layer, kind, artifact_id = _logical_identifiers(logical_root)
     return {
         "artifact_id": artifact_id,
         "layer": layer,
-        "category": category,
+        "kind": kind,
         "logical_relative_root": logical_root,
         "columns": list(columns),
         "dtypes": stats["dtypes"],
@@ -184,29 +185,25 @@ def _logical_identifiers(logical_root: str) -> tuple[str, str, str]:
         raise ValueError("invalid_inventory_root")
     layer = parts[1]
     if layer == "interim":
-        return layer, parts[2], parts[-1]
+        return layer, "interim", parts[-1]
     if layer == "processed":
-        category_parts = parts[3:-1]
-        category = "/".join(category_parts) if category_parts else parts[2]
-        return layer, category, parts[-1]
+        kind_parts = parts[3:-1]
+        kind = "/".join(kind_parts) if kind_parts else parts[2]
+        return layer, kind, parts[-1]
+    if layer == "research":
+        return layer, "research_dataset", parts[-1]
     return layer, "", parts[-1]
 
 
 def _infer_primary_key(columns: tuple[str, ...]) -> tuple[str, ...]:
-    reference_timestamp_key = (
-        "market_id",
-        "asset_id",
-        "source_id",
-        "source_asset_id",
-        "timestamp",
-    )
     canonical_key = ("market_id", "asset_id", "timestamp")
-    reference_key = ("market_id", "asset_id", "source_id", "source_asset_id")
-    calendar_key = ("market_id", "source_id", "timestamp")
+    source_asset_timestamp_key = ("source_asset_id", "timestamp")
+    source_asset_key = ("source_asset_id",)
+    calendar_key = ("timestamp",)
     for candidate in (
-        reference_timestamp_key,
         canonical_key,
-        reference_key,
+        source_asset_timestamp_key,
+        source_asset_key,
         calendar_key,
     ):
         if all(column in columns for column in candidate):

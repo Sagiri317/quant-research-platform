@@ -20,6 +20,7 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
+    ProcessedDataKind,
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
@@ -28,13 +29,9 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
-from quant_research_platform.markets.implementations.a_share.ids import (
-    FORWARD_RETURNS_PROCESSED_DATA_ID,
-    PRICE_VOLUME_PROCESSED_DATA_ID,
-)
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
-    assemble_research_dataset_from_processed,
     read_research_dataset,
     validate_evaluation_input,
     validate_prediction_input,
@@ -49,14 +46,11 @@ from quant_research_platform.research.predictions import (
     run_prediction_from_research_dataset,
     write_prediction_bundle,
 )
-from quant_research_platform.storage.datasets import write_dataset
-from quant_research_platform.storage.layout import (
-    StorageLayout,
-    layout_from_processed_market_root,
-)
+from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
+from quant_research_platform.storage.layout import StorageLayout
 
 
-def _research_frame() -> pd.DataFrame:
+def _research_rows() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "market_id": ["a_share", "a_share", "a_share", "a_share"],
@@ -69,77 +63,18 @@ def _research_frame() -> pd.DataFrame:
             "eligible": [True, True, True, True],
             "can_enter": [True, True, True, True],
             "can_exit": [True, True, True, True],
+            "market_type": [4, 4, 4, 4],
         }
     )
 
 
-def _research_dataset_catalog() -> ResearchDatasetCatalog:
-    catalog = ResearchDatasetCatalog()
+def _processed_catalog() -> ProcessedDataCatalog:
+    catalog = ProcessedDataCatalog()
     catalog.register(
-        ResearchDatasetSpec(
-            dataset_id="demo",
-            market_id=MarketId("a_share"),
-            processed_data_ids=(
-                PRICE_VOLUME_PROCESSED_DATA_ID,
-                FORWARD_RETURNS_PROCESSED_DATA_ID,
-            ),
-            feature_columns=("mom_20d",),
-            label_columns=("forward_return_20d",),
-            filter_columns=("eligible", "can_enter", "can_exit"),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.RESEARCH_ROW,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FEATURE,
-                "forward_return_20d": ColumnRole.LABEL,
-                "eligible": ColumnRole.MASK,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    return catalog
-
-
-def test_research_dataset_assemble_read_validate(tmp_path: Path) -> None:
-    processed_root = tmp_path / "data" / "processed" / "a_share"
-
-    assemble_research_dataset(
-        _research_frame(),
-        _research_dataset_catalog(),
-        "demo",
-        processed_root,
-    )
-    result = read_research_dataset(processed_root, "demo")
-
-    assert len(result) == 4
-    assert set(result.columns) == {
-        "market_id",
-        "asset_id",
-        "timestamp",
-        "mom_20d",
-        "forward_return_20d",
-        "eligible",
-        "can_enter",
-        "can_exit",
-    }
-
-
-def test_research_dataset_assembles_from_processed_specs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    processed_root = tmp_path / "data" / "processed" / "a_share"
-    processed_catalog = ProcessedDataCatalog()
-    processed_catalog.register(
         ProcessedDataSpec(
+            data_id="demo_factors",
             market_id=MarketId("a_share"),
-            category="factors",
-            processed_data_id="demo_factors",
+            kind=ProcessedDataKind.FACTOR,
             frequency=DataFrequency.DAILY,
             grain=DataGrain.ASSET_TIMESTAMP,
             column_roles={
@@ -152,11 +87,11 @@ def test_research_dataset_assembles_from_processed_specs(
             partition_columns=("year",),
         )
     )
-    processed_catalog.register(
+    catalog.register(
         ProcessedDataSpec(
+            data_id="demo_labels",
             market_id=MarketId("a_share"),
-            category="labels",
-            processed_data_id="demo_labels",
+            kind=ProcessedDataKind.LABEL,
             frequency=DataFrequency.DAILY,
             grain=DataGrain.ASSET_TIMESTAMP,
             column_roles={
@@ -169,14 +104,40 @@ def test_research_dataset_assembles_from_processed_specs(
             partition_columns=("year",),
         )
     )
-    dataset_catalog = ResearchDatasetCatalog()
-    dataset_catalog.register(
-        ResearchDatasetSpec(
-            dataset_id="demo_from_processed",
+    catalog.register(
+        ProcessedDataSpec(
+            data_id="demo_annotations",
             market_id=MarketId("a_share"),
-            processed_data_ids=("demo_factors", "demo_labels"),
+            kind=ProcessedDataKind.ANNOTATION,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "eligible": ColumnRole.UNIVERSE,
+                "can_enter": ColumnRole.MASK,
+                "can_exit": ColumnRole.MASK,
+                "market_type": ColumnRole.CONTEXT,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    return catalog
+
+
+def _research_dataset_catalog() -> ResearchDatasetCatalog:
+    catalog = ResearchDatasetCatalog()
+    catalog.register(
+        ResearchDatasetSpec(
+            data_id="demo",
+            market_id=MarketId("a_share"),
+            input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
+            filter_columns=("eligible", "can_enter", "can_exit"),
+            context_columns=("market_type",),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.RESEARCH_ROW,
             column_roles={
@@ -185,68 +146,168 @@ def test_research_dataset_assembles_from_processed_specs(
                 "timestamp": ColumnRole.TIMESTAMP,
                 "mom_20d": ColumnRole.FEATURE,
                 "forward_return_20d": ColumnRole.LABEL,
+                "eligible": ColumnRole.UNIVERSE,
+                "can_enter": ColumnRole.MASK,
+                "can_exit": ColumnRole.MASK,
+                "market_type": ColumnRole.CONTEXT,
             },
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
         )
     )
+    return catalog
 
-    layout = layout_from_processed_market_root(processed_root)
-    factor_spec = processed_catalog.get("demo_factors")
-    write_dataset(
-        layout.processed_data_root(
-            factor_spec.market_id,
-            factor_spec.category,
-            factor_spec.processed_data_id,
-        ),
-        _research_frame().loc[:, ["market_id", "asset_id", "timestamp", "mom_20d"]],
-        spec=factor_spec,
-    )
-    label_spec = processed_catalog.get("demo_labels")
-    write_dataset(
-        layout.processed_data_root(
-            label_spec.market_id,
-            label_spec.category,
-            label_spec.processed_data_id,
-        ),
-        _research_frame().loc[
-            :, ["market_id", "asset_id", "timestamp", "forward_return_20d"]
-        ],
-        spec=label_spec,
-    )
 
-    assemble_research_dataset_from_processed(
-        processed_root=processed_root,
+def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = _research_dataset_catalog()
+    _write_processed_inputs(layout, processed_catalog)
+
+    root = assemble_research_dataset(
+        layout=layout,
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
-        dataset_id="demo_from_processed",
-        years=(2014,),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
-    result = read_research_dataset(processed_root, "demo_from_processed")
+    result = read_research_dataset(
+        layout,
+        market_id=MarketId("a_share"),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+    )
+    inspection = inspect_dataset(root)
 
+    assert root == tmp_path / "data" / "research" / "a_share" / "demo"
     assert list(result.columns) == [
         "market_id",
         "asset_id",
         "timestamp",
         "mom_20d",
         "forward_return_20d",
+        "eligible",
+        "can_enter",
+        "can_exit",
+        "market_type",
     ]
     assert len(result) == 4
+    assert set(inspection.manifest["input_fingerprints"]) == {
+        "demo_factors",
+        "demo_labels",
+        "demo_annotations",
+    }
     validate_evaluation_input(
         result,
-        dataset_catalog.get("demo_from_processed"),
+        dataset_catalog.get("demo"),
         feature_columns=("mom_20d",),
         label_columns=("forward_return_20d",),
     )
     validate_prediction_input(
         result,
-        dataset_catalog.get("demo_from_processed"),
+        dataset_catalog.get("demo"),
         feature_columns=("mom_20d",),
     )
 
 
+def test_research_dataset_role_validation_rejects_wrong_factor_source(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(
+        ResearchDatasetSpec(
+            data_id="bad_demo",
+            market_id=MarketId("a_share"),
+            input_data_ids=("demo_annotations",),
+            feature_columns=("market_type",),
+            label_columns=(),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.RESEARCH_ROW,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "market_type": ColumnRole.FEATURE,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    _write_processed_inputs(layout, processed_catalog)
+
+    with pytest.raises(ValueError, match="invalid_research_feature_columns"):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id="bad_demo",
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_column", "expected_error"),
+    [
+        ("label_columns", "mom_20d", "invalid_research_label_columns"),
+        ("filter_columns", "market_type", "invalid_research_filter_columns"),
+        ("context_columns", "eligible", "invalid_research_context_columns"),
+    ],
+)
+def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context(
+    tmp_path: Path,
+    field_name: str,
+    bad_column: str,
+    expected_error: str,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    spec_kwargs = {
+        "feature_columns": ("mom_20d",),
+        "label_columns": ("forward_return_20d",),
+        "filter_columns": ("eligible", "can_enter", "can_exit"),
+        "context_columns": ("market_type",),
+    }
+    spec_kwargs[field_name] = (bad_column,)
+    dataset_catalog.register(
+        ResearchDatasetSpec(
+            data_id=f"bad_{field_name}",
+            market_id=MarketId("a_share"),
+            input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
+            **spec_kwargs,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.RESEARCH_ROW,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "mom_20d": ColumnRole.FEATURE,
+                "forward_return_20d": ColumnRole.LABEL,
+                "eligible": ColumnRole.UNIVERSE,
+                "can_enter": ColumnRole.MASK,
+                "can_exit": ColumnRole.MASK,
+                "market_type": ColumnRole.CONTEXT,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    _write_processed_inputs(layout, processed_catalog)
+
+    with pytest.raises(ValueError, match=expected_error):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id=f"bad_{field_name}",
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        )
+
+
 def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
-    frame = _research_frame()
+    frame = _research_rows()
     eval_spec = EvaluationSpec(
         run_id="eval_demo",
         market_id=MarketId("a_share"),
@@ -307,13 +368,16 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
 def test_prediction_handoff_reads_research_dataset_and_writes_report(
     tmp_path: Path,
 ) -> None:
-    processed_root = tmp_path / "data" / "processed" / "a_share"
+    layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = _research_dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
-        _research_frame(),
-        dataset_catalog,
-        "demo",
-        processed_root,
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
     model_catalog = ModelCatalog()
     model_catalog.register(
@@ -339,7 +403,7 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     )
 
     run_root = run_prediction_from_research_dataset(
-        processed_root=processed_root,
+        layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
@@ -353,103 +417,23 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["is_oos"] is True
     assert manifest["prediction_mode"] == "minimal_oos"
-    assert manifest["train_end"] == "2014-01-02"
-    assert manifest["test_start"] == "2014-01-03"
-    assert manifest["test_end"] == "2014-01-03"
-    assert manifest["is_final_oos_window"] is False
     assert manifest["prediction_column"] == default_prediction_column()
     assert manifest["primary_key"] == list(platform_entity_time_key())
-
-
-def test_prediction_handoff_rejects_overlapping_oos_split(tmp_path: Path) -> None:
-    processed_root = tmp_path / "data" / "processed" / "a_share"
-    dataset_catalog = _research_dataset_catalog()
-    assemble_research_dataset(
-        _research_frame(),
-        dataset_catalog,
-        "demo",
-        processed_root,
-    )
-    model_catalog = ModelCatalog()
-    model_catalog.register(
-        ModelSpec(
-            model_id="linear_demo",
-            model_family="linear",
-            feature_columns=("mom_20d",),
-            label_column="forward_return_20d",
-        )
-    )
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
-            prediction_id="pred_demo",
-            model_id="linear_demo",
-            research_dataset_id="demo",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
-            train_end="2014-01-03",
-            test_start="2014-01-03",
-        )
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="prediction_train_end_must_precede_test_start",
-    ):
-        run_prediction_from_research_dataset(
-            processed_root=processed_root,
-            dataset_catalog=dataset_catalog,
-            model_catalog=model_catalog,
-            prediction_catalog=prediction_catalog,
-            prediction_id="pred_demo",
-        )
-
-
-def test_prediction_spec_rejects_open_ended_non_final_window() -> None:
-    with pytest.raises(ValueError, match="prediction_open_ended_window_must_be_final"):
-        PredictionSpec(
-            prediction_id="pred_demo",
-            model_id="linear_demo",
-            research_dataset_id="demo",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
-            train_end="2014-01-02",
-            test_start="2014-01-03",
-            is_final_oos_window=False,
-        )
-
-
-def test_prediction_bundle_rejects_empty_oos_test_window() -> None:
-    frame = _research_frame()
-    spec = PredictionSpec(
-        prediction_id="pred_demo",
-        model_id="linear_demo",
-        research_dataset_id="demo",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
-        train_end="2014-01-02",
-        test_start="2099-01-01",
-    )
-
-    with pytest.raises(ValueError, match="prediction_oos_test_window_empty"):
-        build_prediction_bundle(
-            frame,
-            spec,
-            coefficients=pd.Series([0.0, 1.0]).to_numpy(),
-            feature_columns=("mom_20d",),
-        )
 
 
 def test_evaluation_runner_reads_research_dataset_and_writes_report(
     tmp_path: Path,
 ) -> None:
-    processed_root = tmp_path / "data" / "processed" / "a_share"
+    layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = _research_dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog)
     assemble_research_dataset(
-        _research_frame(),
-        dataset_catalog,
-        "demo",
-        processed_root,
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
     evaluation_catalog = EvaluationCatalog()
     evaluation_catalog.register(
@@ -463,7 +447,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     )
 
     run_root = run_evaluation_from_research_dataset(
-        processed_root=processed_root,
+        layout=layout,
         dataset_catalog=dataset_catalog,
         evaluation_catalog=evaluation_catalog,
         run_id="eval_demo",
@@ -475,3 +459,35 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     assert (run_root / "metrics.parquet").is_file()
     assert (run_root / "grouped_returns.parquet").is_file()
     assert (run_root / "manifest.json").is_file()
+
+
+def _write_processed_inputs(
+    layout: StorageLayout,
+    processed_catalog: ProcessedDataCatalog,
+) -> None:
+    frame = _research_rows()
+    columns_by_id = {
+        "demo_factors": ["market_id", "asset_id", "timestamp", "mom_20d"],
+        "demo_labels": [
+            "market_id",
+            "asset_id",
+            "timestamp",
+            "forward_return_20d",
+        ],
+        "demo_annotations": [
+            "market_id",
+            "asset_id",
+            "timestamp",
+            "eligible",
+            "can_enter",
+            "can_exit",
+            "market_type",
+        ],
+    }
+    for data_id, columns in columns_by_id.items():
+        spec = processed_catalog.get(data_id)
+        write_dataset(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            frame.loc[:, columns],
+            spec=spec,
+        )

@@ -6,9 +6,9 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     DataSpec,
     InterimDataSpec,
+    ProcessedDataKind,
     ProcessedDataSpec,
 )
-from quant_research_platform.contracts.data_products import DataProductDefinition
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import (
@@ -18,7 +18,6 @@ from quant_research_platform.contracts.ids import (
     SourceId,
 )
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.masks import MaskDefinition
 from quant_research_platform.contracts.privacy import PrivacyLevel
 from quant_research_platform.contracts.reports import ReportDefinition, ReportSpec
 from quant_research_platform.contracts.run_id import (
@@ -34,7 +33,6 @@ __all__ = [
     "ColumnRole",
     "DataFrequency",
     "DataGrain",
-    "DataProductDefinition",
     "DataSpec",
     "ExecutionMode",
     "FactorDefinition",
@@ -44,7 +42,7 @@ __all__ = [
     "LabelDefinition",
     "LogicalType",
     "MarketId",
-    "MaskDefinition",
+    "ProcessedDataKind",
     "ProcessedDataSpec",
     "PrivacyLevel",
     "ReportDefinition",

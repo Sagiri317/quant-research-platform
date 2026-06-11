@@ -15,7 +15,8 @@ Project purpose:
   exports.
 - Current implementation phase is QRP Clean Rewrite `0.1.0`.
 - Public API/spec/contract version is `0.1`.
-- Public data product id is `a_share_daily_bar`.
+- Public user-facing data objects are factors, labels, and research dataset
+  requirements.
 - Code and public-safe aggregate summaries may later be published after review.
 - Raw/interim/processed private data and private real reports remain private.
 
@@ -65,6 +66,7 @@ Private data/report roots:
 data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
+data/research/a_share/
 reports/private_real/
 ```
 
@@ -90,9 +92,6 @@ set is:
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
-GET  /api/0.1/catalog/universes
-GET  /api/0.1/catalog/data-products
-POST /api/0.1/data-products/{data_product_id}/interim-runs
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
 ```
 
@@ -101,18 +100,12 @@ The clean CLI surface is:
 ```text
 qrp catalog factors
 qrp catalog labels
-qrp catalog universes
-qrp catalog data-products
-qrp data-products run-interim <data_product_id>
-qrp data-products run-interim <data_product_id> --dry-run
-qrp data-products run-interim <data_product_id> --run-id <run_id>
 qrp research-datasets requirements <dataset_id>
 ```
 
-`execution_mode` defaults to `execute`; `--dry-run` maps to
-`execution_mode=dry_run`, and `--run-id` must pass the shared run id sanitizer.
-API/CLI `execute` is fixture-backed registered execution only. Private
-real-data execution is not exposed through API/CLI in `0.1.0`.
+These public commands are read-only. Source/interim/processed materialization is
+internal, and private real-data execution is not exposed through API/CLI in
+`0.1.0`.
 
 Retired command and endpoint names are not compatibility requirements.
 

@@ -15,7 +15,7 @@ from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 ALLOWED_INVENTORY_FIELDS = {
     "artifact_id",
     "layer",
-    "category",
+    "kind",
     "logical_relative_root",
     "columns",
     "dtypes",
@@ -49,7 +49,7 @@ def test_qrp_private_script_entry_is_the_only_private_cli_addition() -> None:
         assert callable(getattr(module, function_name))
 
 
-def test_schema_inventory_scans_only_interim_and_processed_roots(tmp_path) -> None:
+def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     _write_inventory_fixture(tmp_path)
 
     inventory = build_schema_inventory(tmp_path)
@@ -59,21 +59,30 @@ def test_schema_inventory_scans_only_interim_and_processed_roots(tmp_path) -> No
     assert roots == {
         "data/interim/csmar/daily_market",
         "data/interim/csmar/stock_master",
-        "data/processed/a_share/factors/price_volume",
-        "data/processed/a_share/universes/a_share_default",
+        "data/processed/a_share/factor/price_volume",
+        "data/processed/a_share/annotation/a_share_default",
+        "data/research/a_share/demo_research_dataset",
     }
     assert all(set(item) == ALLOWED_INVENTORY_FIELDS for item in inventory)
     daily_market = _inventory_item(inventory, "data/interim/csmar/daily_market")
     stock_master = _inventory_item(inventory, "data/interim/csmar/stock_master")
     price_volume = _inventory_item(
         inventory,
-        "data/processed/a_share/factors/price_volume",
+        "data/processed/a_share/factor/price_volume",
     )
-    universe = _inventory_item(
+    annotation = _inventory_item(
         inventory,
-        "data/processed/a_share/universes/a_share_default",
+        "data/processed/a_share/annotation/a_share_default",
+    )
+    research = _inventory_item(
+        inventory,
+        "data/research/a_share/demo_research_dataset",
     )
 
+    assert daily_market["kind"] == "interim"
+    assert price_volume["kind"] == "factor"
+    assert annotation["kind"] == "annotation"
+    assert research["kind"] == "research_dataset"
     assert daily_market["row_count_by_year"] == {"2023": 1, "2024": 1, "2025": 2}
     assert daily_market["min_timestamp"] == "2023-12-29"
     assert daily_market["max_timestamp"] == "2025-01-06"
@@ -83,7 +92,8 @@ def test_schema_inventory_scans_only_interim_and_processed_roots(tmp_path) -> No
     assert price_volume["row_count_by_year"] == {"2024": 3, "2025": 1}
     assert price_volume["duplicate_primary_key_count"] == 1
     assert {"mom_20d", "mom_60d", "rev_20d"}.issubset(price_volume["columns"])
-    assert universe["selected_important_column_null_counts"] == {"eligible": 1}
+    assert annotation["selected_important_column_null_counts"] == {"eligible": 1}
+    assert research["row_count_by_year"] == {"2024": 2}
     assert "data/raw" not in combined
     assert "reports/private_real" not in combined
     assert str(tmp_path) not in combined
@@ -98,9 +108,6 @@ def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> N
         index_info_root,
         pd.DataFrame(
             {
-                "market_id": ["a_share"],
-                "asset_id": ["index_a"],
-                "source_id": ["csmar"],
                 "source_asset_id": ["source_index_a"],
                 "timestamp": pd.to_datetime(["2020-01-01"]),
                 "index_name": ["Synthetic Index"],
@@ -114,9 +121,6 @@ def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> N
     item = _inventory_item(inventory, "data/interim/csmar/index_info")
 
     assert item["primary_key"] == [
-        "market_id",
-        "asset_id",
-        "source_id",
         "source_asset_id",
         "timestamp",
     ]
@@ -159,7 +163,7 @@ def test_qrp_private_schema_inventory_requires_output_and_refuses_overwrite(
     assert created.exit_code == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert isinstance(payload, list)
-    assert len(payload) == 4
+    assert len(payload) == 5
     assert overwrite.exit_code == 2
     assert "output_already_exists" in overwrite.output
 
@@ -267,7 +271,7 @@ def _write_inventory_fixture(project_root: Path) -> None:
         / "data"
         / "processed"
         / "a_share"
-        / "factors"
+        / "factor"
         / "price_volume"
     )
     stock_master_root = project_root / "data" / "interim" / "csmar" / "stock_master"
@@ -276,8 +280,11 @@ def _write_inventory_fixture(project_root: Path) -> None:
         / "data"
         / "processed"
         / "a_share"
-        / "universes"
+        / "annotation"
         / "a_share_default"
+    )
+    research_root = (
+        project_root / "data" / "research" / "a_share" / "demo_research_dataset"
     )
     raw_root = project_root / "data" / "raw" / "vendor" / "ignored"
     report_root = (
@@ -288,12 +295,9 @@ def _write_inventory_fixture(project_root: Path) -> None:
         interim_root,
         pd.DataFrame(
             {
-                "market_id": ["a_share", "a_share", "a_share", "a_share"],
-                "asset_id": ["asset_a", "asset_a", "asset_b", "asset_c"],
                 "timestamp": pd.to_datetime(
                     ["2023-12-29", "2024-01-02", "2025-01-03", "2025-01-06"]
                 ),
-                "source_id": ["csmar", "csmar", "csmar", "csmar"],
                 "source_asset_id": [
                     "source_asset_a",
                     "source_asset_a",
@@ -303,28 +307,19 @@ def _write_inventory_fixture(project_root: Path) -> None:
                 "close": [1.0, 2.0, 3.0, 4.0],
             }
         ),
-        primary_key=["market_id", "asset_id", "timestamp"],
+        primary_key=["source_asset_id", "timestamp"],
         partition_columns=["year"],
     )
     write_low_level_parquet_artifact(
         stock_master_root,
         pd.DataFrame(
             {
-                "market_id": ["a_share", "a_share"],
-                "asset_id": ["asset_a", "asset_b"],
-                "source_id": ["csmar", "csmar"],
                 "source_asset_id": ["source_asset_a", "source_asset_b"],
                 "timestamp": pd.to_datetime(["2020-01-01", "2021-06-01"]),
                 "listing_date": pd.to_datetime(["2020-01-01", "2021-06-01"]),
             }
         ),
-        primary_key=[
-            "market_id",
-            "asset_id",
-            "source_id",
-            "source_asset_id",
-            "timestamp",
-        ],
+        primary_key=["source_asset_id", "timestamp"],
         partition_columns=["year"],
     )
     write_low_level_parquet_artifact(
@@ -352,6 +347,21 @@ def _write_inventory_fixture(project_root: Path) -> None:
                 "asset_id": ["asset_a", "asset_b"],
                 "timestamp": pd.to_datetime(["2024-01-02", "2025-01-03"]),
                 "eligible": pd.Series([True, pd.NA], dtype="boolean"),
+            }
+        ),
+        primary_key=["market_id", "asset_id", "timestamp"],
+        partition_columns=["year"],
+    )
+    write_low_level_parquet_artifact(
+        research_root,
+        pd.DataFrame(
+            {
+                "market_id": ["a_share", "a_share"],
+                "asset_id": ["asset_a", "asset_b"],
+                "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                "mom_20d": [0.1, 0.2],
+                "forward_return_20d": [0.03, 0.04],
+                "eligible": pd.Series([True, False], dtype="boolean"),
             }
         ),
         primary_key=["market_id", "asset_id", "timestamp"],

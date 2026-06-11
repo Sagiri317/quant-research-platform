@@ -62,8 +62,6 @@ def test_clean_rewrite_target_files_exist() -> None:
         "contracts/execution.py",
         "contracts/factors.py",
         "contracts/labels.py",
-        "contracts/masks.py",
-        "contracts/universes.py",
         "contracts/datasets.py",
         "contracts/evaluations.py",
         "contracts/models.py",
@@ -75,13 +73,10 @@ def test_clean_rewrite_target_files_exist() -> None:
         "storage/layout.py",
         "storage/datasets.py",
         "storage/manifests.py",
-        "storage/partitions.py",
         "storage/checksums.py",
         "catalog/processed.py",
         "catalog/factors.py",
         "catalog/labels.py",
-        "catalog/masks.py",
-        "catalog/universes.py",
         "catalog/datasets.py",
         "catalog/evaluations.py",
         "catalog/models.py",
@@ -124,7 +119,14 @@ def test_clean_rewrite_target_files_exist() -> None:
         "sources/csmar/raw_schemas.py",
         "sources/csmar/field_mappings.py",
         "sources/csmar/checksums.py",
-        "markets/implementations/a_share/source_bindings/csmar.py",
+        "sources/csmar/interim.py",
+        "markets/implementations/a_share/processed/annotations.py",
+        "markets/implementations/a_share/processed/materializer.py",
+        "markets/implementations/a_share/processed/panels.py",
+        "markets/implementations/a_share/factors/definitions.py",
+        "markets/implementations/a_share/factors/calculations.py",
+        "markets/implementations/a_share/labels/definitions.py",
+        "markets/implementations/a_share/labels/calculations.py",
         "markets/implementations/a_share/verification/private_aggregate.py",
         "research/labels/forward_returns.py",
         "interfaces/private_cli.py",
@@ -220,7 +222,6 @@ def test_retired_csmar_compatibility_entrypoints_are_absent() -> None:
         SOURCE_ROOT / "sources/csmar" / ("build" + "_interim.py"),
         SOURCE_ROOT / "sources/csmar/columns.py",
         SOURCE_ROOT / "sources/csmar/importer.py",
-        SOURCE_ROOT / "sources/csmar/interim.py",
         SOURCE_ROOT / "sources/csmar/mappers.py",
         SOURCE_ROOT / "sources/csmar/dataset_contracts.py",
         SOURCE_ROOT / "markets/implementations/a_share/processed/migration.py",
@@ -236,10 +237,7 @@ def test_retired_csmar_compatibility_entrypoints_are_absent() -> None:
 
 def test_a_share_factor_builder_has_no_legacy_partition_fallback() -> None:
     path = SOURCE_ROOT / "markets/implementations/a_share/factors/build_factors.py"
-    text = path.read_text(encoding="utf-8")
-
-    assert "legacy_path" not in text
-    assert "year={start_year}_{end_year}" not in text
+    assert not path.exists()
 
 
 def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
@@ -294,6 +292,8 @@ def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
     }
     hits: list[str] = []
     for path, names in retired_functions.items():
+        if not path.exists():
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         hits.extend(
             f"{path}:{node.lineno}: {node.name}"
@@ -441,6 +441,8 @@ def test_csmar_source_package_does_not_own_a_share_interim_pruning() -> None:
 
 def test_a_share_csmar_binding_does_not_export_unprefixed_behavior() -> None:
     path = SOURCE_ROOT / "markets/implementations/a_share/source_bindings/csmar.py"
+    assert not path.exists()
+    return
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     forbidden = {
         "filter_by_date_range",
@@ -635,6 +637,7 @@ def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
 def test_platform_core_does_not_import_csmar_source_modules() -> None:
     allowed_composition_roots = {
         SOURCE_ROOT / "catalog" / "defaults.py",
+        SOURCE_ROOT / "workflows" / "private_evidence.py",
     }
     checked_roots = (
         SOURCE_ROOT / "interfaces/api",
@@ -724,8 +727,8 @@ def test_csmar_data_additions_are_source_local_by_default() -> None:
         "same table same schema new files": "sources/csmar",
         "same table new fields": "sources/csmar + tests",
         "new A-share CSMAR interim product": (
-            "markets/implementations/a_share/source_bindings/csmar.py "
-            "+ catalog registration"
+            "sources/csmar/interim.py + A-share processed materializer "
+            "dependency wiring"
         ),
         "public route additions": "forbidden",
         "public CLI group additions": "forbidden",
@@ -733,8 +736,8 @@ def test_csmar_data_additions_are_source_local_by_default() -> None:
 
     assert source_local_change_policy["public route additions"] == "forbidden"
     assert source_local_change_policy["public CLI group additions"] == "forbidden"
-    assert source_local_change_policy["new A-share CSMAR interim product"].startswith(
-        "markets/implementations/a_share/source_bindings/csmar.py"
+    assert "sources/csmar/interim.py" in (
+        source_local_change_policy["new A-share CSMAR interim product"]
     )
 
 

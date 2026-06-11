@@ -1,64 +1,78 @@
-"""ResearchDataset IO helpers."""
+"""Research dataset IO helpers."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
-from quant_research_platform.storage.layout import layout_from_processed_market_root
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.storage.datasets import (
+    DatasetInspection,
+    inspect_dataset,
+    read_dataset,
+)
+from quant_research_platform.storage.layout import StorageLayout
 
 
 def read_research_dataset(
-    processed_root: Path,
-    dataset_id: str,
+    layout: StorageLayout,
     *,
-    years: tuple[int, ...] | None = None,
+    market_id: MarketId,
+    dataset_id: str,
+    time_window: TimeWindow | None = None,
     columns: tuple[str, ...] | list[str] | None = None,
 ) -> pd.DataFrame:
-    read_research_dataset_spec_payload(processed_root, dataset_id)
-    artifact_root = _research_dataset_root(processed_root, dataset_id)
-    frame = read_dataset(
+    artifact_root = layout.research_dataset_root(market_id, dataset_id)
+    return read_dataset(
         artifact_root,
-        partition_filter=_year_filter(years),
+        time_window=time_window,
         columns=columns,
     )
-    if "year" in frame.columns:
-        frame = frame.drop(columns=["year"])
-    return frame
+
+
+def inspect_research_dataset(
+    layout: StorageLayout,
+    *,
+    market_id: MarketId,
+    dataset_id: str,
+    time_window: TimeWindow | None = None,
+) -> DatasetInspection:
+    return inspect_dataset(
+        layout.research_dataset_root(market_id, dataset_id),
+        time_window=time_window,
+    )
 
 
 def read_research_dataset_spec_payload(
-    processed_root: Path,
+    layout: StorageLayout,
+    *,
+    market_id: MarketId,
     dataset_id: str,
 ) -> dict[str, Any]:
-    return inspect_dataset(_research_dataset_root(processed_root, dataset_id)).spec
+    return inspect_research_dataset(
+        layout,
+        market_id=market_id,
+        dataset_id=dataset_id,
+    ).spec
 
 
 def read_research_dataset_manifest(
-    processed_root: Path,
+    layout: StorageLayout,
+    *,
+    market_id: MarketId,
     dataset_id: str,
 ) -> dict[str, Any]:
-    return inspect_dataset(_research_dataset_root(processed_root, dataset_id)).manifest
-
-
-def _research_dataset_root(processed_root: Path, dataset_id: str) -> Path:
-    root = Path(processed_root)
-    return layout_from_processed_market_root(processed_root).research_dataset_root(
-        root.name,
-        dataset_id,
-    )
-
-
-def _year_filter(years: tuple[int, ...] | None) -> dict[str, tuple[int, ...]] | None:
-    if years is None:
-        return None
-    return {"year": years}
+    return inspect_research_dataset(
+        layout,
+        market_id=market_id,
+        dataset_id=dataset_id,
+    ).manifest
 
 
 __all__ = [
+    "inspect_research_dataset",
     "read_research_dataset",
     "read_research_dataset_manifest",
     "read_research_dataset_spec_payload",

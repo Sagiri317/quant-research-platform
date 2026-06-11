@@ -42,7 +42,7 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
         assert set(definition.derived_input_columns).issubset(registered_fields)
         assert definition.output_column == definition.factor_id
         assert definition.family == "price_volume"
-        assert definition.required_processed_data_id == "daily_panel"
+        assert definition.required_input_data_id == "daily_panel"
 
     shared_input_superset = {
         "open",
