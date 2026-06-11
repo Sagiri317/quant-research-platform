@@ -23,7 +23,7 @@ A-share processed artifacts.
 ## Source-Owned Responsibilities
 
 - CSMAR source identity and source-local ids.
-- Raw export schema descriptors and read helpers.
+- Raw export schema descriptors and CSV read helpers.
 - Source-to-interim field mappings.
 - Source-normalized interim specs with `data_id` and `source_id`.
 - Interim row fields such as `source_asset_id` where the source table is
@@ -43,6 +43,12 @@ A-share processed artifacts.
 
 ## Notes
 
+- The current supported raw export table format is CSV. Spreadsheet exports are
+  not accepted as raw tables unless a real read path and tests are added.
+- TXT field descriptions are semantic references for source fields. They are
+  not raw table inputs.
+- JSON metadata sidecars are check material for private intake evidence. They
+  are not required pipeline inputs and are not written by the source reader.
 - `source_id` is artifact metadata, not an interim row column.
 - `source_table` is raw schema or manifest metadata when needed, not an interim
   row column.

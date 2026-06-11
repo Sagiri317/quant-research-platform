@@ -292,7 +292,6 @@ def calculate_price_volume_factors(
     amount = pd.to_numeric(result[amount_column], errors="coerce")
     turnover = pd.to_numeric(result[turnover_column], errors="coerce")
     price_grouped = price.groupby(group_keys, sort=False)
-    returns_grouped = returns.groupby(group_keys, sort=False)
     amount_grouped = amount.groupby(group_keys, sort=False)
     turnover_grouped = turnover.groupby(group_keys, sort=False)
 
@@ -314,12 +313,11 @@ def calculate_price_volume_factors(
 
     for window in required_windows:
         if f"vol_{window}d" in requested_set:
-            result[f"vol_{window}d"] = _rolling_aggregate(
+            result[f"vol_{window}d"] = _rolling_std(
                 returns,
-                returns_grouped,
+                group_keys,
                 group_positions,
                 window,
-                "std",
             )
         if f"downside_vol_{window}d" in requested_set:
             result[f"downside_vol_{window}d"] = _rolling_rms(
@@ -359,16 +357,18 @@ def calculate_price_volume_factors(
                 window,
             )
         if f"skew_{window}d" in requested_set:
-            result[f"skew_{window}d"] = _rolling_aggregate(
-                result[return_column],
-                grouped[return_column],
+            result[f"skew_{window}d"] = _rolling_skew(
+                returns,
+                group_keys,
                 group_positions,
                 window,
-                "skew",
             )
         if f"kurt_{window}d" in requested_set:
-            result[f"kurt_{window}d"] = grouped[return_column].transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).kurt()
+            result[f"kurt_{window}d"] = _rolling_kurt(
+                returns,
+                group_keys,
+                group_positions,
+                window,
             )
 
     for window in required_windows:
@@ -393,12 +393,11 @@ def calculate_price_volume_factors(
             denominator = _valid_denominator(shifted_turnover)
             result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
         if f"turnover_vol_{window}d" in requested_set:
-            result[f"turnover_vol_{window}d"] = _rolling_aggregate(
+            result[f"turnover_vol_{window}d"] = _rolling_std(
                 turnover,
-                turnover_grouped,
+                group_keys,
                 group_positions,
                 window,
-                "std",
             )
         if f"zero_volume_ratio_{window}d" in requested_set:
             zero_volume = (amount <= 0.0).astype(float)
@@ -603,6 +602,136 @@ def _rolling_rms(
         "mean",
     )
     return np.sqrt(mean_squared)
+
+
+def _rolling_std(
+    values: pd.Series,
+    group_keys: pd.Series,
+    group_positions: tuple[np.ndarray, ...],
+    window: int,
+) -> pd.Series:
+    return _rolling_window_statistic(values, group_keys, group_positions, window, "std")
+
+
+def _rolling_skew(
+    values: pd.Series,
+    group_keys: pd.Series,
+    group_positions: tuple[np.ndarray, ...],
+    window: int,
+) -> pd.Series:
+    return _rolling_window_statistic(
+        values,
+        group_keys,
+        group_positions,
+        window,
+        "skew",
+    )
+
+
+def _rolling_kurt(
+    values: pd.Series,
+    group_keys: pd.Series,
+    group_positions: tuple[np.ndarray, ...],
+    window: int,
+) -> pd.Series:
+    return _rolling_window_statistic(
+        values,
+        group_keys,
+        group_positions,
+        window,
+        "kurt",
+    )
+
+
+def _rolling_window_statistic(
+    values: pd.Series,
+    group_keys: pd.Series,
+    group_positions: tuple[np.ndarray, ...],
+    window: int,
+    statistic: str,
+) -> pd.Series:
+    del group_keys
+    numeric = pd.to_numeric(values, errors="coerce")
+    source = numeric.to_numpy(dtype="float64", copy=False)
+    output = np.full(len(numeric), np.nan, dtype="float64")
+    for positions in group_positions:
+        output[positions] = _rolling_window_statistic_array(
+            source[positions],
+            window,
+            statistic,
+        )
+    return pd.Series(output, index=values.index, name=values.name)
+
+
+def _rolling_window_statistic_array(
+    values: np.ndarray,
+    window: int,
+    statistic: str,
+) -> np.ndarray:
+    output = np.full(len(values), np.nan, dtype="float64")
+    if window <= 0 or len(values) < window:
+        return output
+    windows = np.lib.stride_tricks.sliding_window_view(values, window_shape=window)
+    valid_windows = np.isfinite(windows).all(axis=1)
+    if not valid_windows.any():
+        return output
+    valid_values = windows[valid_windows]
+    if statistic == "std":
+        window_values = _window_std_values(valid_values)
+    elif statistic == "skew":
+        window_values = _window_skew_values(valid_values)
+    elif statistic == "kurt":
+        window_values = _window_kurt_values(valid_values)
+    else:
+        raise ValueError(f"unsupported_rolling_statistic: {statistic}")
+    values_out = np.full(len(windows), np.nan, dtype="float64")
+    values_out[valid_windows] = window_values
+    output[window - 1 :] = values_out
+    return output
+
+
+def _window_std_values(windows: np.ndarray) -> np.ndarray:
+    counts = windows.shape[1]
+    if counts < 2:
+        return np.full(len(windows), np.nan, dtype="float64")
+    centered = windows - windows.mean(axis=1, keepdims=True)
+    variance = np.sum(centered * centered, axis=1) / (counts - 1)
+    return np.sqrt(variance)
+
+
+def _window_skew_values(windows: np.ndarray) -> np.ndarray:
+    counts = windows.shape[1]
+    if counts < 3:
+        return np.full(len(windows), np.nan, dtype="float64")
+    centered = windows - windows.mean(axis=1, keepdims=True)
+    moment_2 = np.mean(centered * centered, axis=1)
+    moment_3 = np.mean(centered * centered * centered, axis=1)
+    denominator = np.power(moment_2, 1.5)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        values = (
+            np.sqrt(counts * (counts - 1))
+            / (counts - 2)
+            * (moment_3 / denominator)
+        )
+    values[~np.isfinite(values)] = np.nan
+    return values
+
+
+def _window_kurt_values(windows: np.ndarray) -> np.ndarray:
+    counts = windows.shape[1]
+    if counts < 4:
+        return np.full(len(windows), np.nan, dtype="float64")
+    centered = windows - windows.mean(axis=1, keepdims=True)
+    moment_2 = np.mean(centered * centered, axis=1)
+    moment_4 = np.mean(centered**4, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        values = (
+            (counts - 1)
+            / ((counts - 2) * (counts - 3))
+            * ((counts + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
+        )
+    values[~np.isfinite(values)] = np.nan
+    return values
 
 
 def _rolling_drawdown(

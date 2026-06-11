@@ -12,7 +12,7 @@ import pandas as pd
 
 from .raw_schemas import RawExportInspection, inspect_raw_export_file
 
-SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv", ".xlsx"}
+SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv"}
 STRING_CODE_DTYPES = {"Stkcd": str, "Symbol": str, "Indexcd": str}
 INDEX_INFO_CODE_RE = re.compile(r"^[0-9A-Za-z_.-]{1,32}$")
 INDEX_INFO_SOURCE_CODE_ENUMS = (

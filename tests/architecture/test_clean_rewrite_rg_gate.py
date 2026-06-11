@@ -142,6 +142,33 @@ A_SHARE_DAILY_BAR_SHADOW_ALLOWED_TEXT = {
     ),
 }
 
+RETIRED_DATA_LAYER_STRUCTURE_PATTERNS = (
+    ("data_product_id", re.compile(r"\bdata_product_id\b")),
+    ("DATA_PRODUCT_ID", re.compile(r"\bDATA_PRODUCT_ID\b")),
+    ("DataProductId", re.compile(r"\bDataProductId\b")),
+    ("data product id", re.compile(r"\bdata product id\b", re.IGNORECASE)),
+    ("asset_batches", re.compile(r"\basset_batches\b")),
+    ("year_filter", re.compile(r"\byear_filter\b")),
+    ("partition_filter", re.compile(r"\bpartition_filter\b")),
+    ("ChunkAxis.YEAR", re.compile(r"\bChunkAxis\.YEAR\b")),
+    ("ChunkAxis.ENTITY", re.compile(r"\bChunkAxis\.ENTITY\b")),
+    ("source_bindings", re.compile(r"\bsource_bindings\b")),
+    ("MaskCatalog", re.compile(r"\bMaskCatalog\b")),
+    ("UniverseCatalog", re.compile(r"\bUniverseCatalog\b")),
+    ("ProviderBinding", re.compile(r"\bProviderBinding\b")),
+    ("data_products", re.compile(r"\bdata_products\b")),
+)
+
+ACTIVE_STRUCTURE_SCAN_ROOTS = (
+    Path("src"),
+    Path("docs"),
+    Path(".agents"),
+    Path("README.md"),
+    Path("data/README.md"),
+    Path("AGENTS.md"),
+    Path("PROJECT_STATUS.md"),
+)
+
 FUTURE_PUBLIC_TODO_TERMS = (
     "processed-data-runs",
     "workflow-runs",
@@ -211,7 +238,7 @@ def test_active_tree_has_no_retired_terms() -> None:
         ("/api/runs", re.compile(r"/api/runs\b")),
         ("/api/pipeline", re.compile(r"/api/pipeline\b")),
         ("/api/v0.1", re.compile(r"/api/v0\.1\b")),
-        ("/api/v1", re.compile(r"/api/v1\b")),
+        ("/api/" + "v" + "1", re.compile(r"/api/" r"v" r"1\b")),
         ("schema 0.7", re.compile(r"schema\s+`?0\.7`?")),
         ("schema 0.6", re.compile(r"schema\s+`?0\.6`?")),
         ("schema 1.0", re.compile(r"schema\s+`?1\.0`?")),
@@ -312,6 +339,33 @@ def test_active_tree_has_no_a_share_daily_bar_shadow_ids() -> None:
                 hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert hits == []
+
+
+def test_active_tree_has_no_retired_data_layer_structure_vocabulary() -> None:
+    hits: list[str] = []
+    for path in _iter_active_structure_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for name, pattern in RETIRED_DATA_LAYER_STRUCTURE_PATTERNS:
+                if pattern.search(line):
+                    hits.append(f"{path}:{line_number}: {name}: {line.strip()}")
+
+    assert hits == []
+
+
+def _iter_active_structure_files() -> list[Path]:
+    files: list[Path] = []
+    for root in ACTIVE_STRUCTURE_SCAN_ROOTS:
+        if root.is_file():
+            files.append(root)
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and not _is_excluded(path):
+                files.append(path)
+    return files
 
 
 def test_a_share_planning_hot_paths_do_not_use_fingerprint_dataset() -> None:

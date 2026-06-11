@@ -146,7 +146,7 @@ FILENAME_RE = re.compile(
     r"(?P<market_scope>[a-z0-9_]+)__"
     r"(?:(?P<start>\d{8})_(?P<end>\d{8})|(?P<full>full))__"
     r"(?:(?:part-(?P<part>\d{2})__)?)"
-    r"export-(?P<export>\d{8})\.(?P<extension>csv|xlsx)$"
+    r"export-(?P<export>\d{8})\.(?P<extension>csv)$"
 )
 
 NATIVE_TABLE_DATASETS: dict[str, str] = {
@@ -199,14 +199,12 @@ def infer_dataset_from_native_export(path: str | Path) -> str:
 
 
 def read_export_header(path: str | Path) -> tuple[str, ...]:
-    """Read the header row from a supported CSV or XLSX raw export."""
+    """Read the header row from a supported CSV raw export."""
 
     export_path = Path(path)
     suffix = export_path.suffix.lower()
     if suffix == ".csv":
         frame = pd.read_csv(export_path, nrows=0)
-    elif suffix == ".xlsx":
-        frame = pd.read_excel(export_path, nrows=0)
     else:
         raise ValueError(f"Unsupported CSMAR export extension: {suffix}")
     return tuple(str(column) for column in frame.columns)

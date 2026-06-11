@@ -247,7 +247,7 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
     assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
 
 
-def test_price_volume_standard_formula_matches_legacy_reference() -> None:
+def test_price_volume_standard_formula_matches_reference() -> None:
     panel = make_synthetic_factor_panel(
         sessions=270,
         assets=("asset_b", "asset_a", "asset_c"),
@@ -328,7 +328,7 @@ def test_price_volume_standard_formula_matches_legacy_reference() -> None:
         shuffled,
         factor_columns=factor_columns,
     )
-    legacy = _legacy_calculate_price_volume_factors(
+    reference = _reference_calculate_price_volume_factors(
         shuffled,
         factor_columns=factor_columns,
     )
@@ -345,7 +345,35 @@ def test_price_volume_standard_formula_matches_legacy_reference() -> None:
     assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
     pd.testing.assert_frame_equal(
         result.loc[:, expected_columns].reset_index(drop=True),
-        legacy.loc[:, expected_columns].reset_index(drop=True),
+        reference.loc[:, expected_columns].reset_index(drop=True),
+        check_exact=False,
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_price_volume_rolling_moments_are_chunk_start_invariant() -> None:
+    panel = make_synthetic_factor_panel(
+        sessions=260,
+        assets=("asset_a", "asset_b"),
+    )
+    factor_columns = ("skew_20d", "kurt_20d")
+    full = (
+        calculate_price_volume_factors(panel, factor_columns=factor_columns)
+        .sort_values(["asset_id", "timestamp"])
+        .reset_index(drop=True)
+    )
+
+    chunked = _calculate_price_volume_in_session_chunks(
+        panel,
+        factor_columns=factor_columns,
+        split_session_index=130,
+        warmup_sessions=20,
+    )
+
+    pd.testing.assert_frame_equal(
+        full.loc[:, ("market_id", "asset_id", "timestamp", *factor_columns)],
+        chunked.loc[:, ("market_id", "asset_id", "timestamp", *factor_columns)],
         check_exact=True,
     )
 
@@ -379,14 +407,14 @@ def test_price_volume_largest_lookback_is_derived_from_requested_columns() -> No
     )
 
 
-def _legacy_calculate_price_volume_factors(
+def _reference_calculate_price_volume_factors(
     panel: pd.DataFrame,
     *,
     factor_columns: tuple[str, ...],
 ) -> pd.DataFrame:
     requested = tuple(dict.fromkeys(factor_columns))
     requested_set = set(requested)
-    required_windows = _legacy_windows_from_requested_factors(requested_set)
+    required_windows = _reference_windows_from_requested_factors(requested_set)
     result = panel.sort_values(["asset_id", "timestamp"]).copy()
     grouped = result.groupby("asset_id", sort=False)
     group_keys = result["asset_id"]
@@ -404,8 +432,8 @@ def _legacy_calculate_price_volume_factors(
         needs_reversal = f"rev_{window}d" in requested_set
         if needs_momentum or needs_reversal:
             shifted_price = price.groupby(group_keys, sort=False).shift(window)
-            denominator = _legacy_valid_denominator(shifted_price)
-            trailing_return = _legacy_finite_or_nan(price / denominator - 1.0)
+            denominator = _reference_valid_denominator(shifted_price)
+            trailing_return = _reference_finite_or_nan(price / denominator - 1.0)
         if needs_momentum:
             result[f"mom_{window}d"] = trailing_return
         if needs_reversal:
@@ -416,16 +444,19 @@ def _legacy_calculate_price_volume_factors(
             result[f"vol_{window}d"] = returns.groupby(
                 group_keys, sort=False
             ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).std()
+                lambda series, w=window: series.rolling(w, min_periods=w).apply(
+                    _reference_std_window,
+                    raw=True,
+                )
             )
         if f"downside_vol_{window}d" in requested_set:
-            result[f"downside_vol_{window}d"] = _legacy_rolling_rms(
+            result[f"downside_vol_{window}d"] = _reference_rolling_rms(
                 returns.clip(upper=0.0),
                 group_keys,
                 window,
             )
         if f"upside_vol_{window}d" in requested_set:
-            result[f"upside_vol_{window}d"] = _legacy_rolling_rms(
+            result[f"upside_vol_{window}d"] = _reference_rolling_rms(
                 returns.clip(lower=0.0),
                 group_keys,
                 window,
@@ -439,18 +470,24 @@ def _legacy_calculate_price_volume_factors(
                 lambda series, w=window: series.rolling(w, min_periods=w).min()
             )
         if f"drawdown_{window}d" in requested_set:
-            result[f"drawdown_{window}d"] = _legacy_rolling_drawdown(
+            result[f"drawdown_{window}d"] = _reference_rolling_drawdown(
                 pd.to_numeric(result["adj_close"], errors="coerce"),
                 group_keys,
                 window,
             )
         if f"skew_{window}d" in requested_set:
             result[f"skew_{window}d"] = grouped["return_1d"].transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).skew()
+                lambda series, w=window: series.rolling(w, min_periods=w).apply(
+                    _reference_skew_window,
+                    raw=True,
+                )
             )
         if f"kurt_{window}d" in requested_set:
             result[f"kurt_{window}d"] = grouped["return_1d"].transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).kurt()
+                lambda series, w=window: series.rolling(w, min_periods=w).apply(
+                    _reference_kurt_window,
+                    raw=True,
+                )
             )
 
     for window in required_windows:
@@ -468,13 +505,16 @@ def _legacy_calculate_price_volume_factors(
             )
         if f"turnover_chg_{window}d" in requested_set:
             shifted_turnover = turnover.groupby(group_keys, sort=False).shift(window)
-            denominator = _legacy_valid_denominator(shifted_turnover)
+            denominator = _reference_valid_denominator(shifted_turnover)
             result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
         if f"turnover_vol_{window}d" in requested_set:
             result[f"turnover_vol_{window}d"] = turnover.groupby(
                 group_keys, sort=False
             ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).std()
+                lambda series, w=window: series.rolling(w, min_periods=w).apply(
+                    _reference_std_window,
+                    raw=True,
+                )
             )
         if f"zero_volume_ratio_{window}d" in requested_set:
             result[f"zero_volume_ratio_{window}d"] = (
@@ -486,15 +526,15 @@ def _legacy_calculate_price_volume_factors(
                 )
             )
 
-    denominator = _legacy_valid_denominator(amount)
+    denominator = _reference_valid_denominator(amount)
     illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
     amplitude = (
         pd.to_numeric(result["high"], errors="coerce")
         - pd.to_numeric(result["low"], errors="coerce")
-    ) / _legacy_valid_denominator(
+    ) / _reference_valid_denominator(
         pd.to_numeric(result["prev_close"], errors="coerce")
     )
-    amplitude = _legacy_finite_or_nan(amplitude)
+    amplitude = _reference_finite_or_nan(amplitude)
     for window in required_windows:
         if f"amihud_{window}d" in requested_set:
             result[f"amihud_{window}d"] = illiquidity.groupby(
@@ -512,8 +552,10 @@ def _legacy_calculate_price_volume_factors(
     intraday_range = (
         pd.to_numeric(result["high"], errors="coerce")
         - pd.to_numeric(result["low"], errors="coerce")
-    ) / _legacy_valid_denominator(pd.to_numeric(result["adj_close"], errors="coerce"))
-    intraday_range = _legacy_finite_or_nan(intraday_range)
+    ) / _reference_valid_denominator(
+        pd.to_numeric(result["adj_close"], errors="coerce")
+    )
+    intraday_range = _reference_finite_or_nan(intraday_range)
     for window in required_windows:
         if f"intraday_range_{window}d" in requested_set:
             result[f"intraday_range_{window}d"] = intraday_range.groupby(
@@ -523,9 +565,9 @@ def _legacy_calculate_price_volume_factors(
             )
 
     if "log_float_market_cap" in requested_set:
-        result["log_float_market_cap"] = _legacy_safe_log(result["float_market_cap"])
+        result["log_float_market_cap"] = _reference_safe_log(result["float_market_cap"])
     if "log_total_market_cap" in requested_set:
-        result["log_total_market_cap"] = _legacy_safe_log(result["total_market_cap"])
+        result["log_total_market_cap"] = _reference_safe_log(result["total_market_cap"])
     output_columns = [column for column in requested if column in result.columns]
     if output_columns:
         result.loc[:, output_columns] = result.loc[:, output_columns].replace(
@@ -535,7 +577,7 @@ def _legacy_calculate_price_volume_factors(
     return result
 
 
-def _legacy_rolling_rms(
+def _reference_rolling_rms(
     values: pd.Series,
     group_keys: pd.Series,
     window: int,
@@ -546,7 +588,7 @@ def _legacy_rolling_rms(
     )
 
 
-def _legacy_rolling_drawdown(
+def _reference_rolling_drawdown(
     values: pd.Series,
     group_keys: pd.Series,
     window: int,
@@ -554,7 +596,7 @@ def _legacy_rolling_drawdown(
     def drawdown(series: pd.Series) -> float:
         peak = series.cummax()
         return float(
-            _legacy_finite_or_nan(series / peak.replace(0.0, np.nan) - 1.0).min()
+            _reference_finite_or_nan(series / peak.replace(0.0, np.nan) - 1.0).min()
         )
 
     return values.groupby(group_keys, sort=False).transform(
@@ -565,28 +607,103 @@ def _legacy_rolling_drawdown(
     )
 
 
-def _legacy_safe_log(values: pd.Series) -> pd.Series:
+def _reference_std_window(values: np.ndarray) -> float:
+    if not np.isfinite(values).all() or len(values) < 2:
+        return np.nan
+    centered = values - values.mean()
+    return float(np.sqrt(np.sum(centered * centered) / (len(values) - 1)))
+
+
+def _reference_skew_window(values: np.ndarray) -> float:
+    if not np.isfinite(values).all() or len(values) < 3:
+        return np.nan
+    centered = values - values.mean()
+    moment_2 = float(np.mean(centered * centered))
+    moment_3 = float(np.mean(centered * centered * centered))
+    denominator = moment_2**1.5
+    if denominator == 0.0:
+        return np.nan
+    count = len(values)
+    value = np.sqrt(count * (count - 1)) / (count - 2) * moment_3 / denominator
+    return float(value) if np.isfinite(value) else np.nan
+
+
+def _reference_kurt_window(values: np.ndarray) -> float:
+    if not np.isfinite(values).all() or len(values) < 4:
+        return np.nan
+    centered = values - values.mean()
+    moment_2 = float(np.mean(centered * centered))
+    if moment_2 == 0.0:
+        return np.nan
+    moment_4 = float(np.mean(centered**4))
+    count = len(values)
+    value = (
+        (count - 1)
+        / ((count - 2) * (count - 3))
+        * ((count + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
+    )
+    return float(value) if np.isfinite(value) else np.nan
+
+
+def _reference_safe_log(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
     numeric = numeric.where(np.isfinite(numeric) & numeric.gt(0.0))
-    return _legacy_finite_or_nan(np.log(numeric))
+    return _reference_finite_or_nan(np.log(numeric))
 
 
-def _legacy_finite_or_nan(values: pd.Series) -> pd.Series:
+def _reference_finite_or_nan(values: pd.Series) -> pd.Series:
     return values.replace([np.inf, -np.inf], np.nan)
 
 
-def _legacy_valid_denominator(values: pd.Series) -> pd.Series:
+def _reference_valid_denominator(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
     return numeric.where(np.isfinite(numeric) & numeric.ne(0.0))
 
 
-def _legacy_windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
+def _reference_windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
     values = {1} if "rev_1d" in requested else set()
     for factor in requested:
         for token in factor.split("_"):
             if token.endswith("d") and token[:-1].isdigit():
                 values.add(int(token[:-1]))
     return tuple(sorted(values))
+
+
+def _calculate_price_volume_in_session_chunks(
+    panel: pd.DataFrame,
+    *,
+    factor_columns: tuple[str, ...],
+    split_session_index: int,
+    warmup_sessions: int,
+) -> pd.DataFrame:
+    ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    sessions = tuple(
+        sorted(pd.to_datetime(ordered["timestamp"]).dt.normalize().unique())
+    )
+    parts = []
+    for start_index, end_index in (
+        (0, split_session_index),
+        (split_session_index, len(sessions)),
+    ):
+        core_sessions = set(sessions[start_index:end_index])
+        read_start_index = max(0, start_index - warmup_sessions)
+        read_sessions = set(sessions[read_start_index:end_index])
+        read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
+            read_sessions
+        )
+        core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
+            core_sessions
+        )
+        calculated = calculate_price_volume_factors(
+            ordered.loc[read_mask],
+            factor_columns=factor_columns,
+        )
+        parts.append(calculated.loc[core_mask.loc[read_mask].to_numpy()])
+    return (
+        pd.concat(parts, ignore_index=True)
+        .sort_values(["asset_id", "timestamp"])
+        .reset_index(drop=True)
+    )
 
 
 def _factor_panel_for_dates(dates) -> pd.DataFrame:

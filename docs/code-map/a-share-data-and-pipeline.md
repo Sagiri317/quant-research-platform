@@ -58,16 +58,19 @@ processed canonical key.
 
 ## Verification Intent
 
-- 2014 processed panel parity-or-explained-delta.
-- Prior local 2014-2025 full historical `daily_panel` aggregate coverage;
-  full evidence/report regeneration remains pending after the factor catalog
-  refactor.
-- 2014-2025 factor value parity-or-explained-delta.
-- 2014-2025 label value parity-or-explained-delta.
-- 2014-2025 masks/universes parity.
-- 2014-2025 research dataset row/key/column parity.
-- 2014 evaluation and prediction smoke parity only.
-- Private boundary and sanitizer tests.
+- Data-layer correctness covers only raw internal-provider CSV input through interim,
+  processed A-share panel/annotation/factor/label artifacts, and research
+  dataset assembly.
+- Correctness evidence uses hand-checkable golden samples, simple reference
+  implementations, forced tiny session chunks versus default paths, invariant
+  tests, and key-diff diagnostics. Prior materialized runs are comparison
+  inputs, not correctness truth.
+- Key-diff evidence reports baseline-only, candidate-only, and common-key value
+  diagnostics. Expected date deltas are classified against the trading-session
+  set, not inferred from candidate artifact dates alone.
+- Evaluation, model, prediction, and portfolio outputs are outside the
+  data-layer correctness seal and must not be treated as validated by it.
+- Private boundary and sanitizer tests remain required before handoff.
 
 ## Current Local Coverage Status
 
@@ -114,3 +117,6 @@ processed canonical key.
   A-share daily execution chunks by trading-session core windows with read halos:
   next-session halo for panel tradability, past-session warmup for factors, and
   future-session lookahead for labels. Only core rows are written.
+- `TimeWindow` is the public logical interval. `SessionWindow` is the internal
+  execution interval used by processed materialization and research dataset
+  assembly. Public API/CLI surfaces do not expose chunk controls.

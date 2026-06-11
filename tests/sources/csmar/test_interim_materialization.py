@@ -147,6 +147,26 @@ def test_csmar_txt_field_description_is_not_raw_export_table(
         raw_schemas.inspect_raw_export_file(txt_description)
 
 
+def test_csmar_raw_export_contract_is_csv_only(tmp_path: Path) -> None:
+    csv_export = tmp_path / (
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.csv"
+    )
+    xlsx_export = tmp_path / (
+        "csmar__trading_calendar__all_market_types__19901219_20261231__"
+        "export-20260605.xlsx"
+    )
+    _write_trading_calendar_raw_export(csv_export)
+    xlsx_export.write_bytes(b"not-a-supported-raw-export")
+
+    assert raw_exports.SUPPORTED_RAW_EXPORT_SUFFIXES == {".csv"}
+    assert raw_exports.is_raw_export_file(csv_export)
+    assert not raw_exports.is_raw_export_file(xlsx_export)
+    assert raw_exports.iter_raw_export_files(tmp_path) == [csv_export]
+    with pytest.raises(ValueError, match="Invalid CSMAR raw filename"):
+        raw_schemas.parse_raw_filename(xlsx_export)
+
+
 def test_csmar_field_mappings_describe_source_local_aliases() -> None:
     assert "source-local normalized column mappings" in (
         field_mappings.csmar_column_mapping.__doc__ or ""

@@ -192,6 +192,7 @@ def test_chunk_axis_contract_has_no_year_alias() -> None:
         "ROW_GROUP",
     }
     assert "YEAR" not in resources.ChunkAxis.__members__
+    assert "ENTITY" not in resources.ChunkAxis.__members__
 
 
 def _dataclass_field_names(cls: type[object]) -> set[str]:
