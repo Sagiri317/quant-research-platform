@@ -25,7 +25,7 @@ from quant_research_platform.research.factors.price_volume import (
 )
 from tests.correctness._helpers import (
     assert_frame_matches_reference,
-    pandas_window_moment_by_asset,
+    reference_qrp_window_moment_by_asset,
 )
 from tests.helpers.synthetic_a_share import make_synthetic_factor_panel
 
@@ -444,7 +444,7 @@ def _reference_calculate_price_volume_factors(
 
     for window in required_windows:
         if f"vol_{window}d" in requested_set:
-            result[f"vol_{window}d"] = pandas_window_moment_by_asset(
+            result[f"vol_{window}d"] = reference_qrp_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
@@ -477,14 +477,14 @@ def _reference_calculate_price_volume_factors(
                 window,
             )
         if f"skew_{window}d" in requested_set:
-            result[f"skew_{window}d"] = pandas_window_moment_by_asset(
+            result[f"skew_{window}d"] = reference_qrp_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
                 "skew",
             )
         if f"kurt_{window}d" in requested_set:
-            result[f"kurt_{window}d"] = pandas_window_moment_by_asset(
+            result[f"kurt_{window}d"] = reference_qrp_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
@@ -509,7 +509,7 @@ def _reference_calculate_price_volume_factors(
             denominator = _reference_valid_denominator(shifted_turnover)
             result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
         if f"turnover_vol_{window}d" in requested_set:
-            result[f"turnover_vol_{window}d"] = pandas_window_moment_by_asset(
+            result[f"turnover_vol_{window}d"] = reference_qrp_window_moment_by_asset(
                 turnover,
                 group_keys,
                 window,

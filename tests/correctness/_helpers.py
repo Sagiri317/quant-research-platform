@@ -34,6 +34,7 @@ from quant_research_platform.storage.layout import StorageLayout
 KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
 FLOAT_RTOL = 1e-10
 FLOAT_ATOL = 1e-12
+REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12
 
 
 def synthetic_price_volume_panel(
@@ -108,7 +109,7 @@ def _reference_price_volume_factors(
 
     for window in required_windows:
         if f"vol_{window}d" in requested_set:
-            result[f"vol_{window}d"] = pandas_window_moment_by_asset(
+            result[f"vol_{window}d"] = reference_qrp_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
@@ -141,19 +142,19 @@ def _reference_price_volume_factors(
                 window,
             )
         if f"skew_{window}d" in requested_set:
-            result[f"skew_{window}d"] = pandas_window_moment_by_asset(
+            result[f"skew_{window}d"] = reference_qrp_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
                 "skew",
             )
         if f"kurt_{window}d" in requested_set:
-            result[f"kurt_{window}d"] = pandas_window_moment_by_asset(
+            result[f"kurt_{window}d"] = reference_qrp_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
                 "kurt",
-    )
+            )
 
     for column in factor_columns:
         try:
@@ -174,7 +175,7 @@ def _reference_price_volume_factors(
                 turnover / reference_valid_denominator(shifted_turnover) - 1.0
             )
         elif f"turnover_vol_{window}d" == column:
-            result[column] = pandas_window_moment_by_asset(
+            result[column] = reference_qrp_window_moment_by_asset(
                 turnover,
                 group_keys,
                 window,
@@ -277,6 +278,62 @@ def pandas_window_moment(values: np.ndarray, method: str) -> float:
     if method == "kurt":
         return float(rolling.kurt().iloc[-1])
     raise ValueError(f"unsupported_pandas_window_moment: {method}")
+
+
+def reference_qrp_window_moment_by_asset(
+    values: pd.Series,
+    group_keys: pd.Series,
+    window: int,
+    method: str,
+) -> pd.Series:
+    return values.groupby(group_keys, sort=False).transform(
+        lambda series, w=window, name=method: series.rolling(
+            w,
+            min_periods=w,
+        ).apply(
+            lambda window_values: reference_qrp_window_moment(window_values, name),
+            raw=True,
+        )
+    )
+
+
+def reference_qrp_window_moment(values: np.ndarray, method: str) -> float:
+    numeric = np.asarray(values, dtype="float64")
+    if not np.isfinite(numeric).all():
+        return float("nan")
+    counts = len(numeric)
+    centered = numeric - numeric.mean()
+    if method == "std":
+        if counts < 2:
+            return float("nan")
+        variance = np.sum(centered * centered) / (counts - 1)
+        return float(np.sqrt(max(variance, 0.0)))
+    moment_2 = float(np.mean(centered * centered))
+    if moment_2 <= REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE:
+        return float("nan")
+    if method == "skew":
+        if counts < 3:
+            return float("nan")
+        moment_3 = float(np.mean(centered * centered * centered))
+        value = (
+            np.sqrt(counts * (counts - 1))
+            / (counts - 2)
+            * (moment_3 / np.power(moment_2, 1.5))
+        )
+    elif method == "kurt":
+        if counts < 4:
+            return float("nan")
+        moment_4 = float(np.mean(centered**4))
+        value = (
+            (counts - 1)
+            / ((counts - 2) * (counts - 3))
+            * ((counts + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
+        )
+    else:
+        raise ValueError(f"unsupported_qrp_window_moment: {method}")
+    if not np.isfinite(value):
+        return float("nan")
+    return float(value)
 
 
 def factor_window(column: str) -> int:

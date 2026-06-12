@@ -65,14 +65,14 @@ processed canonical key.
   implementations, forced tiny session chunks versus default paths, invariant
   tests, and key-diff diagnostics. Prior materialized runs are comparison
   inputs, not correctness truth.
-- `price_volume` rolling moments are contractually pandas rolling semantics:
-  `std = Series.rolling(window, min_periods=window).std(ddof=1)`,
-  `skew = Series.rolling(window, min_periods=window).skew()`, and
-  `kurt = Series.rolling(window, min_periods=window).kurt()`. Production uses
-  window-local rolling calculations for these moments; the pandas fallback
-  threshold is an implementation path selector, not a semantic convention, and
-  zero-variance, near-zero-variance, NaN, and session-chunk boundary behavior
-  must match the test-only pandas reference under the shared tolerance.
+- `price_volume` rolling moments use the QRP window-local contract. `std` is
+  rolling sample standard deviation with `ddof=1`. `skew` and `kurt` use the
+  adjusted sample skewness and adjusted excess kurtosis formulas, but are
+  undefined and emitted as `NaN` when the window variance is at or below the
+  semantic threshold `_ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12`. pandas
+  rolling is a well-conditioned cross-check only; the test-only QRP reference
+  is the oracle for zero-variance, near-zero-variance, NaN, warmup, and
+  session-chunk boundary behavior under the shared tolerance.
 - Key-diff evidence reports baseline-only, candidate-only, and common-key value
   diagnostics. Expected date deltas are classified against the trading-session
   set, not inferred from candidate artifact dates alone.

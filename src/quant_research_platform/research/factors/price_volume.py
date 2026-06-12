@@ -18,10 +18,9 @@ PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
 PRICE_VOLUME_STANDARD_PRESET = "standard"
 PRICE_VOLUME_CORE_PRESET = "core"
 PRICE_VOLUME_SMOKE_PRESET = "smoke"
-# Implementation detail only: windows at or below this variance are recomputed
-# with pandas rolling moment methods so zero/near-zero behavior follows pandas
-# exactly instead of a custom epsilon convention.
-_PANDAS_MOMENT_FALLBACK_VARIANCE = 1e-12
+# QRP semantic policy: skew/kurt are undefined when the rolling window variance
+# is near zero. std remains sample std and is not masked by this threshold.
+_ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12
 
 _PRICE_VOLUME_STANDARD_WINDOWS: tuple[int, ...] = (1, 5, 10, 20, 60, 120, 252)
 
@@ -700,8 +699,8 @@ def _window_std_values(windows: np.ndarray) -> np.ndarray:
         return np.full(len(windows), np.nan, dtype="float64")
     centered = windows - windows.mean(axis=1, keepdims=True)
     variance = np.sum(centered * centered, axis=1) / (counts - 1)
+    variance = np.maximum(variance, 0.0)
     values = np.sqrt(variance)
-    _replace_small_variance_with_pandas(windows, variance, "std", values)
     return values
 
 
@@ -712,15 +711,18 @@ def _window_skew_values(windows: np.ndarray) -> np.ndarray:
     centered = windows - windows.mean(axis=1, keepdims=True)
     moment_2 = np.mean(centered * centered, axis=1)
     moment_3 = np.mean(centered * centered * centered, axis=1)
-    denominator = np.power(moment_2, 1.5)
+    valid = moment_2 > _ROLLING_MOMENT_NEAR_ZERO_VARIANCE
+    values = np.full(len(windows), np.nan, dtype="float64")
+    if not valid.any():
+        return values
+    denominator = np.power(moment_2[valid], 1.5)
     with np.errstate(divide="ignore", invalid="ignore"):
-        values = (
+        values[valid] = (
             np.sqrt(counts * (counts - 1))
             / (counts - 2)
-            * (moment_3 / denominator)
+            * (moment_3[valid] / denominator)
         )
     values[~np.isfinite(values)] = np.nan
-    _replace_small_variance_with_pandas(windows, moment_2, "skew", values)
     return values
 
 
@@ -731,39 +733,22 @@ def _window_kurt_values(windows: np.ndarray) -> np.ndarray:
     centered = windows - windows.mean(axis=1, keepdims=True)
     moment_2 = np.mean(centered * centered, axis=1)
     moment_4 = np.mean(centered**4, axis=1)
+    valid = moment_2 > _ROLLING_MOMENT_NEAR_ZERO_VARIANCE
+    values = np.full(len(windows), np.nan, dtype="float64")
+    if not valid.any():
+        return values
     with np.errstate(divide="ignore", invalid="ignore"):
-        values = (
+        values[valid] = (
             (counts - 1)
             / ((counts - 2) * (counts - 3))
-            * ((counts + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
+            * (
+                (counts + 1)
+                * (moment_4[valid] / (moment_2[valid] * moment_2[valid]) - 3.0)
+                + 6.0
+            )
         )
     values[~np.isfinite(values)] = np.nan
-    _replace_small_variance_with_pandas(windows, moment_2, "kurt", values)
     return values
-
-
-def _replace_small_variance_with_pandas(
-    windows: np.ndarray,
-    variance: np.ndarray,
-    statistic: str,
-    values: np.ndarray,
-) -> None:
-    small_variance = variance <= _PANDAS_MOMENT_FALLBACK_VARIANCE
-    if not small_variance.any():
-        return
-    for index in np.flatnonzero(small_variance):
-        rolling = pd.Series(windows[index], dtype="float64").rolling(
-            len(windows[index]),
-            min_periods=len(windows[index]),
-        )
-        if statistic == "std":
-            values[index] = rolling.std(ddof=1).iloc[-1]
-        elif statistic == "skew":
-            values[index] = rolling.skew().iloc[-1]
-        elif statistic == "kurt":
-            values[index] = rolling.kurt().iloc[-1]
-        else:
-            raise ValueError(f"unsupported_rolling_statistic: {statistic}")
 
 
 def _rolling_drawdown(
