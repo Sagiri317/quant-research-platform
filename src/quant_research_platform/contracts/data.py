@@ -64,6 +64,8 @@ class InterimDataSpec(DataSpec):
 class ProcessedDataSpec(DataSpec):
     market_id: MarketId
     kind: ProcessedDataKind
+    source_input_data_ids: tuple[str, ...] = ()
+    processed_input_data_ids: tuple[str, ...] = ()
 
 
 __all__ = [

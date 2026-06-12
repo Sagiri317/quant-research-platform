@@ -4,6 +4,13 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.markets.implementations.a_share import calendar
+from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_DEFAULT_UNIVERSE_ID,
+    A_SHARE_EXECUTION_MASK_ID,
+)
+from quant_research_platform.markets.implementations.a_share.processed import (
+    annotations,
+)
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
     compute_daily_panel,
 )
@@ -93,9 +100,16 @@ def test_compute_daily_panel_maps_source_assets_to_a_share_assets() -> None:
     assert pd.api.types.is_numeric_dtype(panel["filling_flag"])
     assert "source_asset_id" not in panel.columns
     assert "source_id" not in panel.columns
-    assert panel["eligible"].tolist() == [True, True]
-    assert panel["can_enter"].tolist() == [True, False]
-    assert panel["can_exit"].tolist() == [True, False]
+    assert "eligible" not in panel.columns
+    masks = annotations.derive_annotations(
+        panel,
+        min_listing_trading_days=1,
+    )
+    default = masks[A_SHARE_DEFAULT_UNIVERSE_ID]
+    execution = masks[A_SHARE_EXECUTION_MASK_ID]
+    assert default["eligible"].tolist() == [True, True]
+    assert execution["can_enter"].tolist() == [True, False]
+    assert execution["can_exit"].tolist() == [True, False]
 
 
 def test_compute_daily_panel_filters_non_a_share_market_types() -> None:
@@ -136,7 +150,11 @@ def test_compute_daily_panel_preserves_listing_age_closed_boundary() -> None:
     )
 
     assert panel["listing_age_trading_days"].tolist() == [1, 2]
-    assert panel["eligible_after_listing_age"].tolist() == [True, True]
+    default = annotations.derive_annotations(
+        panel,
+        min_listing_trading_days=1,
+    )[A_SHARE_DEFAULT_UNIVERSE_ID]
+    assert default["eligible_after_listing_age"].tolist() == [True, True]
 
 
 def test_compute_daily_panel_zero_float_shares_make_turnover_missing() -> None:
@@ -149,8 +167,12 @@ def test_compute_daily_panel_zero_float_shares_make_turnover_missing() -> None:
     )
 
     assert pd.isna(panel.loc[0, "turnover"])
-    assert bool(panel.loc[0, "eligible_liquidity"]) is False
-    assert bool(panel.loc[0, "eligible"]) is False
+    default = annotations.derive_annotations(
+        panel,
+        min_listing_trading_days=1,
+    )[A_SHARE_DEFAULT_UNIVERSE_ID]
+    assert bool(default.loc[0, "eligible_liquidity"]) is False
+    assert bool(default.loc[0, "eligible"]) is False
 
 
 def test_compute_daily_panel_preserves_missing_limit_status_context() -> None:
@@ -214,14 +236,18 @@ def test_compute_daily_panel_masks_only_next_day_one_word_limits() -> None:
             )
         ),
         min_listing_trading_days=1,
-    ).set_index("timestamp")
+    )
+    execution = annotations.derive_annotations(
+        panel,
+        min_listing_trading_days=1,
+    )[A_SHARE_EXECUTION_MASK_ID].set_index("timestamp")
 
-    assert bool(panel.loc[pd.Timestamp("2020-01-01"), "can_enter"]) is False
-    assert bool(panel.loc[pd.Timestamp("2020-01-02"), "can_enter"]) is True
-    assert bool(panel.loc[pd.Timestamp("2020-01-03"), "can_exit"]) is False
-    assert bool(panel.loc[pd.Timestamp("2020-01-06"), "can_exit"]) is True
-    assert bool(panel.loc[pd.Timestamp("2020-01-07"), "can_enter"]) is False
-    assert bool(panel.loc[pd.Timestamp("2020-01-07"), "can_exit"]) is False
+    assert bool(execution.loc[pd.Timestamp("2020-01-01"), "can_enter"]) is False
+    assert bool(execution.loc[pd.Timestamp("2020-01-02"), "can_enter"]) is True
+    assert bool(execution.loc[pd.Timestamp("2020-01-03"), "can_exit"]) is False
+    assert bool(execution.loc[pd.Timestamp("2020-01-06"), "can_exit"]) is True
+    assert bool(execution.loc[pd.Timestamp("2020-01-07"), "can_enter"]) is False
+    assert bool(execution.loc[pd.Timestamp("2020-01-07"), "can_exit"]) is False
 
 
 def test_compute_daily_panel_fails_closed_on_conflicting_reference_duplicates() -> None:

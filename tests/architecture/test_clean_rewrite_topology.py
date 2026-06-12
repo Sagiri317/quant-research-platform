@@ -636,8 +636,7 @@ def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
 
 def test_platform_core_does_not_import_csmar_source_modules() -> None:
     allowed_composition_roots = {
-        SOURCE_ROOT / "catalog" / "defaults.py",
-        SOURCE_ROOT / "workflows" / "private_evidence.py",
+        SOURCE_ROOT / "catalog" / "profiles.py",
     }
     checked_roots = (
         SOURCE_ROOT / "interfaces/api",

@@ -45,8 +45,11 @@ def test_dataspec_hierarchy_uses_data_id_without_retired_id_fields() -> None:
     assert "market_id" not in interim_fields
     assert "source_id" in interim_fields
     assert "kind" in processed_fields
+    assert "source_input_data_ids" in processed_fields
+    assert "processed_input_data_ids" in processed_fields
     assert "category" not in processed_fields
     assert "input_data_ids" in research_fields
+    assert "base_input_data_id" in research_fields
     assert "interim_data_id" not in interim_fields
     assert "processed_data_id" not in processed_fields
     assert "dataset_id" not in research_fields
@@ -100,6 +103,8 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
         label_id="forward_return_20d",
         market_id=MarketId("a_share"),
         output_column="forward_return_20d",
+        family="forward_return",
+        input_columns=("market_id", "asset_id", "timestamp", "adj_open"),
         label_timing="next_open_to_horizon_open",
         horizon=20,
         lookahead=21,

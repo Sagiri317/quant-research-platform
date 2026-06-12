@@ -4,10 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.catalog.defaults import (
-    default_processed_catalog,
-    default_research_dataset_catalog,
-)
+from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
@@ -28,6 +25,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
+    catalogs = local_a_share_csmar_catalogs()
     _write_synthetic_raw_exports(layout)
     interim_result = materialize_interim_data(
         layout=layout,
@@ -58,8 +56,8 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
     )
     assemble_research_dataset(
         layout=layout,
-        dataset_catalog=default_research_dataset_catalog(),
-        processed_catalog=default_processed_catalog(),
+        dataset_catalog=catalogs.research_datasets,
+        processed_catalog=catalogs.processed,
         dataset_id="a_share_price_volume_forward_returns",
         time_window=time_window,
     )
@@ -70,6 +68,10 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
     )
     execution = read_dataset(
         tmp_path / "data/processed/a_share/annotation/a_share_execution",
+        time_window=time_window,
+    )
+    default_universe = read_dataset(
+        tmp_path / "data/processed/a_share/annotation/a_share_default",
         time_window=time_window,
     )
     factors = read_dataset(
@@ -101,16 +103,20 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
         panel["asset_id"].eq("000002")
         & panel["timestamp"].eq(pd.Timestamp("2020-01-15"))
     ].iloc[0]
-    assert bool(st_row["is_st"]) is True
-    assert bool(st_row["eligible"]) is False
-
-    next_limit_up = panel.loc[
-        panel["asset_id"].eq("000001")
-        & panel["timestamp"].eq(pd.Timestamp("2020-01-09"))
+    st_mask_row = default_universe.loc[
+        default_universe["asset_id"].eq("000002")
+        & default_universe["timestamp"].eq(pd.Timestamp("2020-01-15"))
     ].iloc[0]
-    next_limit_down = panel.loc[
-        panel["asset_id"].eq("000001")
-        & panel["timestamp"].eq(pd.Timestamp("2020-01-10"))
+    assert bool(st_row["is_st"]) is True
+    assert bool(st_mask_row["eligible"]) is False
+
+    next_limit_up = execution.loc[
+        execution["asset_id"].eq("000001")
+        & execution["timestamp"].eq(pd.Timestamp("2020-01-09"))
+    ].iloc[0]
+    next_limit_down = execution.loc[
+        execution["asset_id"].eq("000001")
+        & execution["timestamp"].eq(pd.Timestamp("2020-01-10"))
     ].iloc[0]
     assert bool(next_limit_up["can_enter"]) is False
     assert bool(next_limit_down["can_exit"]) is False

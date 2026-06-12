@@ -47,7 +47,8 @@ processed canonical key.
 | Capability | Target owner |
 |---|---|
 | Raw/interim normalization | `sources/` internal adapters |
-| A-share processed panel/context/universe/masks | `markets/implementations/a_share/processed/` with internal session windows |
+| A-share daily facts | `markets/implementations/a_share/processed/panels.py` |
+| A-share context/universe/masks/execution annotations | `markets/implementations/a_share/processed/annotations.py` |
 | A-share factor formulas | `markets/implementations/a_share/factors/` |
 | Forward labels | `markets/implementations/a_share/labels/` |
 | Research dataset assembly | `research/datasets` |
@@ -56,11 +57,30 @@ processed canonical key.
 | Workflow orchestration | `workflows/` |
 | Reports | `reports/` |
 
+The local composition root is `catalog/profiles.py`.
+The public local profile builder returns the A-share internal-provider profile.
+A-share owner modules expose field, processed, factor, label, and research
+dataset catalogs; source/interim catalogs are composed only in the local
+profile.
+
 ## Verification Intent
 
 - Data-layer correctness covers only raw internal-provider CSV input through interim,
   processed A-share panel/annotation/factor/label artifacts, and research
   dataset assembly.
+- First-stage data-layer closure is structural and contract-level: source/raw
+  to interim, A-share fact panel, A-share annotations/masks/context, factor
+  data, label data, and research dataset assembly are closed under explicit
+  catalog/profile ownership.
+- `daily_panel` is a fact layer. It excludes derived `eligible*`,
+  `next_day*`, `can_enter`, and `can_exit` masks.
+- A-share trading semantics are owned by processed annotations. Label,
+  evaluation, model, and prediction paths consume annotation outputs instead of
+  recomputing ST, suspension, limit, eligibility, or execution rules.
+- The research dataset assembler is generic and market-agnostic. It requires
+  `base_input_data_id`, reads the base first, left-joins remaining processed
+  inputs on `market_id, asset_id, timestamp`, and emits columns in primary-key,
+  feature, label, filter, context order.
 - Correctness evidence uses hand-checkable golden samples, simple reference
   implementations, forced tiny session chunks versus default paths, invariant
   tests, and key-diff diagnostics. Prior materialized runs are comparison
@@ -79,6 +99,9 @@ processed canonical key.
   set, not inferred from candidate artifact dates alone.
 - Evaluation, model, prediction, and portfolio outputs are outside the
   data-layer correctness seal and must not be treated as validated by it.
+- Evaluation/model/prediction diagnostics and registries are outside the
+  first-stage data-layer closure. Their demo catalogs are local profile
+  components only.
 - Private boundary and sanitizer tests remain required before handoff.
 
 ## Current Local Coverage Status
@@ -98,6 +121,9 @@ processed canonical key.
   2014-2016 raw-start smoke unless its `.run/reviews/.../full_horizon_notes.md`
   says otherwise; fresh 2014-2025 full-horizon rerun remains an
   overnight/milestone validation before merge/main/demo.
+- Full-horizon private rerun is not a completion requirement for the
+  first-stage data-layer closure unless a generated run artifact explicitly
+  states it was rerun.
 - Evaluation supports `eligible`, `tradable`, and `unfiltered` filter modes.
   `tradable` means `eligible and can_enter and can_exit` and is an
   execution-aware evaluation diagnostic only, not a backtest, live tradable PnL,
@@ -114,10 +140,11 @@ processed canonical key.
 - `market_cap` panel as-of joins use processed keys `asset_id + timestamp`.
   Exact duplicate rows are deduped deterministically and conflicting duplicate
   keys fail closed.
-- `eligible[t]` is the single EOD-as-of-t ResearchDataset universe mask. It is
-  known after signal-date close and intended for t+1 open research
-  prediction/evaluation. It may combine pre-open/reference information and
-  t-day EOD trading/liquidity information.
+- `eligible[t]` is emitted by A-share processed annotations as the single
+  EOD-as-of-t ResearchDataset universe mask. It is known after signal-date
+  close and intended for t+1 open research prediction/evaluation. It may
+  combine pre-open/reference information and t-day EOD trading/liquidity
+  information.
 - ST/PT timing exactness remains future P2. The current mask does not split
   pre-open reference status, trade-date effective status, EOD liquidity, and
   next-open-known ST/PT status.
@@ -128,8 +155,9 @@ processed canonical key.
   research batch.
 - Runtime resource policy controls internal processed/research chunk size.
   A-share daily execution chunks by trading-session core windows with read halos:
-  next-session halo for panel tradability, past-session warmup for factors, and
-  future-session lookahead for labels. Only core rows are written.
+  next-session halo for daily panel construction and annotation execution masks,
+  past-session warmup for factors, and future-session lookahead for labels. Only
+  core rows are written.
 - `TimeWindow` is the public logical interval. `SessionWindow` is the internal
   execution interval used by processed materialization and research dataset
   assembly. Public API/CLI surfaces do not expose chunk controls.

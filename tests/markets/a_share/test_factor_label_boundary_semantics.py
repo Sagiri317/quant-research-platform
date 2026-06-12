@@ -6,15 +6,24 @@ import pytest
 from quant_research_platform.markets.implementations.a_share.factors import (
     calculations as factor_calculations,
 )
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
+)
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.labels.definitions import (
+    a_share_label_catalog,
 )
 
 
 def test_factor_boundary_nan_is_allowed_without_pre_window_history() -> None:
     panel = _factor_label_panel(pd.bdate_range("2014-01-01", periods=280))
 
-    factors = factor_calculations.calculate_price_volume_factors_for_panel(panel)
+    factors = factor_calculations.calculate_factors_for_panel(
+        panel,
+        definitions=factor_definitions.a_share_factor_catalog().list(),
+    )
 
     first = factors.sort_values("timestamp").iloc[0]
     middle = factors.loc[factors["timestamp"].eq(pd.Timestamp("2014-02-12"))].iloc[0]
@@ -25,7 +34,10 @@ def test_factor_boundary_nan_is_allowed_without_pre_window_history() -> None:
 def test_factor_middle_window_keeps_values_when_history_exists() -> None:
     panel = _factor_label_panel(pd.bdate_range("2013-11-01", periods=90))
 
-    factors = factor_calculations.calculate_price_volume_factors_for_panel(panel)
+    factors = factor_calculations.calculate_factors_for_panel(
+        panel,
+        definitions=factor_definitions.a_share_factor_catalog().list(),
+    )
     requested = factors.loc[
         factors["timestamp"].between(
             pd.Timestamp("2014-01-02"),
@@ -40,7 +52,10 @@ def test_factor_middle_window_keeps_values_when_history_exists() -> None:
 def test_label_tail_nan_is_allowed_without_post_window_future() -> None:
     panel = _factor_label_panel(pd.bdate_range("2014-01-01", periods=40))
 
-    labels = label_calculations.calculate_forward_return_labels_for_panel(panel)
+    labels = label_calculations.calculate_labels_for_panel(
+        panel,
+        definitions=a_share_label_catalog().list(),
+    )
 
     middle = labels.loc[labels["timestamp"].eq(pd.Timestamp("2014-01-15"))].iloc[0]
     tail = labels.sort_values("timestamp").iloc[-1]
@@ -51,7 +66,10 @@ def test_label_tail_nan_is_allowed_without_post_window_future() -> None:
 def test_label_middle_window_is_not_artificially_truncated_when_future_exists() -> None:
     panel = _factor_label_panel(pd.bdate_range("2014-01-01", periods=80))
 
-    labels = label_calculations.calculate_forward_return_labels_for_panel(panel)
+    labels = label_calculations.calculate_labels_for_panel(
+        panel,
+        definitions=a_share_label_catalog().list(),
+    )
     requested = labels.loc[
         labels["timestamp"].between(
             pd.Timestamp("2014-01-15"),
@@ -69,7 +87,10 @@ def test_factor_calculation_fails_closed_for_missing_required_input_columns() ->
     )
 
     with pytest.raises(ValueError, match="missing_price_volume_input_columns: amount"):
-        factor_calculations.calculate_price_volume_factors_for_panel(panel)
+        factor_calculations.calculate_factors_for_panel(
+            panel,
+            definitions=factor_definitions.a_share_factor_catalog().list(),
+        )
 
 
 def _factor_label_panel(dates) -> pd.DataFrame:

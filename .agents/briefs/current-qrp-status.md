@@ -37,6 +37,25 @@ replacement for `PROJECT_STATUS.md`.
 - Processed A-share materialization and research dataset assembly are
   session-chunked internally; public API/CLI surfaces do not expose chunk-size,
   year, partition, force, overwrite, or dependency-policy controls.
+- First-stage data-layer closure is the active sealed path:
+  `source/raw -> interim -> A-share processed facts -> A-share annotations/masks/context -> factor data -> label data -> research dataset`.
+- `catalog/profiles.py` is the local composition root. The public local profile
+  builder is `local_a_share_csmar_catalogs()` returning `CatalogBundle`;
+  `catalog/defaults.py`, `default_catalogs()`, and `PlatformCatalogs` are no
+  longer active public entrypoints.
+- A-share owner modules are split by responsibility. Stable IDs remain in
+  `markets/implementations/a_share/ids.py`; calendar helpers remain in
+  `markets/implementations/a_share/calendar.py`.
+- `daily_panel` is the A-share fact layer. It does not emit derived
+  `eligible*`, `next_day*`, `can_enter`, or `can_exit` masks.
+- A-share trading semantics are owned by
+  `markets/implementations/a_share/processed/annotations.py`; labels,
+  evaluation, model, and prediction code must consume annotation outputs rather
+  than recomputing ST, suspension, limit, eligibility, or execution rules.
+- `ResearchDatasetSpec.base_input_data_id` is required. The assembler is
+  market-agnostic, reads the explicit base first, left-joins the other inputs
+  on `market_id, asset_id, timestamp`, and orders output columns as primary
+  key, features, labels, filters, context.
 - Data-layer correctness evidence is evaluated from current semantics:
   golden/reference tests, session-chunk parity, invariants, and key-diff
   diagnostics. Older local materialized runs are comparison inputs only, not
@@ -47,6 +66,12 @@ replacement for `PROJECT_STATUS.md`.
   pending after the factor catalog refactor.
 - Evaluation and prediction evidence is 2014 smoke scope only; it is not a
   2014-2025 full historical evaluation or prediction run.
+- Evaluation/model/prediction registries, diagnostics, workflow execute/resume,
+  dashboards, high-frequency, multi-market implementation, and paper/live
+  trading remain outside the first-stage data-layer closure. Demo
+  evaluation/model/prediction catalogs are local profile components only.
+- Full-horizon private rerun is not required for the first-stage structural
+  closure unless a generated run artifact explicitly records that it occurred.
 - `eligible[t]` is the single EOD-as-of-t ResearchDataset universe mask, known
   after signal-date close and intended for t+1 open research prediction and
   evaluation. Model and prediction default sample filtering may use

@@ -10,22 +10,14 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.catalog.defaults import (
-    default_evaluation_catalog,
-    default_model_catalog,
-    default_prediction_catalog,
-    default_processed_catalog,
-    default_research_dataset_catalog,
+from quant_research_platform.catalog.profiles import (
+    _local_a_share_csmar_materialize_interim_data,
+    _local_a_share_csmar_source_id,
+    _local_a_share_materialize_processed_data,
+    local_a_share_csmar_catalogs,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-)
-from quant_research_platform.markets.implementations.a_share.processed import (
-    materializer as a_share_materializer,
-)
 from quant_research_platform.reports.private_evidence import (
     build_private_evidence_summary,
     build_validation_summary,
@@ -49,8 +41,6 @@ from quant_research_platform.runtime.execution_metrics import (
     write_execution_metrics_csv,
     write_execution_metrics_json,
 )
-from quant_research_platform.sources.csmar.ids import CSMAR_SOURCE_ID
-from quant_research_platform.sources.csmar.interim import materialize_interim_data
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.layout import PrivateEvidenceLayout, StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -103,17 +93,19 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=output_root)
     time_window = TimeWindow(config.start_date, config.end_date)
+    catalogs = local_a_share_csmar_catalogs()
+    source_id = _local_a_share_csmar_source_id()
     with recorder.record("interim_generation", logical_layer="interim"):
-        interim_result = materialize_interim_data(
+        interim_result = _local_a_share_csmar_materialize_interim_data(
             layout=storage_layout,
-            raw_root=Path("data") / "raw" / CSMAR_SOURCE_ID,
+            raw_root=Path("data") / "raw" / source_id,
             start_date=config.start_date,
             end_date=config.end_date,
         )
     with recorder.record("processed_generation", logical_layer="processed") as record:
-        processed_result = a_share_materializer.materialize_processed_data(
+        processed_result = _local_a_share_materialize_processed_data(
             layout=storage_layout,
-            source_id=SourceId(CSMAR_SOURCE_ID),
+            source_id=source_id,
             time_window=time_window,
             kinds=frozenset(
                 {
@@ -128,25 +120,25 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     with recorder.record("research_generation", logical_layer="research"):
         research_root = assemble_research_dataset(
             layout=storage_layout,
-            dataset_catalog=default_research_dataset_catalog(),
-            processed_catalog=default_processed_catalog(),
-            dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+            dataset_catalog=catalogs.research_datasets,
+            processed_catalog=catalogs.processed,
+            dataset_id="a_share_price_volume_forward_returns",
             time_window=time_window,
         )
     with recorder.record("evaluation_generation", logical_layer="evidence"):
         evaluation_root = run_evaluation_from_research_dataset(
             layout=storage_layout,
-            dataset_catalog=default_research_dataset_catalog(),
-            evaluation_catalog=default_evaluation_catalog(),
+            dataset_catalog=catalogs.research_datasets,
+            evaluation_catalog=catalogs.evaluations,
             run_id="a_share_mom_20d_forward_return_20d_2014",
             time_window=time_window,
         )
     with recorder.record("prediction_generation", logical_layer="evidence"):
         prediction_root = run_prediction_from_research_dataset(
             layout=storage_layout,
-            dataset_catalog=default_research_dataset_catalog(),
-            model_catalog=default_model_catalog(),
-            prediction_catalog=default_prediction_catalog(),
+            dataset_catalog=catalogs.research_datasets,
+            model_catalog=catalogs.models,
+            prediction_catalog=catalogs.predictions,
             prediction_id="a_share_linear_mom_20d_prediction_2014",
             time_window=time_window,
         )

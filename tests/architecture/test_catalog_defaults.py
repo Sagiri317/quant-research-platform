@@ -5,7 +5,7 @@ from pathlib import Path
 
 PROJECT_SRC = Path("src/quant_research_platform")
 CATALOG_INIT = PROJECT_SRC / "catalog" / "__init__.py"
-CATALOG_DEFAULTS = PROJECT_SRC / "catalog" / "defaults.py"
+CATALOG_PROFILES = PROJECT_SRC / "catalog" / "profiles.py"
 SCAN_ROOTS = (Path("src"), Path("tests"))
 
 
@@ -22,7 +22,7 @@ def test_catalog_package_init_does_not_export_platform_defaults() -> None:
     assert not [name for name in all_names if name.startswith("default_")]
 
 
-def test_platform_defaults_are_imported_from_explicit_defaults_module() -> None:
+def test_legacy_defaults_are_not_imported_from_catalog_root() -> None:
     root_import_hits: list[str] = []
     for path in _python_files(SCAN_ROOTS):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -47,8 +47,8 @@ def test_platform_defaults_are_imported_from_explicit_defaults_module() -> None:
 
 
 def test_catalog_defaults_remains_platform_composition_root() -> None:
-    source = CATALOG_DEFAULTS.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(CATALOG_DEFAULTS))
+    source = CATALOG_PROFILES.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(CATALOG_PROFILES))
     modules = {
         node.module
         for node in ast.walk(tree)
@@ -56,25 +56,30 @@ def test_catalog_defaults_remains_platform_composition_root() -> None:
     }
     all_names = _module_all_names(tree)
 
-    assert "quant_research_platform.markets.implementations.a_share.catalog" in modules
+    assert (
+        "quant_research_platform.markets.implementations.a_share.processed"
+        in modules
+    )
     assert "quant_research_platform.sources.csmar.catalog" in modules
     assert "quant_research_platform.sources.csmar.interim" in modules
     assert "quant_research_platform.reports.catalog" in modules
     assert "csmar_interim_catalog(" in source
     assert "source_bindings" not in source
     assert "provider_binding" not in source
-    assert "default_catalogs" in all_names
+    assert "local_a_share_csmar_catalogs" in all_names
+    assert "CatalogBundle" in all_names
+    assert not [name for name in all_names if name.startswith("default_")]
 
 
 def test_catalog_defaults_does_not_call_bootstrap_default() -> None:
-    source = CATALOG_DEFAULTS.read_text(encoding="utf-8")
+    source = CATALOG_PROFILES.read_text(encoding="utf-8")
 
     assert ".bootstrap_default(" not in source
 
 
 def test_catalog_defaults_delegates_concrete_definitions_to_owners() -> None:
-    source = CATALOG_DEFAULTS.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(CATALOG_DEFAULTS))
+    source = CATALOG_PROFILES.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(CATALOG_PROFILES))
     forbidden_names = {
         "DataProductDefinition",
         "MarketDefinition",

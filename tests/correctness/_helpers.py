@@ -853,6 +853,7 @@ def correctness_research_dataset_catalog() -> ResearchDatasetCatalog:
             data_id="demo",
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
+            base_input_data_id="demo_annotations",
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
             filter_columns=("eligible", "can_enter", "can_exit"),

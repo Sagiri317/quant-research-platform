@@ -133,10 +133,14 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
         )
         return artifact_root
 
-    monkeypatch.setattr(module, "materialize_interim_data", import_interim)
     monkeypatch.setattr(
-        module.a_share_materializer,
-        "materialize_processed_data",
+        module,
+        "_local_a_share_csmar_materialize_interim_data",
+        import_interim,
+    )
+    monkeypatch.setattr(
+        module,
+        "_local_a_share_materialize_processed_data",
         build_processed,
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
@@ -242,10 +246,14 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
             {"artifact_roots": {"daily_market": artifact_root}},
         )()
 
-    monkeypatch.setattr(module, "materialize_interim_data", import_interim)
     monkeypatch.setattr(
-        module.a_share_materializer,
-        "materialize_processed_data",
+        module,
+        "_local_a_share_csmar_materialize_interim_data",
+        import_interim,
+    )
+    monkeypatch.setattr(
+        module,
+        "_local_a_share_materialize_processed_data",
         lambda **kwargs: {},
     )
     monkeypatch.setattr(
@@ -297,10 +305,14 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
             {"artifact_roots": {"daily_market": artifact_root}},
         )()
 
-    monkeypatch.setattr(module, "materialize_interim_data", import_interim)
     monkeypatch.setattr(
-        module.a_share_materializer,
-        "materialize_processed_data",
+        module,
+        "_local_a_share_csmar_materialize_interim_data",
+        import_interim,
+    )
+    monkeypatch.setattr(
+        module,
+        "_local_a_share_materialize_processed_data",
         lambda **kwargs: {},
     )
     monkeypatch.setattr(
@@ -452,6 +464,7 @@ def _dataset_spec(
             data_id=dataset_id,
             market_id=MarketId("a_share"),
             input_data_ids=("price_volume",),
+            base_input_data_id="price_volume",
             feature_columns=("value",),
             label_columns=(),
         )

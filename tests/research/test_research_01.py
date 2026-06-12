@@ -154,6 +154,7 @@ def _research_dataset_catalog() -> ResearchDatasetCatalog:
             data_id="demo",
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
+            base_input_data_id="demo_annotations",
             feature_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
             filter_columns=("eligible", "can_enter", "can_exit"),
@@ -289,7 +290,7 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     )
 
 
-def test_research_dataset_missing_expected_input_key_fails_closed(
+def test_research_dataset_left_joins_missing_non_base_input_key(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -299,14 +300,26 @@ def test_research_dataset_missing_expected_input_key_fails_closed(
     labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
     _write_processed_inputs(layout, processed_catalog, label_frame=labels)
 
-    with pytest.raises(ValueError, match="missing_research_input_keys"):
-        assemble_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
-            dataset_id="demo",
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        )
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+    )
+    result = read_research_dataset(
+        layout,
+        market_id=MarketId("a_share"),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+    )
+    missing_row = result.loc[
+        result["asset_id"].eq("000002")
+        & result["timestamp"].eq(pd.Timestamp("2014-01-03"))
+    ].iloc[0]
+
+    assert len(result) == 4
+    assert pd.isna(missing_row["forward_return_20d"])
 
 
 def test_research_dataset_role_validation_rejects_wrong_factor_source(
@@ -320,6 +333,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
             data_id="bad_demo",
             market_id=MarketId("a_share"),
             input_data_ids=("demo_annotations",),
+            base_input_data_id="demo_annotations",
             feature_columns=("market_type",),
             label_columns=(),
             frequency=DataFrequency.DAILY,
@@ -375,6 +389,7 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
             data_id=f"bad_{field_name}",
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
+            base_input_data_id="demo_annotations",
             **spec_kwargs,
             frequency=DataFrequency.DAILY,
             grain=DataGrain.RESEARCH_ROW,

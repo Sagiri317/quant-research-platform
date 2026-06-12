@@ -20,7 +20,7 @@ from quant_research_platform.agents.workflow_planner import plan_workflow
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.markets.implementations.a_share.catalog import (
+from quant_research_platform.markets.implementations.a_share.fields import (
     a_share_field_catalog,
 )
 

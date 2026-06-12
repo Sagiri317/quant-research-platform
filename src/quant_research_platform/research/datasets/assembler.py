@@ -79,7 +79,7 @@ def _iter_joined_processed_chunks(
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
 ) -> Iterator[pd.DataFrame]:
-    base_data_id = _base_input_data_id(dataset_spec, processed_catalog)
+    base_data_id = _base_input_data_id(dataset_spec)
     base_spec = processed_catalog.get(base_data_id)
     base_root = layout.processed_data_root(
         base_spec.market_id,
@@ -123,7 +123,7 @@ def _iter_joined_processed_chunks(
         )
         validate_research_dataset(chunk, dataset_spec)
         yield (
-            chunk.loc[:, list(dataset_spec.required_columns)]
+            chunk.loc[:, list(_ordered_output_columns(dataset_spec))]
             .sort_values(list(dataset_spec.primary_key))
             .reset_index(drop=True)
         )
@@ -139,7 +139,6 @@ def _join_processed_inputs(
 ) -> pd.DataFrame:
     ordered_input_ids = _ordered_input_data_ids(
         dataset_spec,
-        processed_catalog,
         base_data_id=base_data_id,
     )
     assembled: pd.DataFrame | None = None
@@ -155,12 +154,6 @@ def _join_processed_inputs(
         if assembled is None:
             assembled = input_frame
             continue
-        _require_input_keys_cover_base(
-            assembled,
-            input_frame,
-            dataset_spec=dataset_spec,
-            input_data_id=input_data_id,
-        )
         assembled = assembled.merge(
             input_frame,
             on=list(dataset_spec.primary_key),
@@ -169,7 +162,7 @@ def _join_processed_inputs(
         )
     if assembled is None:
         raise ValueError("empty_research_dataset_inputs")
-    return assembled.loc[:, list(dataset_spec.required_columns)]
+    return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
 
 
 def _sessions_from_base_input(
@@ -190,25 +183,22 @@ def _sessions_from_base_input(
     return session_dates(timestamps)
 
 
-def _base_input_data_id(
-    dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
-) -> str:
-    for data_id in dataset_spec.input_data_ids:
-        if processed_catalog.get(data_id).kind is ProcessedDataKind.ANNOTATION:
-            return data_id
+def _base_input_data_id(dataset_spec: ResearchDatasetSpec) -> str:
     if not dataset_spec.input_data_ids:
         raise ValueError("empty_research_dataset_inputs")
-    return dataset_spec.input_data_ids[0]
+    if dataset_spec.base_input_data_id not in dataset_spec.input_data_ids:
+        raise ValueError(
+            f"base_input_data_id_not_in_inputs: {dataset_spec.base_input_data_id}"
+        )
+    return dataset_spec.base_input_data_id
 
 
 def _ordered_input_data_ids(
     dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
     *,
     base_data_id: str | None,
 ) -> tuple[str, ...]:
-    base = base_data_id or _base_input_data_id(dataset_spec, processed_catalog)
+    base = base_data_id or _base_input_data_id(dataset_spec)
     return (
         base,
         *(data_id for data_id in dataset_spec.input_data_ids if data_id != base),
@@ -256,11 +246,25 @@ def _read_processed_input(
         processed_spec.kind,
         processed_spec.data_id,
     )
-    return read_dataset(
-        data_root,
-        time_window=time_window,
-        columns=columns,
-    )
+    try:
+        return read_dataset(
+            data_root,
+            time_window=time_window,
+            columns=columns,
+        )
+    except ValueError as exc:
+        if str(exc) == "dataset_column_not_found":
+            missing_keys = [
+                column
+                for column in dataset_spec.primary_key
+                if column not in processed_spec.required_columns
+            ]
+            if missing_keys:
+                raise ValueError(
+                    f"missing_research_join_key: {processed_spec.data_id}: "
+                    + ", ".join(missing_keys)
+                ) from exc
+        raise
 
 
 def _processed_input_columns(
@@ -289,10 +293,26 @@ def _validate_research_input_specs(
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
 ) -> None:
+    _base_input_data_id(dataset_spec)
     processed_specs = {
         data_id: processed_catalog.get(data_id)
         for data_id in dataset_spec.input_data_ids
     }
+    for data_id, processed_spec in processed_specs.items():
+        missing_key_columns = [
+            column
+            for column in dataset_spec.primary_key
+            if column not in processed_spec.primary_key
+        ]
+        if missing_key_columns:
+            raise ValueError(
+                f"missing_research_join_key: {data_id}: "
+                + ", ".join(missing_key_columns)
+            )
+        if processed_spec.primary_key != dataset_spec.primary_key:
+            raise ValueError(f"incompatible_research_input_keys: {data_id}")
+    _require_no_duplicate_output_columns(dataset_spec, processed_specs)
+    _require_research_required_columns_available(dataset_spec, processed_specs)
     role_by_column: dict[str, set[ColumnRole]] = {}
     kind_by_column: dict[str, set[ProcessedDataKind]] = {}
     for processed_spec in processed_specs.values():
@@ -351,6 +371,54 @@ def _require_columns_from_roles_or_kinds(
     ]
     if invalid:
         raise ValueError(f"{error_name}: {', '.join(invalid)}")
+
+
+def _require_no_duplicate_output_columns(
+    dataset_spec: ResearchDatasetSpec,
+    processed_specs: dict[str, ProcessedDataSpec],
+) -> None:
+    requested = set(_ordered_output_columns(dataset_spec)).difference(
+        dataset_spec.primary_key
+    )
+    producers: dict[str, list[str]] = {}
+    for data_id, processed_spec in processed_specs.items():
+        for column in processed_spec.required_columns:
+            if column in dataset_spec.primary_key or column not in requested:
+                continue
+            producers.setdefault(column, []).append(data_id)
+    duplicates = sorted(
+        column for column, data_ids in producers.items() if len(data_ids) > 1
+    )
+    if duplicates:
+        raise ValueError("duplicate_research_output_columns: " + ", ".join(duplicates))
+
+
+def _require_research_required_columns_available(
+    dataset_spec: ResearchDatasetSpec,
+    processed_specs: dict[str, ProcessedDataSpec],
+) -> None:
+    available = {
+        column
+        for processed_spec in processed_specs.values()
+        for column in processed_spec.required_columns
+    }
+    missing = sorted(set(_ordered_output_columns(dataset_spec)).difference(available))
+    if missing:
+        raise ValueError("missing_research_required_columns: " + ", ".join(missing))
+
+
+def _ordered_output_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *dataset_spec.primary_key,
+                *dataset_spec.feature_columns,
+                *dataset_spec.label_columns,
+                *dataset_spec.filter_columns,
+                *dataset_spec.context_columns,
+            )
+        )
+    )
 
 
 def _input_fingerprints(

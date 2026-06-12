@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from math import ceil
 from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.catalog.factors import FactorCatalog
+from quant_research_platform.catalog.labels import LabelCatalog
+from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import (
     SessionWindow,
@@ -19,21 +24,24 @@ from quant_research_platform.markets.calendars import (
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_A_SHARE_MARKET_TYPES,
 )
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_processed_catalog,
-)
 from quant_research_platform.markets.implementations.a_share.factors import (
     calculations as factor_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
-from quant_research_platform.markets.implementations.a_share.labels.definitions import (
-    a_share_forward_return_label_definitions,
+from quant_research_platform.markets.implementations.a_share.labels import (
+    definitions as label_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     annotations,
     panels,
+)
+from quant_research_platform.markets.implementations.a_share.processed.catalog import (
+    a_share_processed_catalog,
 )
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
@@ -74,6 +82,7 @@ def materialize_processed_data(
         targets = tuple(spec for spec in catalog.list() if spec.kind in kinds)
     if not targets:
         raise ValueError("no_processed_targets")
+    _validate_processed_dependency_graph(catalog, targets)
     sessions = _available_trading_sessions(layout, source_id)
     _require_target_sessions(sessions, time_window)
     written: dict[str, DatasetInspection] = {}
@@ -110,6 +119,17 @@ def _materialize_one(
             raise ValueError("dataset_exists")
         _require_dataset_coverage(root, time_window, sessions=sessions)
         return inspect_dataset(root, time_window=time_window)
+    catalog = a_share_processed_catalog()
+    _ensure_processed_dependencies(
+        spec,
+        layout=layout,
+        source_id=source_id,
+        time_window=time_window,
+        policy=policy,
+        sessions=sessions,
+        written=written,
+        processed_catalog=catalog,
+    )
     if spec.kind is ProcessedDataKind.PANEL:
         return _write_panel(
             spec,
@@ -120,21 +140,6 @@ def _materialize_one(
             sessions=sessions,
             written=written,
         )
-    panel_spec = _catalog_get("daily_panel")
-    panel_root = _processed_root(layout, panel_spec)
-    if not panel_root.exists():
-        _materialize_one(
-            panel_spec,
-            layout=layout,
-            source_id=source_id,
-            time_window=time_window,
-            policy=policy,
-            sessions=sessions,
-            written=written,
-            requested=False,
-        )
-    elif panel_spec.data_id not in written:
-        _require_dataset_coverage(panel_root, time_window, sessions=sessions)
     if spec.kind is ProcessedDataKind.ANNOTATION:
         return _write_annotation(
             spec,
@@ -175,12 +180,16 @@ def _write_panel(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
-    daily_market_root = layout.interim_data_root(source_id, "daily_market")
-    stock_master = read_dataset(layout.interim_data_root(source_id, "stock_master"))
-    market_cap = read_dataset(layout.interim_data_root(source_id, "market_cap"))
-    trading_calendar = read_dataset(
-        layout.interim_data_root(source_id, "trading_calendar")
+    source_inputs = _read_source_inputs_for_spec(
+        spec,
+        layout=layout,
+        source_id=source_id,
     )
+    _require_source_inputs_for_spec(spec, source_inputs)
+    stock_master = source_inputs["stock_master"]
+    market_cap = source_inputs["market_cap"]
+    trading_calendar = source_inputs["trading_calendar"]
+    daily_market_root = layout.interim_data_root(source_id, "daily_market")
     estimated = _estimate_panel_bytes_per_session(
         sessions,
         time_window=time_window,
@@ -204,6 +213,11 @@ def _write_panel(
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
             daily_market = read_dataset(daily_market_root, time_window=window.read)
+            _require_source_input_columns(
+                "daily_market",
+                daily_market,
+                columns=("open", "high", "low", "close", "volume", "amount"),
+            )
             panel = panels.compute_daily_panel(
                 daily_market,
                 stock_master=stock_master,
@@ -231,20 +245,22 @@ def _write_annotation(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
-    panel_root = _processed_root(layout, _catalog_get("daily_panel"))
+    panel_spec = a_share_processed_catalog().get(spec.processed_input_data_ids[0])
+    panel_root = _processed_root(layout, panel_spec)
     windows = _planned_session_windows(
         sessions,
         time_window=time_window,
         policy=policy,
         inspection=inspect_dataset(panel_root),
+        lookahead_sessions=1,
         reason="research_assembly",
     )
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            panel = read_dataset(panel_root, time_window=window.core)
+            panel = read_dataset(panel_root, time_window=window.read)
             outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
-            yield outputs[spec.data_id]
+            yield _filter_output_sessions(outputs[spec.data_id], window.core_sessions)
 
     return _write_and_inspect(
         spec,
@@ -264,9 +280,13 @@ def _write_factors(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
-    panel_root = _processed_root(layout, _catalog_get("daily_panel"))
+    processed_catalog = a_share_processed_catalog()
+    factor_catalog = factor_definitions.a_share_factor_catalog()
+    definitions = _select_factor_definitions_for_spec(spec, factor_catalog)
+    panel_spec = processed_catalog.get(spec.processed_input_data_ids[0])
+    panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
-    lookback_days = factor_calculations.price_volume_lookback_days()
+    lookback_days = _factor_warmup_sessions(definitions)
     estimated = _estimate_factor_bytes_per_session(
         sessions,
         time_window=time_window,
@@ -274,6 +294,7 @@ def _write_factors(
         inspection=available,
         lookback_days=lookback_days,
         required_columns=spec.required_columns,
+        definitions=definitions,
     )
     windows = _planned_session_windows(
         sessions,
@@ -288,8 +309,9 @@ def _write_factors(
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
             panel = read_dataset(panel_root, time_window=window.read)
-            factors = factor_calculations.calculate_price_volume_factors_for_panel(
+            factors = factor_calculations.calculate_factors_for_panel(
                 panel,
+                definitions=definitions,
             )
             output = _filter_output_sessions(factors, window.core_sessions)
             yield output.loc[:, list(spec.required_columns)].copy()
@@ -312,12 +334,13 @@ def _write_labels(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
-    panel_root = _processed_root(layout, _catalog_get("daily_panel"))
+    processed_catalog = a_share_processed_catalog()
+    label_catalog = label_definitions.a_share_label_catalog()
+    definitions = _select_label_definitions_for_spec(spec, label_catalog)
+    panel_spec = processed_catalog.get(spec.processed_input_data_ids[0])
+    panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
-    lookahead_sessions = max(
-        definition.lookahead
-        for definition in a_share_forward_return_label_definitions()
-    )
+    lookahead_sessions = _label_lookahead_sessions(definitions)
     estimated = _estimate_label_bytes_per_session(
         sessions,
         time_window=time_window,
@@ -325,6 +348,7 @@ def _write_labels(
         inspection=available,
         lookahead_sessions=lookahead_sessions,
         required_columns=spec.required_columns,
+        definitions=definitions,
     )
     windows = _planned_session_windows(
         sessions,
@@ -339,8 +363,9 @@ def _write_labels(
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
             panel = read_dataset(panel_root, time_window=window.read)
-            labels = label_calculations.calculate_forward_return_labels_for_panel(
+            labels = label_calculations.calculate_labels_for_panel(
                 panel,
+                definitions=definitions,
             )
             output = _filter_output_sessions(labels, window.core_sessions)
             yield output.loc[:, list(spec.required_columns)].copy()
@@ -374,10 +399,6 @@ def _write_and_inspect(
 
 def _processed_root(layout: StorageLayout, spec: ProcessedDataSpec) -> Path:
     return layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-
-
-def _catalog_get(data_id: str) -> ProcessedDataSpec:
-    return a_share_processed_catalog().get(data_id)
 
 
 def _filter_output_sessions(
@@ -565,6 +586,7 @@ def _estimate_factor_bytes_per_session(
     inspection: DatasetInspection,
     lookback_days: int,
     required_columns: tuple[str, ...],
+    definitions: Sequence[FactorDefinition],
 ) -> int:
     sample = _sample_window(
         sessions,
@@ -573,7 +595,10 @@ def _estimate_factor_bytes_per_session(
         reason="factor_sizing",
     )
     panel = read_dataset(panel_root, time_window=sample.read)
-    factors = factor_calculations.calculate_price_volume_factors_for_panel(panel)
+    factors = factor_calculations.calculate_factors_for_panel(
+        panel,
+        definitions=definitions,
+    )
     output = _filter_output_sessions(factors, sample.core_sessions)
     selected = output.loc[:, list(required_columns)]
     return _measured_peak_bytes_per_session(
@@ -593,6 +618,7 @@ def _estimate_label_bytes_per_session(
     inspection: DatasetInspection,
     lookahead_sessions: int,
     required_columns: tuple[str, ...],
+    definitions: Sequence[LabelDefinition],
 ) -> int:
     sample = _sample_window(
         sessions,
@@ -601,7 +627,10 @@ def _estimate_label_bytes_per_session(
         reason="label_sizing",
     )
     panel = read_dataset(panel_root, time_window=sample.read)
-    labels = label_calculations.calculate_forward_return_labels_for_panel(panel)
+    labels = label_calculations.calculate_labels_for_panel(
+        panel,
+        definitions=definitions,
+    )
     output = _filter_output_sessions(labels, sample.core_sessions)
     selected = output.loc[:, list(required_columns)]
     return _measured_peak_bytes_per_session(
@@ -651,6 +680,169 @@ def _measured_peak_bytes_per_session(
     )
     bytes_per_row = sample_bytes / max(1, row_count)
     return max(1, ceil(bytes_per_row * target_rows_per_session))
+
+
+def _select_factor_definitions_for_spec(
+    spec: ProcessedDataSpec,
+    catalog: FactorCatalog,
+) -> tuple[FactorDefinition, ...]:
+    requested = set(spec.required_columns).difference(spec.primary_key)
+    selected = tuple(
+        definition
+        for definition in catalog.list()
+        if definition.output_column in requested
+    )
+    missing = sorted(
+        requested.difference(definition.output_column for definition in selected)
+    )
+    if missing:
+        raise ValueError("unknown_factor_output_columns: " + ", ".join(missing))
+    return selected
+
+
+def _select_label_definitions_for_spec(
+    spec: ProcessedDataSpec,
+    catalog: LabelCatalog,
+) -> tuple[LabelDefinition, ...]:
+    requested = set(spec.required_columns).difference(spec.primary_key)
+    selected = tuple(
+        definition
+        for definition in catalog.list()
+        if definition.output_column in requested
+    )
+    missing = sorted(
+        requested.difference(definition.output_column for definition in selected)
+    )
+    if missing:
+        raise ValueError("unknown_label_output_columns: " + ", ".join(missing))
+    return selected
+
+
+def _read_source_inputs_for_spec(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+) -> dict[str, pd.DataFrame]:
+    inputs: dict[str, pd.DataFrame] = {}
+    for data_id in spec.source_input_data_ids:
+        root = layout.interim_data_root(source_id, data_id)
+        inputs[data_id] = read_dataset(root)
+    return inputs
+
+
+def _require_source_inputs_for_spec(
+    spec: ProcessedDataSpec,
+    source_inputs: dict[str, pd.DataFrame],
+) -> None:
+    if spec.kind is not ProcessedDataKind.PANEL:
+        return
+    _require_source_input_columns(
+        "daily_market",
+        source_inputs["daily_market"],
+        columns=("open", "high", "low", "close", "volume", "amount"),
+    )
+
+
+def _read_processed_inputs_for_spec(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    processed_catalog: ProcessedDataCatalog,
+) -> dict[str, pd.DataFrame]:
+    inputs: dict[str, pd.DataFrame] = {}
+    for data_id in spec.processed_input_data_ids:
+        dependency = processed_catalog.get(data_id)
+        inputs[data_id] = read_dataset(_processed_root(layout, dependency))
+    return inputs
+
+
+def _ensure_processed_dependencies(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    policy: RuntimeResourcePolicy,
+    sessions: tuple[pd.Timestamp, ...],
+    written: dict[str, DatasetInspection],
+    processed_catalog: ProcessedDataCatalog,
+) -> None:
+    for data_id in spec.processed_input_data_ids:
+        dependency = processed_catalog.get(data_id)
+        dependency_root = _processed_root(layout, dependency)
+        if dependency_root.exists():
+            _require_dataset_coverage(dependency_root, time_window, sessions=sessions)
+            continue
+        _materialize_one(
+            dependency,
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            policy=policy,
+            sessions=sessions,
+            written=written,
+            requested=False,
+        )
+
+
+def _validate_processed_dependency_graph(
+    processed_catalog: ProcessedDataCatalog,
+    targets: tuple[ProcessedDataSpec, ...],
+) -> None:
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(spec: ProcessedDataSpec) -> None:
+        if spec.data_id in visited:
+            return
+        if spec.data_id in visiting:
+            raise ValueError(f"processed_dependency_cycle: {spec.data_id}")
+        visiting.add(spec.data_id)
+        for dependency_id in spec.processed_input_data_ids:
+            try:
+                dependency = processed_catalog.get(dependency_id)
+            except KeyError as exc:
+                raise ValueError(
+                    f"unknown_processed_dependency: {dependency_id}"
+                ) from exc
+            visit(dependency)
+        visiting.remove(spec.data_id)
+        visited.add(spec.data_id)
+
+    for target in targets:
+        visit(target)
+
+
+def _factor_warmup_sessions(definitions: Sequence[FactorDefinition]) -> int:
+    values = [
+        value
+        for definition in definitions
+        for value in (
+            definition.lookback_window,
+            definition.window,
+            *definition.required_windows,
+        )
+        if value is not None
+    ]
+    return max(values, default=0)
+
+
+def _label_lookahead_sessions(definitions: Sequence[LabelDefinition]) -> int:
+    return max((definition.lookahead for definition in definitions), default=0)
+
+
+def _require_source_input_columns(
+    data_id: str,
+    frame: pd.DataFrame,
+    *,
+    columns: tuple[str, ...],
+) -> None:
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"missing_source_input_columns: {data_id}: " + ", ".join(missing)
+        )
 
 
 __all__ = ["materialize_processed_data"]

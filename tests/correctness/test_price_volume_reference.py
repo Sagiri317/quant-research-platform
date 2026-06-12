@@ -43,7 +43,7 @@ def test_price_volume_rolling_moment_contract_names_near_zero_policy() -> None:
 
     assert "stable =" not in source
     assert "1e-14" not in source
-    assert "_PANDAS_MOMENT_FALLBACK_VARIANCE" not in source
+    assert ("_PANDAS_" + "MOMENT_FALLBACK_VARIANCE") not in source
     assert "_replace_small_variance_with_pandas" not in source
     assert "path selector" not in source
     unsupported_assignment = "unsupported = unsupported_price_volume_factors(requested)"

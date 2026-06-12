@@ -41,7 +41,7 @@ INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
 
 APPROVED_FIELD_SPEC_FILES = {
     Path("src/quant_research_platform/catalog/fields.py"),
-    Path("src/quant_research_platform/markets/implementations/a_share/catalog.py"),
+    Path("src/quant_research_platform/markets/implementations/a_share/fields.py"),
 }
 
 APPROVED_WRITER_MODULES = {

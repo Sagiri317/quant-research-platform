@@ -274,8 +274,8 @@ def test_full_historical_daily_panel_generation_always_uses_chunks(
 def test_generated_panel_generation_uses_runtime_resource_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.markets.implementations.a_share.catalog import (
-        a_share_processed_catalog,
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog,
     )
     from quant_research_platform.markets.implementations.a_share.verification import (
         private_aggregate,
@@ -322,7 +322,9 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
             }
         )
 
-    required_columns = a_share_processed_catalog().get("daily_panel").required_columns
+    required_columns = (
+        catalog.a_share_processed_catalog().get("daily_panel").required_columns
+    )
 
     def fake_compute_daily_panel(
         daily: pd.DataFrame,

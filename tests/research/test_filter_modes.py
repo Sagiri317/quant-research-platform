@@ -61,6 +61,7 @@ def _dataset_catalog() -> ResearchDatasetCatalog:
             data_id="demo_filter",
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
+            base_input_data_id="demo_annotation",
             feature_columns=("factor",),
             label_columns=("label",),
             filter_columns=("eligible", "can_enter", "can_exit"),

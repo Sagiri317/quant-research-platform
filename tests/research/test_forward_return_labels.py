@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.markets.implementations.a_share.catalog import (
+from quant_research_platform.markets.implementations.a_share.labels.definitions import (
     a_share_label_catalog,
 )
 from quant_research_platform.research.labels.forward_returns import (

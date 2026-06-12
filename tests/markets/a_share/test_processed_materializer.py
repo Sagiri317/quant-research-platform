@@ -8,11 +8,11 @@ import pytest
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_processed_catalog,
-)
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
+)
+from quant_research_platform.markets.implementations.a_share.processed.catalog import (
+    a_share_processed_catalog,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.csmar.interim import interim_catalog
@@ -274,6 +274,43 @@ def test_existing_dependency_coverage_accepts_non_trading_end_date(
         "2016-12-29",
         "2016-12-30",
     ]
+
+
+def test_annotation_materializer_uses_dependency_lookahead_session(tmp_path) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(
+        layout,
+        start_date="2014-01-30",
+        end_date="2014-02-07",
+        closed_dates=(
+            "2014-01-31",
+            "2014-02-03",
+            "2014-02-04",
+            "2014-02-05",
+            "2014-02-06",
+        ),
+    )
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2014-01-30", "2014-02-07"),
+        data_ids=("daily_panel",),
+    )
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SourceId("csmar"),
+        time_window=TimeWindow("2014-01-30", "2014-01-30"),
+        data_ids=("a_share_execution",),
+    )
+
+    execution = read_dataset(
+        _processed_root(tmp_path, "annotation", "a_share_execution")
+    )
+    assert execution["timestamp"].dt.date.astype(str).tolist() == ["2014-01-30"]
+    assert execution["next_day_is_trading"].tolist() == [True]
+    assert execution["can_enter"].tolist() == [True]
+    assert execution["can_exit"].tolist() == [True]
 
 
 def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(

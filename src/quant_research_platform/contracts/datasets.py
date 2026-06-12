@@ -12,6 +12,7 @@ from quant_research_platform.contracts.ids import MarketId
 class ResearchDatasetSpec(DataSpec):
     market_id: MarketId
     input_data_ids: tuple[str, ...]
+    base_input_data_id: str
     feature_columns: tuple[str, ...]
     label_columns: tuple[str, ...]
     filter_columns: tuple[str, ...] = ()

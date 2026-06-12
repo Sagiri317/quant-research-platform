@@ -1129,12 +1129,20 @@ def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
     if isinstance(spec, InterimDataSpec):
         payload.update({"source_id": str(spec.source_id)})
     if isinstance(spec, ProcessedDataSpec):
-        payload.update({"market_id": str(spec.market_id), "kind": spec.kind.value})
+        payload.update(
+            {
+                "market_id": str(spec.market_id),
+                "kind": spec.kind.value,
+                "source_input_data_ids": list(spec.source_input_data_ids),
+                "processed_input_data_ids": list(spec.processed_input_data_ids),
+            }
+        )
     if isinstance(spec, ResearchDatasetSpec):
         payload.update(
             {
                 "market_id": str(spec.market_id),
                 "input_data_ids": list(spec.input_data_ids),
+                "base_input_data_id": spec.base_input_data_id,
                 "feature_columns": list(spec.feature_columns),
                 "label_columns": list(spec.label_columns),
                 "filter_columns": list(spec.filter_columns),

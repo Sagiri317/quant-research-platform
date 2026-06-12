@@ -75,3 +75,37 @@ Current public-safe anchors:
 | 2026-06-04 | status | QRP clean rewrite completed through Phase 10 locally: 2014 parity-or-explained-delta passed, 2014-2025 factor/label-supporting processed layers and ResearchDataset were migrated through spec-driven writers, and reports remain under `reports/private_real`. | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-04 | status | Pre-merge fix added public-safe clean rewrite parity evidence, thin API/CLI dry-run validation services, sanitizer/report/writer gates, and full historical `daily_panel` aggregate coverage for 2014-2025 without committed row-level output. | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-04 | status | Pre-merge blocker repair updated `execution_mode`, registered workflow execution, ReportSpec/ReportCatalog writer gates, P2 split modules, and public-safe aggregate evidence hash validation. | WORKSPACE_STATUS, PLAN_INDEX | open |
+
+## First-Stage Data-Layer Closure
+
+Status: first-stage data-layer closure is implemented for the local A-share
+internal-provider profile.
+
+The closed first-stage path is:
+
+```text
+source/raw -> interim -> A-share processed facts -> A-share annotations/masks/context -> factor data -> label data -> research dataset
+```
+
+`daily_panel` is the A-share fact layer. It does not own derived research or
+execution masks such as `eligible`, `can_enter`, or `can_exit`.
+
+A-share trading semantics are owned by
+`markets/implementations/a_share/processed/annotations.py`. Eligibility,
+as-of, execution, and evaluation annotation datasets are derived from
+`daily_panel` facts and are consumed downstream rather than recomputed by label,
+evaluation, model, or prediction code.
+
+The generic research dataset assembler is market-agnostic. It uses
+`ResearchDatasetSpec.base_input_data_id` as the explicit base input, reads that
+input first, left-joins the remaining inputs on the primary key, and emits
+columns in primary-key, feature, label, filter, context order.
+
+Evaluation, model, and prediction catalogs remain local profile demo
+components and are outside the first-stage data-layer closure. Evaluation
+diagnostics, model registry, prediction registry, workflow execute/resume,
+frontend/dashboard work, high-frequency, multi-market implementation, and
+paper/live trading remain out of scope.
+
+Full-horizon private reruns are not required for this first-stage structural
+closure unless a run artifact explicitly records that such a rerun occurred.

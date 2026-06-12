@@ -133,39 +133,6 @@ def compute_daily_panel(
         listing_date_column="listing_date",
         market_type_column=market_type_column,
     )
-    panel["eligible_after_listing_age"] = (
-        panel["listing_age_trading_days"] >= min_listing_trading_days
-    )
-    panel["eligible_liquidity"] = (
-        pd.to_numeric(panel["amount"], errors="coerce").gt(0)
-        & pd.to_numeric(panel["volume"], errors="coerce").gt(0)
-        & pd.to_numeric(panel["turnover"], errors="coerce").ge(0)
-    )
-    panel["eligible_base"] = (
-        panel["is_a_share_scope"]
-        & panel["is_trading"]
-        & ~panel["is_st"]
-        & ~panel["is_pt"]
-    )
-    panel["eligible"] = (
-        panel["eligible_base"]
-        & panel["eligible_after_listing_age"]
-        & panel["eligible_liquidity"]
-    )
-    panel = _add_one_word_limit_masks(panel)
-    grouped = panel.groupby("asset_id", sort=False)
-    panel["next_day_is_trading"] = _shifted_bool_mask(grouped["is_trading"])
-    panel["next_day_limit_status"] = grouped["limit_status"].shift(-1)
-    next_one_word_limit_up = _shifted_bool_mask(grouped["one_word_limit_up"])
-    next_one_word_limit_down = _shifted_bool_mask(grouped["one_word_limit_down"])
-    panel["can_enter"] = (
-        panel["eligible"]
-        & panel["next_day_is_trading"].astype(bool)
-        & ~next_one_word_limit_up
-    )
-    panel["can_exit"] = panel["next_day_is_trading"].astype(bool) & (
-        ~next_one_word_limit_down
-    )
     leading = [
         "market_id",
         "asset_id",

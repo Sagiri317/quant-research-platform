@@ -17,7 +17,7 @@ class LabelCatalog:
         self._items[definition.label_id] = definition
 
     def list(self) -> tuple[LabelDefinition, ...]:
-        return tuple(self._items[key] for key in sorted(self._items))
+        return tuple(self._items.values())
 
 
 __all__ = ["LabelCatalog"]

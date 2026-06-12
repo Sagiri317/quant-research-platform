@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+ACTIVE_SCAN_ROOTS = (
+    Path("src"),
+    Path("tests/architecture"),
+    Path("tests/correctness"),
+    Path("tests/research"),
+    Path("tests/markets"),
+    Path("tests/storage"),
+)
+PROJECT_SRC = Path("src/quant_research_platform")
+NEGATIVE_GATE_FILES = {
+    Path("tests/architecture/test_clean_rewrite_rg_gate.py"),
+    Path("tests/architecture/test_data_layer_boundaries.py"),
+}
+
+
+def test_old_catalog_entrypoints_are_not_active_imports() -> None:
+    forbidden = {
+        "quant_research_platform.catalog.defaults",
+        "quant_research_platform.markets.implementations.a_share.catalog",
+    }
+    hits = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(ACTIVE_SCAN_ROOTS)
+        if module in forbidden
+    ]
+
+    assert hits == []
+
+
+def test_retired_public_profile_names_are_absent() -> None:
+    profiles_path = PROJECT_SRC / "catalog/profiles.py"
+    defaults_path = PROJECT_SRC / "catalog/defaults.py"
+    assert profiles_path.exists()
+    assert not defaults_path.exists()
+
+    tree = ast.parse(
+        profiles_path.read_text(encoding="utf-8"),
+        filename=str(profiles_path),
+    )
+    public_names = _module_all_names(tree)
+    assert "CatalogBundle" in public_names
+    assert "local_a_share_csmar_catalogs" in public_names
+    assert "PlatformCatalogs" not in public_names
+    assert "default_catalogs" not in public_names
+    assert not [name for name in public_names if name.startswith("default_")]
+
+
+def test_source_market_storage_research_import_boundaries_are_closed() -> None:
+    checks = (
+        (
+            PROJECT_SRC / "markets/implementations/a_share",
+            "a_share_imports_csmar",
+            ("quant_research_platform.sources.csmar",),
+        ),
+        (
+            PROJECT_SRC / "sources/csmar",
+            "csmar_imports_a_share",
+            ("quant_research_platform.markets.implementations.a_share",),
+        ),
+        (
+            PROJECT_SRC / "storage",
+            "storage_imports_implementation",
+            (
+                "quant_research_platform.markets.implementations.a_share",
+                "quant_research_platform.sources.csmar",
+            ),
+        ),
+        (
+            PROJECT_SRC / "research/datasets",
+            "research_dataset_imports_implementation",
+            (
+                "quant_research_platform.markets.implementations.a_share",
+                "quant_research_platform.sources.csmar",
+            ),
+        ),
+        (
+            PROJECT_SRC / "research/factors",
+            "generic_factor_imports_a_share",
+            ("quant_research_platform.markets.implementations.a_share",),
+        ),
+        (
+            PROJECT_SRC / "research/labels",
+            "generic_label_imports_a_share",
+            ("quant_research_platform.markets.implementations.a_share",),
+        ),
+    )
+    for root, error_name, prefixes in checks:
+        hits = [
+            f"{path}:{lineno} imports {module}"
+            for path, lineno, module in _iter_imports((root,))
+            if module.startswith(prefixes)
+        ]
+        assert hits == [], f"{error_name}: " + "; ".join(hits)
+
+
+def test_interfaces_workflows_agents_use_profile_not_direct_implementations() -> None:
+    roots = (
+        PROJECT_SRC / "interfaces",
+        PROJECT_SRC / "workflows",
+        PROJECT_SRC / "agents",
+    )
+    forbidden_prefixes = (
+        "quant_research_platform.markets.implementations.a_share",
+        "quant_research_platform.sources.csmar",
+    )
+    hits = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(roots)
+        if module.startswith(forbidden_prefixes)
+    ]
+    profile_users = [
+        path.as_posix()
+        for path, _lineno, module in _iter_imports(roots)
+        if module == "quant_research_platform.catalog.profiles"
+    ]
+
+    assert hits == []
+    assert profile_users
+
+
+def test_evaluation_model_prediction_do_not_import_a_share_annotation_rules() -> None:
+    roots = (
+        PROJECT_SRC / "research/evaluations",
+        PROJECT_SRC / "research/models",
+        PROJECT_SRC / "research/predictions",
+    )
+    hits = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(roots)
+        if module.startswith(
+            "quant_research_platform.markets.implementations.a_share.processed.annotations"
+        )
+    ]
+
+    assert hits == []
+
+
+def test_materializer_has_no_old_family_specific_or_source_imports() -> None:
+    path = PROJECT_SRC / "markets/implementations/a_share/processed/materializer.py"
+    source = path.read_text(encoding="utf-8")
+    forbidden = (
+        "CSMAR_SOURCE_ID",
+        "calculate_price_volume_factors_for_panel",
+        "calculate_forward_return_labels_for_panel",
+        "a_share_forward_return_label_definitions",
+        "a_share_price_volume_factor_definitions",
+        "markets.implementations.a_share.catalog",
+    )
+
+    assert [token for token in forbidden if token in source] == []
+
+
+def test_active_code_has_no_retired_data_layer_terms() -> None:
+    forbidden_patterns = (
+        r"\basset_batches\b",
+        r"\bdata_product_id\b",
+        r"\bChunkAxis\.YEAR\b",
+        r"\bChunkAxis\.ENTITY\b",
+        r"\b_PANDAS_MOMENT_FALLBACK_VARIANCE\b",
+        r"pandas fallback",
+    )
+    hits: list[str] = []
+    for path in _python_files(ACTIVE_SCAN_ROOTS):
+        if path == Path(__file__) or path in NEGATIVE_GATE_FILES:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for pattern in forbidden_patterns:
+            if re.search(pattern, source):
+                hits.append(f"{path}:{pattern}")
+
+    assert hits == []
+
+
+def _iter_imports(roots: tuple[Path, ...]) -> tuple[tuple[Path, int, str], ...]:
+    imports: list[tuple[Path, int, str]] = []
+    for path in _python_files(roots):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                imports.append((path, node.lineno, node.module))
+            elif isinstance(node, ast.Import):
+                imports.extend((path, node.lineno, alias.name) for alias in node.names)
+    return tuple(imports)
+
+
+def _python_files(roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for root in roots:
+        if root.is_file():
+            files.append(root)
+        else:
+            files.extend(path for path in root.rglob("*.py") if path.is_file())
+    return tuple(
+        sorted(
+            path
+            for path in files
+            if path.resolve() != Path(__file__).resolve()
+        )
+    )
+
+
+def _module_all_names(tree: ast.AST) -> tuple[str, ...]:
+    names: list[str] = []
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in node.targets
+        ):
+            continue
+        if isinstance(node.value, (ast.List, ast.Tuple)):
+            names.extend(
+                item.value
+                for item in node.value.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            )
+    return tuple(names)

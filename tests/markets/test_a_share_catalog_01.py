@@ -10,14 +10,11 @@ from quant_research_platform.catalog.fields import (
 )
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_factor_catalog,
-    a_share_field_catalog,
-    a_share_processed_catalog,
-    a_share_research_dataset_catalog,
-)
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
+)
+from quant_research_platform.markets.implementations.a_share.fields import (
+    a_share_field_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_AS_OF_MASK_ID,
@@ -29,6 +26,12 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     DAILY_PANEL_PROCESSED_DATA_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
+)
+from quant_research_platform.markets.implementations.a_share.processed.catalog import (
+    a_share_processed_catalog,
+)
+from quant_research_platform.markets.implementations.a_share.research_profiles import (
+    a_share_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.validation import (
     factor_tables,
@@ -109,19 +112,20 @@ def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
         if role is ColumnRole.FACTOR
     )
     registered_columns = tuple(
-        definition.output_column for definition in a_share_factor_catalog().list()
+        definition.output_column
+        for definition in factor_definitions.a_share_factor_catalog().list()
     )
 
     with pytest.raises(KeyError, match="unknown_processed_data_spec"):
         catalog.get("price_volume" + "_56")
     assert spec.kind is ProcessedDataKind.FACTOR
-    assert factor_columns == factor_definitions.a_share_price_volume_factor_columns()
+    assert factor_columns == _a_share_factor_columns()
     assert registered_columns == (
-        factor_definitions.a_share_price_volume_factor_columns()
+        _a_share_factor_columns()
     )
     assert spec.required_columns == (
         *platform_entity_time_key(),
-        *factor_definitions.a_share_price_volume_factor_columns(),
+        *_a_share_factor_columns(),
     )
     assert "mom_20d" in factor_columns
     assert "log_float_market_cap" in factor_columns
@@ -144,7 +148,7 @@ def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
 
 
 def test_a_share_factor_validator_blocks_mask_columns() -> None:
-    factor_column = factor_definitions.a_share_price_volume_factor_columns()[0]
+    factor_column = _a_share_factor_columns()[0]
     report = factor_tables.check_factor_table(
         pd.DataFrame(
             {
@@ -171,7 +175,7 @@ def test_a_share_factor_validator_blocks_mask_columns() -> None:
 
 
 def test_a_share_factor_validator_requires_exact_registered_columns() -> None:
-    factor_columns = factor_definitions.a_share_price_volume_factor_columns()
+    factor_columns = _a_share_factor_columns()
     first_factor = factor_columns[0]
     missing_factor = factor_columns[-1]
     base = {
@@ -206,7 +210,7 @@ def test_a_share_factor_and_label_validators_reject_infinite_outputs() -> None:
             "timestamp": pd.to_datetime(["2024-01-02"]),
             **{
                 column: [0.0]
-                for column in factor_definitions.a_share_price_volume_factor_columns()
+                for column in _a_share_factor_columns()
             },
         }
     )
@@ -285,10 +289,10 @@ def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() ->
     )
     assert dataset.required_columns == (
         *platform_entity_time_key(),
-        *dataset.context_columns,
-        *dataset.filter_columns,
         *dataset.feature_columns,
         *dataset.label_columns,
+        *dataset.filter_columns,
+        *dataset.context_columns,
     )
     assert not hasattr(dataset, "source_columns")
     assert not hasattr(dataset, "processed_data_ids")
@@ -299,3 +303,10 @@ def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() ->
         "source_id",
         "source_asset_id",
     }.intersection(dataset.required_columns)
+
+
+def _a_share_factor_columns() -> tuple[str, ...]:
+    return tuple(
+        definition.output_column
+        for definition in factor_definitions.a_share_factor_definitions()
+    )

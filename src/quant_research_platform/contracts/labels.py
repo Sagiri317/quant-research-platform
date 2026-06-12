@@ -12,6 +12,8 @@ from quant_research_platform.contracts.ids import MarketId
 class LabelDefinition:
     label_id: str
     market_id: MarketId
+    family: str
+    input_columns: tuple[str, ...]
     output_column: str
     label_timing: str
     horizon: int
@@ -25,6 +27,8 @@ class LabelDefinition:
             "definition_version": self.definition_version,
             "label_id": self.label_id,
             "market_id": str(self.market_id),
+            "family": self.family,
+            "input_columns": list(self.input_columns),
             "output_column": self.output_column,
             "label_timing": self.label_timing,
             "horizon": self.horizon,

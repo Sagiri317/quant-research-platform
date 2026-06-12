@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.catalog.defaults import (
-    default_source_interim_catalogs,
-    default_source_registry,
-)
 from quant_research_platform.catalog.processed import InterimDataCatalog
+from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
 
 EXPECTED_CSMAR_INTERIM_DATA_IDS = (
     "adjustment",
@@ -19,8 +16,9 @@ EXPECTED_CSMAR_INTERIM_DATA_IDS = (
 
 
 def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() -> None:
-    source = default_source_registry().get("csmar")
-    catalog = default_source_interim_catalogs()["csmar"]
+    catalogs = local_a_share_csmar_catalogs()
+    source = catalogs.sources.get("csmar")
+    catalog = catalogs.source_interim_catalogs["csmar"]
 
     assert isinstance(catalog, InterimDataCatalog)
     assert str(source.source_id) == "csmar"
@@ -36,7 +34,7 @@ def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() ->
 
 
 def test_csmar_source_interim_specs_have_source_not_market_identity() -> None:
-    for spec in default_source_interim_catalogs()["csmar"].list():
+    for spec in local_a_share_csmar_catalogs().source_interim_catalogs["csmar"].list():
         assert hasattr(spec, "data_id")
         assert hasattr(spec, "source_id")
         assert not hasattr(spec, "market_id")
@@ -44,7 +42,7 @@ def test_csmar_source_interim_specs_have_source_not_market_identity() -> None:
 
 
 def test_csmar_catalog_rejects_retired_interim_data_id() -> None:
-    catalog = default_source_interim_catalogs()["csmar"]
+    catalog = local_a_share_csmar_catalogs().source_interim_catalogs["csmar"]
 
     with pytest.raises(KeyError, match="unknown_interim_data_spec"):
         catalog.get("_".join(("csmar", "daily", "market", "interim")))
@@ -52,7 +50,10 @@ def test_csmar_catalog_rejects_retired_interim_data_id() -> None:
 
 def test_csmar_catalog_exposes_current_source_owned_data_ids() -> None:
     csmar_catalog_ids = {
-        spec.data_id for spec in default_source_interim_catalogs()["csmar"].list()
+        spec.data_id
+        for spec in local_a_share_csmar_catalogs().source_interim_catalogs[
+            "csmar"
+        ].list()
     }
 
     assert csmar_catalog_ids == set(EXPECTED_CSMAR_INTERIM_DATA_IDS)

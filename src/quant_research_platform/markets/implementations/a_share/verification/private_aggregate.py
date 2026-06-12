@@ -32,9 +32,6 @@ from quant_research_platform.runtime.resources import (
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
 )
-from quant_research_platform.sources.csmar.ids import (
-    CSMAR_SOURCE_ID,
-)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
@@ -57,6 +54,7 @@ FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
+PRIVATE_INTERIM_SOURCE_ID = "csmar"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/panel/daily_panel": "full_historical_daily_panel_status",
@@ -462,17 +460,18 @@ def _iter_generated_full_daily_panel_chunks(
 def _iter_generated_full_daily_panel_session_chunks(
     project_root: Path,
 ) -> Iterator[pd.DataFrame]:
-    from quant_research_platform.markets.implementations.a_share.catalog import (
-        a_share_processed_catalog,
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog as processed_catalog,
     )
     from quant_research_platform.markets.implementations.a_share.processed import (
         panels,
     )
+
     interim_root = _private_interim_root(project_root)
     stock_master = read_dataset(interim_root / "stock_master")
     market_cap = read_dataset(interim_root / "market_cap")
     trading_calendar = read_dataset(interim_root / "trading_calendar")
-    spec = a_share_processed_catalog().get("daily_panel")
+    spec = processed_catalog.a_share_processed_catalog().get("daily_panel")
     daily_market_root = interim_root / "daily_market"
     time_window = TimeWindow(FULL_HISTORY_START_DATE, FULL_HISTORY_END_DATE)
     sessions = _trading_sessions_from_calendar(trading_calendar)
@@ -530,7 +529,7 @@ def _iter_generated_full_daily_panel_session_chunks(
 def _private_interim_root(
     project_root: Path,
 ) -> Path:
-    return Path(project_root) / "data" / "interim" / CSMAR_SOURCE_ID
+    return Path(project_root) / "data" / "interim" / PRIVATE_INTERIM_SOURCE_ID
 
 
 def _estimate_generated_full_panel_memory_bytes(

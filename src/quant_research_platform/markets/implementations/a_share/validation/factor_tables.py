@@ -5,14 +5,18 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_factor_catalog,
-    a_share_label_catalog,
-    a_share_processed_catalog,
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
+)
+from quant_research_platform.markets.implementations.a_share.labels import (
+    definitions as label_definitions,
+)
+from quant_research_platform.markets.implementations.a_share.processed.catalog import (
+    a_share_processed_catalog,
 )
 
 from .quality_report import (
@@ -52,7 +56,8 @@ def factor_columns(frame: pd.DataFrame) -> list[str]:
     """Return registered factor columns present in a split factor table."""
 
     registered = {
-        definition.output_column for definition in a_share_factor_catalog().list()
+        definition.output_column
+        for definition in factor_definitions.a_share_factor_catalog().list()
     }
     return [column for column in frame.columns if column in registered]
 
@@ -61,7 +66,8 @@ def label_columns(frame: pd.DataFrame) -> list[str]:
     """Return registered label columns present in a split factor table."""
 
     registered = {
-        definition.output_column for definition in a_share_label_catalog().list()
+        definition.output_column
+        for definition in label_definitions.a_share_label_catalog().list()
     }
     return [column for column in frame.columns if column in registered]
 

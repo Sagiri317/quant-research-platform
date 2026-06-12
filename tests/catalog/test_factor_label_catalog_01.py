@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.catalog.defaults import default_source_registry
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
+from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.markets.implementations.a_share.catalog import (
-    a_share_factor_catalog,
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
+)
+from quant_research_platform.markets.implementations.a_share.fields import (
     a_share_field_catalog,
 )
 from quant_research_platform.research.factors.price_volume import (
@@ -21,7 +23,7 @@ def test_factor_catalog_is_pure_registry_without_market_bootstrap() -> None:
 
 
 def test_a_share_price_volume_factor_definitions_have_input_requirements() -> None:
-    catalog = a_share_factor_catalog()
+    catalog = factor_definitions.a_share_factor_catalog()
     definitions = catalog.list()
     registered_fields = set(a_share_field_catalog().list_names())
 
@@ -85,6 +87,8 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
         label_id="forward_return_20d",
         market_id=MarketId("a_share"),
         output_column="forward_return_20d",
+        family="forward_return",
+        input_columns=("market_id", "asset_id", "timestamp", "adj_open"),
         label_timing="next_open_to_horizon_open",
         horizon=20,
         lookahead=21,
@@ -101,7 +105,7 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
 
 
 def test_source_registry_entries_are_internal_only() -> None:
-    sources = default_source_registry().list()
+    sources = local_a_share_csmar_catalogs().sources.list()
 
     assert sources
     assert all(not item.public_identifier for item in sources)

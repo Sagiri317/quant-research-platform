@@ -2,28 +2,35 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pandas as pd
 
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.research.factors.price_volume import (
+    PRICE_VOLUME_FACTOR_FAMILY,
     calculate_price_volume_factors,
-    largest_price_volume_lookback_days,
 )
 
-from .definitions import a_share_price_volume_factor_columns
 
-
-def calculate_price_volume_factors_for_panel(panel_frame: pd.DataFrame) -> pd.DataFrame:
+def calculate_factors_for_panel(
+    panel_frame: pd.DataFrame,
+    *,
+    definitions: Sequence[FactorDefinition],
+) -> pd.DataFrame:
+    requested = tuple(definitions)
+    families = tuple(dict.fromkeys(definition.family for definition in requested))
+    if not requested:
+        return panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+    if families != (PRICE_VOLUME_FACTOR_FAMILY,):
+        unsupported = next(
+            family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
+        )
+        raise ValueError(f"unsupported_a_share_factor_family: {unsupported}")
     return calculate_price_volume_factors(
         panel_frame,
-        factor_columns=a_share_price_volume_factor_columns(),
+        factor_columns=tuple(definition.output_column for definition in requested),
     )
 
 
-def price_volume_lookback_days() -> int:
-    return largest_price_volume_lookback_days(a_share_price_volume_factor_columns())
-
-
-__all__ = [
-    "calculate_price_volume_factors_for_panel",
-    "price_volume_lookback_days",
-]
+__all__ = ["calculate_factors_for_panel"]
