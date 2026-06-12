@@ -4,6 +4,7 @@ import inspect
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.markets.implementations.a_share.processed import (
     annotations,
@@ -167,6 +168,93 @@ def test_annotation_outputs_are_joinable_by_primary_key() -> None:
         keys = frame.loc[:, ["market_id", "asset_id", "timestamp"]]
         assert not keys.duplicated().any(), data_id
         pd.testing.assert_frame_equal(keys, base_keys)
+
+
+def test_annotations_fail_closed_on_missing_required_projection_column() -> None:
+    panel = _annotation_panel_frame().drop(columns=["market_type"])
+
+    with pytest.raises(
+        ValueError,
+        match="missing_annotation_input_columns: daily_context: market_type",
+    ):
+        annotations.derive_annotations(panel, data_ids=("daily_context",))
+
+
+def test_annotations_accept_explicit_one_word_limit_columns() -> None:
+    panel = _annotation_panel_frame().assign(
+        one_word_limit_up=[0, 1, 0],
+        one_word_limit_down=[False, False, True],
+    )
+
+    execution = annotations.derive_annotations(
+        panel,
+        data_ids=("a_share_execution",),
+    )["a_share_execution"]
+
+    assert execution["can_enter"].tolist() == [False, True, False]
+    assert execution["can_exit"].tolist() == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        (
+            "drop_turnover",
+            "missing_annotation_input_columns: turnover",
+        ),
+        (
+            "partial_explicit",
+            "missing_one_word_limit_explicit_columns: one_word_limit_down",
+        ),
+        (
+            "drop_open",
+            "missing_one_word_limit_inference_columns: open",
+        ),
+        (
+            "bad_open",
+            "invalid_one_word_limit_inference_values",
+        ),
+        (
+            "bad_status",
+            "invalid_one_word_limit_status",
+        ),
+        (
+            "null_explicit",
+            "null_one_word_limit_column: one_word_limit_up",
+        ),
+        (
+            "bad_explicit",
+            "invalid_one_word_limit_column: one_word_limit_up",
+        ),
+    ],
+)
+def test_annotations_fail_closed_on_invalid_mask_inputs(
+    case: str,
+    expected: str,
+) -> None:
+    builders = {
+        "drop_turnover": lambda: _annotation_panel_frame().drop(columns=["turnover"]),
+        "partial_explicit": lambda: _annotation_panel_frame().assign(
+            one_word_limit_up=True
+        ),
+        "drop_open": lambda: _annotation_panel_frame().drop(columns=["open"]),
+        "bad_open": lambda: _annotation_panel_frame().assign(
+            open=["bad", "bad", "bad"]
+        ),
+        "bad_status": lambda: _annotation_panel_frame().assign(
+            limit_status=["bad", 0, 0]
+        ),
+        "null_explicit": lambda: _annotation_panel_frame().assign(
+            one_word_limit_up=[1, None, 0],
+            one_word_limit_down=[0, 0, 0],
+        ),
+        "bad_explicit": lambda: _annotation_panel_frame().assign(
+            one_word_limit_up=[2, 0, 0],
+            one_word_limit_down=[0, 0, 0],
+        ),
+    }
+    with pytest.raises(ValueError, match=expected):
+        annotations.derive_annotations(builders[case]())
 
 
 def test_label_calculation_source_does_not_recompute_a_share_trading_rules() -> None:

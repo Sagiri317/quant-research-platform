@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
@@ -11,7 +14,10 @@ from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
-from quant_research_platform.catalog.processed import ProcessedDataCatalog
+from quant_research_platform.catalog.processed import (
+    InterimDataCatalog,
+    ProcessedDataCatalog,
+)
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 
@@ -108,6 +114,71 @@ def test_reports_bundles_uses_report_local_catalog_not_profile_bundle() -> None:
     assert "local_a_share_csmar_catalogs" not in source
     assert "quant_research_platform.reports.catalog" in source
     assert "report_catalog(" in source
+
+
+def test_catalog_profile_private_binding_helpers_convert_source_id(monkeypatch) -> None:
+    import quant_research_platform.catalog.profiles as profiles
+    from quant_research_platform.contracts.ids import SourceId
+
+    captured: dict[str, object] = {}
+
+    def fake_materialize(**kwargs: object) -> str:
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(
+        profiles.a_share_processed_materializer,
+        "materialize_processed_data",
+        fake_materialize,
+    )
+
+    assert profiles._local_a_share_materialize_processed_data(source_id="csmar") == "ok"
+    assert captured["source_id"] == SourceId("csmar")
+
+
+def test_catalog_profile_private_interim_helper_forwards_kwargs(monkeypatch) -> None:
+    import quant_research_platform.catalog.profiles as profiles
+
+    captured: dict[str, object] = {}
+
+    def fake_materialize(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return captured
+
+    monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", fake_materialize)
+
+    result = profiles._local_a_share_csmar_materialize_interim_data(data_id="daily")
+
+    assert result == {"data_id": "daily"}
+
+
+def test_catalog_profile_source_interim_catalog_requires_single_source(
+    monkeypatch,
+) -> None:
+    import quant_research_platform.catalog.profiles as profiles
+
+    def fake_catalog() -> object:
+        return SimpleNamespace(
+            list=lambda: [
+                SimpleNamespace(source_id="synthetic_a"),
+                SimpleNamespace(source_id="synthetic_b"),
+            ]
+        )
+
+    monkeypatch.setattr(profiles, "csmar_interim_catalog", fake_catalog)
+
+    with pytest.raises(ValueError, match="unexpected_source_interim_catalog_sources"):
+        profiles._local_a_share_source_interim_catalogs()
+
+
+def test_catalog_profile_source_id_matches_interim_catalog() -> None:
+    import quant_research_platform.catalog.profiles as profiles
+
+    assert profiles._local_a_share_csmar_source_id() == "csmar"
+    assert isinstance(
+        next(iter(profiles._local_a_share_source_interim_catalogs().values())),
+        InterimDataCatalog,
+    )
 
 
 def _imported_modules(tree: ast.AST) -> set[str]:

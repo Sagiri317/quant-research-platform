@@ -33,6 +33,34 @@ def test_old_catalog_entrypoints_are_not_active_imports() -> None:
     assert hits == []
 
 
+def test_active_source_has_no_old_catalog_or_defaults_entrypoints() -> None:
+    forbidden = (
+        "markets.implementations.a_share.catalog",
+        "from ..catalog import",
+        "from .catalog import",
+        "catalog.defaults",
+        "default_catalogs",
+        "default_factor_catalog",
+        "default_label_catalog",
+        "default_processed_data_catalog",
+        "default_research_dataset_catalog",
+        "default_evaluation_catalog",
+        "default_model_catalog",
+        "default_prediction_catalog",
+        "PlatformCatalogs",
+        "validation/research_panel.py",
+        "validation\\research_panel.py",
+    )
+    hits: list[str] = []
+    for path in _python_files((Path("src"),)):
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in source:
+                hits.append(f"{path}:{token}")
+
+    assert hits == []
+
+
 def test_retired_public_profile_names_are_absent() -> None:
     profiles_path = PROJECT_SRC / "catalog/profiles.py"
     defaults_path = PROJECT_SRC / "catalog/defaults.py"

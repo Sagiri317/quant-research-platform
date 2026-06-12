@@ -209,6 +209,98 @@ def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
     ]
 
 
+def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(_dataset_spec())
+    _write_processed_inputs(layout, processed_catalog)
+
+    with pytest.raises(ValueError, match="no_research_dataset_sessions"):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id="dummy_dataset",
+            time_window=TimeWindow("2025-01-01", "2025-01-02"),
+        )
+
+
+def test_research_dataset_fails_closed_on_empty_inputs() -> None:
+    from quant_research_platform.research.datasets.assembler import (
+        _base_input_data_id,
+        _join_processed_inputs,
+    )
+
+    spec = _dataset_spec(input_data_ids=(), base_input_data_id="")
+    with pytest.raises(ValueError, match="empty_research_dataset_inputs"):
+        _base_input_data_id(spec)
+
+    with pytest.raises(ValueError, match="empty_research_dataset_inputs"):
+        _join_processed_inputs(
+            layout=StorageLayout(project_root=Path(".")),
+            dataset_spec=spec,
+            processed_catalog=ProcessedDataCatalog(),
+            time_window=TimeWindow("2024-01-01", "2024-01-02"),
+            base_data_id="",
+        )
+
+
+def test_research_dataset_detects_missing_input_keys() -> None:
+    from quant_research_platform.research.datasets.assembler import (
+        _require_input_keys_cover_base,
+    )
+
+    base = _base_frame()
+    input_frame = base.iloc[[0]].copy()
+
+    with pytest.raises(ValueError, match="missing_research_input_keys: labels: 1"):
+        _require_input_keys_cover_base(
+            base,
+            input_frame,
+            dataset_spec=_dataset_spec(),
+            input_data_id="labels",
+        )
+
+
+def test_research_dataset_reports_incompatible_and_missing_required_specs() -> None:
+    incompatible = _processed_catalog()
+    bad_features = _processed_spec(
+        "features",
+        ProcessedDataKind.FACTOR,
+        (*platform_entity_time_key(), "feature_1"),
+        role=ColumnRole.FACTOR,
+        primary_key=("asset_id", "market_id", "timestamp"),
+    )
+    incompatible = ProcessedDataCatalog()
+    for data_id in ("base", "labels", "filters", "context"):
+        incompatible.register(_processed_catalog().get(data_id))
+    incompatible.register(bad_features)
+    spec = _dataset_spec()
+    with pytest.raises(ValueError, match="incompatible_research_input_keys: features"):
+        _validate_inputs(spec, incompatible)
+
+    missing_label = _processed_catalog()
+    spec = _dataset_spec(label_columns=("label_2",))
+    with pytest.raises(ValueError, match="missing_research_required_columns: label_2"):
+        _validate_inputs(spec, missing_label)
+
+
+def test_research_dataset_measured_bytes_handles_empty_frame() -> None:
+    from quant_research_platform.research.datasets.assembler import (
+        _measured_bytes_per_session,
+    )
+
+    assert (
+        _measured_bytes_per_session(
+            pd.DataFrame(),
+            sample_sessions=(pd.Timestamp("2024-01-02"),),
+            target_session_count=1,
+        )
+        == 1
+    )
+
+
 def _validate_inputs(
     spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,

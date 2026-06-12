@@ -12,6 +12,9 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     annotations,
 )
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
+    _asof_join_stock_master,
+    _dedupe_exact_key_duplicates_or_raise_conflict,
+    _first_static_stock_value,
     compute_daily_panel,
 )
 
@@ -263,6 +266,120 @@ def test_compute_daily_panel_fails_closed_on_conflicting_reference_duplicates() 
             market_cap=_market_cap_frame(),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
         )
+
+
+def test_compute_daily_panel_fails_closed_on_missing_source_keys() -> None:
+    with pytest.raises(ValueError, match="missing_source_asset_id"):
+        compute_daily_panel(
+            _daily_market_frame(["2020-01-02"]).drop(columns=["source_asset_id"]),
+            stock_master=_stock_master_frame(),
+            market_cap=_market_cap_frame(),
+            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        )
+
+    with pytest.raises(ValueError, match="missing_source_timestamp"):
+        compute_daily_panel(
+            _daily_market_frame(["2020-01-02"]).drop(columns=["timestamp"]),
+            stock_master=_stock_master_frame(),
+            market_cap=_market_cap_frame(),
+            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        )
+
+
+def test_compute_daily_panel_fails_closed_on_missing_reference_dates() -> None:
+    with pytest.raises(ValueError, match="missing_market_cap_panel_timestamp"):
+        compute_daily_panel(
+            _daily_market_frame(["2020-01-02"]),
+            stock_master=_stock_master_frame(),
+            market_cap=_market_cap_frame().assign(timestamp=pd.NaT),
+            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="missing_stock_master_panel_effective_timestamp",
+    ):
+        compute_daily_panel(
+            _daily_market_frame(["2020-01-02"]),
+            stock_master=_stock_master_frame().assign(
+                listing_date=pd.NaT,
+                status_change_date=pd.NaT,
+            ),
+            market_cap=_market_cap_frame(),
+            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        )
+
+
+def test_compute_daily_panel_uses_missing_reference_defaults() -> None:
+    panel = compute_daily_panel(
+        _daily_market_frame(["2020-01-02"]),
+        stock_master=_stock_master_frame(),
+        market_cap=_market_cap_frame().iloc[0:0],
+        trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+    )
+
+    assert pd.isna(panel.loc[0, "share_change_date"])
+    assert pd.isna(panel.loc[0, "total_shares"])
+    assert pd.isna(panel.loc[0, "a_float_shares"])
+    assert pd.isna(panel.loc[0, "turnover"])
+
+
+def test_compute_daily_panel_fails_closed_on_missing_join_key_columns() -> None:
+    with pytest.raises(
+        ValueError,
+        match="missing_panel_join_key_columns: market_cap: timestamp",
+    ):
+        _dedupe_exact_key_duplicates_or_raise_conflict(
+            pd.DataFrame({"asset_id": ["000001"]}),
+            key_columns=("asset_id", "timestamp"),
+            dataset="market_cap",
+        )
+
+
+def test_compute_daily_panel_fails_closed_on_missing_canonical_after_mapping(
+    monkeypatch,
+) -> None:
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+
+    monkeypatch.setattr(
+        panels,
+        "CANONICAL_DAILY_COLUMNS",
+        (*panels.CANONICAL_DAILY_COLUMNS, "missing_canonical"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="daily_market_interim_missing_canonical_columns: missing_canonical",
+    ):
+        compute_daily_panel(
+            _daily_market_frame(["2020-01-02"]),
+            stock_master=_stock_master_frame(),
+            market_cap=_market_cap_frame(),
+            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        )
+
+
+def test_panel_asof_stock_master_fills_missing_stock_columns() -> None:
+    daily = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset_without_master"],
+            "timestamp": pd.to_datetime(["2020-01-02"]),
+        }
+    )
+    stocks = pd.DataFrame(
+        {
+            "asset_id": pd.Series([], dtype="object"),
+            "listing_date": pd.Series([], dtype="datetime64[ns]"),
+            "status_change_date": pd.Series([], dtype="datetime64[ns]"),
+            "stock_name": pd.Series([], dtype="object"),
+        }
+    )
+
+    joined = _asof_join_stock_master(daily, stocks)
+
+    assert pd.isna(joined.loc[0, "stock_name"])
+    assert _first_static_stock_value(stocks, "missing_column") == {}
 
 
 def _daily_market_frame(dates: list[str]) -> pd.DataFrame:

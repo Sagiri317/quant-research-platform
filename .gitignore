@@ -34,6 +34,8 @@ coverage/
 .coverage
 reports/runs/
 reports/profiles/
+reviews/*-handoff.zip
+reviews/*-handoff-manifest.json
 
 # 数据和密钥
 data/raw/

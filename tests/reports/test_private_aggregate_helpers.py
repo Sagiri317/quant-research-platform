@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from quant_research_platform.markets.implementations.a_share.verification import (
+    private_aggregate,
+)
+
+
+def test_private_aggregate_summarizes_frames_without_row_level_output() -> None:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share", "a_share"],
+            "asset_id": ["asset_a", "asset_a", "asset_b"],
+            "timestamp": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03"]
+            ),
+            "value": [1.0, 1.0, 2.0],
+            "flag": [True, False, True],
+        }
+    )
+
+    summary = private_aggregate._summarize_frames([frame])
+
+    assert summary.row_count == 3
+    assert summary.key_count == 2
+    assert summary.duplicate_key_count == 1
+    assert summary.period == "2024-01-02 through 2024-01-03"
+    assert summary.column_count == 5
+    assert summary.dtype_summary_hash == private_aggregate._sha256_json(
+        summary.dtype_summary
+    )
+    assert len(summary.aggregate_checksum) == 64
+    assert "value" in summary.content_summary
+    assert summary.content_summary["flag"]["numeric_max"] == 1.0
+
+
+def test_private_aggregate_combines_summaries_and_area_records(monkeypatch) -> None:
+    first = private_aggregate._summarize_frames(
+        [
+            pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2024-01-02"]),
+                    "feature": ["mom"],
+                    "label": ["ret"],
+                    "group": [1],
+                    "value": [1.0],
+                }
+            )
+        ]
+    )
+    second = private_aggregate._summarize_frames(
+        [
+            pd.DataFrame(
+                {
+                    "session_date": pd.to_datetime(["2024-01-03"]),
+                    "value": [2.0],
+                }
+            )
+        ]
+    )
+    combined = private_aggregate._combine_summaries([first, second])
+
+    assert combined.row_count == 2
+    assert combined.period == "2024-01-02 through 2024-01-03"
+
+    monkeypatch.setattr(private_aggregate, "_summarize_area_input", lambda _area: first)
+    ok = private_aggregate._area_record(
+        private_aggregate.AggregateInput(
+            area="factor_value_parity",
+            roots=(Path("unused"),),
+            expected_period=first.period,
+            explanation_name="factor value",
+        )
+    )
+    gap = private_aggregate._area_record(
+        private_aggregate.AggregateInput(
+            area="factor_value_parity",
+            roots=(Path("unused"),),
+            expected_period="2024-01-01 through 2024-01-01",
+            explanation_name="factor value",
+        )
+    )
+
+    assert ok["human_approval_required"] is False
+    assert ok["accepted_explained_delta"] is False
+    assert gap["human_approval_required"] is True
+    assert gap["max_abs_delta"] == 1.0
+
+
+def test_public_safe_aggregate_evidence_orchestrates_area_inputs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    summary = private_aggregate._summarize_frames(
+        [
+            pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2024-01-02"]),
+                    "value": [1.0],
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        private_aggregate,
+        "_area_inputs",
+        lambda root: (
+            private_aggregate.AggregateInput(
+                area="factor_value_parity",
+                roots=(root / "factor",),
+                expected_period=summary.period,
+                explanation_name="factor value",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        private_aggregate,
+        "_summarize_area_input",
+        lambda _area: summary,
+    )
+
+    payload = private_aggregate.generate_public_safe_aggregate_evidence(tmp_path)
+
+    assert payload["merge_ready"] is True
+    assert payload["verification_periods"] == [summary.period]
+    assert payload["areas"][0]["area"] == "factor_value_parity"
+
+
+def test_private_aggregate_area_inputs_and_inventory_helpers(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    area_inputs = private_aggregate._area_inputs(tmp_path)
+    assert {item.area for item in area_inputs} >= {
+        "processed_panel_parity",
+        "factor_value_parity",
+        "full_historical_daily_panel_status",
+    }
+
+    artifact_root = (
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "panel"
+        / "daily_panel"
+    )
+    artifact_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        private_aggregate,
+        "_official_dataset_artifact_roots",
+        lambda _root: (artifact_root,),
+    )
+    monkeypatch.setattr(
+        private_aggregate,
+        "_summarize_dataset_root",
+        lambda _root: private_aggregate._summarize_frames(
+            [
+                pd.DataFrame(
+                    {
+                        "market_id": ["a_share"],
+                        "asset_id": ["asset_a"],
+                        "timestamp": pd.to_datetime(["2024-01-02"]),
+                    }
+                )
+            ]
+        ),
+    )
+
+    inventory = private_aggregate._dataset_inventory(tmp_path)
+
+    assert inventory[0]["kind"] == "panel"
+    assert inventory[0]["artifact_id"] == "daily_panel"
+    assert inventory[0]["covered_by_evidence_area"] == (
+        "full_historical_daily_panel_status"
+    )
+    assert private_aggregate._logical_dataset_root(tmp_path, artifact_root) == (
+        "processed/a_share/panel/daily_panel"
+    )
+    assert private_aggregate._dataset_kind_and_artifact_id(
+        "research/a_share/demo_dataset"
+    ) == ("research_dataset", "demo_dataset")
+
+
+def test_private_aggregate_official_roots_use_inspection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    artifact_root = (
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "panel"
+        / "daily_panel"
+    )
+    artifact_root.mkdir(parents=True)
+    (artifact_root / "_manifest").mkdir()
+    inspected: list[Path] = []
+
+    def fake_inspect(path: Path) -> object:
+        inspected.append(path)
+        if path == artifact_root:
+            return object()
+        raise ValueError("not_dataset")
+
+    monkeypatch.setattr(private_aggregate, "inspect_dataset", fake_inspect)
+
+    assert private_aggregate._is_dataset_artifact_root(artifact_root) is True
+    assert private_aggregate._is_dataset_artifact_root(tmp_path) is False
+    assert private_aggregate._official_dataset_artifact_roots(tmp_path) == (
+        artifact_root,
+    )
+    assert artifact_root in inspected
+
+
+def test_private_aggregate_helpers_validate_paths_and_periods(tmp_path: Path) -> None:
+    assert private_aggregate._private_interim_root(tmp_path).as_posix().endswith(
+        "data/interim/csmar"
+    )
+    assert (
+        private_aggregate._time_window_from_years((2023, 2025)).start.isoformat()
+        == "2023-01-01"
+    )
+    assert private_aggregate._time_window_from_years(None) is None
+    assert private_aggregate._parse_period("not_applicable") == (None, None)
+    assert private_aggregate._format_period(None, pd.Timestamp("2024-01-02")) == (
+        "not_applicable"
+    )
+
+    with pytest.raises(FileNotFoundError, match="private_dataset_roots_missing"):
+        private_aggregate._official_dataset_artifact_roots(tmp_path)
+    with pytest.raises(ValueError, match="invalid_dataset_logical_root"):
+        private_aggregate._dataset_kind_and_artifact_id("bad")
+    with pytest.raises(ValueError, match="invalid_dataset_logical_root"):
+        private_aggregate._dataset_kind_and_artifact_id("raw/a_share/demo")
+
+
+def test_private_aggregate_filtering_and_calendar_helpers() -> None:
+    calendar = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "is_trading_day": [True, False],
+        }
+    )
+    assert private_aggregate._trading_sessions_from_calendar(calendar) == (
+        pd.Timestamp("2024-01-02"),
+    )
+    with pytest.raises(ValueError, match="trading_calendar_columns_missing"):
+        private_aggregate._trading_sessions_from_calendar(pd.DataFrame())
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03", pd.NaT]),
+            "value": [1, 2, 3],
+        }
+    )
+    filtered = private_aggregate._filter_output_sessions(
+        frame,
+        (pd.Timestamp("2024-01-03"),),
+    )
+    assert filtered["value"].tolist() == [2]
+
+
+def test_private_verification_summary_uses_inventory(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    evidence = {"merge_ready": True}
+    monkeypatch.setattr(
+        private_aggregate,
+        "_dataset_inventory",
+        lambda _root: [
+            {
+                "logical_root": "processed/a_share/panel/daily_panel",
+                "covered_by_evidence_area": "panel",
+            },
+            {
+                "logical_root": "processed/a_share/other/demo",
+                "covered_by_evidence_area": "",
+            },
+        ],
+    )
+
+    summary = private_aggregate.generate_private_verification_summary(
+        tmp_path,
+        evidence_payload=evidence,
+    )
+
+    assert summary["merge_ready"] is False
+    assert summary["covered_roots"] == ["processed/a_share/panel/daily_panel"]
+    assert summary["uncovered_roots"] == ["processed/a_share/other/demo"]
