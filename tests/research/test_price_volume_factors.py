@@ -23,7 +23,11 @@ from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_input_columns,
     select_price_volume_feature_columns_from_schema,
 )
-from tests.correctness._helpers import FLOAT_RTOL
+from tests.correctness._helpers import (
+    FLOAT_ATOL,
+    FLOAT_RTOL,
+    pandas_window_moment_by_asset,
+)
 from tests.helpers.synthetic_a_share import make_synthetic_factor_panel
 
 
@@ -349,10 +353,7 @@ def test_price_volume_standard_formula_matches_reference() -> None:
         reference.loc[:, expected_columns].reset_index(drop=True),
         check_exact=False,
         rtol=FLOAT_RTOL,
-        # Window-local kurtosis is chunk-stable; pandas' rolling kurtosis uses
-        # an incremental numerical path that can differ around e-8 on long
-        # smooth windows while preserving the same rolling-window semantics.
-        atol=1e-7,
+        atol=FLOAT_ATOL,
     )
 
 
@@ -380,10 +381,11 @@ def test_price_volume_rolling_moments_are_chunk_start_invariant() -> None:
         chunked.loc[:, ("market_id", "asset_id", "timestamp", *factor_columns)],
         check_exact=False,
         rtol=FLOAT_RTOL,
-        # pandas rolling skew/kurt can differ by a few e-12 when the same
-        # 20-row window is evaluated at a chunk start vs deep in a full series.
-        atol=1e-11,
+        atol=FLOAT_ATOL,
     )
+    assert (
+        full.loc[:, factor_columns].isna() == chunked.loc[:, factor_columns].isna()
+    ).all().all()
 
 
 def test_price_volume_drawdown_path_avoids_pandas_rolling_apply_hot_path() -> None:
@@ -449,10 +451,11 @@ def _reference_calculate_price_volume_factors(
 
     for window in required_windows:
         if f"vol_{window}d" in requested_set:
-            result[f"vol_{window}d"] = returns.groupby(
-                group_keys, sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).std()
+            result[f"vol_{window}d"] = pandas_window_moment_by_asset(
+                returns,
+                group_keys,
+                window,
+                "std",
             )
         if f"downside_vol_{window}d" in requested_set:
             result[f"downside_vol_{window}d"] = _reference_rolling_rms(
@@ -481,16 +484,18 @@ def _reference_calculate_price_volume_factors(
                 window,
             )
         if f"skew_{window}d" in requested_set:
-            result[f"skew_{window}d"] = returns.groupby(
-                group_keys, sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).skew()
+            result[f"skew_{window}d"] = pandas_window_moment_by_asset(
+                returns,
+                group_keys,
+                window,
+                "skew",
             )
         if f"kurt_{window}d" in requested_set:
-            result[f"kurt_{window}d"] = returns.groupby(
-                group_keys, sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).kurt()
+            result[f"kurt_{window}d"] = pandas_window_moment_by_asset(
+                returns,
+                group_keys,
+                window,
+                "kurt",
             )
 
     for window in required_windows:
@@ -511,10 +516,11 @@ def _reference_calculate_price_volume_factors(
             denominator = _reference_valid_denominator(shifted_turnover)
             result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
         if f"turnover_vol_{window}d" in requested_set:
-            result[f"turnover_vol_{window}d"] = turnover.groupby(
-                group_keys, sort=False
-            ).transform(
-                lambda series, w=window: series.rolling(w, min_periods=w).std()
+            result[f"turnover_vol_{window}d"] = pandas_window_moment_by_asset(
+                turnover,
+                group_keys,
+                window,
+                "std",
             )
         if f"zero_volume_ratio_{window}d" in requested_set:
             result[f"zero_volume_ratio_{window}d"] = (
@@ -605,44 +611,6 @@ def _reference_rolling_drawdown(
             raw=False,
         )
     )
-
-
-def _reference_std_window(values: np.ndarray) -> float:
-    if not np.isfinite(values).all() or len(values) < 2:
-        return np.nan
-    centered = values - values.mean()
-    return float(np.sqrt(np.sum(centered * centered) / (len(values) - 1)))
-
-
-def _reference_skew_window(values: np.ndarray) -> float:
-    if not np.isfinite(values).all() or len(values) < 3:
-        return np.nan
-    centered = values - values.mean()
-    moment_2 = float(np.mean(centered * centered))
-    moment_3 = float(np.mean(centered * centered * centered))
-    denominator = moment_2**1.5
-    if denominator == 0.0:
-        return np.nan
-    count = len(values)
-    value = np.sqrt(count * (count - 1)) / (count - 2) * moment_3 / denominator
-    return float(value) if np.isfinite(value) else np.nan
-
-
-def _reference_kurt_window(values: np.ndarray) -> float:
-    if not np.isfinite(values).all() or len(values) < 4:
-        return np.nan
-    centered = values - values.mean()
-    moment_2 = float(np.mean(centered * centered))
-    if moment_2 == 0.0:
-        return np.nan
-    moment_4 = float(np.mean(centered**4))
-    count = len(values)
-    value = (
-        (count - 1)
-        / ((count - 2) * (count - 3))
-        * ((count + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
-    )
-    return float(value) if np.isfinite(value) else np.nan
 
 
 def _reference_safe_log(values: pd.Series) -> pd.Series:

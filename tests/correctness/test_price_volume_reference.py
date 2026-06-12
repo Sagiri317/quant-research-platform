@@ -105,6 +105,45 @@ def test_price_volume_pandas_moment_contract_edge_windows() -> None:
     )
 
 
+def test_price_volume_moments_match_pandas_near_constant_windows() -> None:
+    panel = synthetic_price_volume_panel(sessions=12, assets=("asset_a", "asset_b"))
+    asset_a = panel["asset_id"].eq("asset_a")
+    asset_b = panel["asset_id"].eq("asset_b")
+    panel.loc[asset_a, "return_1d"] = [
+        1_000_000.0,
+        1_000_000.0000000001,
+        1_000_000.0,
+        1_000_000.0000000001,
+        1_000_000.0000000001,
+        *[1_000_000.0] * 7,
+    ]
+    panel.loc[asset_a, "turnover"] = panel.loc[asset_a, "return_1d"]
+    panel.loc[asset_b, "return_1d"] = [
+        0.9999999379513019,
+        0.999999985798791,
+        0.9999997798638084,
+        1.0000000345234172,
+        1.0000001128020557,
+        *[1.0] * 7,
+    ]
+    panel.loc[asset_b, "turnover"] = panel.loc[asset_b, "return_1d"]
+    factor_columns = ("vol_5d", "skew_5d", "kurt_5d", "turnover_vol_5d")
+
+    result = calculate_price_volume_factors(
+        panel,
+        factor_columns=factor_columns,
+    ).loc[:, [*KEY_COLUMNS, *factor_columns]]
+    reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
+
+    pd.testing.assert_frame_equal(
+        result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        check_exact=False,
+        rtol=FLOAT_RTOL,
+        atol=FLOAT_ATOL,
+    )
+
+
 def test_price_volume_uses_past_rows_only_for_past_timestamps() -> None:
     panel = synthetic_price_volume_panel(sessions=90, assets=("asset_a",))
     changed_future = panel.copy()

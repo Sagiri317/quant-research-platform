@@ -108,7 +108,7 @@ def _reference_price_volume_factors(
 
     for window in required_windows:
         if f"vol_{window}d" in requested_set:
-            result[f"vol_{window}d"] = pandas_rolling_by_asset(
+            result[f"vol_{window}d"] = pandas_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
@@ -141,14 +141,14 @@ def _reference_price_volume_factors(
                 window,
             )
         if f"skew_{window}d" in requested_set:
-            result[f"skew_{window}d"] = pandas_rolling_by_asset(
+            result[f"skew_{window}d"] = pandas_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
                 "skew",
             )
         if f"kurt_{window}d" in requested_set:
-            result[f"kurt_{window}d"] = pandas_rolling_by_asset(
+            result[f"kurt_{window}d"] = pandas_window_moment_by_asset(
                 returns,
                 group_keys,
                 window,
@@ -174,7 +174,7 @@ def _reference_price_volume_factors(
                 turnover / reference_valid_denominator(shifted_turnover) - 1.0
             )
         elif f"turnover_vol_{window}d" == column:
-            result[column] = pandas_rolling_by_asset(
+            result[column] = pandas_window_moment_by_asset(
                 turnover,
                 group_keys,
                 window,
@@ -248,6 +248,35 @@ def pandas_rolling_by_asset(
             name,
         )()
     )
+
+
+def pandas_window_moment_by_asset(
+    values: pd.Series,
+    group_keys: pd.Series,
+    window: int,
+    method: str,
+) -> pd.Series:
+    return values.groupby(group_keys, sort=False).transform(
+        lambda series, w=window, name=method: series.rolling(
+            w,
+            min_periods=w,
+        ).apply(
+            lambda window_values: pandas_window_moment(window_values, name),
+            raw=True,
+        )
+    )
+
+
+def pandas_window_moment(values: np.ndarray, method: str) -> float:
+    series = pd.Series(values, dtype="float64")
+    rolling = series.rolling(len(series), min_periods=len(series))
+    if method == "std":
+        return float(rolling.std(ddof=1).iloc[-1])
+    if method == "skew":
+        return float(rolling.skew().iloc[-1])
+    if method == "kurt":
+        return float(rolling.kurt().iloc[-1])
+    raise ValueError(f"unsupported_pandas_window_moment: {method}")
 
 
 def factor_window(column: str) -> int:
