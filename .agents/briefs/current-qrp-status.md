@@ -54,8 +54,15 @@ replacement for `PROJECT_STATUS.md`.
   than recomputing ST, suspension, limit, eligibility, or execution rules.
 - `ResearchDatasetSpec.base_input_data_id` is required. The assembler is
   market-agnostic, reads the explicit base first, left-joins the other inputs
-  on `market_id, asset_id, timestamp`, and orders output columns as primary
-  key, features, labels, filters, context.
+  on `market_id, asset_id, timestamp`, validates strict input key coverage by
+  default, allows sparse input keys only through explicit `key_coverage`
+  opt-in, and orders output columns as primary key, features, labels, filters,
+  context.
+- A-share processed annotation, factor, and label materializers consume
+  `ProcessedDataSpec.processed_input_data_ids` through internal input
+  contracts. Current `price_volume` factors and `forward_return` labels use
+  `daily_panel` as their primary processed input by contract, not as an
+  implicit writer fallback.
 - Data-layer correctness evidence is evaluated from current semantics:
   golden/reference tests, session-chunk parity, invariants, and key-diff
   diagnostics. Older local materialized runs are comparison inputs only, not

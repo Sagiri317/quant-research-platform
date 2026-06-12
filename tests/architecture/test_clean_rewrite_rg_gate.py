@@ -196,6 +196,8 @@ FORBIDDEN_WRITER_METHODS = {
 def _iter_text_files() -> list[Path]:
     files: list[Path] = []
     for root in SCAN_ROOTS:
+        if not root.exists():
+            raise AssertionError(f"scan_root_missing: {root}")
         if root.is_file():
             files.append(root)
             continue
@@ -359,6 +361,8 @@ def test_active_tree_has_no_retired_data_layer_structure_vocabulary() -> None:
 def _iter_active_structure_files() -> list[Path]:
     files: list[Path] = []
     for root in ACTIVE_STRUCTURE_SCAN_ROOTS:
+        if not root.exists():
+            raise AssertionError(f"active_structure_scan_root_missing: {root}")
         if root.is_file():
             files.append(root)
             continue
@@ -372,21 +376,27 @@ def test_a_share_planning_hot_paths_do_not_use_fingerprint_dataset() -> None:
     checked = (
         Path(
             "src/quant_research_platform/markets/implementations/a_share/"
+            "processed/materializer.py"
+        ),
+        Path(
+            "src/quant_research_platform/markets/implementations/a_share/"
             "processed/panels.py"
         ),
         Path(
             "src/quant_research_platform/markets/implementations/a_share/"
-            "factors/build_factors.py"
+            "factors/calculations.py"
         ),
         Path(
             "src/quant_research_platform/markets/implementations/a_share/"
-            "labels/build_labels.py"
+            "labels/calculations.py"
         ),
     )
+    missing = [str(path) for path in checked if not path.is_file()]
+    assert missing == []
     hits = [
         str(path)
         for path in checked
-        if path.exists() and "fingerprint_dataset" in path.read_text(encoding="utf-8")
+        if "fingerprint_dataset" in path.read_text(encoding="utf-8")
     ]
 
     assert hits == []
@@ -425,6 +435,8 @@ def test_public_surfaces_do_not_expose_internal_provider_markers() -> None:
 def _iter_public_surface_files() -> list[Path]:
     files: list[Path] = []
     for root in PUBLIC_SURFACE_SCAN_ROOTS:
+        if not root.exists():
+            raise AssertionError(f"public_surface_scan_root_missing: {root}")
         if root.is_file():
             files.append(root)
             continue

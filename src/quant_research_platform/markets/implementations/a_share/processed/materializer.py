@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 
@@ -58,6 +59,24 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.layout import StorageLayout
 
 SIZING_SAMPLE_SESSION_CAP = 20
+
+
+@dataclass(frozen=True)
+class _ProcessedInputContract:
+    required_input_data_ids: tuple[str, ...]
+    primary_input_data_id: str
+
+
+_DAILY_PANEL_INPUT_CONTRACT = _ProcessedInputContract(
+    required_input_data_ids=("daily_panel",),
+    primary_input_data_id="daily_panel",
+)
+_FACTOR_FAMILY_INPUT_CONTRACTS = {
+    "price_volume": _DAILY_PANEL_INPUT_CONTRACT,
+}
+_LABEL_FAMILY_INPUT_CONTRACTS = {
+    "forward_return": _DAILY_PANEL_INPUT_CONTRACT,
+}
 
 
 def materialize_processed_data(
@@ -246,7 +265,13 @@ def _write_annotation(
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
     processed_catalog = a_share_processed_catalog()
-    panel_spec = processed_catalog.get("daily_panel")
+    contract = _annotation_input_contract(spec)
+    _validate_processed_input_contract(
+        spec,
+        contract=contract,
+        purpose="annotation",
+    )
+    panel_spec = processed_catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     windows = _planned_session_windows(
         sessions,
@@ -265,9 +290,13 @@ def _write_annotation(
                 processed_catalog=processed_catalog,
                 time_window=window.read,
             )
-            if "daily_panel" not in processed_inputs:
-                raise ValueError("missing_processed_input_for_annotation: daily_panel")
-            panel = processed_inputs["daily_panel"]
+            _validate_processed_input_contract(
+                spec,
+                contract=contract,
+                purpose="annotation",
+                processed_inputs=processed_inputs,
+            )
+            panel = processed_inputs[contract.primary_input_data_id]
             outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
             yield _filter_output_sessions(outputs[spec.data_id], window.core_sessions)
 
@@ -292,7 +321,13 @@ def _write_factors(
     processed_catalog = a_share_processed_catalog()
     factor_catalog = factor_definitions.a_share_factor_catalog()
     definitions = _select_factor_definitions_for_spec(spec, factor_catalog)
-    panel_spec = processed_catalog.get("daily_panel")
+    contract = _factor_input_contract(definitions)
+    _validate_processed_input_contract(
+        spec,
+        contract=contract,
+        purpose="factor",
+    )
+    panel_spec = processed_catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookback_days = _factor_warmup_sessions(definitions)
@@ -323,9 +358,13 @@ def _write_factors(
                 processed_catalog=processed_catalog,
                 time_window=window.read,
             )
-            if "daily_panel" not in processed_inputs:
-                raise ValueError("missing_processed_input_for_factor: daily_panel")
-            panel = processed_inputs["daily_panel"]
+            _validate_processed_input_contract(
+                spec,
+                contract=contract,
+                purpose="factor",
+                processed_inputs=processed_inputs,
+            )
+            panel = processed_inputs[contract.primary_input_data_id]
             factors = factor_calculations.calculate_factors_for_panel(
                 panel,
                 definitions=definitions,
@@ -354,7 +393,13 @@ def _write_labels(
     processed_catalog = a_share_processed_catalog()
     label_catalog = label_definitions.a_share_label_catalog()
     definitions = _select_label_definitions_for_spec(spec, label_catalog)
-    panel_spec = processed_catalog.get("daily_panel")
+    contract = _label_input_contract(definitions)
+    _validate_processed_input_contract(
+        spec,
+        contract=contract,
+        purpose="label",
+    )
+    panel_spec = processed_catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookahead_sessions = _label_lookahead_sessions(definitions)
@@ -385,9 +430,13 @@ def _write_labels(
                 processed_catalog=processed_catalog,
                 time_window=window.read,
             )
-            if "daily_panel" not in processed_inputs:
-                raise ValueError("missing_processed_input_for_label: daily_panel")
-            panel = processed_inputs["daily_panel"]
+            _validate_processed_input_contract(
+                spec,
+                contract=contract,
+                purpose="label",
+                processed_inputs=processed_inputs,
+            )
+            panel = processed_inputs[contract.primary_input_data_id]
             labels = label_calculations.calculate_labels_for_panel(
                 panel,
                 definitions=definitions,
@@ -741,6 +790,69 @@ def _select_label_definitions_for_spec(
     if missing:
         raise ValueError("unknown_label_output_columns: " + ", ".join(missing))
     return selected
+
+
+def _annotation_input_contract(spec: ProcessedDataSpec) -> _ProcessedInputContract:
+    if spec.kind is not ProcessedDataKind.ANNOTATION:
+        raise ValueError(f"invalid_annotation_spec_kind: {spec.data_id}")
+    return _DAILY_PANEL_INPUT_CONTRACT
+
+
+def _factor_input_contract(
+    definitions: Sequence[FactorDefinition],
+) -> _ProcessedInputContract:
+    families = tuple(dict.fromkeys(definition.family for definition in definitions))
+    if not families:
+        return _DAILY_PANEL_INPUT_CONTRACT
+    if len(families) > 1:
+        raise ValueError("mixed_factor_families: " + ", ".join(families))
+    try:
+        return _FACTOR_FAMILY_INPUT_CONTRACTS[families[0]]
+    except KeyError as exc:
+        raise ValueError(f"unknown_factor_family: {families[0]}") from exc
+
+
+def _label_input_contract(
+    definitions: Sequence[LabelDefinition],
+) -> _ProcessedInputContract:
+    families = tuple(dict.fromkeys(definition.family for definition in definitions))
+    if not families:
+        return _DAILY_PANEL_INPUT_CONTRACT
+    if len(families) > 1:
+        raise ValueError("mixed_label_families: " + ", ".join(families))
+    try:
+        return _LABEL_FAMILY_INPUT_CONTRACTS[families[0]]
+    except KeyError as exc:
+        raise ValueError(f"unknown_label_family: {families[0]}") from exc
+
+
+def _validate_processed_input_contract(
+    spec: ProcessedDataSpec,
+    *,
+    contract: _ProcessedInputContract,
+    purpose: str,
+    processed_inputs: dict[str, pd.DataFrame] | None = None,
+) -> None:
+    declared = tuple(spec.processed_input_data_ids)
+    required = tuple(contract.required_input_data_ids)
+    available = tuple(processed_inputs) if processed_inputs is not None else declared
+    missing = [data_id for data_id in required if data_id not in available]
+    if missing:
+        raise ValueError(
+            f"missing_processed_input_for_{purpose}: {spec.data_id}: "
+            + ", ".join(missing)
+        )
+    unexpected = [data_id for data_id in available if data_id not in required]
+    if unexpected:
+        raise ValueError(
+            f"unexpected_processed_input_for_{purpose}: {spec.data_id}: "
+            + ", ".join(unexpected)
+        )
+    if contract.primary_input_data_id not in required:
+        raise ValueError(
+            f"invalid_primary_processed_input_for_{purpose}: {spec.data_id}: "
+            f"{contract.primary_input_data_id}"
+        )
 
 
 def _read_source_inputs_for_spec(

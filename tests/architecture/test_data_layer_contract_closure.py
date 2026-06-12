@@ -306,6 +306,8 @@ def _iter_imports(roots: tuple[Path, ...]) -> tuple[tuple[Path, int, str], ...]:
 def _python_files(roots: tuple[Path, ...]) -> tuple[Path, ...]:
     files: list[Path] = []
     for root in roots:
+        if not root.exists():
+            raise AssertionError(f"python_scan_root_missing: {root}")
         if root.is_file():
             files.append(root)
         else:

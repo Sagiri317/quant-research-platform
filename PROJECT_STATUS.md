@@ -99,7 +99,17 @@ evaluation, model, or prediction code.
 The generic research dataset assembler is market-agnostic. It uses
 `ResearchDatasetSpec.base_input_data_id` as the explicit base input, reads that
 input first, left-joins the remaining inputs on the primary key, and emits
-columns in primary-key, feature, label, filter, context order.
+columns in primary-key, feature, label, filter, context order. Non-base inputs
+use strict key coverage by default: they must cover the base primary-key set,
+value-column nulls are allowed, and keys outside the base fail closed. Sparse
+inputs are allowed only through explicit `key_coverage` opt-in and still fail
+closed on keys outside the base.
+
+A-share processed annotation, factor, and label materializers resolve
+`ProcessedDataSpec.processed_input_data_ids` through internal input contracts.
+Current `price_volume` factors and `forward_return` labels use `daily_panel` as
+their primary processed input by contract, without adding public factor or label
+registries.
 
 Evaluation, model, and prediction catalogs remain local profile demo
 components and are outside the first-stage data-layer closure. Evaluation

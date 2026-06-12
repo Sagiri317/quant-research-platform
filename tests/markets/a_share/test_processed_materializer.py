@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.processed import InterimDataCatalog
+from quant_research_platform.catalog.processed import (
+    InterimDataCatalog,
+    ProcessedDataCatalog,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -106,6 +110,51 @@ def test_materialize_processed_data_by_kind_writes_dependency_and_target(
     assert (
         tmp_path / "data" / "processed" / "a_share" / "factor" / "price_volume"
     ).exists()
+
+
+def test_factor_materializer_rejects_unexpected_declared_processed_input(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+    catalog = _catalog_with_processed_inputs(
+        "price_volume",
+        ("daily_panel", "daily_context"),
+    )
+    monkeypatch.setattr(materializer, "a_share_processed_catalog", lambda: catalog)
+
+    with pytest.raises(
+        ValueError,
+        match="unexpected_processed_input_for_factor: price_volume: daily_context",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            data_ids=("price_volume",),
+        )
+
+
+def test_factor_materializer_requires_family_contract_input_declared_by_spec(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+    catalog = _catalog_with_processed_inputs("price_volume", ())
+    monkeypatch.setattr(materializer, "a_share_processed_catalog", lambda: catalog)
+
+    with pytest.raises(
+        ValueError,
+        match="missing_processed_input_for_factor: price_volume: daily_panel",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            data_ids=("price_volume",),
+        )
 
 
 def test_materializer_reuses_same_run_dependency_for_empty_window_tail(
@@ -406,6 +455,21 @@ def _assert_forced_tiny_chunks_match_default(
 
 def _processed_root(project_root: Path, kind: str, data_id: str) -> Path:
     return project_root / "data" / "processed" / "a_share" / kind / data_id
+
+
+def _catalog_with_processed_inputs(
+    target_data_id: str,
+    processed_input_data_ids: tuple[str, ...],
+) -> ProcessedDataCatalog:
+    catalog = ProcessedDataCatalog()
+    for spec in a_share_processed_catalog().list():
+        if spec.data_id == target_data_id:
+            spec = replace(
+                spec,
+                processed_input_data_ids=processed_input_data_ids,
+            )
+        catalog.register(spec)
+    return catalog
 
 
 def _interim_catalog() -> InterimDataCatalog:

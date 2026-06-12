@@ -57,7 +57,7 @@ def _iter_active_text_files() -> tuple[Path, ...]:
     files: list[Path] = []
     for root in SCAN_ROOTS:
         if not root.exists():
-            continue
+            raise AssertionError(f"scan_root_missing: {root}")
         if root.is_file():
             files.append(root)
             continue

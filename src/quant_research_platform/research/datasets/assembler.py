@@ -142,6 +142,7 @@ def _join_processed_inputs(
         base_data_id=base_data_id,
     )
     assembled: pd.DataFrame | None = None
+    base_frame: pd.DataFrame | None = None
     for input_data_id in ordered_input_ids:
         processed_spec = processed_catalog.get(input_data_id)
         input_frame = _read_processed_input(
@@ -153,7 +154,15 @@ def _join_processed_inputs(
         )
         if assembled is None:
             assembled = input_frame
+            base_frame = input_frame
             continue
+        assert base_frame is not None
+        _validate_input_key_coverage(
+            base_frame,
+            input_frame,
+            dataset_spec=dataset_spec,
+            input_data_id=input_data_id,
+        )
         assembled = assembled.merge(
             input_frame,
             on=list(dataset_spec.primary_key),
@@ -205,7 +214,7 @@ def _ordered_input_data_ids(
     )
 
 
-def _require_input_keys_cover_base(
+def _validate_input_key_coverage(
     base_frame: pd.DataFrame,
     input_frame: pd.DataFrame,
     *,
@@ -215,13 +224,29 @@ def _require_input_keys_cover_base(
     key_columns = list(dataset_spec.primary_key)
     base_keys = base_frame.loc[:, key_columns].drop_duplicates()
     input_keys = input_frame.loc[:, key_columns].drop_duplicates()
-    coverage = base_keys.merge(
+    extra = input_keys.merge(
+        base_keys,
+        on=key_columns,
+        how="left",
+        indicator=True,
+    )["_merge"].eq("left_only")
+    if bool(extra.any()):
+        raise ValueError(
+            f"extra_research_input_keys: {input_data_id}: {int(extra.sum())}"
+        )
+    policy = dataset_spec.key_coverage.get(input_data_id, "strict")
+    if policy == "sparse":
+        return
+    if policy != "strict":
+        raise ValueError(
+            f"invalid_research_key_coverage: {input_data_id}={policy}"
+        )
+    missing = base_keys.merge(
         input_keys,
         on=key_columns,
         how="left",
         indicator=True,
-    )
-    missing = coverage["_merge"].eq("left_only")
+    )["_merge"].eq("left_only")
     if bool(missing.any()):
         raise ValueError(
             f"missing_research_input_keys: {input_data_id}: {int(missing.sum())}"

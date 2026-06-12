@@ -147,7 +147,10 @@ def _processed_catalog() -> ProcessedDataCatalog:
     return catalog
 
 
-def _research_dataset_catalog() -> ResearchDatasetCatalog:
+def _research_dataset_catalog(
+    *,
+    key_coverage: dict[str, str] | None = None,
+) -> ResearchDatasetCatalog:
     catalog = ResearchDatasetCatalog()
     catalog.register(
         ResearchDatasetSpec(
@@ -159,6 +162,7 @@ def _research_dataset_catalog() -> ResearchDatasetCatalog:
             label_columns=("forward_return_20d",),
             filter_columns=("eligible", "can_enter", "can_exit"),
             context_columns=("market_type",),
+            key_coverage=key_coverage or {},
             frequency=DataFrequency.DAILY,
             grain=DataGrain.RESEARCH_ROW,
             column_roles={
@@ -290,12 +294,14 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     )
 
 
-def test_research_dataset_left_joins_missing_non_base_input_key(
+def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = _processed_catalog()
-    dataset_catalog = _research_dataset_catalog()
+    dataset_catalog = _research_dataset_catalog(
+        key_coverage={"demo_labels": "sparse"},
+    )
     frame = _research_rows()
     labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
     _write_processed_inputs(layout, processed_catalog, label_frame=labels)

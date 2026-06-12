@@ -203,9 +203,11 @@ def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
 
     result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
     ordered_keys = result.loc[:, ["market_id", "asset_id", "timestamp"]]
-    assert ordered_keys.to_records(index=False).tolist() == [
-        ("dummy_market", "asset_a", pd.Timestamp("2024-01-02")),
-        ("dummy_market", "asset_b", pd.Timestamp("2024-01-03")),
+    assert ordered_keys["market_id"].tolist() == ["dummy_market", "dummy_market"]
+    assert ordered_keys["asset_id"].tolist() == ["asset_a", "asset_b"]
+    assert ordered_keys["timestamp"].tolist() == [
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-03"),
     ]
 
 
@@ -246,20 +248,90 @@ def test_research_dataset_fails_closed_on_empty_inputs() -> None:
         )
 
 
-def test_research_dataset_detects_missing_input_keys() -> None:
-    from quant_research_platform.research.datasets.assembler import (
-        _require_input_keys_cover_base,
+def test_strict_research_input_missing_base_key_fails_in_assembler(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(_dataset_spec())
+    _write_processed_inputs(layout, processed_catalog, truncate_features=True)
+
+    with pytest.raises(ValueError, match="missing_research_input_keys: features: 1"):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id="dummy_dataset",
+            time_window=TimeWindow("2024-01-02", "2024-01-03"),
+        )
+
+
+def test_sparse_research_input_missing_base_key_passes_with_nan(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(
+        _dataset_spec(key_coverage={"features": "sparse"})
+    )
+    _write_processed_inputs(layout, processed_catalog, truncate_features=True)
+
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="dummy_dataset",
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
 
-    base = _base_frame()
-    input_frame = base.iloc[[0]].copy()
+    result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
+    assert result.loc[result["asset_id"].eq("asset_a"), "feature_1"].tolist() == [1.0]
+    assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "feature_1"]).all()
 
-    with pytest.raises(ValueError, match="missing_research_input_keys: labels: 1"):
-        _require_input_keys_cover_base(
-            base,
-            input_frame,
-            dataset_spec=_dataset_spec(),
-            input_data_id="labels",
+
+def test_strict_research_input_value_nan_does_not_count_as_missing_key(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(_dataset_spec())
+    _write_processed_inputs(layout, processed_catalog, feature_values=[1.0, None])
+
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="dummy_dataset",
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+    )
+
+    result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
+    assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "feature_1"]).all()
+
+
+@pytest.mark.parametrize("coverage_policy", ["strict", "sparse"])
+def test_research_input_extra_key_outside_base_fails_closed(
+    tmp_path: Path,
+    coverage_policy: str,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(
+        _dataset_spec(key_coverage={"features": coverage_policy})
+    )
+    _write_processed_inputs(layout, processed_catalog, extra_feature_key=True)
+
+    with pytest.raises(ValueError, match="extra_research_input_keys: features: 1"):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            processed_catalog=processed_catalog,
+            dataset_id="dummy_dataset",
+            time_window=TimeWindow("2024-01-02", "2024-01-03"),
         )
 
 
@@ -327,6 +399,7 @@ def _dataset_spec(
     filter_columns: tuple[str, ...] = ("eligible",),
     context_columns: tuple[str, ...] = ("context_1",),
     include_extensions: bool = False,
+    key_coverage: dict[str, str] | None = None,
 ) -> ResearchDatasetSpec:
     return ResearchDatasetSpec(
         data_id="dummy_dataset",
@@ -337,6 +410,7 @@ def _dataset_spec(
         label_columns=label_columns,
         filter_columns=filter_columns,
         context_columns=context_columns,
+        key_coverage=key_coverage or {},
         frequency=DataFrequency.DAILY,
         grain=DataGrain.RESEARCH_ROW,
         column_roles={
@@ -453,18 +527,39 @@ def _write_processed_inputs(
     include_extensions: bool = False,
     drop_feature_key: str | None = None,
     reverse_base: bool = False,
+    truncate_features: bool = False,
+    extra_feature_key: bool = False,
+    feature_values: list[object] | None = None,
 ) -> None:
     base = _base_frame()
     if reverse_base:
         base = base.iloc[::-1].reset_index(drop=True)
+    feature_frame = _with_optional_columns(
+        _base_frame().assign(feature_1=feature_values or [1.0, 2.0]),
+        include_extensions=include_extensions,
+        extension_column="feature_2",
+        values=[10.0, 20.0],
+    )
+    if truncate_features:
+        feature_frame = feature_frame.iloc[[0]].reset_index(drop=True)
+    if extra_feature_key:
+        feature_frame = pd.concat(
+            [
+                feature_frame,
+                pd.DataFrame(
+                    {
+                        "market_id": ["dummy_market"],
+                        "asset_id": ["asset_extra"],
+                        "timestamp": [pd.Timestamp("2024-01-03")],
+                        "feature_1": [3.0],
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
     frames = {
         "base": base,
-        "features": _with_optional_columns(
-            _base_frame().assign(feature_1=[1.0, 2.0]),
-            include_extensions=include_extensions,
-            extension_column="feature_2",
-            values=[10.0, 20.0],
-        ),
+        "features": feature_frame,
         "labels": _with_optional_columns(
             _base_frame().assign(label_1=[0.1, 0.2]),
             include_extensions=include_extensions,
