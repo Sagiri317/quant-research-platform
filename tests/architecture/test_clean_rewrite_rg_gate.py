@@ -123,7 +123,7 @@ DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
         "/api/0.1/catalog/data-products",
         "data-products",
     ),
-    Path("tests/catalog/test_catalog_defaults.py"): (
+    Path("tests/catalog/test_catalog_profiles.py"): (
         '"data_products"',
     ),
 }

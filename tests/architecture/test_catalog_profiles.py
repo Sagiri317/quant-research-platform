@@ -9,7 +9,7 @@ CATALOG_PROFILES = PROJECT_SRC / "catalog" / "profiles.py"
 SCAN_ROOTS = (Path("src"), Path("tests"))
 
 
-def test_catalog_package_init_does_not_export_platform_defaults() -> None:
+def test_catalog_profiles_package_init_does_not_export_retired_entrypoints() -> None:
     source = CATALOG_INIT.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(CATALOG_INIT))
     all_names = _module_all_names(tree)
@@ -22,7 +22,7 @@ def test_catalog_package_init_does_not_export_platform_defaults() -> None:
     assert not [name for name in all_names if name.startswith("default_")]
 
 
-def test_legacy_defaults_are_not_imported_from_catalog_root() -> None:
+def test_catalog_profiles_retired_entrypoints_are_not_imported_from_root() -> None:
     root_import_hits: list[str] = []
     for path in _python_files(SCAN_ROOTS):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -31,22 +31,22 @@ def test_legacy_defaults_are_not_imported_from_catalog_root() -> None:
                 continue
             if node.module != "quant_research_platform.catalog":
                 continue
-            default_names = [
+            retired_names = [
                 alias.name
                 for alias in node.names
                 if alias.name == "default_catalogs"
                 or alias.name.startswith("default_")
             ]
-            if default_names:
+            if retired_names:
                 root_import_hits.append(f"{path}:{node.lineno}")
 
     assert not root_import_hits, (
-        "catalog_defaults_must_use_explicit_module: "
+        "catalog_profiles_must_use_explicit_module: "
         + "; ".join(root_import_hits)
     )
 
 
-def test_catalog_defaults_remains_platform_composition_root() -> None:
+def test_catalog_profiles_remains_platform_composition_root() -> None:
     source = CATALOG_PROFILES.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(CATALOG_PROFILES))
     modules = {
@@ -71,13 +71,13 @@ def test_catalog_defaults_remains_platform_composition_root() -> None:
     assert not [name for name in all_names if name.startswith("default_")]
 
 
-def test_catalog_defaults_does_not_call_bootstrap_default() -> None:
+def test_catalog_profiles_does_not_call_retired_bootstrap_entrypoint() -> None:
     source = CATALOG_PROFILES.read_text(encoding="utf-8")
 
     assert ".bootstrap_default(" not in source
 
 
-def test_catalog_defaults_delegates_concrete_definitions_to_owners() -> None:
+def test_catalog_profiles_delegates_concrete_definitions_to_owners() -> None:
     source = CATALOG_PROFILES.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(CATALOG_PROFILES))
     forbidden_names = {
@@ -102,7 +102,7 @@ def test_catalog_defaults_delegates_concrete_definitions_to_owners() -> None:
     )
 
     assert not violations, (
-        "defaults_must_delegate_concrete_definitions_to_owners: "
+        "profiles_must_delegate_concrete_definitions_to_owners: "
         + ", ".join(violations)
     )
     assert "ProviderBinding" not in instantiated_names

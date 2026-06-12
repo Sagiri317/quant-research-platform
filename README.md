@@ -18,6 +18,9 @@ manage credentials, or connect external market-data APIs.
 - Current website UI work: out of scope for this clean rewrite slice.
 - Current deployment/scheduler/worker/model-registry/feature-store scope: out
   of scope.
+- Current local catalog profile composition lives in `catalog/profiles.py`.
+  The public local profile builder is `local_a_share_csmar_catalogs()`,
+  returning `CatalogBundle`.
 
 Private boundaries:
 

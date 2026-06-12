@@ -43,30 +43,30 @@ def test_local_profile_returns_boundary_sealed_bundle() -> None:
 
 def test_local_profile_market_catalogs_delegate_to_a_share_owner_factories() -> None:
     catalogs = local_a_share_csmar_catalogs()
-    default_factors = catalogs.factors.list()
+    profile_factors = catalogs.factors.list()
     owner_factors = factor_definitions.a_share_factor_catalog().list()
-    default_labels = catalogs.labels.list()
+    profile_labels = catalogs.labels.list()
     owner_labels = label_definitions.a_share_label_catalog().list()
 
-    assert [(item.factor_id, item.output_column) for item in default_factors] == [
+    assert [(item.factor_id, item.output_column) for item in profile_factors] == [
         (item.factor_id, item.output_column) for item in owner_factors
     ]
-    assert [(item.label_id, item.output_column) for item in default_labels] == [
+    assert [(item.label_id, item.output_column) for item in profile_labels] == [
         (item.label_id, item.output_column) for item in owner_labels
     ]
 
 
 def test_local_profile_research_dataset_catalog_delegates_to_a_share_owner() -> None:
     catalogs = local_a_share_csmar_catalogs()
-    default_spec = catalogs.research_datasets.get(
+    profile_spec = catalogs.research_datasets.get(
         A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
     owner_spec = a_share_research_dataset_catalog().get(
         A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 
-    assert default_spec.data_id == owner_spec.data_id
-    assert default_spec.input_data_ids == owner_spec.input_data_ids
+    assert profile_spec.data_id == owner_spec.data_id
+    assert profile_spec.input_data_ids == owner_spec.input_data_ids
 
 
 def test_local_profile_processed_catalog_uses_kind_not_category() -> None:

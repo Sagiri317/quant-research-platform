@@ -107,5 +107,9 @@ diagnostics, model registry, prediction registry, workflow execute/resume,
 frontend/dashboard work, high-frequency, multi-market implementation, and
 paper/live trading remain out of scope.
 
+The current local catalog profile composition root is `catalog/profiles.py`.
+The public local profile builder is `local_a_share_csmar_catalogs()`,
+returning `CatalogBundle`.
+
 Full-horizon private reruns are not required for this first-stage structural
 closure unless a run artifact explicitly records that such a rerun occurred.
