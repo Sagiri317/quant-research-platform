@@ -67,12 +67,13 @@ processed canonical key.
   inputs, not correctness truth.
 - `price_volume` rolling moments use the QRP window-local contract. `std` is
   rolling sample standard deviation with `ddof=1`. `skew` and `kurt` use the
-  adjusted sample skewness and adjusted excess kurtosis formulas, but are
-  undefined and emitted as `NaN` when the window variance is at or below the
-  semantic threshold `_ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12`. pandas
-  rolling is a well-conditioned cross-check only; the test-only QRP reference
-  is the oracle for zero-variance, near-zero-variance, NaN, warmup, and
-  session-chunk boundary behavior under the shared tolerance.
+  adjusted sample skewness and adjusted excess kurtosis formulas. Their
+  near-zero policy uses `moment_2 = mean((x - mean(x))^2)`, the population
+  second central moment, not sample variance with `ddof=1`; for skew/kurt
+  only, `moment_2 <= _ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12` emits `NaN`.
+  pandas rolling is a well-conditioned cross-check only; the test-only QRP
+  reference is the oracle for zero-moment_2, near-zero-moment_2, NaN, warmup,
+  and session-chunk boundary behavior under the shared tolerance.
 - Key-diff evidence reports baseline-only, candidate-only, and common-key value
   diagnostics. Expected date deltas are classified against the trading-session
   set, not inferred from candidate artifact dates alone.

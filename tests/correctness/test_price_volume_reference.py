@@ -46,6 +46,8 @@ def test_price_volume_rolling_moment_contract_names_near_zero_policy() -> None:
     assert "_PANDAS_MOMENT_FALLBACK_VARIANCE" not in source
     assert "_replace_small_variance_with_pandas" not in source
     assert "path selector" not in source
+    unsupported_assignment = "unsupported = unsupported_price_volume_factors(requested)"
+    assert source.count(unsupported_assignment) == 1
     assert (
         price_volume_module._ROLLING_MOMENT_NEAR_ZERO_VARIANCE
         == REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE
@@ -181,9 +183,9 @@ def test_price_volume_moments_use_qrp_formula_above_near_zero_threshold() -> Non
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
     reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
     first_window_series = pd.Series(first_window, dtype="float64")
-    variance = float(((first_window_series - first_window_series.mean()) ** 2).mean())
+    moment_2 = float(((first_window_series - first_window_series.mean()) ** 2).mean())
 
-    assert variance > REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE
+    assert moment_2 > REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE
     assert_frame_matches_reference(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),

@@ -18,8 +18,8 @@ PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
 PRICE_VOLUME_STANDARD_PRESET = "standard"
 PRICE_VOLUME_CORE_PRESET = "core"
 PRICE_VOLUME_SMOKE_PRESET = "smoke"
-# QRP semantic policy: skew/kurt are undefined when the rolling window variance
-# is near zero. std remains sample std and is not masked by this threshold.
+# QRP semantic policy: skew/kurt are undefined when window moment_2
+# (mean squared centered return) is near zero. std remains sample std.
 _ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12
 
 _PRICE_VOLUME_STANDARD_WINDOWS: tuple[int, ...] = (1, 5, 10, 20, 60, 120, 252)
