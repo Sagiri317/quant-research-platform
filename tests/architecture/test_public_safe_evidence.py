@@ -547,6 +547,30 @@ def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> N
         assert term not in combined
 
 
+def test_private_evidence_source_fixture_is_not_public_market_contract() -> None:
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
+
+    source = Path(private_aggregate.__file__).read_text(encoding="utf-8")
+    public_payloads = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            Path("docs/reports/clean-rewrite-0.1-parity-evidence.md"),
+            Path("docs/reports/clean-rewrite-0.1-parity-evidence.json"),
+            Path("docs/reports/clean-rewrite-0.1-private-verification-summary.md"),
+            Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json"),
+        )
+    )
+
+    assert private_aggregate.LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID == "csmar"
+    assert 'PRIVATE_INTERIM_SOURCE_ID = "csmar"' not in source
+    assert 'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"' in source
+    assert "not an A-share market contract" in source
+    assert "csmar" not in public_payloads
+    assert "CSMAR" not in public_payloads
+
+
 def test_clean_rewrite_public_safe_parity_evidence_uses_lf_newlines() -> None:
     paths = [
         Path("docs/reports/clean-rewrite-0.1-parity-evidence.md"),

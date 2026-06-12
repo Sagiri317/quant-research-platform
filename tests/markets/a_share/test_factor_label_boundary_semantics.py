@@ -86,7 +86,10 @@ def test_factor_calculation_fails_closed_for_missing_required_input_columns() ->
         columns=["amount"]
     )
 
-    with pytest.raises(ValueError, match="missing_price_volume_input_columns: amount"):
+    with pytest.raises(
+        ValueError,
+        match="missing_a_share_factor_input_columns: price_volume: amount",
+    ):
         factor_calculations.calculate_factors_for_panel(
             panel,
             definitions=factor_definitions.a_share_factor_catalog().list(),

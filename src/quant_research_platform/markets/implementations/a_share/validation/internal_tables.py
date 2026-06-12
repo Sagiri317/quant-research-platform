@@ -1,4 +1,4 @@
-"""提供 CSMAR 派生 interim internal tables 的 validation checks。"""
+"""Validation checks for source-normalized A-share interim tables."""
 
 from __future__ import annotations
 
@@ -33,7 +33,6 @@ DAILY_MARKET_REQUIRED_COLUMNS = (
     "float_market_cap",
     "total_market_cap",
     "is_a_share_scope",
-    "eligible_base",
 )
 
 BENCHMARK_INDEX_REQUIRED_COLUMNS = (

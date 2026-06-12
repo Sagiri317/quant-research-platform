@@ -54,7 +54,8 @@ FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
-PRIVATE_INTERIM_SOURCE_ID = "csmar"
+# Local private evidence runner source fixture; not an A-share market contract.
+LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/panel/daily_panel": "full_historical_daily_panel_status",
@@ -529,7 +530,12 @@ def _iter_generated_full_daily_panel_session_chunks(
 def _private_interim_root(
     project_root: Path,
 ) -> Path:
-    return Path(project_root) / "data" / "interim" / PRIVATE_INTERIM_SOURCE_ID
+    return (
+        Path(project_root)
+        / "data"
+        / "interim"
+        / LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID
+    )
 
 
 def _estimate_generated_full_panel_memory_bytes(

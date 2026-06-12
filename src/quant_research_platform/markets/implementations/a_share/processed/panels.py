@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
@@ -33,7 +32,6 @@ def compute_daily_panel(
     stock_master: pd.DataFrame,
     market_cap: pd.DataFrame,
     trading_calendar: pd.DataFrame,
-    min_listing_trading_days: int = 120,
 ) -> pd.DataFrame:
     """Compute the A-share processed daily panel from source interim frames."""
 
@@ -203,65 +201,6 @@ def _ensure_datetime(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         if column in result.columns:
             result[column] = pd.to_datetime(result[column], errors="coerce")
     return result
-
-
-def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
-    result = panel.copy()
-    explicit = {"one_word_limit_up", "one_word_limit_down"}
-    if explicit.issubset(result.columns):
-        result["one_word_limit_up"] = _bool_like_column(result, "one_word_limit_up")
-        result["one_word_limit_down"] = _bool_like_column(
-            result,
-            "one_word_limit_down",
-        )
-        return result
-    if explicit.intersection(result.columns):
-        missing = sorted(explicit.difference(result.columns))
-        raise ValueError(
-            "missing_one_word_limit_explicit_columns: " + ", ".join(missing)
-        )
-    required = ("open", "high", "low", "close", "limit_status")
-    missing = [column for column in required if column not in result.columns]
-    if missing:
-        raise ValueError(
-            "missing_one_word_limit_inference_columns: " + ", ".join(missing)
-        )
-    prices = result.loc[:, ["open", "high", "low", "close"]].apply(
-        pd.to_numeric,
-        errors="coerce",
-    )
-    if prices.isna().any(axis=None):
-        raise ValueError("invalid_one_word_limit_inference_values")
-    status = pd.to_numeric(result["limit_status"], errors="coerce")
-    invalid_non_null = status.isna() & result["limit_status"].notna()
-    if invalid_non_null.any():
-        raise ValueError("invalid_one_word_limit_status")
-    status = status.fillna(0)
-    equal_prices = (
-        np.isclose(prices["open"], prices["high"], rtol=1e-7, atol=1e-8)
-        & np.isclose(prices["open"], prices["low"], rtol=1e-7, atol=1e-8)
-        & np.isclose(prices["open"], prices["close"], rtol=1e-7, atol=1e-8)
-    )
-    result["one_word_limit_up"] = status.eq(1) & equal_prices
-    result["one_word_limit_down"] = status.eq(-1) & equal_prices
-    return result
-
-
-def _shifted_bool_mask(series: pd.core.groupby.SeriesGroupBy) -> pd.Series:
-    shifted = series.shift(-1)
-    return shifted.where(shifted.notna(), False).astype(bool)
-
-
-def _bool_like_column(frame: pd.DataFrame, column: str) -> pd.Series:
-    series = frame[column]
-    if bool(series.isna().any()):
-        raise ValueError(f"null_one_word_limit_column: {column}")
-    if series.dtype == bool:
-        return series.astype(bool)
-    numeric = pd.to_numeric(series, errors="coerce")
-    if numeric.isna().any() or not set(numeric.unique()).issubset({0, 1}):
-        raise ValueError(f"invalid_one_word_limit_column: {column}")
-    return numeric.astype(bool)
 
 
 def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:

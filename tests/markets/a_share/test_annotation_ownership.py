@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pandas as pd
 
@@ -10,13 +11,34 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 
 
+def test_panel_module_has_no_annotation_rule_helpers() -> None:
+    source = (
+        Path("src/quant_research_platform/markets/implementations/a_share")
+        / "processed/panels.py"
+    ).read_text(encoding="utf-8")
+    forbidden = (
+        "_add_one_word_limit_masks",
+        "_shifted_bool_mask",
+        "_bool_like_column",
+        "one_word_limit",
+        "can_enter",
+        "can_exit",
+        "eligible_base",
+        "eligible_after_listing_age",
+        "eligible_liquidity",
+        "next_day_is_trading",
+        "next_day_limit_status",
+    )
+
+    assert [token for token in forbidden if token in source] == []
+
+
 def test_daily_panel_schema_excludes_derived_annotation_masks() -> None:
     panel = panels.compute_daily_panel(
         _daily_market_frame(),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(),
         trading_calendar=_trading_calendar_frame(),
-        min_listing_trading_days=1,
     )
 
     assert not {
@@ -68,6 +90,40 @@ def test_annotations_own_eligibility_and_execution_masks() -> None:
 
     pd.testing.assert_frame_equal(default, expected_default)
     pd.testing.assert_frame_equal(execution, expected_execution)
+
+
+def test_annotation_can_enter_can_exit_chunk_boundary_matches_full_frame() -> None:
+    panel = _chunk_boundary_panel_frame()
+    full_execution = annotations.derive_annotations(
+        panel,
+        data_ids=("a_share_execution",),
+        min_listing_trading_days=1,
+    )["a_share_execution"]
+    chunk_execution = annotations.derive_annotations(
+        panel.iloc[:3],
+        data_ids=("a_share_execution",),
+        min_listing_trading_days=1,
+    )["a_share_execution"]
+    chunk_core = chunk_execution.loc[
+        chunk_execution["timestamp"].isin(pd.to_datetime(["2024-01-02", "2024-01-03"]))
+    ].reset_index(drop=True)
+    expected = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "asset_id": ["asset_a", "asset_a"],
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "next_day_is_trading": [True, True],
+            "next_day_limit_status": [1.0, -1.0],
+            "can_enter": [False, True],
+            "can_exit": [True, False],
+        }
+    )
+
+    pd.testing.assert_frame_equal(chunk_core, expected)
+    pd.testing.assert_frame_equal(
+        chunk_core,
+        full_execution.iloc[:2].reset_index(drop=True),
+    )
 
 
 def test_daily_context_and_execution_projection_are_separate() -> None:
@@ -159,6 +215,38 @@ def _annotation_panel_frame() -> pd.DataFrame:
             "turnover": [0.1, 0.1, 0.1],
         }
     )
+
+
+def _chunk_boundary_panel_frame() -> pd.DataFrame:
+    base = _annotation_panel_frame().iloc[:1].copy()
+    rows: list[dict[str, object]] = []
+    for timestamp, limit_status, price in (
+        ("2024-01-02", 0.0, 10.0),
+        ("2024-01-03", 1.0, 11.0),
+        ("2024-01-04", -1.0, 9.0),
+        ("2024-01-05", 0.0, 9.5),
+    ):
+        row = base.iloc[0].to_dict()
+        row.update(
+            {
+                "timestamp": pd.Timestamp(timestamp),
+                "limit_status": limit_status,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "is_st": False,
+                "is_pt": False,
+                "is_trading": True,
+                "is_a_share_scope": True,
+                "listing_age_trading_days": 130,
+                "amount": 1000.0,
+                "volume": 100.0,
+                "turnover": 0.1,
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _daily_market_frame() -> pd.DataFrame:

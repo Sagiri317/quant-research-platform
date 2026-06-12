@@ -5,7 +5,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.catalog.processed import InterimDataCatalog
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    InterimDataSpec,
+    ProcessedDataKind,
+)
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
@@ -15,13 +22,14 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
     a_share_processed_catalog,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
-from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
+
+SYNTHETIC_SOURCE_ID = SourceId("synthetic_vendor_a")
 
 
 def test_materialize_processed_data_writes_requested_panel_and_dependencies(
@@ -32,7 +40,7 @@ def test_materialize_processed_data_writes_requested_panel_and_dependencies(
 
     written = materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
         data_ids=("daily_panel",),
     )
@@ -50,7 +58,7 @@ def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) ->
     _write_interim_inputs(layout)
     kwargs = {
         "layout": layout,
-        "source_id": SourceId("csmar"),
+        "source_id": SYNTHETIC_SOURCE_ID,
         "time_window": TimeWindow("2014-01-02", "2014-01-03"),
         "data_ids": ("daily_panel",),
     }
@@ -64,7 +72,7 @@ def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) ->
 def test_materialize_processed_data_requires_exactly_one_selector(tmp_path) -> None:
     common = {
         "layout": StorageLayout(project_root=tmp_path),
-        "source_id": SourceId("csmar"),
+        "source_id": SYNTHETIC_SOURCE_ID,
         "time_window": TimeWindow("2014-01-02", "2014-01-03"),
     }
 
@@ -86,7 +94,7 @@ def test_materialize_processed_data_by_kind_writes_dependency_and_target(
 
     written = materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
         kinds=frozenset({ProcessedDataKind.FACTOR}),
     )
@@ -108,7 +116,7 @@ def test_materializer_reuses_same_run_dependency_for_empty_window_tail(
 
     written = materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-04"),
         kinds=frozenset({ProcessedDataKind.ANNOTATION}),
     )
@@ -130,14 +138,14 @@ def test_materialize_processed_data_existing_dependency_accepts_non_trading_end(
     _write_interim_inputs(layout)
     materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
         data_ids=("daily_panel",),
     )
 
     written = materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-04"),
         data_ids=("a_share_execution",),
     )
@@ -158,7 +166,7 @@ def test_materialize_processed_data_writes_only_core_trading_sessions(
 
     materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2017-04-28", "2017-05-03"),
         data_ids=("price_volume",),
     )
@@ -185,7 +193,7 @@ def test_materialize_processed_data_existing_dependency_must_cover_trading_sessi
     _write_interim_inputs(layout, end_date="2014-01-06")
     materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
         data_ids=("daily_panel",),
     )
@@ -193,7 +201,7 @@ def test_materialize_processed_data_existing_dependency_must_cover_trading_sessi
     with pytest.raises(ValueError, match="insufficient_dataset_coverage"):
         materializer.materialize_processed_data(
             layout=layout,
-            source_id=SourceId("csmar"),
+            source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2014-01-02", "2014-01-06"),
             data_ids=("a_share_execution",),
         )
@@ -210,7 +218,7 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
     )
     materializer.materialize_processed_data(
         layout=source_layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2016-01-04"),
         data_ids=("daily_panel",),
     )
@@ -239,7 +247,7 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
     ):
         materializer.materialize_processed_data(
             layout=layout,
-            source_id=SourceId("csmar"),
+            source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2014-01-02", "2016-01-04"),
             data_ids=("a_share_execution",),
         )
@@ -256,14 +264,14 @@ def test_existing_dependency_coverage_accepts_non_trading_end_date(
     )
     materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2016-12-29", "2016-12-30"),
         data_ids=("daily_panel",),
     )
 
     materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2016-12-29", "2016-12-31"),
         data_ids=("a_share_execution",),
     )
@@ -292,14 +300,14 @@ def test_annotation_materializer_uses_dependency_lookahead_session(tmp_path) -> 
     )
     materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-30", "2014-02-07"),
         data_ids=("daily_panel",),
     )
 
     materializer.materialize_processed_data(
         layout=layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-30", "2014-01-30"),
         data_ids=("a_share_execution",),
     )
@@ -362,13 +370,13 @@ def _assert_forced_tiny_chunks_match_default(
 
     materializer.materialize_processed_data(
         layout=default_layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=time_window,
         data_ids=(data_id,),
     )
     materializer.materialize_processed_data(
         layout=tiny_layout,
-        source_id=SourceId("csmar"),
+        source_id=SYNTHETIC_SOURCE_ID,
         time_window=time_window,
         data_ids=(data_id,),
         resource_policy=RuntimeResourcePolicy(
@@ -400,6 +408,87 @@ def _processed_root(project_root: Path, kind: str, data_id: str) -> Path:
     return project_root / "data" / "processed" / "a_share" / kind / data_id
 
 
+def _interim_catalog() -> InterimDataCatalog:
+    specs = {
+        "daily_market": (
+            "source_asset_id",
+            "timestamp",
+            "trade_date",
+            "market_type",
+            "trading_status_code",
+            "filling_flag",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "prev_close",
+            "limit_status",
+            "return_1d",
+            "adj_close",
+            "adj_open",
+            "float_market_cap",
+            "total_market_cap",
+            "turnover",
+        ),
+        "stock_master": (
+            "source_asset_id",
+            "timestamp",
+            "stock_name",
+            "listing_date",
+            "delisting_date",
+            "company_status",
+            "csrc_2012_industry_code",
+            "csrc_2012_industry_name",
+            "status_change_date",
+        ),
+        "market_cap": (
+            "source_asset_id",
+            "timestamp",
+            "share_change_date",
+            "total_shares",
+            "a_float_shares",
+        ),
+        "trading_calendar": (
+            "timestamp",
+            "calendar_date",
+            "source_market_type",
+            "is_trading_day",
+            "source_day_of_week",
+            "source_state",
+        ),
+    }
+    catalog = InterimDataCatalog()
+    for data_id, columns in specs.items():
+        primary_key = (
+            ("timestamp",)
+            if data_id == "trading_calendar"
+            else ("source_asset_id", "timestamp")
+        )
+        catalog.register(
+            InterimDataSpec(
+                data_id=data_id,
+                source_id=SYNTHETIC_SOURCE_ID,
+                frequency=DataFrequency.DAILY,
+                grain=DataGrain.ASSET_TIMESTAMP,
+                column_roles={
+                    column: (
+                        ColumnRole.TIMESTAMP
+                        if column in {"timestamp", "calendar_date"}
+                        else ColumnRole.KEY
+                        if column in primary_key
+                        else ColumnRole.CONTEXT
+                    )
+                    for column in columns
+                },
+                primary_key=primary_key,
+                partition_columns=("year",),
+            )
+        )
+    return catalog
+
+
 def _write_interim_inputs(
     layout: StorageLayout,
     *,
@@ -407,8 +496,8 @@ def _write_interim_inputs(
     end_date: str = "2014-01-03",
     closed_dates: tuple[str, ...] = (),
 ) -> None:
-    catalog = interim_catalog()
-    source_id = SourceId("csmar")
+    catalog = _interim_catalog()
+    source_id = SYNTHETIC_SOURCE_ID
     frames = {
         "daily_market": _daily_market_frame(
             start_date=start_date,

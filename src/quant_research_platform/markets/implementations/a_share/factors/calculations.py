@@ -19,6 +19,7 @@ def calculate_factors_for_panel(
     definitions: Sequence[FactorDefinition],
 ) -> pd.DataFrame:
     requested = tuple(definitions)
+    _require_factor_input_columns(panel_frame, requested)
     families = tuple(dict.fromkeys(definition.family for definition in requested))
     if not requested:
         return panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
@@ -31,6 +32,23 @@ def calculate_factors_for_panel(
         panel_frame,
         factor_columns=tuple(definition.output_column for definition in requested),
     )
+
+
+def _require_factor_input_columns(
+    panel_frame: pd.DataFrame,
+    definitions: Sequence[FactorDefinition],
+) -> None:
+    for definition in definitions:
+        missing = [
+            column
+            for column in definition.input_columns
+            if column not in panel_frame.columns
+        ]
+        if missing:
+            raise ValueError(
+                "missing_a_share_factor_input_columns: "
+                f"{definition.family}: {', '.join(missing)}"
+            )
 
 
 __all__ = ["calculate_factors_for_panel"]

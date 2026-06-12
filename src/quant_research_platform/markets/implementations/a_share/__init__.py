@@ -1,1 +1,1 @@
-"""基于本地私有 CSMAR 数据的 A-share market module。"""
+"""A-share market implementation for source-normalized processed datasets."""

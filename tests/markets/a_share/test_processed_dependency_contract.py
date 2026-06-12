@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -19,6 +20,11 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.calendars import SessionWindow
+from quant_research_platform.markets.implementations.a_share.labels import (
+    calculations as label_calculations,
+)
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
@@ -183,6 +189,211 @@ def test_future_tradable_forward_return_spec_depends_on_execution_mask() -> None
     assert spec.processed_input_data_ids == ("daily_panel", "a_share_execution")
 
 
+def test_write_paths_read_processed_inputs_via_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    window = TimeWindow("2024-01-02", "2024-01-02")
+    sessions = (pd.Timestamp("2024-01-02"),)
+    session_window = SessionWindow(
+        core=window,
+        read=window,
+        core_sessions=sessions,
+        read_sessions=sessions,
+        reason="test",
+    )
+    calls = {"annotation": 0, "factor": 0, "label": 0}
+
+    def fake_planned_session_windows(*args: object, **kwargs: object):
+        return (session_window,)
+
+    def fake_inspect_dataset(*args: object, **kwargs: object):
+        return SimpleNamespace(manifest={"file_size_bytes": 1}, row_count=1)
+
+    def fake_write_and_inspect(spec: ProcessedDataSpec, frame, **kwargs: object):
+        list(frame)
+        return fake_inspect_dataset()
+
+    def fake_read_processed_inputs(
+        spec: ProcessedDataSpec,
+        **kwargs: object,
+    ) -> dict[str, pd.DataFrame]:
+        if spec.kind is ProcessedDataKind.ANNOTATION:
+            calls["annotation"] += 1
+        elif spec.kind is ProcessedDataKind.FACTOR:
+            calls["factor"] += 1
+        elif spec.kind is ProcessedDataKind.LABEL:
+            calls["label"] += 1
+        return {"daily_panel": _panel_frame_for_write_path()}
+
+    def fake_derive_annotations(
+        panel: pd.DataFrame,
+        *,
+        data_ids: tuple[str, ...],
+        **kwargs: object,
+    ) -> dict[str, pd.DataFrame]:
+        output = _key_frame().assign(
+            next_day_is_trading=[True],
+            next_day_limit_status=[0],
+            can_enter=[True],
+            can_exit=[True],
+        )
+        return {data_ids[0]: output}
+
+    def fake_calculate_factors_for_panel(
+        panel: pd.DataFrame,
+        *,
+        definitions: tuple[FactorDefinition, ...],
+    ) -> pd.DataFrame:
+        return _key_frame().assign(**{definitions[0].output_column: [1.0]})
+
+    def fake_calculate_labels_for_panel(
+        panel: pd.DataFrame,
+        *,
+        definitions: tuple[LabelDefinition, ...],
+    ) -> pd.DataFrame:
+        return _key_frame().assign(**{definitions[0].output_column: [0.01]})
+
+    monkeypatch.setattr(
+        materializer,
+        "_planned_session_windows",
+        fake_planned_session_windows,
+    )
+    monkeypatch.setattr(materializer, "inspect_dataset", fake_inspect_dataset)
+    monkeypatch.setattr(materializer, "_write_and_inspect", fake_write_and_inspect)
+    monkeypatch.setattr(
+        materializer,
+        "_read_processed_inputs_for_spec",
+        fake_read_processed_inputs,
+    )
+    monkeypatch.setattr(
+        materializer.annotations,
+        "derive_annotations",
+        fake_derive_annotations,
+    )
+    monkeypatch.setattr(
+        materializer.factor_calculations,
+        "calculate_factors_for_panel",
+        fake_calculate_factors_for_panel,
+    )
+    monkeypatch.setattr(
+        materializer.label_calculations,
+        "calculate_labels_for_panel",
+        fake_calculate_labels_for_panel,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "_estimate_factor_bytes_per_session",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "_estimate_label_bytes_per_session",
+        lambda *args, **kwargs: 1,
+    )
+
+    materializer._write_annotation(
+        _processed_spec(
+            "a_share_execution",
+            kind=ProcessedDataKind.ANNOTATION,
+            columns=(
+                *platform_entity_time_key(),
+                "next_day_is_trading",
+                "next_day_limit_status",
+                "can_enter",
+                "can_exit",
+            ),
+            processed_input_data_ids=("daily_panel",),
+        ),
+        layout=layout,
+        time_window=window,
+        policy=SimpleNamespace(),
+        sessions=sessions,
+        written={},
+    )
+    materializer._write_factors(
+        _processed_spec(
+            "price_volume",
+            kind=ProcessedDataKind.FACTOR,
+            columns=(*platform_entity_time_key(), "mom_20d"),
+            processed_input_data_ids=("daily_panel",),
+        ),
+        layout=layout,
+        time_window=window,
+        policy=SimpleNamespace(),
+        sessions=sessions,
+        written={},
+    )
+    materializer._write_labels(
+        _processed_spec(
+            "forward_returns",
+            kind=ProcessedDataKind.LABEL,
+            columns=(*platform_entity_time_key(), "forward_return_20d"),
+            processed_input_data_ids=("daily_panel",),
+        ),
+        layout=layout,
+        time_window=window,
+        policy=SimpleNamespace(),
+        sessions=sessions,
+        written={},
+    )
+
+    assert calls == {"annotation": 1, "factor": 1, "label": 1}
+
+
+def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    panel_spec = _processed_spec("daily_panel", kind=ProcessedDataKind.PANEL)
+    execution_spec = _processed_spec(
+        "a_share_execution",
+        kind=ProcessedDataKind.ANNOTATION,
+    )
+    target = _processed_spec(
+        "tradable_forward_return",
+        kind=ProcessedDataKind.LABEL,
+        columns=(*platform_entity_time_key(), "tradable_forward_return_1d"),
+        processed_input_data_ids=("daily_panel", "a_share_execution"),
+    )
+    for spec in (panel_spec, execution_spec):
+        write_dataset(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            _key_frame(),
+            spec=spec,
+        )
+
+    inputs = materializer._read_processed_inputs_for_spec(
+        target,
+        layout=layout,
+        processed_catalog=_catalog(panel_spec, execution_spec, target),
+    )
+
+    assert set(inputs) == {"daily_panel", "a_share_execution"}
+    with pytest.raises(
+        ValueError,
+        match="unsupported_a_share_label_family: tradable_forward_return",
+    ):
+        label_calculations.calculate_labels_for_panel(
+            inputs["daily_panel"],
+            definitions=(
+                LabelDefinition(
+                    label_id="tradable_forward_return_1d",
+                    market_id=MarketId("a_share"),
+                    family="tradable_forward_return",
+                    input_columns=platform_entity_time_key(),
+                    output_column="tradable_forward_return_1d",
+                    label_timing="next_open_to_horizon_open",
+                    horizon=1,
+                    lookahead=2,
+                    entry_rule="next_session_open",
+                    exit_rule="horizon_session_open",
+                ),
+            ),
+        )
+
+
 def _catalog(*specs: ProcessedDataSpec) -> ProcessedDataCatalog:
     catalog = ProcessedDataCatalog()
     for spec in specs:
@@ -230,6 +441,13 @@ def _key_frame() -> pd.DataFrame:
             "asset_id": ["asset_a"],
             "timestamp": pd.to_datetime(["2024-01-02"]),
         }
+    )
+
+
+def _panel_frame_for_write_path() -> pd.DataFrame:
+    return _key_frame().assign(
+        adj_close=[10.0],
+        adj_open=[10.0],
     )
 
 

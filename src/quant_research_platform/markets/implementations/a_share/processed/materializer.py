@@ -245,7 +245,8 @@ def _write_annotation(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
-    panel_spec = a_share_processed_catalog().get(spec.processed_input_data_ids[0])
+    processed_catalog = a_share_processed_catalog()
+    panel_spec = processed_catalog.get("daily_panel")
     panel_root = _processed_root(layout, panel_spec)
     windows = _planned_session_windows(
         sessions,
@@ -258,7 +259,15 @@ def _write_annotation(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            panel = read_dataset(panel_root, time_window=window.read)
+            processed_inputs = _read_processed_inputs_for_spec(
+                spec,
+                layout=layout,
+                processed_catalog=processed_catalog,
+                time_window=window.read,
+            )
+            if "daily_panel" not in processed_inputs:
+                raise ValueError("missing_processed_input_for_annotation: daily_panel")
+            panel = processed_inputs["daily_panel"]
             outputs = annotations.derive_annotations(panel, data_ids=(spec.data_id,))
             yield _filter_output_sessions(outputs[spec.data_id], window.core_sessions)
 
@@ -283,7 +292,7 @@ def _write_factors(
     processed_catalog = a_share_processed_catalog()
     factor_catalog = factor_definitions.a_share_factor_catalog()
     definitions = _select_factor_definitions_for_spec(spec, factor_catalog)
-    panel_spec = processed_catalog.get(spec.processed_input_data_ids[0])
+    panel_spec = processed_catalog.get("daily_panel")
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookback_days = _factor_warmup_sessions(definitions)
@@ -308,7 +317,15 @@ def _write_factors(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            panel = read_dataset(panel_root, time_window=window.read)
+            processed_inputs = _read_processed_inputs_for_spec(
+                spec,
+                layout=layout,
+                processed_catalog=processed_catalog,
+                time_window=window.read,
+            )
+            if "daily_panel" not in processed_inputs:
+                raise ValueError("missing_processed_input_for_factor: daily_panel")
+            panel = processed_inputs["daily_panel"]
             factors = factor_calculations.calculate_factors_for_panel(
                 panel,
                 definitions=definitions,
@@ -337,7 +354,7 @@ def _write_labels(
     processed_catalog = a_share_processed_catalog()
     label_catalog = label_definitions.a_share_label_catalog()
     definitions = _select_label_definitions_for_spec(spec, label_catalog)
-    panel_spec = processed_catalog.get(spec.processed_input_data_ids[0])
+    panel_spec = processed_catalog.get("daily_panel")
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookahead_sessions = _label_lookahead_sessions(definitions)
@@ -362,7 +379,15 @@ def _write_labels(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            panel = read_dataset(panel_root, time_window=window.read)
+            processed_inputs = _read_processed_inputs_for_spec(
+                spec,
+                layout=layout,
+                processed_catalog=processed_catalog,
+                time_window=window.read,
+            )
+            if "daily_panel" not in processed_inputs:
+                raise ValueError("missing_processed_input_for_label: daily_panel")
+            panel = processed_inputs["daily_panel"]
             labels = label_calculations.calculate_labels_for_panel(
                 panel,
                 definitions=definitions,
@@ -749,11 +774,15 @@ def _read_processed_inputs_for_spec(
     *,
     layout: StorageLayout,
     processed_catalog: ProcessedDataCatalog,
+    time_window: TimeWindow | None = None,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
     for data_id in spec.processed_input_data_ids:
         dependency = processed_catalog.get(data_id)
-        inputs[data_id] = read_dataset(_processed_root(layout, dependency))
+        inputs[data_id] = read_dataset(
+            _processed_root(layout, dependency),
+            time_window=time_window,
+        )
     return inputs
 
 

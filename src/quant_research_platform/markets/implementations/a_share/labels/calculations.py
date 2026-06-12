@@ -18,6 +18,7 @@ def calculate_labels_for_panel(
     definitions: Sequence[LabelDefinition],
 ) -> pd.DataFrame:
     requested = tuple(definitions)
+    _require_label_input_columns(panel_frame, requested)
     families = tuple(dict.fromkeys(definition.family for definition in requested))
     if not requested:
         return panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
@@ -31,6 +32,23 @@ def calculate_labels_for_panel(
         date_column="timestamp",
         execution_price_column="adj_open",
     )
+
+
+def _require_label_input_columns(
+    panel_frame: pd.DataFrame,
+    definitions: Sequence[LabelDefinition],
+) -> None:
+    for definition in definitions:
+        missing = [
+            column
+            for column in definition.input_columns
+            if column not in panel_frame.columns
+        ]
+        if missing:
+            raise ValueError(
+                "missing_a_share_label_input_columns: "
+                f"{definition.family}: {', '.join(missing)}"
+            )
 
 
 __all__ = ["calculate_labels_for_panel"]

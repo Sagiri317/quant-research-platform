@@ -84,6 +84,22 @@ def test_unknown_factor_family_fails_closed() -> None:
         )
 
 
+def test_factor_input_columns_are_validated_before_dispatch() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"missing_a_share_factor_input_columns: price_volume: missing_fact",
+    ):
+        factor_calculations.calculate_factors_for_panel(
+            _factor_panel(),
+            definitions=(
+                _factor_definition(
+                    "rev_1d",
+                    input_columns=("return_1d", "missing_fact"),
+                ),
+            ),
+        )
+
+
 def test_a_share_label_definitions_expose_unified_catalog_only() -> None:
     module = import_module(
         "quant_research_platform.markets.implementations.a_share."
@@ -140,6 +156,30 @@ def test_unknown_label_family_fails_closed() -> None:
         )
 
 
+def test_label_input_columns_are_validated_before_dispatch() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"missing_a_share_label_input_columns: forward_return: missing_price",
+    ):
+        label_calculations.calculate_labels_for_panel(
+            _label_panel(),
+            definitions=(
+                _label_definition(
+                    "forward_return_2d",
+                    horizon=2,
+                    lookahead=3,
+                    input_columns=(
+                        "market_id",
+                        "asset_id",
+                        "timestamp",
+                        "adj_open",
+                        "missing_price",
+                    ),
+                ),
+            ),
+        )
+
+
 def test_label_core_does_not_import_a_share_annotations() -> None:
     from quant_research_platform.research.labels import forward_returns
 
@@ -174,12 +214,13 @@ def _label_definition(
     horizon: int,
     lookahead: int,
     family: str = "forward_return",
+    input_columns: tuple[str, ...] = ("market_id", "asset_id", "timestamp", "adj_open"),
 ) -> LabelDefinition:
     return LabelDefinition(
         label_id=output_column,
         market_id=MarketId("a_share"),
         family=family,
-        input_columns=("market_id", "asset_id", "timestamp", "adj_open"),
+        input_columns=input_columns,
         output_column=output_column,
         label_timing="next_open_to_horizon_open",
         horizon=horizon,

@@ -156,6 +156,92 @@ def test_materializer_has_no_old_family_specific_or_source_imports() -> None:
     assert [token for token in forbidden if token in source] == []
 
 
+def test_panel_layer_has_no_annotation_rule_terms() -> None:
+    path = PROJECT_SRC / "markets/implementations/a_share/processed/panels.py"
+    source = path.read_text(encoding="utf-8")
+    forbidden = (
+        "_add_one_word_limit_masks",
+        "_shifted_bool_mask",
+        "_bool_like_column",
+        "one_word_limit",
+        "can_enter",
+        "can_exit",
+        "eligible_base",
+        "eligible_after_listing_age",
+        "eligible_liquidity",
+        "next_day_is_trading",
+        "next_day_limit_status",
+    )
+
+    assert [token for token in forbidden if token in source] == []
+
+
+def test_deleted_panel_helper_names_only_appear_in_negative_gates() -> None:
+    allowed_gate_files = {
+        Path(__file__),
+        Path("tests/markets/a_share/test_annotation_ownership.py"),
+        PROJECT_SRC / "markets/implementations/a_share/processed/annotations.py",
+    }
+    forbidden = (
+        "_add_one_word_limit_masks",
+        "_shifted_bool_mask",
+        "_bool_like_column",
+    )
+    hits: list[str] = []
+    for path in _python_files(ACTIVE_SCAN_ROOTS):
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in source and path not in allowed_gate_files:
+                hits.append(f"{path}:{token}")
+
+    assert hits == []
+
+
+def test_a_share_csmar_residue_is_limited_to_private_evidence_fixture() -> None:
+    a_share_root = PROJECT_SRC / "markets/implementations/a_share"
+    hits: list[str] = []
+    csmar_hits: list[tuple[Path, str]] = []
+    allowed_fixture = (
+        'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"'
+    )
+    for path in sorted(a_share_root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "CSMAR_SOURCE_ID" in source:
+            hits.append(f"{path}:CSMAR_SOURCE_ID")
+        if "from quant_research_platform.sources.csmar" in source:
+            hits.append(f"{path}:sources.csmar import")
+        if re.search(r"(?i)\bcsmar\b", source):
+            if path == a_share_root / "verification/private_aggregate.py":
+                for line in source.splitlines():
+                    if re.search(r"(?i)\bcsmar\b", line):
+                        csmar_hits.append(
+                            (path.relative_to(a_share_root), line.strip())
+                        )
+            else:
+                csmar_hits.append((path.relative_to(a_share_root), "csmar"))
+
+    assert hits == []
+    assert csmar_hits == [(Path("verification/private_aggregate.py"), allowed_fixture)]
+
+
+def test_handoff_checklist_has_no_ambiguous_completion_words() -> None:
+    review_root = Path(".run/reviews")
+    checklists = tuple(
+        sorted(
+            review_root.glob(
+                "data-layer-contract-closure-cleanup-*/prompt_completion_checklist.md"
+            )
+        )
+    )
+    forbidden = ("mostly", "partial", "partially")
+    hits: list[str] = []
+    for path in checklists:
+        source = path.read_text(encoding="utf-8").lower()
+        hits.extend(f"{path}:{word}" for word in forbidden if word in source)
+
+    assert hits == []
+
+
 def test_active_code_has_no_retired_data_layer_terms() -> None:
     forbidden_patterns = (
         r"\basset_batches\b",

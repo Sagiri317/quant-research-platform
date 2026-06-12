@@ -92,7 +92,6 @@ def test_compute_daily_panel_maps_source_assets_to_a_share_assets() -> None:
         trading_calendar=_trading_calendar_frame(
             pd.date_range("2010-01-01", "2014-01-03", freq="D")
         ),
-        min_listing_trading_days=1,
     )
 
     assert panel["market_id"].unique().tolist() == ["a_share"]
@@ -129,7 +128,6 @@ def test_compute_daily_panel_filters_non_a_share_market_types() -> None:
                 ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07"]
             )
         ),
-        min_listing_trading_days=1,
     )
 
     assert len(panel) == 2
@@ -146,7 +144,6 @@ def test_compute_daily_panel_preserves_listing_age_closed_boundary() -> None:
             pd.to_datetime(["2020-01-01", "2020-01-02"]),
             is_trading_day=True,
         ),
-        min_listing_trading_days=1,
     )
 
     assert panel["listing_age_trading_days"].tolist() == [1, 2]
@@ -163,7 +160,6 @@ def test_compute_daily_panel_zero_float_shares_make_turnover_missing() -> None:
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(a_float_shares=0.0),
         trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
-        min_listing_trading_days=1,
     )
 
     assert pd.isna(panel.loc[0, "turnover"])
@@ -181,7 +177,6 @@ def test_compute_daily_panel_preserves_missing_limit_status_context() -> None:
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(),
         trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
-        min_listing_trading_days=1,
     )
 
     assert pd.isna(panel.loc[0, "limit_status"])
@@ -189,7 +184,7 @@ def test_compute_daily_panel_preserves_missing_limit_status_context() -> None:
     assert bool(panel.loc[0, "is_limit_down"]) is False
 
 
-def test_compute_daily_panel_masks_only_next_day_one_word_limits() -> None:
+def test_annotations_mask_only_next_day_one_word_limits() -> None:
     rows = [
         _daily_market_row("2020-01-01"),
         _daily_market_row(
@@ -235,7 +230,6 @@ def test_compute_daily_panel_masks_only_next_day_one_word_limits() -> None:
                 ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"]
             )
         ),
-        min_listing_trading_days=1,
     )
     execution = annotations.derive_annotations(
         panel,
@@ -268,7 +262,6 @@ def test_compute_daily_panel_fails_closed_on_conflicting_reference_duplicates() 
             stock_master=duplicate_stocks,
             market_cap=_market_cap_frame(),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
-            min_listing_trading_days=1,
         )
 
 

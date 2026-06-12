@@ -106,6 +106,23 @@ def test_missing_required_source_column_fails_closed_with_data_id_and_column(
         )
 
 
+def test_normalized_daily_market_contract_excludes_annotation_masks() -> None:
+    from quant_research_platform.markets.implementations.a_share.validation import (
+        internal_tables,
+    )
+
+    forbidden = {
+        "eligible_base",
+        "eligible",
+        "can_enter",
+        "can_exit",
+        "next_day_is_trading",
+        "next_day_limit_status",
+    }
+
+    assert forbidden.isdisjoint(internal_tables.DAILY_MARKET_REQUIRED_COLUMNS)
+
+
 def _write_interim_inputs(
     layout: StorageLayout,
     source_id: SourceId,
