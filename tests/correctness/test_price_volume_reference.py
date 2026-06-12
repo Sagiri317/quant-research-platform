@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import inspect
+
 import pandas as pd
 
+from quant_research_platform.research.factors import price_volume as price_volume_module
 from quant_research_platform.research.factors.price_volume import (
     _rolling_aggregate,
     calculate_price_volume_factors,
@@ -9,10 +12,9 @@ from quant_research_platform.research.factors.price_volume import (
 )
 
 from ._helpers import (
-    FLOAT_ATOL,
-    FLOAT_RTOL,
     KEY_COLUMNS,
     _reference_price_volume_factors,
+    assert_frame_matches_reference,
     synthetic_price_volume_panel,
 )
 
@@ -27,13 +29,18 @@ def test_price_volume_all_factor_columns_match_pandas_reference() -> None:
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
     reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
 
-    pd.testing.assert_frame_equal(
+    assert_frame_matches_reference(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-        check_exact=False,
-        rtol=FLOAT_RTOL,
-        atol=FLOAT_ATOL,
     )
+
+
+def test_price_volume_rolling_moment_path_has_no_unchecked_stability_guard() -> None:
+    source = inspect.getsource(price_volume_module)
+
+    assert "stable =" not in source
+    assert "1e-14" not in source
+    assert price_volume_module._PANDAS_MOMENT_FALLBACK_VARIANCE == 1e-12
 
 
 def test_rolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
@@ -96,12 +103,9 @@ def test_price_volume_pandas_moment_contract_edge_windows() -> None:
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
     reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
 
-    pd.testing.assert_frame_equal(
+    assert_frame_matches_reference(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-        check_exact=False,
-        rtol=FLOAT_RTOL,
-        atol=FLOAT_ATOL,
     )
 
 
@@ -135,12 +139,9 @@ def test_price_volume_moments_match_pandas_near_constant_windows() -> None:
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
     reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
 
-    pd.testing.assert_frame_equal(
+    assert_frame_matches_reference(
         result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-        check_exact=False,
-        rtol=FLOAT_RTOL,
-        atol=FLOAT_ATOL,
     )
 
 
@@ -196,19 +197,13 @@ def test_price_volume_session_chunk_boundary_matches_unchunked_reference() -> No
     reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
 
     expected = reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
-    pd.testing.assert_frame_equal(
+    assert_frame_matches_reference(
         unchunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         expected,
-        check_exact=False,
-        rtol=FLOAT_RTOL,
-        atol=FLOAT_ATOL,
     )
-    pd.testing.assert_frame_equal(
+    assert_frame_matches_reference(
         chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         expected,
-        check_exact=False,
-        rtol=FLOAT_RTOL,
-        atol=FLOAT_ATOL,
     )
     sorted_chunked = chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
     assert (

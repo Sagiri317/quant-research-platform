@@ -24,8 +24,7 @@ from quant_research_platform.research.factors.price_volume import (
     select_price_volume_feature_columns_from_schema,
 )
 from tests.correctness._helpers import (
-    FLOAT_ATOL,
-    FLOAT_RTOL,
+    assert_frame_matches_reference,
     pandas_window_moment_by_asset,
 )
 from tests.helpers.synthetic_a_share import make_synthetic_factor_panel
@@ -348,12 +347,9 @@ def test_price_volume_standard_formula_matches_reference() -> None:
     assert result["skew_20d"].notna().any()
     assert result["kurt_20d"].notna().any()
     assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
-    pd.testing.assert_frame_equal(
+    assert_frame_matches_reference(
         result.loc[:, expected_columns].reset_index(drop=True),
         reference.loc[:, expected_columns].reset_index(drop=True),
-        check_exact=False,
-        rtol=FLOAT_RTOL,
-        atol=FLOAT_ATOL,
     )
 
 
@@ -376,12 +372,9 @@ def test_price_volume_rolling_moments_are_chunk_start_invariant() -> None:
         warmup_sessions=20,
     )
 
-    pd.testing.assert_frame_equal(
+    assert_frame_matches_reference(
         full.loc[:, ("market_id", "asset_id", "timestamp", *factor_columns)],
         chunked.loc[:, ("market_id", "asset_id", "timestamp", *factor_columns)],
-        check_exact=False,
-        rtol=FLOAT_RTOL,
-        atol=FLOAT_ATOL,
     )
     assert (
         full.loc[:, factor_columns].isna() == chunked.loc[:, factor_columns].isna()

@@ -65,6 +65,14 @@ processed canonical key.
   implementations, forced tiny session chunks versus default paths, invariant
   tests, and key-diff diagnostics. Prior materialized runs are comparison
   inputs, not correctness truth.
+- `price_volume` rolling moments are contractually pandas rolling semantics:
+  `std = Series.rolling(window, min_periods=window).std(ddof=1)`,
+  `skew = Series.rolling(window, min_periods=window).skew()`, and
+  `kurt = Series.rolling(window, min_periods=window).kurt()`. Production uses
+  window-local rolling calculations for these moments; the pandas fallback
+  threshold is an implementation path selector, not a semantic convention, and
+  zero-variance, near-zero-variance, NaN, and session-chunk boundary behavior
+  must match the test-only pandas reference under the shared tolerance.
 - Key-diff evidence reports baseline-only, candidate-only, and common-key value
   diagnostics. Expected date deltas are classified against the trading-session
   set, not inferred from candidate artifact dates alone.
@@ -85,6 +93,10 @@ processed canonical key.
   without committing row-level output artifacts.
 - Evaluation and prediction remain 2014 smoke evidence; they have not been
   expanded into full historical 2014-2025 runs.
+- The final `price_volume` rolling-moment follow-up reruns only the bounded
+  2014-2016 raw-start smoke unless its `.run/reviews/.../full_horizon_notes.md`
+  says otherwise; fresh 2014-2025 full-horizon rerun remains an
+  overnight/milestone validation before merge/main/demo.
 - Evaluation supports `eligible`, `tradable`, and `unfiltered` filter modes.
   `tradable` means `eligible and can_enter and can_exit` and is an
   execution-aware evaluation diagnostic only, not a backtest, live tradable PnL,

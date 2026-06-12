@@ -363,15 +363,13 @@ def numeric_series_diff_report(
     left: pd.Series,
     right: pd.Series,
     *,
-    atol: float = 1e-12,
-    rtol: float = 0.0,
+    atol: float = FLOAT_ATOL,
+    rtol: float = FLOAT_RTOL,
 ) -> NumericDiffReport:
     left_num = pd.to_numeric(left, errors="coerce")
     right_num = pd.to_numeric(right, errors="coerce")
-    both_nan = left_num.isna() & right_num.isna()
     diffs = (left_num - right_num).abs()
-    tolerance = atol + rtol * right_num.abs()
-    mismatch = ~(both_nan | diffs.le(tolerance))
+    mismatch = ~numeric_values_equal(left_num, right_num, atol=atol, rtol=rtol)
     finite = diffs[mismatch & np.isfinite(diffs)]
     if finite.empty:
         return NumericDiffReport(
@@ -386,6 +384,41 @@ def numeric_series_diff_report(
         max_abs_diff=float(finite.max()),
         mean_abs_diff=float(finite.mean()),
         quantiles={str(index): float(value) for index, value in quantiles.items()},
+    )
+
+
+def numeric_values_equal(
+    left: pd.Series,
+    right: pd.Series,
+    *,
+    atol: float = FLOAT_ATOL,
+    rtol: float = FLOAT_RTOL,
+) -> pd.Series:
+    left_num = pd.to_numeric(left, errors="coerce")
+    right_num = pd.to_numeric(right, errors="coerce")
+    left_na = left_num.isna()
+    right_na = right_num.isna()
+    tolerance = atol + rtol * right_num.abs()
+    return (left_na & right_na) | (
+        left_na.eq(False)
+        & right_na.eq(False)
+        & (left_num - right_num).abs().le(tolerance)
+    )
+
+
+def assert_frame_matches_reference(
+    actual: pd.DataFrame,
+    reference: pd.DataFrame,
+    *,
+    rtol: float = FLOAT_RTOL,
+    atol: float = FLOAT_ATOL,
+) -> None:
+    pd.testing.assert_frame_equal(
+        actual,
+        reference,
+        check_exact=False,
+        rtol=rtol,
+        atol=atol,
     )
 
 
@@ -475,9 +508,7 @@ def value_equal(left: pd.Series, right: pd.Series) -> pd.Series:
     left_na = left.isna()
     right_na = right.isna()
     if pd.api.types.is_numeric_dtype(left) or pd.api.types.is_numeric_dtype(right):
-        left_num = pd.to_numeric(left, errors="coerce")
-        right_num = pd.to_numeric(right, errors="coerce")
-        return (left_na & right_na) | ((left_num - right_num).abs() <= 1e-12)
+        return numeric_values_equal(left, right)
     return (left_na & right_na) | (
         left.astype("string").fillna("<NA>") == right.astype("string").fillna("<NA>")
     )
