@@ -17,7 +17,7 @@ NEGATIVE_GATE_FILES = {
     Path("tests/architecture/test_clean_rewrite_rg_gate.py"),
     Path("tests/architecture/test_data_layer_boundaries.py"),
 }
-# Only local/private evidence fixture residue may name the source here.
+# Only local/verification evidence fixture residue may name the source here.
 LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL = (
     'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"'
 )
@@ -229,7 +229,7 @@ def test_deleted_panel_helper_names_only_appear_in_negative_gates() -> None:
     assert hits == []
 
 
-def test_a_share_csmar_residue_is_limited_to_private_evidence_fixture() -> None:
+def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> None:
     a_share_root = PROJECT_SRC / "markets/implementations/a_share"
     hits: list[str] = []
     csmar_hits: list[tuple[Path, str]] = []

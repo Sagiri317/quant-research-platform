@@ -24,7 +24,7 @@ def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -
         atomic_write_directory(final_root, failing_writer)
 
     assert not final_root.exists()
-    assert list(final_root.parent.glob(".run.tmp-*")) == []
+    assert list(final_root.parent.glob(".tmp-*")) == []
 
 
 def test_atomic_write_directory_retries_transient_permission_error(

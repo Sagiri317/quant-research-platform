@@ -11,13 +11,16 @@ import typer
 from quant_research_platform.reports.schema_inventory import build_schema_inventory
 from quant_research_platform.runtime.privacy import sanitize_public_text
 from quant_research_platform.storage.atomic import atomic_write_text
-from quant_research_platform.workflows.private_evidence import (
-    PrivateEvidenceRunConfig,
-    run_private_evidence,
+from quant_research_platform.workflows.verification_evidence import (
+    VerificationEvidenceRunConfig,
+    run_verification_evidence,
 )
 
 app = typer.Typer(add_completion=False)
-evidence_app = typer.Typer(add_completion=False, help="Private evidence commands.")
+evidence_app = typer.Typer(
+    add_completion=False,
+    help="Verification evidence commands.",
+)
 PROJECT_ROOT_DEFAULT = Path(".")
 
 app.add_typer(evidence_app, name="evidence")
@@ -68,7 +71,7 @@ def schema_inventory(
 def evidence_run(
     output_root: Annotated[
         Path,
-        typer.Option("--output-root", help="Attempt output root under .run/."),
+        typer.Option("--output-root", help="Explicit verification output root."),
     ] = ...,
     start_date: Annotated[
         str,
@@ -80,14 +83,17 @@ def evidence_run(
     ] = ...,
     replace_output: Annotated[
         bool,
-        typer.Option("--replace-output", help="Replace exact output root under .run."),
+        typer.Option(
+            "--replace-output",
+            help="Replace an owned verification evidence output root.",
+        ),
     ] = False,
 ) -> None:
-    """Run the private evidence verification harness."""
+    """Run the verification evidence verification harness."""
 
     try:
-        result = run_private_evidence(
-            PrivateEvidenceRunConfig(
+        result = run_verification_evidence(
+            VerificationEvidenceRunConfig(
                 output_root=output_root,
                 start_date=start_date,
                 end_date=end_date,

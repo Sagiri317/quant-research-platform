@@ -17,68 +17,52 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
-from quant_research_platform.storage.layout import PrivateEvidenceLayout
-from quant_research_platform.workflows import private_evidence as module
-from quant_research_platform.workflows.private_evidence import (
-    PrivateEvidenceRunConfig,
-    run_private_evidence,
+from quant_research_platform.storage.layout import VerificationEvidenceLayout
+from quant_research_platform.workflows import verification_evidence as module
+from quant_research_platform.workflows.verification_evidence import (
+    VerificationEvidenceRunConfig,
+    run_verification_evidence,
 )
 
 LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
 
 
-def test_private_evidence_workflow_rejects_output_root_outside_run(tmp_path):
-    config = PrivateEvidenceRunConfig(
-        output_root=tmp_path / "outside",
-        start_date="2014-01-01",
-        end_date="2016-12-31",
-    )
-
-    with pytest.raises(ValueError, match="output_root_must_be_under_run"):
-        run_private_evidence(config)
-
-
-def test_private_evidence_output_root_rejects_traversal_outside_run(tmp_path):
-    with pytest.raises(ValueError, match="output_root_must_be_under_run"):
-        module._assert_output_root_under_run(tmp_path / ".run" / ".." / "outside")
-
-
-def test_private_evidence_workflow_rejects_existing_output_root(tmp_path):
-    output_root = tmp_path / ".run" / "s1"
+def test_verification_evidence_workflow_rejects_existing_output_root(tmp_path):
+    output_root = tmp_path / "verification-output" / "s1"
     output_root.mkdir(parents=True)
-    config = PrivateEvidenceRunConfig(
+    config = VerificationEvidenceRunConfig(
         output_root=output_root,
         start_date="2014-01-01",
         end_date="2016-12-31",
     )
 
     with pytest.raises(ValueError, match="output_root_already_exists"):
-        run_private_evidence(config)
+        run_verification_evidence(config)
 
 
-def test_private_evidence_workflow_rejects_invalid_date_range(tmp_path):
-    config = PrivateEvidenceRunConfig(
-        output_root=tmp_path / ".run" / "s1",
+def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
+    config = VerificationEvidenceRunConfig(
+        output_root=tmp_path / "verification-output" / "s1",
         start_date="2016-12-31",
         end_date="2014-01-01",
     )
 
     with pytest.raises(ValueError, match="start_date_after_end_date"):
-        run_private_evidence(config)
+        run_verification_evidence(config)
 
 
-def test_private_evidence_run_id_can_be_explicit_long_semantic_value(tmp_path):
-    config = PrivateEvidenceRunConfig(
-        output_root=tmp_path / ".run" / "s1",
+def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_path):
+    config = VerificationEvidenceRunConfig(
+        output_root=tmp_path / "verification-output" / "s1",
         start_date="2014-01-01",
         end_date="2016-12-31",
-        run_id="private-evidence-smoke-a-share-2014-2016",
+        run_id="verification-evidence-smoke-a-share-2014-2016",
     )
 
-    assert config.run_id == "private-evidence-smoke-a-share-2014-2016"
+    assert config.run_id == "verification-evidence-smoke-a-share-2014-2016"
 
 
-def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts(
+def test_verification_evidence_workflow_runs_injected_generation_and_writes_artifacts(
     tmp_path,
     monkeypatch,
 ):
@@ -165,9 +149,9 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
         ),
     )
 
-    output_root = tmp_path / ".run" / "s1"
-    result = run_private_evidence(
-        PrivateEvidenceRunConfig(
+    output_root = tmp_path / "verification-output" / "s1"
+    result = run_verification_evidence(
+        VerificationEvidenceRunConfig(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -184,7 +168,7 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
     assert (output_root / "manifests" / "run_manifest.json").is_file()
     assert (output_root / "timings" / "timings.json").is_file()
     assert (output_root / "validations" / "validation_summary.json").is_file()
-    layout = PrivateEvidenceLayout.from_output_root(output_root)
+    layout = VerificationEvidenceLayout.from_output_root(output_root)
     assert (layout.evidence_root / "evidence_summary.json").is_file()
     for layer in ("interim", "processed", "research", "evidence"):
         layer_root = getattr(layout, f"{layer}_root")
@@ -222,7 +206,7 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
     assert LEGACY_RSS_PEAK_FIELD not in validation_record
 
 
-def test_private_evidence_workflow_preserves_dataset_manifests(
+def test_verification_evidence_workflow_preserves_dataset_manifests(
     tmp_path,
     monkeypatch,
 ):
@@ -272,9 +256,9 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
         lambda **kwargs: Path("prediction"),
     )
 
-    output_root = tmp_path / ".run" / "s8"
-    result = run_private_evidence(
-        PrivateEvidenceRunConfig(
+    output_root = tmp_path / "verification-output" / "s8"
+    result = run_verification_evidence(
+        VerificationEvidenceRunConfig(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -286,7 +270,7 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
     assert manifest == captured_manifests[0]
 
 
-def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
+def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
     tmp_path,
     monkeypatch,
 ):
@@ -331,9 +315,9 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
         lambda **kwargs: Path("prediction"),
     )
 
-    output_root = tmp_path / ".run" / "s9"
-    result = run_private_evidence(
-        PrivateEvidenceRunConfig(
+    output_root = tmp_path / "verification-output" / "s9"
+    result = run_verification_evidence(
+        VerificationEvidenceRunConfig(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -349,7 +333,7 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
     assert result.status == "FAIL"
     assert "dataset_manifest_missing" in validation["failure_codes"]
     assert validation["dataset_manifest_completeness"]["missing"] == [
-        ".run/s9/data/interim/csmar/daily_market"
+        "data/interim/csmar/daily_market"
     ]
     assert summary["status"] == validation["status"] == "FAIL"
     summary_md = (output_root / "summary.md").read_text(encoding="utf-8")
@@ -362,7 +346,7 @@ def test_no_comparison_engine_is_introduced_in_src():
     hits = [
         str(path)
         for path in Path("src").rglob("*comparison*.py")
-        if "private_evidence" not in str(path)
+        if "verification_evidence" not in str(path)
     ]
 
     assert hits == []

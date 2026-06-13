@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from quant_research_platform.reports.evidence_rendering import (
+from quant_research_platform.reports.verification_evidence import (
     render_private_verification_summary_markdown,
     render_public_safe_evidence_markdown,
 )

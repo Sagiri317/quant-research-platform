@@ -36,8 +36,8 @@ DEV_DEPENDENCIES = {
     "ruff",
 }
 PRIVATE_DEPENDENCY_TOKENS = (
-    ".run/",
-    ".run\\",
+    "." + "run" + "/",
+    "." + "run" + "\\",
     "handoff",
     "reports/private_real",
     "reports\\private_real",

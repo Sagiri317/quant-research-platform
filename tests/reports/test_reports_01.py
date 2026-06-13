@@ -297,7 +297,7 @@ def test_stage_profile_bundle_cleans_temp_root_after_mid_bundle_failure(
         )
 
     assert not run_root.exists()
-    assert list(run_root.parent.glob(".run.tmp-*")) == []
+    assert list(run_root.parent.glob(".tmp-*")) == []
 
 
 def test_prediction_bundle_cleans_temp_root_after_mid_bundle_failure(

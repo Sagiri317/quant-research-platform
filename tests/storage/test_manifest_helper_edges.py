@@ -72,7 +72,7 @@ def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> 
     )
 
     layer_path = manifests.write_layer_manifest(
-        layer_root=tmp_path / ".run" / "layers",
+        layer_root=tmp_path / "verification-output" / "layers",
         logical_layer="processed",
         run_id="run_demo",
         dataset_roots=(dataset_root, missing_root, failed_root),
@@ -85,9 +85,9 @@ def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> 
     assert layer["missing_dataset_manifests"]
 
     run_path = manifests.write_run_manifest(
-        manifests_root=tmp_path / ".run" / "manifests",
+        manifests_root=tmp_path / "verification-output" / "manifests",
         run_id="run_demo",
-        output_root=tmp_path / ".run" / "output",
+        output_root=tmp_path / "verification-output" / "output",
         layer_manifest_paths=(layer_path,),
     )
     run = manifests.read_manifest(run_path)

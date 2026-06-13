@@ -75,7 +75,7 @@ qrp-private schema-inventory --project-root . --output <path>
 
 It writes sanitized aggregate schema metadata for sealed dataset roots. It does
 not scan `data/raw` or `reports/private_real`, and it does not run private
-import, private rebuild, or private evidence regeneration.
+import, private rebuild, or verification evidence regeneration.
 
 ## Privacy
 

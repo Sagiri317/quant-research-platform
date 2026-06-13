@@ -206,7 +206,7 @@ def test_qrp_private_schema_inventory_help_exposes_only_schema_inventory() -> No
     assert "--overwrite" not in command_help.output
 
 
-def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
+def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> None:
     calls = []
 
     def fake_run(config):
@@ -217,13 +217,13 @@ def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
             {
                 "status": "PASS",
                 "run_id": "s1",
-                "output_root": ".run/s1",
-                "summary": {"status": "PASS", "output_root": ".run/s1"},
+                "output_root": "verification-output/s1",
+                "summary": {"status": "PASS", "output_root": "verification-output/s1"},
             },
         )()
 
     monkeypatch.setattr(
-        "quant_research_platform.interfaces.private_cli.run_private_evidence",
+        "quant_research_platform.interfaces.private_cli.run_verification_evidence",
         fake_run,
     )
     runner = CliRunner()
@@ -234,7 +234,7 @@ def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
             "evidence",
             "run",
             "--output-root",
-            ".run/s1",
+            "verification-output/s1",
             "--start-date",
             "2014-01-01",
             "--end-date",
@@ -243,7 +243,7 @@ def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert calls[0].output_root == Path(".run/s1")
+    assert calls[0].output_root == Path("verification-output/s1")
     assert calls[0].start_date == "2014-01-01"
     assert calls[0].end_date == "2016-12-31"
     assert calls[0].run_id is None
@@ -251,7 +251,7 @@ def test_qrp_private_evidence_run_accepts_required_options(monkeypatch) -> None:
     assert "run_id=s1" in result.output
 
 
-def test_qrp_private_evidence_run_rejects_missing_required_options() -> None:
+def test_qrp_verification_evidence_run_rejects_missing_required_options() -> None:
     runner = CliRunner()
 
     result = runner.invoke(private_app, ["evidence", "run"])

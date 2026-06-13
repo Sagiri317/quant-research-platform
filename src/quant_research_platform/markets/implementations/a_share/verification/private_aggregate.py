@@ -23,7 +23,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
-from quant_research_platform.reports.evidence_rendering import (
+from quant_research_platform.reports.verification_evidence import (
     render_private_verification_summary_markdown,
     render_public_safe_evidence_markdown,
 )
@@ -54,7 +54,7 @@ FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
-# Local private evidence runner source fixture; not an A-share market contract.
+# Local verification evidence runner source fixture; not an A-share market contract.
 LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
@@ -504,7 +504,7 @@ def _iter_generated_full_daily_panel_session_chunks(
         lookahead_sessions=1,
     ).windows(
         time_window,
-        reason="private_evidence_generated_panel",
+        reason="verification_evidence_generated_panel",
     )
     daily_market_columns = tuple(inspect_dataset(daily_market_root).columns)
     for window in windows:

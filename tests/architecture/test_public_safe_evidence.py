@@ -374,7 +374,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
     assert sum(len(chunk) for chunk in chunks) == len(sessions)
 
 
-def test_private_evidence_does_not_keep_legacy_chunk_policy_helpers() -> None:
+def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers() -> None:
     from quant_research_platform.markets.implementations.a_share.verification import (
         private_aggregate,
     )
@@ -547,7 +547,7 @@ def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> N
         assert term not in combined
 
 
-def test_private_evidence_source_fixture_is_not_public_market_contract() -> None:
+def test_verification_evidence_source_fixture_is_not_public_market_contract() -> None:
     from quant_research_platform.markets.implementations.a_share.verification import (
         private_aggregate,
     )
