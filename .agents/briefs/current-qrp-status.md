@@ -44,8 +44,8 @@ replacement for `PROJECT_STATUS.md`.
   `source/raw -> interim -> A-share processed facts -> A-share annotations/masks/context -> factor data -> label data -> research dataset`.
 - `catalog/profiles.py` is the local composition root. The public local profile
   builder is `research_profile()` returning `ResearchProfile`;
-  retired `catalog/defaults.py`, `default_catalogs()`, and `PlatformCatalogs`
-  are replaced and are no longer active public entrypoints.
+  retired default-profile entrypoints are replaced and are no longer active
+  public entrypoints.
 - A-share owner modules are split by responsibility. Stable IDs remain in
   `markets/implementations/a_share/ids.py`; calendar helpers remain in
   `markets/implementations/a_share/calendar.py`.
@@ -86,7 +86,7 @@ replacement for `PROJECT_STATUS.md`.
   after signal-date close and intended for t+1 open research prediction and
   evaluation. Model and prediction default sample filtering may use
   `eligible`, but they do not use `can_enter` or `can_exit`.
-- Before the next PE/full-data run, processed panel as-of joins should fail
+- Before the next verification evidence/full-data run, processed panel as-of joins should fail
   closed on conflicting duplicate `stock_master` and `market_cap` keys while
   exact duplicate rows are deterministically deduped.
 - A-share is the first enabled market. Other markets are future design only.
