@@ -8,6 +8,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_CONTRACT = PROJECT_ROOT / "docs/architecture/environment-contract.md"
 README = PROJECT_ROOT / "README.md"
+CONTRACTS_AND_VERIFICATION = (
+    PROJECT_ROOT
+    / ".agents/skills/quant-research-platform-maintenance/references"
+    / "contracts-and-verification.md"
+)
 
 EXPECTED_PYTHON_SPEC = ">=3.13,<3.14"
 EXPECTED_RUFF_TARGET = "py313"
@@ -83,7 +88,7 @@ def test_environment_contract_includes_windows_and_bash_commands() -> None:
 
     assert "```powershell" in text
     assert "```bash" in text
-    assert "conda env update -f environment.yml --prune" in text
+    assert "conda env update -f environment.yml" in text
     assert "python -m pytest tests/architecture -q" in text
     assert (
         "python -m pytest tests/correctness/test_price_volume_reference.py -q"
@@ -91,6 +96,48 @@ def test_environment_contract_includes_windows_and_bash_commands() -> None:
     )
     assert "python -m ruff check src tests" in text
     assert "python -m pytest --cov=quant_research_platform" in text
+
+
+def test_default_environment_update_commands_do_not_prune_quantlab313() -> None:
+    checked = {
+        "README.md": README,
+        "docs/architecture/environment-contract.md": ENVIRONMENT_CONTRACT,
+        "contracts-and-verification.md": CONTRACTS_AND_VERIFICATION,
+    }
+    unsafe_defaults: list[str] = []
+    for label, path in checked.items():
+        text = path.read_text(encoding="utf-8")
+        for block in _code_blocks(text):
+            if "conda env update -f environment.yml --prune" in block:
+                unsafe_defaults.append(label)
+
+    assert unsafe_defaults == []
+
+
+def test_prune_mentions_are_marked_as_non_default_qrp_minimal_rebuild() -> None:
+    checked = {
+        "README.md": README,
+        "docs/architecture/environment-contract.md": ENVIRONMENT_CONTRACT,
+        "contracts-and-verification.md": CONTRACTS_AND_VERIFICATION,
+    }
+    missing_context: list[str] = []
+    for label, path in checked.items():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if "--prune" not in line:
+                continue
+            nearby = " ".join(lines[max(0, index - 3) : index + 4]).lower()
+            has_default_warning = (
+                "not default" in nearby
+                or ("do not use" in nearby and "default" in nearby)
+            )
+            has_qrp_minimal_rebuild_context = (
+                "qrp-minimal" in nearby and "intentionally rebuilding" in nearby
+            )
+            if not (has_default_warning and has_qrp_minimal_rebuild_context):
+                missing_context.append(f"{label}:{index + 1}")
+
+    assert missing_context == []
 
 
 def test_formal_verification_commands_do_not_depend_on_private_artifacts() -> None:

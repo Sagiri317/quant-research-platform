@@ -21,16 +21,22 @@ private-data smoke run unless the matching commands actually ran there.
 Windows PowerShell:
 
 ```powershell
-conda env update -f environment.yml --prune
+conda env update -f environment.yml
 conda run -n quantlab313 python --version
 ```
 
 macOS/Linux bash:
 
 ```bash
-conda env update -f environment.yml --prune
+conda env update -f environment.yml
 conda run -n quantlab313 python --version
 ```
+
+Do not use `--prune` by default for `quantlab313`. `quantlab313` is the
+user's broader quant research environment, and `--prune` may remove packages
+installed for notebooks, research, visualization, ML/DL experiments, or other
+projects. Use `--prune` only when intentionally rebuilding a QRP-minimal
+environment; it is not default.
 
 ## Formal Verification
 
