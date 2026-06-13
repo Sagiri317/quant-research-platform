@@ -71,7 +71,7 @@ def write_evaluation_result(
     )
     return write_evaluation_report_artifacts(
         result.metrics,
-        result.grouped_returns,
+        result.grouped_label_values,
         spec=result.spec,
         report_spec=report_spec,
         layout=layout,

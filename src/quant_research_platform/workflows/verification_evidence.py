@@ -10,12 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.catalog.profiles import (
-    ResearchProfile,
-    _a_share_csmar_source_id,
-    _materialize_a_share_csmar_interim_data,
-    _materialize_a_share_processed_data,
-)
+from quant_research_platform.catalog.profiles import ResearchProfile
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.reports.verification_evidence import (
@@ -106,20 +101,20 @@ def run_verification_evidence(
     storage_layout = StorageLayout(project_root=output_root)
     time_window = TimeWindow(config.start_date, config.end_date)
     catalogs = config.profile
-    source_id = _a_share_csmar_source_id()
+    source_id = config.profile.source_id
     with recorder.record("interim_generation", logical_layer="interim"):
-        interim_result = _materialize_a_share_csmar_interim_data(
-            layout=storage_layout,
-            raw_root=Path("data") / "raw" / source_id,
-            start_date=config.start_date,
-            end_date=config.end_date,
+        interim_result = config.profile.materialize_interim_data(
+            storage_layout,
+            Path("data") / "raw" / str(source_id),
+            config.start_date,
+            config.end_date,
         )
     with recorder.record("processed_generation", logical_layer="processed") as record:
-        processed_result = _materialize_a_share_processed_data(
-            layout=storage_layout,
-            source_id=source_id,
-            time_window=time_window,
-            kinds=frozenset(
+        processed_result = config.profile.materialize_processed_data(
+            storage_layout,
+            source_id,
+            time_window,
+            frozenset(
                 {
                     ProcessedDataKind.PANEL,
                     ProcessedDataKind.ANNOTATION,
@@ -365,7 +360,7 @@ def _dataset_id(dataset_root: Path) -> str:
 def _logical_path(path: Path) -> str:
     item = Path(path)
     parts = item.parts
-    for marker in (".run", "data", "reports", "manifests", "validations", "timings"):
+    for marker in ("data", "reports", "manifests", "validations", "timings"):
         if marker in parts:
             return Path(*parts[parts.index(marker) :]).as_posix()
     if item.is_absolute():

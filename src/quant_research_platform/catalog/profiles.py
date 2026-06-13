@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
@@ -24,10 +25,12 @@ from quant_research_platform.catalog.processed import (
 )
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
+from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_profiles as a_share_research_profiles,
 )
@@ -61,6 +64,8 @@ from quant_research_platform.sources.csmar.interim import (
 from quant_research_platform.sources.csmar.interim import (
     materialize_interim_data as _materialize_csmar_interim_data,
 )
+from quant_research_platform.storage.datasets import DatasetInspection
+from quant_research_platform.storage.layout import StorageLayout
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,12 @@ class ResearchProfile:
     markets: MarketRegistry
     reports: ReportCatalog
     source_interim_catalogs: Mapping[str, InterimDataCatalog]
+    source_id: SourceId
+    materialize_interim_data: Callable[[StorageLayout, Path, str, str], object]
+    materialize_processed_data: Callable[
+        [StorageLayout, SourceId, TimeWindow, frozenset[ProcessedDataKind]],
+        Mapping[str, DatasetInspection],
+    ]
 
 
 def research_profile() -> ResearchProfile:
@@ -99,6 +110,9 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         markets=_a_share_market_registry(),
         reports=report_catalog(),
         source_interim_catalogs=_a_share_csmar_source_interim_catalogs(),
+        source_id=_a_share_csmar_source_id(),
+        materialize_interim_data=_materialize_a_share_csmar_interim_data,
+        materialize_processed_data=_materialize_a_share_processed_data,
     )
 
 
@@ -165,19 +179,36 @@ def _a_share_csmar_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]
     return {next(iter(source_ids)): catalog}
 
 
-def _a_share_csmar_source_id() -> str:
-    return next(iter(_a_share_csmar_source_interim_catalogs()))
+def _a_share_csmar_source_id() -> SourceId:
+    return SourceId(next(iter(_a_share_csmar_source_interim_catalogs())))
 
 
-def _materialize_a_share_csmar_interim_data(**kwargs: object) -> object:
-    return _materialize_csmar_interim_data(**kwargs)
+def _materialize_a_share_csmar_interim_data(
+    layout: StorageLayout,
+    raw_root: Path,
+    start_date: str,
+    end_date: str,
+) -> object:
+    return _materialize_csmar_interim_data(
+        layout=layout,
+        raw_root=raw_root,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
 
-def _materialize_a_share_processed_data(**kwargs: object) -> object:
-    source_id = kwargs.get("source_id")
-    if isinstance(source_id, str):
-        kwargs = {**kwargs, "source_id": SourceId(source_id)}
-    return a_share_processed_materializer.materialize_processed_data(**kwargs)
+def _materialize_a_share_processed_data(
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    kinds: frozenset[ProcessedDataKind],
+) -> Mapping[str, DatasetInspection]:
+    return a_share_processed_materializer.materialize_processed_data(
+        layout=layout,
+        source_id=source_id,
+        time_window=time_window,
+        kinds=kinds,
+    )
 
 
 __all__ = ["ResearchProfile", "research_profile"]

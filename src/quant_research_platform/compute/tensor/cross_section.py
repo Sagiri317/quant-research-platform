@@ -81,7 +81,7 @@ def compute_ic_and_grouped_label_values_tensor(
                     _label_ranks_for_mask(labels, valid, label_rank_cache),
                 )
                 groups = _assign_groups(factor, n_groups)
-                _append_grouped_return_records(
+                _append_grouped_label_value_records(
                     grouped_records,
                     timestamp=timestamp,
                     feature=feature,
@@ -127,7 +127,7 @@ def compute_grouped_label_values_tensor(
             if len(factor) < 2:
                 continue
             groups = _assign_groups(factor, n_groups)
-            _append_grouped_return_records(
+            _append_grouped_label_value_records(
                 records,
                 timestamp=timestamp,
                 feature=feature,
@@ -138,10 +138,10 @@ def compute_grouped_label_values_tensor(
     return pd.DataFrame.from_records(records, columns=GROUPED_LABEL_VALUE_COLUMNS)
 
 
-def summarize_group_spread_tensor(grouped_returns: pd.DataFrame) -> pd.DataFrame:
-    """使用 DataFrame policy 汇总 tensor grouped-return output。"""
+def summarize_group_spread_tensor(grouped_label_values: pd.DataFrame) -> pd.DataFrame:
+    """使用 DataFrame policy 汇总 tensor grouped label-value output。"""
 
-    summary = summarize_group_spread(grouped_returns)
+    summary = summarize_group_spread(grouped_label_values)
     return summary[GROUP_SPREAD_SUMMARY_COLUMNS]
 
 
@@ -154,7 +154,7 @@ def _assign_groups(values: np.ndarray, n_groups: int) -> np.ndarray:
     return np.clip(zero_based.astype("int64") + 1, 1, group_count)
 
 
-def _append_grouped_return_records(
+def _append_grouped_label_value_records(
     records: list[dict[str, object]],
     *,
     timestamp: object,

@@ -20,6 +20,10 @@ from quant_research_platform.catalog.processed import (
 )
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
+from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.storage.layout import StorageLayout
 
 PROJECT_SRC = Path("src/quant_research_platform")
 
@@ -56,6 +60,9 @@ def test_research_profile_contains_current_local_profile_catalogs() -> None:
     assert isinstance(profile.sources, SourceRegistry)
     assert isinstance(profile.markets, MarketRegistry)
     assert set(profile.source_interim_catalogs) == {"csmar"}
+    assert profile.source_id == SourceId("csmar")
+    assert callable(profile.materialize_interim_data)
+    assert callable(profile.materialize_processed_data)
 
 
 def test_a_share_research_profiles_do_not_import_csmar() -> None:
@@ -120,14 +127,28 @@ def test_reports_bundles_uses_report_local_catalog_not_profile_bundle() -> None:
     assert "report_catalog(" in source
 
 
-def test_catalog_profile_private_binding_helpers_convert_source_id(monkeypatch) -> None:
+def test_catalog_profile_private_processed_helper_forwards_typed_source_id(
+    monkeypatch,
+) -> None:
     import quant_research_platform.catalog.profiles as profiles
-    from quant_research_platform.contracts.ids import SourceId
 
     captured: dict[str, object] = {}
 
-    def fake_materialize(**kwargs: object) -> str:
-        captured.update(kwargs)
+    def fake_materialize(
+        *,
+        layout: StorageLayout,
+        source_id: SourceId,
+        time_window: TimeWindow,
+        kinds: frozenset[ProcessedDataKind],
+    ) -> str:
+        captured.update(
+            {
+                "layout": layout,
+                "source_id": source_id,
+                "time_window": time_window,
+                "kinds": kinds,
+            }
+        )
         return "ok"
 
     monkeypatch.setattr(
@@ -136,8 +157,23 @@ def test_catalog_profile_private_binding_helpers_convert_source_id(monkeypatch) 
         fake_materialize,
     )
 
-    assert profiles._materialize_a_share_processed_data(source_id="csmar") == "ok"
+    layout = StorageLayout(project_root=Path("project"))
+    time_window = TimeWindow("2014-01-01", "2014-01-31")
+    kinds = frozenset({ProcessedDataKind.PANEL})
+
+    assert (
+        profiles._materialize_a_share_processed_data(
+            layout,
+            SourceId("csmar"),
+            time_window,
+            kinds,
+        )
+        == "ok"
+    )
+    assert captured["layout"] == layout
     assert captured["source_id"] == SourceId("csmar")
+    assert captured["time_window"] == time_window
+    assert captured["kinds"] == kinds
 
 
 def test_catalog_profile_private_interim_helper_forwards_kwargs(monkeypatch) -> None:
@@ -145,15 +181,40 @@ def test_catalog_profile_private_interim_helper_forwards_kwargs(monkeypatch) -> 
 
     captured: dict[str, object] = {}
 
-    def fake_materialize(**kwargs: object) -> dict[str, object]:
-        captured.update(kwargs)
+    def fake_materialize(
+        *,
+        layout: StorageLayout,
+        raw_root: Path,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "layout": layout,
+                "raw_root": raw_root,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
         return captured
 
     monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", fake_materialize)
 
-    result = profiles._materialize_a_share_csmar_interim_data(data_id="daily")
+    layout = StorageLayout(project_root=Path("project"))
+    raw_root = Path("data/raw/csmar")
+    result = profiles._materialize_a_share_csmar_interim_data(
+        layout,
+        raw_root,
+        "2014-01-01",
+        "2014-01-31",
+    )
 
-    assert result == {"data_id": "daily"}
+    assert result == {
+        "layout": layout,
+        "raw_root": raw_root,
+        "start_date": "2014-01-01",
+        "end_date": "2014-01-31",
+    }
 
 
 def test_catalog_profile_source_interim_catalog_requires_single_source(
@@ -178,7 +239,7 @@ def test_catalog_profile_source_interim_catalog_requires_single_source(
 def test_catalog_profile_source_id_matches_interim_catalog() -> None:
     import quant_research_platform.catalog.profiles as profiles
 
-    assert profiles._a_share_csmar_source_id() == "csmar"
+    assert profiles._a_share_csmar_source_id() == SourceId("csmar")
     assert isinstance(
         next(iter(profiles._a_share_csmar_source_interim_catalogs().values())),
         InterimDataCatalog,

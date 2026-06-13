@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -128,6 +129,48 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
             report_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
+
+
+def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        feature_columns=("feature",),
+        label_columns=("label",),
+    )
+    report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
+
+    run_root = report_artifacts.write_evaluation_report_artifacts(
+        pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2024-01-02")],
+                "feature": ["feature"],
+                "label": ["label"],
+                "ic": [0.1],
+                "rankic": [0.2],
+                "n_obs": [2],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2024-01-02")],
+                "feature": ["feature"],
+                "label": ["label"],
+                "group": [1],
+                "mean_label_value": [0.1],
+                "n_obs": [2],
+            }
+        ),
+        spec=spec,
+        report_spec=report_spec,
+        layout=StorageLayout(project_root=tmp_path),
+    )
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert (run_root / "grouped_label_values.parquet").is_file()
+    assert not (run_root / "grouped_returns.parquet").exists()
+    assert manifest["artifacts"] == ["metrics.parquet", "grouped_label_values.parquet"]
 
 
 def test_report_parquet_writer_cleans_temp_on_failure(

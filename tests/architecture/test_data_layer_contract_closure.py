@@ -160,7 +160,13 @@ def test_interfaces_workflows_agents_use_profile_not_direct_implementations() ->
 
 def test_deep_layers_do_not_build_default_research_profile() -> None:
     hits: list[str] = []
-    forbidden = ("research_profile(", "local_a_share_csmar_catalogs(")
+    forbidden = (
+        "research_profile(",
+        "local_a_share_csmar_catalogs(",
+        "_a_share_csmar_source_id",
+        "_materialize_a_share_csmar_interim_data",
+        "_materialize_a_share_processed_data",
+    )
     roots = (
         PROJECT_SRC / "interfaces/services.py",
         PROJECT_SRC / "agents",
@@ -173,6 +179,24 @@ def test_deep_layers_do_not_build_default_research_profile() -> None:
                 hits.append(f"{path}:{token}")
 
     assert hits == []
+
+
+def test_verification_workflow_uses_injected_profile_materialization_hooks() -> None:
+    workflow_path = PROJECT_SRC / "workflows/verification_evidence.py"
+    source = workflow_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(workflow_path))
+    imported_profile_names = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "quant_research_platform.catalog.profiles"
+        for alias in node.names
+    ]
+
+    assert imported_profile_names == ["ResearchProfile"]
+    assert "config.profile.source_id" in source
+    assert "config.profile.materialize_interim_data(" in source
+    assert "config.profile.materialize_processed_data(" in source
 
 
 def test_shared_services_receive_research_profile_by_parameter() -> None:

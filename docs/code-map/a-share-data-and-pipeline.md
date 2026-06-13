@@ -120,8 +120,8 @@ profile.
 - Evaluation and prediction remain 2014 smoke evidence; they have not been
   expanded into full historical 2014-2025 runs.
 - The final `price_volume` rolling-moment follow-up reruns only the bounded
-  2014-2016 raw-start smoke unless its `.run/reviews/.../full_horizon_notes.md`
-  says otherwise; fresh 2014-2025 full-horizon rerun remains an
+  2014-2016 raw-start smoke unless the corresponding handoff notes say
+  otherwise; fresh 2014-2025 full-horizon rerun remains an
   overnight/milestone validation before merge/main/demo.
 - Full-horizon private rerun is not a completion requirement for the
   first-stage data-layer closure unless a generated run artifact explicitly

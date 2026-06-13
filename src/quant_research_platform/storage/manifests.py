@@ -224,7 +224,7 @@ def _data_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
 def _logical_path(path: Path) -> str:
     item = Path(path)
     parts = item.parts
-    for marker in (".run", "data", "manifests", "validations", "timings"):
+    for marker in ("data", "manifests", "validations", "timings"):
         if marker in parts:
             index = parts.index(marker)
             return Path(*parts[index:]).as_posix()

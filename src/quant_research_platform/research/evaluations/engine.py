@@ -17,7 +17,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 class EvaluationResult:
     spec: EvaluationSpec
     metrics: pd.DataFrame
-    grouped_returns: pd.DataFrame
+    grouped_label_values: pd.DataFrame
     metadata: dict[str, object]
 
 
@@ -52,17 +52,17 @@ def evaluate_factor_frame(
         timestamp_column="timestamp",
         asset_column="asset_id" if "asset_id" in usable_frame else "asset",
     )
-    metrics, grouped_returns = compute_ic_and_grouped_label_values(
+    metrics, grouped_label_values = compute_ic_and_grouped_label_values(
         usable_frame,
         compute_spec,
         n_groups=n_groups,
     )
     metrics.attrs["metadata"] = metadata
-    grouped_returns.attrs["metadata"] = metadata
+    grouped_label_values.attrs["metadata"] = metadata
     return EvaluationResult(
         spec=spec,
         metrics=metrics,
-        grouped_returns=grouped_returns,
+        grouped_label_values=grouped_label_values,
         metadata=metadata,
     )
 

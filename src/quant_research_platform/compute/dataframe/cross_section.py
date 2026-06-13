@@ -250,23 +250,25 @@ def summarize_ic(
 
 
 def summarize_group_spread(
-    grouped_returns: pd.DataFrame,
+    grouped_label_values: pd.DataFrame,
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """按 feature 汇总 top-bottom group return spread diagnostics。"""
+    """按 feature 汇总 top-bottom group label-value spread diagnostics。"""
 
     required_columns = {*segment_columns, *GROUPED_LABEL_VALUE_COLUMNS}
-    missing_columns = sorted(required_columns.difference(grouped_returns.columns))
+    missing_columns = sorted(required_columns.difference(grouped_label_values.columns))
     if missing_columns:
-        raise ValueError(f"grouped_returns is missing columns: {missing_columns}.")
+        raise ValueError(
+            f"grouped_label_values is missing columns: {missing_columns}."
+        )
 
     output_columns = [*segment_columns, *GROUP_SPREAD_SUMMARY_COLUMNS]
-    if grouped_returns.empty:
+    if grouped_label_values.empty:
         return pd.DataFrame(columns=output_columns)
 
     timestamp_group_columns = [*segment_columns, "feature", "label", "timestamp"]
-    ordered = grouped_returns[
+    ordered = grouped_label_values[
         [*timestamp_group_columns, "group", "mean_label_value"]
     ].copy()
     ordered["mean_label_value"] = pd.to_numeric(

@@ -424,7 +424,7 @@ def _merge_profile(target: dict[str, int], value: object) -> None:
 def _logical_path(path: Path) -> str:
     item = Path(path)
     parts = item.parts
-    for marker in (".run", "data", "manifests", "validations", "timings"):
+    for marker in ("data", "manifests", "validations", "timings"):
         if marker in parts:
             return Path(*parts[parts.index(marker) :]).as_posix()
     if item.is_absolute():

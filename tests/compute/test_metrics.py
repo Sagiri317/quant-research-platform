@@ -132,7 +132,9 @@ def test_compute_grouped_label_values_does_not_group_assigned_pairs(
     monkeypatch,
 ) -> None:
     def fail_assign(*args, **kwargs):
-        raise AssertionError("grouped returns should aggregate rank buckets directly")
+        raise AssertionError(
+            "grouped label values should aggregate rank buckets directly"
+        )
 
     monkeypatch.setattr(pd.DataFrame, "assign", fail_assign)
 
@@ -169,7 +171,7 @@ def test_summarize_ic_reports_icir_and_positive_rates() -> None:
 
 
 def test_summarize_group_spread_reports_top_bottom_spread() -> None:
-    grouped_returns = pd.DataFrame(
+    grouped_label_values = pd.DataFrame(
         {
             "timestamp": [
                 "2026-01-01",
@@ -185,7 +187,7 @@ def test_summarize_group_spread_reports_top_bottom_spread() -> None:
         }
     )
 
-    summary = summarize_group_spread(grouped_returns)
+    summary = summarize_group_spread(grouped_label_values)
 
     row = summary.iloc[0]
     assert row["top_group_mean_label_value"] == pytest.approx(0.02)
@@ -201,7 +203,7 @@ def test_summarize_group_spread_uses_dataframe_aggregation(monkeypatch) -> None:
     def fail_from_records(*args, **kwargs):
         raise AssertionError("group spread summary should avoid row-record loops")
 
-    grouped_returns = original_from_records(
+    grouped_label_values = original_from_records(
         {
             "timestamp": [
                 "2026-01-01",
@@ -218,7 +220,7 @@ def test_summarize_group_spread_uses_dataframe_aggregation(monkeypatch) -> None:
     )
     monkeypatch.setattr(pd.DataFrame, "from_records", fail_from_records)
 
-    summary = summarize_group_spread(grouped_returns)
+    summary = summarize_group_spread(grouped_label_values)
 
     assert summary.iloc[0]["top_bottom_label_value_spread_mean"] == pytest.approx(
         0.015

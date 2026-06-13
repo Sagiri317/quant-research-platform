@@ -577,7 +577,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
         "reports/private_real/a_share/evaluation/eval_demo"
     )
     assert (run_root / "metrics.parquet").is_file()
-    assert (run_root / "grouped_returns.parquet").is_file()
+    assert (run_root / "grouped_label_values.parquet").is_file()
     assert (run_root / "manifest.json").is_file()
 
 

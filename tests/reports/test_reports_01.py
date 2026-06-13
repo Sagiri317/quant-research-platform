@@ -248,7 +248,7 @@ def test_evaluation_report_artifacts_reject_existing_run_root_without_writes(
     with pytest.raises(OutputAlreadyExistsError):
         write_evaluation_report_artifacts(
             _evaluation_metrics_frame(),
-            _evaluation_grouped_returns_frame(),
+            _evaluation_grouped_label_values_frame(),
             spec=_evaluation_spec(),
             report_spec=_evaluation_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -362,7 +362,7 @@ def test_evaluation_report_artifacts_clean_temp_root_after_mid_write_failure(
     with pytest.raises(RuntimeError, match="simulated_evaluation_failure"):
         write_evaluation_report_artifacts(
             _evaluation_metrics_frame(),
-            _evaluation_grouped_returns_frame(),
+            _evaluation_grouped_label_values_frame(),
             spec=_evaluation_spec(),
             report_spec=_evaluation_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -460,7 +460,7 @@ def _evaluation_metrics_frame() -> pd.DataFrame:
     )
 
 
-def _evaluation_grouped_returns_frame() -> pd.DataFrame:
+def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2014-01-03"]),

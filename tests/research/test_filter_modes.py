@@ -204,17 +204,17 @@ def test_evaluation_filter_modes_and_metadata_use_hand_calculated_values(
 
     assert eligible.metrics.loc[0, "ic"] == pytest.approx(1.0)
     assert eligible.metrics.loc[0, "rankic"] == pytest.approx(1.0)
-    assert eligible.grouped_returns["mean_label_value"].tolist() == pytest.approx(
+    assert eligible.grouped_label_values["mean_label_value"].tolist() == pytest.approx(
         [0.015, 0.045]
     )
     assert tradable.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert tradable.grouped_returns["mean_label_value"].tolist() == pytest.approx(
-        [0.01, 0.02]
-    )
+    assert tradable.grouped_label_values[
+        "mean_label_value"
+    ].tolist() == pytest.approx([0.01, 0.02])
     assert unfiltered.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert unfiltered.grouped_returns["mean_label_value"].tolist() == pytest.approx(
-        [0.02, 0.045]
-    )
+    assert unfiltered.grouped_label_values[
+        "mean_label_value"
+    ].tolist() == pytest.approx([0.02, 0.045])
 
 
 @pytest.mark.parametrize(

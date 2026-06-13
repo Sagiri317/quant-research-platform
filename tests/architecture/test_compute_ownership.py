@@ -114,6 +114,26 @@ def test_compute_cross_section_output_columns_use_label_value_names() -> None:
     assert not hits, "compute_grouped_output_name_not_neutral: " + "; ".join(hits)
 
 
+def test_evaluation_group_artifact_names_are_label_value_neutral() -> None:
+    hits: list[str] = []
+    roots = (
+        PROJECT_SRC / "reports",
+        PROJECT_SRC / "research/evaluations",
+    )
+    forbidden_terms = (
+        "grouped_returns",
+        "evaluation_grouped_returns",
+        "grouped_returns.parquet",
+    )
+    for path in _python_files(roots):
+        text = path.read_text(encoding="utf-8")
+        for term in forbidden_terms:
+            if term in text:
+                hits.append(f"{path}: {term}")
+
+    assert not hits, "evaluation_group_artifact_name_not_neutral: " + "; ".join(hits)
+
+
 def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:
     hits: list[str] = []
     for path in _python_files((PROJECT_SRC / "compute/tensor",)):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -75,10 +76,16 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
     evaluation_run_ids: list[str] = []
     prediction_ids: list[str] = []
 
-    def import_interim(**kwargs):
+    def import_interim(
+        layout,
+        raw_root,
+        start_date,
+        end_date,
+    ):
+        del raw_root, start_date, end_date
         calls.append("interim")
         artifact_root = (
-            kwargs["layout"].project_root
+            layout.project_root
             / "data"
             / "interim"
             / "csmar"
@@ -91,10 +98,16 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
             {"artifact_roots": {"daily_market": artifact_root}},
         )()
 
-    def build_processed(**kwargs):
+    def build_processed(
+        layout,
+        source_id,
+        time_window,
+        kinds,
+    ):
+        del source_id, time_window, kinds
         calls.append("processed")
         artifact_root = (
-            kwargs["layout"].project_root
+            layout.project_root
             / "data"
             / "processed"
             / "a_share"
@@ -121,16 +134,6 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         )
         return artifact_root
 
-    monkeypatch.setattr(
-        module,
-        "_materialize_a_share_csmar_interim_data",
-        import_interim,
-    )
-    monkeypatch.setattr(
-        module,
-        "_materialize_a_share_processed_data",
-        build_processed,
-    )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
     monkeypatch.setattr(
         module,
@@ -159,7 +162,7 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
-            profile=research_profile(),
+            profile=_profile_with_materializers(import_interim, build_processed),
         )
     )
 
@@ -218,9 +221,15 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
     captured_roots: list[Path] = []
     captured_manifests: list[dict[str, object]] = []
 
-    def import_interim(**kwargs):
+    def import_interim(
+        layout,
+        raw_root,
+        start_date,
+        end_date,
+    ):
+        del raw_root, start_date, end_date
         artifact_root = (
-            kwargs["layout"].project_root
+            layout.project_root
             / "data"
             / "interim"
             / "csmar"
@@ -235,16 +244,6 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
             {"artifact_roots": {"daily_market": artifact_root}},
         )()
 
-    monkeypatch.setattr(
-        module,
-        "_materialize_a_share_csmar_interim_data",
-        import_interim,
-    )
-    monkeypatch.setattr(
-        module,
-        "_materialize_a_share_processed_data",
-        lambda **kwargs: {},
-    )
     monkeypatch.setattr(
         module,
         "assemble_research_dataset",
@@ -267,7 +266,7 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
-            profile=research_profile(),
+            profile=_profile_with_materializers(import_interim, _empty_processed),
         )
     )
     manifest = inspect_dataset(captured_roots[0]).manifest
@@ -280,9 +279,15 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
     tmp_path,
     monkeypatch,
 ):
-    def import_interim(**kwargs):
+    def import_interim(
+        layout,
+        raw_root,
+        start_date,
+        end_date,
+    ):
+        del raw_root, start_date, end_date
         artifact_root = (
-            kwargs["layout"].project_root
+            layout.project_root
             / "data"
             / "interim"
             / "csmar"
@@ -295,16 +300,6 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
             {"artifact_roots": {"daily_market": artifact_root}},
         )()
 
-    monkeypatch.setattr(
-        module,
-        "_materialize_a_share_csmar_interim_data",
-        import_interim,
-    )
-    monkeypatch.setattr(
-        module,
-        "_materialize_a_share_processed_data",
-        lambda **kwargs: {},
-    )
     monkeypatch.setattr(
         module,
         "assemble_research_dataset",
@@ -327,7 +322,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
-            profile=research_profile(),
+            profile=_profile_with_materializers(import_interim, _empty_processed),
         )
     )
     validation = json.loads(
@@ -386,6 +381,24 @@ def _persist_fake_research_root(**kwargs) -> Path:
         "research",
     )
     return artifact_root
+
+
+def _empty_processed(
+    layout,
+    source_id,
+    time_window,
+    kinds,
+) -> dict[str, object]:
+    del layout, source_id, time_window, kinds
+    return {}
+
+
+def _profile_with_materializers(interim, processed):
+    return replace(
+        research_profile(),
+        materialize_interim_data=interim,
+        materialize_processed_data=processed,
+    )
 
 
 def _dataset_frame() -> pd.DataFrame:

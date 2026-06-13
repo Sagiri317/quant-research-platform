@@ -139,7 +139,7 @@ def write_prediction_report_artifacts(
 
 def write_evaluation_report_artifacts(
     metrics: pd.DataFrame,
-    grouped_returns: pd.DataFrame,
+    grouped_label_values: pd.DataFrame,
     *,
     spec: EvaluationSpec,
     report_spec: ReportSpec,
@@ -163,7 +163,7 @@ def write_evaluation_report_artifacts(
         error_name="evaluation_metrics",
     )
     _validate_report_frame(
-        grouped_returns,
+        grouped_label_values,
         required=(
             "timestamp",
             "feature",
@@ -172,7 +172,7 @@ def write_evaluation_report_artifacts(
             "mean_label_value",
             "n_obs",
         ),
-        error_name="evaluation_grouped_returns",
+        error_name="evaluation_grouped_label_values",
     )
 
     def _write(temp_root: Path) -> None:
@@ -184,8 +184,8 @@ def write_evaluation_report_artifacts(
             index=False,
         )
         _atomic_write_report_parquet(
-            grouped_returns,
-            temp_root / "grouped_returns.parquet",
+            grouped_label_values,
+            temp_root / "grouped_label_values.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
@@ -202,7 +202,7 @@ def write_evaluation_report_artifacts(
                 "label_columns": list(spec.label_columns),
                 "filter_mode": spec.filter_mode,
                 "metadata": spec_metadata,
-                "artifacts": ["metrics.parquet", "grouped_returns.parquet"],
+                "artifacts": ["metrics.parquet", "grouped_label_values.parquet"],
             },
         )
 

@@ -75,7 +75,7 @@ def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> N
         compute_grouped_label_values(_panel(), spec, n_groups=1)
     with pytest.raises(ValueError, match="ic is missing columns"):
         summarize_ic(pd.DataFrame({"feature": ["factor"]}))
-    with pytest.raises(ValueError, match="grouped_returns is missing columns"):
+    with pytest.raises(ValueError, match="grouped_label_values is missing columns"):
         summarize_group_spread(pd.DataFrame({"feature": ["factor"]}))
 
 
