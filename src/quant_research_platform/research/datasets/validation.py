@@ -6,6 +6,9 @@ import pandas as pd
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.research.datasets._contracts import (
+    RESEARCH_DATASET_PRIMARY_KEY_COLUMNS,
+)
 
 
 def validate_research_dataset(
@@ -14,7 +17,7 @@ def validate_research_dataset(
     *,
     require_all_columns: bool = True,
 ) -> None:
-    if spec.primary_key != ("market_id", "asset_id", "timestamp"):
+    if spec.primary_key != RESEARCH_DATASET_PRIMARY_KEY_COLUMNS:
         raise ValueError("invalid_research_dataset_primary_key")
     required = set(spec.required_columns if require_all_columns else spec.primary_key)
     missing = sorted(required.difference(frame.columns))

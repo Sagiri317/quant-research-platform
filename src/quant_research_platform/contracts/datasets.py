@@ -21,6 +21,10 @@ class ResearchDatasetSpec(DataSpec):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.base_input_data_id not in self.input_data_ids:
+            raise ValueError(
+                f"base_input_data_id_not_in_inputs: {self.base_input_data_id}"
+            )
         invalid_inputs = sorted(set(self.key_coverage).difference(self.input_data_ids))
         if invalid_inputs:
             raise ValueError(

@@ -25,14 +25,33 @@ from quant_research_platform.storage.layout import StorageLayout
 
 
 def test_research_dataset_spec_requires_base_input_in_inputs() -> None:
-    spec = _dataset_spec(
-        input_data_ids=("features", "labels"),
-        base_input_data_id="base",
-    )
-    catalog = _processed_catalog()
-
     with pytest.raises(ValueError, match="base_input_data_id_not_in_inputs: base"):
-        _validate_inputs(spec, catalog)
+        _dataset_spec(
+            input_data_ids=("features", "labels"),
+            base_input_data_id="base",
+        )
+
+
+def test_research_dataset_key_coverage_is_defensively_copied() -> None:
+    source = {"features": "sparse"}
+
+    spec = _dataset_spec(key_coverage=source)
+    source["features"] = "strict"
+
+    assert spec.key_coverage["features"] == "sparse"
+
+
+def test_research_dataset_validation_rejects_noncanonical_primary_key() -> None:
+    from dataclasses import replace
+
+    from quant_research_platform.research.datasets.validation import (
+        validate_research_dataset,
+    )
+
+    spec = replace(_dataset_spec(), primary_key=("asset_id", "market_id", "timestamp"))
+
+    with pytest.raises(ValueError, match="invalid_research_dataset_primary_key"):
+        validate_research_dataset(_base_frame().assign(feature_1=[1.0, 2.0]), spec)
 
 
 def test_research_dataset_assembler_uses_explicit_base_not_input_order(
@@ -230,23 +249,8 @@ def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) ->
 
 
 def test_research_dataset_fails_closed_on_empty_inputs() -> None:
-    from quant_research_platform.research.datasets.assembler import (
-        _base_input_data_id,
-        _join_processed_inputs,
-    )
-
-    spec = _dataset_spec(input_data_ids=(), base_input_data_id="")
-    with pytest.raises(ValueError, match="empty_research_dataset_inputs"):
-        _base_input_data_id(spec)
-
-    with pytest.raises(ValueError, match="empty_research_dataset_inputs"):
-        _join_processed_inputs(
-            layout=StorageLayout(project_root=Path(".")),
-            dataset_spec=spec,
-            processed_catalog=ProcessedDataCatalog(),
-            time_window=TimeWindow("2024-01-01", "2024-01-02"),
-            base_data_id="",
-        )
+    with pytest.raises(ValueError, match="base_input_data_id_not_in_inputs"):
+        _dataset_spec(input_data_ids=(), base_input_data_id="")
 
 
 def test_strict_research_input_missing_base_key_fails_in_assembler(

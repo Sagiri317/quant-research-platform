@@ -16,6 +16,12 @@ SCAN_ROOTS = (
     Path("pyproject.toml"),
 )
 
+
+def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
+    assert Path("reports") not in SCAN_ROOTS
+    assert Path(".run") not in SCAN_ROOTS
+    assert all(".run" not in root.parts for root in SCAN_ROOTS)
+
 EXCLUDED_SCAN_PARTS = {
     ("docs", "archive"),
     ("__pycache__",),
