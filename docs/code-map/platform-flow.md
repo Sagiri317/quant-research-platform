@@ -30,7 +30,7 @@ internal source adapters -> source-normalized interim artifacts
 | `compute/` | DataFrame and tensor compute backends |
 | `agents/` | Proposal-only factory/planner boundaries |
 | `interfaces/` | Local CLI and API adapters |
-| `reports/` | Report manifests, summaries, and bundles |
+| `reports/` | Report catalog and private report artifact writers |
 | `runtime/` | Privacy, sanitization, logging, profiling, errors, resource chunk planning |
 
 ## API Flow

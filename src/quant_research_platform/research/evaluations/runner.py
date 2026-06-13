@@ -9,7 +9,9 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.reports.bundles import write_evaluation_report_files
+from quant_research_platform.reports.report_artifacts import (
+    write_evaluation_report_artifacts,
+)
 from quant_research_platform.research.datasets import (
     read_research_dataset,
     validate_evaluation_input,
@@ -67,7 +69,7 @@ def write_evaluation_result(
         market_id=result.spec.market_id,
         run_type=result.spec.run_type,
     )
-    return write_evaluation_report_files(
+    return write_evaluation_report_artifacts(
         result.metrics,
         result.grouped_returns,
         spec=result.spec,

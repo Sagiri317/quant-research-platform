@@ -281,14 +281,14 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             (evaluation,),
             "2014-01-29 through 2014-12-31",
             "evaluation",
-            summary_kind="report_bundle",
+            summary_kind="report_artifacts",
         ),
         AggregateInput(
             "prediction_oos_smoke_parity",
             (prediction,),
             "2014-01-01 through 2014-12-31",
             "prediction OOS smoke",
-            summary_kind="report_bundle",
+            summary_kind="report_artifacts",
         ),
         AggregateInput(
             "supporting_layers_coverage_2014_2025",
@@ -443,7 +443,7 @@ def _summarize_area_input(area_input: AggregateInput) -> AggregateSummary:
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
         return _summarize_generated_full_daily_panel(area_input.roots[0])
-    if area_input.summary_kind == "report_bundle":
+    if area_input.summary_kind == "report_artifacts":
         return _summarize_report_roots(area_input.roots)
     return _summarize_roots(area_input.roots, years=area_input.years)
 

@@ -1,1 +1,1 @@
-"""Report and artifact bundle helpers."""
+"""Report artifact helpers."""

@@ -1,9 +1,8 @@
-"""Report bundle helpers."""
+"""Private report artifact writers."""
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -29,20 +28,14 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 
 
-@dataclass(frozen=True)
-class ReportBundle:
-    run_id: str
-    root: Path
-
-
-def write_stage_profile_bundle(
+def write_stage_profile_report_artifacts(
     frame: pd.DataFrame,
     *,
     spec: ReportSpec,
     report_text: str,
     layout: StorageLayout,
 ) -> dict[str, Path]:
-    """Write a private stage-profile report bundle."""
+    """Write private stage-profile report artifacts."""
 
     destination = _derive_report_run_root(
         report_spec=spec,
@@ -86,14 +79,14 @@ def write_stage_profile_bundle(
     return {"csv": csv_path, "json": json_path, "report": report_path}
 
 
-def write_prediction_bundle_files(
+def write_prediction_report_artifacts(
     frame: pd.DataFrame,
     *,
     spec: PredictionSpec,
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write a private prediction bundle under reports/private_real."""
+    """Write private prediction report artifacts under reports/private_real."""
 
     run_root = _derive_report_run_root(
         report_spec=report_spec,
@@ -144,7 +137,7 @@ def write_prediction_bundle_files(
     return run_root
 
 
-def write_evaluation_report_files(
+def write_evaluation_report_artifacts(
     metrics: pd.DataFrame,
     grouped_returns: pd.DataFrame,
     *,
@@ -152,7 +145,7 @@ def write_evaluation_report_files(
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write a private evaluation report bundle under reports/private_real."""
+    """Write private evaluation report artifacts under reports/private_real."""
 
     run_root = _derive_report_run_root(
         report_spec=report_spec,
@@ -302,8 +295,7 @@ def _rename_with_transient_permission_retry(
 
 
 __all__ = [
-    "ReportBundle",
-    "write_evaluation_report_files",
-    "write_prediction_bundle_files",
-    "write_stage_profile_bundle",
+    "write_evaluation_report_artifacts",
+    "write_prediction_report_artifacts",
+    "write_stage_profile_report_artifacts",
 ]

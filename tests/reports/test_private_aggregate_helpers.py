@@ -140,6 +140,15 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         "factor_value_parity",
         "full_historical_daily_panel_status",
     }
+    report_artifact_area_inputs = {
+        item.area: item.summary_kind
+        for item in area_inputs
+        if item.area in {"evaluation_parity", "prediction_oos_smoke_parity"}
+    }
+    assert report_artifact_area_inputs == {
+        "evaluation_parity": "report_artifacts",
+        "prediction_oos_smoke_parity": "report_artifacts",
+    }
 
     artifact_root = (
         tmp_path

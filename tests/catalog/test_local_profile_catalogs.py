@@ -110,7 +110,9 @@ def test_demo_eval_model_prediction_catalogs_not_in_a_share_market_modules() -> 
 
 
 def test_reports_bundles_uses_report_local_catalog_not_profile_bundle() -> None:
-    source = (PROJECT_SRC / "reports/bundles.py").read_text(encoding="utf-8")
+    source = (PROJECT_SRC / "reports/report_artifacts.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "quant_research_platform.catalog.profiles" not in source
     assert "local_a_share_csmar_catalogs" not in source

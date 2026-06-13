@@ -115,8 +115,7 @@ APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/storage/atomic.py"),
     Path("src/quant_research_platform/storage/datasets.py"),
     Path("src/quant_research_platform/storage/manifests.py"),
-    Path("src/quant_research_platform/reports/bundles.py"),
-    Path("src/quant_research_platform/reports/manifests.py"),
+    Path("src/quant_research_platform/reports/report_artifacts.py"),
     Path("src/quant_research_platform/reports/verification_evidence.py"),
     Path("src/quant_research_platform/runtime/execution_metrics.py"),
 }
@@ -778,17 +777,17 @@ def test_direct_write_gate_detects_chained_open_write() -> None:
 def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> None:
     import inspect
 
-    from quant_research_platform.reports.bundles import (
-        write_evaluation_report_files,
-        write_prediction_bundle_files,
-        write_stage_profile_bundle,
+    from quant_research_platform.reports.report_artifacts import (
+        write_evaluation_report_artifacts,
+        write_prediction_report_artifacts,
+        write_stage_profile_report_artifacts,
     )
     from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
 
     writer_signatures = (
-        inspect.signature(write_stage_profile_bundle),
-        inspect.signature(write_prediction_bundle_files),
-        inspect.signature(write_evaluation_report_files),
+        inspect.signature(write_stage_profile_report_artifacts),
+        inspect.signature(write_prediction_report_artifacts),
+        inspect.signature(write_evaluation_report_artifacts),
         inspect.signature(StageProfiler.write_artifacts),
     )
 

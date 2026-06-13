@@ -51,7 +51,7 @@ src/quant_research_platform/
   compute/          DataFrame/tensor compute backends
   agents/           Proposal-only Factor/Label/Dataset/Workflow boundaries
   interfaces/       CLI and local API adapters
-  reports/          Report manifests, summaries, and bundles
+  reports/          Report catalog and private report artifact writers
   runtime/          Privacy, sanitization, logging, profiling, errors
 ```
 
