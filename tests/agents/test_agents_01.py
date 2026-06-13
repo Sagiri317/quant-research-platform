@@ -18,6 +18,7 @@ from quant_research_platform.agents.safety import (
 )
 from quant_research_platform.agents.workflow_planner import plan_workflow
 from quant_research_platform.catalog.factors import FactorCatalog
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.markets.implementations.a_share.fields import (
@@ -92,6 +93,7 @@ def test_public_safety_rejects_preapproved_proposals() -> None:
 
 def test_factories_return_only_public_safe_unapproved_proposals() -> None:
     factor = propose_factor(
+        profile=research_profile(),
         proposal_id="factor-proposal-002",
         factor_id="turnover_reversal",
         rationale="Candidate based on portable close and turnover fields.",
@@ -127,6 +129,7 @@ def test_factories_return_only_public_safe_unapproved_proposals() -> None:
 def test_factor_factory_rejects_unknown_input_columns() -> None:
     with pytest.raises(ValueError, match="unknown_factor_input_columns"):
         propose_factor(
+            profile=research_profile(),
             proposal_id="factor-proposal-unknown-input",
             factor_id="bad_input_factor",
             rationale="Candidate with unregistered input.",
@@ -151,6 +154,7 @@ def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() 
 
 def test_factor_catalog_registers_valid_factor_proposal() -> None:
     proposal = propose_factor(
+        profile=research_profile(),
         proposal_id="factor-proposal-register",
         factor_id="candidate_factor",
         rationale="Candidate based on registered close field.",

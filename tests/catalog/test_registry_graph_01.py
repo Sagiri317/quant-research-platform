@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
-from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
+from quant_research_platform.catalog.profiles import research_profile
 
 EXPECTED_CSMAR_INTERIM_DATA_IDS = (
     "adjustment",
@@ -16,7 +16,7 @@ EXPECTED_CSMAR_INTERIM_DATA_IDS = (
 
 
 def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() -> None:
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
     source = catalogs.sources.get("csmar")
     catalog = catalogs.source_interim_catalogs["csmar"]
 
@@ -34,7 +34,7 @@ def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() ->
 
 
 def test_csmar_source_interim_specs_have_source_not_market_identity() -> None:
-    for spec in local_a_share_csmar_catalogs().source_interim_catalogs["csmar"].list():
+    for spec in research_profile().source_interim_catalogs["csmar"].list():
         assert hasattr(spec, "data_id")
         assert hasattr(spec, "source_id")
         assert not hasattr(spec, "market_id")
@@ -42,7 +42,7 @@ def test_csmar_source_interim_specs_have_source_not_market_identity() -> None:
 
 
 def test_csmar_catalog_rejects_retired_interim_data_id() -> None:
-    catalog = local_a_share_csmar_catalogs().source_interim_catalogs["csmar"]
+    catalog = research_profile().source_interim_catalogs["csmar"]
 
     with pytest.raises(KeyError, match="unknown_interim_data_spec"):
         catalog.get("_".join(("csmar", "daily", "market", "interim")))
@@ -51,7 +51,7 @@ def test_csmar_catalog_rejects_retired_interim_data_id() -> None:
 def test_csmar_catalog_exposes_current_source_owned_data_ids() -> None:
     csmar_catalog_ids = {
         spec.data_id
-        for spec in local_a_share_csmar_catalogs().source_interim_catalogs[
+        for spec in research_profile().source_interim_catalogs[
             "csmar"
         ].list()
     }

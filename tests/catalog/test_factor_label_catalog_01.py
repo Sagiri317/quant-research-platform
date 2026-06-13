@@ -4,7 +4,7 @@ import pytest
 
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.markets.implementations.a_share.factors import (
@@ -105,7 +105,7 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
 
 
 def test_source_registry_entries_are_internal_only() -> None:
-    sources = local_a_share_csmar_catalogs().sources.list()
+    sources = research_profile().sources.list()
 
     assert sources
     assert all(not item.public_identifier for item in sources)

@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import typer
 
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.interfaces import services
 from quant_research_platform.runtime.privacy import sanitize_public_text
 
@@ -40,7 +41,7 @@ def catalog_factors() -> None:
     """List registered factor definitions."""
 
     _echo_safe("factor_id,market_id,factor_set,definition_version")
-    for item in services.list_factors()["items"]:
+    for item in services.list_factors(research_profile())["items"]:
         _echo_safe(
             f"{item['factor_id']},{item['market_id']},{item['factor_set']},"
             f"{item['definition_version']}"
@@ -52,7 +53,7 @@ def catalog_labels() -> None:
     """List registered label definitions."""
 
     _echo_safe("label_id,market_id,horizon,definition_version")
-    for item in services.list_labels()["items"]:
+    for item in services.list_labels(research_profile())["items"]:
         _echo_safe(
             f"{item['label_id']},{item['market_id']},{item['horizon']},"
             f"{item['definition_version']}"
@@ -65,7 +66,12 @@ def research_dataset_requirements(
 ) -> None:
     """Describe public research dataset requirements."""
 
-    _run_cli(lambda: services.describe_research_dataset_requirements(dataset_id))
+    _run_cli(
+        lambda: services.describe_research_dataset_requirements(
+            dataset_id,
+            research_profile(),
+        )
+    )
 
 
 def main() -> None:

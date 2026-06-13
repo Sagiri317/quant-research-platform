@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.catalog.profiles import (
-    CatalogBundle,
-    local_a_share_csmar_catalogs,
+    ResearchProfile,
+    research_profile,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.markets.implementations.a_share.definition import (
@@ -28,9 +28,9 @@ from quant_research_platform.markets.implementations.a_share.research_profiles i
 
 
 def test_local_profile_returns_boundary_sealed_bundle() -> None:
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
 
-    assert isinstance(catalogs, CatalogBundle)
+    assert isinstance(catalogs, ResearchProfile)
     assert catalogs.factors is not None
     assert catalogs.labels is not None
     assert catalogs.processed is not None
@@ -42,7 +42,7 @@ def test_local_profile_returns_boundary_sealed_bundle() -> None:
 
 
 def test_local_profile_market_catalogs_delegate_to_a_share_owner_factories() -> None:
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
     profile_factors = catalogs.factors.list()
     owner_factors = factor_definitions.a_share_factor_catalog().list()
     profile_labels = catalogs.labels.list()
@@ -57,7 +57,7 @@ def test_local_profile_market_catalogs_delegate_to_a_share_owner_factories() -> 
 
 
 def test_local_profile_research_dataset_catalog_delegates_to_a_share_owner() -> None:
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
     profile_spec = catalogs.research_datasets.get(
         A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
@@ -70,7 +70,7 @@ def test_local_profile_research_dataset_catalog_delegates_to_a_share_owner() -> 
 
 
 def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
     specs = catalogs.processed.list()
     kinds_by_id = {spec.data_id: spec.kind for spec in specs}
 
@@ -82,7 +82,7 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
 
 
 def test_local_profile_internal_registries_are_platform_composed() -> None:
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
     market = catalogs.markets.get(A_SHARE_MARKET_ID)
     owner_market = a_share_market_definition()
     source = catalogs.sources.get("csmar")
@@ -98,7 +98,7 @@ def test_local_profile_internal_registries_are_platform_composed() -> None:
 
 
 def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
-    source_catalogs = local_a_share_csmar_catalogs().source_interim_catalogs
+    source_catalogs = research_profile().source_interim_catalogs
 
     assert set(source_catalogs) == {"csmar"}
     assert isinstance(source_catalogs["csmar"], InterimDataCatalog)
@@ -120,7 +120,7 @@ def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
 
 def test_a_share_processed_catalog_owner_matches_profile() -> None:
     profile_ids = {
-        spec.data_id for spec in local_a_share_csmar_catalogs().processed.list()
+        spec.data_id for spec in research_profile().processed.list()
     }
     owner_ids = {
         spec.data_id for spec in processed_catalog.a_share_processed_catalog().list()

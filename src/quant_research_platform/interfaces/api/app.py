@@ -7,6 +7,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.interfaces import services
 from quant_research_platform.interfaces.api.errors import (
     ApiError,
@@ -57,14 +58,14 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
         operation_id="list_catalog_factors",
     )
     def catalog_factors() -> dict[str, object]:
-        return services.list_factors()
+        return services.list_factors(research_profile())
 
     @app.get(
         "/api/0.1/catalog/labels",
         operation_id="list_catalog_labels",
     )
     def catalog_labels() -> dict[str, object]:
-        return services.list_labels()
+        return services.list_labels(research_profile())
 
     @app.get(
         "/api/0.1/research-datasets/{dataset_id}/requirements",
@@ -72,7 +73,10 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
     )
     def describe_research_dataset_requirements(dataset_id: str) -> dict[str, object]:
         try:
-            return services.describe_research_dataset_requirements(dataset_id)
+            return services.describe_research_dataset_requirements(
+                dataset_id,
+                research_profile(),
+            )
         except KeyError as exc:
             raise ApiError(
                 error_code="unknown_dataset_id",

@@ -66,8 +66,10 @@ def test_catalog_profiles_remains_platform_composition_root() -> None:
     assert "csmar_interim_catalog(" in source
     assert "source_bindings" not in source
     assert "provider_binding" not in source
-    assert "local_a_share_csmar_catalogs" in all_names
-    assert "CatalogBundle" in all_names
+    assert "research_profile" in all_names
+    assert "ResearchProfile" in all_names
+    assert "local_a_share_csmar_catalogs" not in all_names
+    assert "CatalogBundle" not in all_names
     assert not [name for name in all_names if name.startswith("default_")]
 
 

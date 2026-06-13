@@ -76,8 +76,10 @@ def test_retired_public_profile_names_are_absent() -> None:
         filename=str(profiles_path),
     )
     public_names = _module_all_names(tree)
-    assert "CatalogBundle" in public_names
-    assert "local_a_share_csmar_catalogs" in public_names
+    assert "ResearchProfile" in public_names
+    assert "research_profile" in public_names
+    assert "CatalogBundle" not in public_names
+    assert "local_a_share_csmar_catalogs" not in public_names
     assert "PlatformCatalogs" not in public_names
     assert "default_catalogs" not in public_names
     assert not [name for name in public_names if name.startswith("default_")]
@@ -154,6 +156,52 @@ def test_interfaces_workflows_agents_use_profile_not_direct_implementations() ->
 
     assert hits == []
     assert profile_users
+
+
+def test_deep_layers_do_not_build_default_research_profile() -> None:
+    hits: list[str] = []
+    forbidden = ("research_profile(", "local_a_share_csmar_catalogs(")
+    roots = (
+        PROJECT_SRC / "interfaces/services.py",
+        PROJECT_SRC / "agents",
+        PROJECT_SRC / "workflows",
+    )
+    for path in _python_files(roots):
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in source:
+                hits.append(f"{path}:{token}")
+
+    assert hits == []
+
+
+def test_shared_services_receive_research_profile_by_parameter() -> None:
+    services_path = PROJECT_SRC / "interfaces/services.py"
+    source = services_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(services_path))
+    expected_profile_parameter = {
+        "list_factors",
+        "list_labels",
+        "describe_research_dataset_requirements",
+    }
+    function_parameters = {
+        node.name: {arg.arg for arg in node.args.args}
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name in expected_profile_parameter
+    }
+    forbidden_import_names = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "quant_research_platform.catalog.profiles"
+        for alias in node.names
+        if alias.name == "research_profile"
+    ]
+
+    assert expected_profile_parameter == set(function_parameters)
+    assert all("profile" in names for names in function_parameters.values())
+    assert forbidden_import_names == []
 
 
 def test_evaluation_model_prediction_do_not_import_a_share_annotation_rules() -> None:

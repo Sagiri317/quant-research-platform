@@ -8,6 +8,7 @@ from typing import Annotated
 
 import typer
 
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.reports.schema_inventory import build_schema_inventory
 from quant_research_platform.runtime.privacy import sanitize_public_text
 from quant_research_platform.storage.atomic import atomic_write_text
@@ -91,6 +92,7 @@ def evidence_run(
                 output_root=output_root,
                 start_date=start_date,
                 end_date=end_date,
+                profile=research_profile(),
                 replace_output=replace_output,
             )
         )

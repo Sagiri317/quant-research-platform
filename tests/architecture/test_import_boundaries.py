@@ -134,7 +134,9 @@ def test_catalog_profiles_is_the_only_interface_composition_root() -> None:
             "quant_research_platform.sources.csmar.interim",
         }
     )
-    assert "local_a_share_csmar_catalogs" in profiles_path.read_text(encoding="utf-8")
+    profiles_source = profiles_path.read_text(encoding="utf-8")
+    assert "research_profile" in profiles_source
+    assert "local_a_share_csmar_catalogs" not in profiles_source
     interface_market_imports = [
         f"{path}:{lineno} imports {module}"
         for path, lineno, module in _iter_imports(PROJECT_SRC / "interfaces")

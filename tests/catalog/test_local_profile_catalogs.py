@@ -24,36 +24,38 @@ from quant_research_platform.catalog.sources import SourceRegistry
 PROJECT_SRC = Path("src/quant_research_platform")
 
 
-def test_local_a_share_csmar_catalogs_is_only_public_profile_builder() -> None:
+def test_research_profile_is_only_public_profile_builder() -> None:
     import quant_research_platform.catalog.profiles as profiles
 
     all_names = set(profiles.__all__)
-    assert all_names == {"CatalogBundle", "local_a_share_csmar_catalogs"}
+    assert all_names == {"ResearchProfile", "research_profile"}
     assert "default_catalogs" not in vars(profiles)
+    assert "CatalogBundle" not in vars(profiles)
+    assert "local_a_share_csmar_catalogs" not in vars(profiles)
     assert not [name for name in vars(profiles) if name.startswith("default_")]
 
 
-def test_catalog_bundle_contains_current_local_profile_catalogs() -> None:
+def test_research_profile_contains_current_local_profile_catalogs() -> None:
     from quant_research_platform.catalog.profiles import (
-        CatalogBundle,
-        local_a_share_csmar_catalogs,
+        ResearchProfile,
+        research_profile,
     )
 
-    bundle = local_a_share_csmar_catalogs()
+    profile = research_profile()
 
-    assert isinstance(bundle, CatalogBundle)
-    assert isinstance(bundle.fields, FieldCatalog)
-    assert isinstance(bundle.factors, FactorCatalog)
-    assert isinstance(bundle.labels, LabelCatalog)
-    assert isinstance(bundle.processed, ProcessedDataCatalog)
-    assert isinstance(bundle.research_datasets, ResearchDatasetCatalog)
-    assert isinstance(bundle.reports, ReportCatalog)
-    assert isinstance(bundle.evaluations, EvaluationCatalog)
-    assert isinstance(bundle.models, ModelCatalog)
-    assert isinstance(bundle.predictions, PredictionCatalog)
-    assert isinstance(bundle.sources, SourceRegistry)
-    assert isinstance(bundle.markets, MarketRegistry)
-    assert set(bundle.source_interim_catalogs) == {"csmar"}
+    assert isinstance(profile, ResearchProfile)
+    assert isinstance(profile.fields, FieldCatalog)
+    assert isinstance(profile.factors, FactorCatalog)
+    assert isinstance(profile.labels, LabelCatalog)
+    assert isinstance(profile.processed, ProcessedDataCatalog)
+    assert isinstance(profile.research_datasets, ResearchDatasetCatalog)
+    assert isinstance(profile.reports, ReportCatalog)
+    assert isinstance(profile.evaluations, EvaluationCatalog)
+    assert isinstance(profile.models, ModelCatalog)
+    assert isinstance(profile.predictions, PredictionCatalog)
+    assert isinstance(profile.sources, SourceRegistry)
+    assert isinstance(profile.markets, MarketRegistry)
+    assert set(profile.source_interim_catalogs) == {"csmar"}
 
 
 def test_a_share_research_profiles_do_not_import_csmar() -> None:
@@ -132,7 +134,7 @@ def test_catalog_profile_private_binding_helpers_convert_source_id(monkeypatch) 
         fake_materialize,
     )
 
-    assert profiles._local_a_share_materialize_processed_data(source_id="csmar") == "ok"
+    assert profiles._materialize_a_share_processed_data(source_id="csmar") == "ok"
     assert captured["source_id"] == SourceId("csmar")
 
 
@@ -147,7 +149,7 @@ def test_catalog_profile_private_interim_helper_forwards_kwargs(monkeypatch) -> 
 
     monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", fake_materialize)
 
-    result = profiles._local_a_share_csmar_materialize_interim_data(data_id="daily")
+    result = profiles._materialize_a_share_csmar_interim_data(data_id="daily")
 
     assert result == {"data_id": "daily"}
 
@@ -168,15 +170,15 @@ def test_catalog_profile_source_interim_catalog_requires_single_source(
     monkeypatch.setattr(profiles, "csmar_interim_catalog", fake_catalog)
 
     with pytest.raises(ValueError, match="unexpected_source_interim_catalog_sources"):
-        profiles._local_a_share_source_interim_catalogs()
+        profiles._a_share_csmar_source_interim_catalogs()
 
 
 def test_catalog_profile_source_id_matches_interim_catalog() -> None:
     import quant_research_platform.catalog.profiles as profiles
 
-    assert profiles._local_a_share_csmar_source_id() == "csmar"
+    assert profiles._a_share_csmar_source_id() == "csmar"
     assert isinstance(
-        next(iter(profiles._local_a_share_source_interim_catalogs().values())),
+        next(iter(profiles._a_share_csmar_source_interim_catalogs().values())),
         InterimDataCatalog,
     )
 

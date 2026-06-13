@@ -2,29 +2,29 @@
 
 from __future__ import annotations
 
-from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
+from quant_research_platform.catalog.profiles import ResearchProfile
 from quant_research_platform.runtime.privacy import sanitize_public_object
 
 API_VERSION = "0.1"
 
 
-def list_factors() -> dict[str, object]:
-    catalogs = local_a_share_csmar_catalogs()
+def list_factors(profile: ResearchProfile) -> dict[str, object]:
     return _response(
-        items=[item.to_manifest() for item in catalogs.factors.list()]
+        items=[item.to_manifest() for item in profile.factors.list()]
     )
 
 
-def list_labels() -> dict[str, object]:
-    catalogs = local_a_share_csmar_catalogs()
+def list_labels(profile: ResearchProfile) -> dict[str, object]:
     return _response(
-        items=[item.to_manifest() for item in catalogs.labels.list()]
+        items=[item.to_manifest() for item in profile.labels.list()]
     )
 
 
-def describe_research_dataset_requirements(dataset_id: str) -> dict[str, object]:
-    catalogs = local_a_share_csmar_catalogs()
-    spec = catalogs.research_datasets.get(dataset_id)
+def describe_research_dataset_requirements(
+    dataset_id: str,
+    profile: ResearchProfile,
+) -> dict[str, object]:
+    spec = profile.research_datasets.get(dataset_id)
     return _response(
         status="available",
         mode="requirements_query_only",
