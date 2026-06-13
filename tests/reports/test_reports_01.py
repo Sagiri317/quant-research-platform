@@ -544,6 +544,7 @@ def _evaluation_metrics_frame() -> pd.DataFrame:
             "label": ["forward_return_20d"],
             "ic": [0.1],
             "rankic": [0.2],
+            "n_obs": [2],
         }
     )
 
@@ -552,7 +553,10 @@ def _evaluation_grouped_returns_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2014-01-03"]),
+            "feature": ["mom_20d"],
+            "label": ["forward_return_20d"],
             "group": [1],
-            "mean_return": [0.01],
+            "mean_label_value": [0.01],
+            "n_obs": [2],
         }
     )

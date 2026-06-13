@@ -6,12 +6,12 @@ Focused portfolio compute entry points are split into owner modules:
 - `compute/dataframe/constraints.py`
 - `compute/dataframe/turnover.py`
 - `compute/dataframe/exposure.py`
-- `compute/dataframe/reporting.py`
+- `compute/dataframe/portfolio_returns.py`
 - `compute/tensor/construction.py`
 - `compute/tensor/constraints.py`
 - `compute/tensor/turnover.py`
 - `compute/tensor/exposure.py`
-- `compute/tensor/reporting.py`
+- `compute/tensor/portfolio_returns.py`
 
 These modules must not gain storage, catalog, API, workflow, market,
 broker/exchange, paper trading, or live trading responsibilities. New portfolio

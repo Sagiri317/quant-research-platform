@@ -109,12 +109,12 @@ def test_clean_rewrite_target_files_exist() -> None:
         "compute/dataframe/constraints.py",
         "compute/dataframe/turnover.py",
         "compute/dataframe/exposure.py",
-        "compute/dataframe/reporting.py",
+        "compute/dataframe/portfolio_returns.py",
         "compute/tensor/construction.py",
         "compute/tensor/constraints.py",
         "compute/tensor/turnover.py",
         "compute/tensor/exposure.py",
-        "compute/tensor/reporting.py",
+        "compute/tensor/portfolio_returns.py",
         "sources/csmar/ids.py",
         "sources/csmar/raw_schemas.py",
         "sources/csmar/field_mappings.py",
@@ -150,7 +150,9 @@ def test_compute_portfolio_compatibility_facades_are_absent() -> None:
     retired = (
         SOURCE_ROOT / "compute/dataframe/portfolio.py",
         SOURCE_ROOT / "compute/dataframe/helpers.py",
+        SOURCE_ROOT / "compute/dataframe" / ("report" + "ing.py"),
         SOURCE_ROOT / "compute/tensor/portfolio.py",
+        SOURCE_ROOT / "compute/tensor" / ("report" + "ing.py"),
     )
 
     assert [str(path) for path in retired if path.exists()] == []
@@ -162,12 +164,12 @@ def test_compute_split_modules_own_implementations() -> None:
         SOURCE_ROOT / "compute/dataframe/constraints.py",
         SOURCE_ROOT / "compute/dataframe/turnover.py",
         SOURCE_ROOT / "compute/dataframe/exposure.py",
-        SOURCE_ROOT / "compute/dataframe/reporting.py",
+        SOURCE_ROOT / "compute/dataframe/portfolio_returns.py",
         SOURCE_ROOT / "compute/tensor/construction.py",
         SOURCE_ROOT / "compute/tensor/constraints.py",
         SOURCE_ROOT / "compute/tensor/turnover.py",
         SOURCE_ROOT / "compute/tensor/exposure.py",
-        SOURCE_ROOT / "compute/tensor/reporting.py",
+        SOURCE_ROOT / "compute/tensor/portfolio_returns.py",
     )
     missing: list[str] = []
     reverse_imports: list[str] = []

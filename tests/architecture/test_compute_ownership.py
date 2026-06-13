@@ -59,6 +59,79 @@ def test_active_code_does_not_import_compute_protocols_or_old_exact_names() -> N
     assert not hits, "old_compute_or_storage_symbol_found: " + "; ".join(hits)
 
 
+def test_compute_modules_do_not_import_platform_layers() -> None:
+    forbidden_prefixes = (
+        "quant_research_platform.research.evaluations",
+        "quant_research_platform.reports",
+        "quant_research_platform.workflows",
+        "quant_research_platform.catalog",
+        "quant_research_platform.storage",
+    )
+    hits: list[str] = []
+    for path in _python_files((PROJECT_SRC / "compute",)):
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.startswith(forbidden_prefixes):
+                    hits.append(f"{path}:{node.lineno}: {node.module}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith(forbidden_prefixes):
+                        hits.append(f"{path}:{node.lineno}: {alias.name}")
+
+    assert not hits, "compute_layer_import_boundary_violation: " + "; ".join(hits)
+
+
+def test_compute_cross_section_public_kernels_use_compute_names() -> None:
+    hits: list[str] = []
+    for path in (
+        PROJECT_SRC / "compute/dataframe/cross_section.py",
+        PROJECT_SRC / "compute/tensor/cross_section.py",
+    ):
+        tree = _parse(path)
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name.startswith("_"):
+                continue
+            if node.name.startswith(("evaluate_", "analyze_")):
+                hits.append(f"{path}:{node.lineno}: {node.name}")
+
+    assert not hits, "compute_public_kernel_name_not_neutral: " + "; ".join(hits)
+
+
+def test_compute_cross_section_output_columns_use_label_value_names() -> None:
+    retired_column = "mean_forward" + "_return"
+    hits: list[str] = []
+    for path in (
+        PROJECT_SRC / "compute/dataframe/cross_section.py",
+        PROJECT_SRC / "compute/tensor/cross_section.py",
+    ):
+        text = path.read_text(encoding="utf-8")
+        if retired_column in text:
+            hits.append(f"{path}: {retired_column}")
+
+    assert not hits, "compute_grouped_output_name_not_neutral: " + "; ".join(hits)
+
+
+def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:
+    hits: list[str] = []
+    for path in _python_files((PROJECT_SRC / "compute/tensor",)):
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            if not node.module.startswith("quant_research_platform.compute.dataframe"):
+                continue
+            private_names = [
+                alias.name for alias in node.names if alias.name.startswith("_")
+            ]
+            if private_names:
+                hits.append(f"{path}:{node.lineno}: {node.module}.{private_names}")
+
+    assert not hits, "tensor_imports_dataframe_private_helper: " + "; ".join(hits)
+
+
 def _parse(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 

@@ -166,12 +166,19 @@ def write_evaluation_report_files(
 
     _validate_report_frame(
         metrics,
-        required=("timestamp", "feature", "label", "ic", "rankic"),
+        required=("timestamp", "feature", "label", "ic", "rankic", "n_obs"),
         error_name="evaluation_metrics",
     )
     _validate_report_frame(
         grouped_returns,
-        required=("timestamp", "group", "mean_return"),
+        required=(
+            "timestamp",
+            "feature",
+            "label",
+            "group",
+            "mean_label_value",
+            "n_obs",
+        ),
         error_name="evaluation_grouped_returns",
     )
 

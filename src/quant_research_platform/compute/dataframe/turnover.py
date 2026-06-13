@@ -8,7 +8,6 @@ from quant_research_platform.compute.config import (
     CostConfig,
     WeightConfig,
 )
-from quant_research_platform.compute.dataframe.construction import _validate_positions
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
     TURNOVER_COLUMNS,
@@ -17,6 +16,7 @@ from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _cost_components,
     _normalize_group_key,
 )
+from quant_research_platform.compute.dataframe.position_math import _validate_positions
 
 
 def calculate_turnover(

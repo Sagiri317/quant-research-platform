@@ -1,4 +1,4 @@
-"""DataFrame portfolio return reporting algorithms."""
+"""DataFrame portfolio return algorithms."""
 
 from __future__ import annotations
 
@@ -14,9 +14,6 @@ from quant_research_platform.compute.dataframe.constraints import (
     _build_tradability_context,
     _validate_tradability_columns,
 )
-from quant_research_platform.compute.dataframe.construction import (
-    _build_feature_positions,
-)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
     POSITION_COLUMNS,
@@ -31,6 +28,9 @@ from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _select_features,
     _validate_segment_columns,
     _validate_weight_columns,
+)
+from quant_research_platform.compute.dataframe.position_math import (
+    _build_feature_positions,
 )
 from quant_research_platform.compute.dataframe.turnover import (
     _active_position_map,

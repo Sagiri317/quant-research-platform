@@ -142,7 +142,18 @@ def _processed_catalog() -> ProcessedDataCatalog:
     return catalog
 
 
-def test_evaluation_filter_modes_and_metadata_use_hand_calculated_values() -> None:
+def test_evaluation_filter_modes_and_metadata_use_hand_calculated_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_corr(*args, **kwargs):
+        raise AssertionError("evaluation should delegate correlation math to compute")
+
+    def fail_qcut(*args, **kwargs):
+        raise AssertionError("evaluation should delegate grouped label math to compute")
+
+    monkeypatch.setattr(pd.Series, "corr", fail_corr)
+    monkeypatch.setattr(pd, "qcut", fail_qcut)
+
     frame = _filter_frame()
     eligible_spec = EvaluationSpec(
         run_id="eval_eligible",
@@ -193,15 +204,15 @@ def test_evaluation_filter_modes_and_metadata_use_hand_calculated_values() -> No
 
     assert eligible.metrics.loc[0, "ic"] == pytest.approx(1.0)
     assert eligible.metrics.loc[0, "rankic"] == pytest.approx(1.0)
-    assert eligible.grouped_returns["mean_return"].tolist() == pytest.approx(
+    assert eligible.grouped_returns["mean_label_value"].tolist() == pytest.approx(
         [0.015, 0.045]
     )
     assert tradable.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert tradable.grouped_returns["mean_return"].tolist() == pytest.approx(
+    assert tradable.grouped_returns["mean_label_value"].tolist() == pytest.approx(
         [0.01, 0.02]
     )
     assert unfiltered.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert unfiltered.grouped_returns["mean_return"].tolist() == pytest.approx(
+    assert unfiltered.grouped_returns["mean_label_value"].tolist() == pytest.approx(
         [0.02, 0.045]
     )
 

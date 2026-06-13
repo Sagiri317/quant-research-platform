@@ -1,4 +1,4 @@
-"""提供 tensor-backed cross-sectional IC 和 group-return diagnostics。"""
+"""Tensor-backed cross-sectional math kernels."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
     GROUP_SPREAD_SUMMARY_COLUMNS,
-    GROUPED_RETURN_COLUMNS,
+    GROUPED_LABEL_VALUE_COLUMNS,
     IC_RESULT_COLUMNS,
     summarize_group_spread,
 )
@@ -15,7 +15,7 @@ from quant_research_platform.compute.tensor.layout import PanelTensor
 from quant_research_platform.compute.tensor.masks import valid_observation_mask
 
 
-def evaluate_ic_by_timestamp_tensor(tensor: PanelTensor) -> pd.DataFrame:
+def compute_ic_by_timestamp_tensor(tensor: PanelTensor) -> pd.DataFrame:
     """基于 PanelTensor 计算 IC 和 RankIC。"""
 
     records: list[dict[str, object]] = []
@@ -49,12 +49,12 @@ def evaluate_ic_by_timestamp_tensor(tensor: PanelTensor) -> pd.DataFrame:
     return pd.DataFrame.from_records(records, columns=IC_RESULT_COLUMNS)
 
 
-def evaluate_ic_and_grouped_returns_tensor(
+def compute_ic_and_grouped_label_values_tensor(
     tensor: PanelTensor,
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """在一次 tensor timestamp/feature 扫描中计算 IC 和 grouped returns。"""
+    """在一次 tensor timestamp/feature 扫描中计算 IC 和 grouped label values。"""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -101,11 +101,11 @@ def evaluate_ic_and_grouped_returns_tensor(
             )
     return (
         pd.DataFrame.from_records(ic_records, columns=IC_RESULT_COLUMNS),
-        pd.DataFrame.from_records(grouped_records, columns=GROUPED_RETURN_COLUMNS),
+        pd.DataFrame.from_records(grouped_records, columns=GROUPED_LABEL_VALUE_COLUMNS),
     )
 
 
-def analyze_grouped_returns_tensor(
+def compute_grouped_label_values_tensor(
     tensor: PanelTensor,
     n_groups: int = 5,
 ) -> pd.DataFrame:
@@ -135,7 +135,7 @@ def analyze_grouped_returns_tensor(
                 label_values=label,
                 groups=groups,
             )
-    return pd.DataFrame.from_records(records, columns=GROUPED_RETURN_COLUMNS)
+    return pd.DataFrame.from_records(records, columns=GROUPED_LABEL_VALUE_COLUMNS)
 
 
 def summarize_group_spread_tensor(grouped_returns: pd.DataFrame) -> pd.DataFrame:
@@ -167,7 +167,7 @@ def _append_grouped_return_records(
     counts = np.bincount(groups, minlength=group_count + 1)[1:]
     sums = np.bincount(groups, weights=label_values, minlength=group_count + 1)[1:]
     means = sums / counts
-    for group_offset, (mean_return, n_obs) in enumerate(
+    for group_offset, (mean_label_value, n_obs) in enumerate(
         zip(means, counts, strict=True),
         start=1,
     ):
@@ -177,7 +177,7 @@ def _append_grouped_return_records(
                 "feature": feature,
                 "label": label_name,
                 "group": group_offset,
-                "mean_forward_return": float(mean_return),
+                "mean_label_value": float(mean_label_value),
                 "n_obs": int(n_obs),
             }
         )

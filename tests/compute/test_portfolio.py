@@ -5,7 +5,6 @@ import pytest
 
 import quant_research_platform.compute.tensor.construction as tensor_construction
 import quant_research_platform.compute.tensor.exposure as tensor_exposure
-import quant_research_platform.compute.tensor.reporting as tensor_reporting
 import quant_research_platform.compute.tensor.turnover as tensor_turnover
 from quant_research_platform.compute.config import (
     CostConfig,
@@ -25,7 +24,10 @@ from quant_research_platform.compute.dataframe import (
     performance as dataframe_performance,
 )
 from quant_research_platform.compute.dataframe import (
-    reporting as dataframe_reporting,
+    portfolio_returns as dataframe_portfolio_returns,
+)
+from quant_research_platform.compute.dataframe import (
+    position_math as dataframe_position_math,
 )
 from quant_research_platform.compute.dataframe import (
     turnover as dataframe_turnover,
@@ -39,7 +41,7 @@ from quant_research_platform.compute.dataframe.performance import (
     calculate_cumulative_returns,
     summarize_performance,
 )
-from quant_research_platform.compute.dataframe.reporting import (
+from quant_research_platform.compute.dataframe.portfolio_returns import (
     simulate_long_short_returns,
     simulate_weighted_long_short_returns,
 )
@@ -48,6 +50,9 @@ from quant_research_platform.compute.dataframe.turnover import (
     calculate_turnover,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
+from quant_research_platform.compute.tensor import (
+    portfolio_returns as tensor_portfolio_returns,
+)
 
 
 def test_portfolio_split_modules_are_direct_owners() -> None:
@@ -58,7 +63,7 @@ def test_portfolio_split_modules_are_direct_owners() -> None:
     assert hasattr(tensor_construction, "build_tensor_weighted_positions")
     assert hasattr(tensor_turnover, "calculate_tensor_turnover_and_cost")
     assert hasattr(tensor_exposure, "summarize_tensor_exposure_from_path")
-    assert hasattr(tensor_reporting, "calculate_tensor_long_short")
+    assert hasattr(tensor_portfolio_returns, "calculate_tensor_long_short")
 
 
 def _ranking_panel() -> pd.DataFrame:
@@ -261,14 +266,14 @@ def test_weighted_position_ranking_avoids_dataframe_signal_sort(
 
 
 def test_weighted_positions_pass_sparse_targets_to_tradability(monkeypatch) -> None:
-    original_apply = dataframe_construction._apply_tradability_constraints
+    original_apply = dataframe_position_math._apply_tradability_constraints
 
     def assert_sparse_positions(*, positions, **kwargs):
         assert len(positions) == 2
         return original_apply(positions=positions, **kwargs)
 
     monkeypatch.setattr(
-        dataframe_construction,
+        dataframe_position_math,
         "_apply_tradability_constraints",
         assert_sparse_positions,
     )
@@ -725,8 +730,8 @@ def test_simulation_does_not_join_timestamp_asset_labels(monkeypatch) -> None:
 def test_simulation_does_not_scan_turnover_and_cost_per_return_group(
     monkeypatch,
 ) -> None:
-    assert not hasattr(dataframe_reporting, "_lookup_turnover")
-    assert not hasattr(dataframe_reporting, "_lookup_cost")
+    assert not hasattr(dataframe_portfolio_returns, "_lookup_turnover")
+    assert not hasattr(dataframe_portfolio_returns, "_lookup_cost")
 
     simulate_weighted_long_short_returns(
         _ranking_panel(),
@@ -744,7 +749,7 @@ def test_simulation_streams_portfolio_path_without_rebuilding_from_positions(
     monkeypatch.setattr(dataframe_turnover, "calculate_turnover", fail_rebuild)
     monkeypatch.setattr(dataframe_turnover, "calculate_cost_breakdown", fail_rebuild)
     monkeypatch.setattr(
-        dataframe_reporting,
+        dataframe_portfolio_returns,
         "_calculate_long_short_from_positions",
         fail_rebuild,
     )

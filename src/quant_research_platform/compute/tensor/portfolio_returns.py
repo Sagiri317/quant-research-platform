@@ -1,19 +1,17 @@
-"""Tensor portfolio long-short reporting algorithms."""
+"""Tensor portfolio long-short return algorithms."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute._portfolio_math import _normalize_group_key
 from quant_research_platform.compute.config import (
     CostConfig,
     WeightConfig,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     RETURNS_COLUMNS,
-)
-from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _normalize_group_key,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.compute.tensor.exposure import _exposure_record_from_arrays

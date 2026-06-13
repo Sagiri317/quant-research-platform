@@ -5,6 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute._portfolio_math import (
+    _cost_components,
+    _normalize_group_key,
+)
 from quant_research_platform.compute.config import (
     CostConfig,
     WeightConfig,
@@ -12,10 +16,6 @@ from quant_research_platform.compute.config import (
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
     TURNOVER_COLUMNS,
-)
-from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _cost_components,
-    _normalize_group_key,
 )
 
 
