@@ -5,10 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import quant_research_platform.reports.private_evidence as private_evidence_module
-from quant_research_platform.reports.private_evidence import (
-    build_private_evidence_summary,
+from quant_research_platform.reports.verification_evidence import (
     build_validation_summary,
+    build_verification_evidence_summary,
     write_run_summary_md,
 )
 from quant_research_platform.storage.atomic import atomic_write_json
@@ -34,8 +33,7 @@ def test_validation_summary_detects_manifest_failures_and_private_safety(
         "validation_status": "fail",
     }
     monkeypatch.setattr(
-        private_evidence_module,
-        "inspect_dataset",
+        "quant_research_platform.reports.verification_evidence.inspect_dataset",
         lambda root: SimpleNamespace(manifest=manifest),
     )
     unsafe_summary = tmp_path / "summary.md"
@@ -72,14 +70,13 @@ def test_validation_summary_accepts_schema_only_dataset_manifest(tmp_path, monke
         },
     }
     monkeypatch.setattr(
-        private_evidence_module,
-        "inspect_dataset",
+        "quant_research_platform.reports.verification_evidence.inspect_dataset",
         lambda root: SimpleNamespace(manifest=manifest),
     )
 
     summary = build_validation_summary(
         run_id="s8",
-        output_root=tmp_path / ".run" / "s8",
+        output_root=tmp_path / "verification-output" / "s8",
         dataset_roots=(dataset_root,),
         layer_manifest_paths=(),
         generated_text_paths=(),
@@ -89,21 +86,21 @@ def test_validation_summary_accepts_schema_only_dataset_manifest(tmp_path, monke
     assert "dataset_validation_failed" not in summary["failure_codes"]
 
 
-def test_private_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
+def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
     validation = {"status": "PASS", "failure_codes": []}
-    evidence = build_private_evidence_summary(
+    evidence = build_verification_evidence_summary(
         run_id="run",
         date_range={"start_date": "2014-01-01", "end_date": "2016-12-31"},
         manifests={"dataset_count": 1, "layer_count": 4},
         timings={"total_duration_seconds": 1.25},
         validation_summary=validation,
-        output_root=Path(".run") / "s1",
+        output_root=Path("verification-output") / "s1",
     )
     md_path = write_run_summary_md(tmp_path / "summary.md", evidence)
     text = md_path.read_text(encoding="utf-8")
 
     assert evidence["status"] == "PASS"
-    assert ".run/s1" in text
+    assert "verification-output/s1" in text
     assert str(tmp_path) not in text
 
 
@@ -160,7 +157,7 @@ def test_private_safety_scan_does_not_treat_json_numbers_as_stock_samples(tmp_pa
 
 
 def test_private_safety_scan_counts_only_existing_scanned_paths(tmp_path):
-    run_root = tmp_path / ".run" / "s1"
+    run_root = tmp_path / "verification-output" / "s1"
     run_root.mkdir(parents=True)
     safe = run_root / "safe.json"
     missing = run_root / "timings" / "timings.json"

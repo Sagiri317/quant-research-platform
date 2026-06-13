@@ -41,11 +41,11 @@ class StorageLayout:
 
 
 @dataclass(frozen=True)
-class PrivateEvidenceLayout:
+class VerificationEvidenceLayout:
     output_root: Path
 
     @classmethod
-    def from_output_root(cls, output_root: Path) -> PrivateEvidenceLayout:
+    def from_output_root(cls, output_root: Path) -> VerificationEvidenceLayout:
         return cls(output_root=Path(output_root))
 
     @property
@@ -109,7 +109,7 @@ def layout_from_processed_market_root(processed_root: Path) -> StorageLayout:
 
 
 __all__ = [
-    "PrivateEvidenceLayout",
+    "VerificationEvidenceLayout",
     "StorageLayout",
     "layout_from_processed_market_root",
 ]

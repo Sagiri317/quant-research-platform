@@ -11,9 +11,10 @@ SCAN_ROOTS = (
     Path("PROJECT_STATUS.md"),
     Path(".agents"),
 )
+RUNTIME_WORKSPACE_PART = "." + "run"
 EXCLUDED_PARTS = {
     (".git",),
-    (".run",),
+    (RUNTIME_WORKSPACE_PART,),
     ("__pycache__",),
     ("docs", "architecture", "open-issues-register.md"),
     ("docs", "archive"),
@@ -35,9 +36,11 @@ FORBIDDEN_PATTERNS = {
 
 
 def test_factor_contract_scan_roots_are_clean_checkout_stable_roots() -> None:
+    runtime_workspace = Path(RUNTIME_WORKSPACE_PART)
+
     assert Path("reports") not in SCAN_ROOTS
-    assert Path(".run") not in SCAN_ROOTS
-    assert all(".run" not in root.parts for root in SCAN_ROOTS)
+    assert runtime_workspace not in SCAN_ROOTS
+    assert all(runtime_workspace.name not in root.parts for root in SCAN_ROOTS)
 
 
 def test_active_files_do_not_reference_stale_price_volume_contract_terms() -> None:

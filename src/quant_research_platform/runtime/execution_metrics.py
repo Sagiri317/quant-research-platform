@@ -1,4 +1,4 @@
-"""Execution metrics helpers for private evidence runs."""
+"""Execution metrics helpers for verification evidence runs."""
 
 from __future__ import annotations
 

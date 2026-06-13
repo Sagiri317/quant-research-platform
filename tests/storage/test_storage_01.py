@@ -174,7 +174,7 @@ def test_run_manifest_aggregates_layers(tmp_path: Path) -> None:
     manifest = write_run_manifest(
         manifests_root=tmp_path / "manifests",
         run_id="run",
-        output_root=Path(".run") / "s1",
+        output_root=Path("verification-output") / "s1",
         layer_manifest_paths=(
             processed / "_manifests" / "layer_manifest.json",
             evidence / "_manifests" / "layer_manifest.json",
@@ -183,7 +183,7 @@ def test_run_manifest_aggregates_layers(tmp_path: Path) -> None:
     payload = json.loads(manifest.read_text(encoding="utf-8"))
 
     assert payload["run_id"] == "run"
-    assert payload["output_root"] == ".run/s1"
+    assert payload["output_root"] == "verification-output/s1"
     assert payload["layer_count"] == 2
     assert payload["run_validation_status"] == "pass"
 

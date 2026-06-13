@@ -222,12 +222,15 @@ def _data_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
 
 
 def _logical_path(path: Path) -> str:
-    parts = Path(path).parts
+    item = Path(path)
+    parts = item.parts
     for marker in (".run", "data", "manifests", "validations", "timings"):
         if marker in parts:
             index = parts.index(marker)
             return Path(*parts[index:]).as_posix()
-    return Path(path).as_posix()
+    if item.is_absolute():
+        return item.name
+    return item.as_posix()
 
 
 def _utc_now() -> str:

@@ -91,7 +91,7 @@ qrp-private schema-inventory --project-root . --output <path>
 ```
 
 `qrp-private` currently exposes only sanitized schema inventory. It does not run
-private import, private rebuild, or private evidence regeneration. Treat this as
+private import, private rebuild, or verification evidence regeneration. Treat this as
 private aggregate schema inventory, not as public-safe aggregate evidence,
 because logical source paths or source field names may be included.
 

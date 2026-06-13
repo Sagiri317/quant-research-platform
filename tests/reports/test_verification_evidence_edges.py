@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from quant_research_platform.reports import private_evidence
+from quant_research_platform.reports import verification_evidence
 
 
 def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None:
@@ -14,7 +14,7 @@ def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None
     text_leak = tmp_path / "payload.md"
     text_leak.write_text("source_asset_id", encoding="utf-8")
 
-    result = private_evidence._private_safety_scan(
+    result = verification_evidence._private_safety_scan(
         (safe, json_leak, text_leak, tmp_path / "missing.md")
     )
 
@@ -27,16 +27,22 @@ def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None
     }
 
 
-def test_private_evidence_unsafe_reason_variants() -> None:
-    assert private_evidence._unsafe_text_reason(r"C:\\private\\path") == "absolute_path"
+def test_verification_evidence_unsafe_reason_variants() -> None:
     assert (
-        private_evidence._unsafe_text_reason("daily__vendor__export-20240101.csv")
+        verification_evidence._unsafe_text_reason(r"C:\\private\\path")
+        == "absolute_path"
+    )
+    assert (
+        verification_evidence._unsafe_text_reason("daily__vendor__export-20240101.csv")
         == "vendor_filename"
     )
-    assert private_evidence._unsafe_text_reason("000001.SZ") == "stock_sample"
-    assert private_evidence._unsafe_text_reason("token: abcdefghi123") == "credential"
-    assert private_evidence._unsafe_json_reason("{bad") == "invalid_json"
-    assert private_evidence._unsafe_json_reason('{"safe": ["aggregate"]}') is None
+    assert verification_evidence._unsafe_text_reason("000001.SZ") == "stock_sample"
+    assert (
+        verification_evidence._unsafe_text_reason("token: abcdefghi123")
+        == "credential"
+    )
+    assert verification_evidence._unsafe_json_reason("{bad") == "invalid_json"
+    assert verification_evidence._unsafe_json_reason('{"safe": ["aggregate"]}') is None
 
 
 def test_validation_summary_classifies_manifest_and_safety_failures(
@@ -70,13 +76,13 @@ def test_validation_summary_classifies_manifest_and_safety_failures(
     }
 
     monkeypatch.setattr(
-        private_evidence,
+        verification_evidence,
         "inspect_dataset",
         lambda _root: SimpleNamespace(manifest=manifest),
     )
-    result = private_evidence.build_validation_summary(
+    result = verification_evidence.build_validation_summary(
         run_id="run_demo",
-        output_root=tmp_path / ".run" / "output",
+        output_root=tmp_path / "verification-output" / "output",
         dataset_roots=(dataset_root,),
         layer_manifest_paths=(layer_manifest, tmp_path / "missing_layer.json"),
         generated_text_paths=(text_leak,),
@@ -97,24 +103,24 @@ def test_validation_summary_classifies_manifest_and_safety_failures(
     assert result["label_nan_profile"] == {"label": 3}
 
 
-def test_private_evidence_writers_emit_utf8(tmp_path: Path) -> None:
+def test_verification_evidence_writers_emit_utf8(tmp_path: Path) -> None:
     payload = {"status": "PASS", "rows": 1}
     run_payload = {
         "run_id": "run_demo",
         "status": "PASS",
-        "output_root": ".run/output",
+        "output_root": "verification-output",
         "validation_summary": {"status": "PASS"},
     }
 
-    json_path = private_evidence.write_validation_summary(
+    json_path = verification_evidence.write_validation_summary(
         tmp_path / "summary.json",
         payload,
     )
-    md_path = private_evidence.write_run_summary_md(
+    md_path = verification_evidence.write_run_summary_md(
         tmp_path / "summary.md",
         run_payload,
     )
-    run_json_path = private_evidence.write_run_summary_json(
+    run_json_path = verification_evidence.write_run_summary_json(
         tmp_path / "run_summary.json",
         run_payload,
     )
@@ -124,14 +130,17 @@ def test_private_evidence_writers_emit_utf8(tmp_path: Path) -> None:
     assert "status" in md_path.read_text(encoding="utf-8")
 
 
-def test_private_evidence_mapping_and_logical_path_helpers() -> None:
+def test_verification_evidence_mapping_and_logical_path_helpers() -> None:
     target: dict[str, int] = {"a": 1}
-    private_evidence._merge_profile(target, {"a": 2, "b": None})
+    verification_evidence._merge_profile(target, {"a": 2, "b": None})
 
     assert target == {"a": 3, "b": 0}
-    assert private_evidence._int_mapping([("a", 1)]) == {}
-    assert private_evidence._logical_path(Path("plain") / "path") == "plain/path"
-    assert private_evidence._logical_path(Path(".run") / "demo" / "file.md") == (
-        ".run/demo/file.md"
+    assert verification_evidence._int_mapping([("a", 1)]) == {}
+    assert verification_evidence._logical_path(Path("plain") / "path") == "plain/path"
+    assert (
+        verification_evidence._logical_path(
+            Path("verification-output") / "demo" / "file.md"
+        )
+        == "verification-output/demo/file.md"
     )
-    assert private_evidence._utc_now().endswith("Z")
+    assert verification_evidence._utc_now().endswith("Z")

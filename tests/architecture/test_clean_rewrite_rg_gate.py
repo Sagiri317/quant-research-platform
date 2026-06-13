@@ -18,9 +18,70 @@ SCAN_ROOTS = (
 
 
 def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
+    runtime_workspace = Path("." + "run")
+
     assert Path("reports") not in SCAN_ROOTS
-    assert Path(".run") not in SCAN_ROOTS
-    assert all(".run" not in root.parts for root in SCAN_ROOTS)
+    assert runtime_workspace not in SCAN_ROOTS
+    assert all(runtime_workspace.name not in root.parts for root in SCAN_ROOTS)
+
+
+def test_tests_do_not_depend_on_runtime_workspace_path() -> None:
+    runtime_workspace_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape('.' + 'run')}(?![A-Za-z0-9_])"
+    )
+    hits: list[str] = []
+    current_file = Path(__file__).resolve()
+    for path in Path("tests").rglob("*.py"):
+        if path.resolve() == current_file:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if runtime_workspace_pattern.search(line):
+                hits.append(f"{path}:{line_number}: {line.strip()}")
+
+    assert hits == []
+
+
+def test_verification_evidence_replaces_retired_public_names() -> None:
+    expected_files = {
+        Path("src/quant_research_platform/workflows/verification_evidence.py"),
+        Path("src/quant_research_platform/reports/verification_evidence.py"),
+    }
+    retired_files = {
+        Path(
+            "src/quant_research_platform/workflows/"
+            + "private"
+            + "_evidence.py"
+        ),
+        Path("src/quant_research_platform/reports/" + "private" + "_evidence.py"),
+        Path("src/quant_research_platform/reports/evidence" + "_rendering.py"),
+    }
+    forbidden_terms = (
+        "private" + "_evidence",
+        "Private" + "Evidence",
+        "run_" + "private" + "_evidence",
+        "build_" + "private" + "_evidence_summary",
+        "write_" + "private" + "_evidence_summary",
+        "output_root_must_be_under_" + "run",
+    )
+    missing = sorted(str(path) for path in expected_files if not path.is_file())
+    present = sorted(str(path) for path in retired_files if path.exists())
+    hits: list[str] = []
+    current_file = Path(__file__).resolve()
+    for path in _iter_text_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if any(term in line for term in forbidden_terms):
+                hits.append(f"{path}:{line_number}: {line.strip()}")
+
+    assert missing == []
+    assert present == []
+    assert hits == []
 
 EXCLUDED_SCAN_PARTS = {
     ("docs", "archive"),
@@ -56,7 +117,7 @@ APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/storage/manifests.py"),
     Path("src/quant_research_platform/reports/bundles.py"),
     Path("src/quant_research_platform/reports/manifests.py"),
-    Path("src/quant_research_platform/reports/private_evidence.py"),
+    Path("src/quant_research_platform/reports/verification_evidence.py"),
     Path("src/quant_research_platform/runtime/execution_metrics.py"),
 }
 

@@ -1,4 +1,4 @@
-"""Aggregate private evidence report writers."""
+"""Aggregate verification evidence report writers."""
 
 from __future__ import annotations
 
@@ -154,7 +154,7 @@ def write_validation_summary(path: Path, payload: dict[str, Any]) -> Path:
     return atomic_write_json(path, payload)
 
 
-def build_private_evidence_summary(
+def build_verification_evidence_summary(
     *,
     run_id: str,
     date_range: dict[str, str],
@@ -178,13 +178,19 @@ def build_private_evidence_summary(
     }
 
 
-def write_private_evidence_summary_json(path: Path, payload: dict[str, Any]) -> Path:
+def write_verification_evidence_summary_json(
+    path: Path,
+    payload: dict[str, Any],
+) -> Path:
     return atomic_write_json(path, payload)
 
 
-def write_private_evidence_summary_md(path: Path, payload: dict[str, Any]) -> Path:
+def write_verification_evidence_summary_md(
+    path: Path,
+    payload: dict[str, Any],
+) -> Path:
     lines = [
-        "# Private Evidence Summary",
+        "# Verification Evidence Summary",
         "",
         f"- run_id: `{payload['run_id']}`",
         f"- status: `{payload['status']}`",
@@ -202,7 +208,7 @@ def write_run_summary_json(path: Path, payload: dict[str, Any]) -> Path:
 def write_run_summary_md(path: Path, payload: dict[str, Any]) -> Path:
     text = "\n".join(
         [
-            "# Private Evidence Run Summary",
+            "# Verification Evidence Run Summary",
             "",
             f"- run_id: `{payload['run_id']}`",
             f"- status: `{payload['status']}`",
@@ -213,6 +219,127 @@ def write_run_summary_md(path: Path, payload: dict[str, Any]) -> Path:
         ]
     )
     return atomic_write_text(path, text, encoding="utf-8")
+
+
+def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
+    """Render the public-safe evidence payload as Markdown."""
+
+    lines = [
+        "# Clean Rewrite 0.1 Public-Safe Parity Evidence",
+        "",
+        (
+            "This evidence records public-safe aggregate validation for QRP "
+            "Clean Rewrite `0.1.0`. Public identifiers are "
+            "`artifact_id=a_share_private_aggregate_evidence`, "
+            "`market_id=a_share`, and contract version `0.1`."
+        ),
+        "",
+        (
+            "Machine-readable evidence lives in "
+            "`docs/reports/clean-rewrite-0.1-parity-evidence.json`."
+        ),
+        "",
+        "| Area | Rows | Columns | Period | Status |",
+        "| --- | ---: | ---: | --- | --- |",
+    ]
+    for area in payload["areas"]:
+        status = (
+            "human approval required"
+            if area["human_approval_required"]
+            else "verified aggregate"
+        )
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(area["area"]).replace("_", " "),
+                    str(area["row_count"]),
+                    str(area["column_count"]),
+                    str(area["period"]),
+                    status,
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "Public-safe status:",
+            "",
+            f"- `privacy_level | {payload['privacy_level']}`",
+            f"- `contract_version | {payload['contract_version']}`",
+            f"- `verification_kind | {payload['verification_kind']}`",
+            f"- `verification_scope | {payload['verification_scope']}`",
+            f"- `evidence_generation_mode | {payload['evidence_generation_mode']}`",
+            f"- `source_data_visibility | {payload['source_data_visibility']}`",
+            "- `row_level_output_committed | false`",
+            f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+            (
+                "- private local aggregate run completed without committed "
+                "row-level artifacts"
+            ),
+        ]
+    )
+    if not payload["merge_ready"]:
+        lines.append("- human approval required before merge-ready status")
+    return "\n".join(lines) + "\n"
+
+
+def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str:
+    """Render the sealed dataset inventory summary as public-safe Markdown."""
+
+    lines = [
+        "# Clean Rewrite 0.1 Private Verification Summary",
+        "",
+        (
+            "This summary records aggregate-only sealed dataset inventory "
+            "for QRP Clean Rewrite `0.1.0`."
+        ),
+        "",
+        (
+            "Machine-readable summary lives in "
+            "`docs/reports/clean-rewrite-0.1-private-verification-summary.json`."
+        ),
+        "",
+        "| Logical Root | Area | Rows | Columns | Period |",
+        "| --- | --- | ---: | ---: | --- |",
+    ]
+    for item in payload["dataset_inventory"]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    item["logical_root"],
+                    item["covered_by_evidence_area"] or "uncovered",
+                    str(item["row_count"]),
+                    str(item["column_count"]),
+                    str(item["period"]),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "Public-safe status:",
+            "",
+            f"- `privacy_level | {payload['privacy_level']}`",
+            f"- `contract_version | {payload['contract_version']}`",
+            f"- `verification_kind | {payload['verification_kind']}`",
+            f"- `source_data_visibility | {payload['source_data_visibility']}`",
+            "- `row_level_output_committed | false`",
+            f"- `covered_roots | {len(payload['covered_roots'])}`",
+            f"- `uncovered_roots | {len(payload['uncovered_roots'])}`",
+            (
+                "- `allowed_unverified_roots | "
+                f"{len(payload['allowed_unverified_roots'])}`"
+            ),
+            f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+        ]
+    )
+    if payload["uncovered_roots"]:
+        lines.append("- uncovered dataset roots require review before merge-ready")
+    return "\n".join(lines) + "\n"
 
 
 def _private_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
@@ -295,11 +422,14 @@ def _merge_profile(target: dict[str, int], value: object) -> None:
 
 
 def _logical_path(path: Path) -> str:
-    parts = Path(path).parts
+    item = Path(path)
+    parts = item.parts
     for marker in (".run", "data", "manifests", "validations", "timings"):
         if marker in parts:
             return Path(*parts[parts.index(marker) :]).as_posix()
-    return Path(path).as_posix()
+    if item.is_absolute():
+        return item.name
+    return item.as_posix()
 
 
 def _utc_now() -> str:
@@ -307,10 +437,12 @@ def _utc_now() -> str:
 
 
 __all__ = [
-    "build_private_evidence_summary",
+    "build_verification_evidence_summary",
     "build_validation_summary",
-    "write_private_evidence_summary_json",
-    "write_private_evidence_summary_md",
+    "render_private_verification_summary_markdown",
+    "render_public_safe_evidence_markdown",
+    "write_verification_evidence_summary_json",
+    "write_verification_evidence_summary_md",
     "write_run_summary_json",
     "write_run_summary_md",
     "write_validation_summary",

@@ -1,4 +1,4 @@
-"""Minimal removable private evidence verification harness."""
+"""Minimal removable verification evidence verification harness."""
 
 from __future__ import annotations
 
@@ -18,14 +18,14 @@ from quant_research_platform.catalog.profiles import (
 )
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.reports.private_evidence import (
-    build_private_evidence_summary,
+from quant_research_platform.reports.verification_evidence import (
     build_validation_summary,
-    write_private_evidence_summary_json,
-    write_private_evidence_summary_md,
+    build_verification_evidence_summary,
     write_run_summary_json,
     write_run_summary_md,
     write_validation_summary,
+    write_verification_evidence_summary_json,
+    write_verification_evidence_summary_md,
 )
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
@@ -42,7 +42,10 @@ from quant_research_platform.runtime.execution_metrics import (
     write_execution_metrics_json,
 )
 from quant_research_platform.storage.atomic import atomic_write_json
-from quant_research_platform.storage.layout import PrivateEvidenceLayout, StorageLayout
+from quant_research_platform.storage.layout import (
+    StorageLayout,
+    VerificationEvidenceLayout,
+)
 from quant_research_platform.storage.manifests import (
     read_manifest,
     write_layer_manifest,
@@ -51,7 +54,7 @@ from quant_research_platform.storage.manifests import (
 
 
 @dataclass(frozen=True)
-class PrivateEvidenceRunConfig:
+class VerificationEvidenceRunConfig:
     output_root: Path
     start_date: str
     end_date: str
@@ -61,23 +64,29 @@ class PrivateEvidenceRunConfig:
 
 
 @dataclass(frozen=True)
-class PrivateEvidenceRunResult:
+class VerificationEvidenceRunResult:
     status: str
     run_id: str
     output_root: str
     summary: dict[str, Any]
 
 
-def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRunResult:
+_OWNERSHIP_MARKER_FILENAME = ".qrp-verification-evidence.json"
+_OWNERSHIP_MARKER = "qrp_verification_evidence_workflow"
+_OWNERSHIP_CONTRACT_VERSION = "0.1"
+
+
+def run_verification_evidence(
+    config: VerificationEvidenceRunConfig,
+) -> VerificationEvidenceRunResult:
     start = pd.Timestamp(config.start_date)
     end = pd.Timestamp(config.end_date)
     if start > end:
         raise ValueError("start_date_after_end_date")
     output_root = Path(config.output_root)
-    _assert_output_root_under_run(output_root)
     _prepare_output_root(output_root, replace_output=config.replace_output)
     run_id = config.run_id or output_root.name
-    layout = PrivateEvidenceLayout.from_output_root(output_root)
+    layout = VerificationEvidenceLayout.from_output_root(output_root)
     _create_layout_directories(layout)
     atomic_write_json(
         layout.config_root / "run_config.json",
@@ -87,6 +96,8 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
             "end_date": config.end_date,
             "output_root": _logical_path(output_root),
             "replace_output": config.replace_output,
+            "workflow_id": _OWNERSHIP_MARKER,
+            "contract_version": _OWNERSHIP_CONTRACT_VERSION,
             "created_at": _utc_now(),
         },
     )
@@ -225,7 +236,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     )
     write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder.records)
     timings_payload = read_manifest(timings_json)
-    evidence_summary = build_private_evidence_summary(
+    evidence_summary = build_verification_evidence_summary(
         run_id=run_id,
         date_range={"start_date": config.start_date, "end_date": config.end_date},
         manifests={
@@ -238,11 +249,11 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
         validation_summary=validation_summary,
         output_root=output_root,
     )
-    write_private_evidence_summary_json(
+    write_verification_evidence_summary_json(
         layout.evidence_root / "evidence_summary.json",
         evidence_summary,
     )
-    write_private_evidence_summary_md(
+    write_verification_evidence_summary_md(
         layout.evidence_root / "evidence_summary.md",
         evidence_summary,
     )
@@ -255,7 +266,7 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     }
     write_run_summary_json(layout.summary_json_path, summary)
     write_run_summary_md(layout.summary_md_path, summary)
-    return PrivateEvidenceRunResult(
+    return VerificationEvidenceRunResult(
         status=str(validation_summary["status"]),
         run_id=run_id,
         output_root=output_root.as_posix(),
@@ -263,25 +274,45 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     )
 
 
-def _assert_output_root_under_run(path: Path) -> None:
-    raw_parts = Path(path).parts
-    if ".." in raw_parts:
-        raise ValueError("output_root_must_be_under_run")
-    resolved_parts = Path(path).resolve(strict=False).parts
-    if ".run" not in resolved_parts:
-        raise ValueError("output_root_must_be_under_run")
-
-
 def _prepare_output_root(path: Path, *, replace_output: bool) -> None:
-    if path.exists() and not replace_output:
+    output_root = Path(path)
+    if output_root.exists() and not replace_output:
         raise ValueError("output_root_already_exists")
-    if path.exists() and replace_output:
-        _assert_output_root_under_run(path)
-        shutil.rmtree(path)
-    path.mkdir(parents=True, exist_ok=False)
+    if output_root.exists() and replace_output:
+        _assert_owned_verification_evidence_output(output_root)
+        shutil.rmtree(output_root)
+    output_root.mkdir(parents=True, exist_ok=False)
+    _write_ownership_marker(output_root)
 
 
-def _create_layout_directories(layout: PrivateEvidenceLayout) -> None:
+def _ownership_marker_path(output_root: Path) -> Path:
+    return Path(output_root) / _OWNERSHIP_MARKER_FILENAME
+
+
+def _write_ownership_marker(output_root: Path) -> Path:
+    return atomic_write_json(
+        _ownership_marker_path(output_root),
+        {
+            "workflow_id": _OWNERSHIP_MARKER,
+            "contract_version": _OWNERSHIP_CONTRACT_VERSION,
+            "created_at": _utc_now(),
+        },
+    )
+
+
+def _assert_owned_verification_evidence_output(output_root: Path) -> None:
+    marker_path = _ownership_marker_path(output_root)
+    if not marker_path.is_file():
+        raise ValueError("output_root_not_owned_by_verification_evidence_workflow")
+    marker = read_manifest(marker_path)
+    if (
+        marker.get("workflow_id") != _OWNERSHIP_MARKER
+        or marker.get("contract_version") != _OWNERSHIP_CONTRACT_VERSION
+    ):
+        raise ValueError("output_root_not_owned_by_verification_evidence_workflow")
+
+
+def _create_layout_directories(layout: VerificationEvidenceLayout) -> None:
     for root in (
         layout.config_root,
         layout.interim_root,
@@ -297,7 +328,7 @@ def _create_layout_directories(layout: PrivateEvidenceLayout) -> None:
 
 
 def _dataset_roots(
-    layout: PrivateEvidenceLayout,
+    layout: VerificationEvidenceLayout,
     *,
     interim_roots: tuple[Path, ...] = (),
     processed_roots: tuple[Path, ...] = (),
@@ -323,7 +354,7 @@ def _logical_layer(dataset_root: Path, output_root: Path) -> str:
     return "processed"
 
 
-def _layer_for_root(dataset_root: Path, layout: PrivateEvidenceLayout) -> str:
+def _layer_for_root(dataset_root: Path, layout: VerificationEvidenceLayout) -> str:
     return _logical_layer(dataset_root, layout.output_root)
 
 
@@ -332,11 +363,14 @@ def _dataset_id(dataset_root: Path) -> str:
 
 
 def _logical_path(path: Path) -> str:
-    parts = Path(path).parts
+    item = Path(path)
+    parts = item.parts
     for marker in (".run", "data", "reports", "manifests", "validations", "timings"):
         if marker in parts:
             return Path(*parts[parts.index(marker) :]).as_posix()
-    return Path(path).as_posix()
+    if item.is_absolute():
+        return item.name
+    return item.as_posix()
 
 
 def _utc_now() -> str:
@@ -344,7 +378,7 @@ def _utc_now() -> str:
 
 
 __all__ = [
-    "PrivateEvidenceRunConfig",
-    "PrivateEvidenceRunResult",
-    "run_private_evidence",
+    "VerificationEvidenceRunConfig",
+    "VerificationEvidenceRunResult",
+    "run_verification_evidence",
 ]
