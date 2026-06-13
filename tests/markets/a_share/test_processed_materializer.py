@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.catalog.factors import FactorCatalog
+from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
@@ -154,6 +156,102 @@ def test_factor_materializer_requires_family_contract_input_declared_by_spec(
             source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2014-01-02", "2014-01-03"),
             data_ids=("price_volume",),
+        )
+
+
+def test_factor_materializer_unknown_family_fails_closed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+    monkeypatch.setattr(
+        materializer.factor_definitions,
+        "a_share_factor_catalog",
+        lambda: _factor_catalog_with_families(("alternative_price_family",)),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="unknown_factor_family: alternative_price_family",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            data_ids=("price_volume",),
+        )
+
+
+def test_factor_materializer_mixed_families_fail_closed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+    monkeypatch.setattr(
+        materializer.factor_definitions,
+        "a_share_factor_catalog",
+        lambda: _factor_catalog_with_families(("price_volume", "other_factor")),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="mixed_factor_families: price_volume, other_factor",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            data_ids=("price_volume",),
+        )
+
+
+def test_label_materializer_unknown_family_fails_closed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+    monkeypatch.setattr(
+        materializer.label_definitions,
+        "a_share_label_catalog",
+        lambda: _label_catalog_with_families(("alternative_label_family",)),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="unknown_label_family: alternative_label_family",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            data_ids=("forward_returns",),
+        )
+
+
+def test_label_materializer_mixed_families_fail_closed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+    monkeypatch.setattr(
+        materializer.label_definitions,
+        "a_share_label_catalog",
+        lambda: _label_catalog_with_families(("forward_return", "other_label")),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="mixed_label_families: forward_return, other_label",
+    ):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2014-01-02", "2014-01-03"),
+            data_ids=("forward_returns",),
         )
 
 
@@ -469,6 +567,24 @@ def _catalog_with_processed_inputs(
                 processed_input_data_ids=processed_input_data_ids,
             )
         catalog.register(spec)
+    return catalog
+
+
+def _factor_catalog_with_families(families: tuple[str, ...]) -> FactorCatalog:
+    catalog = FactorCatalog()
+    definitions = materializer.factor_definitions.a_share_factor_definitions()
+    for index, definition in enumerate(definitions):
+        family = families[min(index, len(families) - 1)]
+        catalog.register(replace(definition, family=family))
+    return catalog
+
+
+def _label_catalog_with_families(families: tuple[str, ...]) -> LabelCatalog:
+    catalog = LabelCatalog()
+    definitions = materializer.label_definitions.a_share_label_definitions()
+    for index, definition in enumerate(definitions):
+        family = families[min(index, len(families) - 1)]
+        catalog.register(replace(definition, family=family))
     return catalog
 
 
