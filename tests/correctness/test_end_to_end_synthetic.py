@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
@@ -25,7 +25,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
     _write_synthetic_raw_exports(layout)
     interim_result = materialize_interim_data(
         layout=layout,

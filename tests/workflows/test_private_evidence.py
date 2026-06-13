@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -32,6 +33,7 @@ def test_private_evidence_workflow_rejects_output_root_outside_run(tmp_path):
         output_root=tmp_path / "outside",
         start_date="2014-01-01",
         end_date="2016-12-31",
+        profile=research_profile(),
     )
 
     with pytest.raises(ValueError, match="output_root_must_be_under_run"):
@@ -50,6 +52,7 @@ def test_private_evidence_workflow_rejects_existing_output_root(tmp_path):
         output_root=output_root,
         start_date="2014-01-01",
         end_date="2016-12-31",
+        profile=research_profile(),
     )
 
     with pytest.raises(ValueError, match="output_root_already_exists"):
@@ -61,6 +64,7 @@ def test_private_evidence_workflow_rejects_invalid_date_range(tmp_path):
         output_root=tmp_path / ".run" / "s1",
         start_date="2016-12-31",
         end_date="2014-01-01",
+        profile=research_profile(),
     )
 
     with pytest.raises(ValueError, match="start_date_after_end_date"):
@@ -72,6 +76,7 @@ def test_private_evidence_run_id_can_be_explicit_long_semantic_value(tmp_path):
         output_root=tmp_path / ".run" / "s1",
         start_date="2014-01-01",
         end_date="2016-12-31",
+        profile=research_profile(),
         run_id="private-evidence-smoke-a-share-2014-2016",
     )
 
@@ -135,12 +140,12 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
 
     monkeypatch.setattr(
         module,
-        "_local_a_share_csmar_materialize_interim_data",
+        "_materialize_a_share_csmar_interim_data",
         import_interim,
     )
     monkeypatch.setattr(
         module,
-        "_local_a_share_materialize_processed_data",
+        "_materialize_a_share_processed_data",
         build_processed,
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
@@ -171,6 +176,7 @@ def test_private_evidence_workflow_runs_injected_generation_and_writes_artifacts
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
+            profile=research_profile(),
         )
     )
 
@@ -248,12 +254,12 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
 
     monkeypatch.setattr(
         module,
-        "_local_a_share_csmar_materialize_interim_data",
+        "_materialize_a_share_csmar_interim_data",
         import_interim,
     )
     monkeypatch.setattr(
         module,
-        "_local_a_share_materialize_processed_data",
+        "_materialize_a_share_processed_data",
         lambda **kwargs: {},
     )
     monkeypatch.setattr(
@@ -278,6 +284,7 @@ def test_private_evidence_workflow_preserves_dataset_manifests(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
+            profile=research_profile(),
         )
     )
     manifest = inspect_dataset(captured_roots[0]).manifest
@@ -307,12 +314,12 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
 
     monkeypatch.setattr(
         module,
-        "_local_a_share_csmar_materialize_interim_data",
+        "_materialize_a_share_csmar_interim_data",
         import_interim,
     )
     monkeypatch.setattr(
         module,
-        "_local_a_share_materialize_processed_data",
+        "_materialize_a_share_processed_data",
         lambda **kwargs: {},
     )
     monkeypatch.setattr(
@@ -337,6 +344,7 @@ def test_private_evidence_workflow_fails_when_dataset_manifest_is_missing(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
+            profile=research_profile(),
         )
     )
     validation = json.loads(

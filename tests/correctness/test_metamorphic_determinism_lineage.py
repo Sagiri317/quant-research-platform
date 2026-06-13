@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.profiles import local_a_share_csmar_catalogs
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.factors.price_volume import (
@@ -134,7 +134,7 @@ def test_invalid_time_window_fails_closed() -> None:
 
 
 def test_column_lineage_and_roles_stay_in_data_layer_boundaries() -> None:
-    catalogs = local_a_share_csmar_catalogs()
+    catalogs = research_profile()
     processed = catalogs.processed
     research_spec = catalogs.research_datasets.get(
         "a_share_price_volume_forward_returns"

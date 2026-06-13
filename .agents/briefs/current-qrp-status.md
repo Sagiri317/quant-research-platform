@@ -43,7 +43,7 @@ replacement for `PROJECT_STATUS.md`.
 - First-stage data-layer closure is the active sealed path:
   `source/raw -> interim -> A-share processed facts -> A-share annotations/masks/context -> factor data -> label data -> research dataset`.
 - `catalog/profiles.py` is the local composition root. The public local profile
-  builder is `local_a_share_csmar_catalogs()` returning `CatalogBundle`;
+  builder is `research_profile()` returning `ResearchProfile`;
   retired `catalog/defaults.py`, `default_catalogs()`, and `PlatformCatalogs`
   are replaced and are no longer active public entrypoints.
 - A-share owner modules are split by responsibility. Stable IDs remain in

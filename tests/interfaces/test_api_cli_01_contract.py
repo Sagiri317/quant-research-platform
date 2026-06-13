@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 import quant_research_platform.interfaces.api.app as api_app_module
 import quant_research_platform.interfaces.cli.commands as cli_commands_module
 import quant_research_platform.interfaces.services as services_module
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
 from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
@@ -234,7 +235,8 @@ def test_api_and_cli_naming_conventions_are_contractual() -> None:
             assert resource_segment_re.fullmatch(segment)
 
     requirements = services_module.describe_research_dataset_requirements(
-        "a_share_price_volume_forward_returns"
+        "a_share_price_volume_forward_returns",
+        profile=research_profile(),
     )
     assert snake_case_re.fullmatch(requirements["dataset_id"])
 
@@ -287,7 +289,8 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
         "describe_research_dataset_requirements": [],
     }
 
-    def list_factors() -> dict[str, object]:
+    def list_factors(profile) -> dict[str, object]:
+        assert profile.fields.list_names()
         calls["list_factors"].append(())
         return {
             "api_version": "0.1",
@@ -301,7 +304,8 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
             ],
         }
 
-    def list_labels() -> dict[str, object]:
+    def list_labels(profile) -> dict[str, object]:
+        assert profile.fields.list_names()
         calls["list_labels"].append(())
         return {
             "api_version": "0.1",
@@ -315,7 +319,11 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
             ],
         }
 
-    def describe_research_dataset_requirements(dataset_id: str) -> dict[str, object]:
+    def describe_research_dataset_requirements(
+        dataset_id: str,
+        profile,
+    ) -> dict[str, object]:
+        assert profile.research_datasets.list()
         calls["describe_research_dataset_requirements"].append((dataset_id,))
         return {
             "api_version": "0.1",

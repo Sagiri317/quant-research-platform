@@ -11,10 +11,10 @@ from typing import Any
 import pandas as pd
 
 from quant_research_platform.catalog.profiles import (
-    _local_a_share_csmar_materialize_interim_data,
-    _local_a_share_csmar_source_id,
-    _local_a_share_materialize_processed_data,
-    local_a_share_csmar_catalogs,
+    ResearchProfile,
+    _a_share_csmar_source_id,
+    _materialize_a_share_csmar_interim_data,
+    _materialize_a_share_processed_data,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.time import TimeWindow
@@ -55,6 +55,7 @@ class PrivateEvidenceRunConfig:
     output_root: Path
     start_date: str
     end_date: str
+    profile: ResearchProfile
     replace_output: bool = False
     run_id: str | None = None
 
@@ -93,17 +94,17 @@ def run_private_evidence(config: PrivateEvidenceRunConfig) -> PrivateEvidenceRun
     recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=output_root)
     time_window = TimeWindow(config.start_date, config.end_date)
-    catalogs = local_a_share_csmar_catalogs()
-    source_id = _local_a_share_csmar_source_id()
+    catalogs = config.profile
+    source_id = _a_share_csmar_source_id()
     with recorder.record("interim_generation", logical_layer="interim"):
-        interim_result = _local_a_share_csmar_materialize_interim_data(
+        interim_result = _materialize_a_share_csmar_interim_data(
             layout=storage_layout,
             raw_root=Path("data") / "raw" / source_id,
             start_date=config.start_date,
             end_date=config.end_date,
         )
     with recorder.record("processed_generation", logical_layer="processed") as record:
-        processed_result = _local_a_share_materialize_processed_data(
+        processed_result = _materialize_a_share_processed_data(
             layout=storage_layout,
             source_id=source_id,
             time_window=time_window,

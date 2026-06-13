@@ -64,7 +64,7 @@ from quant_research_platform.sources.csmar.interim import (
 
 
 @dataclass(frozen=True)
-class CatalogBundle:
+class ResearchProfile:
     fields: FieldCatalog
     factors: FactorCatalog
     labels: LabelCatalog
@@ -79,26 +79,30 @@ class CatalogBundle:
     source_interim_catalogs: Mapping[str, InterimDataCatalog]
 
 
-def local_a_share_csmar_catalogs() -> CatalogBundle:
-    """Return the active local A-share + CSMAR catalog profile."""
+def research_profile() -> ResearchProfile:
+    """Return the active local research profile."""
 
-    return CatalogBundle(
+    return _a_share_csmar_research_profile()
+
+
+def _a_share_csmar_research_profile() -> ResearchProfile:
+    return ResearchProfile(
         fields=a_share_field_catalog(),
         factors=a_share_factor_definitions.a_share_factor_catalog(),
         labels=a_share_label_definitions.a_share_label_catalog(),
         processed=a_share_processed_catalog_module.a_share_processed_catalog(),
         research_datasets=a_share_research_profiles.a_share_research_dataset_catalog(),
-        evaluations=_local_a_share_evaluation_catalog(),
-        models=_local_a_share_model_catalog(),
-        predictions=_local_a_share_prediction_catalog(),
-        sources=_local_a_share_source_registry(),
-        markets=_local_a_share_market_registry(),
+        evaluations=_a_share_evaluation_catalog(),
+        models=_a_share_model_catalog(),
+        predictions=_a_share_prediction_catalog(),
+        sources=_a_share_csmar_source_registry(),
+        markets=_a_share_market_registry(),
         reports=report_catalog(),
-        source_interim_catalogs=_local_a_share_source_interim_catalogs(),
+        source_interim_catalogs=_a_share_csmar_source_interim_catalogs(),
     )
 
 
-def _local_a_share_evaluation_catalog() -> EvaluationCatalog:
+def _a_share_evaluation_catalog() -> EvaluationCatalog:
     catalog = EvaluationCatalog()
     catalog.register(
         EvaluationSpec(
@@ -112,7 +116,7 @@ def _local_a_share_evaluation_catalog() -> EvaluationCatalog:
     return catalog
 
 
-def _local_a_share_model_catalog() -> ModelCatalog:
+def _a_share_model_catalog() -> ModelCatalog:
     catalog = ModelCatalog()
     catalog.register(
         ModelSpec(
@@ -125,7 +129,7 @@ def _local_a_share_model_catalog() -> ModelCatalog:
     return catalog
 
 
-def _local_a_share_prediction_catalog() -> PredictionCatalog:
+def _a_share_prediction_catalog() -> PredictionCatalog:
     catalog = PredictionCatalog()
     catalog.register(
         PredictionSpec(
@@ -141,19 +145,19 @@ def _local_a_share_prediction_catalog() -> PredictionCatalog:
     return catalog
 
 
-def _local_a_share_source_registry() -> SourceRegistry:
+def _a_share_csmar_source_registry() -> SourceRegistry:
     registry = SourceRegistry()
     registry.register(csmar_source_definition())
     return registry
 
 
-def _local_a_share_market_registry() -> MarketRegistry:
+def _a_share_market_registry() -> MarketRegistry:
     registry = MarketRegistry()
     registry.register(a_share_market_definition())
     return registry
 
 
-def _local_a_share_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]:
+def _a_share_csmar_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]:
     catalog = csmar_interim_catalog()
     source_ids = {str(spec.source_id) for spec in catalog.list()}
     if len(source_ids) != 1:
@@ -161,19 +165,19 @@ def _local_a_share_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]
     return {next(iter(source_ids)): catalog}
 
 
-def _local_a_share_csmar_source_id() -> str:
-    return next(iter(_local_a_share_source_interim_catalogs()))
+def _a_share_csmar_source_id() -> str:
+    return next(iter(_a_share_csmar_source_interim_catalogs()))
 
 
-def _local_a_share_csmar_materialize_interim_data(**kwargs: object) -> object:
+def _materialize_a_share_csmar_interim_data(**kwargs: object) -> object:
     return _materialize_csmar_interim_data(**kwargs)
 
 
-def _local_a_share_materialize_processed_data(**kwargs: object) -> object:
+def _materialize_a_share_processed_data(**kwargs: object) -> object:
     source_id = kwargs.get("source_id")
     if isinstance(source_id, str):
         kwargs = {**kwargs, "source_id": SourceId(source_id)}
     return a_share_processed_materializer.materialize_processed_data(**kwargs)
 
 
-__all__ = ["CatalogBundle", "local_a_share_csmar_catalogs"]
+__all__ = ["ResearchProfile", "research_profile"]
