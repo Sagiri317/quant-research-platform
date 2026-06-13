@@ -30,26 +30,14 @@ web/test-results/
 .playwright-cli/
 .run/
 *.egg-info/
-coverage/
 .coverage
-reports/runs/
-reports/profiles/
-reviews/*-handoff.zip
-reviews/*-handoff-manifest.json
 
 # 数据和密钥
 data/raw/
 data/interim/
 data/processed/
-data/external/
-data/private/
 data/reference_docs/
-# Backward-safety ignore only; not active clean-rewrite data layout.
-data/raw_private/
-data/interim_private/
-data/processed_private/
 reports/private_real/
-config/private_column_overrides.json
 secrets.*
 credentials.*
 token.*

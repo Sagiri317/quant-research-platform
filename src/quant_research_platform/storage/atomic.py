@@ -8,14 +8,11 @@ import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar
 from uuid import uuid4
 
 import pandas as pd
 
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
-
-T = TypeVar("T")
 
 
 def reject_if_exists(path: Path) -> None:
@@ -66,7 +63,7 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
     return final_path
 
 
-def atomic_write_directory(root: Path, writer: Callable[[Path], T]) -> T:
+def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:
     final_root = Path(root)
     reject_if_exists(final_root)
     final_root.parent.mkdir(parents=True, exist_ok=True)

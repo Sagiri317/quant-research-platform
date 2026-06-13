@@ -7,6 +7,7 @@ This is the change-prone contract map for QRP Clean Rewrite `0.1.0`.
 - Project version: `0.1.0`.
 - API/spec/contract version: `0.1`.
 - API paths use `/api/0.1/...`.
+- Environment contract: `docs/architecture/environment-contract.md`.
 
 ## Source Map
 
@@ -65,11 +66,7 @@ context.
 
 ## Verification
 
-```powershell
-$env:PYTHONPATH="src"
-conda run -n analysis python -m pytest -q
-conda run -n analysis python -m ruff check src tests
-git diff --check
-```
-
-Also run the clean rewrite stale-term gate before commit.
+Use the setup and common check commands in `README.md` and the environment
+contract in `docs/architecture/environment-contract.md`. Run targeted pytest,
+`ruff`, `git diff --check`, and the clean rewrite stale-term gate before
+commit. Only claim PASS for OS/Python/dependency combinations actually run.

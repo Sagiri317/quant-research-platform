@@ -20,6 +20,9 @@ replacement for `PROJECT_STATUS.md`.
   `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`,
   `reports`, and `runtime`.
 - Project version is `0.1.0`; API/spec/contract version is `0.1`.
+- Official Python is `>=3.13,<3.14`; the primary verified environment is
+  Windows 11 + conda `quantlab313`. macOS/Linux are cross-platform compatible
+  targets, but PASS must not be claimed unless tests run there.
 - API paths use `/api/0.1/...`; do not add a version-letter prefix.
 - Current public CLI contract is `qrp catalog factors`,
   `qrp catalog labels`, and `qrp research-datasets requirements`.

@@ -2,25 +2,27 @@
 name = "quant-research-platform"
 version = "0.1.0"
 description = "Local multi-market quantitative research platform."
-requires-python = ">=3.11"
+requires-python = ">=3.13,<3.14"
 dependencies = [
-  "fastapi",
-  "numpy",
-  "pandas",
-  "pyarrow",
-  "pydantic",
-  "scikit-learn",
-  "typer",
-  "uvicorn",
+  "fastapi>=0.136,<1",
+  "numpy>=2.3,<2.4",
+  "pandas>=3.0,<4",
+  "pyarrow>=24,<25",
+  "pydantic>=2.13,<3",
+  "psutil>=7.2,<8",
+  "scikit-learn>=1.9,<2",
+  "typer>=0.26,<1",
+  "uvicorn>=0.49,<1",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest",
-  "ruff",
-  "pytest-cov",
-  "coverage",
-  "hypothesis",
+  "pytest>=9,<10",
+  "ruff>=0.15,<0.16",
+  "pytest-cov>=7,<8",
+  "coverage>=7.14,<8",
+  "hypothesis>=6.155,<7",
+  "httpx2>=2.3,<3",
 ]
 
 [project.scripts]
@@ -35,7 +37,7 @@ addopts = ["--import-mode=importlib"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

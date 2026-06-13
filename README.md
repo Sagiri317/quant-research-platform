@@ -97,18 +97,21 @@ because logical source paths or source field names may be included.
 
 ## Development Checks
 
-Use the approved Conda environment. Install dev/test tools conda-first:
+The environment contract is documented in
+`docs/architecture/environment-contract.md`.
+
+Create or update the project Conda environment from `environment.yml`:
 
 ```powershell
-conda install -n analysis -c conda-forge pytest ruff pytest-cov coverage hypothesis
+conda env update -f environment.yml --prune
 ```
 
 Then run checks:
 
 ```powershell
 $env:PYTHONPATH="src"
-conda run -n analysis python -m pytest -q tests/architecture tests/contracts tests/interfaces/test_api_cli_01_contract.py
-conda run -n analysis python -m ruff check src tests
+conda run -n quantlab313 python -m pytest -q tests/architecture tests/contracts tests/interfaces/test_api_cli_01_contract.py
+conda run -n quantlab313 python -m ruff check src tests
 git diff --check
 ```
 

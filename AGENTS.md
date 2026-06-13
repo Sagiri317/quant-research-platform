@@ -150,27 +150,8 @@ local/private context.
 
 ## 8. Environment
 
-Approved default Conda environment:
-
-```text
-analysis
-```
-
-Rules:
-
-- Do not use Conda `base` for project work.
-- Use Conda for dependency management.
-- Do not install, update, or remove dependencies without explicit approval.
-- Use PowerShell-native commands on Windows.
-
-Common checks:
-
-```powershell
-$env:PYTHONPATH="src"
-conda run -n analysis python -m pytest -q
-conda run -n analysis python -m ruff check src tests
-git diff --check
-```
+Use the Conda environment defined in `environment.yml`. Keep setup and common
+check commands in `README.md`.
 
 ## 9. Testing And Verification
 

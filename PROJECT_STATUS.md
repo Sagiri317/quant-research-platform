@@ -13,7 +13,6 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 |---|---|
 | 当前阶段 | QRP Clean Rewrite `0.1.0` on Local Research Platform |
 | 当前分支 | `feature/qrp-clean-rewrite` |
-| Conda 环境 | `analysis` |
 | 版本边界 | project `0.1.0`; API/contracts use `0.1` |
 | 源码拓扑 | `contracts`, `storage`, `catalog`, `sources`, `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`, `reports`, `runtime` |
 | 当前 API/CLI | `/api/0.1/...` factor/label catalog routes and research dataset requirements; `qrp catalog factors`, `qrp catalog labels`, `qrp research-datasets requirements` |
@@ -29,6 +28,10 @@ artifacts remain local evidence only. The previous public-safe aggregate parity
 and coverage evidence in `docs/reports/` is
 `superseded_by_factor_catalog_refactor` and
 `evidence_pending_regeneration` until the next private rebuild.
+
+Formal verification uses Python `>=3.13,<3.14` with conda `quantlab313`.
+The primary verified OS is Windows 11. macOS/Linux are cross-platform
+compatible targets, but PASS must only be claimed after tests run there.
 
 Current public-safe anchors:
 
