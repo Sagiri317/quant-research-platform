@@ -94,9 +94,7 @@ def test_clean_rewrite_target_files_exist() -> None:
         "agents/workflow_planner.py",
         "agents/proposals.py",
         "agents/safety.py",
-        "reports/bundles.py",
-        "reports/manifests.py",
-        "reports/summaries.py",
+        "reports/report_artifacts.py",
         "reports/schema_inventory.py",
         "reports/evidence_rendering.py",
         "reports/private_evidence.py",
@@ -151,6 +149,17 @@ def test_compute_portfolio_compatibility_facades_are_absent() -> None:
         SOURCE_ROOT / "compute/dataframe/portfolio.py",
         SOURCE_ROOT / "compute/dataframe/helpers.py",
         SOURCE_ROOT / "compute/tensor/portfolio.py",
+    )
+
+    assert [str(path) for path in retired if path.exists()] == []
+
+
+def test_report_placeholder_modules_and_generic_bundle_module_are_absent() -> None:
+    retired = (
+        SOURCE_ROOT / "reports/bundles.py",
+        SOURCE_ROOT / "reports/index.py",
+        SOURCE_ROOT / "reports/manifests.py",
+        SOURCE_ROOT / "reports/summaries.py",
     )
 
     assert [str(path) for path in retired if path.exists()] == []

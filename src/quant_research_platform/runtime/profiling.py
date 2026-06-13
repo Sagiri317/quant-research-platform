@@ -172,12 +172,12 @@ class StageProfiler:
     ) -> dict[str, object]:
         """写出 stage profile 的 CSV、JSON 和 Markdown artifacts。"""
 
-        from quant_research_platform.reports.bundles import (
-            write_stage_profile_bundle,
+        from quant_research_platform.reports.report_artifacts import (
+            write_stage_profile_report_artifacts,
         )
 
         frame = self.to_frame()
-        return write_stage_profile_bundle(
+        return write_stage_profile_report_artifacts(
             frame,
             spec=spec,
             layout=layout,

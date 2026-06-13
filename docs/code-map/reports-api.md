@@ -8,9 +8,7 @@ ownership only.
 
 ```text
 research/evaluations
--> reports/manifests.py
--> reports/summaries.py
--> reports/bundles.py
+-> reports/report_artifacts.py
 -> reports/private_real/<market>/<run_type>/<run_id>
 ```
 
@@ -21,13 +19,13 @@ research/evaluations
 - `contracts/portfolios.py` defines `PortfolioSpec`.
 - `contracts/reports.py` defines `ReportDefinition` and `ReportSpec`.
 - `catalog/reports.py` owns `ReportCatalog` and registered report definitions.
-- `reports/` owns report manifests, summaries, and bundles.
+- `reports/` owns the report catalog and private report artifact writers.
 - Public API/CLI report lookup is not part of the active `0.1.0` surface.
 - Future-only report lookup belongs with `report index/show` and
   `ReportRepository` planning.
 
-Persisted stage profile, prediction, and evaluation report outputs are derived
-from `StorageLayout + ReportSpec + run_id`. Report writers do not accept
+Persisted stage profile, prediction, and evaluation report artifacts are derived
+from `StorageLayout + ReportSpec + run_id`. Report artifact writers do not accept
 arbitrary `output_root` or `output_dir` path-selection inputs.
 
 Evaluation reports record `filter_mode` metadata. Supported modes are

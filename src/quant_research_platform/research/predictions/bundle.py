@@ -10,7 +10,9 @@ import pandas as pd
 from quant_research_platform.contracts.filtering import reject_filter_feature_columns
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
-from quant_research_platform.reports.bundles import write_prediction_bundle_files
+from quant_research_platform.reports.report_artifacts import (
+    write_prediction_report_artifacts,
+)
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -68,7 +70,7 @@ def write_prediction_bundle(
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
-    return write_prediction_bundle_files(
+    return write_prediction_report_artifacts(
         frame,
         spec=spec,
         report_spec=report_spec,

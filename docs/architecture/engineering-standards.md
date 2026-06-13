@@ -24,7 +24,7 @@ These standards apply to QRP Clean Rewrite `0.1.0`.
 - `compute/` owns dataframe/tensor math helpers only.
 - `agents/` owns proposal/spec boundaries only.
 - `interfaces/` owns local API/CLI adapters.
-- `reports/` owns report manifests, summaries, and bundles.
+- `reports/` owns the report catalog and private report artifact writers.
 - `runtime/` owns logging, profiling, privacy, sanitization, and errors.
 
 ## Data Safety

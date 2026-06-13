@@ -9,19 +9,19 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
-from quant_research_platform.reports import bundles
+from quant_research_platform.reports import report_artifacts
 from quant_research_platform.storage.layout import StorageLayout
 
 
 def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns: ic"):
-        bundles._validate_report_frame(
+        report_artifacts._validate_report_frame(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             required=("timestamp", "ic"),
             error_name="evaluation_metrics",
         )
     with pytest.raises(ValueError, match="unregistered_evaluation_metrics_columns"):
-        bundles._validate_report_frame(
+        report_artifacts._validate_report_frame(
             pd.DataFrame(
                 {
                     "timestamp": [pd.Timestamp("2024-01-02")],
@@ -34,7 +34,9 @@ def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
         )
 
 
-def test_prediction_bundle_validation_rejects_bad_frames(tmp_path: Path) -> None:
+def test_prediction_report_artifact_validation_rejects_bad_frames(
+    tmp_path: Path,
+) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
         "prediction_bundle_private",
@@ -52,21 +54,21 @@ def test_prediction_bundle_validation_rejects_bad_frames(tmp_path: Path) -> None
     )
 
     with pytest.raises(ValueError, match="missing_prediction_bundle_columns"):
-        bundles.write_prediction_bundle_files(
+        report_artifacts.write_prediction_report_artifacts(
             valid.drop(columns=["prediction"]),
             spec=spec,
             report_spec=report_spec,
             layout=layout,
         )
     with pytest.raises(ValueError, match="unregistered_prediction_bundle_columns"):
-        bundles.write_prediction_bundle_files(
+        report_artifacts.write_prediction_report_artifacts(
             valid.assign(extra=1),
             spec=spec,
             report_spec=report_spec,
             layout=layout,
         )
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
-        bundles.write_prediction_bundle_files(
+        report_artifacts.write_prediction_report_artifacts(
             pd.concat([valid, valid], ignore_index=True),
             spec=spec,
             report_spec=report_spec,
@@ -78,14 +80,14 @@ def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="report_spec_mismatch"):
-        bundles._derive_report_run_root(
+        report_artifacts._derive_report_run_root(
             report_spec=_report_spec("unknown", "run_demo", "prediction"),
             layout=layout,
             expected_definition_id="prediction_bundle_private",
             expected_run_id="run_demo",
     )
     with pytest.raises(ValueError, match="report_spec_mismatch"):
-        bundles._derive_report_run_root(
+        report_artifacts._derive_report_run_root(
             report_spec=_report_spec(
                 "evaluation_report_private",
                 "run_demo",
@@ -96,7 +98,7 @@ def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
             expected_run_id="run_demo",
         )
     with pytest.raises(ValueError, match="report_spec_mismatch"):
-        bundles._derive_report_run_root(
+        report_artifacts._derive_report_run_root(
             report_spec=_report_spec(
                 "prediction_bundle_private",
                 "other_run",
@@ -119,7 +121,7 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
     report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
 
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns"):
-        bundles.write_evaluation_report_files(
+        report_artifacts.write_evaluation_report_artifacts(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             spec=spec,
@@ -141,7 +143,10 @@ def test_report_parquet_writer_cleans_temp_on_failure(
     monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_to_parquet)
 
     with pytest.raises(RuntimeError, match="write failed"):
-        bundles._atomic_write_report_parquet(frame, tmp_path / "report.parquet")
+        report_artifacts._atomic_write_report_parquet(
+            frame,
+            tmp_path / "report.parquet",
+        )
     assert not list(tmp_path.glob("*.tmp-*"))
 
 
