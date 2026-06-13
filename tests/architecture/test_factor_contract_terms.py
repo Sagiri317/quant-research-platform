@@ -7,7 +7,6 @@ SCAN_ROOTS = (
     Path("src"),
     Path("tests"),
     Path("docs"),
-    Path("reports"),
     Path("README.md"),
     Path("PROJECT_STATUS.md"),
     Path(".agents"),
@@ -33,6 +32,12 @@ FORBIDDEN_PATTERNS = {
     "len_factor_equals_56": re.compile(r"len\([^\n]+factor[^\n]*\)\s*==\s*56"),
     "assert_factor_equals_56": re.compile(r"assert\s+[^\n]*factor[^\n]*==\s*56"),
 }
+
+
+def test_factor_contract_scan_roots_are_clean_checkout_stable_roots() -> None:
+    assert Path("reports") not in SCAN_ROOTS
+    assert Path(".run") not in SCAN_ROOTS
+    assert all(".run" not in root.parts for root in SCAN_ROOTS)
 
 
 def test_active_files_do_not_reference_stale_price_volume_contract_terms() -> None:
