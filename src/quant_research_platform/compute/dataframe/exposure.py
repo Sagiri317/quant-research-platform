@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.construction import _validate_positions
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     EXPOSURE_SUMMARY_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _normalize_group_key,
 )
+from quant_research_platform.compute.dataframe.position_math import _validate_positions
 
 
 def summarize_exposure(

@@ -1,4 +1,4 @@
-"""Minimal IC, RankIC, and grouped-return evaluation."""
+"""Spec-driven evaluation orchestration for compute kernels."""
 
 from __future__ import annotations
 
@@ -6,6 +6,10 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    compute_ic_and_grouped_label_values,
+)
+from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 
 
@@ -42,38 +46,17 @@ def evaluate_factor_frame(
     usable_frame = filtered.dropna(subset=[feature, label]).copy()
     metadata["rows_after_feature_label_dropna"] = int(len(usable_frame))
 
-    rows: list[dict[str, object]] = []
-    grouped_rows: list[dict[str, object]] = []
-    for timestamp, group in usable_frame.groupby("timestamp", sort=True):
-        usable = group[[feature, label]]
-        if len(usable) < 2:
-            continue
-        rows.append(
-            {
-                "timestamp": timestamp,
-                "feature": feature,
-                "label": label,
-                "ic": usable[feature].corr(usable[label]),
-                "rankic": usable[feature].rank().corr(usable[label].rank()),
-            }
-        )
-        buckets = pd.qcut(
-            usable[feature].rank(method="first"),
-            q=min(n_groups, len(usable)),
-            labels=False,
-            duplicates="drop",
-        )
-        bucketed = usable.assign(group=buckets.astype(int) + 1)
-        for bucket, bucket_frame in bucketed.groupby("group", sort=True):
-            grouped_rows.append(
-                {
-                    "timestamp": timestamp,
-                    "group": int(bucket),
-                    "mean_return": float(bucket_frame[label].mean()),
-                }
-            )
-    metrics = pd.DataFrame(rows)
-    grouped_returns = pd.DataFrame(grouped_rows)
+    compute_spec = ComputePanelSpec(
+        feature_columns=(feature,),
+        label_column=label,
+        timestamp_column="timestamp",
+        asset_column="asset_id" if "asset_id" in usable_frame else "asset",
+    )
+    metrics, grouped_returns = compute_ic_and_grouped_label_values(
+        usable_frame,
+        compute_spec,
+        n_groups=n_groups,
+    )
     metrics.attrs["metadata"] = metadata
     grouped_returns.attrs["metadata"] = metadata
     return EvaluationResult(

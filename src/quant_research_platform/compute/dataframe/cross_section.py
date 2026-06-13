@@ -1,4 +1,4 @@
-"""提供 long-panel research data 的共享 factor evaluation metrics。"""
+"""DataFrame cross-sectional math kernels for long panel inputs."""
 
 from __future__ import annotations
 
@@ -23,26 +23,26 @@ IC_SUMMARY_COLUMNS = [
     "rankicir",
     "positive_rankic_rate",
 ]
-GROUPED_RETURN_COLUMNS = [
+GROUPED_LABEL_VALUE_COLUMNS = [
     "timestamp",
     "feature",
     "label",
     "group",
-    "mean_forward_return",
+    "mean_label_value",
     "n_obs",
 ]
 GROUP_SPREAD_SUMMARY_COLUMNS = [
     "feature",
     "label",
-    "top_group_mean_return",
-    "bottom_group_mean_return",
-    "top_bottom_spread_mean",
-    "top_bottom_spread_hit_rate",
+    "top_group_mean_label_value",
+    "bottom_group_mean_label_value",
+    "top_bottom_label_value_spread_mean",
+    "top_bottom_label_value_spread_hit_rate",
     "group_monotonicity_score",
 ]
 
 
-def evaluate_ic_by_timestamp(
+def compute_ic_by_timestamp(
     frame: pd.DataFrame,
     spec: ComputePanelSpec,
 ) -> pd.DataFrame:
@@ -76,29 +76,29 @@ def evaluate_ic_by_timestamp(
     return pd.DataFrame.from_records(records, columns=IC_RESULT_COLUMNS)
 
 
-def evaluate_ic_and_grouped_returns(
+def compute_ic_and_grouped_label_values(
     frame: pd.DataFrame,
     spec: ComputePanelSpec,
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """在一次 timestamp/feature 扫描中计算 IC 和 grouped returns。"""
+    """在一次 timestamp/feature 扫描中计算 IC 和 grouped label values。"""
 
     panel = validate_compute_panel(frame, spec)
-    return evaluate_ic_and_grouped_returns_from_validated_panel(
+    return compute_ic_and_grouped_label_values_from_validated_panel(
         panel,
         spec,
         n_groups=n_groups,
     )
 
 
-def evaluate_ic_and_grouped_returns_from_validated_panel(
+def compute_ic_and_grouped_label_values_from_validated_panel(
     panel: pd.DataFrame,
     spec: ComputePanelSpec,
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """基于上游已校验的 panel 计算 IC 和 grouped returns。"""
+    """基于上游已校验的 panel 计算 IC 和 grouped label values。"""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -138,9 +138,7 @@ def evaluate_ic_and_grouped_returns_from_validated_panel(
                             "feature": feature,
                             "label": spec.label_column,
                             "group": group,
-                            "mean_forward_return": float(
-                                label_valid[group_mask].mean()
-                            ),
+                            "mean_label_value": float(label_valid[group_mask].mean()),
                             "n_obs": int(group_mask.sum()),
                         }
                     )
@@ -157,16 +155,16 @@ def evaluate_ic_and_grouped_returns_from_validated_panel(
 
     return (
         pd.DataFrame.from_records(ic_records, columns=IC_RESULT_COLUMNS),
-        pd.DataFrame.from_records(grouped_records, columns=GROUPED_RETURN_COLUMNS),
+        pd.DataFrame.from_records(grouped_records, columns=GROUPED_LABEL_VALUE_COLUMNS),
     )
 
 
-def analyze_grouped_returns(
+def compute_grouped_label_values(
     frame: pd.DataFrame,
     spec: ComputePanelSpec,
     n_groups: int = 5,
 ) -> pd.DataFrame:
-    """按 feature rank group 计算 timestamp-level mean forward return。"""
+    """按 feature rank group 计算 timestamp-level mean label value。"""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -190,12 +188,12 @@ def analyze_grouped_returns(
                         "feature": feature,
                         "label": spec.label_column,
                         "group": int(group),
-                        "mean_forward_return": float(label_values[group_mask].mean()),
+                        "mean_label_value": float(label_values[group_mask].mean()),
                         "n_obs": int(group_mask.sum()),
                     }
                 )
 
-    return pd.DataFrame.from_records(records, columns=GROUPED_RETURN_COLUMNS)
+    return pd.DataFrame.from_records(records, columns=GROUPED_LABEL_VALUE_COLUMNS)
 
 
 def _finite_pair(frame: pd.DataFrame, feature: str, label: str) -> pd.DataFrame:
@@ -258,7 +256,7 @@ def summarize_group_spread(
 ) -> pd.DataFrame:
     """按 feature 汇总 top-bottom group return spread diagnostics。"""
 
-    required_columns = {*segment_columns, *GROUPED_RETURN_COLUMNS}
+    required_columns = {*segment_columns, *GROUPED_LABEL_VALUE_COLUMNS}
     missing_columns = sorted(required_columns.difference(grouped_returns.columns))
     if missing_columns:
         raise ValueError(f"grouped_returns is missing columns: {missing_columns}.")
@@ -269,16 +267,16 @@ def summarize_group_spread(
 
     timestamp_group_columns = [*segment_columns, "feature", "label", "timestamp"]
     ordered = grouped_returns[
-        [*timestamp_group_columns, "group", "mean_forward_return"]
+        [*timestamp_group_columns, "group", "mean_label_value"]
     ].copy()
-    ordered["mean_forward_return"] = pd.to_numeric(
-        ordered["mean_forward_return"],
+    ordered["mean_label_value"] = pd.to_numeric(
+        ordered["mean_label_value"],
         errors="coerce",
     )
     ordered = ordered.sort_values([*timestamp_group_columns, "group"], kind="mergesort")
     ordered["_return_diff_sign"] = np.sign(
         ordered.groupby(timestamp_group_columns, sort=True, dropna=False)[
-            "mean_forward_return"
+            "mean_label_value"
         ].diff()
     )
     timestamp_frame = (
@@ -288,8 +286,8 @@ def summarize_group_spread(
             dropna=False,
         )
         .agg(
-            top_return=("mean_forward_return", "last"),
-            bottom_return=("mean_forward_return", "first"),
+            top_label_value=("mean_label_value", "last"),
+            bottom_label_value=("mean_label_value", "first"),
             monotonicity=("_return_diff_sign", "mean"),
         )
         .reset_index()
@@ -298,7 +296,7 @@ def summarize_group_spread(
         return pd.DataFrame(columns=output_columns)
     timestamp_frame["monotonicity"] = timestamp_frame["monotonicity"].fillna(0.0)
     timestamp_frame["spread"] = (
-        timestamp_frame["top_return"] - timestamp_frame["bottom_return"]
+        timestamp_frame["top_label_value"] - timestamp_frame["bottom_label_value"]
     )
 
     summary_group_columns = [*segment_columns, "feature", "label"]
@@ -309,10 +307,13 @@ def summarize_group_spread(
             dropna=False,
         )
         .agg(
-            top_group_mean_return=("top_return", "mean"),
-            bottom_group_mean_return=("bottom_return", "mean"),
-            top_bottom_spread_mean=("spread", "mean"),
-            top_bottom_spread_hit_rate=("spread", lambda values: (values > 0).mean()),
+            top_group_mean_label_value=("top_label_value", "mean"),
+            bottom_group_mean_label_value=("bottom_label_value", "mean"),
+            top_bottom_label_value_spread_mean=("spread", "mean"),
+            top_bottom_label_value_spread_hit_rate=(
+                "spread",
+                lambda values: (values > 0).mean(),
+            ),
             group_monotonicity_score=("monotonicity", "mean"),
         )
         .reset_index()

@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.config import WeightConfig
-from quant_research_platform.compute.dataframe.reporting import (
+from quant_research_platform.compute.dataframe.portfolio_returns import (
     _build_portfolio_return_record_from_positions,
     _calculate_long_short_from_positions,
     _timestamp_label_lookup,
@@ -12,7 +12,7 @@ from quant_research_platform.compute.dataframe.reporting import (
 from quant_research_platform.compute.panels import ComputePanelSpec
 
 
-def test_dataframe_reporting_calculates_returns_from_positions() -> None:
+def test_dataframe_portfolio_returns_calculates_returns_from_positions() -> None:
     spec = ComputePanelSpec(feature_columns=("factor",), label_column="label")
     panel = _panel()
     positions = pd.DataFrame(
@@ -48,7 +48,7 @@ def test_dataframe_reporting_calculates_returns_from_positions() -> None:
     assert returns["segment"].tolist() == ["s1"]
 
 
-def test_dataframe_reporting_return_record_handles_empty_or_missing_legs() -> None:
+def test_dataframe_portfolio_return_record_handles_empty_or_missing_legs() -> None:
     group_values = {"timestamp": pd.Timestamp("2024-01-02"), "feature": "factor"}
     label_lookup = {"A": 0.01, "B": -0.02}
 
@@ -80,7 +80,7 @@ def test_dataframe_reporting_return_record_handles_empty_or_missing_legs() -> No
     assert long_only["net_portfolio_return"] == pytest.approx(0.009)
 
 
-def test_dataframe_reporting_timestamp_label_lookup_uses_asset_strings() -> None:
+def test_dataframe_portfolio_return_timestamp_label_lookup_uses_asset_strings() -> None:
     spec = ComputePanelSpec(feature_columns=("factor",), label_column="label")
     frame = pd.DataFrame(
         {

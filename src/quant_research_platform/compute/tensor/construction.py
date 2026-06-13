@@ -8,13 +8,18 @@ from operator import itemgetter
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute._portfolio_math import (
+    _normalize_group_key,
+    _select_features,
+    _selection_count,
+    _validate_segment_columns,
+    _validate_tradability_columns,
+    _validate_weight_columns,
+)
 from quant_research_platform.compute.config import (
     CostConfig,
     TradabilityConfig,
     WeightConfig,
-)
-from quant_research_platform.compute.dataframe.constraints import (
-    _validate_tradability_columns,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -22,13 +27,6 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     RETURNS_COLUMNS,
     TURNOVER_COLUMNS,
     WEIGHT_DIAGNOSTIC_COLUMNS,
-)
-from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _normalize_group_key,
-    _select_features,
-    _selection_count,
-    _validate_segment_columns,
-    _validate_weight_columns,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
@@ -46,7 +44,7 @@ from quant_research_platform.compute.tensor.portfolio_constants import (
 from quant_research_platform.compute.tensor.portfolio_helpers import (
     _leg_weight_values,
 )
-from quant_research_platform.compute.tensor.reporting import (
+from quant_research_platform.compute.tensor.portfolio_returns import (
     _build_path_records_from_arrays,
 )
 from quant_research_platform.compute.tensor.turnover import _position_map_from_arrays

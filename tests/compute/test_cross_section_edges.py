@@ -8,10 +8,10 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _assign_groups_array,
     _average_ranks,
     _pearson_correlation_values,
-    analyze_grouped_returns,
-    evaluate_ic_and_grouped_returns,
-    evaluate_ic_and_grouped_returns_from_validated_panel,
-    evaluate_ic_by_timestamp,
+    compute_grouped_label_values,
+    compute_ic_and_grouped_label_values,
+    compute_ic_and_grouped_label_values_from_validated_panel,
+    compute_ic_by_timestamp,
     summarize_group_spread,
     summarize_ic,
 )
@@ -25,9 +25,13 @@ def test_dataframe_cross_section_metrics_and_summaries() -> None:
     )
     frame = _panel()
 
-    ic = evaluate_ic_by_timestamp(frame, spec)
-    combined_ic, grouped = evaluate_ic_and_grouped_returns(frame, spec, n_groups=3)
-    grouped_only = analyze_grouped_returns(frame, spec, n_groups=3)
+    ic = compute_ic_by_timestamp(frame, spec)
+    combined_ic, grouped = compute_ic_and_grouped_label_values(
+        frame,
+        spec,
+        n_groups=3,
+    )
+    grouped_only = compute_grouped_label_values(frame, spec, n_groups=3)
     ic_summary = summarize_ic(ic)
     spread_summary = summarize_group_spread(grouped)
 
@@ -42,7 +46,7 @@ def test_dataframe_cross_section_validated_panel_and_empty_summaries() -> None:
     spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
     frame = _panel().assign(segment=["a", "a", "a", "b", "b", "b"])
 
-    ic, grouped = evaluate_ic_and_grouped_returns_from_validated_panel(
+    ic, grouped = compute_ic_and_grouped_label_values_from_validated_panel(
         frame,
         spec,
         n_groups=2,
@@ -66,9 +70,9 @@ def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> N
     spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
     with pytest.raises(TypeError, match="n_groups must be an integer"):
-        evaluate_ic_and_grouped_returns(_panel(), spec, n_groups=True)
+        compute_ic_and_grouped_label_values(_panel(), spec, n_groups=True)
     with pytest.raises(ValueError, match="n_groups must be at least 2"):
-        analyze_grouped_returns(_panel(), spec, n_groups=1)
+        compute_grouped_label_values(_panel(), spec, n_groups=1)
     with pytest.raises(ValueError, match="ic is missing columns"):
         summarize_ic(pd.DataFrame({"feature": ["factor"]}))
     with pytest.raises(ValueError, match="grouped_returns is missing columns"):

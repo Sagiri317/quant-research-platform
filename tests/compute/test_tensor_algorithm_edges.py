@@ -18,9 +18,9 @@ from quant_research_platform.compute.tensor.conversion import (
     panel_to_tensor_batch,
 )
 from quant_research_platform.compute.tensor.cross_section import (
-    analyze_grouped_returns_tensor,
-    evaluate_ic_and_grouped_returns_tensor,
-    evaluate_ic_by_timestamp_tensor,
+    compute_grouped_label_values_tensor,
+    compute_ic_and_grouped_label_values_tensor,
+    compute_ic_by_timestamp_tensor,
     summarize_group_spread_tensor,
 )
 from quant_research_platform.compute.tensor.exposure import (
@@ -32,7 +32,7 @@ from quant_research_platform.compute.tensor.portfolio_helpers import (
     _filter_panel_group,
     _leg_weight_values,
 )
-from quant_research_platform.compute.tensor.reporting import (
+from quant_research_platform.compute.tensor.portfolio_returns import (
     _build_path_records_from_arrays,
     _long_short_record_from_arrays,
     calculate_tensor_long_short,
@@ -59,9 +59,12 @@ def test_tensor_conversion_and_cross_section_outputs() -> None:
     assert tensor.label_values.shape == (2, 3)
     assert tensor.valid_mask.shape == (2, 3, 2)
 
-    ic = evaluate_ic_by_timestamp_tensor(tensor)
-    combined_ic, grouped = evaluate_ic_and_grouped_returns_tensor(tensor, n_groups=3)
-    grouped_only = analyze_grouped_returns_tensor(tensor, n_groups=3)
+    ic = compute_ic_by_timestamp_tensor(tensor)
+    combined_ic, grouped = compute_ic_and_grouped_label_values_tensor(
+        tensor,
+        n_groups=3,
+    )
+    grouped_only = compute_grouped_label_values_tensor(tensor, n_groups=3)
     spread = summarize_group_spread_tensor(grouped)
 
     assert len(ic) == 4
@@ -70,8 +73,8 @@ def test_tensor_conversion_and_cross_section_outputs() -> None:
     assert grouped_only.equals(grouped)
     assert {
         "feature",
-        "top_group_mean_return",
-        "bottom_group_mean_return",
+        "top_group_mean_label_value",
+        "bottom_group_mean_label_value",
     }.issubset(spread.columns)
 
 
@@ -293,7 +296,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     ) == {"B": -0.25}
 
 
-def test_tensor_reporting_and_exposure_helpers() -> None:
+def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
     spec = ComputePanelSpec(
         feature_columns=("factor",),
         label_column="forward_return",

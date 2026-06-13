@@ -9,8 +9,8 @@ from quant_research_platform.compute.backends import (
     TENSOR_BACKEND,
 )
 from quant_research_platform.compute.dataframe.cross_section import (
-    analyze_grouped_returns,
-    evaluate_ic_by_timestamp,
+    compute_grouped_label_values,
+    compute_ic_by_timestamp,
     summarize_group_spread,
     summarize_ic,
 )
@@ -68,10 +68,10 @@ def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None
         validate_compute_panel(panel, spec)
 
 
-def test_evaluate_ic_by_timestamp_computes_pearson_and_rankic() -> None:
+def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
     spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
-    result = evaluate_ic_by_timestamp(_perfect_panel(), spec)
+    result = compute_ic_by_timestamp(_perfect_panel(), spec)
 
     assert result["timestamp"].nunique() == 2
     assert result["feature"].tolist() == ["factor", "factor"]
@@ -80,7 +80,7 @@ def test_evaluate_ic_by_timestamp_computes_pearson_and_rankic() -> None:
     assert result["n_obs"].tolist() == [3, 3]
 
 
-def test_evaluate_ic_by_timestamp_does_not_call_pandas_series_corr(
+def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
     monkeypatch,
 ) -> None:
     def fail_corr(*args, **kwargs):
@@ -88,7 +88,7 @@ def test_evaluate_ic_by_timestamp_does_not_call_pandas_series_corr(
 
     monkeypatch.setattr(pd.Series, "corr", fail_corr)
 
-    result = evaluate_ic_by_timestamp(
+    result = compute_ic_by_timestamp(
         _perfect_panel(),
         ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
     )
@@ -97,13 +97,13 @@ def test_evaluate_ic_by_timestamp_does_not_call_pandas_series_corr(
     assert result["rankic"].round(6).tolist() == [1.0, 1.0]
 
 
-def test_analyze_grouped_returns_assigns_timestamp_level_groups() -> None:
+def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
     spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
 
-    result = analyze_grouped_returns(_perfect_panel(), spec, n_groups=3)
+    result = compute_grouped_label_values(_perfect_panel(), spec, n_groups=3)
 
     assert result["group"].tolist() == [1, 2, 3, 1, 2, 3]
-    assert result["mean_forward_return"].round(6).tolist() == [
+    assert result["mean_label_value"].round(6).tolist() == [
         0.01,
         0.02,
         0.03,
@@ -113,13 +113,13 @@ def test_analyze_grouped_returns_assigns_timestamp_level_groups() -> None:
     ]
 
 
-def test_analyze_grouped_returns_does_not_call_pandas_qcut(monkeypatch) -> None:
+def test_compute_grouped_label_values_does_not_call_pandas_qcut(monkeypatch) -> None:
     def fail_qcut(*args, **kwargs):
         raise AssertionError("group assignment should use deterministic rank buckets")
 
     monkeypatch.setattr(pd, "qcut", fail_qcut)
 
-    result = analyze_grouped_returns(
+    result = compute_grouped_label_values(
         _perfect_panel(),
         ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         n_groups=3,
@@ -128,7 +128,7 @@ def test_analyze_grouped_returns_does_not_call_pandas_qcut(monkeypatch) -> None:
     assert result["group"].tolist() == [1, 2, 3, 1, 2, 3]
 
 
-def test_analyze_grouped_returns_does_not_group_assigned_pairs(
+def test_compute_grouped_label_values_does_not_group_assigned_pairs(
     monkeypatch,
 ) -> None:
     def fail_assign(*args, **kwargs):
@@ -136,7 +136,7 @@ def test_analyze_grouped_returns_does_not_group_assigned_pairs(
 
     monkeypatch.setattr(pd.DataFrame, "assign", fail_assign)
 
-    result = analyze_grouped_returns(
+    result = compute_grouped_label_values(
         _perfect_panel(),
         ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
         n_groups=3,
@@ -180,7 +180,7 @@ def test_summarize_group_spread_reports_top_bottom_spread() -> None:
             "feature": ["factor", "factor", "factor", "factor"],
             "label": ["forward_return"] * 4,
             "group": [1, 2, 1, 2],
-            "mean_forward_return": [-0.01, 0.03, 0.02, 0.01],
+            "mean_label_value": [-0.01, 0.03, 0.02, 0.01],
             "n_obs": [5, 5, 5, 5],
         }
     )
@@ -188,10 +188,10 @@ def test_summarize_group_spread_reports_top_bottom_spread() -> None:
     summary = summarize_group_spread(grouped_returns)
 
     row = summary.iloc[0]
-    assert row["top_group_mean_return"] == pytest.approx(0.02)
-    assert row["bottom_group_mean_return"] == pytest.approx(0.005)
-    assert row["top_bottom_spread_mean"] == pytest.approx(0.015)
-    assert row["top_bottom_spread_hit_rate"] == pytest.approx(0.5)
+    assert row["top_group_mean_label_value"] == pytest.approx(0.02)
+    assert row["bottom_group_mean_label_value"] == pytest.approx(0.005)
+    assert row["top_bottom_label_value_spread_mean"] == pytest.approx(0.015)
+    assert row["top_bottom_label_value_spread_hit_rate"] == pytest.approx(0.5)
     assert row["group_monotonicity_score"] == pytest.approx(0.0)
 
 
@@ -212,7 +212,7 @@ def test_summarize_group_spread_uses_dataframe_aggregation(monkeypatch) -> None:
             "feature": ["factor", "factor", "factor", "factor"],
             "label": ["forward_return"] * 4,
             "group": [1, 2, 1, 2],
-            "mean_forward_return": [-0.01, 0.03, 0.02, 0.01],
+            "mean_label_value": [-0.01, 0.03, 0.02, 0.01],
             "n_obs": [5, 5, 5, 5],
         }
     )
@@ -220,4 +220,6 @@ def test_summarize_group_spread_uses_dataframe_aggregation(monkeypatch) -> None:
 
     summary = summarize_group_spread(grouped_returns)
 
-    assert summary.iloc[0]["top_bottom_spread_mean"] == pytest.approx(0.015)
+    assert summary.iloc[0]["top_bottom_label_value_spread_mean"] == pytest.approx(
+        0.015
+    )
