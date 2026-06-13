@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -289,6 +290,39 @@ def test_sparse_research_input_missing_base_key_passes_with_nan(
     result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
     assert result.loc[result["asset_id"].eq("asset_a"), "feature_1"].tolist() == [1.0]
     assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "feature_1"]).all()
+
+
+def test_research_dataset_key_coverage_is_persisted_for_all_inputs(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(_dataset_spec(key_coverage={"features": "sparse"}))
+    _write_processed_inputs(layout, processed_catalog, truncate_features=True)
+
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="dummy_dataset",
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+    )
+
+    root = tmp_path / "data/research/dummy_market/dummy_dataset"
+    spec_payload = json.loads((root / "spec.json").read_text(encoding="utf-8"))
+    manifest_payload = json.loads(
+        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "base": "strict",
+        "features": "sparse",
+        "labels": "strict",
+        "filters": "strict",
+        "context": "strict",
+    }
+    assert spec_payload["key_coverage"] == expected
+    assert manifest_payload["key_coverage"] == expected
 
 
 def test_strict_research_input_value_nan_does_not_count_as_missing_key(

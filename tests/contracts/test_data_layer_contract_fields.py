@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import fields
 
+import pytest
+
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -74,6 +76,62 @@ def test_label_definition_declares_family_and_input_columns_only() -> None:
     ]
     assert "required_input_data_id" not in manifest
     assert not hasattr(label, "required_input_data_id")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "expected_error"),
+    [
+        ("label_id", "", "label_id_required"),
+        ("family", "", "label_family_required"),
+        ("input_columns", (), "label_input_columns_required"),
+        ("input_columns", ("market_id", ""), "label_input_column_required"),
+        ("output_column", "", "label_output_column_required"),
+        ("label_timing", "", "label_timing_required"),
+        ("horizon", 0, "label_horizon_must_be_positive"),
+        ("lookahead", 0, "label_lookahead_must_be_positive"),
+        ("entry_rule", "", "label_entry_rule_required"),
+        ("exit_rule", "", "label_exit_rule_required"),
+        ("definition_version", "", "label_definition_version_required"),
+    ],
+)
+def test_label_definition_fails_closed_on_invalid_contract_fields(
+    field_name: str,
+    bad_value: object,
+    expected_error: str,
+) -> None:
+    kwargs = {
+        "label_id": "forward_return_20d",
+        "market_id": MarketId("a_share"),
+        "family": "forward_return",
+        "input_columns": ("market_id", "asset_id", "timestamp", "adj_open"),
+        "output_column": "forward_return_20d",
+        "label_timing": "next_open_to_horizon_open",
+        "horizon": 20,
+        "lookahead": 21,
+        "entry_rule": "next_session_open",
+        "exit_rule": "horizon_session_open",
+    }
+    kwargs[field_name] = bad_value
+
+    with pytest.raises(ValueError, match=expected_error):
+        LabelDefinition(**kwargs)
+
+
+def test_label_definition_rejects_unsupported_definition_version() -> None:
+    with pytest.raises(ValueError, match="unsupported_label_definition_version"):
+        LabelDefinition(
+            label_id="forward_return_20d",
+            market_id=MarketId("a_share"),
+            family="forward_return",
+            input_columns=("market_id", "asset_id", "timestamp", "adj_open"),
+            output_column="forward_return_20d",
+            label_timing="next_open_to_horizon_open",
+            horizon=20,
+            lookahead=21,
+            entry_rule="next_session_open",
+            exit_rule="horizon_session_open",
+            definition_version="9.9",
+        )
 
 
 def test_research_dataset_spec_requires_explicit_base_input() -> None:

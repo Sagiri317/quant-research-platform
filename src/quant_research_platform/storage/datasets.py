@@ -1147,6 +1147,7 @@ def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                 "label_columns": list(spec.label_columns),
                 "filter_columns": list(spec.filter_columns),
                 "context_columns": list(spec.context_columns),
+                "key_coverage": dict(spec.key_coverage),
             }
         )
     return payload

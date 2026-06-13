@@ -37,6 +37,11 @@ class ResearchDatasetSpec(DataSpec):
             )
         if self.key_coverage.get(self.base_input_data_id, "strict") != "strict":
             raise ValueError("base_input_key_coverage_must_be_strict")
+        normalized = {
+            data_id: self.key_coverage.get(data_id, "strict")
+            for data_id in self.input_data_ids
+        }
+        object.__setattr__(self, "key_coverage", normalized)
 
 
 __all__ = ["ResearchDatasetSpec"]

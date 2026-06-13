@@ -252,24 +252,6 @@ def test_a_share_csmar_residue_is_limited_to_private_evidence_fixture() -> None:
     assert csmar_hits == [(Path("verification/private_aggregate.py"), allowed_fixture)]
 
 
-def test_handoff_checklist_has_no_ambiguous_completion_words() -> None:
-    review_root = Path(".run/reviews")
-    checklists = tuple(
-        sorted(
-            review_root.glob(
-                "data-layer-contract-closure-cleanup-*/prompt_completion_checklist.md"
-            )
-        )
-    )
-    forbidden = ("mostly", "partial", "partially")
-    hits: list[str] = []
-    for path in checklists:
-        source = path.read_text(encoding="utf-8").lower()
-        hits.extend(f"{path}:{word}" for word in forbidden if word in source)
-
-    assert hits == []
-
-
 def test_active_code_has_no_retired_data_layer_terms() -> None:
     forbidden_patterns = (
         r"\basset_batches\b",

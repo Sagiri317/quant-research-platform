@@ -127,13 +127,6 @@ EVALUATION_COLUMNS: tuple[str, ...] = (
     "can_exit",
 )
 
-A_SHARE_MASK_ALLOWED_USES: dict[str, tuple[str, ...]] = {
-    "a_share_as_of": ("feature_filter", "universe_filter", "diagnostics"),
-    "a_share_execution": ("label_alignment", "execution_feasibility"),
-    "a_share_evaluation": ("evaluation_filter", "diagnostics"),
-}
-
-
 def a_share_processed_catalog() -> ProcessedDataCatalog:
     """Register the first-stage A-share 0.1 processed data specs."""
 
@@ -278,7 +271,6 @@ def _registered_label_columns() -> tuple[str, ...]:
 
 
 __all__ = [
-    "A_SHARE_MASK_ALLOWED_USES",
     "AS_OF_COLUMNS",
     "CONTEXT_COLUMNS",
     "DEFAULT_UNIVERSE_COLUMNS",

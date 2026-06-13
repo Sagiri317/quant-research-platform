@@ -103,7 +103,9 @@ columns in primary-key, feature, label, filter, context order. Non-base inputs
 use strict key coverage by default: they must cover the base primary-key set,
 value-column nulls are allowed, and keys outside the base fail closed. Sparse
 inputs are allowed only through explicit `key_coverage` opt-in and still fail
-closed on keys outside the base.
+closed on keys outside the base. `ResearchDatasetSpec.key_coverage` is
+normalized for every declared input and persisted into research dataset
+`spec.json` and `_manifest/manifest.json`; the base input is always `strict`.
 
 A-share processed annotation, factor, and label materializers resolve
 `ProcessedDataSpec.processed_input_data_ids` through internal input contracts.

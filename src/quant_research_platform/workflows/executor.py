@@ -16,23 +16,6 @@ from quant_research_platform.workflows.registry import (
 )
 
 
-def _execute_registered_steps(
-    step_ids: tuple[str, ...],
-    registry: WorkflowNodeRegistry,
-    checkpoints: InMemoryCheckpointStore | None = None,
-) -> tuple[str, ...]:
-    completed: list[str] = []
-    for step_id in step_ids:
-        definition = registry.get(step_id)
-        if checkpoints is not None:
-            checkpoints.record(step_id, "running")
-        definition.handler()
-        if checkpoints is not None:
-            checkpoints.record(step_id, "completed")
-        completed.append(step_id)
-    return tuple(completed)
-
-
 def _validate_registered_steps(
     step_ids: tuple[str, ...],
     registry: WorkflowNodeRegistry,

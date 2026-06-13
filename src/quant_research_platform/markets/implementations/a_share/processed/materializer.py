@@ -31,6 +31,9 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
+from quant_research_platform.markets.implementations.a_share.ids import (
+    DAILY_PANEL_PROCESSED_DATA_ID,
+)
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
@@ -68,8 +71,8 @@ class _ProcessedInputContract:
 
 
 _DAILY_PANEL_INPUT_CONTRACT = _ProcessedInputContract(
-    required_input_data_ids=("daily_panel",),
-    primary_input_data_id="daily_panel",
+    required_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+    primary_input_data_id=DAILY_PANEL_PROCESSED_DATA_ID,
 )
 _FACTOR_FAMILY_INPUT_CONTRACTS = {
     "price_volume": _DAILY_PANEL_INPUT_CONTRACT,

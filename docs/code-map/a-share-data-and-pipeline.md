@@ -80,7 +80,9 @@ profile.
 - The research dataset assembler is generic and market-agnostic. It requires
   `base_input_data_id`, reads the base first, left-joins remaining processed
   inputs on `market_id, asset_id, timestamp`, and emits columns in primary-key,
-  feature, label, filter, context order.
+  feature, label, filter, context order. `key_coverage` is normalized and
+  persisted for every declared research input in the dataset spec payload and
+  manifest; the base input remains fixed to `strict`.
 - Correctness evidence uses hand-checkable golden samples, simple reference
   implementations, forced tiny session chunks versus default paths, invariant
   tests, and key-diff diagnostics. Prior materialized runs are comparison

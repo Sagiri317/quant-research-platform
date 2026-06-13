@@ -22,6 +22,16 @@ from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import SessionWindow
+from quant_research_platform.markets.implementations.a_share.ids import (
+    A_SHARE_AS_OF_MASK_ID,
+    A_SHARE_DEFAULT_UNIVERSE_ID,
+    A_SHARE_EVALUATION_MASK_ID,
+    A_SHARE_EXECUTION_MASK_ID,
+    DAILY_CONTEXT_PROCESSED_DATA_ID,
+    DAILY_PANEL_PROCESSED_DATA_ID,
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+)
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
@@ -45,17 +55,17 @@ def test_a_share_processed_specs_declare_exact_direct_dependencies() -> None:
     }
 
     assert dependencies == {
-        "daily_panel": (
+        DAILY_PANEL_PROCESSED_DATA_ID: (
             ("daily_market", "stock_master", "market_cap", "trading_calendar"),
             (),
         ),
-        "daily_context": ((), ("daily_panel",)),
-        "a_share_default": ((), ("daily_panel",)),
-        "a_share_as_of": ((), ("daily_panel",)),
-        "a_share_execution": ((), ("daily_panel",)),
-        "a_share_evaluation": ((), ("daily_panel",)),
-        "price_volume": ((), ("daily_panel",)),
-        "forward_returns": ((), ("daily_panel",)),
+        DAILY_CONTEXT_PROCESSED_DATA_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
+        A_SHARE_DEFAULT_UNIVERSE_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
+        A_SHARE_AS_OF_MASK_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
+        A_SHARE_EXECUTION_MASK_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
+        A_SHARE_EVALUATION_MASK_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
+        PRICE_VOLUME_PROCESSED_DATA_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
+        FORWARD_RETURNS_PROCESSED_DATA_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
     }
 
 
