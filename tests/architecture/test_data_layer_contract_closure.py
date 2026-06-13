@@ -17,6 +17,10 @@ NEGATIVE_GATE_FILES = {
     Path("tests/architecture/test_clean_rewrite_rg_gate.py"),
     Path("tests/architecture/test_data_layer_boundaries.py"),
 }
+# Only local/private evidence fixture residue may name the source here.
+LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL = (
+    'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"'
+)
 
 
 def test_old_catalog_entrypoints_are_not_active_imports() -> None:
@@ -229,9 +233,6 @@ def test_a_share_csmar_residue_is_limited_to_private_evidence_fixture() -> None:
     a_share_root = PROJECT_SRC / "markets/implementations/a_share"
     hits: list[str] = []
     csmar_hits: list[tuple[Path, str]] = []
-    allowed_fixture = (
-        'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"'
-    )
     for path in sorted(a_share_root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
         if "CSMAR_SOURCE_ID" in source:
@@ -249,7 +250,12 @@ def test_a_share_csmar_residue_is_limited_to_private_evidence_fixture() -> None:
                 csmar_hits.append((path.relative_to(a_share_root), "csmar"))
 
     assert hits == []
-    assert csmar_hits == [(Path("verification/private_aggregate.py"), allowed_fixture)]
+    assert csmar_hits == [
+        (
+            Path("verification/private_aggregate.py"),
+            LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL,
+        )
+    ]
 
 
 def test_active_code_has_no_retired_data_layer_terms() -> None:

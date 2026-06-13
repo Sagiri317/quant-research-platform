@@ -62,7 +62,7 @@ Current public-safe anchors:
 
 ## 下一步
 
-1. Run final Phase 11 gates and review the staged diff.
+1. Complete the data-layer residual closure and handoff package verification.
 2. Commit and push `feature/qrp-clean-rewrite` only after final verification
    passes.
 3. Do not merge `main` from this task.

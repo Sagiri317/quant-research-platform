@@ -104,8 +104,8 @@ markers, local absolute paths, credentials, or stock-code samples.
 
 ## Current Next Step
 
-- Run final pre-merge verification gates, review the diff, and commit/push only
-  if no required blocker remains.
+- Complete data-layer residual closure, formal verification, and handoff
+  package verification before commit/push.
 
 ## Hard Reminders
 
