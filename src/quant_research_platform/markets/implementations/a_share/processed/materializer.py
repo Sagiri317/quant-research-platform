@@ -352,14 +352,20 @@ def _write_factors(
         warmup_sessions=lookback_days,
         reason="factor_warmup",
     )
+    panel_keys = read_dataset(panel_root, columns=["asset_id", "timestamp"])
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
+            read_window = _factor_read_window(
+                panel_keys,
+                window,
+                warmup_sessions=lookback_days,
+            )
             processed_inputs = _read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
                 processed_catalog=processed_catalog,
-                time_window=window.read,
+                time_window=read_window,
             )
             _validate_processed_input_contract(
                 spec,
@@ -487,6 +493,46 @@ def _filter_output_sessions(
     session_dates_set = {session.date() for session in sessions}
     dates = output["timestamp"].dt.date
     return output.loc[dates.isin(session_dates_set).fillna(False)].copy()
+
+
+def _factor_read_window(
+    panel_keys: pd.DataFrame,
+    window: SessionWindow,
+    *,
+    warmup_sessions: int,
+) -> TimeWindow:
+    if warmup_sessions <= 0 or panel_keys.empty:
+        return window.read
+    keys = panel_keys.loc[:, ["asset_id", "timestamp"]].copy()
+    keys["timestamp"] = pd.to_datetime(keys["timestamp"], errors="coerce")
+    keys = keys.dropna(subset=["asset_id", "timestamp"])
+    if keys.empty:
+        return window.read
+    read_end = pd.Timestamp(window.read.end)
+    keys = keys.loc[keys["timestamp"].dt.normalize().le(read_end)].sort_values(
+        ["asset_id", "timestamp"]
+    )
+    if keys.empty:
+        return window.read
+    core_dates = {session.date() for session in window.core_sessions}
+    core_rows = keys.loc[keys["timestamp"].dt.date.isin(core_dates)]
+    if core_rows.empty:
+        return window.read
+    starts = [pd.Timestamp(window.read.start)]
+    for _, asset_rows in keys.groupby("asset_id", sort=False):
+        asset_core_positions = [
+            position
+            for position, timestamp in enumerate(asset_rows["timestamp"])
+            if timestamp.date() in core_dates
+        ]
+        if not asset_core_positions:
+            continue
+        read_position = max(0, asset_core_positions[0] - warmup_sessions)
+        starts.append(asset_rows.iloc[read_position]["timestamp"].normalize())
+    start = min(starts).date()
+    if start >= window.read.start:
+        return window.read
+    return TimeWindow(start, window.read.end)
 
 
 def _require_dataset_coverage(

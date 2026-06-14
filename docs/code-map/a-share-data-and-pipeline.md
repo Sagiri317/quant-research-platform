@@ -57,10 +57,10 @@ processed canonical key.
 | Workflow orchestration | `workflows/` |
 | Reports | `reports/` |
 
-The local composition root is `catalog/profiles.py`.
-The public local profile builder returns the A-share internal-provider profile.
+The research profile composition root is `catalog/profiles.py`.
+The public research profile composition root returns the A-share internal-provider profile.
 A-share owner modules expose field, processed, factor, label, and research
-dataset catalogs; source/interim catalogs are composed only in the local
+dataset catalogs; source/interim catalogs are composed only in the research
 profile.
 
 ## Verification Intent
@@ -102,7 +102,7 @@ profile.
 - Evaluation, model, prediction, and portfolio outputs are outside the
   data-layer correctness seal and must not be treated as validated by it.
 - Evaluation/model/prediction diagnostics and registries are outside the
-  first-stage data-layer closure. Their demo catalogs are local profile
+  first-stage data-layer closure. Their demo catalogs are research profile
   components only.
 - Private boundary and sanitizer tests remain required before handoff.
 

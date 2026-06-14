@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from quant_research_platform.storage.layout import VerificationEvidenceLayout
+from quant_research_platform.reports.verification_evidence import (
+    VerificationEvidenceLayout,
+)
 
 
 def test_verification_evidence_layout_uses_normal_internal_directory_names() -> None:

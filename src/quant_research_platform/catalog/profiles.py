@@ -1,4 +1,4 @@
-"""Local catalog profile composition roots."""
+"""Research profile composition roots."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ class ResearchProfile:
 
 
 def research_profile() -> ResearchProfile:
-    """Return the active local research profile."""
+    """Return the active research profile."""
 
     return _a_share_csmar_research_profile()
 

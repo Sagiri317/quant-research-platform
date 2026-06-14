@@ -160,7 +160,10 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     assert layout.research_dataset_root(MarketId("a_share"), "demo") == Path(
         "/repo/data/research/a_share/demo"
     )
-    assert layout.private_report_root(MarketId("a_share"), "evaluation") == Path(
+    assert layout.private_research_report_root(
+        MarketId("a_share"),
+        "evaluation",
+    ) == Path(
         "/repo/reports/private_real/a_share/evaluation"
     )
     assert PRIVATE_BOUNDARY_ROOTS == ("data", "reports/private_real")

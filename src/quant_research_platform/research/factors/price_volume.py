@@ -576,18 +576,46 @@ def _rolling_aggregate(
     window: int,
     aggregation: str,
 ) -> pd.Series:
-    rolled = grouped_values.rolling(window, min_periods=window)
-    rolled_values = getattr(rolled, aggregation)().to_numpy(
-        dtype="float64",
-        copy=False,
-    )
+    del grouped_values
+    numeric = pd.to_numeric(values, errors="coerce")
+    source = numeric.to_numpy(dtype="float64", copy=False)
     output = np.full(len(values), np.nan, dtype="float64")
-    offset = 0
     for positions in group_positions:
-        next_offset = offset + len(positions)
-        output[positions] = rolled_values[offset:next_offset]
-        offset = next_offset
+        output[positions] = _rolling_aggregate_array(
+            source[positions],
+            window,
+            aggregation,
+        )
     return pd.Series(output, index=values.index, name=values.name)
+
+
+def _rolling_aggregate_array(
+    values: np.ndarray,
+    window: int,
+    aggregation: str,
+) -> np.ndarray:
+    output = np.full(len(values), np.nan, dtype="float64")
+    if window <= 0 or len(values) < window:
+        return output
+    windows = np.lib.stride_tricks.sliding_window_view(values, window_shape=window)
+    valid_windows = ~np.isnan(windows).any(axis=1)
+    if not valid_windows.any():
+        return output
+    valid_values = windows[valid_windows]
+    if aggregation == "mean":
+        window_values = np.mean(valid_values, axis=1)
+    elif aggregation == "max":
+        window_values = np.max(valid_values, axis=1)
+    elif aggregation == "min":
+        window_values = np.min(valid_values, axis=1)
+    elif aggregation == "std":
+        window_values = np.std(valid_values, axis=1, ddof=1)
+    else:
+        raise ValueError(f"unsupported_rolling_aggregation: {aggregation}")
+    values_out = np.full(len(windows), np.nan, dtype="float64")
+    values_out[valid_windows] = window_values
+    output[window - 1 :] = values_out
+    return output
 
 
 def _rolling_rms(

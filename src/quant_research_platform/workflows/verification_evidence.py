@@ -14,6 +14,7 @@ from quant_research_platform.catalog.profiles import ResearchProfile
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.reports.verification_evidence import (
+    VerificationEvidenceLayout,
     build_validation_summary,
     build_verification_evidence_summary,
     write_run_summary_json,
@@ -37,10 +38,7 @@ from quant_research_platform.runtime.execution_metrics import (
     write_execution_metrics_json,
 )
 from quant_research_platform.storage.atomic import atomic_write_json
-from quant_research_platform.storage.layout import (
-    StorageLayout,
-    VerificationEvidenceLayout,
-)
+from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_manifest,
     write_layer_manifest,

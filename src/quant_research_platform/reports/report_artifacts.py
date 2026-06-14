@@ -246,7 +246,10 @@ def _derive_report_run_root(
     if definition.run_type != report_spec.run_type:
         raise ValueError("report_spec_mismatch")
     run_root = (
-        layout.private_report_root(report_spec.market_id, report_spec.run_type)
+        layout.private_research_report_root(
+            report_spec.market_id,
+            report_spec.run_type,
+        )
         / report_spec.run_id
     )
     if report_spec.private_boundary_required and not is_private_boundary_path(run_root):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,68 @@ _CREDENTIAL_RE = re.compile(
 )
 _ROW_SAMPLE_RE = re.compile(r"(?i)\b(?:row_sample|row samples?|samples?)\b")
 _SOURCE_ASSET_RE = re.compile(r"\bsource_asset_id\b")
+_SMOKE_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
+_COMPARE_STATUSES = frozenset({"NOT_APPLICABLE", "PASS", "FAIL"})
+_FULL_HORIZON_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
+_COMPARE_EVIDENCE_FIELDS = frozenset({"comparison_path", "verification_scope"})
+_FULL_HORIZON_EVIDENCE_FIELDS = frozenset({"evidence_path", "verification_scope"})
+
+
+@dataclass(frozen=True)
+class VerificationEvidenceLayout:
+    output_root: Path
+
+    @classmethod
+    def from_output_root(cls, output_root: Path) -> VerificationEvidenceLayout:
+        return cls(output_root=Path(output_root))
+
+    @property
+    def config_root(self) -> Path:
+        return self.output_root / "config"
+
+    @property
+    def data_root(self) -> Path:
+        return self.output_root / "data"
+
+    @property
+    def interim_root(self) -> Path:
+        return self.data_root / "interim"
+
+    @property
+    def processed_root(self) -> Path:
+        return self.data_root / "processed"
+
+    @property
+    def research_root(self) -> Path:
+        return self.data_root / "research"
+
+    @property
+    def evidence_root(self) -> Path:
+        return self.data_root / "evidence"
+
+    @property
+    def manifests_root(self) -> Path:
+        return self.output_root / "manifests"
+
+    @property
+    def validations_root(self) -> Path:
+        return self.output_root / "validations"
+
+    @property
+    def timings_root(self) -> Path:
+        return self.output_root / "timings"
+
+    @property
+    def logs_root(self) -> Path:
+        return self.output_root / "logs"
+
+    @property
+    def summary_json_path(self) -> Path:
+        return self.output_root / "summary.json"
+
+    @property
+    def summary_md_path(self) -> Path:
+        return self.output_root / "summary.md"
 
 
 def build_validation_summary(
@@ -162,12 +225,25 @@ def build_verification_evidence_summary(
     timings: dict[str, object],
     validation_summary: dict[str, object],
     output_root: Path,
+    smoke_status: str = "NOT_RUN",
+    compare_status: str = "NOT_APPLICABLE",
+    full_horizon_status: str = "NOT_RUN",
+    compare_evidence: dict[str, object] | None = None,
+    full_horizon_evidence: dict[str, object] | None = None,
 ) -> dict[str, Any]:
+    statuses = _validate_verification_statuses(
+        smoke_status=smoke_status,
+        compare_status=compare_status,
+        full_horizon_status=full_horizon_status,
+        compare_evidence=compare_evidence,
+        full_horizon_evidence=full_horizon_evidence,
+    )
     return {
         "run_id": run_id,
         "status": validation_summary.get("status", "FAIL"),
         "date_range": date_range,
         "output_root": _logical_path(output_root),
+        **statuses,
         "manifest_status": manifests,
         "timings": timings,
         "validation_summary": validation_summary,
@@ -195,6 +271,9 @@ def write_verification_evidence_summary_md(
         f"- run_id: `{payload['run_id']}`",
         f"- status: `{payload['status']}`",
         f"- output_root: `{payload['output_root']}`",
+        f"- smoke_status: `{payload['smoke_status']}`",
+        f"- compare_status: `{payload['compare_status']}`",
+        f"- full_horizon_status: `{payload['full_horizon_status']}`",
         "- source_level_compare_engine: `false`",
         "",
     ]
@@ -214,6 +293,9 @@ def write_run_summary_md(path: Path, payload: dict[str, Any]) -> Path:
             f"- status: `{payload['status']}`",
             f"- output_root: `{payload['output_root']}`",
             f"- validation_status: `{payload['validation_summary']['status']}`",
+            f"- smoke_status: `{payload['smoke_status']}`",
+            f"- compare_status: `{payload['compare_status']}`",
+            f"- full_horizon_status: `{payload['full_horizon_status']}`",
             "- source_level_compare_engine: `false`",
             "",
         ]
@@ -362,6 +444,72 @@ def _private_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
     }
 
 
+def _validate_verification_statuses(
+    *,
+    smoke_status: str,
+    compare_status: str,
+    full_horizon_status: str,
+    compare_evidence: dict[str, object] | None,
+    full_horizon_evidence: dict[str, object] | None,
+) -> dict[str, object]:
+    smoke = smoke_status.upper()
+    compare = compare_status.upper()
+    full_horizon = full_horizon_status.upper()
+    if smoke not in _SMOKE_STATUSES:
+        raise ValueError("invalid_smoke_status")
+    if compare not in _COMPARE_STATUSES:
+        raise ValueError("invalid_compare_status")
+    if full_horizon not in _FULL_HORIZON_STATUSES:
+        raise ValueError("invalid_full_horizon_status")
+    if smoke == "NOT_RUN" and compare != "NOT_APPLICABLE":
+        raise ValueError("compare_status_requires_smoke")
+    if smoke != "NOT_RUN" and compare == "NOT_APPLICABLE":
+        raise ValueError("smoke_status_requires_compare_status")
+    if compare in {"PASS", "FAIL"} and not compare_evidence:
+        raise ValueError("compare_evidence_required")
+    if compare == "NOT_APPLICABLE" and compare_evidence:
+        raise ValueError("compare_evidence_not_applicable")
+    if compare in {"PASS", "FAIL"}:
+        _require_evidence_fields(
+            compare_evidence,
+            required_fields=_COMPARE_EVIDENCE_FIELDS,
+            error_name="compare_evidence_missing_fields",
+        )
+    if full_horizon == "NOT_RUN" and full_horizon_evidence:
+        raise ValueError("full_horizon_evidence_not_applicable")
+    if full_horizon != "NOT_RUN" and not full_horizon_evidence:
+        raise ValueError("full_horizon_evidence_required")
+    if full_horizon != "NOT_RUN":
+        _require_evidence_fields(
+            full_horizon_evidence,
+            required_fields=_FULL_HORIZON_EVIDENCE_FIELDS,
+            error_name="full_horizon_evidence_missing_fields",
+        )
+    return {
+        "smoke_status": smoke,
+        "compare_status": compare,
+        "full_horizon_status": full_horizon,
+        "compare_evidence": dict(compare_evidence or {}),
+        "full_horizon_evidence": dict(full_horizon_evidence or {}),
+    }
+
+
+def _require_evidence_fields(
+    evidence: dict[str, object] | None,
+    *,
+    required_fields: frozenset[str],
+    error_name: str,
+) -> None:
+    payload = evidence or {}
+    missing = [
+        field
+        for field in sorted(required_fields)
+        if not str(payload.get(field, "")).strip()
+    ]
+    if missing:
+        raise ValueError(error_name)
+
+
 def _unsafe_text_reason(text: str) -> str | None:
     if _WINDOWS_DRIVE_PATH_RE.search(text) or _UNC_PATH_RE.search(text):
         return "absolute_path"
@@ -437,6 +585,7 @@ def _utc_now() -> str:
 
 
 __all__ = [
+    "VerificationEvidenceLayout",
     "build_verification_evidence_summary",
     "build_validation_summary",
     "render_private_verification_summary_markdown",

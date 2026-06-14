@@ -42,7 +42,7 @@ replacement for `PROJECT_STATUS.md`.
   year, partition, force, overwrite, or dependency-policy controls.
 - First-stage data-layer closure is the active sealed path:
   `source/raw -> interim -> A-share processed facts -> A-share annotations/masks/context -> factor data -> label data -> research dataset`.
-- `catalog/profiles.py` is the local composition root. The public local profile
+- `catalog/profiles.py` is the research profile composition root. The public
   builder is `research_profile()` returning `ResearchProfile`;
   retired default-profile entrypoints are replaced and are no longer active
   public entrypoints.
@@ -79,7 +79,7 @@ replacement for `PROJECT_STATUS.md`.
 - Evaluation/model/prediction registries, diagnostics, workflow execute/resume,
   dashboards, high-frequency, multi-market implementation, and paper/live
   trading remain outside the first-stage data-layer closure. Demo
-  evaluation/model/prediction catalogs are local profile components only.
+  evaluation/model/prediction catalogs are research profile components only.
 - Full-horizon private rerun is not required for the first-stage structural
   closure unless a generated run artifact explicitly records that it occurred.
 - `eligible[t]` is the single EOD-as-of-t ResearchDataset universe mask, known

@@ -278,6 +278,11 @@ def test_write_paths_read_processed_inputs_via_helper(
         fake_read_processed_inputs,
     )
     monkeypatch.setattr(
+        materializer,
+        "read_dataset",
+        lambda *args, **kwargs: _key_frame(),
+    )
+    monkeypatch.setattr(
         materializer.annotations,
         "derive_annotations",
         fake_derive_annotations,

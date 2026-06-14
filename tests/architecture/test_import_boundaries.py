@@ -59,26 +59,26 @@ PROFILE_REPORT_CATALOG = (
 )
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
     PROFILE_A_SHARE_DEFINITION: (
-        "profiles.py composes the local A-share market definition."
+        "profiles.py composes the active A-share market definition."
     ),
     PROFILE_A_SHARE_ROOT: "profiles.py composes A-share research profile owners.",
     PROFILE_A_SHARE_FACTORS: (
-        "profiles.py composes the local A-share factor catalog."
+        "profiles.py composes the active A-share factor catalog."
     ),
-    PROFILE_A_SHARE_FIELDS: "profiles.py composes the local A-share field catalog.",
-    PROFILE_A_SHARE_IDS: "profiles.py uses stable local A-share identifiers.",
+    PROFILE_A_SHARE_FIELDS: "profiles.py composes the active A-share field catalog.",
+    PROFILE_A_SHARE_IDS: "profiles.py uses stable A-share identifiers.",
     PROFILE_A_SHARE_LABELS: (
-        "profiles.py composes the local A-share label catalog."
+        "profiles.py composes the active A-share label catalog."
     ),
     PROFILE_A_SHARE_PROCESSED: (
-        "profiles.py composes the local A-share processed catalog."
+        "profiles.py composes the active A-share processed catalog."
     ),
-    PROFILE_CSMAR_CATALOG: "profiles.py composes the local CSMAR source catalog.",
+    PROFILE_CSMAR_CATALOG: "profiles.py composes the CSMAR source catalog.",
     PROFILE_CSMAR_INTERIM: (
         "profiles.py composes the source-owned CSMAR interim catalog."
     ),
     PROFILE_REPORT_CATALOG: (
-        "profiles.py composes report owner definitions into the local profile."
+        "profiles.py composes report owner definitions into the research profile."
     ),
 }
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST = set(KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS)

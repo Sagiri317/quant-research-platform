@@ -18,8 +18,8 @@ manage credentials, or connect external market-data APIs.
 - Current website UI work: out of scope for this clean rewrite slice.
 - Current deployment/scheduler/worker/model-registry/feature-store scope: out
   of scope.
-- Current local catalog profile composition lives in `catalog/profiles.py`.
-  The public local profile builder is `research_profile()`, returning
+- Current research profile composition lives in `catalog/profiles.py`.
+  The public research profile composition root is `research_profile()`, returning
   `ResearchProfile`.
 
 Private boundaries:

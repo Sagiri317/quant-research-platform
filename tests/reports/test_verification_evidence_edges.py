@@ -105,12 +105,14 @@ def test_validation_summary_classifies_manifest_and_safety_failures(
 
 def test_verification_evidence_writers_emit_utf8(tmp_path: Path) -> None:
     payload = {"status": "PASS", "rows": 1}
-    run_payload = {
-        "run_id": "run_demo",
-        "status": "PASS",
-        "output_root": "verification-output",
-        "validation_summary": {"status": "PASS"},
-    }
+    run_payload = verification_evidence.build_verification_evidence_summary(
+        run_id="run_demo",
+        date_range={"start_date": "2014-01-01", "end_date": "2014-01-31"},
+        manifests={"dataset_count": 1},
+        timings={"records": []},
+        validation_summary={"status": "PASS"},
+        output_root=Path("verification-output"),
+    )
 
     json_path = verification_evidence.write_validation_summary(
         tmp_path / "summary.json",

@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import inspect
 
+import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.calendars import SessionWindow
+from quant_research_platform.markets.implementations.a_share.processed import (
+    materializer as processed_materializer,
+)
 from quant_research_platform.research.factors import price_volume as price_volume_module
 from quant_research_platform.research.factors.price_volume import (
     _rolling_aggregate,
@@ -89,6 +95,28 @@ def test_rolling_aggregate_preserves_groupby_rolling_row_alignment() -> None:
 
     pd.testing.assert_series_equal(actual_mean, expected_mean)
     pd.testing.assert_series_equal(actual_std, expected_std)
+
+
+def test_rolling_aggregate_mean_is_segment_start_invariant() -> None:
+    rng = np.random.default_rng(7)
+    _ = rng.normal(size=3000)
+    values = pd.Series(
+        rng.normal(size=1000) * 1_000_000_000_000.0 + np.arange(1000) * 0.01
+    )
+    full = _calculate_rolling_aggregate_segment(
+        values,
+        segment_start=0,
+        core_start=500,
+        window=120,
+    )
+    shifted = _calculate_rolling_aggregate_segment(
+        values,
+        segment_start=100,
+        core_start=500,
+        window=120,
+    )
+
+    pd.testing.assert_series_equal(full, shifted, check_exact=True)
 
 
 def test_price_volume_qrp_moment_contract_edge_windows() -> None:
@@ -335,6 +363,83 @@ def test_price_volume_session_chunk_boundary_matches_unchunked_reference() -> No
     assert sorted_chunked.duplicated(list(KEY_COLUMNS)).sum() == 0
 
 
+def test_price_volume_factor_read_window_expands_for_sparse_asset_history() -> None:
+    panel = synthetic_price_volume_panel(sessions=160, assets=("asset_a", "asset_b"))
+    sessions = tuple(sorted(pd.to_datetime(panel["timestamp"]).dt.normalize().unique()))
+    missing_sessions = set(sessions[98:116])
+    panel = panel.loc[
+        ~(
+            panel["asset_id"].eq("asset_b")
+            & pd.to_datetime(panel["timestamp"]).dt.normalize().isin(missing_sessions)
+        )
+    ].copy()
+    first_core = sessions[130]
+    window = SessionWindow(
+        core=TimeWindow(first_core.date(), sessions[135].date()),
+        read=TimeWindow(sessions[110].date(), sessions[135].date()),
+        core_sessions=sessions[130:136],
+        read_sessions=sessions[110:136],
+        reason="factor_warmup",
+    )
+
+    expanded = processed_materializer._factor_read_window(
+        panel.loc[:, ["asset_id", "timestamp"]],
+        window,
+        warmup_sessions=20,
+    )
+
+    assert expanded.start == sessions[92].date()
+    assert expanded.end == window.read.end
+
+
+def test_price_volume_session_chunks_with_sparse_asset_history_match_full_run() -> None:
+    panel = synthetic_price_volume_panel(sessions=160, assets=("asset_a", "asset_b"))
+    sessions = tuple(sorted(pd.to_datetime(panel["timestamp"]).dt.normalize().unique()))
+    missing_sessions = set(sessions[98:116])
+    panel = panel.loc[
+        ~(
+            panel["asset_id"].eq("asset_b")
+            & pd.to_datetime(panel["timestamp"]).dt.normalize().isin(missing_sessions)
+        )
+    ].copy()
+    factor_columns = (
+        "turnover_20d",
+        "amihud_20d",
+        "amplitude_20d",
+        "downside_vol_20d",
+        "upside_vol_20d",
+    )
+    full = calculate_price_volume_factors(
+        panel,
+        factor_columns=factor_columns,
+    ).loc[:, [*KEY_COLUMNS, *factor_columns]]
+    chunked_130 = calculate_in_session_chunks(
+        panel,
+        factor_columns=factor_columns,
+        split_session_index=130,
+        warmup_sessions=20,
+    )
+    chunked_121 = calculate_in_session_chunks(
+        panel,
+        factor_columns=factor_columns,
+        split_session_index=121,
+        warmup_sessions=20,
+    )
+
+    assert_frame_matches_reference(
+        chunked_130.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+    )
+    assert_frame_matches_reference(
+        chunked_121.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+    )
+    assert_frame_matches_reference(
+        chunked_121.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        chunked_130.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+    )
+
+
 def calculate_in_session_chunks(
     panel: pd.DataFrame,
     *,
@@ -353,9 +458,30 @@ def calculate_in_session_chunks(
     ):
         core_sessions = set(sessions[start_index:end_index])
         read_start_index = max(0, start_index - warmup_sessions)
-        read_sessions = set(sessions[read_start_index:end_index])
+        window = SessionWindow(
+            core=TimeWindow(
+                sessions[start_index].date(),
+                sessions[end_index - 1].date(),
+            ),
+            read=TimeWindow(
+                sessions[read_start_index].date(),
+                sessions[end_index - 1].date(),
+            ),
+            core_sessions=sessions[start_index:end_index],
+            read_sessions=sessions[read_start_index:end_index],
+            reason="factor_warmup",
+        )
+        read_window = processed_materializer._factor_read_window(
+            ordered.loc[:, ["asset_id", "timestamp"]],
+            window,
+            warmup_sessions=warmup_sessions,
+        )
         read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
-            read_sessions
+            {
+                session
+                for session in sessions
+                if read_window.start <= session.date() <= read_window.end
+            }
         )
         core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
             core_sessions
@@ -366,3 +492,29 @@ def calculate_in_session_chunks(
         )
         parts.append(calculated.loc[core_mask.loc[read_mask].to_numpy()])
     return pd.concat(parts, ignore_index=True).loc[:, [*KEY_COLUMNS, *factor_columns]]
+
+
+def _calculate_rolling_aggregate_segment(
+    values: pd.Series,
+    *,
+    segment_start: int,
+    core_start: int,
+    window: int,
+) -> pd.Series:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["asset_a"] * (len(values) - segment_start),
+            "value": values.iloc[segment_start:].to_numpy(dtype="float64"),
+        }
+    )
+    group_keys = frame["asset_id"]
+    grouped = frame["value"].groupby(group_keys, sort=False)
+    group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
+    result = _rolling_aggregate(
+        frame["value"],
+        grouped,
+        group_positions,
+        window,
+        "mean",
+    )
+    return result.iloc[core_start - segment_start :].reset_index(drop=True)

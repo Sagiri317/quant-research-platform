@@ -81,7 +81,7 @@ Current public-safe anchors:
 
 ## First-Stage Data-Layer Closure
 
-Status: first-stage data-layer closure is implemented for the local A-share
+Status: first-stage data-layer closure is implemented for the A-share
 internal-provider profile.
 
 The closed first-stage path is:
@@ -116,14 +116,14 @@ Current `price_volume` factors and `forward_return` labels use `daily_panel` as
 their primary processed input by contract, without adding public factor or label
 registries.
 
-Evaluation, model, and prediction catalogs remain local profile demo
+Evaluation, model, and prediction catalogs remain research profile demo
 components and are outside the first-stage data-layer closure. Evaluation
 diagnostics, model registry, prediction registry, workflow execute/resume,
 frontend/dashboard work, high-frequency, multi-market implementation, and
 paper/live trading remain out of scope.
 
-The current local catalog profile composition root is `catalog/profiles.py`.
-The public local profile builder is `research_profile()`, returning
+The current research profile composition root is `catalog/profiles.py`.
+The public research profile composition root is `research_profile()`, returning
 `ResearchProfile`.
 
 Full-horizon private reruns are not required for this first-stage structural

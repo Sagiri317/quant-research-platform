@@ -39,7 +39,7 @@ def test_research_profile_is_only_public_profile_builder() -> None:
     assert not [name for name in vars(profiles) if name.startswith("default_")]
 
 
-def test_research_profile_contains_current_local_profile_catalogs() -> None:
+def test_research_profile_contains_active_catalogs() -> None:
     from quant_research_platform.catalog.profiles import (
         ResearchProfile,
         research_profile,

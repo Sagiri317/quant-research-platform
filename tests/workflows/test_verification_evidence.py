@@ -18,8 +18,10 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.reports.verification_evidence import (
+    VerificationEvidenceLayout,
+)
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
-from quant_research_platform.storage.layout import VerificationEvidenceLayout
 from quant_research_platform.workflows import verification_evidence as module
 from quant_research_platform.workflows.verification_evidence import (
     VerificationEvidenceRunConfig,
