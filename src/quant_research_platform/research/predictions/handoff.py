@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -32,8 +33,26 @@ def run_prediction_from_research_dataset(
     prediction_catalog: PredictionCatalog,
     prediction_id: str,
     time_window: TimeWindow | None = None,
+    prediction_train_end: str | None = None,
+    prediction_test_start: str | None = None,
+    prediction_test_end: str | None = None,
 ) -> Path:
     prediction_spec = prediction_catalog.get(prediction_id)
+    if (
+        prediction_train_end is not None
+        or prediction_test_start is not None
+        or prediction_test_end is not None
+    ):
+        prediction_spec = replace(
+            prediction_spec,
+            train_end=prediction_train_end or prediction_spec.train_end,
+            test_start=prediction_test_start or prediction_spec.test_start,
+            test_end=(
+                prediction_test_end
+                if prediction_test_end is not None
+                else prediction_spec.test_end
+            ),
+        )
     model_spec = model_catalog.get(prediction_spec.model_id)
     dataset_spec = dataset_catalog.get(prediction_spec.research_dataset_id)
     read_columns = tuple(

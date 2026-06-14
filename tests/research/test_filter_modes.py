@@ -222,10 +222,12 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         "std_ic",
         "icir",
         "positive_ic_rate",
+        "valid_ic_count",
         "mean_rankic",
         "std_rankic",
         "rankicir",
         "positive_rankic_rate",
+        "valid_rankic_count",
     ]
     assert list(eligible.group_spread_summary.columns) == [
         "feature",
@@ -247,6 +249,68 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
     assert unfiltered.grouped_label_values[
         "mean_label_value"
     ].tolist() == pytest.approx([0.02, 0.045])
+
+
+def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.evaluations import engine as eval_engine
+
+    frame = pd.concat(
+        [
+            _filter_frame().assign(
+                timestamp=pd.Timestamp(value),
+                unused_blob="x" * 1000,
+            )
+            for value in (
+                "2024-01-02",
+                "2024-01-03",
+                "2024-01-04",
+                "2024-01-05",
+            )
+        ],
+        ignore_index=True,
+    )
+    spec = EvaluationSpec(
+        run_id="eval_memory_safe",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        feature_columns=("factor",),
+        label_columns=("label",),
+    )
+    expected = evaluate_factor_frame(frame, spec, n_groups=2)
+    original = eval_engine.compute_ic_and_grouped_label_values
+    seen_columns: list[tuple[str, ...]] = []
+
+    def wrapped_compute(frame, spec, *, n_groups):
+        seen_columns.append(tuple(frame.columns))
+        assert tuple(frame.columns) == ("timestamp", "asset_id", "factor", "label")
+        return original(frame, spec, n_groups=n_groups)
+
+    monkeypatch.setattr(
+        eval_engine,
+        "compute_ic_and_grouped_label_values",
+        wrapped_compute,
+    )
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+
+    result = evaluate_factor_frame(frame, spec, n_groups=2)
+
+    assert len(seen_columns) > 1
+    pd.testing.assert_frame_equal(
+        result.metrics.sort_values(["timestamp", "feature", "label"]).reset_index(
+            drop=True
+        ),
+        expected.metrics.sort_values(["timestamp", "feature", "label"]).reset_index(
+            drop=True
+        ),
+    )
+    pd.testing.assert_frame_equal(result.ic_summary, expected.ic_summary)
+    pd.testing.assert_frame_equal(
+        result.group_spread_summary,
+        expected.group_spread_summary,
+    )
+    assert result.diagnostics == expected.diagnostics
 
 
 def test_evaluation_diagnostics_contract_validates_shape() -> None:
@@ -375,6 +439,22 @@ def test_evaluation_filter_columns_fail_closed(
         evaluate_factor_frame(frame, spec)
 
 
+def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
+    spec = EvaluationSpec(
+        run_id="bad_timestamp",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        feature_columns=("factor",),
+        label_columns=("label",),
+    )
+
+    with pytest.raises(ValueError, match="invalid_time_chunk_timestamp_values"):
+        evaluate_factor_frame(
+            _filter_frame().assign(timestamp=[pd.NaT] * len(_filter_frame())),
+            spec,
+        )
+
+
 def test_filter_columns_cannot_be_features() -> None:
     with pytest.raises(ValueError, match="filter_column_in_feature_columns: eligible"):
         EvaluationSpec(
@@ -434,6 +514,140 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     all_tradability_blocked = frame.assign(can_enter=False, can_exit=False)
     still_trains = fit_linear_baseline_result(all_tradability_blocked, eligible_spec)
     assert still_trains.metadata["rows_after_feature_label_dropna"] == 4
+
+
+def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.models import baseline as model_baseline
+
+    frame = pd.concat(
+        [
+            _filter_frame().assign(
+                timestamp=pd.Timestamp(value),
+                unused_blob="x" * 1000,
+            )
+            for value in (
+                "2024-01-02",
+                "2024-01-03",
+                "2024-01-04",
+                "2024-01-05",
+            )
+        ],
+        ignore_index=True,
+    )
+    spec = ModelSpec(
+        model_id="linear_memory_safe",
+        model_family="linear",
+        feature_columns=("factor",),
+        label_column="label",
+    )
+    expected = fit_linear_baseline_result(frame, spec)
+    original_filter = model_baseline.apply_filter_mode
+    filtered_chunk_rows: list[int] = []
+
+    def wrapped_filter(frame, *, mode, metadata_key):
+        filtered_chunk_rows.append(len(frame))
+        return original_filter(frame, mode=mode, metadata_key=metadata_key)
+
+    def fail_column_stack(*args, **kwargs):
+        raise AssertionError("model fit must not allocate a full intercept matrix")
+
+    monkeypatch.setattr(model_baseline, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(np, "column_stack", fail_column_stack)
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+
+    result = fit_linear_baseline_result(frame, spec)
+
+    assert len(filtered_chunk_rows) > 1
+    assert max(filtered_chunk_rows) < len(frame)
+    assert result.coefficients.tolist() == pytest.approx(
+        expected.coefficients.tolist()
+    )
+    assert result.metadata == expected.metadata
+
+
+def test_model_rank_deficient_fit_matches_direct_lstsq_design(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    x1 = [
+        0.1257302210933933,
+        -0.1321048632913019,
+        0.6404226504432821,
+        0.10490011715303971,
+        -0.535669373161111,
+        0.36159505490948474,
+        1.3040000451301372,
+        0.9470809631292422,
+    ]
+    x2 = [
+        0.12573021405604093,
+        -0.1321048759455166,
+        0.6404226442105374,
+        0.1049001175662995,
+        -0.5356693964114188,
+        0.3615950527215681,
+        1.3040000326710277,
+        0.9470809558065686,
+    ]
+    y = [
+        -0.5442589828573099,
+        -0.31630015636915454,
+        0.4116305363741328,
+        1.0425133694426776,
+        -0.12853466294403426,
+        1.3664634705496859,
+        -0.6651946734866135,
+        0.3515100700930197,
+    ]
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-02",
+                    "2024-01-02",
+                    "2024-01-03",
+                    "2024-01-03",
+                    "2024-01-04",
+                    "2024-01-04",
+                    "2024-01-05",
+                    "2024-01-05",
+                ]
+            ),
+            "asset_id": [f"asset_{idx}" for idx in range(len(x1))],
+            "factor": x1,
+            "factor_shadow": x2,
+            "label": y,
+            "eligible": [True] * len(x1),
+        }
+    )
+    spec = ModelSpec(
+        model_id="linear_rank_deficient",
+        model_family="linear",
+        feature_columns=("factor", "factor_shadow"),
+        label_column="label",
+    )
+    usable = frame.loc[frame["eligible"]].dropna(
+        subset=[*spec.feature_columns, spec.label_column]
+    )
+    x = usable.loc[:, spec.feature_columns].to_numpy(dtype="float64")
+    y = usable.loc[:, spec.label_column].to_numpy(dtype="float64")
+    design = np.empty((len(x), len(spec.feature_columns) + 1), dtype="float64")
+    design[:, 0] = 1.0
+    design[:, 1:] = x
+    expected, *_ = np.linalg.lstsq(design, y, rcond=None)
+
+    result = fit_linear_baseline_result(frame, spec)
+
+    assert result.coefficients.tolist() == pytest.approx(expected.tolist())
+
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    tiny_result = fit_linear_baseline_result(frame, spec)
+
+    assert tiny_result.coefficients.tolist() == pytest.approx(
+        expected.tolist(),
+        rel=1e-7,
+    )
 
 
 def test_model_rejects_tradable_sample_filter_mode() -> None:
@@ -496,6 +710,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         "rows_after_filter_mode": 10,
         "rows_after_feature_dropna": 10,
         "prediction_rows": 5,
+        "train_end": "2024-01-02",
         "test_start": "2024-01-03",
         "test_end": "2024-01-03",
         "is_oos": True,
@@ -552,6 +767,127 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     assert manifest["prediction_metadata"]["prediction_rows"] == 5
     assert manifest["prediction_metadata"]["sample_filter_mode"] == "eligible"
     assert manifest["prediction_metadata"]["rows_after_feature_dropna"] == 10
+    assert manifest["prediction_metadata"]["train_end"] == "2024-01-02"
+
+
+def test_prediction_forced_tiny_resource_chunks_match_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.predictions import bundle as bundle_module
+
+    frame = pd.concat(
+        [
+            _filter_frame().assign(
+                timestamp=pd.Timestamp(value),
+                unused_blob="x" * 1000,
+            )
+            for value in (
+                "2024-01-02",
+                "2024-01-03",
+                "2024-01-04",
+                "2024-01-05",
+            )
+        ],
+        ignore_index=True,
+    )
+    spec = PredictionSpec(
+        prediction_id="pred_memory_safe",
+        model_id="linear_memory_safe",
+        research_dataset_id="demo_filter",
+        prediction_column=default_prediction_column(),
+        primary_key=platform_entity_time_key(),
+        train_end="2024-01-02",
+        test_start="2024-01-03",
+        test_end="2024-01-05",
+    )
+    expected = build_prediction_bundle(
+        frame.drop(columns=["label"]),
+        spec,
+        coefficients=np.asarray([0.0, 0.01]),
+        feature_columns=("factor",),
+    )
+    original_filter = bundle_module.apply_filter_mode
+    filtered_chunk_rows: list[int] = []
+
+    def wrapped_filter(frame, *, mode, metadata_key):
+        filtered_chunk_rows.append(len(frame))
+        return original_filter(frame, mode=mode, metadata_key=metadata_key)
+
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    monkeypatch.setattr(bundle_module, "apply_filter_mode", wrapped_filter)
+    result = build_prediction_bundle(
+        frame.drop(columns=["label"]),
+        spec,
+        coefficients=np.asarray([0.0, 0.01]),
+        feature_columns=("factor",),
+    )
+
+    assert len(filtered_chunk_rows) > 1
+    assert max(filtered_chunk_rows) < len(frame)
+    pd.testing.assert_frame_equal(result, expected)
+    assert result.attrs["prediction_metadata"] == expected.attrs["prediction_metadata"]
+
+
+def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> None:
+    frame = pd.concat(
+        [
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+        ],
+        ignore_index=True,
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog, frame)
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo_filter",
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+    )
+    model_catalog = ModelCatalog()
+    model_catalog.register(
+        ModelSpec(
+            model_id="linear_eligible",
+            model_family="linear",
+            feature_columns=("factor",),
+            label_column="label",
+        )
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="pred_override",
+            model_id="linear_eligible",
+            research_dataset_id="demo_filter",
+            prediction_column=default_prediction_column(),
+            primary_key=platform_entity_time_key(),
+            train_end="2024-01-01",
+            test_start="2024-01-04",
+            test_end="2024-01-04",
+        )
+    )
+
+    run_root = run_prediction_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        model_catalog=model_catalog,
+        prediction_catalog=prediction_catalog,
+        prediction_id="pred_override",
+        prediction_train_end="2024-01-02",
+        prediction_test_start="2024-01-03",
+        prediction_test_end="2024-01-03",
+    )
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["train_end"] == "2024-01-02"
+    assert manifest["test_start"] == "2024-01-03"
+    assert manifest["test_end"] == "2024-01-03"
+    assert manifest["prediction_metadata"]["train_end"] == "2024-01-02"
+    assert manifest["prediction_metadata"]["test_start"] == "2024-01-03"
+    assert manifest["prediction_metadata"]["test_end"] == "2024-01-03"
 
 
 def _write_processed_inputs(

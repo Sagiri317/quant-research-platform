@@ -52,6 +52,11 @@ class VerificationEvidenceRunConfig:
     start_date: str
     end_date: str
     profile: ResearchProfile
+    evaluation_start_date: str | None = None
+    evaluation_end_date: str | None = None
+    prediction_train_end: str | None = None
+    prediction_test_start: str | None = None
+    prediction_test_end: str | None = None
     replace_output: bool = False
     run_id: str | None = None
 
@@ -76,6 +81,7 @@ def run_verification_evidence(
     end = pd.Timestamp(config.end_date)
     if start > end:
         raise ValueError("start_date_after_end_date")
+    effective_windows = _resolve_effective_windows(config)
     output_root = Path(config.output_root)
     _prepare_output_root(output_root, replace_output=config.replace_output)
     run_id = config.run_id or output_root.name
@@ -87,6 +93,14 @@ def run_verification_evidence(
             "run_id": run_id,
             "start_date": config.start_date,
             "end_date": config.end_date,
+            "requested_windows": {
+                "evaluation_start_date": config.evaluation_start_date,
+                "evaluation_end_date": config.evaluation_end_date,
+                "prediction_train_end": config.prediction_train_end,
+                "prediction_test_start": config.prediction_test_start,
+                "prediction_test_end": config.prediction_test_end,
+            },
+            "effective_windows": effective_windows,
             "output_root": _logical_path(output_root),
             "replace_output": config.replace_output,
             "workflow_id": _OWNERSHIP_MARKER,
@@ -98,6 +112,10 @@ def run_verification_evidence(
     recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=output_root)
     time_window = TimeWindow(config.start_date, config.end_date)
+    evaluation_time_window = TimeWindow(
+        effective_windows["evaluation_start_date"],
+        effective_windows["evaluation_end_date"],
+    )
     catalogs = config.profile
     source_id = config.profile.source_id
     with recorder.record("interim_generation", logical_layer="interim"):
@@ -136,7 +154,7 @@ def run_verification_evidence(
             dataset_catalog=catalogs.research_datasets,
             evaluation_catalog=catalogs.evaluations,
             run_id="a_share_mom_20d_forward_return_20d_2014",
-            time_window=time_window,
+            time_window=evaluation_time_window,
         )
     with recorder.record("prediction_generation", logical_layer="evidence"):
         prediction_root = run_prediction_from_research_dataset(
@@ -146,6 +164,9 @@ def run_verification_evidence(
             prediction_catalog=catalogs.predictions,
             prediction_id="a_share_linear_mom_20d_prediction_2014",
             time_window=time_window,
+            prediction_train_end=effective_windows["prediction_train_end"],
+            prediction_test_start=effective_windows["prediction_test_start"],
+            prediction_test_end=effective_windows["prediction_test_end"],
         )
 
     dataset_roots = _dataset_roots(
@@ -276,6 +297,42 @@ def _prepare_output_root(path: Path, *, replace_output: bool) -> None:
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=False)
     _write_ownership_marker(output_root)
+
+
+def _resolve_effective_windows(
+    config: VerificationEvidenceRunConfig,
+) -> dict[str, str | None]:
+    evaluation_start_date = config.evaluation_start_date or config.start_date
+    evaluation_end_date = config.evaluation_end_date or config.end_date
+    if pd.Timestamp(evaluation_start_date) > pd.Timestamp(evaluation_end_date):
+        raise ValueError("evaluation_start_date_after_end_date")
+
+    prediction_spec = config.profile.predictions.get(
+        "a_share_linear_mom_20d_prediction_2014"
+    )
+    prediction_train_end = config.prediction_train_end or prediction_spec.train_end
+    prediction_test_start = (
+        config.prediction_test_start or prediction_spec.test_start
+    )
+    prediction_test_end = (
+        config.prediction_test_end
+        if config.prediction_test_end is not None
+        else prediction_spec.test_end
+    )
+    if pd.Timestamp(prediction_train_end) >= pd.Timestamp(prediction_test_start):
+        raise ValueError("prediction_train_end_must_precede_test_start")
+    if (
+        prediction_test_end is not None
+        and pd.Timestamp(prediction_test_end) < pd.Timestamp(prediction_test_start)
+    ):
+        raise ValueError("prediction_test_end_must_not_precede_test_start")
+    return {
+        "evaluation_start_date": evaluation_start_date,
+        "evaluation_end_date": evaluation_end_date,
+        "prediction_train_end": prediction_train_end,
+        "prediction_test_start": prediction_test_start,
+        "prediction_test_end": prediction_test_end,
+    }
 
 
 def _ownership_marker_path(output_root: Path) -> Path:

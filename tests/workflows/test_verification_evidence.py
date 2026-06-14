@@ -57,6 +57,53 @@ def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
         run_verification_evidence(config)
 
 
+def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_path):
+    with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
+        run_verification_evidence(
+            VerificationEvidenceRunConfig(
+                output_root=tmp_path / "verification-output" / "bad-evaluation",
+                start_date="2014-01-01",
+                end_date="2016-12-31",
+                evaluation_start_date="2016-12-31",
+                evaluation_end_date="2014-01-01",
+                profile=research_profile(),
+            )
+        )
+    assert not (tmp_path / "verification-output" / "bad-evaluation").exists()
+
+    with pytest.raises(
+        ValueError,
+        match="prediction_train_end_must_precede_test_start",
+    ):
+        run_verification_evidence(
+            VerificationEvidenceRunConfig(
+                output_root=tmp_path / "verification-output" / "bad-prediction",
+                start_date="2014-01-01",
+                end_date="2016-12-31",
+                prediction_train_end="2018-01-01",
+                prediction_test_start="2018-01-01",
+                profile=research_profile(),
+            )
+        )
+    assert not (tmp_path / "verification-output" / "bad-prediction").exists()
+
+    with pytest.raises(
+        ValueError,
+        match="prediction_test_end_must_not_precede_test_start",
+    ):
+        run_verification_evidence(
+            VerificationEvidenceRunConfig(
+                output_root=tmp_path / "verification-output" / "bad-prediction-end",
+                start_date="2014-01-01",
+                end_date="2016-12-31",
+                prediction_test_start="2018-01-02",
+                prediction_test_end="2018-01-01",
+                profile=research_profile(),
+            )
+        )
+    assert not (tmp_path / "verification-output" / "bad-prediction-end").exists()
+
+
 def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_path):
     config = VerificationEvidenceRunConfig(
         output_root=tmp_path / "verification-output" / "s1",
@@ -67,6 +114,140 @@ def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_pa
     )
 
     assert config.run_id == "verification-evidence-smoke-a-share-2014-2016"
+
+
+def test_verification_evidence_default_windows_use_global_and_catalog() -> None:
+    profile = research_profile()
+    prediction_spec = profile.predictions.get("a_share_linear_mom_20d_prediction_2014")
+
+    windows = module._resolve_effective_windows(
+        VerificationEvidenceRunConfig(
+            output_root=Path("unused"),
+            start_date="2014-01-01",
+            end_date="2016-12-31",
+            profile=profile,
+        )
+    )
+
+    assert windows == {
+        "evaluation_start_date": "2014-01-01",
+        "evaluation_end_date": "2016-12-31",
+        "prediction_train_end": prediction_spec.train_end,
+        "prediction_test_start": prediction_spec.test_start,
+        "prediction_test_end": prediction_spec.test_end,
+    }
+
+
+def test_verification_evidence_workflow_resolves_independent_windows(
+    tmp_path,
+    monkeypatch,
+):
+    calls: list[str] = []
+    captured_evaluation_windows: list[tuple[str, str]] = []
+    captured_prediction_inputs: list[dict[str, object]] = []
+
+    def import_interim(layout, raw_root, start_date, end_date):
+        del raw_root, start_date, end_date
+        calls.append("interim")
+        artifact_root = (
+            layout.project_root
+            / "data"
+            / "interim"
+            / "csmar"
+            / "daily_market"
+        )
+        _persist_fake_artifact(artifact_root, "daily_market", "interim")
+        return type("Result", (), {"artifact_roots": {"daily_market": artifact_root}})()
+
+    def build_processed(layout, source_id, time_window, kinds):
+        del source_id, time_window, kinds
+        calls.append("processed")
+        artifact_root = (
+            layout.project_root
+            / "data"
+            / "processed"
+            / "a_share"
+            / "factor"
+            / "price_volume"
+        )
+        _persist_fake_artifact(artifact_root, "price_volume", "processed")
+        return {"price_volume": inspect_dataset(artifact_root)}
+
+    def assemble_dataset(**kwargs):
+        calls.append("research")
+        return _persist_fake_research_root(**kwargs)
+
+    monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    monkeypatch.setattr(
+        module,
+        "run_evaluation_from_research_dataset",
+        lambda **kwargs: (
+            calls.append("evaluation")
+                or captured_evaluation_windows.append(
+                    (
+                        kwargs["time_window"].start.isoformat(),
+                        kwargs["time_window"].end.isoformat(),
+                    )
+                )
+            or Path("evaluation")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_prediction_from_research_dataset",
+        lambda **kwargs: (
+            calls.append("prediction")
+            or captured_prediction_inputs.append(
+                {
+                    "time_window": (
+                        kwargs["time_window"].start.isoformat(),
+                        kwargs["time_window"].end.isoformat(),
+                    ),
+                    "prediction_train_end": kwargs["prediction_train_end"],
+                    "prediction_test_start": kwargs["prediction_test_start"],
+                    "prediction_test_end": kwargs["prediction_test_end"],
+                }
+            )
+            or Path("prediction")
+        ),
+    )
+
+    output_root = tmp_path / "verification-output" / "s-window"
+    result = run_verification_evidence(
+        VerificationEvidenceRunConfig(
+            output_root=output_root,
+            start_date="2014-01-01",
+            end_date="2019-12-31",
+            evaluation_start_date="2015-01-01",
+            evaluation_end_date="2018-12-31",
+            prediction_train_end="2017-12-31",
+            prediction_test_start="2018-01-01",
+            prediction_test_end="2019-12-31",
+            profile=_profile_with_materializers(import_interim, build_processed),
+        )
+    )
+    run_config = json.loads(
+        (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
+    )
+
+    assert result.status == "PASS"
+    assert calls == ["interim", "processed", "research", "evaluation", "prediction"]
+    assert captured_evaluation_windows == [("2015-01-01", "2018-12-31")]
+    assert captured_prediction_inputs == [
+        {
+            "time_window": ("2014-01-01", "2019-12-31"),
+            "prediction_train_end": "2017-12-31",
+            "prediction_test_start": "2018-01-01",
+            "prediction_test_end": "2019-12-31",
+        }
+    ]
+    assert run_config["effective_windows"] == {
+        "evaluation_start_date": "2015-01-01",
+        "evaluation_end_date": "2018-12-31",
+        "prediction_train_end": "2017-12-31",
+        "prediction_test_start": "2018-01-01",
+        "prediction_test_end": "2019-12-31",
+    }
 
 
 def test_verification_evidence_workflow_runs_injected_generation_and_writes_artifacts(

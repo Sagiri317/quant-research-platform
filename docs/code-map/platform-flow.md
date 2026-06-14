@@ -11,7 +11,7 @@ internal source adapters -> source-normalized interim artifacts
 -> data/processed/a_share/{panel,annotation,factor,label}
 -> research/datasets session-chunked assembly
 -> data/research/a_share
--> research/evaluations and research/predictions
+-> research/evaluations, research/models, and research/predictions
 -> reports/private_real
 -> interfaces/api and interfaces/cli read research/catalog surfaces
 ```
@@ -41,11 +41,17 @@ internal source adapters -> source-normalized interim artifacts
   mutate `_manifest/manifest.json` after writing.
 - Evaluation owns `EvaluationDiagnostics`, IC summary, and group-spread summary
   construction. Reports validate and persist evaluation frames as private
-  artifacts without importing compute.
+  artifacts without importing compute. Evaluation summary statistics use
+  explicit valid counts, and no-valid IC or RankIC values remain `NaN`.
 - Prediction/model handoff uses fixed-shape `model_metadata` and
-  `prediction_metadata` report manifest payloads. No model registry,
-  prediction registry, universal artifact ID, public run API, or report lookup
-  is part of `0.1.0`.
+  `prediction_metadata` report manifest payloads. Prediction metadata records
+  the effective train/test window values, including `train_end`.
+- Evaluation, model fitting, and prediction generation use the shared
+  `runtime.resources` policy for internal timestamp-session chunking when the
+  resource budget requires it. These are private implementation details and do
+  not add public run APIs.
+- No model registry, prediction registry, universal artifact ID, public run API,
+  or report lookup is part of `0.1.0`.
 
 ## API Flow
 
@@ -84,6 +90,11 @@ Private local schema inventory is exposed separately through
 sealed dataset roots and emits private aggregate schema inventory metadata. This
 inventory may include logical source paths or source field names, so it is not
 the same thing as public-safe aggregate evidence.
+
+The existing private verification evidence harness is exposed through
+`qrp-private evidence run` for local smoke/evidence generation only. It supports
+optional internal evaluation and prediction window overrides, but this does not
+create public `evaluate`, `predict`, or `report` commands.
 
 ## Narrow Follow-up Notes
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -166,8 +167,37 @@ def test_summarize_ic_reports_icir_and_positive_rates() -> None:
     assert row["std_ic"] > 0
     assert row["icir"] != 0
     assert row["positive_ic_rate"] == pytest.approx(2 / 3)
+    assert row["valid_ic_count"] == 3
     assert row["mean_rankic"] == pytest.approx((0.3 + 0.1 - 0.2) / 3)
     assert row["positive_rankic_rate"] == pytest.approx(2 / 3)
+    assert row["valid_rankic_count"] == 3
+
+
+def test_summarize_ic_uses_nan_when_no_valid_ic_or_rankic() -> None:
+    ic = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01", "2026-01-02"],
+            "feature": ["factor", "factor"],
+            "label": ["forward_return", "forward_return"],
+            "ic": [np.nan, np.nan],
+            "rankic": [np.nan, np.nan],
+            "n_obs": [1, 1],
+        }
+    )
+
+    summary = summarize_ic(ic)
+
+    row = summary.iloc[0]
+    assert row["valid_ic_count"] == 0
+    assert pd.isna(row["mean_ic"])
+    assert pd.isna(row["std_ic"])
+    assert pd.isna(row["icir"])
+    assert pd.isna(row["positive_ic_rate"])
+    assert row["valid_rankic_count"] == 0
+    assert pd.isna(row["mean_rankic"])
+    assert pd.isna(row["std_rankic"])
+    assert pd.isna(row["rankicir"])
+    assert pd.isna(row["positive_rankic_rate"])
 
 
 def test_summarize_group_spread_reports_top_bottom_spread() -> None:

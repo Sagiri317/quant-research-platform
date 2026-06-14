@@ -16,6 +16,9 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
 )
+from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.research._memory import iter_time_sized_frames
+from quant_research_platform.runtime.resources import ChunkAxis
 
 
 @dataclass(frozen=True)
@@ -43,33 +46,43 @@ def evaluate_factor_frame(
     if missing:
         raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
 
-    from quant_research_platform.research.filtering import apply_filter_mode
 
-    filtered, filter_metadata = apply_filter_mode(
-        frame,
-        mode=spec.filter_mode,
-        metadata_key="filter_mode",
+    asset_column = "asset_id" if "asset_id" in frame else "asset"
+    work_columns = tuple(
+        dict.fromkeys(
+            (
+                "timestamp",
+                asset_column,
+                feature,
+                label,
+                *required_filter_columns(spec.filter_mode),
+            )
+        )
     )
-    usable_frame = filtered.dropna(subset=[feature, label]).copy()
-    rows_after_feature_label_dropna = int(len(usable_frame))
-
+    work_frame = frame.loc[
+        :,
+        [column for column in work_columns if column in frame.columns],
+    ]
     compute_spec = ComputePanelSpec(
         feature_columns=(feature,),
         label_column=label,
         timestamp_column="timestamp",
-        asset_column="asset_id" if "asset_id" in usable_frame else "asset",
+        asset_column=asset_column,
     )
-    metrics, grouped_label_values = compute_ic_and_grouped_label_values(
-        usable_frame,
-        compute_spec,
-        n_groups=n_groups,
+    metrics, grouped_label_values, filter_metadata, rows_after_dropna = (
+        _compute_evaluation_frames(
+            work_frame,
+            spec=spec,
+            compute_spec=compute_spec,
+            n_groups=n_groups,
+        )
     )
     ic_summary = summarize_ic(metrics)
     group_spread_summary = summarize_group_spread(grouped_label_values)
     diagnostics = _evaluation_diagnostics(
         spec=spec,
         filter_metadata=filter_metadata,
-        rows_after_feature_label_dropna=rows_after_feature_label_dropna,
+        rows_after_feature_label_dropna=rows_after_dropna,
         metrics=metrics,
         grouped_label_values=grouped_label_values,
         ic_summary=ic_summary,
@@ -85,6 +98,81 @@ def evaluate_factor_frame(
         group_spread_summary=group_spread_summary,
         diagnostics=diagnostics,
     )
+
+
+def _compute_evaluation_frames(
+    frame: pd.DataFrame,
+    *,
+    spec: EvaluationSpec,
+    compute_spec: ComputePanelSpec,
+    n_groups: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], int]:
+    from quant_research_platform.research.filtering import apply_filter_mode
+
+    metric_parts: list[pd.DataFrame] = []
+    grouped_parts: list[pd.DataFrame] = []
+    rows_input = 0
+    rows_after_filter = 0
+    rows_after_dropna = 0
+    filter_columns_used: list[str] = []
+    filter_definition = ""
+    compute_columns = (
+        compute_spec.timestamp_column,
+        compute_spec.asset_column,
+        *compute_spec.feature_columns,
+        compute_spec.label_column,
+    )
+
+    for chunk in iter_time_sized_frames(
+        frame,
+        timestamp_column=compute_spec.timestamp_column,
+        axis=ChunkAxis.TIME,
+    ):
+        filtered, metadata = apply_filter_mode(
+            chunk,
+            mode=spec.filter_mode,
+            metadata_key="filter_mode",
+        )
+        rows_input += int(metadata["rows_input"])
+        rows_after_filter += int(metadata["rows_after_filter_mode"])
+        filter_columns_used = list(metadata["filter_columns_used"])
+        filter_definition = str(metadata["filter_definition"])
+        usable = (
+            filtered.dropna(
+                subset=[*compute_spec.feature_columns, compute_spec.label_column]
+            )
+            .loc[:, list(compute_columns)]
+            .copy()
+        )
+        rows_after_dropna += int(len(usable))
+        metrics, grouped_label_values = compute_ic_and_grouped_label_values(
+            usable,
+            compute_spec,
+            n_groups=n_groups,
+        )
+        metric_parts.append(metrics)
+        grouped_parts.append(grouped_label_values)
+
+    filter_metadata = {
+        "filter_mode": spec.filter_mode,
+        "filter_columns_used": filter_columns_used,
+        "filter_definition": filter_definition,
+        "rows_input": rows_input,
+        "rows_after_filter_mode": rows_after_filter,
+    }
+    return (
+        _concat_parts(metric_parts),
+        _concat_parts(grouped_parts),
+        filter_metadata,
+        rows_after_dropna,
+    )
+
+
+def _concat_parts(parts: list[pd.DataFrame]) -> pd.DataFrame:
+    non_empty = [part for part in parts if not part.empty]
+    if not non_empty:
+        return parts[0].copy() if parts else pd.DataFrame()
+    return pd.concat(non_empty, ignore_index=True)
 
 
 def _evaluation_diagnostics(

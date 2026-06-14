@@ -54,9 +54,14 @@ Current public-safe anchors:
   mutating dataset manifests after write.
 - Evaluation outputs include typed `EvaluationDiagnostics` and persisted
   `ic_summary.parquet` / `group_spread_summary.parquet` summary artifacts.
+  IC and RankIC summaries use explicit valid counts and keep no-valid
+  statistics as `NaN`.
 - Prediction reports require fixed-shape `model_metadata` and
-  `prediction_metadata`; generic prediction `metadata` attrs are not an active
-  report writer input.
+  `prediction_metadata`, including effective train/test window values; generic
+  prediction `metadata` attrs are not an active report writer input.
+- Evaluation, model fitting, and prediction generation use the shared runtime
+  resource policy for internal timestamp-session chunking when memory budgets
+  require it.
 - Prior local verification covered the new processed factor/label-supporting
   layout, ResearchDataset layout, and full historical `daily_panel` aggregate
   coverage for `2014-01-01` through `2025-12-31` without committing row-level
@@ -69,9 +74,11 @@ Current public-safe anchors:
 2. Future-only items remain out of the active public contract:
    `processed-data-runs`, `workflow-runs`, `report index/show`,
    `RunRepository`, `ReportRepository`, and `private plugin`.
-3. Active private local-data CLI is limited to
-   `qrp-private schema-inventory --project-root . --output <path>`; private
-   import, rebuild, and evidence regeneration remain out of scope.
+3. Active private local-data CLI remains internal-only. `qrp-private
+   schema-inventory --project-root . --output <path>` writes aggregate schema
+   inventory, and `qrp-private evidence run` is a local smoke/evidence harness
+   with narrow evaluation/prediction window overrides. Neither expands the
+   public `qrp` API/CLI surface.
 
 ## 下一步
 

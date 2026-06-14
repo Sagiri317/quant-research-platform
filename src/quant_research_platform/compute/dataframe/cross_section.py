@@ -18,10 +18,12 @@ IC_SUMMARY_COLUMNS = [
     "std_ic",
     "icir",
     "positive_ic_rate",
+    "valid_ic_count",
     "mean_rankic",
     "std_rankic",
     "rankicir",
     "positive_rankic_rate",
+    "valid_rankic_count",
 ]
 GROUPED_LABEL_VALUE_COLUMNS = [
     "timestamp",
@@ -223,27 +225,23 @@ def summarize_ic(
         group_values = _normalize_group_key(group_key, group_columns)
         ic_values = pd.to_numeric(group["ic"], errors="coerce").dropna()
         rankic_values = pd.to_numeric(group["rankic"], errors="coerce").dropna()
-        mean_ic = float(ic_values.mean()) if len(ic_values) else 0.0
-        std_ic = float(ic_values.std(ddof=0)) if len(ic_values) else 0.0
-        mean_rankic = float(rankic_values.mean()) if len(rankic_values) else 0.0
-        std_rankic = float(rankic_values.std(ddof=0)) if len(rankic_values) else 0.0
+        ic_stats = _summarize_correlation_values(ic_values)
+        rankic_stats = _summarize_correlation_values(rankic_values)
         records.append(
             {
                 **{column: group_values[column] for column in segment_columns},
                 "feature": group_values["feature"],
                 "label": group_values["label"],
-                "mean_ic": mean_ic,
-                "std_ic": std_ic,
-                "icir": _safe_ratio(mean_ic, std_ic),
-                "positive_ic_rate": (
-                    float((ic_values > 0).mean()) if len(ic_values) else 0.0
-                ),
-                "mean_rankic": mean_rankic,
-                "std_rankic": std_rankic,
-                "rankicir": _safe_ratio(mean_rankic, std_rankic),
-                "positive_rankic_rate": (
-                    float((rankic_values > 0).mean()) if len(rankic_values) else 0.0
-                ),
+                "mean_ic": ic_stats["mean"],
+                "std_ic": ic_stats["std"],
+                "icir": ic_stats["ratio"],
+                "positive_ic_rate": ic_stats["positive_rate"],
+                "valid_ic_count": ic_stats["valid_count"],
+                "mean_rankic": rankic_stats["mean"],
+                "std_rankic": rankic_stats["std"],
+                "rankicir": rankic_stats["ratio"],
+                "positive_rankic_rate": rankic_stats["positive_rate"],
+                "valid_rankic_count": rankic_stats["valid_count"],
             }
         )
     return pd.DataFrame.from_records(records, columns=output_columns)
@@ -365,6 +363,27 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     if denominator == 0 or not np.isfinite(numerator) or not np.isfinite(denominator):
         return 0.0
     return float(numerator / denominator)
+
+
+def _summarize_correlation_values(values: pd.Series) -> dict[str, float | int]:
+    valid_count = int(len(values))
+    if valid_count == 0:
+        return {
+            "mean": np.nan,
+            "std": np.nan,
+            "ratio": np.nan,
+            "positive_rate": np.nan,
+            "valid_count": 0,
+        }
+    mean = float(values.mean())
+    std = float(values.std(ddof=0))
+    return {
+        "mean": mean,
+        "std": std,
+        "ratio": _safe_ratio(mean, std),
+        "positive_rate": float((values > 0).mean()),
+        "valid_count": valid_count,
+    }
 
 
 def _normalize_group_key(

@@ -7,13 +7,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.filtering import reject_filter_feature_columns
+from quant_research_platform.contracts.filtering import (
+    reject_filter_feature_columns,
+    required_filter_columns,
+)
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.report_artifacts import (
     write_prediction_report_artifacts,
 )
+from quant_research_platform.research._memory import iter_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.runtime.resources import ChunkAxis
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -29,26 +34,23 @@ def build_prediction_bundle(
     if missing:
         raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
     _validate_oos_split(spec)
-    filtered, filter_metadata = apply_filter_mode(
-        frame,
-        mode=spec.sample_filter_mode,
-        metadata_key="sample_filter_mode",
+    work_columns = tuple(
+        dict.fromkeys(
+            (
+                *spec.primary_key,
+                *feature_columns,
+                *required_filter_columns(spec.sample_filter_mode),
+            )
+        )
     )
-    usable = filtered.dropna(subset=list(feature_columns)).copy()
-    test_mask = usable["timestamp"] >= pd.Timestamp(spec.test_start)
-    if spec.test_end is not None:
-        test_mask &= usable["timestamp"] <= pd.Timestamp(spec.test_end)
-    test_frame = usable.loc[test_mask].copy()
-    if test_frame.empty:
+    result, filter_metadata, rows_after_dropna = _build_prediction_frame(
+        frame.loc[:, [column for column in work_columns if column in frame.columns]],
+        spec=spec,
+        coefficients=coefficients,
+        feature_columns=feature_columns,
+    )
+    if result.empty:
         raise ValueError("prediction_oos_test_window_empty")
-    design = np.column_stack(
-        [
-            np.ones(len(test_frame)),
-            test_frame.loc[:, feature_columns].to_numpy(dtype=float),
-        ]
-    )
-    result = test_frame.loc[:, spec.primary_key].copy()
-    result[spec.prediction_column] = design @ coefficients
     result.attrs["prediction_metadata"] = {
         "contract_version": spec.contract_version,
         "prediction_mode": spec.prediction_mode,
@@ -57,8 +59,9 @@ def build_prediction_bundle(
         "filter_definition": str(filter_metadata["filter_definition"]),
         "rows_input": int(filter_metadata["rows_input"]),
         "rows_after_filter_mode": int(filter_metadata["rows_after_filter_mode"]),
-        "rows_after_feature_dropna": int(len(usable)),
+        "rows_after_feature_dropna": int(rows_after_dropna),
         "prediction_rows": int(len(result)),
+        "train_end": spec.train_end,
         "test_start": spec.test_start,
         "test_end": spec.test_end,
         "is_oos": spec.is_oos,
@@ -68,6 +71,59 @@ def build_prediction_bundle(
         "prediction_column": spec.prediction_column,
     }
     return result
+
+
+def _build_prediction_frame(
+    frame: pd.DataFrame,
+    *,
+    spec: PredictionSpec,
+    coefficients: np.ndarray,
+    feature_columns: tuple[str, ...],
+) -> tuple[pd.DataFrame, dict[str, object], int]:
+    parts: list[pd.DataFrame] = []
+    rows_input = 0
+    rows_after_filter = 0
+    rows_after_dropna = 0
+    filter_columns_used: list[str] = []
+    filter_definition = ""
+    usable_columns = tuple(dict.fromkeys((*spec.primary_key, *feature_columns)))
+    for chunk in iter_time_sized_frames(
+        frame,
+        timestamp_column="timestamp",
+        axis=ChunkAxis.TIME,
+    ):
+        filtered, metadata = apply_filter_mode(
+            chunk,
+            mode=spec.sample_filter_mode,
+            metadata_key="sample_filter_mode",
+        )
+        rows_input += int(metadata["rows_input"])
+        rows_after_filter += int(metadata["rows_after_filter_mode"])
+        filter_columns_used = list(metadata["filter_columns_used"])
+        filter_definition = str(metadata["filter_definition"])
+        usable = filtered.dropna(subset=list(feature_columns)).loc[
+            :, list(usable_columns)
+        ]
+        rows_after_dropna += int(len(usable))
+        test_mask = usable["timestamp"] >= pd.Timestamp(spec.test_start)
+        if spec.test_end is not None:
+            test_mask &= usable["timestamp"] <= pd.Timestamp(spec.test_end)
+        test_frame = usable.loc[test_mask]
+        if test_frame.empty:
+            continue
+        x = test_frame.loc[:, feature_columns].to_numpy(dtype=float, copy=False)
+        output = test_frame.loc[:, spec.primary_key].copy()
+        output[spec.prediction_column] = float(coefficients[0]) + x @ coefficients[1:]
+        parts.append(output)
+    result = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    filter_metadata = {
+        "sample_filter_mode": spec.sample_filter_mode,
+        "filter_columns_used": filter_columns_used,
+        "filter_definition": filter_definition,
+        "rows_input": rows_input,
+        "rows_after_filter_mode": rows_after_filter,
+    }
+    return result, filter_metadata, rows_after_dropna
 
 
 def _validate_oos_split(spec: PredictionSpec) -> None:

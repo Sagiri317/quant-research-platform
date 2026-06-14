@@ -34,17 +34,27 @@ Evaluation reports persist `metrics.parquet`, `grouped_label_values.parquet`,
 Evaluation owns filtering, summary construction, and typed
 `evaluation_diagnostics`; compute owns IC, RankIC, grouped label-value, IC
 summary, and group-spread kernels; report writers validate and persist frames
-without importing compute. Supported evaluation filter modes are `eligible`,
+without importing compute. Report writers fail closed when
+`EvaluationDiagnostics` row counts, timestamp counts, timestamp min/max values,
+filter mode, or skipped timestamp counts do not match the persisted artifacts
+and `EvaluationSpec`. IC and RankIC summaries use explicit valid-count fields;
+when no valid IC or RankIC exists, the corresponding summary statistics are
+`NaN` rather than `0.0`. Supported evaluation filter modes are `eligible`,
 `tradable`, and `unfiltered`; `tradable` is an execution-aware evaluation
 diagnostic only, not a backtest, live tradable PnL, or production trading
 result.
 
 Prediction bundles record fixed-shape `model_metadata` and
-`prediction_metadata` in report manifests. Supported sample filter modes are
-`eligible` and `unfiltered`; prediction generation uses feature values only and
-does not use labels as prediction inputs. The current prediction path remains a
-historical research handoff, not label-free live inference. Missing model or
-prediction metadata fails closed in the report writer.
+`prediction_metadata` in report manifests. Prediction metadata records the
+effective `train_end`, `test_start`, and `test_end` window values used for the
+bundle; report writers fail closed when metadata row counts, prediction column,
+mode, sample filter mode, OOS flags, or window values diverge from
+`PredictionSpec` and the prediction frame. Linear model metadata must record a
+`coefficient_count` equal to `feature_count + 1`. Supported sample filter modes
+are `eligible` and `unfiltered`; prediction generation uses feature values only
+and does not use labels as prediction inputs. The current prediction path
+remains a historical research handoff, not label-free live inference. Missing
+model or prediction metadata fails closed in the report writer.
 
 Report manifest payload construction is private to
 `reports/report_artifacts.py`. Retired `reports/manifests.py`,

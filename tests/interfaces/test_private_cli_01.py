@@ -252,6 +252,60 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
     assert "run_id=s1" in result.output
 
 
+def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(config):
+        calls.append(config)
+        return type(
+            "Result",
+            (),
+            {
+                "status": "PASS",
+                "run_id": "s2",
+                "output_root": "verification-output/s2",
+                "summary": {"status": "PASS", "output_root": "verification-output/s2"},
+            },
+        )()
+
+    monkeypatch.setattr(
+        "quant_research_platform.interfaces.private_cli.run_verification_evidence",
+        fake_run,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        private_app,
+        [
+            "evidence",
+            "run",
+            "--output-root",
+            "verification-output/s2",
+            "--start-date",
+            "2014-01-01",
+            "--end-date",
+            "2019-12-31",
+            "--evaluation-start-date",
+            "2014-01-01",
+            "--evaluation-end-date",
+            "2019-12-31",
+            "--prediction-train-end",
+            "2017-12-31",
+            "--prediction-test-start",
+            "2018-01-01",
+            "--prediction-test-end",
+            "2019-12-31",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls[0].evaluation_start_date == "2014-01-01"
+    assert calls[0].evaluation_end_date == "2019-12-31"
+    assert calls[0].prediction_train_end == "2017-12-31"
+    assert calls[0].prediction_test_start == "2018-01-01"
+    assert calls[0].prediction_test_end == "2019-12-31"
+
+
 def test_qrp_verification_evidence_run_rejects_missing_required_options() -> None:
     runner = CliRunner()
 
@@ -263,6 +317,11 @@ def test_qrp_verification_evidence_run_rejects_missing_required_options() -> Non
     assert "--output-root" in help_result.output
     assert "--start-date" in help_result.output
     assert "--end-date" in help_result.output
+    assert "--evaluation-start-date" in help_result.output
+    assert "--evaluation-end-date" in help_result.output
+    assert "--prediction-train-end" in help_result.output
+    assert "--prediction-test-start" in help_result.output
+    assert "--prediction-test-end" in help_result.output
 
 
 def _write_inventory_fixture(project_root: Path) -> None:

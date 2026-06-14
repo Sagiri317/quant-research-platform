@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -134,6 +135,70 @@ def test_prediction_report_artifacts_require_standard_metadata_attrs(
         )
 
 
+def test_prediction_report_artifacts_reject_inconsistent_metadata(
+    tmp_path: Path,
+) -> None:
+    spec = _prediction_spec()
+    report_spec = _report_spec(
+        "prediction_bundle_private",
+        spec.prediction_id,
+        "prediction",
+    )
+    layout = StorageLayout(project_root=tmp_path)
+
+    bad_rows = _prediction_frame(with_metadata=True)
+    bad_rows.attrs["prediction_metadata"] = {
+        **_prediction_metadata(),
+        "prediction_rows": 2,
+    }
+    with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
+        report_artifacts.write_prediction_report_artifacts(
+            bad_rows,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    bad_window = _prediction_frame(with_metadata=True)
+    bad_window.attrs["prediction_metadata"] = {
+        **_prediction_metadata(),
+        "test_start": "2024-01-03",
+    }
+    with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
+        report_artifacts.write_prediction_report_artifacts(
+            bad_window,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    bad_train_end = _prediction_frame(with_metadata=True)
+    bad_train_end.attrs["prediction_metadata"] = {
+        **_prediction_metadata(),
+        "train_end": "2024-01-02",
+    }
+    with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
+        report_artifacts.write_prediction_report_artifacts(
+            bad_train_end,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    bad_model = _prediction_frame(with_metadata=True)
+    bad_model.attrs["model_metadata"] = {
+        **_model_metadata(),
+        "coefficient_count": 1,
+    }
+    with pytest.raises(ValueError, match="model_metadata_inconsistent"):
+        report_artifacts.write_prediction_report_artifacts(
+            bad_model,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+
 def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
 
@@ -212,6 +277,71 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
             spec=spec,
             report_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
+        )
+
+
+def test_evaluation_report_rejects_inconsistent_diagnostics(tmp_path: Path) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        feature_columns=("feature",),
+        label_columns=("label",),
+    )
+    report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
+    layout = StorageLayout(project_root=tmp_path)
+
+    bad_metric_rows = replace(_evaluation_diagnostics(), metric_rows=2)
+    with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
+        report_artifacts.write_evaluation_report_artifacts(
+            _evaluation_metrics_frame(),
+            _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=bad_metric_rows,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    bad_filter_mode = replace(_evaluation_diagnostics(), filter_mode="unfiltered")
+    with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
+        report_artifacts.write_evaluation_report_artifacts(
+            _evaluation_metrics_frame(),
+            _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=bad_filter_mode,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    bad_timestamp_count = replace(_evaluation_diagnostics(), timestamp_count=2)
+    with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
+        report_artifacts.write_evaluation_report_artifacts(
+            _evaluation_metrics_frame(),
+            _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=bad_timestamp_count,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    skipped_metrics = _evaluation_metrics_frame().assign(n_obs=[1])
+    bad_skipped = replace(_evaluation_diagnostics(), skipped_timestamp_count=0)
+    with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
+        report_artifacts.write_evaluation_report_artifacts(
+            skipped_metrics,
+            _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=bad_skipped,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
         )
 
 
@@ -326,6 +456,7 @@ def _prediction_metadata() -> dict[str, object]:
         "rows_after_filter_mode": 2,
         "rows_after_feature_dropna": 2,
         "prediction_rows": 1,
+        "train_end": "2024-01-01",
         "test_start": "2024-01-02",
         "test_end": None,
         "is_oos": True,
@@ -385,10 +516,12 @@ def _evaluation_ic_summary_frame() -> pd.DataFrame:
             "std_ic": [0.0],
             "icir": [0.0],
             "positive_ic_rate": [1.0],
+            "valid_ic_count": [1],
             "mean_rankic": [0.2],
             "std_rankic": [0.0],
             "rankicir": [0.0],
             "positive_rankic_rate": [1.0],
+            "valid_rankic_count": [1],
         }
     )
 

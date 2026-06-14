@@ -48,10 +48,12 @@ _EVALUATION_IC_SUMMARY_COLUMNS = (
     "std_ic",
     "icir",
     "positive_ic_rate",
+    "valid_ic_count",
     "mean_rankic",
     "std_rankic",
     "rankicir",
     "positive_rankic_rate",
+    "valid_rankic_count",
 )
 _EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
     "feature",
@@ -95,6 +97,7 @@ _PREDICTION_METADATA_KEYS = frozenset(
         "rows_after_filter_mode",
         "rows_after_feature_dropna",
         "prediction_rows",
+        "train_end",
         "test_start",
         "test_end",
         "is_oos",
@@ -182,6 +185,12 @@ def write_prediction_report_artifacts(
             error_name="missing_prediction_metadata",
         )
     )
+    _validate_model_metadata_consistency(model_metadata)
+    _validate_prediction_metadata_consistency(
+        prediction_metadata,
+        spec=spec,
+        frame=frame,
+    )
 
     def _write(temp_root: Path) -> None:
         _atomic_write_report_parquet(
@@ -243,6 +252,14 @@ def write_evaluation_report_artifacts(
         group_spread_summary,
         required=_EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
         error_name="evaluation_group_spread_summary",
+    )
+    _validate_evaluation_diagnostics_consistency(
+        metrics=metrics,
+        grouped_label_values=grouped_label_values,
+        ic_summary=ic_summary,
+        group_spread_summary=group_spread_summary,
+        evaluation_diagnostics=evaluation_diagnostics,
+        spec=spec,
     )
 
     def _write(temp_root: Path) -> None:
@@ -466,6 +483,7 @@ def _validate_prediction_metadata_shape(
         "filter_definition",
         "invalid_prediction_metadata",
     )
+    _require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
     _require_metadata_string(metadata, "test_start", "invalid_prediction_metadata")
     if metadata["test_end"] is not None:
         _require_metadata_string(metadata, "test_end", "invalid_prediction_metadata")
@@ -486,6 +504,79 @@ def _validate_prediction_metadata_shape(
     ):
         raise ValueError("invalid_prediction_metadata")
     return metadata
+
+
+def _validate_model_metadata_consistency(metadata: dict[str, object]) -> None:
+    feature_count = int(metadata["feature_count"])
+    feature_columns = metadata["feature_columns"]
+    if not isinstance(feature_columns, list) or feature_count != len(feature_columns):
+        raise ValueError("model_metadata_inconsistent")
+    if (
+        metadata["model_family"] == "linear"
+        and int(metadata["coefficient_count"]) != feature_count + 1
+    ):
+        raise ValueError("model_metadata_inconsistent")
+
+
+def _validate_prediction_metadata_consistency(
+    metadata: dict[str, object],
+    *,
+    spec: PredictionSpec,
+    frame: pd.DataFrame,
+) -> None:
+    expected = {
+        "prediction_rows": len(frame),
+        "prediction_column": spec.prediction_column,
+        "prediction_mode": spec.prediction_mode,
+        "sample_filter_mode": spec.sample_filter_mode,
+        "train_end": spec.train_end,
+        "test_start": spec.test_start,
+        "test_end": spec.test_end,
+        "is_oos": spec.is_oos,
+        "is_final_oos_window": spec.is_final_oos_window,
+    }
+    for key, value in expected.items():
+        if metadata[key] != value:
+            raise ValueError("prediction_metadata_inconsistent")
+
+
+def _validate_evaluation_diagnostics_consistency(
+    *,
+    metrics: pd.DataFrame,
+    grouped_label_values: pd.DataFrame,
+    ic_summary: pd.DataFrame,
+    group_spread_summary: pd.DataFrame,
+    evaluation_diagnostics: EvaluationDiagnostics,
+    spec: EvaluationSpec,
+) -> None:
+    timestamps = pd.to_datetime(metrics["timestamp"], errors="coerce").dropna()
+    expected_timestamp_count = int(timestamps.nunique()) if not timestamps.empty else 0
+    expected_min_timestamp = (
+        pd.Timestamp(timestamps.min()).date().isoformat()
+        if not timestamps.empty
+        else None
+    )
+    expected_max_timestamp = (
+        pd.Timestamp(timestamps.max()).date().isoformat()
+        if not timestamps.empty
+        else None
+    )
+    n_obs = pd.to_numeric(metrics["n_obs"], errors="coerce")
+    expected_skipped_timestamp_count = int(n_obs.lt(2).sum())
+    expected = {
+        "filter_mode": spec.filter_mode,
+        "metric_rows": len(metrics),
+        "grouped_label_value_rows": len(grouped_label_values),
+        "ic_summary_rows": len(ic_summary),
+        "group_spread_summary_rows": len(group_spread_summary),
+        "timestamp_count": expected_timestamp_count,
+        "min_timestamp": expected_min_timestamp,
+        "max_timestamp": expected_max_timestamp,
+        "skipped_timestamp_count": expected_skipped_timestamp_count,
+    }
+    for key, value in expected.items():
+        if getattr(evaluation_diagnostics, key) != value:
+            raise ValueError("evaluation_diagnostics_inconsistent")
 
 
 def _require_metadata_string(

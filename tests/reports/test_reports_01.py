@@ -472,6 +472,7 @@ def _prediction_frame() -> pd.DataFrame:
         "rows_after_filter_mode": 2,
         "rows_after_feature_dropna": 2,
         "prediction_rows": 1,
+        "train_end": "2014-01-02",
         "test_start": "2014-01-03",
         "test_end": "2014-01-03",
         "is_oos": True,
@@ -538,10 +539,12 @@ def _evaluation_ic_summary_frame() -> pd.DataFrame:
             "std_ic": [0.0],
             "icir": [0.0],
             "positive_ic_rate": [1.0],
+            "valid_ic_count": [1],
             "mean_rankic": [0.2],
             "std_rankic": [0.0],
             "rankicir": [0.0],
             "positive_rankic_rate": [1.0],
+            "valid_rankic_count": [1],
         }
     )
 
