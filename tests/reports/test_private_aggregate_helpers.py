@@ -67,7 +67,11 @@ def test_private_aggregate_combines_summaries_and_area_records(monkeypatch) -> N
     assert combined.row_count == 2
     assert combined.period == "2024-01-02 through 2024-01-03"
 
-    monkeypatch.setattr(private_aggregate, "_summarize_area_input", lambda _area: first)
+    monkeypatch.setattr(
+        private_aggregate,
+        "_summarize_area_input",
+        lambda *args, **kwargs: first,
+    )
     ok = private_aggregate._area_record(
         private_aggregate.AggregateInput(
             area="factor_value_parity",
@@ -120,7 +124,7 @@ def test_public_safe_aggregate_evidence_orchestrates_area_inputs(
     monkeypatch.setattr(
         private_aggregate,
         "_summarize_area_input",
-        lambda _area: summary,
+        lambda *args, **kwargs: summary,
     )
 
     payload = private_aggregate.generate_public_safe_aggregate_evidence(tmp_path)
@@ -167,7 +171,7 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
     monkeypatch.setattr(
         private_aggregate,
         "_summarize_dataset_root",
-        lambda _root: private_aggregate._summarize_frames(
+        lambda *args, **kwargs: private_aggregate._summarize_frames(
             [
                 pd.DataFrame(
                     {
@@ -283,7 +287,7 @@ def test_private_verification_summary_uses_inventory(
     monkeypatch.setattr(
         private_aggregate,
         "_dataset_inventory",
-        lambda _root: [
+        lambda *args, **kwargs: [
             {
                 "logical_root": "processed/a_share/panel/daily_panel",
                 "covered_by_evidence_area": "panel",

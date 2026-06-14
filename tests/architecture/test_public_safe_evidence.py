@@ -183,8 +183,16 @@ def test_current_public_safe_aggregate_payload_includes_key_value_paired_hash(
             "value": {"hash_sum": 2, "hash_xor": 2, "non_null_count": 1}
         },
     )
-    monkeypatch.setattr(private_aggregate, "_summarize_area_input", lambda _: summary)
-    monkeypatch.setattr(private_aggregate, "_summarize_dataset_root", lambda _: summary)
+    monkeypatch.setattr(
+        private_aggregate,
+        "_summarize_area_input",
+        lambda *args, **kwargs: summary,
+    )
+    monkeypatch.setattr(
+        private_aggregate,
+        "_summarize_dataset_root",
+        lambda *args, **kwargs: summary,
+    )
     artifact_root = (
         tmp_path
         / "data"

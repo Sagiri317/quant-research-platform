@@ -79,6 +79,8 @@ PROCESSED_ROOT_AREA_COVERAGE = {
     "a_share_price_volume_forward_returns": "research_dataset_parity",
 }
 
+_SummaryCache = dict[tuple[str, tuple[int, ...] | None], "AggregateSummary"]
+
 
 @dataclass(frozen=True)
 class AggregateInput:
@@ -146,7 +148,97 @@ def generate_public_safe_aggregate_evidence(
 
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
-    areas = [_area_record(area_input) for area_input in _area_inputs(root)]
+    summary_cache: _SummaryCache = {}
+    return _generate_public_safe_aggregate_evidence_with_cache(
+        root,
+        generated_at=generated_at,
+        summary_cache=summary_cache,
+    )
+
+
+def generate_private_verification_summary(
+    project_root: Path = Path("."),
+    *,
+    evidence_payload: dict[str, Any] | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Generate a public-safe inventory summary for sealed dataset artifacts."""
+
+    root = Path(project_root)
+    generated_at = generated_at or datetime.now(UTC)
+    if evidence_payload is None:
+        evidence_payload = generate_public_safe_aggregate_evidence(
+            root,
+            generated_at=generated_at,
+        )
+    inventory = _dataset_inventory(root, summary_cache={})
+    covered_roots = [
+        item["logical_root"]
+        for item in inventory
+        if item["covered_by_evidence_area"]
+    ]
+    uncovered_roots = [
+        item["logical_root"]
+        for item in inventory
+        if not item["covered_by_evidence_area"]
+    ]
+    allowed_unverified_roots: list[dict[str, str]] = []
+    merge_ready = (
+        bool(evidence_payload.get("merge_ready"))
+        and not uncovered_roots
+        and not allowed_unverified_roots
+    )
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "project_version": PROJECT_VERSION,
+        "verification_kind": "private_real_data_aggregate_inventory",
+        "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        "privacy_level": PRIVACY_LEVEL,
+        "source_data_visibility": "private_local_only",
+        "row_level_output_committed": False,
+        "dataset_inventory": inventory,
+        "covered_roots": covered_roots,
+        "uncovered_roots": uncovered_roots,
+        "allowed_unverified_roots": allowed_unverified_roots,
+        "merge_ready": merge_ready,
+    }
+
+
+def _generate_private_aggregate_payloads(
+    project_root: Path = Path("."),
+    *,
+    generated_at: datetime | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    root = Path(project_root)
+    generated_at = generated_at or datetime.now(UTC)
+    summary_cache: _SummaryCache = {}
+    evidence_payload = _generate_public_safe_aggregate_evidence_with_cache(
+        root,
+        generated_at=generated_at,
+        summary_cache=summary_cache,
+    )
+    inventory_payload = _generate_private_verification_summary_with_cache(
+        root,
+        evidence_payload=evidence_payload,
+        generated_at=generated_at,
+        summary_cache=summary_cache,
+    )
+    return evidence_payload, inventory_payload
+
+
+def _generate_public_safe_aggregate_evidence_with_cache(
+    root: Path,
+    *,
+    generated_at: datetime,
+    summary_cache: _SummaryCache,
+) -> dict[str, Any]:
+    areas = [
+        _area_record(area_input, summary_cache=summary_cache)
+        for area_input in _area_inputs(root)
+    ]
     merge_ready = not any(area["human_approval_required"] for area in areas)
     status = (
         "private real-data aggregate verification completed"
@@ -178,22 +270,14 @@ def generate_public_safe_aggregate_evidence(
     }
 
 
-def generate_private_verification_summary(
-    project_root: Path = Path("."),
+def _generate_private_verification_summary_with_cache(
+    root: Path,
     *,
-    evidence_payload: dict[str, Any] | None = None,
-    generated_at: datetime | None = None,
+    evidence_payload: dict[str, Any],
+    generated_at: datetime,
+    summary_cache: _SummaryCache,
 ) -> dict[str, Any]:
-    """Generate a public-safe inventory summary for sealed dataset artifacts."""
-
-    root = Path(project_root)
-    generated_at = generated_at or datetime.now(UTC)
-    if evidence_payload is None:
-        evidence_payload = generate_public_safe_aggregate_evidence(
-            root,
-            generated_at=generated_at,
-        )
-    inventory = _dataset_inventory(root)
+    inventory = _dataset_inventory(root, summary_cache=summary_cache)
     covered_roots = [
         item["logical_root"]
         for item in inventory
@@ -316,11 +400,18 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     )
 
 
-def _dataset_inventory(root: Path) -> list[dict[str, Any]]:
+def _dataset_inventory(
+    root: Path,
+    *,
+    summary_cache: _SummaryCache | None = None,
+) -> list[dict[str, Any]]:
     inventory: list[dict[str, Any]] = []
     for artifact_root in _official_dataset_artifact_roots(root):
         logical_root = _logical_dataset_root(root, artifact_root)
-        summary = _summarize_dataset_root(artifact_root)
+        summary = _summarize_dataset_root(
+            artifact_root,
+            summary_cache=summary_cache,
+        )
         kind, artifact_id = _dataset_kind_and_artifact_id(logical_root)
         inventory.append(
             {
@@ -389,8 +480,12 @@ def _dataset_kind_and_artifact_id(logical_root: str) -> tuple[str, str]:
     raise ValueError("invalid_dataset_logical_root")
 
 
-def _area_record(area_input: AggregateInput) -> dict[str, Any]:
-    summary = _summarize_area_input(area_input)
+def _area_record(
+    area_input: AggregateInput,
+    *,
+    summary_cache: _SummaryCache | None = None,
+) -> dict[str, Any]:
+    summary = _summarize_area_input(area_input, summary_cache=summary_cache)
     period_matches = (
         area_input.expected_period is None
         or summary.period == area_input.expected_period
@@ -453,14 +548,22 @@ def _area_record(area_input: AggregateInput) -> dict[str, Any]:
     }
 
 
-def _summarize_area_input(area_input: AggregateInput) -> AggregateSummary:
+def _summarize_area_input(
+    area_input: AggregateInput,
+    *,
+    summary_cache: _SummaryCache | None = None,
+) -> AggregateSummary:
     if area_input.summary_kind == "generated_daily_panel_from_interim":
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
         return _summarize_generated_full_daily_panel(area_input.roots[0])
     if area_input.summary_kind == "report_artifacts":
         return _summarize_report_roots(area_input.roots)
-    return _summarize_roots(area_input.roots, years=area_input.years)
+    return _summarize_roots(
+        area_input.roots,
+        years=area_input.years,
+        summary_cache=summary_cache,
+    )
 
 
 def _summarize_generated_full_daily_panel(project_root: Path) -> AggregateSummary:
@@ -600,8 +703,12 @@ def _summarize_roots(
     roots: tuple[Path, ...],
     *,
     years: tuple[int, ...] | None = None,
+    summary_cache: _SummaryCache | None = None,
 ) -> AggregateSummary:
-    summaries = [_summarize_dataset_root(root, years=years) for root in roots]
+    summaries = [
+        _summarize_dataset_root(root, years=years, summary_cache=summary_cache)
+        for root in roots
+    ]
     return _combine_summaries(summaries)
 
 
@@ -620,13 +727,29 @@ def _summarize_dataset_root(
     root: Path,
     *,
     years: tuple[int, ...] | None = None,
+    summary_cache: _SummaryCache | None = None,
 ) -> AggregateSummary:
+    if summary_cache is not None:
+        key = _summary_cache_key(root, years)
+        cached = summary_cache.get(key)
+        if cached is not None:
+            return cached
     chunks = read_dataset(
         root,
         time_window=_time_window_from_years(years),
         mode=DatasetReadMode.CHUNKED,
     )
-    return _summarize_frames(chunks)
+    summary = _summarize_frames(chunks)
+    if summary_cache is not None:
+        summary_cache[key] = summary
+    return summary
+
+
+def _summary_cache_key(
+    root: Path,
+    years: tuple[int, ...] | None,
+) -> tuple[str, tuple[int, ...] | None]:
+    return Path(root).resolve().as_posix(), years
 
 
 def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:

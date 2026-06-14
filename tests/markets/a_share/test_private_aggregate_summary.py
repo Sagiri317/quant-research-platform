@@ -164,3 +164,47 @@ def test_private_aggregate_numeric_min_max_ignores_all_null_datetimes() -> None:
     series = pd.Series(pd.to_datetime([None, None]))
 
     assert private_aggregate._finite_numeric_min_max(series) is None
+
+
+def test_private_aggregate_dataset_summary_cache_reuses_same_root(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = 0
+
+    def fake_read_dataset(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return iter((_base_frame(),))
+
+    monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
+    cache = {}
+    root = tmp_path / "dataset"
+
+    first = private_aggregate._summarize_dataset_root(root, summary_cache=cache)
+    second = private_aggregate._summarize_dataset_root(root, summary_cache=cache)
+
+    assert first.aggregate_checksum == second.aggregate_checksum
+    assert calls == 1
+
+
+def test_private_aggregate_dataset_summary_cache_keeps_year_filters_distinct(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = 0
+
+    def fake_read_dataset(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return iter((_base_frame(),))
+
+    monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
+    cache = {}
+    root = tmp_path / "dataset"
+
+    private_aggregate._summarize_dataset_root(root, years=(2014,), summary_cache=cache)
+    private_aggregate._summarize_dataset_root(root, summary_cache=cache)
+    private_aggregate._summarize_dataset_root(root, years=(2014,), summary_cache=cache)
+
+    assert calls == 2
