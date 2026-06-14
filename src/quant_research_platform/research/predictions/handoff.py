@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,13 +14,13 @@ from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets import (
-    read_research_dataset,
-    validate_prediction_input,
+from quant_research_platform.research.datasets import validate_prediction_input
+from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
+from quant_research_platform.research.models.baseline import (
+    _fit_linear_baseline_result_from_frames,
 )
-from quant_research_platform.research.models import fit_linear_baseline_result
 from quant_research_platform.research.predictions.bundle import (
-    build_prediction_bundle,
+    _build_prediction_bundle_from_frames,
     write_prediction_bundle,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -66,32 +67,28 @@ def run_prediction_from_research_dataset(
             )
         )
     )
-    frame = read_research_dataset(
-        layout,
-        market_id=dataset_spec.market_id,
-        dataset_id=dataset_spec.data_id,
-        time_window=time_window,
-        columns=read_columns,
-    )
-    validate_prediction_input(
-        frame,
-        dataset_spec,
-        feature_columns=model_spec.feature_columns,
-    )
-    train_end = pd.Timestamp(prediction_spec.train_end)
-    test_start = pd.Timestamp(prediction_spec.test_start)
-    if train_end >= test_start:
-        raise ValueError("prediction_train_end_must_precede_test_start")
-    train_frame = frame.loc[frame["timestamp"] <= train_end].copy()
-    test_mask = frame["timestamp"] >= test_start
-    if prediction_spec.test_end is not None:
-        test_mask &= frame["timestamp"] <= pd.Timestamp(prediction_spec.test_end)
-    test_frame = frame.loc[test_mask]
-    if train_frame.empty or test_frame.empty:
+    def _chunks() -> Iterable[pd.DataFrame]:
+        return _validated_prediction_chunks(
+            _iter_research_dataset_chunks(
+                layout,
+                market_id=dataset_spec.market_id,
+                dataset_id=dataset_spec.data_id,
+                time_window=time_window,
+                columns=read_columns,
+            ),
+            dataset_spec=dataset_spec,
+            feature_columns=model_spec.feature_columns,
+        )
+
+    if not _prediction_split_has_rows(_chunks(), prediction_spec):
         raise ValueError("prediction_oos_split_has_empty_side")
-    model_result = fit_linear_baseline_result(train_frame, model_spec)
-    prediction = build_prediction_bundle(
-        frame,
+    train_end = pd.Timestamp(prediction_spec.train_end)
+    model_result = _fit_linear_baseline_result_from_frames(
+        _prediction_train_chunks(_chunks(), train_end=train_end),
+        model_spec,
+    )
+    prediction = _build_prediction_bundle_from_frames(
+        _chunks(),
         prediction_spec,
         model_result.coefficients,
         model_spec.feature_columns,
@@ -110,6 +107,65 @@ def run_prediction_from_research_dataset(
         report_spec=report_spec,
         layout=layout,
     )
+
+
+def _validated_prediction_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    dataset_spec,
+    feature_columns: tuple[str, ...],
+) -> Iterable[pd.DataFrame]:
+    for chunk in chunks:
+        validate_prediction_input(
+            chunk,
+            dataset_spec,
+            feature_columns=feature_columns,
+        )
+        yield chunk
+
+
+def _prediction_split_has_rows(
+    chunks: Iterable[pd.DataFrame],
+    spec,
+) -> bool:
+    train_end = pd.Timestamp(spec.train_end)
+    test_start = pd.Timestamp(spec.test_start)
+    if train_end >= test_start:
+        raise ValueError("prediction_train_end_must_precede_test_start")
+    test_end = pd.Timestamp(spec.test_end) if spec.test_end is not None else None
+    has_train = False
+    has_test = False
+    for chunk in chunks:
+        timestamps = _prediction_timestamps(chunk)
+        has_train = has_train or bool((timestamps <= train_end).any())
+        test_mask = timestamps >= test_start
+        if test_end is not None:
+            test_mask &= timestamps <= test_end
+        has_test = has_test or bool(test_mask.any())
+        if has_train and has_test:
+            return True
+    return False
+
+
+def _prediction_train_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    train_end: pd.Timestamp,
+) -> Iterable[pd.DataFrame]:
+    for chunk in chunks:
+        timestamps = _prediction_timestamps(chunk)
+        train = chunk.loc[timestamps <= train_end]
+        if not train.empty:
+            yield train
+
+
+def _prediction_timestamps(chunk: pd.DataFrame) -> pd.Series:
+    if "timestamp" not in chunk.columns:
+        raise ValueError("missing_prediction_columns: timestamp")
+    timestamps = pd.to_datetime(chunk["timestamp"], errors="coerce")
+    if bool(timestamps.isna().any()):
+        raise ValueError("invalid_prediction_timestamp_values")
+    return timestamps
 
 
 __all__ = ["run_prediction_from_research_dataset"]

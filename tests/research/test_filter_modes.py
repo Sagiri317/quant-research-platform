@@ -313,6 +313,109 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
     assert result.diagnostics == expected.diagnostics
 
 
+def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
+    from quant_research_platform.research.evaluations import engine as eval_engine
+
+    frame = _filter_frame()
+    spec = EvaluationSpec(
+        run_id="eval_split_timestamp",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        feature_columns=("factor",),
+        label_columns=("label",),
+    )
+    expected = evaluate_factor_frame(frame, spec, n_groups=2)
+
+    result = eval_engine._evaluate_factor_frame_chunks(
+        (frame.iloc[:3], frame.iloc[3:]),
+        spec,
+        n_groups=2,
+    )
+
+    pd.testing.assert_frame_equal(result.metrics, expected.metrics)
+    pd.testing.assert_frame_equal(
+        result.grouped_label_values,
+        expected.grouped_label_values,
+    )
+    pd.testing.assert_frame_equal(result.ic_summary, expected.ic_summary)
+    pd.testing.assert_frame_equal(
+        result.group_spread_summary,
+        expected.group_spread_summary,
+    )
+    assert result.diagnostics == expected.diagnostics
+
+
+def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
+    from quant_research_platform.research.evaluations import engine as eval_engine
+
+    frame = _filter_frame()
+    first = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
+    second = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
+    late_overlap = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
+    spec = EvaluationSpec(
+        run_id="eval_non_monotonic_chunks",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        feature_columns=("factor",),
+        label_columns=("label",),
+    )
+
+    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
+        eval_engine._evaluate_factor_frame_chunks(
+            (first, second, late_overlap),
+            spec,
+            n_groups=2,
+        )
+
+
+def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
+    from quant_research_platform.research.evaluations import engine as eval_engine
+
+    frame = _filter_frame()
+    first = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
+    earlier = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
+    spec = EvaluationSpec(
+        run_id="eval_pending_non_monotonic_chunks",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        feature_columns=("factor",),
+        label_columns=("label",),
+    )
+
+    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
+        eval_engine._evaluate_factor_frame_chunks(
+            (first, earlier),
+            spec,
+            n_groups=2,
+        )
+
+
+def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.evaluations import engine as eval_engine
+
+    frame = _filter_frame()
+    spec = EvaluationSpec(
+        run_id="eval_boundary_over_budget",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        feature_columns=("factor",),
+        label_columns=("label",),
+    )
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+
+    with pytest.raises(
+        ValueError,
+        match="time_chunk_boundary_overlap_exceeds_memory_budget",
+    ):
+        eval_engine._evaluate_factor_frame_chunks(
+            (frame.iloc[:3], frame.iloc[3:]),
+            spec,
+            n_groups=2,
+        )
+
+
 def test_evaluation_diagnostics_contract_validates_shape() -> None:
     diagnostics = EvaluationDiagnostics(
         filter_mode="eligible",

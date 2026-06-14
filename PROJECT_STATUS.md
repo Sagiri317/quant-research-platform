@@ -59,9 +59,12 @@ Current public-safe anchors:
 - Prediction reports require fixed-shape `model_metadata` and
   `prediction_metadata`, including effective train/test window values; generic
   prediction `metadata` attrs are not an active report writer input.
-- Evaluation, model fitting, and prediction generation use the shared runtime
-  resource policy for internal timestamp-session chunking when memory budgets
-  require it.
+- Evaluation, model fitting, and prediction handoff read research datasets
+  through chunked storage IO and use the shared runtime resource policy for
+  timestamp-session chunking when memory budgets require it. Evaluation also
+  preserves complete timestamp sessions across adjacent storage chunks before
+  cross-sectional compute, then fails closed on non-boundary time-order overlap
+  or boundary merges that exceed the active runtime chunk budget.
 - Prior local verification covered the new processed factor/label-supporting
   layout, ResearchDataset layout, and full historical `daily_panel` aggregate
   coverage for `2014-01-01` through `2025-12-31` without committing row-level
@@ -82,9 +85,10 @@ Current public-safe anchors:
 
 ## 下一步
 
-1. Complete N2 formal verification, three-year smoke, `.run/s75` compare, and
-   official handoff package verification.
-2. Commit and push `feature/n2-closure` only after final verification passes.
+1. Finish the official review-fix handoff package and push the follow-up commit
+   on `feature/n2-closure`.
+2. Keep coverage and fresh-clone formal verification marked `NOT_RUN` unless
+   they are actually executed in a separate verification pass.
 3. Do not merge `main` or merge back into `feature/qrp-clean-rewrite` from this
    task.
 

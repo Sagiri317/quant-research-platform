@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,12 +22,16 @@ class ModelFitResult:
 
 
 def fit_linear_baseline_result(frame: pd.DataFrame, spec: ModelSpec) -> ModelFitResult:
+    return _fit_linear_baseline_result_from_frames((frame,), spec)
+
+
+def _fit_linear_baseline_result_from_frames(
+    frames: Iterable[pd.DataFrame],
+    spec: ModelSpec,
+) -> ModelFitResult:
     required = set(spec.feature_columns)
     required.add(spec.label_column)
     required.add("timestamp")
-    missing = sorted(required.difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_model_columns: {', '.join(missing)}")
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -37,14 +42,17 @@ def fit_linear_baseline_result(frame: pd.DataFrame, spec: ModelSpec) -> ModelFit
             )
         )
     )
-    work_columns = tuple(column for column in work_columns if column in frame.columns)
     fit_columns = tuple(
         column
         for column in ("timestamp", *spec.feature_columns, spec.label_column)
         if column in work_columns
     )
     beta, row_counts, filter_metadata = _fit_linear_coefficients(
-        frame.loc[:, list(work_columns)],
+        _iter_model_work_frames(
+            frames,
+            required=required,
+            work_columns=work_columns,
+        ),
         spec=spec,
         fit_columns=fit_columns,
     )
@@ -70,7 +78,7 @@ def fit_linear_baseline_result(frame: pd.DataFrame, spec: ModelSpec) -> ModelFit
 
 
 def _fit_linear_coefficients(
-    frame: pd.DataFrame,
+    frames: Iterable[pd.DataFrame],
     *,
     spec: ModelSpec,
     fit_columns: tuple[str, ...],
@@ -86,41 +94,42 @@ def _fit_linear_coefficients(
     r_factor: np.ndarray | None = None
     qt_y: np.ndarray | None = None
 
-    for chunk in iter_time_sized_frames(
-        frame,
-        timestamp_column="timestamp",
-        axis=ChunkAxis.TIME,
-    ):
-        chunk_count += 1
-        filtered, metadata = apply_filter_mode(
-            chunk,
-            mode=spec.sample_filter_mode,
-            metadata_key="sample_filter_mode",
-        )
-        rows_input += int(metadata["rows_input"])
-        rows_after_filter += int(metadata["rows_after_filter_mode"])
-        filter_columns_used = list(metadata["filter_columns_used"])
-        filter_definition = str(metadata["filter_definition"])
-        usable = filtered.dropna(
-            subset=[*spec.feature_columns, spec.label_column]
-        ).loc[:, list(fit_columns)]
-        if first_usable is None:
-            first_usable = usable
-        elif not first_usable.empty:
-            first_usable = pd.DataFrame()
-        y = usable.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
-        row_count += int(len(y))
-        if len(y) == 0:
-            continue
-        chunk_design = _linear_design_matrix(usable, spec)
-        if r_factor is None or qt_y is None:
-            stacked_design = chunk_design
-            stacked_y = y
-        else:
-            stacked_design = np.vstack([r_factor, chunk_design])
-            stacked_y = np.concatenate([qt_y, y])
-        q_factor, r_factor = np.linalg.qr(stacked_design, mode="reduced")
-        qt_y = q_factor.T @ stacked_y
+    for frame in frames:
+        for chunk in iter_time_sized_frames(
+            frame,
+            timestamp_column="timestamp",
+            axis=ChunkAxis.TIME,
+        ):
+            chunk_count += 1
+            filtered, metadata = apply_filter_mode(
+                chunk,
+                mode=spec.sample_filter_mode,
+                metadata_key="sample_filter_mode",
+            )
+            rows_input += int(metadata["rows_input"])
+            rows_after_filter += int(metadata["rows_after_filter_mode"])
+            filter_columns_used = list(metadata["filter_columns_used"])
+            filter_definition = str(metadata["filter_definition"])
+            usable = filtered.dropna(
+                subset=[*spec.feature_columns, spec.label_column]
+            ).loc[:, list(fit_columns)]
+            if first_usable is None:
+                first_usable = usable
+            elif not first_usable.empty:
+                first_usable = pd.DataFrame()
+            y = usable.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
+            row_count += int(len(y))
+            if len(y) == 0:
+                continue
+            chunk_design = _linear_design_matrix(usable, spec)
+            if r_factor is None or qt_y is None:
+                stacked_design = chunk_design
+                stacked_y = y
+            else:
+                stacked_design = np.vstack([r_factor, chunk_design])
+                stacked_y = np.concatenate([qt_y, y])
+            q_factor, r_factor = np.linalg.qr(stacked_design, mode="reduced")
+            qt_y = q_factor.T @ stacked_y
 
     row_counts = {
         "rows_input": rows_input,
@@ -159,6 +168,20 @@ def _fit_linear_coefficients_exact(
     y = frame.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
     beta, *_ = np.linalg.lstsq(design, y, rcond=None)
     return beta
+
+
+def _iter_model_work_frames(
+    frames: Iterable[pd.DataFrame],
+    *,
+    required: set[str],
+    work_columns: tuple[str, ...],
+) -> Iterable[pd.DataFrame]:
+    for frame in frames:
+        missing = sorted(required.difference(frame.columns))
+        if missing:
+            raise ValueError(f"missing_model_columns: {', '.join(missing)}")
+        selected = [column for column in work_columns if column in frame.columns]
+        yield frame.loc[:, selected]
 
 
 def _linear_design_matrix(

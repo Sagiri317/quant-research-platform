@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 import pandas as pd
@@ -17,7 +18,7 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.research._memory import iter_time_sized_frames
+from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.runtime.resources import ChunkAxis
 
 
@@ -37,32 +38,26 @@ def evaluate_factor_frame(
     *,
     n_groups: int = 5,
 ) -> EvaluationResult:
+    asset_column = "asset_id" if "asset_id" in frame else "asset"
+    return _evaluate_factor_frame_chunks(
+        (frame,),
+        spec,
+        n_groups=n_groups,
+        asset_column=asset_column,
+    )
+
+
+def _evaluate_factor_frame_chunks(
+    frames: Iterable[pd.DataFrame],
+    spec: EvaluationSpec,
+    *,
+    n_groups: int = 5,
+    asset_column: str = "asset_id",
+) -> EvaluationResult:
     if len(spec.feature_columns) != 1 or len(spec.label_columns) != 1:
         raise ValueError("minimal_evaluation_requires_one_feature_and_one_label")
     feature = spec.feature_columns[0]
     label = spec.label_columns[0]
-    required = {"timestamp", feature, label}
-    missing = sorted(required.difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
-
-
-    asset_column = "asset_id" if "asset_id" in frame else "asset"
-    work_columns = tuple(
-        dict.fromkeys(
-            (
-                "timestamp",
-                asset_column,
-                feature,
-                label,
-                *required_filter_columns(spec.filter_mode),
-            )
-        )
-    )
-    work_frame = frame.loc[
-        :,
-        [column for column in work_columns if column in frame.columns],
-    ]
     compute_spec = ComputePanelSpec(
         feature_columns=(feature,),
         label_column=label,
@@ -71,7 +66,7 @@ def evaluate_factor_frame(
     )
     metrics, grouped_label_values, filter_metadata, rows_after_dropna = (
         _compute_evaluation_frames(
-            work_frame,
+            frames,
             spec=spec,
             compute_spec=compute_spec,
             n_groups=n_groups,
@@ -101,7 +96,7 @@ def evaluate_factor_frame(
 
 
 def _compute_evaluation_frames(
-    frame: pd.DataFrame,
+    frames: Iterable[pd.DataFrame],
     *,
     spec: EvaluationSpec,
     compute_spec: ComputePanelSpec,
@@ -123,8 +118,12 @@ def _compute_evaluation_frames(
         compute_spec.label_column,
     )
 
-    for chunk in iter_time_sized_frames(
-        frame,
+    for chunk in iter_complete_time_sized_frames(
+        _iter_evaluation_work_frames(
+            frames,
+            spec=spec,
+            compute_spec=compute_spec,
+        ),
         timestamp_column=compute_spec.timestamp_column,
         axis=ChunkAxis.TIME,
     ):
@@ -166,6 +165,39 @@ def _compute_evaluation_frames(
         filter_metadata,
         rows_after_dropna,
     )
+
+
+def _iter_evaluation_work_frames(
+    frames: Iterable[pd.DataFrame],
+    *,
+    spec: EvaluationSpec,
+    compute_spec: ComputePanelSpec,
+) -> Iterator[pd.DataFrame]:
+    required = {
+        compute_spec.timestamp_column,
+        compute_spec.asset_column,
+        *compute_spec.feature_columns,
+        compute_spec.label_column,
+    }
+    work_columns = tuple(
+        dict.fromkeys(
+            (
+                compute_spec.timestamp_column,
+                compute_spec.asset_column,
+                *compute_spec.feature_columns,
+                compute_spec.label_column,
+                *required_filter_columns(spec.filter_mode),
+            )
+        )
+    )
+    for frame in frames:
+        missing = sorted(required.difference(frame.columns))
+        if missing:
+            raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
+        yield frame.loc[
+            :,
+            [column for column in work_columns if column in frame.columns],
+        ]
 
 
 def _concat_parts(parts: list[pd.DataFrame]) -> pd.DataFrame:

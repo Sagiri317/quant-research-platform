@@ -46,10 +46,14 @@ internal source adapters -> source-normalized interim artifacts
 - Prediction/model handoff uses fixed-shape `model_metadata` and
   `prediction_metadata` report manifest payloads. Prediction metadata records
   the effective train/test window values, including `train_end`.
-- Evaluation, model fitting, and prediction generation use the shared
-  `runtime.resources` policy for internal timestamp-session chunking when the
-  resource budget requires it. These are private implementation details and do
-  not add public run APIs.
+- Evaluation, model fitting, and prediction handoff read research datasets
+  through chunked storage IO, then use the shared `runtime.resources` policy for
+  timestamp-session chunking inside compute when the resource budget requires
+  it. Evaluation preserves complete timestamp sessions across adjacent storage
+  chunks before cross-sectional compute and fails closed on non-boundary
+  time-order overlap or boundary merges that exceed the active runtime chunk
+  budget. These are private implementation details and do not add public run
+  APIs.
 - No model registry, prediction registry, universal artifact ID, public run API,
   or report lookup is part of `0.1.0`.
 

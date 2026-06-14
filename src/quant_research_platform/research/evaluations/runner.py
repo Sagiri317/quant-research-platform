@@ -12,13 +12,11 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.reports.report_artifacts import (
     write_evaluation_report_artifacts,
 )
-from quant_research_platform.research.datasets import (
-    read_research_dataset,
-    validate_evaluation_input,
-)
+from quant_research_platform.research.datasets import validate_evaluation_input
+from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
 from quant_research_platform.research.evaluations.engine import (
     EvaluationResult,
-    evaluate_factor_frame,
+    _evaluate_factor_frame_chunks,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -40,20 +38,23 @@ def run_evaluation_from_research_dataset(
         *spec.label_columns,
         *required_filter_columns(spec.filter_mode),
     )
-    frame = read_research_dataset(
+    chunks = _iter_research_dataset_chunks(
         layout,
         market_id=dataset_spec.market_id,
         dataset_id=dataset_spec.data_id,
         time_window=time_window,
         columns=read_columns,
     )
-    validate_evaluation_input(
-        frame,
-        dataset_spec,
-        feature_columns=spec.feature_columns,
-        label_columns=spec.label_columns,
+    result = _evaluate_factor_frame_chunks(
+        _validated_evaluation_chunks(
+            chunks,
+            dataset_spec=dataset_spec,
+            feature_columns=spec.feature_columns,
+            label_columns=spec.label_columns,
+        ),
+        spec,
+        n_groups=n_groups,
     )
-    result = evaluate_factor_frame(frame, spec, n_groups=n_groups)
     return write_evaluation_result(result, layout=layout)
 
 
@@ -79,6 +80,23 @@ def write_evaluation_result(
         report_spec=report_spec,
         layout=layout,
     )
+
+
+def _validated_evaluation_chunks(
+    chunks,
+    *,
+    dataset_spec,
+    feature_columns: tuple[str, ...],
+    label_columns: tuple[str, ...],
+):
+    for chunk in chunks:
+        validate_evaluation_input(
+            chunk,
+            dataset_spec,
+            feature_columns=feature_columns,
+            label_columns=label_columns,
+        )
+        yield chunk
 
 
 __all__ = ["run_evaluation_from_research_dataset", "write_evaluation_result"]

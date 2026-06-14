@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -28,11 +29,22 @@ def build_prediction_bundle(
     coefficients: np.ndarray,
     feature_columns: tuple[str, ...],
 ) -> pd.DataFrame:
+    return _build_prediction_bundle_from_frames(
+        (frame,),
+        spec,
+        coefficients,
+        feature_columns,
+    )
+
+
+def _build_prediction_bundle_from_frames(
+    frames: Iterable[pd.DataFrame],
+    spec: PredictionSpec,
+    coefficients: np.ndarray,
+    feature_columns: tuple[str, ...],
+) -> pd.DataFrame:
     reject_filter_feature_columns(feature_columns)
     required = set((*spec.primary_key, *feature_columns))
-    missing = sorted(required.difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
     _validate_oos_split(spec)
     work_columns = tuple(
         dict.fromkeys(
@@ -44,7 +56,11 @@ def build_prediction_bundle(
         )
     )
     result, filter_metadata, rows_after_dropna = _build_prediction_frame(
-        frame.loc[:, [column for column in work_columns if column in frame.columns]],
+        _iter_prediction_work_frames(
+            frames,
+            required=required,
+            work_columns=work_columns,
+        ),
         spec=spec,
         coefficients=coefficients,
         feature_columns=feature_columns,
@@ -74,7 +90,7 @@ def build_prediction_bundle(
 
 
 def _build_prediction_frame(
-    frame: pd.DataFrame,
+    frames: Iterable[pd.DataFrame],
     *,
     spec: PredictionSpec,
     coefficients: np.ndarray,
@@ -87,34 +103,37 @@ def _build_prediction_frame(
     filter_columns_used: list[str] = []
     filter_definition = ""
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *feature_columns)))
-    for chunk in iter_time_sized_frames(
-        frame,
-        timestamp_column="timestamp",
-        axis=ChunkAxis.TIME,
-    ):
-        filtered, metadata = apply_filter_mode(
-            chunk,
-            mode=spec.sample_filter_mode,
-            metadata_key="sample_filter_mode",
-        )
-        rows_input += int(metadata["rows_input"])
-        rows_after_filter += int(metadata["rows_after_filter_mode"])
-        filter_columns_used = list(metadata["filter_columns_used"])
-        filter_definition = str(metadata["filter_definition"])
-        usable = filtered.dropna(subset=list(feature_columns)).loc[
-            :, list(usable_columns)
-        ]
-        rows_after_dropna += int(len(usable))
-        test_mask = usable["timestamp"] >= pd.Timestamp(spec.test_start)
-        if spec.test_end is not None:
-            test_mask &= usable["timestamp"] <= pd.Timestamp(spec.test_end)
-        test_frame = usable.loc[test_mask]
-        if test_frame.empty:
-            continue
-        x = test_frame.loc[:, feature_columns].to_numpy(dtype=float, copy=False)
-        output = test_frame.loc[:, spec.primary_key].copy()
-        output[spec.prediction_column] = float(coefficients[0]) + x @ coefficients[1:]
-        parts.append(output)
+    for frame in frames:
+        for chunk in iter_time_sized_frames(
+            frame,
+            timestamp_column="timestamp",
+            axis=ChunkAxis.TIME,
+        ):
+            filtered, metadata = apply_filter_mode(
+                chunk,
+                mode=spec.sample_filter_mode,
+                metadata_key="sample_filter_mode",
+            )
+            rows_input += int(metadata["rows_input"])
+            rows_after_filter += int(metadata["rows_after_filter_mode"])
+            filter_columns_used = list(metadata["filter_columns_used"])
+            filter_definition = str(metadata["filter_definition"])
+            usable = filtered.dropna(subset=list(feature_columns)).loc[
+                :, list(usable_columns)
+            ]
+            rows_after_dropna += int(len(usable))
+            test_mask = usable["timestamp"] >= pd.Timestamp(spec.test_start)
+            if spec.test_end is not None:
+                test_mask &= usable["timestamp"] <= pd.Timestamp(spec.test_end)
+            test_frame = usable.loc[test_mask]
+            if test_frame.empty:
+                continue
+            x = test_frame.loc[:, feature_columns].to_numpy(dtype=float, copy=False)
+            output = test_frame.loc[:, spec.primary_key].copy()
+            output[spec.prediction_column] = (
+                float(coefficients[0]) + x @ coefficients[1:]
+            )
+            parts.append(output)
     result = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     filter_metadata = {
         "sample_filter_mode": spec.sample_filter_mode,
@@ -133,6 +152,20 @@ def _validate_oos_split(spec: PredictionSpec) -> None:
         spec.test_start
     ):
         raise ValueError("prediction_test_end_must_not_precede_test_start")
+
+
+def _iter_prediction_work_frames(
+    frames: Iterable[pd.DataFrame],
+    *,
+    required: set[str],
+    work_columns: tuple[str, ...],
+) -> Iterable[pd.DataFrame]:
+    for frame in frames:
+        missing = sorted(required.difference(frame.columns))
+        if missing:
+            raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
+        selected = [column for column in work_columns if column in frame.columns]
+        yield frame.loc[:, selected]
 
 
 def write_prediction_bundle(

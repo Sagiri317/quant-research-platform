@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.datasets.assembler as assembler_module
+import quant_research_platform.research.evaluations.runner as evaluation_runner_module
+import quant_research_platform.research.predictions.handoff as prediction_handoff_module
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -568,6 +570,109 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     assert "metadata" not in manifest
 
 
+def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _research_rows_for_dates(
+        [
+            "2014-01-02",
+            "2014-01-03",
+            "2014-01-06",
+            "2014-01-07",
+            "2014-01-08",
+        ]
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _research_dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog, frame=frame)
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    )
+    model_catalog = ModelCatalog()
+    model_catalog.register(
+        ModelSpec(
+            model_id="linear_demo",
+            model_family="linear",
+            feature_columns=("mom_20d",),
+            label_column="forward_return_20d",
+        )
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="pred_demo",
+            model_id="linear_demo",
+            research_dataset_id="demo",
+            prediction_column=default_prediction_column(),
+            primary_key=platform_entity_time_key(),
+            train_end="2014-01-03",
+            test_start="2014-01-06",
+            test_end="2014-01-08",
+        )
+    )
+
+    original_iter = prediction_handoff_module._iter_research_dataset_chunks
+    original_fit = prediction_handoff_module._fit_linear_baseline_result_from_frames
+    original_build = prediction_handoff_module._build_prediction_bundle_from_frames
+    read_chunk_rows: list[int] = []
+    fit_chunk_rows: list[int] = []
+    prediction_chunk_rows: list[int] = []
+
+    def wrapped_iter(*args, **kwargs):
+        for chunk in original_iter(*args, **kwargs):
+            read_chunk_rows.append(len(chunk))
+            yield chunk
+
+    def wrapped_fit(frames, spec):
+        chunks = list(frames)
+        fit_chunk_rows.extend(len(chunk) for chunk in chunks)
+        return original_fit(iter(chunks), spec)
+
+    def wrapped_build(frames, spec, coefficients, feature_columns):
+        chunks = list(frames)
+        prediction_chunk_rows.extend(len(chunk) for chunk in chunks)
+        return original_build(iter(chunks), spec, coefficients, feature_columns)
+
+    monkeypatch.setattr(
+        prediction_handoff_module,
+        "_iter_research_dataset_chunks",
+        wrapped_iter,
+    )
+    monkeypatch.setattr(
+        prediction_handoff_module,
+        "_fit_linear_baseline_result_from_frames",
+        wrapped_fit,
+    )
+    monkeypatch.setattr(
+        prediction_handoff_module,
+        "_build_prediction_bundle_from_frames",
+        wrapped_build,
+    )
+
+    run_root = run_prediction_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        model_catalog=model_catalog,
+        prediction_catalog=prediction_catalog,
+        prediction_id="pred_demo",
+    )
+
+    assert (run_root / "prediction.parquet").is_file()
+    assert len([rows for rows in read_chunk_rows if rows]) > 1
+    assert max(read_chunk_rows) < len(frame)
+    assert len(fit_chunk_rows) > 1
+    assert max(fit_chunk_rows) < len(frame)
+    assert len(prediction_chunk_rows) > 1
+    assert max(prediction_chunk_rows) < len(frame)
+
+
 def test_evaluation_runner_reads_research_dataset_and_writes_report(
     tmp_path: Path,
 ) -> None:
@@ -617,6 +722,67 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     ]
     assert manifest["evaluation_diagnostics"]["contract_version"] == "0.1"
     assert "metadata" not in manifest
+
+
+def test_evaluation_runner_streams_research_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _research_rows_for_dates(
+        [
+            "2014-01-02",
+            "2014-01-03",
+            "2014-01-06",
+            "2014-01-07",
+            "2014-01-08",
+        ]
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _research_dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog, frame=frame)
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    )
+    evaluation_catalog = EvaluationCatalog()
+    evaluation_catalog.register(
+        EvaluationSpec(
+            run_id="eval_demo",
+            market_id=MarketId("a_share"),
+            research_dataset_id="demo",
+            feature_columns=("mom_20d",),
+            label_columns=("forward_return_20d",),
+        )
+    )
+    original_iter = evaluation_runner_module._iter_research_dataset_chunks
+    read_chunk_rows: list[int] = []
+
+    def wrapped_iter(*args, **kwargs):
+        for chunk in original_iter(*args, **kwargs):
+            read_chunk_rows.append(len(chunk))
+            yield chunk
+
+    monkeypatch.setattr(
+        evaluation_runner_module,
+        "_iter_research_dataset_chunks",
+        wrapped_iter,
+    )
+
+    run_root = run_evaluation_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        evaluation_catalog=evaluation_catalog,
+        run_id="eval_demo",
+    )
+
+    assert (run_root / "metrics.parquet").is_file()
+    assert len([rows for rows in read_chunk_rows if rows]) > 1
+    assert max(read_chunk_rows) < len(frame)
 
 
 def _write_processed_inputs(
