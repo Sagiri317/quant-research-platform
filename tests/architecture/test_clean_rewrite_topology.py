@@ -166,6 +166,32 @@ def test_report_placeholder_modules_and_generic_bundle_module_are_absent() -> No
     assert [str(path) for path in retired if path.exists()] == []
 
 
+def test_active_source_has_no_broad_artifact_report_diagnostics_abstractions() -> None:
+    forbidden_names = {
+        "Artifact" + "Service",
+        "Artifact" + "Store",
+        "Artifact" + "Registry",
+        "Run" + "Repository",
+        "Report" + "Repository",
+        "Report" + "Store",
+        "Evidence" + "Registry",
+        "Diagnostics" + "Manager",
+        "Diagnostics" + "Store",
+        "Diagnostics" + "Registry",
+        "Evaluation" + "Facade",
+        "Report" + "Facade",
+        "Artifact" + "Facade",
+    }
+    hits: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        defined = _top_level_defined_names(tree)
+        for name in sorted(forbidden_names & defined):
+            hits.append(f"{path}: {name}")
+
+    assert hits == []
+
+
 def test_compute_split_modules_own_implementations() -> None:
     split_modules = (
         SOURCE_ROOT / "compute/dataframe/construction.py",

@@ -12,7 +12,7 @@ workspace root 的 handoff 信号。历史 closeout、旧分支叙事、私有 r
 | 项目 | 当前事实 |
 |---|---|
 | 当前阶段 | QRP Clean Rewrite `0.1.0` on Local Research Platform |
-| 当前分支 | `feature/qrp-clean-rewrite` |
+| 当前分支 | `feature/n2-closure` |
 | 版本边界 | project `0.1.0`; API/contracts use `0.1` |
 | 源码拓扑 | `contracts`, `storage`, `catalog`, `sources`, `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`, `reports`, `runtime` |
 | 当前 API/CLI | `/api/0.1/...` factor/label catalog routes and research dataset requirements; `qrp catalog factors`, `qrp catalog labels`, `qrp research-datasets requirements` |
@@ -49,6 +49,14 @@ Current public-safe anchors:
   owner modules only.
 - Report writers derive paths through `ReportSpec`, `ReportCatalog`,
   `StorageLayout`, and `run_id`.
+- Dataset instance metadata is writer-owned at `write_dataset()`; research
+  dataset assembly persists `input_fingerprints` through storage rather than
+  mutating dataset manifests after write.
+- Evaluation outputs include typed `EvaluationDiagnostics` and persisted
+  `ic_summary.parquet` / `group_spread_summary.parquet` summary artifacts.
+- Prediction reports require fixed-shape `model_metadata` and
+  `prediction_metadata`; generic prediction `metadata` attrs are not an active
+  report writer input.
 - Prior local verification covered the new processed factor/label-supporting
   layout, ResearchDataset layout, and full historical `daily_panel` aggregate
   coverage for `2014-01-01` through `2025-12-31` without committing row-level
@@ -67,10 +75,11 @@ Current public-safe anchors:
 
 ## 下一步
 
-1. Complete the data-layer residual closure and handoff package verification.
-2. Commit and push `feature/qrp-clean-rewrite` only after final verification
-   passes.
-3. Do not merge `main` from this task.
+1. Complete N2 formal verification, three-year smoke, `.run/s75` compare, and
+   official handoff package verification.
+2. Commit and push `feature/n2-closure` only after final verification passes.
+3. Do not merge `main` or merge back into `feature/qrp-clean-rewrite` from this
+   task.
 
 ## Root Handoff / 根目录回传信号
 
@@ -111,6 +120,9 @@ inputs are allowed only through explicit `key_coverage` opt-in and still fail
 closed on keys outside the base. `ResearchDatasetSpec.key_coverage` is
 normalized for every declared input and persisted into research dataset
 `spec.json` and `_manifest/manifest.json`; the base input is always `strict`.
+Runtime research dataset `input_fingerprints` are merged by the storage writer
+through guarded `instance_metadata`, not by reopening the manifest from the
+research layer.
 
 A-share processed annotation, factor, and label materializers resolve
 `ProcessedDataSpec.processed_input_data_ids` through internal input contracts.
@@ -119,10 +131,10 @@ their primary processed input by contract, without adding public factor or label
 registries.
 
 Evaluation, model, and prediction catalogs remain research profile demo
-components and are outside the first-stage data-layer closure. Evaluation
-diagnostics, model registry, prediction registry, workflow execute/resume,
-frontend/dashboard work, high-frequency, multi-market implementation, and
-paper/live trading remain out of scope.
+components. Evaluation diagnostics are now a narrow typed 0.1 contract for
+smoke-scoped reports; model registry, prediction registry, workflow
+execute/resume, frontend/dashboard work, high-frequency, multi-market
+implementation, and paper/live trading remain out of scope.
 
 The current research profile composition root is `catalog/profiles.py`.
 The public research profile composition root is `research_profile()`, returning

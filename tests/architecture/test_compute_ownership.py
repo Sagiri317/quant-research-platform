@@ -61,7 +61,7 @@ def test_active_code_does_not_import_compute_protocols_or_old_exact_names() -> N
 
 def test_compute_modules_do_not_import_platform_layers() -> None:
     forbidden_prefixes = (
-        "quant_research_platform.research.evaluations",
+        "quant_research_platform.research",
         "quant_research_platform.reports",
         "quant_research_platform.workflows",
         "quant_research_platform.catalog",
@@ -132,6 +132,43 @@ def test_evaluation_group_artifact_names_are_label_value_neutral() -> None:
                 hits.append(f"{path}: {term}")
 
     assert not hits, "evaluation_group_artifact_name_not_neutral: " + "; ".join(hits)
+
+
+def test_evaluation_result_and_report_writer_do_not_use_generic_metadata() -> None:
+    engine_path = PROJECT_SRC / "research/evaluations/engine.py"
+    report_path = PROJECT_SRC / "reports/report_artifacts.py"
+    engine_tree = _parse(engine_path)
+    report_text = report_path.read_text(encoding="utf-8")
+    result_class = next(
+        node
+        for node in engine_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "EvaluationResult"
+    )
+    field_names = {
+        child.target.id
+        for child in result_class.body
+        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name)
+    }
+
+    assert "metadata" not in field_names
+    assert "diagnostics" in field_names
+    assert 'attrs.get("metadata"' not in report_text
+    assert 'attrs["metadata"]' not in report_text
+    assert "metrics.attrs" not in report_text
+
+
+def test_prediction_bundle_and_report_writer_do_not_use_generic_metadata_attr() -> None:
+    bundle_text = (
+        PROJECT_SRC / "research/predictions/bundle.py"
+    ).read_text(encoding="utf-8")
+    report_text = (PROJECT_SRC / "reports/report_artifacts.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'attrs["metadata"]' not in bundle_text
+    assert 'attrs.get("metadata"' not in report_text
+    assert 'attrs["prediction_metadata"]' in bundle_text
+    assert '"prediction_metadata"' in report_text
 
 
 def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:

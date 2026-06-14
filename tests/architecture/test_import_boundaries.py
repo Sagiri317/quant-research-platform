@@ -16,6 +16,12 @@ FORBIDDEN_CONTRACT_IMPORT_PREFIXES = (
     "quant_research_platform.workflows",
     "quant_research_platform.reports",
 )
+FORBIDDEN_REPORT_IMPORT_PREFIXES = (
+    "quant_research_platform.compute",
+    "quant_research_platform.research",
+    "quant_research_platform.workflows",
+    "quant_research_platform.interfaces",
+)
 
 PROFILE_A_SHARE_DEFINITION = (
     "src/quant_research_platform/catalog/profiles.py",
@@ -92,6 +98,16 @@ def test_contracts_do_not_import_upper_layers() -> None:
     ]
 
     assert not hits, "contracts_import_boundary_violation: " + "; ".join(hits)
+
+
+def test_reports_do_not_import_compute_research_workflows_or_interfaces() -> None:
+    hits = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(PROJECT_SRC / "reports")
+        if module.startswith(FORBIDDEN_REPORT_IMPORT_PREFIXES)
+    ]
+
+    assert not hits, "reports_import_boundary_violation: " + "; ".join(hits)
 
 
 def test_known_cross_layer_imports_are_explicitly_allowlisted() -> None:

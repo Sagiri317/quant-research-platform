@@ -14,7 +14,8 @@ research/evaluations
 
 ## Contract Boundaries
 
-- `contracts/evaluations.py` defines `EvaluationSpec`.
+- `contracts/evaluations.py` defines `EvaluationSpec` and
+  `EvaluationDiagnostics`.
 - `contracts/predictions.py` defines `PredictionSpec`.
 - `contracts/portfolios.py` defines `PortfolioSpec`.
 - `contracts/reports.py` defines `ReportDefinition` and `ReportSpec`.
@@ -28,15 +29,27 @@ Persisted stage profile, prediction, and evaluation report artifacts are derived
 from `StorageLayout + ReportSpec + run_id`. Report artifact writers do not accept
 arbitrary `output_root` or `output_dir` path-selection inputs.
 
-Evaluation reports record `filter_mode` metadata. Supported modes are
-`eligible`, `tradable`, and `unfiltered`; `tradable` is an execution-aware
-evaluation diagnostic only, not a backtest, live tradable PnL, or production
-trading result.
+Evaluation reports persist `metrics.parquet`, `grouped_label_values.parquet`,
+`ic_summary.parquet`, and `group_spread_summary.parquet` in that order.
+Evaluation owns filtering, summary construction, and typed
+`evaluation_diagnostics`; compute owns IC, RankIC, grouped label-value, IC
+summary, and group-spread kernels; report writers validate and persist frames
+without importing compute. Supported evaluation filter modes are `eligible`,
+`tradable`, and `unfiltered`; `tradable` is an execution-aware evaluation
+diagnostic only, not a backtest, live tradable PnL, or production trading
+result.
 
-Prediction bundles record `sample_filter_mode` metadata. Supported modes are
+Prediction bundles record fixed-shape `model_metadata` and
+`prediction_metadata` in report manifests. Supported sample filter modes are
 `eligible` and `unfiltered`; prediction generation uses feature values only and
 does not use labels as prediction inputs. The current prediction path remains a
-historical research handoff, not label-free live inference.
+historical research handoff, not label-free live inference. Missing model or
+prediction metadata fails closed in the report writer.
+
+Report manifest payload construction is private to
+`reports/report_artifacts.py`. Retired `reports/manifests.py`,
+`reports/bundles.py`, report repositories, report stores, and public report
+lookup remain outside the active `0.1.0` surface.
 
 ## Privacy
 

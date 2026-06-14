@@ -11,7 +11,7 @@ internal source adapters -> source-normalized interim artifacts
 -> data/processed/a_share/{panel,annotation,factor,label}
 -> research/datasets session-chunked assembly
 -> data/research/a_share
--> research/evaluations
+-> research/evaluations and research/predictions
 -> reports/private_real
 -> interfaces/api and interfaces/cli read research/catalog surfaces
 ```
@@ -32,6 +32,20 @@ internal source adapters -> source-normalized interim artifacts
 | `interfaces/` | Local CLI and API adapters |
 | `reports/` | Report catalog and private report artifact writers |
 | `runtime/` | Privacy, sanitization, logging, profiling, errors, resource chunk planning |
+
+## Artifact Ownership
+
+- Dataset instance metadata is owned by `storage/datasets.py`.
+  `write_dataset(instance_metadata=...)` accepts only explicit, guarded
+  metadata keys such as `input_fingerprints`; research dataset assembly does not
+  mutate `_manifest/manifest.json` after writing.
+- Evaluation owns `EvaluationDiagnostics`, IC summary, and group-spread summary
+  construction. Reports validate and persist evaluation frames as private
+  artifacts without importing compute.
+- Prediction/model handoff uses fixed-shape `model_metadata` and
+  `prediction_metadata` report manifest payloads. No model registry,
+  prediction registry, universal artifact ID, public run API, or report lookup
+  is part of `0.1.0`.
 
 ## API Flow
 

@@ -42,6 +42,24 @@ def test_tests_do_not_depend_on_runtime_workspace_path() -> None:
     assert hits == []
 
 
+def test_source_and_tests_do_not_depend_on_runtime_workspace_path() -> None:
+    runtime_workspace_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape('.' + 'run')}(?![A-Za-z0-9_])"
+    )
+    current_file = Path(__file__).resolve()
+    hits: list[str] = []
+    for root in (Path("src"), Path("tests")):
+        for path in root.rglob("*.py"):
+            if path.resolve() == current_file:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if runtime_workspace_pattern.search(line):
+                    hits.append(f"{path}:{line_number}: {line.strip()}")
+
+    assert hits == []
+
+
 def test_verification_evidence_replaces_retired_public_names() -> None:
     expected_files = {
         Path("src/quant_research_platform/workflows/verification_evidence.py"),
