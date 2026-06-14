@@ -34,10 +34,6 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import (
-    read_manifest,
-    replace_internal_artifact_manifest,
-)
 
 SIZING_SAMPLE_SESSION_CAP = 20
 
@@ -67,8 +63,12 @@ def assemble_research_dataset(
         time_window=time_window,
     )
     artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
-    write_dataset(artifact_root, chunks, spec=spec)
-    _write_input_fingerprints(artifact_root, input_fingerprints)
+    write_dataset(
+        artifact_root,
+        chunks,
+        spec=spec,
+        instance_metadata={"input_fingerprints": input_fingerprints},
+    )
     return artifact_root
 
 
@@ -465,16 +465,6 @@ def _input_fingerprints(
             fingerprint_dataset(root, time_window=time_window)
         )
     return fingerprints
-
-
-def _write_input_fingerprints(
-    artifact_root: Path,
-    input_fingerprints: dict[str, dict[str, object]],
-) -> None:
-    manifest_path = artifact_root / "_manifest" / "manifest.json"
-    manifest = read_manifest(manifest_path)
-    manifest["input_fingerprints"] = input_fingerprints
-    replace_internal_artifact_manifest(manifest_path, manifest)
 
 
 def _estimate_research_join_bytes_per_session(

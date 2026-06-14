@@ -9,6 +9,8 @@ from pathlib import Path
 
 SOURCE_ROOT = Path("src/quant_research_platform")
 FORBIDDEN_PUBLIC_STORAGE_PARAMS = {
+    "output_root",
+    "output_dir",
     "partition_filter",
     "force",
     "overwrite",
@@ -99,7 +101,7 @@ def test_time_window_contract_is_closed_and_required() -> None:
 def test_public_storage_signatures_hide_physical_and_execution_knobs() -> None:
     storage = importlib.import_module("quant_research_platform.storage.datasets")
     expected = {
-        "write_dataset": ("dataset_root", "data", "spec"),
+        "write_dataset": ("dataset_root", "data", "spec", "instance_metadata"),
         "read_dataset": ("dataset_root", "columns", "time_window", "mode"),
         "inspect_dataset": ("dataset_root", "time_window"),
         "fingerprint_dataset": ("dataset_root", "columns", "time_window"),
@@ -109,8 +111,39 @@ def test_public_storage_signatures_hide_physical_and_execution_knobs() -> None:
     for function_name, required_names in expected.items():
         parameters = inspect.signature(getattr(storage, function_name)).parameters
         assert FORBIDDEN_PUBLIC_STORAGE_PARAMS.isdisjoint(parameters), function_name
-        for name in required_names:
-            assert name in parameters, function_name
+        if function_name == "write_dataset":
+            assert tuple(parameters) == required_names
+        else:
+            for name in required_names:
+                assert name in parameters, function_name
+
+
+def test_research_dataset_assembler_does_not_mutate_storage_manifests() -> None:
+    assembler_path = SOURCE_ROOT / "research/datasets/assembler.py"
+    source = assembler_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(assembler_path))
+    forbidden_imports = {
+        "read_manifest",
+        "replace_internal_artifact_manifest",
+    }
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+    assert imported_names.isdisjoint(forbidden_imports)
+    assert "_write_input_fingerprints" not in {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }
+    string_constants = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "_manifest" not in string_constants
+    assert "manifest.json" not in string_constants
 
 
 def test_dataset_inspection_absorbs_planning_metadata() -> None:

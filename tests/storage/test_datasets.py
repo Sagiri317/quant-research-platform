@@ -76,6 +76,27 @@ def _frame() -> pd.DataFrame:
     )
 
 
+def _input_fingerprint_payload(
+    *,
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "fingerprint_schema_version": "0.1",
+        "schema_hash": "a" * 64,
+        "row_count": 3,
+        "key_columns": ["market_id", "asset_id", "timestamp"],
+        "content_hash": "b" * 64,
+        "partition_fingerprints": [
+            {"partition": "year=2014", "row_count": 1, "content_hash": "c" * 64}
+        ],
+        "file_count": 1,
+        "column_names": ["market_id", "asset_id", "timestamp", "value"],
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def _artifact_root(tmp_path: Path, name: str = "x") -> Path:
     return tmp_path / "data" / "processed" / "a_share" / "factor" / name
 
@@ -104,6 +125,89 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     assert spec_payload["kind"] == "factor"
     assert "category" not in spec_payload
     assert "processed_data_id" not in spec_payload
+
+
+def test_write_dataset_merges_allowed_instance_metadata(tmp_path: Path) -> None:
+    root = _artifact_root(tmp_path)
+    input_fingerprints = {"demo_input": _input_fingerprint_payload()}
+
+    write_dataset(
+        root,
+        _frame(),
+        spec=_spec(),
+        instance_metadata={"input_fingerprints": input_fingerprints},
+    )
+
+    inspection = inspect_dataset(root)
+    assert inspection.manifest["input_fingerprints"] == input_fingerprints
+
+
+def test_write_dataset_rejects_malformed_input_fingerprints_metadata(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        {"demo_input": _input_fingerprint_payload(extra={"unexpected": "x"})},
+        {"demo_input": _input_fingerprint_payload(extra={"stock_code_sample": "x"})},
+        {"demo_input": _input_fingerprint_payload(extra={"row_count": math.nan})},
+        {
+            "demo_input": _input_fingerprint_payload(
+                extra={
+                    "partition_fingerprints": [
+                        {
+                            "partition": "year=2014",
+                            "row_count": 1,
+                            "content_hash": "c" * 64,
+                            "sample": ["x"],
+                        }
+                    ]
+                }
+            )
+        },
+    ]
+
+    for index, input_fingerprints in enumerate(cases):
+        with pytest.raises(ValueError, match="invalid_input_fingerprints_metadata"):
+            write_dataset(
+                _artifact_root(tmp_path, f"bad_fingerprint_metadata_{index}"),
+                _frame(),
+                spec=_spec(f"bad_fingerprint_metadata_{index}"),
+                instance_metadata={"input_fingerprints": input_fingerprints},
+            )
+
+
+def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="unsupported_dataset_instance_metadata_key"):
+        write_dataset(
+            _artifact_root(tmp_path, "unsupported_metadata"),
+            _frame(),
+            spec=_spec("unsupported_metadata"),
+            instance_metadata={"other_metadata": {}},
+        )
+
+    with pytest.raises(ValueError, match="reserved_dataset_instance_metadata_key"):
+        write_dataset(
+            _artifact_root(tmp_path, "reserved_metadata"),
+            _frame(),
+            spec=_spec("reserved_metadata"),
+            instance_metadata={"row_count": 999},
+        )
+
+    unsafe_root = _artifact_root(tmp_path, "unsafe_metadata")
+    unsafe_fingerprint = _input_fingerprint_payload(
+        extra={"content_hash": "data/raw/internal-provider/export.csv"}
+    )
+    with pytest.raises(ValueError, match="unsafe_internal_artifact_metadata"):
+        write_dataset(
+            unsafe_root,
+            _frame(),
+            spec=_spec("unsafe_metadata"),
+            instance_metadata={
+                "input_fingerprints": {"demo_input": unsafe_fingerprint}
+            },
+        )
+    assert not unsafe_root.exists()
 
 
 def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) -> None:
@@ -359,6 +463,27 @@ def test_compare_datasets_statuses_for_semantic_and_schema_differences(
     assert not schema_comparison.matches
 
 
+def test_compare_datasets_ignores_allowed_instance_metadata_for_same_content(
+    tmp_path: Path,
+) -> None:
+    left_root = _artifact_root(tmp_path, "left_metadata")
+    right_root = _artifact_root(tmp_path, "right_metadata")
+    write_dataset(left_root, _frame(), spec=_spec("left_metadata"))
+    write_dataset(
+        right_root,
+        _frame(),
+        spec=_spec("right_metadata"),
+        instance_metadata={
+            "input_fingerprints": {"demo_input": _input_fingerprint_payload()}
+        },
+    )
+
+    comparison = compare_datasets(left_root, right_root)
+
+    assert comparison.status == "MATCH"
+    assert comparison.matches
+
+
 def test_storage_datasets_public_api_is_hard_cutover() -> None:
     import quant_research_platform.storage as storage
 
@@ -390,6 +515,7 @@ def test_storage_datasets_public_signatures_do_not_expose_physical_controls() ->
         "dataset_root",
         "data",
         "spec",
+        "instance_metadata",
     ]
     assert list(public_signatures["read_dataset"].parameters) == [
         "dataset_root",

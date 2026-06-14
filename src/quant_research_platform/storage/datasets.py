@@ -37,6 +37,64 @@ class DatasetReadMode(StrEnum):
     CHUNKED = "chunked"
 
 
+_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset({"input_fingerprints"})
+_DATASET_MANIFEST_RESERVED_KEYS = frozenset(
+    {
+        "schema_version",
+        "data_id",
+        "frequency",
+        "grain",
+        "primary_key",
+        "partition_columns",
+        "required_columns",
+        "column_roles",
+        "source_id",
+        "market_id",
+        "kind",
+        "source_input_data_ids",
+        "processed_input_data_ids",
+        "input_data_ids",
+        "base_input_data_id",
+        "feature_columns",
+        "label_columns",
+        "filter_columns",
+        "context_columns",
+        "key_coverage",
+        "row_count",
+        "file_count",
+        "file_size_bytes",
+        "columns",
+        "schema_hash",
+        "partition_row_counts",
+        "partition_count",
+        "partitions",
+        "date_min",
+        "date_max",
+        "null_count_summary",
+        "non_finite_count_summary",
+        "duplicate_primary_key_count",
+        "factor_nan_profile",
+        "label_nan_profile",
+        "validation_status",
+    }
+)
+_DATASET_INPUT_FINGERPRINT_KEYS = frozenset(
+    {
+        "fingerprint_schema_version",
+        "schema_hash",
+        "row_count",
+        "key_columns",
+        "content_hash",
+        "partition_fingerprints",
+        "file_count",
+        "column_names",
+    }
+)
+_DATASET_PARTITION_FINGERPRINT_KEYS = frozenset(
+    {"partition", "row_count", "content_hash"}
+)
+
+
 @dataclass(frozen=True)
 class DatasetInspection:
     root: Path
@@ -234,6 +292,7 @@ def write_dataset(
     data: pd.DataFrame | Iterable[pd.DataFrame],
     *,
     spec: DataSpec,
+    instance_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     final_root = Path(dataset_root)
     _validate_dataset_spec(spec)
@@ -253,7 +312,10 @@ def write_dataset(
         )
         write_internal_artifact_manifest(
             temp_root / "_manifest" / "manifest.json",
-            accumulator.payload(),
+            _merge_dataset_instance_metadata(
+                accumulator.payload(),
+                instance_metadata,
+            ),
         )
         _validate_written_artifact(temp_root, accumulator)
 
@@ -497,6 +559,111 @@ def _comparison(
         summary={} if summary is None else summary,
         layout_delta={} if layout_delta is None else layout_delta,
     )
+
+
+def _merge_dataset_instance_metadata(
+    payload: Mapping[str, Any],
+    instance_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    result = dict(payload)
+    if instance_metadata is None:
+        return result
+    if not isinstance(instance_metadata, Mapping):
+        raise TypeError("invalid_dataset_instance_metadata")
+    metadata: dict[str, Any] = {}
+    for key, value in instance_metadata.items():
+        if not isinstance(key, str):
+            raise ValueError("unsupported_dataset_instance_metadata_key")
+        if key in _DATASET_MANIFEST_RESERVED_KEYS or key in result:
+            raise ValueError(f"reserved_dataset_instance_metadata_key: {key}")
+        if key not in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS:
+            raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
+        if key == "input_fingerprints":
+            metadata[key] = _validate_input_fingerprints_metadata(value)
+    _require_json_serializable(metadata)
+    result.update(metadata)
+    return result
+
+
+def _require_json_serializable(value: Mapping[str, Any]) -> None:
+    try:
+        json.dumps(value, ensure_ascii=True, sort_keys=True, allow_nan=False)
+    except TypeError as exc:
+        raise ValueError("dataset_instance_metadata_not_json_serializable") from exc
+    except ValueError as exc:
+        raise ValueError("dataset_instance_metadata_not_json_serializable") from exc
+
+
+def _validate_input_fingerprints_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    fingerprints: dict[str, Any] = {}
+    for data_id, fingerprint in value.items():
+        if not isinstance(data_id, str) or not data_id:
+            raise ValueError("invalid_input_fingerprints_metadata")
+        fingerprints[data_id] = _validate_input_fingerprint_payload(fingerprint)
+    return fingerprints
+
+
+def _validate_input_fingerprint_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    keys = set(value)
+    if keys != _DATASET_INPUT_FINGERPRINT_KEYS:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return {
+        "fingerprint_schema_version": _require_string(
+            value["fingerprint_schema_version"],
+        ),
+        "schema_hash": _require_string(value["schema_hash"]),
+        "row_count": _require_non_negative_int(value["row_count"]),
+        "key_columns": _require_string_list(value["key_columns"]),
+        "content_hash": _require_string(value["content_hash"]),
+        "partition_fingerprints": [
+            _validate_partition_fingerprint_payload(item)
+            for item in _require_list(value["partition_fingerprints"])
+        ],
+        "file_count": _require_non_negative_int(value["file_count"]),
+        "column_names": _require_string_list(value["column_names"]),
+    }
+
+
+def _validate_partition_fingerprint_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    keys = set(value)
+    if keys != _DATASET_PARTITION_FINGERPRINT_KEYS:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return {
+        "partition": _require_string(value["partition"]),
+        "row_count": _require_non_negative_int(value["row_count"]),
+        "content_hash": _require_string(value["content_hash"]),
+    }
+
+
+def _require_string(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return value
+
+
+def _require_string_list(value: Any) -> list[str]:
+    values = _require_list(value)
+    if any(not isinstance(item, str) or not item for item in values):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return list(values)
+
+
+def _require_list(value: Any) -> list[Any]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return list(value)
+
+
+def _require_non_negative_int(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_input_fingerprints_metadata")
+    return int(value)
 
 
 def _staged_write_directory(

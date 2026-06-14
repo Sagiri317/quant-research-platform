@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.datasets.assembler as assembler_module
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -235,6 +237,21 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
     )
 
 
+def test_research_dataset_assembler_does_not_mutate_storage_manifest() -> None:
+    source = inspect.getsource(assembler_module)
+    tree = ast.parse(source)
+    string_constants = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert "replace_internal_artifact_manifest" not in source
+    assert "_write_input_fingerprints" not in source
+    assert "_manifest" not in string_constants
+    assert "manifest.json" not in string_constants
+
+
 def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -453,13 +470,14 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     )
 
     evaluation = evaluate_factor_frame(frame, eval_spec)
-    coefficients = fit_linear_baseline_result(frame, model_spec).coefficients
+    model_result = fit_linear_baseline_result(frame, model_spec)
     prediction = build_prediction_bundle(
         frame,
         prediction_spec,
-        coefficients,
+        model_result.coefficients,
         model_spec.feature_columns,
     )
+    prediction.attrs["model_metadata"] = model_result.metadata
     layout = StorageLayout(project_root=tmp_path)
     report_spec = ReportSpec(
         report_id="prediction_bundle",
@@ -476,6 +494,9 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     )
 
     assert len(evaluation.metrics) == 2
+    assert len(evaluation.ic_summary) == 1
+    assert len(evaluation.group_spread_summary) == 1
+    assert evaluation.diagnostics.rows_input == 4
     assert prediction_spec.prediction_column in prediction.columns
     assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
     assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
@@ -539,6 +560,12 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     assert manifest["prediction_mode"] == "minimal_oos"
     assert manifest["prediction_column"] == default_prediction_column()
     assert manifest["primary_key"] == list(platform_entity_time_key())
+    assert manifest["model_metadata"]["contract_version"] == "0.1"
+    assert manifest["model_metadata"]["feature_count"] == 1
+    assert manifest["model_metadata"]["coefficient_count"] == 2
+    assert manifest["prediction_metadata"]["contract_version"] == "0.1"
+    assert manifest["prediction_metadata"]["prediction_rows"] == 2
+    assert "metadata" not in manifest
 
 
 def test_evaluation_runner_reads_research_dataset_and_writes_report(
@@ -578,7 +605,18 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     )
     assert (run_root / "metrics.parquet").is_file()
     assert (run_root / "grouped_label_values.parquet").is_file()
+    assert (run_root / "ic_summary.parquet").is_file()
+    assert (run_root / "group_spread_summary.parquet").is_file()
     assert (run_root / "manifest.json").is_file()
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["artifacts"] == [
+        "metrics.parquet",
+        "grouped_label_values.parquet",
+        "ic_summary.parquet",
+        "group_spread_summary.parquet",
+    ]
+    assert manifest["evaluation_diagnostics"]["contract_version"] == "0.1"
+    assert "metadata" not in manifest
 
 
 def _write_processed_inputs(
