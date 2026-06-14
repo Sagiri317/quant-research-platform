@@ -29,13 +29,12 @@ def build_prediction_bundle(
     if missing:
         raise ValueError(f"missing_prediction_columns: {', '.join(missing)}")
     _validate_oos_split(spec)
-    filtered, metadata = apply_filter_mode(
+    filtered, filter_metadata = apply_filter_mode(
         frame,
         mode=spec.sample_filter_mode,
         metadata_key="sample_filter_mode",
     )
     usable = filtered.dropna(subset=list(feature_columns)).copy()
-    metadata["rows_after_feature_dropna"] = int(len(usable))
     test_mask = usable["timestamp"] >= pd.Timestamp(spec.test_start)
     if spec.test_end is not None:
         test_mask &= usable["timestamp"] <= pd.Timestamp(spec.test_end)
@@ -50,7 +49,24 @@ def build_prediction_bundle(
     )
     result = test_frame.loc[:, spec.primary_key].copy()
     result[spec.prediction_column] = design @ coefficients
-    result.attrs["metadata"] = metadata
+    result.attrs["prediction_metadata"] = {
+        "contract_version": spec.contract_version,
+        "prediction_mode": spec.prediction_mode,
+        "sample_filter_mode": spec.sample_filter_mode,
+        "filter_columns_used": list(filter_metadata["filter_columns_used"]),
+        "filter_definition": str(filter_metadata["filter_definition"]),
+        "rows_input": int(filter_metadata["rows_input"]),
+        "rows_after_filter_mode": int(filter_metadata["rows_after_filter_mode"]),
+        "rows_after_feature_dropna": int(len(usable)),
+        "prediction_rows": int(len(result)),
+        "test_start": spec.test_start,
+        "test_end": spec.test_end,
+        "is_oos": spec.is_oos,
+        "is_final_oos_window": spec.is_final_oos_window,
+        "feature_columns": list(feature_columns),
+        "feature_count": len(feature_columns),
+        "prediction_column": spec.prediction_column,
+    }
     return result
 
 

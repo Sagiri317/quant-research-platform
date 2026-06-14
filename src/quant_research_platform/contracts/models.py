@@ -21,6 +21,8 @@ class ModelSpec:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
+        if self.contract_version != "0.1":
+            raise ValueError("unsupported_model_contract_version")
         validate_sample_filter_mode(self.sample_filter_mode, owner="model")
         reject_filter_feature_columns(self.feature_columns)
 

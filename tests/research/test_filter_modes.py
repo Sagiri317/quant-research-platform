@@ -23,7 +23,10 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.evaluations import (
+    EvaluationDiagnostics,
+    EvaluationSpec,
+)
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -142,7 +145,7 @@ def _processed_catalog() -> ProcessedDataCatalog:
     return catalog
 
 
-def test_evaluation_filter_modes_and_metadata_use_hand_calculated_values(
+def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_corr(*args, **kwargs):
@@ -183,27 +186,56 @@ def test_evaluation_filter_modes_and_metadata_use_hand_calculated_values(
     tradable = evaluate_factor_frame(frame, tradable_spec, n_groups=2)
     unfiltered = evaluate_factor_frame(frame, unfiltered_spec, n_groups=2)
 
-    assert eligible.metadata == {
-        "filter_mode": "eligible",
-        "filter_columns_used": ["eligible"],
-        "filter_definition": "eligible == True",
-        "rows_input": 6,
-        "rows_after_filter_mode": 5,
-        "rows_after_feature_label_dropna": 4,
-    }
-    assert tradable.metadata["filter_columns_used"] == [
+    assert not hasattr(eligible, "metadata")
+    assert eligible.diagnostics.filter_mode == "eligible"
+    assert eligible.diagnostics.filter_columns_used == ("eligible",)
+    assert eligible.diagnostics.filter_definition == "eligible == True"
+    assert eligible.diagnostics.rows_input == 6
+    assert eligible.diagnostics.rows_after_filter_mode == 5
+    assert eligible.diagnostics.rows_after_feature_label_dropna == 4
+    assert eligible.diagnostics.metric_rows == 1
+    assert eligible.diagnostics.grouped_label_value_rows == 2
+    assert eligible.diagnostics.ic_summary_rows == 1
+    assert eligible.diagnostics.group_spread_summary_rows == 1
+    assert eligible.diagnostics.timestamp_count == 1
+    assert eligible.diagnostics.min_timestamp == "2024-01-02"
+    assert eligible.diagnostics.max_timestamp == "2024-01-02"
+    assert eligible.diagnostics.n_groups == 2
+    assert eligible.diagnostics.skipped_timestamp_count == 0
+    assert tradable.diagnostics.filter_columns_used == (
         "eligible",
         "can_enter",
         "can_exit",
-    ]
-    assert tradable.metadata["rows_after_filter_mode"] == 3
-    assert tradable.metadata["rows_after_feature_label_dropna"] == 2
-    assert unfiltered.metadata["filter_columns_used"] == []
-    assert unfiltered.metadata["rows_after_filter_mode"] == 6
-    assert unfiltered.metadata["rows_after_feature_label_dropna"] == 5
+    )
+    assert tradable.diagnostics.rows_after_filter_mode == 3
+    assert tradable.diagnostics.rows_after_feature_label_dropna == 2
+    assert unfiltered.diagnostics.filter_columns_used == ()
+    assert unfiltered.diagnostics.rows_after_filter_mode == 6
+    assert unfiltered.diagnostics.rows_after_feature_label_dropna == 5
 
     assert eligible.metrics.loc[0, "ic"] == pytest.approx(1.0)
     assert eligible.metrics.loc[0, "rankic"] == pytest.approx(1.0)
+    assert list(eligible.ic_summary.columns) == [
+        "feature",
+        "label",
+        "mean_ic",
+        "std_ic",
+        "icir",
+        "positive_ic_rate",
+        "mean_rankic",
+        "std_rankic",
+        "rankicir",
+        "positive_rankic_rate",
+    ]
+    assert list(eligible.group_spread_summary.columns) == [
+        "feature",
+        "label",
+        "top_group_mean_label_value",
+        "bottom_group_mean_label_value",
+        "top_bottom_label_value_spread_mean",
+        "top_bottom_label_value_spread_hit_rate",
+        "group_monotonicity_score",
+    ]
     assert eligible.grouped_label_values["mean_label_value"].tolist() == pytest.approx(
         [0.015, 0.045]
     )
@@ -215,6 +247,84 @@ def test_evaluation_filter_modes_and_metadata_use_hand_calculated_values(
     assert unfiltered.grouped_label_values[
         "mean_label_value"
     ].tolist() == pytest.approx([0.02, 0.045])
+
+
+def test_evaluation_diagnostics_contract_validates_shape() -> None:
+    diagnostics = EvaluationDiagnostics(
+        filter_mode="eligible",
+        filter_columns_used=("eligible",),
+        filter_definition="eligible == True",
+        rows_input=6,
+        rows_after_filter_mode=5,
+        rows_after_feature_label_dropna=4,
+        metric_rows=1,
+        grouped_label_value_rows=2,
+        ic_summary_rows=1,
+        group_spread_summary_rows=1,
+        timestamp_count=1,
+        min_timestamp="2024-01-02",
+        max_timestamp="2024-01-02",
+        n_groups=2,
+        skipped_timestamp_count=0,
+    )
+
+    assert diagnostics.contract_version == "0.1"
+
+    with pytest.raises(ValueError, match="unsupported_evaluation_contract_version"):
+        EvaluationDiagnostics(
+            filter_mode="eligible",
+            filter_columns_used=(),
+            filter_definition="none",
+            rows_input=0,
+            rows_after_filter_mode=0,
+            rows_after_feature_label_dropna=0,
+            metric_rows=0,
+            grouped_label_value_rows=0,
+            ic_summary_rows=0,
+            group_spread_summary_rows=0,
+            timestamp_count=0,
+            min_timestamp=None,
+            max_timestamp=None,
+            n_groups=2,
+            skipped_timestamp_count=0,
+            contract_version="9.9",
+        )
+    with pytest.raises(ValueError, match="invalid_evaluation_diagnostics_count"):
+        EvaluationDiagnostics(
+            filter_mode="eligible",
+            filter_columns_used=(),
+            filter_definition="none",
+            rows_input=-1,
+            rows_after_filter_mode=0,
+            rows_after_feature_label_dropna=0,
+            metric_rows=0,
+            grouped_label_value_rows=0,
+            ic_summary_rows=0,
+            group_spread_summary_rows=0,
+            timestamp_count=0,
+            min_timestamp=None,
+            max_timestamp=None,
+            n_groups=2,
+            skipped_timestamp_count=0,
+        )
+    with pytest.raises(ValueError, match="evaluation_diagnostics_n_groups_too_small"):
+        EvaluationDiagnostics(
+            filter_mode="eligible",
+            filter_columns_used=(),
+            filter_definition="none",
+            rows_input=0,
+            rows_after_filter_mode=0,
+            rows_after_feature_label_dropna=0,
+            metric_rows=0,
+            grouped_label_value_rows=0,
+            ic_summary_rows=0,
+            group_spread_summary_rows=0,
+            timestamp_count=0,
+            min_timestamp=None,
+            max_timestamp=None,
+            n_groups=1,
+            skipped_timestamp_count=0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -303,12 +413,18 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     unfiltered = fit_linear_baseline_result(frame, unfiltered_spec)
 
     assert eligible.metadata == {
+        "contract_version": "0.1",
+        "model_family": "linear",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
         "rows_input": 6,
         "rows_after_filter_mode": 5,
         "rows_after_feature_label_dropna": 4,
+        "feature_columns": ["factor"],
+        "feature_count": 1,
+        "label_column": "label",
+        "coefficient_count": 2,
     }
     assert unfiltered.metadata["rows_after_filter_mode"] == 6
     assert unfiltered.metadata["rows_after_feature_label_dropna"] == 5
@@ -328,6 +444,17 @@ def test_model_rejects_tradable_sample_filter_mode() -> None:
             feature_columns=("factor",),
             label_column="label",
             sample_filter_mode="tradable",
+        )
+
+
+def test_model_rejects_unsupported_contract_version() -> None:
+    with pytest.raises(ValueError, match="unsupported_model_contract_version"):
+        ModelSpec(
+            model_id="linear_bad_contract",
+            model_family="linear",
+            feature_columns=("factor",),
+            label_column="label",
+            contract_version="9.9",
         )
 
 
@@ -358,13 +485,24 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         feature_columns=("factor",),
     )
 
-    assert prediction.attrs["metadata"] == {
+    assert "metadata" not in prediction.attrs
+    assert prediction.attrs["prediction_metadata"] == {
+        "contract_version": "0.1",
+        "prediction_mode": "minimal_oos",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
         "rows_input": 12,
         "rows_after_filter_mode": 10,
         "rows_after_feature_dropna": 10,
+        "prediction_rows": 5,
+        "test_start": "2024-01-03",
+        "test_end": "2024-01-03",
+        "is_oos": True,
+        "is_final_oos_window": False,
+        "feature_columns": ["factor"],
+        "feature_count": 1,
+        "prediction_column": default_prediction_column(),
     }
     assert len(prediction) == 5
     assert set(prediction.columns) == {
@@ -405,8 +543,13 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         prediction_id="pred_eligible",
     )
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["model_metadata"]["contract_version"] == "0.1"
+    assert manifest["model_metadata"]["feature_count"] == 1
+    assert manifest["model_metadata"]["coefficient_count"] == 2
     assert manifest["model_metadata"]["sample_filter_mode"] == "eligible"
     assert manifest["model_metadata"]["rows_after_feature_label_dropna"] == 4
+    assert manifest["prediction_metadata"]["contract_version"] == "0.1"
+    assert manifest["prediction_metadata"]["prediction_rows"] == 5
     assert manifest["prediction_metadata"]["sample_filter_mode"] == "eligible"
     assert manifest["prediction_metadata"]["rows_after_feature_dropna"] == 10
 
@@ -455,8 +598,9 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
         feature_columns=("factor",),
     )
 
-    assert prediction.attrs["metadata"]["rows_after_filter_mode"] == 6
-    assert prediction.attrs["metadata"]["rows_after_feature_dropna"] == 6
+    assert "metadata" not in prediction.attrs
+    assert prediction.attrs["prediction_metadata"]["rows_after_filter_mode"] == 6
+    assert prediction.attrs["prediction_metadata"]["rows_after_feature_dropna"] == 6
 
     with pytest.raises(ValueError, match="unsupported_prediction_sample_filter_mode"):
         PredictionSpec(
