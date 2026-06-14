@@ -6,7 +6,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.evaluations import (
+    EvaluationDiagnostics,
+    EvaluationSpec,
+)
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
@@ -45,14 +48,7 @@ def test_prediction_report_artifact_validation_rejects_bad_frames(
         "prediction",
     )
     layout = StorageLayout(project_root=tmp_path)
-    valid = pd.DataFrame(
-        {
-            "market_id": ["a_share"],
-            "asset_id": ["asset_a"],
-            "timestamp": pd.to_datetime(["2024-01-02"]),
-            "prediction": [0.1],
-        }
-    )
+    valid = _prediction_frame(with_metadata=True)
 
     with pytest.raises(ValueError, match="missing_prediction_bundle_columns"):
         report_artifacts.write_prediction_report_artifacts(
@@ -71,6 +67,67 @@ def test_prediction_report_artifact_validation_rejects_bad_frames(
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
         report_artifacts.write_prediction_report_artifacts(
             pd.concat([valid, valid], ignore_index=True),
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+
+def test_prediction_report_artifacts_require_standard_metadata_attrs(
+    tmp_path: Path,
+) -> None:
+    spec = _prediction_spec()
+    report_spec = _report_spec(
+        "prediction_bundle_private",
+        spec.prediction_id,
+        "prediction",
+    )
+    layout = StorageLayout(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match="missing_model_metadata"):
+        report_artifacts.write_prediction_report_artifacts(
+            _prediction_frame(with_metadata=False),
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+    )
+
+    model_only = _prediction_frame(with_metadata=False)
+    model_only.attrs["model_metadata"] = _model_metadata()
+    with pytest.raises(ValueError, match="missing_prediction_metadata"):
+        report_artifacts.write_prediction_report_artifacts(
+            model_only,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    generic_metadata = _prediction_frame(with_metadata=False)
+    generic_metadata.attrs["model_metadata"] = _model_metadata()
+    generic_metadata.attrs["metadata"] = {"contract_version": "0.1"}
+    with pytest.raises(ValueError, match="missing_prediction_metadata"):
+        report_artifacts.write_prediction_report_artifacts(
+            generic_metadata,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    incomplete_model = _prediction_frame(with_metadata=True)
+    incomplete_model.attrs["model_metadata"] = {"contract_version": "0.1"}
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        report_artifacts.write_prediction_report_artifacts(
+            incomplete_model,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    incomplete_prediction = _prediction_frame(with_metadata=True)
+    incomplete_prediction.attrs["prediction_metadata"] = {"contract_version": "0.1"}
+    with pytest.raises(ValueError, match="invalid_prediction_metadata"):
+        report_artifacts.write_prediction_report_artifacts(
+            incomplete_prediction,
             spec=spec,
             report_spec=report_spec,
             layout=layout,
@@ -124,7 +181,34 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns"):
         report_artifacts.write_evaluation_report_artifacts(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
-            pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
+            _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=_evaluation_diagnostics(),
+            spec=spec,
+            report_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+    with pytest.raises(ValueError, match="missing_evaluation_ic_summary_columns"):
+        report_artifacts.write_evaluation_report_artifacts(
+            _evaluation_metrics_frame(),
+            _evaluation_grouped_label_values_frame(),
+            ic_summary=pd.DataFrame({"feature": ["feature"]}),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=_evaluation_diagnostics(),
+            spec=spec,
+            report_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+    with pytest.raises(ValueError, match="missing_evaluation_group_spread_summary"):
+        report_artifacts.write_evaluation_report_artifacts(
+            _evaluation_metrics_frame(),
+            _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=pd.DataFrame({"feature": ["feature"]}),
+            evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
             report_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
@@ -142,26 +226,11 @@ def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> N
     report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
 
     run_root = report_artifacts.write_evaluation_report_artifacts(
-        pd.DataFrame(
-            {
-                "timestamp": [pd.Timestamp("2024-01-02")],
-                "feature": ["feature"],
-                "label": ["label"],
-                "ic": [0.1],
-                "rankic": [0.2],
-                "n_obs": [2],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "timestamp": [pd.Timestamp("2024-01-02")],
-                "feature": ["feature"],
-                "label": ["label"],
-                "group": [1],
-                "mean_label_value": [0.1],
-                "n_obs": [2],
-            }
-        ),
+        _evaluation_metrics_frame(),
+        _evaluation_grouped_label_values_frame(),
+        ic_summary=_evaluation_ic_summary_frame(),
+        group_spread_summary=_evaluation_group_spread_summary_frame(),
+        evaluation_diagnostics=_evaluation_diagnostics(),
         spec=spec,
         report_spec=report_spec,
         layout=StorageLayout(project_root=tmp_path),
@@ -169,8 +238,17 @@ def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> N
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
 
     assert (run_root / "grouped_label_values.parquet").is_file()
+    assert (run_root / "ic_summary.parquet").is_file()
+    assert (run_root / "group_spread_summary.parquet").is_file()
     assert not (run_root / "grouped_returns.parquet").exists()
-    assert manifest["artifacts"] == ["metrics.parquet", "grouped_label_values.parquet"]
+    assert manifest["artifacts"] == [
+        "metrics.parquet",
+        "grouped_label_values.parquet",
+        "ic_summary.parquet",
+        "group_spread_summary.parquet",
+    ]
+    assert manifest["evaluation_diagnostics"]["contract_version"] == "0.1"
+    assert "metadata" not in manifest
 
 
 def test_report_parquet_writer_cleans_temp_on_failure(
@@ -205,6 +283,59 @@ def _prediction_spec() -> PredictionSpec:
     )
 
 
+def _prediction_frame(*, with_metadata: bool) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["asset_a"],
+            "timestamp": pd.to_datetime(["2024-01-02"]),
+            "prediction": [0.1],
+        }
+    )
+    if with_metadata:
+        frame.attrs["model_metadata"] = _model_metadata()
+        frame.attrs["prediction_metadata"] = _prediction_metadata()
+    return frame
+
+
+def _model_metadata() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "model_family": "linear",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_feature_label_dropna": 2,
+        "feature_columns": ["feature"],
+        "feature_count": 1,
+        "label_column": "label",
+        "coefficient_count": 2,
+    }
+
+
+def _prediction_metadata() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "prediction_mode": "minimal_oos",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_feature_dropna": 2,
+        "prediction_rows": 1,
+        "test_start": "2024-01-02",
+        "test_end": None,
+        "is_oos": True,
+        "is_final_oos_window": True,
+        "feature_columns": ["feature"],
+        "feature_count": 1,
+        "prediction_column": "prediction",
+    }
+
+
 def _report_spec(
     report_definition_id: str,
     run_id: str,
@@ -216,4 +347,81 @@ def _report_spec(
         run_id=run_id,
         market_id=MarketId("a_share"),
         run_type=run_type,
+    )
+
+
+def _evaluation_metrics_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02")],
+            "feature": ["feature"],
+            "label": ["label"],
+            "ic": [0.1],
+            "rankic": [0.2],
+            "n_obs": [2],
+        }
+    )
+
+
+def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02")],
+            "feature": ["feature"],
+            "label": ["label"],
+            "group": [1],
+            "mean_label_value": [0.1],
+            "n_obs": [2],
+        }
+    )
+
+
+def _evaluation_ic_summary_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "feature": ["feature"],
+            "label": ["label"],
+            "mean_ic": [0.1],
+            "std_ic": [0.0],
+            "icir": [0.0],
+            "positive_ic_rate": [1.0],
+            "mean_rankic": [0.2],
+            "std_rankic": [0.0],
+            "rankicir": [0.0],
+            "positive_rankic_rate": [1.0],
+        }
+    )
+
+
+def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "feature": ["feature"],
+            "label": ["label"],
+            "top_group_mean_label_value": [0.1],
+            "bottom_group_mean_label_value": [0.0],
+            "top_bottom_label_value_spread_mean": [0.1],
+            "top_bottom_label_value_spread_hit_rate": [1.0],
+            "group_monotonicity_score": [1.0],
+        }
+    )
+
+
+def _evaluation_diagnostics() -> EvaluationDiagnostics:
+    return EvaluationDiagnostics(
+        filter_mode="eligible",
+        filter_columns_used=("eligible",),
+        filter_definition="eligible == True",
+        rows_input=2,
+        rows_after_filter_mode=2,
+        rows_after_feature_label_dropna=2,
+        metric_rows=1,
+        grouped_label_value_rows=1,
+        ic_summary_rows=1,
+        group_spread_summary_rows=1,
+        timestamp_count=1,
+        min_timestamp="2024-01-02",
+        max_timestamp="2024-01-02",
+        n_groups=2,
+        skipped_timestamp_count=0,
     )

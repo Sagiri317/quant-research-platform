@@ -7,7 +7,10 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.reports.report_artifacts as report_artifacts_module
-from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.evaluations import (
+    EvaluationDiagnostics,
+    EvaluationSpec,
+)
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
@@ -164,6 +167,20 @@ def test_report_artifact_writers_do_not_accept_output_root() -> None:
     )
 
 
+def test_report_manifest_payload_builders_are_private_and_local() -> None:
+    assert hasattr(report_artifacts_module, "_stage_profile_report_manifest_payload")
+    assert hasattr(report_artifacts_module, "_prediction_report_manifest_payload")
+    assert hasattr(report_artifacts_module, "_evaluation_report_manifest_payload")
+    private_builders = {
+        "_stage_profile_report_manifest_payload",
+        "_prediction_report_manifest_payload",
+        "_evaluation_report_manifest_payload",
+    }
+    assert private_builders.isdisjoint(report_artifacts_module.__all__)
+    assert not hasattr(report_artifacts_module, "ReportManifest")
+    assert not hasattr(report_artifacts_module, "ReportBundle")
+
+
 def test_stage_profile_report_artifacts_reject_existing_run_root_without_writes(
     tmp_path,
 ):
@@ -249,6 +266,9 @@ def test_evaluation_report_artifacts_reject_existing_run_root_without_writes(
         write_evaluation_report_artifacts(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             report_spec=_evaluation_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -363,6 +383,9 @@ def test_evaluation_report_artifacts_clean_temp_root_after_mid_write_failure(
         write_evaluation_report_artifacts(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
+            ic_summary=_evaluation_ic_summary_frame(),
+            group_spread_summary=_evaluation_group_spread_summary_frame(),
+            evaluation_diagnostics=_evaluation_diagnostics(),
             spec=_evaluation_spec(),
             report_spec=_evaluation_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -417,7 +440,7 @@ def _prediction_report_spec() -> ReportSpec:
 
 
 def _prediction_frame() -> pd.DataFrame:
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "market_id": ["a_share"],
             "asset_id": ["asset-a"],
@@ -425,6 +448,39 @@ def _prediction_frame() -> pd.DataFrame:
             "prediction": [0.25],
         }
     )
+    frame.attrs["model_metadata"] = {
+        "contract_version": "0.1",
+        "model_family": "linear",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_feature_label_dropna": 2,
+        "feature_columns": ["mom_20d"],
+        "feature_count": 1,
+        "label_column": "forward_return_20d",
+        "coefficient_count": 2,
+    }
+    frame.attrs["prediction_metadata"] = {
+        "contract_version": "0.1",
+        "prediction_mode": "minimal_oos",
+        "sample_filter_mode": "eligible",
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "rows_input": 2,
+        "rows_after_filter_mode": 2,
+        "rows_after_feature_dropna": 2,
+        "prediction_rows": 1,
+        "test_start": "2014-01-03",
+        "test_end": "2014-01-03",
+        "is_oos": True,
+        "is_final_oos_window": False,
+        "feature_columns": ["mom_20d"],
+        "feature_count": 1,
+        "prediction_column": "prediction",
+    }
+    return frame
 
 
 def _evaluation_spec() -> EvaluationSpec:
@@ -470,4 +526,55 @@ def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
             "mean_label_value": [0.01],
             "n_obs": [2],
         }
+    )
+
+
+def _evaluation_ic_summary_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "feature": ["mom_20d"],
+            "label": ["forward_return_20d"],
+            "mean_ic": [0.1],
+            "std_ic": [0.0],
+            "icir": [0.0],
+            "positive_ic_rate": [1.0],
+            "mean_rankic": [0.2],
+            "std_rankic": [0.0],
+            "rankicir": [0.0],
+            "positive_rankic_rate": [1.0],
+        }
+    )
+
+
+def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "feature": ["mom_20d"],
+            "label": ["forward_return_20d"],
+            "top_group_mean_label_value": [0.01],
+            "bottom_group_mean_label_value": [0.0],
+            "top_bottom_label_value_spread_mean": [0.01],
+            "top_bottom_label_value_spread_hit_rate": [1.0],
+            "group_monotonicity_score": [1.0],
+        }
+    )
+
+
+def _evaluation_diagnostics() -> EvaluationDiagnostics:
+    return EvaluationDiagnostics(
+        filter_mode="eligible",
+        filter_columns_used=("eligible",),
+        filter_definition="eligible == True",
+        rows_input=2,
+        rows_after_filter_mode=2,
+        rows_after_feature_label_dropna=2,
+        metric_rows=1,
+        grouped_label_value_rows=1,
+        ic_summary_rows=1,
+        group_spread_summary_rows=1,
+        timestamp_count=1,
+        min_timestamp="2014-01-03",
+        max_timestamp="2014-01-03",
+        n_groups=2,
+        skipped_timestamp_count=0,
     )
