@@ -240,7 +240,10 @@ def build_verification_evidence_summary(
     )
     return {
         "run_id": run_id,
-        "status": validation_summary.get("status", "FAIL"),
+        "status": _overall_verification_status(
+            validation_summary.get("status", "FAIL"),
+            statuses,
+        ),
         "date_range": date_range,
         "output_root": _logical_path(output_root),
         **statuses,
@@ -465,6 +468,8 @@ def _validate_verification_statuses(
         raise ValueError("compare_status_requires_smoke")
     if smoke != "NOT_RUN" and compare == "NOT_APPLICABLE":
         raise ValueError("smoke_status_requires_compare_status")
+    if smoke == "FAIL" and compare == "PASS":
+        raise ValueError("compare_pass_requires_smoke_pass")
     if compare in {"PASS", "FAIL"} and not compare_evidence:
         raise ValueError("compare_evidence_required")
     if compare == "NOT_APPLICABLE" and compare_evidence:
@@ -492,6 +497,21 @@ def _validate_verification_statuses(
         "compare_evidence": dict(compare_evidence or {}),
         "full_horizon_evidence": dict(full_horizon_evidence or {}),
     }
+
+
+def _overall_verification_status(
+    validation_status: object,
+    statuses: dict[str, object],
+) -> str:
+    if str(validation_status).upper() != "PASS":
+        return "FAIL"
+    if statuses["smoke_status"] == "FAIL":
+        return "FAIL"
+    if statuses["compare_status"] == "FAIL":
+        return "FAIL"
+    if statuses["full_horizon_status"] == "FAIL":
+        return "FAIL"
+    return "PASS"
 
 
 def _require_evidence_fields(

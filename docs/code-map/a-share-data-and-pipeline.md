@@ -96,6 +96,14 @@ profile.
   pandas rolling is a well-conditioned cross-check only; the test-only QRP
   reference is the oracle for zero-moment_2, near-zero-moment_2, NaN, warmup,
   and session-chunk boundary behavior under the shared tolerance.
+- Current price-volume factor windows and forward-return label horizons use
+  per-asset valid-bar semantics. In column names such as `mom_20d`,
+  `turnover_5d`, and `forward_return_10d`, `d` means valid daily bars from
+  each asset's own available price-volume record sequence, not calendar days or
+  market-wide trading sessions. Missing/suspended rows are not forward-filled,
+  backfilled, or filled with zero, and chunk boundaries must not change values
+  or `NaN` positions. Future calendar/session semantics require distinct names
+  such as `calendar_mom_20d` or `session_forward_return_10d`.
 - Key-diff evidence reports baseline-only, candidate-only, and common-key value
   diagnostics. Expected date deltas are classified against the trading-session
   set, not inferred from candidate artifact dates alone.
@@ -158,8 +166,8 @@ profile.
 - Runtime resource policy controls internal processed/research chunk size.
   A-share daily execution chunks by trading-session core windows with read halos:
   next-session halo for daily panel construction and annotation execution masks,
-  past-session warmup for factors, and future-session lookahead for labels. Only
-  core rows are written.
+  per-asset valid daily bar warmup for factors, and per-asset valid daily bar
+  future lookahead for labels. Only core rows are written.
 - `TimeWindow` is the public logical interval. `SessionWindow` is the internal
   execution interval used by processed materialization and research dataset
   assembly. Public API/CLI surfaces do not expose chunk controls.

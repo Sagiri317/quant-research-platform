@@ -114,6 +114,143 @@ def test_materialize_processed_data_by_kind_writes_dependency_and_target(
     ).exists()
 
 
+def test_label_materializer_expands_same_run_panel_dependency_for_future_halo(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(
+        layout,
+        start_date="2014-01-02",
+        end_date="2014-01-10",
+    )
+    monkeypatch.setattr(
+        materializer,
+        "a_share_processed_catalog",
+        lambda: _catalog_with_forward_return_1d_only(),
+    )
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SYNTHETIC_SOURCE_ID,
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        data_ids=("forward_returns",),
+    )
+
+    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
+    assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
+    jan3_label = labels.loc[
+        pd.to_datetime(labels["timestamp"]).dt.date.astype(str).eq("2014-01-03"),
+        "forward_return_1d",
+    ].iloc[0]
+    assert pd.notna(jan3_label)
+
+
+def test_label_materializer_expands_requested_panel_dependency_for_future_halo(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(
+        layout,
+        start_date="2014-01-02",
+        end_date="2014-01-10",
+    )
+    monkeypatch.setattr(
+        materializer,
+        "a_share_processed_catalog",
+        lambda: _catalog_with_forward_return_1d_only(),
+    )
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SYNTHETIC_SOURCE_ID,
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        data_ids=("daily_panel", "forward_returns"),
+    )
+
+    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
+    assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
+    jan3_label = labels.loc[
+        pd.to_datetime(labels["timestamp"]).dt.date.astype(str).eq("2014-01-03"),
+        "forward_return_1d",
+    ].iloc[0]
+    assert pd.notna(jan3_label)
+
+
+def test_factor_materializer_expands_same_run_panel_dependency_for_history_halo(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(
+        layout,
+        start_date="2014-01-01",
+        end_date="2014-01-31",
+    )
+    monkeypatch.setattr(
+        materializer,
+        "a_share_processed_catalog",
+        lambda: _catalog_with_mom_20d_only(),
+    )
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SYNTHETIC_SOURCE_ID,
+        time_window=TimeWindow("2014-01-31", "2014-01-31"),
+        data_ids=("price_volume",),
+    )
+
+    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
+    assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
+    assert pd.notna(factors["mom_20d"].iloc[0])
+
+
+def test_factor_materializer_expands_requested_panel_dependency_for_history_halo(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(
+        layout,
+        start_date="2014-01-01",
+        end_date="2014-01-31",
+    )
+    monkeypatch.setattr(
+        materializer,
+        "a_share_processed_catalog",
+        lambda: _catalog_with_mom_20d_only(),
+    )
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SYNTHETIC_SOURCE_ID,
+        time_window=TimeWindow("2014-01-31", "2014-01-31"),
+        data_ids=("daily_panel", "price_volume"),
+    )
+
+    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
+    assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
+    assert pd.notna(factors["mom_20d"].iloc[0])
+
+
+def test_materializer_empty_target_window_still_fails_closed(tmp_path) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+
+    with pytest.raises(ValueError, match="no_trading_sessions_in_time_window"):
+        materializer.materialize_processed_data(
+            layout=layout,
+            source_id=SYNTHETIC_SOURCE_ID,
+            time_window=TimeWindow("2009-01-01", "2009-01-31"),
+            data_ids=("daily_panel",),
+        )
+
+
 def test_factor_materializer_rejects_unexpected_declared_processed_input(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -566,6 +703,36 @@ def _catalog_with_processed_inputs(
                 spec,
                 processed_input_data_ids=processed_input_data_ids,
             )
+        catalog.register(spec)
+    return catalog
+
+
+def _catalog_with_forward_return_1d_only() -> ProcessedDataCatalog:
+    catalog = ProcessedDataCatalog()
+    for spec in a_share_processed_catalog().list():
+        if spec.data_id == "forward_returns":
+            column_roles = {
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "forward_return_1d": ColumnRole.LABEL,
+            }
+            spec = replace(spec, column_roles=column_roles)
+        catalog.register(spec)
+    return catalog
+
+
+def _catalog_with_mom_20d_only() -> ProcessedDataCatalog:
+    catalog = ProcessedDataCatalog()
+    for spec in a_share_processed_catalog().list():
+        if spec.data_id == "price_volume":
+            column_roles = {
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "mom_20d": ColumnRole.FACTOR,
+            }
+            spec = replace(spec, column_roles=column_roles)
         catalog.register(spec)
     return catalog
 

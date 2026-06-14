@@ -107,17 +107,29 @@ def materialize_processed_data(
     _validate_processed_dependency_graph(catalog, targets)
     sessions = _available_trading_sessions(layout, source_id)
     _require_target_sessions(sessions, time_window)
+    dependency_windows = _planned_processed_dependency_windows(
+        targets,
+        layout=layout,
+        source_id=source_id,
+        time_window=time_window,
+        sessions=sessions,
+    )
     written: dict[str, DatasetInspection] = {}
     for spec in targets:
+        target_time_window = _merge_time_windows(
+            time_window,
+            dependency_windows.get(spec.data_id, time_window),
+        )
         _materialize_one(
             spec,
             layout=layout,
             source_id=source_id,
-            time_window=time_window,
+            time_window=target_time_window,
             policy=policy,
             sessions=sessions,
             written=written,
             requested=True,
+            dependency_windows=dependency_windows,
         )
     return written
 
@@ -132,6 +144,7 @@ def _materialize_one(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
     requested: bool,
+    dependency_windows: dict[str, TimeWindow],
 ) -> DatasetInspection:
     root = _processed_root(layout, spec)
     if spec.data_id in written:
@@ -151,6 +164,7 @@ def _materialize_one(
         sessions=sessions,
         written=written,
         processed_catalog=catalog,
+        dependency_windows=dependency_windows,
     )
     if spec.kind is ProcessedDataKind.PANEL:
         return _write_panel(
@@ -333,13 +347,15 @@ def _write_factors(
     panel_spec = processed_catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
-    lookback_days = _factor_warmup_sessions(definitions)
+    lookback_days = factor_calculations.factor_lookback_bars(definitions)
+    panel_input_columns = factor_calculations.factor_panel_input_columns(definitions)
     estimated = _estimate_factor_bytes_per_session(
         sessions,
         time_window=time_window,
         panel_root=panel_root,
         inspection=available,
         lookback_days=lookback_days,
+        panel_input_columns=panel_input_columns,
         required_columns=spec.required_columns,
         definitions=definitions,
     )
@@ -356,16 +372,20 @@ def _write_factors(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            read_window = _factor_read_window(
+            read_window = factor_calculations.factor_read_window_for_panel(
                 panel_keys,
-                window,
-                warmup_sessions=lookback_days,
+                definitions=definitions,
+                read_window=window.read,
+                core_sessions=window.core_sessions,
             )
             processed_inputs = _read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
                 processed_catalog=processed_catalog,
                 time_window=read_window,
+                columns_by_data_id={
+                    contract.primary_input_data_id: panel_input_columns,
+                },
             )
             _validate_processed_input_contract(
                 spec,
@@ -411,13 +431,15 @@ def _write_labels(
     panel_spec = processed_catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
-    lookahead_sessions = _label_lookahead_sessions(definitions)
+    lookahead_sessions = label_calculations.label_lookahead_bars(definitions)
+    panel_input_columns = label_calculations.label_panel_input_columns(definitions)
     estimated = _estimate_label_bytes_per_session(
         sessions,
         time_window=time_window,
         panel_root=panel_root,
         inspection=available,
         lookahead_sessions=lookahead_sessions,
+        panel_input_columns=panel_input_columns,
         required_columns=spec.required_columns,
         definitions=definitions,
     )
@@ -430,14 +452,24 @@ def _write_labels(
         lookahead_sessions=lookahead_sessions,
         reason="label_lookahead",
     )
+    panel_keys = read_dataset(panel_root, columns=["asset_id", "timestamp"])
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
+            read_window = label_calculations.label_read_window_for_panel(
+                panel_keys,
+                definitions=definitions,
+                read_window=window.read,
+                core_sessions=window.core_sessions,
+            )
             processed_inputs = _read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
                 processed_catalog=processed_catalog,
-                time_window=window.read,
+                time_window=read_window,
+                columns_by_data_id={
+                    contract.primary_input_data_id: panel_input_columns,
+                },
             )
             _validate_processed_input_contract(
                 spec,
@@ -493,46 +525,6 @@ def _filter_output_sessions(
     session_dates_set = {session.date() for session in sessions}
     dates = output["timestamp"].dt.date
     return output.loc[dates.isin(session_dates_set).fillna(False)].copy()
-
-
-def _factor_read_window(
-    panel_keys: pd.DataFrame,
-    window: SessionWindow,
-    *,
-    warmup_sessions: int,
-) -> TimeWindow:
-    if warmup_sessions <= 0 or panel_keys.empty:
-        return window.read
-    keys = panel_keys.loc[:, ["asset_id", "timestamp"]].copy()
-    keys["timestamp"] = pd.to_datetime(keys["timestamp"], errors="coerce")
-    keys = keys.dropna(subset=["asset_id", "timestamp"])
-    if keys.empty:
-        return window.read
-    read_end = pd.Timestamp(window.read.end)
-    keys = keys.loc[keys["timestamp"].dt.normalize().le(read_end)].sort_values(
-        ["asset_id", "timestamp"]
-    )
-    if keys.empty:
-        return window.read
-    core_dates = {session.date() for session in window.core_sessions}
-    core_rows = keys.loc[keys["timestamp"].dt.date.isin(core_dates)]
-    if core_rows.empty:
-        return window.read
-    starts = [pd.Timestamp(window.read.start)]
-    for _, asset_rows in keys.groupby("asset_id", sort=False):
-        asset_core_positions = [
-            position
-            for position, timestamp in enumerate(asset_rows["timestamp"])
-            if timestamp.date() in core_dates
-        ]
-        if not asset_core_positions:
-            continue
-        read_position = max(0, asset_core_positions[0] - warmup_sessions)
-        starts.append(asset_rows.iloc[read_position]["timestamp"].normalize())
-    start = min(starts).date()
-    if start >= window.read.start:
-        return window.read
-    return TimeWindow(start, window.read.end)
 
 
 def _require_dataset_coverage(
@@ -708,6 +700,7 @@ def _estimate_factor_bytes_per_session(
     panel_root: Path,
     inspection: DatasetInspection,
     lookback_days: int,
+    panel_input_columns: tuple[str, ...],
     required_columns: tuple[str, ...],
     definitions: Sequence[FactorDefinition],
 ) -> int:
@@ -717,7 +710,11 @@ def _estimate_factor_bytes_per_session(
         warmup_sessions=lookback_days,
         reason="factor_sizing",
     )
-    panel = read_dataset(panel_root, time_window=sample.read)
+    panel = read_dataset(
+        panel_root,
+        time_window=sample.read,
+        columns=panel_input_columns,
+    )
     factors = factor_calculations.calculate_factors_for_panel(
         panel,
         definitions=definitions,
@@ -740,6 +737,7 @@ def _estimate_label_bytes_per_session(
     panel_root: Path,
     inspection: DatasetInspection,
     lookahead_sessions: int,
+    panel_input_columns: tuple[str, ...],
     required_columns: tuple[str, ...],
     definitions: Sequence[LabelDefinition],
 ) -> int:
@@ -749,7 +747,11 @@ def _estimate_label_bytes_per_session(
         lookahead_sessions=lookahead_sessions,
         reason="label_sizing",
     )
-    panel = read_dataset(panel_root, time_window=sample.read)
+    panel = read_dataset(
+        panel_root,
+        time_window=sample.read,
+        columns=panel_input_columns,
+    )
     labels = label_calculations.calculate_labels_for_panel(
         panel,
         definitions=definitions,
@@ -936,6 +938,7 @@ def _read_processed_inputs_for_spec(
     layout: StorageLayout,
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow | None = None,
+    columns_by_data_id: dict[str, Sequence[str]] | None = None,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
     for data_id in spec.processed_input_data_ids:
@@ -943,6 +946,11 @@ def _read_processed_inputs_for_spec(
         inputs[data_id] = read_dataset(
             _processed_root(layout, dependency),
             time_window=time_window,
+            columns=(
+                None
+                if columns_by_data_id is None
+                else columns_by_data_id.get(data_id)
+            ),
         )
     return inputs
 
@@ -957,23 +965,130 @@ def _ensure_processed_dependencies(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
     processed_catalog: ProcessedDataCatalog,
+    dependency_windows: dict[str, TimeWindow],
 ) -> None:
+    dependency_window = _processed_dependency_time_window(
+        spec,
+        layout=layout,
+        source_id=source_id,
+        time_window=time_window,
+        sessions=sessions,
+    )
     for data_id in spec.processed_input_data_ids:
         dependency = processed_catalog.get(data_id)
+        required_window = _merge_time_windows(
+            dependency_window,
+            dependency_windows.get(data_id, dependency_window),
+        )
         dependency_root = _processed_root(layout, dependency)
         if dependency_root.exists():
-            _require_dataset_coverage(dependency_root, time_window, sessions=sessions)
+            _require_dataset_coverage(
+                dependency_root,
+                required_window,
+                sessions=sessions,
+            )
             continue
         _materialize_one(
             dependency,
             layout=layout,
             source_id=source_id,
-            time_window=time_window,
+            time_window=required_window,
             policy=policy,
             sessions=sessions,
             written=written,
             requested=False,
+            dependency_windows=dependency_windows,
         )
+
+
+def _planned_processed_dependency_windows(
+    targets: tuple[ProcessedDataSpec, ...],
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    sessions: tuple[pd.Timestamp, ...],
+) -> dict[str, TimeWindow]:
+    windows: dict[str, TimeWindow] = {}
+    for spec in targets:
+        if not spec.processed_input_data_ids:
+            continue
+        dependency_window = _processed_dependency_time_window(
+            spec,
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            sessions=sessions,
+        )
+        for data_id in spec.processed_input_data_ids:
+            windows[data_id] = _merge_time_windows(
+                windows.get(data_id, dependency_window),
+                dependency_window,
+            )
+    return windows
+
+
+def _merge_time_windows(left: TimeWindow, right: TimeWindow) -> TimeWindow:
+    return TimeWindow(min(left.start, right.start), max(left.end, right.end))
+
+
+def _processed_dependency_time_window(
+    spec: ProcessedDataSpec,
+    *,
+    layout: StorageLayout,
+    source_id: SourceId,
+    time_window: TimeWindow,
+    sessions: tuple[pd.Timestamp, ...],
+) -> TimeWindow:
+    if not spec.processed_input_data_ids:
+        return time_window
+    if spec.kind is ProcessedDataKind.FACTOR:
+        definitions = _select_factor_definitions_for_spec(
+            spec,
+            factor_definitions.a_share_factor_catalog(),
+        )
+        _validate_processed_input_contract(
+            spec,
+            contract=_factor_input_contract(definitions),
+            purpose="factor",
+        )
+        return factor_calculations.factor_read_window_for_panel(
+            _source_daily_market_panel_keys(layout, source_id),
+            definitions=definitions,
+            read_window=time_window,
+            core_sessions=_target_sessions(sessions, time_window),
+        )
+    if spec.kind is ProcessedDataKind.LABEL:
+        definitions = _select_label_definitions_for_spec(
+            spec,
+            label_definitions.a_share_label_catalog(),
+        )
+        _validate_processed_input_contract(
+            spec,
+            contract=_label_input_contract(definitions),
+            purpose="label",
+        )
+        return label_calculations.label_read_window_for_panel(
+            _source_daily_market_panel_keys(layout, source_id),
+            definitions=definitions,
+            read_window=time_window,
+            core_sessions=_target_sessions(sessions, time_window),
+        )
+    return time_window
+
+
+def _source_daily_market_panel_keys(
+    layout: StorageLayout,
+    source_id: SourceId,
+) -> pd.DataFrame:
+    daily_market = read_dataset(
+        layout.interim_data_root(source_id, "daily_market"),
+        columns=["source_asset_id", "timestamp"],
+    )
+    return daily_market.rename(columns={"source_asset_id": "asset_id"}).loc[
+        :,
+        ["asset_id", "timestamp"],
+    ]
 
 
 def _validate_processed_dependency_graph(
@@ -1002,24 +1117,6 @@ def _validate_processed_dependency_graph(
 
     for target in targets:
         visit(target)
-
-
-def _factor_warmup_sessions(definitions: Sequence[FactorDefinition]) -> int:
-    values = [
-        value
-        for definition in definitions
-        for value in (
-            definition.lookback_window,
-            definition.window,
-            *definition.required_windows,
-        )
-        if value is not None
-    ]
-    return max(values, default=0)
-
-
-def _label_lookahead_sessions(definitions: Sequence[LabelDefinition]) -> int:
-    return max((definition.lookahead for definition in definitions), default=0)
 
 
 def _require_source_input_columns(

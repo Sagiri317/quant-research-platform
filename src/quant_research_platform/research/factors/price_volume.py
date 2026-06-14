@@ -1,4 +1,4 @@
-"""Reusable price-volume factor definitions and calculations."""
+"""Reusable valid daily bar price-volume factor definitions and calculations."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pandas as pd
 from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.time import TimeWindow
 
 PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
 
@@ -290,13 +291,73 @@ def calculate_price_volume_factors(
     group_keys = result[asset_column]
     grouped = result.groupby(asset_column, sort=False)
     group_positions = tuple(grouped.indices.values())
-    price = pd.to_numeric(result[price_column], errors="coerce")
-    returns = pd.to_numeric(result[return_column], errors="coerce")
-    amount = pd.to_numeric(result[amount_column], errors="coerce")
-    turnover = pd.to_numeric(result[turnover_column], errors="coerce")
-    price_grouped = price.groupby(group_keys, sort=False)
-    amount_grouped = amount.groupby(group_keys, sort=False)
-    turnover_grouped = turnover.groupby(group_keys, sort=False)
+    needs_trailing_price = any(
+        f"mom_{window}d" in requested_set or f"rev_{window}d" in requested_set
+        for window in required_windows
+        if window != 1
+    )
+    needs_price = (
+        needs_trailing_price
+        or any(f"drawdown_{window}d" in requested_set for window in required_windows)
+        or any(
+            f"intraday_range_{window}d" in requested_set
+            for window in required_windows
+        )
+    )
+    needs_returns = (
+        "rev_1d" in requested_set
+        or any(
+            f"{prefix}_{window}d" in requested_set
+            for prefix in (
+                "vol",
+                "downside_vol",
+                "upside_vol",
+                "max_return",
+                "min_return",
+                "skew",
+                "kurt",
+                "amihud",
+            )
+            for window in required_windows
+        )
+    )
+    needs_amount = any(
+        f"{prefix}_{window}d" in requested_set
+        for prefix in ("avg_amount", "amihud", "zero_volume_ratio")
+        for window in required_windows
+    )
+    needs_turnover = any(
+        f"{prefix}_{window}d" in requested_set
+        for prefix in ("turnover", "turnover_chg", "turnover_vol")
+        for window in required_windows
+    )
+    price = (
+        pd.to_numeric(result[price_column], errors="coerce")
+        if needs_price
+        else None
+    )
+    returns = (
+        pd.to_numeric(result[return_column], errors="coerce")
+        if needs_returns
+        else None
+    )
+    amount = (
+        pd.to_numeric(result[amount_column], errors="coerce")
+        if needs_amount
+        else None
+    )
+    turnover = (
+        pd.to_numeric(result[turnover_column], errors="coerce")
+        if needs_turnover
+        else None
+    )
+    price_grouped = price.groupby(group_keys, sort=False) if price is not None else None
+    amount_grouped = (
+        amount.groupby(group_keys, sort=False) if amount is not None else None
+    )
+    turnover_grouped = (
+        turnover.groupby(group_keys, sort=False) if turnover is not None else None
+    )
 
     if "rev_1d" in requested_set:
         result["rev_1d"] = -returns
@@ -412,13 +473,19 @@ def calculate_price_volume_factors(
                 "mean",
             )
 
-    denominator = _valid_denominator(amount)
-    illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
-    amplitude = (
-        pd.to_numeric(result[high_column], errors="coerce")
-        - pd.to_numeric(result[low_column], errors="coerce")
-    ) / _valid_denominator(pd.to_numeric(result[prev_close_column], errors="coerce"))
-    amplitude = _finite_or_nan(amplitude)
+    illiquidity = None
+    if any(f"amihud_{window}d" in requested_set for window in required_windows):
+        denominator = _valid_denominator(amount)
+        illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
+    amplitude = None
+    if any(f"amplitude_{window}d" in requested_set for window in required_windows):
+        amplitude = (
+            pd.to_numeric(result[high_column], errors="coerce")
+            - pd.to_numeric(result[low_column], errors="coerce")
+        ) / _valid_denominator(
+            pd.to_numeric(result[prev_close_column], errors="coerce")
+        )
+        amplitude = _finite_or_nan(amplitude)
     for window in required_windows:
         if f"amihud_{window}d" in requested_set:
             result[f"amihud_{window}d"] = _rolling_aggregate(
@@ -437,11 +504,15 @@ def calculate_price_volume_factors(
                 "mean",
             )
 
-    intraday_range = (
-        pd.to_numeric(result[high_column], errors="coerce")
-        - pd.to_numeric(result[low_column], errors="coerce")
-    ) / _valid_denominator(pd.to_numeric(result[price_column], errors="coerce"))
-    intraday_range = _finite_or_nan(intraday_range)
+    intraday_range = None
+    if any(
+        f"intraday_range_{window}d" in requested_set for window in required_windows
+    ):
+        intraday_range = (
+            pd.to_numeric(result[high_column], errors="coerce")
+            - pd.to_numeric(result[low_column], errors="coerce")
+        ) / _valid_denominator(price)
+        intraday_range = _finite_or_nan(intraday_range)
     for window in required_windows:
         if f"intraday_range_{window}d" in requested_set:
             result[f"intraday_range_{window}d"] = _rolling_aggregate(
@@ -460,6 +531,49 @@ def calculate_price_volume_factors(
     for column in output_columns:
         result[column] = _finite_or_nan(result[column])
     return result
+
+
+def price_volume_valid_bar_read_window(
+    panel_keys: pd.DataFrame,
+    *,
+    read_window: TimeWindow,
+    core_sessions: tuple[pd.Timestamp, ...],
+    lookback_bars: int,
+    asset_column: str = "asset_id",
+    date_column: str = "timestamp",
+) -> TimeWindow:
+    if lookback_bars <= 0 or panel_keys.empty:
+        return read_window
+    keys = panel_keys.loc[:, [asset_column, date_column]].copy()
+    keys[date_column] = pd.to_datetime(keys[date_column], errors="coerce")
+    keys = keys.dropna(subset=[asset_column, date_column])
+    if keys.empty:
+        return read_window
+    read_end = pd.Timestamp(read_window.end)
+    keys = keys.loc[keys[date_column].dt.normalize().le(read_end)].sort_values(
+        [asset_column, date_column]
+    )
+    if keys.empty:
+        return read_window
+    core_dates = {session.date() for session in core_sessions}
+    core_rows = keys.loc[keys[date_column].dt.date.isin(core_dates)]
+    if core_rows.empty:
+        return read_window
+    starts = [pd.Timestamp(read_window.start)]
+    for _, asset_rows in keys.groupby(asset_column, sort=False):
+        asset_core_positions = [
+            position
+            for position, timestamp in enumerate(asset_rows[date_column])
+            if timestamp.date() in core_dates
+        ]
+        if not asset_core_positions:
+            continue
+        read_position = max(0, asset_core_positions[0] - lookback_bars)
+        starts.append(asset_rows.iloc[read_position][date_column].normalize())
+    start = min(starts).date()
+    if start >= read_window.start:
+        return read_window
+    return TimeWindow(start, read_window.end)
 
 
 def select_price_volume_features(
@@ -598,7 +712,7 @@ def _rolling_aggregate_array(
     if window <= 0 or len(values) < window:
         return output
     windows = np.lib.stride_tricks.sliding_window_view(values, window_shape=window)
-    valid_windows = ~np.isnan(windows).any(axis=1)
+    valid_windows = np.isfinite(windows).all(axis=1)
     if not valid_windows.any():
         return output
     valid_values = windows[valid_windows]
@@ -800,7 +914,7 @@ def _rolling_drawdown_array(values: np.ndarray, window: int) -> np.ndarray:
     if len(values) < window:
         return output
     windows = np.lib.stride_tricks.sliding_window_view(values, window_shape=window)
-    valid_windows = ~np.isnan(windows).any(axis=1)
+    valid_windows = np.isfinite(windows).all(axis=1)
     if not valid_windows.any():
         return output
     valid_values = windows[valid_windows]
@@ -881,6 +995,7 @@ __all__ = [
     "price_volume_factor_columns_for_windows",
     "price_volume_factor_definitions",
     "price_volume_factor_input_columns",
+    "price_volume_valid_bar_read_window",
     "select_price_volume_feature_columns_from_schema",
     "select_price_volume_features",
     "unsupported_price_volume_factors",

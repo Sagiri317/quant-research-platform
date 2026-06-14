@@ -24,11 +24,11 @@ def a_share_label_definitions() -> tuple[LabelDefinition, ...]:
             family="forward_return",
             input_columns=LABEL_PANEL_INPUT_COLUMNS,
             output_column=f"forward_return_{horizon}d",
-            label_timing="next_open_to_horizon_open",
+            label_timing="next_valid_daily_bar_open_to_horizon_valid_daily_bar_open",
             horizon=horizon,
             lookahead=horizon + 1,
-            entry_rule="next_session_open",
-            exit_rule="horizon_session_open",
+            entry_rule="next_asset_valid_daily_bar_open",
+            exit_rule="horizon_asset_valid_daily_bar_open",
         )
         for horizon in (1, 5, 10, 20, 60, 120)
     )

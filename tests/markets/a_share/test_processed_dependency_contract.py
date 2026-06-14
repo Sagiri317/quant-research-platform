@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -188,6 +189,15 @@ def test_materializer_selects_label_definitions_from_required_columns_only() -> 
     assert max(definition.lookahead for definition in definitions) == 3
 
 
+def test_materializer_delegates_factor_label_calculation_details() -> None:
+    source = inspect.getsource(materializer)
+
+    assert "forward_returns" not in source
+    assert "_forward_return_valid_bar_read_window" not in source
+    assert "_factor_read_window" not in source
+    assert "_factor_warmup_sessions" not in source
+
+
 def test_future_tradable_forward_return_spec_depends_on_execution_mask() -> None:
     spec = _processed_spec(
         "tradable_forward_return",
@@ -214,6 +224,8 @@ def test_write_paths_read_processed_inputs_via_helper(
         reason="test",
     )
     calls = {"annotation": 0, "factor": 0, "label": 0}
+    factor_window_calls = {"count": 0}
+    label_window_calls = {"count": 0}
 
     def fake_planned_session_windows(*args: object, **kwargs: object):
         return (session_window,)
@@ -258,12 +270,32 @@ def test_write_paths_read_processed_inputs_via_helper(
     ) -> pd.DataFrame:
         return _key_frame().assign(**{definitions[0].output_column: [1.0]})
 
+    def fake_factor_read_window_for_panel(
+        panel_keys: pd.DataFrame,
+        *,
+        definitions: tuple[FactorDefinition, ...],
+        read_window: TimeWindow,
+        core_sessions: tuple[pd.Timestamp, ...],
+    ) -> TimeWindow:
+        factor_window_calls["count"] += 1
+        return read_window
+
     def fake_calculate_labels_for_panel(
         panel: pd.DataFrame,
         *,
         definitions: tuple[LabelDefinition, ...],
     ) -> pd.DataFrame:
         return _key_frame().assign(**{definitions[0].output_column: [0.01]})
+
+    def fake_label_read_window_for_panel(
+        panel_keys: pd.DataFrame,
+        *,
+        definitions: tuple[LabelDefinition, ...],
+        read_window: TimeWindow,
+        core_sessions: tuple[pd.Timestamp, ...],
+    ) -> TimeWindow:
+        label_window_calls["count"] += 1
+        return read_window
 
     monkeypatch.setattr(
         materializer,
@@ -293,9 +325,19 @@ def test_write_paths_read_processed_inputs_via_helper(
         fake_calculate_factors_for_panel,
     )
     monkeypatch.setattr(
+        materializer.factor_calculations,
+        "factor_read_window_for_panel",
+        fake_factor_read_window_for_panel,
+    )
+    monkeypatch.setattr(
         materializer.label_calculations,
         "calculate_labels_for_panel",
         fake_calculate_labels_for_panel,
+    )
+    monkeypatch.setattr(
+        materializer.label_calculations,
+        "label_read_window_for_panel",
+        fake_label_read_window_for_panel,
     )
     monkeypatch.setattr(
         materializer,
@@ -355,6 +397,8 @@ def test_write_paths_read_processed_inputs_via_helper(
     )
 
     assert calls == {"annotation": 1, "factor": 1, "label": 1}
+    assert factor_window_calls == {"count": 1}
+    assert label_window_calls == {"count": 1}
 
 
 def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(

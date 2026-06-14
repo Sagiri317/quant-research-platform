@@ -26,6 +26,7 @@ def _summary(**overrides):
 def test_verification_status_allows_first_night_without_smoke_or_full_horizon() -> None:
     summary = _summary()
 
+    assert summary["status"] == "PASS"
     assert summary["smoke_status"] == "NOT_RUN"
     assert summary["compare_status"] == "NOT_APPLICABLE"
     assert summary["full_horizon_status"] == "NOT_RUN"
@@ -58,6 +59,33 @@ def test_verification_status_accepts_smoke_with_real_compare_evidence() -> None:
     assert summary["smoke_status"] == "PASS"
     assert summary["compare_status"] == "PASS"
     assert summary["compare_evidence"]["comparison_path"].endswith(".json")
+
+
+def test_verification_status_accepts_smoke_pass_with_compare_fail() -> None:
+    summary = _summary(
+        smoke_status="PASS",
+        compare_status="FAIL",
+        compare_evidence={
+            "verification_scope": "aggregate_public_safe_parity",
+            "comparison_path": "smoke-compare-old-baseline.json",
+        },
+    )
+
+    assert summary["smoke_status"] == "PASS"
+    assert summary["compare_status"] == "FAIL"
+    assert summary["status"] == "FAIL"
+
+
+def test_verification_status_rejects_smoke_fail_with_compare_pass() -> None:
+    with pytest.raises(ValueError, match="compare_pass_requires_smoke_pass"):
+        _summary(
+            smoke_status="FAIL",
+            compare_status="PASS",
+            compare_evidence={
+                "verification_scope": "aggregate_public_safe_parity",
+                "comparison_path": "smoke-compare.json",
+            },
+        )
 
 
 def test_verification_status_rejects_compare_when_smoke_not_run() -> None:

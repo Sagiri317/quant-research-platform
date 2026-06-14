@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from pathlib import Path
@@ -7,6 +8,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.markets.implementations.a_share.verification import (
+    private_aggregate,
+)
 from quant_research_platform.storage.datasets import DatasetReadMode
 
 REQUIRED_AREAS = {
@@ -159,6 +163,58 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
         if item["max_abs_delta"] > item["tolerance"]:
             assert item["accepted_explained_delta"] or item["human_approval_required"]
             assert item["explanation"]
+
+
+def test_current_public_safe_aggregate_payload_includes_key_value_paired_hash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    summary = private_aggregate.AggregateSummary(
+        row_count=1,
+        key_count=1,
+        column_count=4,
+        duplicate_key_count=0,
+        period="2024-01-02 through 2024-01-02",
+        columns=("market_id", "asset_id", "timestamp", "value"),
+        dtype_summary={"value": ("float64",)},
+        null_summary={"value": 0},
+        content_summary={"value": {"hash_sum": 1, "hash_xor": 1, "non_null_count": 1}},
+        key_value_paired_summary={
+            "value": {"hash_sum": 2, "hash_xor": 2, "non_null_count": 1}
+        },
+    )
+    monkeypatch.setattr(private_aggregate, "_summarize_area_input", lambda _: summary)
+    monkeypatch.setattr(private_aggregate, "_summarize_dataset_root", lambda _: summary)
+    artifact_root = (
+        tmp_path
+        / "data"
+        / "processed"
+        / "a_share"
+        / "factor"
+        / "price_volume"
+    )
+    artifact_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        private_aggregate,
+        "_official_dataset_artifact_roots",
+        lambda _: (artifact_root,),
+    )
+
+    area = private_aggregate._area_record(
+        private_aggregate.AggregateInput(
+            area="factor_value_parity",
+            roots=(artifact_root,),
+            expected_period=summary.period,
+            explanation_name="factor values",
+        )
+    )
+    inventory = private_aggregate._dataset_inventory(tmp_path)
+
+    assert HASH_RE.fullmatch(area["key_value_paired_summary_hash"])
+    assert HASH_RE.fullmatch(inventory[0]["key_value_paired_summary_hash"])
+    assert "key_value_pairs" in inspect.getsource(
+        private_aggregate.AggregateSummary.aggregate_checksum.fget
+    )
 
 
 def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:

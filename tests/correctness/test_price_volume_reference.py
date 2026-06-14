@@ -4,17 +4,30 @@ import inspect
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import SessionWindow
-from quant_research_platform.markets.implementations.a_share.processed import (
-    materializer as processed_materializer,
+from quant_research_platform.markets.implementations.a_share.factors import (
+    calculations as factor_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
+)
+from quant_research_platform.markets.implementations.a_share.labels import (
+    calculations as label_calculations,
+)
+from quant_research_platform.markets.implementations.a_share.labels import (
+    definitions as label_definitions,
 )
 from quant_research_platform.research.factors import price_volume as price_volume_module
 from quant_research_platform.research.factors.price_volume import (
     _rolling_aggregate,
     calculate_price_volume_factors,
     price_volume_factor_columns,
+)
+from quant_research_platform.research.labels.forward_returns import (
+    add_forward_return_labels,
 )
 
 from ._helpers import (
@@ -117,6 +130,62 @@ def test_rolling_aggregate_mean_is_segment_start_invariant() -> None:
     )
 
     pd.testing.assert_series_equal(full, shifted, check_exact=True)
+
+
+def test_rolling_aggregate_requires_finite_values_for_entire_window() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["asset_a"] * 5,
+            "value": [0.01, np.inf, 0.03, -np.inf, 0.05],
+        }
+    )
+    group_keys = frame["asset_id"]
+    grouped = frame["value"].groupby(group_keys, sort=False)
+    group_positions = tuple(frame.groupby("asset_id", sort=False).indices.values())
+
+    actual_min = _rolling_aggregate(
+        frame["value"],
+        grouped,
+        group_positions,
+        2,
+        "min",
+    )
+    actual_max = _rolling_aggregate(
+        frame["value"],
+        grouped,
+        group_positions,
+        2,
+        "max",
+    )
+
+    assert actual_min.isna().tolist() == [True, True, True, True, True]
+    assert actual_max.isna().tolist() == actual_min.isna().tolist()
+
+
+def test_price_volume_calculates_requested_factor_without_unneeded_inputs() -> None:
+    panel = synthetic_price_volume_panel(sessions=6, assets=("asset_a",))
+    minimal = panel.loc[:, ["market_id", "asset_id", "timestamp", "return_1d"]]
+
+    result = calculate_price_volume_factors(
+        minimal,
+        factor_columns=("rev_1d",),
+    )
+
+    expected = -minimal["return_1d"]
+    pd.testing.assert_series_equal(result["rev_1d"], expected, check_names=False)
+
+
+def test_price_volume_calculates_amount_factor_without_price_inputs() -> None:
+    panel = synthetic_price_volume_panel(sessions=6, assets=("asset_a",))
+    minimal = panel.loc[:, ["market_id", "asset_id", "timestamp", "amount"]]
+
+    result = calculate_price_volume_factors(
+        minimal,
+        factor_columns=("avg_amount_5d",),
+    )
+
+    assert result["avg_amount_5d"].notna().sum() == 2
+    assert "adj_close" not in minimal.columns
 
 
 def test_price_volume_qrp_moment_contract_edge_windows() -> None:
@@ -382,10 +451,15 @@ def test_price_volume_factor_read_window_expands_for_sparse_asset_history() -> N
         reason="factor_warmup",
     )
 
-    expanded = processed_materializer._factor_read_window(
+    expanded = factor_calculations.factor_read_window_for_panel(
         panel.loc[:, ["asset_id", "timestamp"]],
-        window,
-        warmup_sessions=20,
+        definitions=tuple(
+            definition
+            for definition in factor_definitions.a_share_factor_definitions()
+            if definition.output_column == "mom_20d"
+        ),
+        read_window=window.read,
+        core_sessions=window.core_sessions,
     )
 
     assert expanded.start == sessions[92].date()
@@ -440,6 +514,87 @@ def test_price_volume_session_chunks_with_sparse_asset_history_match_full_run() 
     )
 
 
+def test_forward_return_label_read_window_expands_for_sparse_asset_future() -> None:
+    panel = synthetic_price_volume_panel(sessions=80, assets=("asset_a", "asset_b"))
+    sessions = tuple(sorted(pd.to_datetime(panel["timestamp"]).dt.normalize().unique()))
+    missing_sessions = set(sessions[41:52])
+    panel = panel.loc[
+        ~(
+            panel["asset_id"].eq("asset_b")
+            & pd.to_datetime(panel["timestamp"]).dt.normalize().isin(missing_sessions)
+        )
+    ].copy()
+    window = SessionWindow(
+        core=TimeWindow(sessions[35].date(), sessions[39].date()),
+        read=TimeWindow(sessions[35].date(), sessions[50].date()),
+        core_sessions=sessions[35:40],
+        read_sessions=sessions[35:51],
+        reason="label_lookahead",
+    )
+
+    expanded = label_calculations.label_read_window_for_panel(
+        panel.loc[:, ["asset_id", "timestamp"]],
+        definitions=tuple(
+            definition
+            for definition in label_definitions.a_share_label_definitions()
+            if definition.output_column == "forward_return_10d"
+        ),
+        read_window=window.read,
+        core_sessions=window.core_sessions,
+    )
+
+    assert expanded.start == window.read.start
+    assert expanded.end == sessions[61].date()
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 11, 17, 29, 31])
+def test_forward_return_valid_bar_session_chunks_match_full_run(
+    chunk_size: int,
+) -> None:
+    panel = synthetic_price_volume_panel(
+        sessions=120,
+        assets=("asset_a", "asset_b", "asset_c"),
+    )
+    sessions = tuple(sorted(pd.to_datetime(panel["timestamp"]).dt.normalize().unique()))
+    missing_b = set(sessions[37:49]) | set(sessions[74:82])
+    missing_c = set(sessions[:8]) | set(sessions[91:104])
+    panel = panel.loc[
+        ~(
+            (
+                panel["asset_id"].eq("asset_b")
+                & pd.to_datetime(panel["timestamp"]).dt.normalize().isin(missing_b)
+            )
+            | (
+                panel["asset_id"].eq("asset_c")
+                & pd.to_datetime(panel["timestamp"]).dt.normalize().isin(missing_c)
+            )
+        )
+    ].copy()
+    horizons = (5, 10, 20)
+    label_columns = tuple(f"forward_return_{horizon}d" for horizon in horizons)
+
+    full = add_forward_return_labels(panel, horizons=horizons).loc[
+        :, [*KEY_COLUMNS, *label_columns]
+    ]
+    chunked = calculate_forward_returns_in_session_chunks(
+        panel,
+        horizons=horizons,
+        chunk_size=chunk_size,
+    )
+
+    assert_frame_matches_reference(
+        chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+    )
+    sorted_chunked = chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
+    sorted_full = full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
+    assert (
+        sorted_chunked.loc[:, label_columns].isna()
+        == sorted_full.loc[:, label_columns].isna()
+    ).all().all()
+    assert sorted_chunked.duplicated(list(KEY_COLUMNS)).sum() == 0
+
+
 def calculate_in_session_chunks(
     panel: pd.DataFrame,
     *,
@@ -450,6 +605,11 @@ def calculate_in_session_chunks(
     ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
     sessions = tuple(
         sorted(pd.to_datetime(ordered["timestamp"]).dt.normalize().unique())
+    )
+    definitions = tuple(
+        definition
+        for definition in factor_definitions.a_share_factor_definitions()
+        if definition.output_column in factor_columns
     )
     parts = []
     for start_index, end_index in (
@@ -471,10 +631,11 @@ def calculate_in_session_chunks(
             read_sessions=sessions[read_start_index:end_index],
             reason="factor_warmup",
         )
-        read_window = processed_materializer._factor_read_window(
+        read_window = factor_calculations.factor_read_window_for_panel(
             ordered.loc[:, ["asset_id", "timestamp"]],
-            window,
-            warmup_sessions=warmup_sessions,
+            definitions=definitions,
+            read_window=window.read,
+            core_sessions=window.core_sessions,
         )
         read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
             {
@@ -492,6 +653,65 @@ def calculate_in_session_chunks(
         )
         parts.append(calculated.loc[core_mask.loc[read_mask].to_numpy()])
     return pd.concat(parts, ignore_index=True).loc[:, [*KEY_COLUMNS, *factor_columns]]
+
+
+def calculate_forward_returns_in_session_chunks(
+    panel: pd.DataFrame,
+    *,
+    horizons: tuple[int, ...],
+    chunk_size: int,
+) -> pd.DataFrame:
+    ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    sessions = tuple(
+        sorted(pd.to_datetime(ordered["timestamp"]).dt.normalize().unique())
+    )
+    parts = []
+    definitions = tuple(
+        definition
+        for definition in label_definitions.a_share_label_definitions()
+        if definition.horizon in horizons
+    )
+    max_lookahead = label_calculations.label_lookahead_bars(definitions)
+    for start_index in range(0, len(sessions), chunk_size):
+        end_index = min(start_index + chunk_size, len(sessions))
+        core_sessions = set(sessions[start_index:end_index])
+        read_end_index = min(len(sessions), end_index + max_lookahead)
+        window = SessionWindow(
+            core=TimeWindow(
+                sessions[start_index].date(),
+                sessions[end_index - 1].date(),
+            ),
+            read=TimeWindow(
+                sessions[start_index].date(),
+                sessions[read_end_index - 1].date(),
+            ),
+            core_sessions=sessions[start_index:end_index],
+            read_sessions=sessions[start_index:read_end_index],
+            reason="label_lookahead",
+        )
+        read_window = label_calculations.label_read_window_for_panel(
+            ordered.loc[:, ["asset_id", "timestamp"]],
+            definitions=definitions,
+            read_window=window.read,
+            core_sessions=window.core_sessions,
+        )
+        read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
+            {
+                session
+                for session in sessions
+                if read_window.start <= session.date() <= read_window.end
+            }
+        )
+        core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
+            core_sessions
+        )
+        calculated = add_forward_return_labels(
+            ordered.loc[read_mask],
+            horizons=horizons,
+        )
+        parts.append(calculated.loc[core_mask.loc[read_mask].to_numpy()])
+    label_columns = tuple(f"forward_return_{horizon}d" for horizon in horizons)
+    return pd.concat(parts, ignore_index=True).loc[:, [*KEY_COLUMNS, *label_columns]]
 
 
 def _calculate_rolling_aggregate_segment(

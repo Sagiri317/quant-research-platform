@@ -49,6 +49,11 @@ GENERATED_BY = (
     "private_aggregate"
 )
 HASH_MODULUS = 1 << 64
+KEY_VALUE_HASH_MIXER = np.uint64(0x9E3779B185EBCA87)
+HASH_BLOCK_MIN_ROWS = 1_024
+HASH_BLOCK_MAX_ROWS = 1_048_576
+HASH_BLOCK_BYTES_PER_VALUE = 8
+HASH_BLOCK_INTERMEDIATE_WIDTH = 8
 FULL_HISTORY_START_YEAR = 2014
 FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
@@ -96,6 +101,7 @@ class AggregateSummary:
     dtype_summary: dict[str, tuple[str, ...]]
     null_summary: dict[str, int]
     content_summary: dict[str, dict[str, Any]]
+    key_value_paired_summary: dict[str, dict[str, Any]]
 
     @property
     def column_set_hash(self) -> str:
@@ -110,6 +116,10 @@ class AggregateSummary:
         return _sha256_json(self.null_summary)
 
     @property
+    def key_value_paired_summary_hash(self) -> str:
+        return _sha256_json(self.key_value_paired_summary)
+
+    @property
     def aggregate_checksum(self) -> str:
         return _sha256_json(
             {
@@ -122,6 +132,7 @@ class AggregateSummary:
                 "dtypes": self.dtype_summary,
                 "nulls": self.null_summary,
                 "content": self.content_summary,
+                "key_value_pairs": self.key_value_paired_summary,
             }
         )
 
@@ -324,6 +335,9 @@ def _dataset_inventory(root: Path) -> list[dict[str, Any]]:
                 "column_set_hash": summary.column_set_hash,
                 "dtype_summary_hash": summary.dtype_summary_hash,
                 "null_summary_hash": summary.null_summary_hash,
+                "key_value_paired_summary_hash": (
+                    summary.key_value_paired_summary_hash
+                ),
                 "aggregate_checksum": summary.aggregate_checksum,
                 "covered_by_evidence_area": PROCESSED_ROOT_AREA_COVERAGE.get(
                     logical_root,
@@ -408,6 +422,7 @@ def _area_record(area_input: AggregateInput) -> dict[str, Any]:
         "column_set_hash": summary.column_set_hash,
         "dtype_summary_hash": summary.dtype_summary_hash,
         "null_summary_hash": summary.null_summary_hash,
+        "key_value_paired_summary_hash": summary.key_value_paired_summary_hash,
         "aggregate_checksum": summary.aggregate_checksum,
         "max_abs_delta": max_abs_delta,
         "mean_abs_delta": mean_abs_delta,
@@ -623,6 +638,7 @@ def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
     dtype_summary: dict[str, set[str]] = {}
     null_summary: dict[str, int] = {}
     content_summary: dict[str, dict[str, Any]] = {}
+    key_value_paired_summary: dict[str, dict[str, Any]] = {}
     min_date: pd.Timestamp | None = None
     max_date: pd.Timestamp | None = None
     for frame in frames:
@@ -637,16 +653,18 @@ def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
             _update_content_summary(content_summary, column_name, frame[column])
         key_columns = _available_key_columns(frame)
         if key_columns:
-            key_hashes = pd.util.hash_pandas_object(
-                frame.loc[:, key_columns],
-                index=False,
-            ).to_numpy(dtype="uint64")
-            for key_hash in key_hashes:
-                value = int(key_hash)
-                if value in seen_key_hashes:
-                    duplicate_key_count += 1
-                else:
-                    seen_key_hashes.add(value)
+            _update_key_value_paired_summary(
+                key_value_paired_summary,
+                frame,
+                key_columns=key_columns,
+            )
+            for _, key_hashes in _key_hash_blocks(frame, key_columns):
+                for key_hash in key_hashes:
+                    value = int(key_hash)
+                    if value in seen_key_hashes:
+                        duplicate_key_count += 1
+                    else:
+                        seen_key_hashes.add(value)
             key_count = len(seen_key_hashes)
         else:
             key_count += int(len(frame))
@@ -666,6 +684,10 @@ def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
         column: _normalize_content_stats(stats)
         for column, stats in sorted(content_summary.items())
     }
+    normalized_key_value_pairs = {
+        column: _normalize_content_stats(stats)
+        for column, stats in sorted(key_value_paired_summary.items())
+    }
     return AggregateSummary(
         row_count=row_count,
         key_count=key_count,
@@ -676,6 +698,7 @@ def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:
         dtype_summary=normalized_dtypes,
         null_summary=dict(sorted(null_summary.items())),
         content_summary=normalized_content,
+        key_value_paired_summary=normalized_key_value_pairs,
     )
 
 
@@ -689,6 +712,7 @@ def _combine_summaries(summaries: list[AggregateSummary]) -> AggregateSummary:
     dtype_summary: dict[str, set[str]] = {}
     null_summary: dict[str, int] = {}
     content_summary: dict[str, dict[str, Any]] = {}
+    key_value_paired_summary: dict[str, dict[str, Any]] = {}
     periods = [_parse_period(summary.period) for summary in summaries]
     min_dates = [period[0] for period in periods if period[0] is not None]
     max_dates = [period[1] for period in periods if period[1] is not None]
@@ -699,6 +723,8 @@ def _combine_summaries(summaries: list[AggregateSummary]) -> AggregateSummary:
             null_summary[column] = null_summary.get(column, 0) + int(null_count)
         for column, stats in summary.content_summary.items():
             _merge_content_stats(content_summary, column, stats)
+        for column, stats in summary.key_value_paired_summary.items():
+            _merge_content_stats(key_value_paired_summary, column, stats)
     normalized_dtypes = {
         column: tuple(sorted(values))
         for column, values in sorted(dtype_summary.items())
@@ -706,6 +732,10 @@ def _combine_summaries(summaries: list[AggregateSummary]) -> AggregateSummary:
     normalized_content = {
         column: _normalize_content_stats(stats)
         for column, stats in sorted(content_summary.items())
+    }
+    normalized_key_value_pairs = {
+        column: _normalize_content_stats(stats)
+        for column, stats in sorted(key_value_paired_summary.items())
     }
     return AggregateSummary(
         row_count=row_count,
@@ -720,6 +750,7 @@ def _combine_summaries(summaries: list[AggregateSummary]) -> AggregateSummary:
         dtype_summary=normalized_dtypes,
         null_summary=dict(sorted(null_summary.items())),
         content_summary=normalized_content,
+        key_value_paired_summary=normalized_key_value_pairs,
     )
 
 
@@ -732,25 +763,18 @@ def _update_content_summary(
         column,
         {"hash_sum": 0, "hash_xor": 0, "non_null_count": 0},
     )
-    hashes = pd.util.hash_pandas_object(series, index=False).to_numpy(dtype="uint64")
-    stats["hash_sum"] = int((int(stats["hash_sum"]) + int(hashes.sum())) % HASH_MODULUS)
-    stats["hash_xor"] = int(stats["hash_xor"]) ^ int(
-        np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
-    )
+    for hashes in _series_hash_blocks(series):
+        stats["hash_sum"] = int(
+            (int(stats["hash_sum"]) + int(hashes.sum())) % HASH_MODULUS
+        )
+        stats["hash_xor"] = int(stats["hash_xor"]) ^ int(
+            np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
+        )
     stats["non_null_count"] = int(stats["non_null_count"]) + int(series.notna().sum())
-    if pd.api.types.is_bool_dtype(series):
-        numeric = series.astype("float64")
-    elif pd.api.types.is_numeric_dtype(series):
-        numeric = pd.to_numeric(series, errors="coerce")
-    elif pd.api.types.is_datetime64_any_dtype(series):
-        numeric = pd.to_datetime(series, errors="coerce").dropna().astype("int64")
-    else:
+    numeric_min_max = _finite_numeric_min_max(series)
+    if numeric_min_max is None:
         return
-    numeric = numeric.replace([np.inf, -np.inf], np.nan).dropna()
-    if numeric.empty:
-        return
-    numeric_min = float(numeric.min())
-    numeric_max = float(numeric.max())
+    numeric_min, numeric_max = numeric_min_max
     stats["numeric_min"] = min(
         float(stats.get("numeric_min", numeric_min)),
         numeric_min,
@@ -759,6 +783,146 @@ def _update_content_summary(
         float(stats.get("numeric_max", numeric_max)),
         numeric_max,
     )
+
+
+def _update_key_value_paired_summary(
+    paired_summary: dict[str, dict[str, Any]],
+    frame: pd.DataFrame,
+    *,
+    key_columns: list[str],
+) -> None:
+    data_columns = [
+        str(column) for column in frame.columns if str(column) not in key_columns
+    ]
+    column_hashes = {
+        column_name: np.uint64(
+            pd.util.hash_pandas_object(
+                pd.Series([column_name], dtype="string"),
+                index=False,
+            ).iloc[0]
+        )
+        for column_name in data_columns
+    }
+    for column in frame.columns:
+        column_name = str(column)
+        if column_name in key_columns:
+            continue
+        stats = paired_summary.setdefault(
+            column_name,
+            {"hash_sum": 0, "hash_xor": 0, "non_null_count": 0},
+        )
+        stats["non_null_count"] = int(stats["non_null_count"]) + int(
+            frame[column].notna().sum()
+        )
+    for start, key_hashes in _key_hash_blocks(frame, key_columns):
+        stop = start + len(key_hashes)
+        for column_name in data_columns:
+            stats = paired_summary[column_name]
+            values = frame[column_name].iloc[start:stop]
+            value_hashes = _value_hashes(values)
+            hashes = _mix_key_value_hashes(
+                key_hashes,
+                column_hash=column_hashes[column_name],
+                value_hashes=value_hashes,
+            )
+            stats["hash_sum"] = int(
+                (int(stats["hash_sum"]) + int(hashes.sum())) % HASH_MODULUS
+            )
+            stats["hash_xor"] = int(stats["hash_xor"]) ^ int(
+                np.bitwise_xor.reduce(hashes, initial=np.uint64(0))
+            )
+
+
+def _series_hash_blocks(series: pd.Series) -> Iterator[np.ndarray]:
+    block_rows = _hash_block_rows(value_width=1)
+    for start in range(0, len(series), block_rows):
+        block = series.iloc[start : start + block_rows].reset_index(drop=True)
+        yield pd.util.hash_pandas_object(block, index=False).to_numpy(dtype="uint64")
+
+
+def _key_hash_blocks(
+    frame: pd.DataFrame,
+    key_columns: list[str],
+) -> Iterator[tuple[int, np.ndarray]]:
+    block_rows = _hash_block_rows(value_width=max(1, len(key_columns)))
+    for start in range(0, len(frame), block_rows):
+        block = frame.iloc[start : start + block_rows].loc[:, key_columns]
+        yield start, pd.util.hash_pandas_object(block, index=False).to_numpy(
+            dtype="uint64"
+        )
+
+
+def _hash_block_rows(*, value_width: int) -> int:
+    try:
+        effective_bytes = RuntimeResourcePolicy.from_environment().effective_chunk_bytes
+    except Exception:
+        effective_bytes = 16 * 1024 * 1024
+    bytes_per_row = max(1, value_width) * HASH_BLOCK_BYTES_PER_VALUE
+    bytes_per_row *= HASH_BLOCK_INTERMEDIATE_WIDTH
+    rows = max(1, effective_bytes // max(1, bytes_per_row))
+    return max(HASH_BLOCK_MIN_ROWS, min(HASH_BLOCK_MAX_ROWS, int(rows)))
+
+
+def _finite_numeric_min_max(series: pd.Series) -> tuple[float, float] | None:
+    values: list[tuple[float, float]] = []
+    block_rows = _hash_block_rows(value_width=1)
+    for start in range(0, len(series), block_rows):
+        block = series.iloc[start : start + block_rows]
+        if pd.api.types.is_bool_dtype(block):
+            numeric = block.to_numpy(dtype="float64", na_value=np.nan)
+        elif pd.api.types.is_numeric_dtype(block):
+            numeric = pd.to_numeric(block, errors="coerce").to_numpy(
+                dtype="float64",
+                na_value=np.nan,
+            )
+        elif pd.api.types.is_datetime64_any_dtype(block):
+            datetimes = pd.to_datetime(block, errors="coerce")
+            mask = datetimes.notna().to_numpy()
+            if not bool(mask.any()):
+                continue
+            numeric = datetimes.astype("int64").to_numpy(dtype="float64")[mask]
+        else:
+            return None
+        finite = np.isfinite(numeric)
+        if bool(finite.any()):
+            finite_values = numeric[finite]
+            values.append((float(finite_values.min()), float(finite_values.max())))
+    if not values:
+        return None
+    return min(item[0] for item in values), max(item[1] for item in values)
+
+
+def _value_hashes(series: pd.Series) -> np.ndarray:
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        numeric = pd.to_numeric(series, errors="coerce")
+        numeric = numeric.mask(numeric.eq(0), 0.0)
+        return pd.util.hash_pandas_object(
+            numeric.reset_index(drop=True),
+            index=False,
+        ).to_numpy(dtype="uint64")
+    return pd.util.hash_pandas_object(
+        series.reset_index(drop=True),
+        index=False,
+    ).to_numpy(dtype="uint64")
+
+
+def _mix_key_value_hashes(
+    key_hashes: np.ndarray,
+    *,
+    column_hash: np.uint64,
+    value_hashes: np.ndarray,
+) -> np.ndarray:
+    with np.errstate(over="ignore"):
+        mixed = key_hashes ^ (
+            value_hashes
+            + KEY_VALUE_HASH_MIXER
+            + (key_hashes << 6)
+            + (key_hashes >> 2)
+        )
+        result = mixed ^ (
+            column_hash + KEY_VALUE_HASH_MIXER + (mixed << 6) + (mixed >> 2)
+        )
+    return result
 
 
 def _merge_content_stats(

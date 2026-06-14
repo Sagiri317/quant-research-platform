@@ -70,6 +70,33 @@ def test_price_volume_extension_can_use_registered_context_fact_columns() -> Non
     assert "log_total_market_cap" in result.columns
 
 
+def test_price_volume_empty_definition_dispatch_returns_keys_only() -> None:
+    result = factor_calculations.calculate_factors_for_panel(
+        _factor_panel(),
+        definitions=(),
+    )
+
+    assert list(result.columns) == ["market_id", "asset_id", "timestamp"]
+    assert factor_calculations.factor_panel_input_columns(()) == (
+        "market_id",
+        "asset_id",
+        "timestamp",
+    )
+
+
+def test_price_volume_input_column_query_fails_closed_for_unknown_family() -> None:
+    with pytest.raises(ValueError, match="unsupported_a_share_factor_family: custom"):
+        factor_calculations.factor_panel_input_columns(
+            (
+                _factor_definition(
+                    "custom_factor",
+                    family="custom",
+                    input_columns=("return_1d",),
+                ),
+            )
+        )
+
+
 def test_unknown_factor_family_fails_closed() -> None:
     with pytest.raises(ValueError, match="unsupported_a_share_factor_family: custom"):
         factor_calculations.calculate_factors_for_panel(
@@ -124,6 +151,13 @@ def test_a_share_label_definitions_expose_unified_catalog_only() -> None:
     assert {
         definition.family for definition in module.a_share_label_definitions()
     } == {"forward_return"}
+    definition = module.a_share_label_definitions()[0]
+    assert (
+        definition.label_timing
+        == "next_valid_daily_bar_open_to_horizon_valid_daily_bar_open"
+    )
+    assert definition.entry_rule == "next_asset_valid_daily_bar_open"
+    assert definition.exit_rule == "horizon_asset_valid_daily_bar_open"
 
 
 def test_forward_return_label_dispatch_is_definition_driven() -> None:
@@ -139,6 +173,34 @@ def test_forward_return_label_dispatch_is_definition_driven() -> None:
     assert "forward_return_2d" in result.columns
     assert "forward_return_20d" not in result.columns
     assert pd.isna(result.loc[result.index[-1], "forward_return_2d"])
+
+
+def test_forward_return_empty_definition_dispatch_returns_keys_only() -> None:
+    result = label_calculations.calculate_labels_for_panel(
+        _label_panel(),
+        definitions=(),
+    )
+
+    assert list(result.columns) == ["market_id", "asset_id", "timestamp"]
+    assert label_calculations.label_panel_input_columns(()) == (
+        "market_id",
+        "asset_id",
+        "timestamp",
+    )
+
+
+def test_forward_return_input_column_query_fails_closed_for_unknown_family() -> None:
+    with pytest.raises(ValueError, match="unsupported_a_share_label_family: tradable"):
+        label_calculations.label_panel_input_columns(
+            (
+                _label_definition(
+                    "tradable_forward_return_1d",
+                    family="tradable",
+                    horizon=1,
+                    lookahead=2,
+                ),
+            )
+        )
 
 
 def test_unknown_label_family_fails_closed() -> None:
