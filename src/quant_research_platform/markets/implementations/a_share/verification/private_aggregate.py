@@ -749,7 +749,10 @@ def _summary_cache_key(
     root: Path,
     years: tuple[int, ...] | None,
 ) -> tuple[str, tuple[int, ...] | None]:
-    return Path(root).resolve().as_posix(), years
+    return (
+        Path(root).resolve().as_posix(),
+        None if years is None else tuple(sorted(years)),
+    )
 
 
 def _summarize_frames(frames: Iterable[pd.DataFrame]) -> AggregateSummary:

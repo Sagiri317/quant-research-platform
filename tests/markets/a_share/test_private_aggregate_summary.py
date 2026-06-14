@@ -208,3 +208,32 @@ def test_private_aggregate_dataset_summary_cache_keeps_year_filters_distinct(
     private_aggregate._summarize_dataset_root(root, years=(2014,), summary_cache=cache)
 
     assert calls == 2
+
+
+def test_private_aggregate_dataset_summary_cache_normalizes_year_order(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = 0
+
+    def fake_read_dataset(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return iter((_base_frame(),))
+
+    monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
+    cache = {}
+    root = tmp_path / "dataset"
+
+    private_aggregate._summarize_dataset_root(
+        root,
+        years=(2015, 2014),
+        summary_cache=cache,
+    )
+    private_aggregate._summarize_dataset_root(
+        root,
+        years=(2014, 2015),
+        summary_cache=cache,
+    )
+
+    assert calls == 1

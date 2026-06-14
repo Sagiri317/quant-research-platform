@@ -89,11 +89,11 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
         output_column="forward_return_20d",
         family="forward_return",
         input_columns=("market_id", "asset_id", "timestamp", "adj_open"),
-        label_timing="next_open_to_horizon_open",
+        label_timing="example_label_timing",
         horizon=20,
         lookahead=21,
-        entry_rule="next_session_open",
-        exit_rule="horizon_session_open",
+        entry_rule="example_entry_rule",
+        exit_rule="example_exit_rule",
     )
 
     catalog.register(definition)

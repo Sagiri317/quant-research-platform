@@ -466,7 +466,37 @@ def test_price_volume_factor_read_window_expands_for_sparse_asset_history() -> N
     assert expanded.end == window.read.end
 
 
-def test_price_volume_session_chunks_with_sparse_asset_history_match_full_run() -> None:
+@pytest.mark.parametrize(
+    "chunk_size",
+    [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        9,
+        10,
+        11,
+        17,
+        19,
+        20,
+        21,
+        29,
+        31,
+        47,
+        53,
+        59,
+        60,
+        61,
+        89,
+        97,
+    ],
+)
+def test_price_volume_valid_bar_session_chunks_match_full_run(
+    chunk_size: int,
+) -> None:
     panel = synthetic_price_volume_panel(sessions=160, assets=("asset_a", "asset_b"))
     sessions = tuple(sorted(pd.to_datetime(panel["timestamp"]).dt.normalize().unique()))
     missing_sessions = set(sessions[98:116])
@@ -477,41 +507,42 @@ def test_price_volume_session_chunks_with_sparse_asset_history_match_full_run() 
         )
     ].copy()
     factor_columns = (
+        "mom_5d",
+        "turnover_5d",
+        "amplitude_5d",
         "turnover_20d",
         "amihud_20d",
         "amplitude_20d",
         "downside_vol_20d",
         "upside_vol_20d",
+        "turnover_60d",
+        "amihud_60d",
+        "amplitude_60d",
+        "downside_vol_60d",
+        "upside_vol_60d",
     )
     full = calculate_price_volume_factors(
         panel,
         factor_columns=factor_columns,
     ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    chunked_130 = calculate_in_session_chunks(
+    chunked = calculate_in_session_chunks_by_size(
         panel,
         factor_columns=factor_columns,
-        split_session_index=130,
-        warmup_sessions=20,
-    )
-    chunked_121 = calculate_in_session_chunks(
-        panel,
-        factor_columns=factor_columns,
-        split_session_index=121,
+        chunk_size=chunk_size,
         warmup_sessions=20,
     )
 
     assert_frame_matches_reference(
-        chunked_130.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
+        chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
         full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
     )
-    assert_frame_matches_reference(
-        chunked_121.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-        full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-    )
-    assert_frame_matches_reference(
-        chunked_121.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-        chunked_130.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-    )
+    sorted_chunked = chunked.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
+    sorted_full = full.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
+    assert (
+        sorted_chunked.loc[:, factor_columns].isna()
+        == sorted_full.loc[:, factor_columns].isna()
+    ).all().all()
+    assert sorted_chunked.duplicated(list(KEY_COLUMNS)).sum() == 0
 
 
 def test_forward_return_label_read_window_expands_for_sparse_asset_future() -> None:
@@ -547,12 +578,39 @@ def test_forward_return_label_read_window_expands_for_sparse_asset_future() -> N
     assert expanded.end == sessions[61].date()
 
 
-@pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 11, 17, 29, 31])
+@pytest.mark.parametrize(
+    "chunk_size",
+    [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        9,
+        10,
+        11,
+        17,
+        19,
+        20,
+        21,
+        29,
+        31,
+        47,
+        53,
+        59,
+        60,
+        61,
+        89,
+        97,
+    ],
+)
 def test_forward_return_valid_bar_session_chunks_match_full_run(
     chunk_size: int,
 ) -> None:
     panel = synthetic_price_volume_panel(
-        sessions=120,
+        sessions=160,
         assets=("asset_a", "asset_b", "asset_c"),
     )
     sessions = tuple(sorted(pd.to_datetime(panel["timestamp"]).dt.normalize().unique()))
@@ -570,7 +628,7 @@ def test_forward_return_valid_bar_session_chunks_match_full_run(
             )
         )
     ].copy()
-    horizons = (5, 10, 20)
+    horizons = (5, 10, 20, 60)
     label_columns = tuple(f"forward_return_{horizon}d" for horizon in horizons)
 
     full = add_forward_return_labels(panel, horizons=horizons).loc[
@@ -616,6 +674,64 @@ def calculate_in_session_chunks(
         (0, split_session_index),
         (split_session_index, len(sessions)),
     ):
+        core_sessions = set(sessions[start_index:end_index])
+        read_start_index = max(0, start_index - warmup_sessions)
+        window = SessionWindow(
+            core=TimeWindow(
+                sessions[start_index].date(),
+                sessions[end_index - 1].date(),
+            ),
+            read=TimeWindow(
+                sessions[read_start_index].date(),
+                sessions[end_index - 1].date(),
+            ),
+            core_sessions=sessions[start_index:end_index],
+            read_sessions=sessions[read_start_index:end_index],
+            reason="factor_warmup",
+        )
+        read_window = factor_calculations.factor_read_window_for_panel(
+            ordered.loc[:, ["asset_id", "timestamp"]],
+            definitions=definitions,
+            read_window=window.read,
+            core_sessions=window.core_sessions,
+        )
+        read_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
+            {
+                session
+                for session in sessions
+                if read_window.start <= session.date() <= read_window.end
+            }
+        )
+        core_mask = pd.to_datetime(ordered["timestamp"]).dt.normalize().isin(
+            core_sessions
+        )
+        calculated = calculate_price_volume_factors(
+            ordered.loc[read_mask],
+            factor_columns=factor_columns,
+        )
+        parts.append(calculated.loc[core_mask.loc[read_mask].to_numpy()])
+    return pd.concat(parts, ignore_index=True).loc[:, [*KEY_COLUMNS, *factor_columns]]
+
+
+def calculate_in_session_chunks_by_size(
+    panel: pd.DataFrame,
+    *,
+    factor_columns: tuple[str, ...],
+    chunk_size: int,
+    warmup_sessions: int,
+) -> pd.DataFrame:
+    ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    sessions = tuple(
+        sorted(pd.to_datetime(ordered["timestamp"]).dt.normalize().unique())
+    )
+    definitions = tuple(
+        definition
+        for definition in factor_definitions.a_share_factor_definitions()
+        if definition.output_column in factor_columns
+    )
+    parts = []
+    for start_index in range(0, len(sessions), chunk_size):
+        end_index = min(start_index + chunk_size, len(sessions))
         core_sessions = set(sessions[start_index:end_index])
         read_start_index = max(0, start_index - warmup_sessions)
         window = SessionWindow(

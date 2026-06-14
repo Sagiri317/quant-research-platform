@@ -21,6 +21,9 @@ manage credentials, or connect external market-data APIs.
 - Current research profile composition lives in `catalog/profiles.py`.
   The public research profile composition root is `research_profile()`, returning
   `ResearchProfile`.
+- Current A-share daily price-volume factors and `forward_return` labels use
+  valid-bar semantics: `d` means each asset's own valid daily bars, not
+  calendar sessions, and missing/suspended rows are not filled.
 
 Private boundaries:
 

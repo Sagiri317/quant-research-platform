@@ -284,11 +284,11 @@ def _label_definition(
         family=family,
         input_columns=input_columns,
         output_column=output_column,
-        label_timing="next_open_to_horizon_open",
+        label_timing="example_label_timing",
         horizon=horizon,
         lookahead=lookahead,
-        entry_rule="next_session_open",
-        exit_rule="horizon_session_open",
+        entry_rule="example_entry_rule",
+        exit_rule="example_exit_rule",
     )
 
 

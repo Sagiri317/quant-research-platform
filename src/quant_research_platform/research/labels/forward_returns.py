@@ -1,4 +1,8 @@
-"""Generic forward-return label helpers."""
+"""Generic forward-return label helpers.
+
+Forward-return horizons use per-asset valid daily bars. They do not imply
+calendar/session windows and do not fill missing or suspended rows.
+"""
 
 from __future__ import annotations
 

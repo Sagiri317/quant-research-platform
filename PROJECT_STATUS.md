@@ -39,6 +39,8 @@ Current public-safe anchors:
 - 0.1 contracts/storage/catalog/source tests.
 - 0.1 A-share processed, ResearchDataset, evaluation, model, and prediction
   tests.
+- A-share daily price-volume factors and `forward_return` labels use
+  per-asset valid daily bars, not calendar sessions.
 - 0.1 API/CLI route and command contract tests.
 - Public-safe parity-or-explained-delta evidence for processed panel, factor
   values, labels, masks/universes, ResearchDataset, evaluation, and prediction
