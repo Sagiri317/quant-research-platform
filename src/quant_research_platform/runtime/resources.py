@@ -166,11 +166,11 @@ def runtime_resource_policy_scope(
 ) -> Iterator[RuntimeResourcePolicy]:
     """Temporarily make one resource policy snapshot active."""
 
-    token = _ACTIVE_RUNTIME_RESOURCE_POLICY.set(policy)
+    policy_context_token = _ACTIVE_RUNTIME_RESOURCE_POLICY.set(policy)
     try:
         yield policy
     finally:
-        _ACTIVE_RUNTIME_RESOURCE_POLICY.reset(token)
+        _ACTIVE_RUNTIME_RESOURCE_POLICY.reset(policy_context_token)
 
 
 @dataclass(frozen=True)
