@@ -200,6 +200,43 @@ def test_summarize_ic_uses_nan_when_no_valid_ic_or_rankic() -> None:
     assert pd.isna(row["positive_rankic_rate"])
 
 
+def test_summarize_ic_uses_nan_icir_when_valid_count_or_std_is_insufficient() -> None:
+    one_valid = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01"],
+            "feature": ["factor"],
+            "label": ["forward_return"],
+            "ic": [0.4],
+            "rankic": [-0.3],
+            "n_obs": [10],
+        }
+    )
+    constant_valid = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01", "2026-01-02"],
+            "feature": ["factor", "factor"],
+            "label": ["forward_return", "forward_return"],
+            "ic": [0.4, 0.4],
+            "rankic": [-0.3, -0.3],
+            "n_obs": [10, 10],
+        }
+    )
+
+    one_row = summarize_ic(one_valid).iloc[0]
+    constant_row = summarize_ic(constant_valid).iloc[0]
+
+    assert one_row["valid_ic_count"] == 1
+    assert pd.isna(one_row["icir"])
+    assert one_row["valid_rankic_count"] == 1
+    assert pd.isna(one_row["rankicir"])
+    assert constant_row["valid_ic_count"] == 2
+    assert constant_row["std_ic"] == pytest.approx(0.0)
+    assert pd.isna(constant_row["icir"])
+    assert constant_row["valid_rankic_count"] == 2
+    assert constant_row["std_rankic"] == pytest.approx(0.0)
+    assert pd.isna(constant_row["rankicir"])
+
+
 def test_summarize_group_spread_reports_top_bottom_spread() -> None:
     grouped_label_values = pd.DataFrame(
         {

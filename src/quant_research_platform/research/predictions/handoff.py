@@ -78,15 +78,19 @@ def run_prediction_from_research_dataset(
             ),
             dataset_spec=dataset_spec,
             feature_columns=model_spec.feature_columns,
-        )
-
-    if not _prediction_split_has_rows(_chunks(), prediction_spec):
-        raise ValueError("prediction_oos_split_has_empty_side")
-    train_end = pd.Timestamp(prediction_spec.train_end)
-    model_result = _fit_linear_baseline_result_from_frames(
-        _prediction_train_chunks(_chunks(), train_end=train_end),
-        model_spec,
     )
+
+    _validate_prediction_window_order(prediction_spec)
+    train_end = pd.Timestamp(prediction_spec.train_end)
+    try:
+        model_result = _fit_linear_baseline_result_from_frames(
+            _prediction_train_chunks(_chunks(), train_end=train_end),
+            model_spec,
+        )
+    except ValueError as exc:
+        if str(exc) == "model_training_sample_empty":
+            raise ValueError("empty_training_window") from exc
+        raise
     prediction = _build_prediction_bundle_from_frames(
         _chunks(),
         prediction_spec,
@@ -124,27 +128,14 @@ def _validated_prediction_chunks(
         yield chunk
 
 
-def _prediction_split_has_rows(
-    chunks: Iterable[pd.DataFrame],
-    spec,
-) -> bool:
+def _validate_prediction_window_order(spec) -> None:
     train_end = pd.Timestamp(spec.train_end)
     test_start = pd.Timestamp(spec.test_start)
     if train_end >= test_start:
         raise ValueError("prediction_train_end_must_precede_test_start")
     test_end = pd.Timestamp(spec.test_end) if spec.test_end is not None else None
-    has_train = False
-    has_test = False
-    for chunk in chunks:
-        timestamps = _prediction_timestamps(chunk)
-        has_train = has_train or bool((timestamps <= train_end).any())
-        test_mask = timestamps >= test_start
-        if test_end is not None:
-            test_mask &= timestamps <= test_end
-        has_test = has_test or bool(test_mask.any())
-        if has_train and has_test:
-            return True
-    return False
+    if test_end is not None and test_end < test_start:
+        raise ValueError("prediction_test_end_must_not_precede_test_start")
 
 
 def _prediction_train_chunks(

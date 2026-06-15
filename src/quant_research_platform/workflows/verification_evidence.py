@@ -304,8 +304,14 @@ def _resolve_effective_windows(
 ) -> dict[str, str | None]:
     evaluation_start_date = config.evaluation_start_date or config.start_date
     evaluation_end_date = config.evaluation_end_date or config.end_date
-    if pd.Timestamp(evaluation_start_date) > pd.Timestamp(evaluation_end_date):
+    evidence_start = pd.Timestamp(config.start_date)
+    evidence_end = pd.Timestamp(config.end_date)
+    evaluation_start = pd.Timestamp(evaluation_start_date)
+    evaluation_end = pd.Timestamp(evaluation_end_date)
+    if evaluation_start > evaluation_end:
         raise ValueError("evaluation_start_date_after_end_date")
+    if evaluation_start < evidence_start or evaluation_end > evidence_end:
+        raise ValueError("evaluation_window_out_of_evidence_range")
 
     prediction_spec = config.profile.predictions.get(
         "a_share_linear_mom_20d_prediction_2014"
@@ -319,12 +325,24 @@ def _resolve_effective_windows(
         if config.prediction_test_end is not None
         else prediction_spec.test_end
     )
-    if pd.Timestamp(prediction_train_end) >= pd.Timestamp(prediction_test_start):
-        raise ValueError("prediction_train_end_must_precede_test_start")
+    train_end = pd.Timestamp(prediction_train_end)
+    test_start = pd.Timestamp(prediction_test_start)
+    test_end = (
+        pd.Timestamp(prediction_test_end)
+        if prediction_test_end is not None
+        else None
+    )
     if (
-        prediction_test_end is not None
-        and pd.Timestamp(prediction_test_end) < pd.Timestamp(prediction_test_start)
+        train_end < evidence_start
+        or train_end > evidence_end
+        or test_start < evidence_start
+        or test_start > evidence_end
+        or (test_end is not None and test_end > evidence_end)
     ):
+        raise ValueError("prediction_window_out_of_evidence_range")
+    if train_end >= test_start:
+        raise ValueError("prediction_train_end_must_precede_test_start")
+    if test_end is not None and test_end < test_start:
         raise ValueError("prediction_test_end_must_not_precede_test_start")
     return {
         "evaluation_start_date": evaluation_start_date,

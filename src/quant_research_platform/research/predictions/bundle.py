@@ -66,7 +66,8 @@ def _build_prediction_bundle_from_frames(
         feature_columns=feature_columns,
     )
     if result.empty:
-        raise ValueError("prediction_oos_test_window_empty")
+        raise ValueError("empty_prediction_window")
+    effective_test_end = _date_string(pd.to_datetime(result["timestamp"]).max())
     result.attrs["prediction_metadata"] = {
         "contract_version": spec.contract_version,
         "prediction_mode": spec.prediction_mode,
@@ -79,7 +80,8 @@ def _build_prediction_bundle_from_frames(
         "prediction_rows": int(len(result)),
         "train_end": spec.train_end,
         "test_start": spec.test_start,
-        "test_end": spec.test_end,
+        "requested_test_end": spec.test_end,
+        "effective_test_end": effective_test_end,
         "is_oos": spec.is_oos,
         "is_final_oos_window": spec.is_final_oos_window,
         "feature_columns": list(feature_columns),
@@ -152,6 +154,10 @@ def _validate_oos_split(spec: PredictionSpec) -> None:
         spec.test_start
     ):
         raise ValueError("prediction_test_end_must_not_precede_test_start")
+
+
+def _date_string(value: pd.Timestamp) -> str:
+    return pd.Timestamp(value).date().isoformat()
 
 
 def _iter_prediction_work_frames(

@@ -69,6 +69,8 @@ def _fit_linear_baseline_result_from_frames(
         "rows_after_feature_label_dropna": int(
             row_counts["rows_after_feature_label_dropna"]
         ),
+        "train_start": row_counts["train_start"],
+        "train_end": row_counts["train_end"],
         "feature_columns": list(spec.feature_columns),
         "feature_count": len(spec.feature_columns),
         "label_column": spec.label_column,
@@ -82,7 +84,7 @@ def _fit_linear_coefficients(
     *,
     spec: ModelSpec,
     fit_columns: tuple[str, ...],
-) -> tuple[np.ndarray, dict[str, int], dict[str, object]]:
+) -> tuple[np.ndarray, dict[str, object], dict[str, object]]:
     feature_count = len(spec.feature_columns)
     chunk_count = 0
     row_count = 0
@@ -93,6 +95,8 @@ def _fit_linear_coefficients(
     filter_definition = ""
     r_factor: np.ndarray | None = None
     qt_y: np.ndarray | None = None
+    train_start: str | None = None
+    train_end: str | None = None
 
     for frame in frames:
         for chunk in iter_time_sized_frames(
@@ -121,6 +125,19 @@ def _fit_linear_coefficients(
             row_count += int(len(y))
             if len(y) == 0:
                 continue
+            usable_timestamps = pd.to_datetime(usable["timestamp"], errors="coerce")
+            chunk_start = _date_string(usable_timestamps.min())
+            chunk_end = _date_string(usable_timestamps.max())
+            train_start = (
+                chunk_start
+                if train_start is None
+                else min(train_start, chunk_start)
+            )
+            train_end = (
+                chunk_end
+                if train_end is None
+                else max(train_end, chunk_end)
+            )
             chunk_design = _linear_design_matrix(usable, spec)
             if r_factor is None or qt_y is None:
                 stacked_design = chunk_design
@@ -135,6 +152,8 @@ def _fit_linear_coefficients(
         "rows_input": rows_input,
         "rows_after_filter_mode": rows_after_filter,
         "rows_after_feature_label_dropna": row_count,
+        "train_start": train_start,
+        "train_end": train_end,
     }
     filter_metadata = {
         "sample_filter_mode": spec.sample_filter_mode,
@@ -201,6 +220,10 @@ def _fit_linear_coefficients_from_tsqr(
 ) -> np.ndarray:
     beta, *_ = np.linalg.lstsq(r_factor, qt_y, rcond=None)
     return beta
+
+
+def _date_string(value: pd.Timestamp) -> str:
+    return pd.Timestamp(value).date().isoformat()
 
 
 __all__ = ["ModelFitResult", "fit_linear_baseline_result"]

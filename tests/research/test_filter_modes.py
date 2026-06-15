@@ -604,6 +604,8 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
         "rows_input": 6,
         "rows_after_filter_mode": 5,
         "rows_after_feature_label_dropna": 4,
+        "train_start": "2024-01-02",
+        "train_end": "2024-01-02",
         "feature_columns": ["factor"],
         "feature_count": 1,
         "label_column": "label",
@@ -815,7 +817,8 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         "prediction_rows": 5,
         "train_end": "2024-01-02",
         "test_start": "2024-01-03",
-        "test_end": "2024-01-03",
+        "requested_test_end": "2024-01-03",
+        "effective_test_end": "2024-01-03",
         "is_oos": True,
         "is_final_oos_window": False,
         "feature_columns": ["factor"],
@@ -866,11 +869,15 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     assert manifest["model_metadata"]["coefficient_count"] == 2
     assert manifest["model_metadata"]["sample_filter_mode"] == "eligible"
     assert manifest["model_metadata"]["rows_after_feature_label_dropna"] == 4
+    assert manifest["model_metadata"]["train_start"] == "2024-01-02"
+    assert manifest["model_metadata"]["train_end"] == "2024-01-02"
     assert manifest["prediction_metadata"]["contract_version"] == "0.1"
     assert manifest["prediction_metadata"]["prediction_rows"] == 5
     assert manifest["prediction_metadata"]["sample_filter_mode"] == "eligible"
     assert manifest["prediction_metadata"]["rows_after_feature_dropna"] == 10
     assert manifest["prediction_metadata"]["train_end"] == "2024-01-02"
+    assert manifest["prediction_metadata"]["requested_test_end"] == "2024-01-03"
+    assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-03"
 
 
 def test_prediction_forced_tiny_resource_chunks_match_default(
@@ -988,9 +995,79 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
     assert manifest["train_end"] == "2024-01-02"
     assert manifest["test_start"] == "2024-01-03"
     assert manifest["test_end"] == "2024-01-03"
+    assert manifest["model_metadata"]["train_start"] == "2024-01-02"
+    assert manifest["model_metadata"]["train_end"] == "2024-01-02"
     assert manifest["prediction_metadata"]["train_end"] == "2024-01-02"
     assert manifest["prediction_metadata"]["test_start"] == "2024-01-03"
-    assert manifest["prediction_metadata"]["test_end"] == "2024-01-03"
+    assert manifest["prediction_metadata"]["requested_test_end"] == "2024-01-03"
+    assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-03"
+
+
+def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
+    tmp_path: Path,
+) -> None:
+    train_rows = _filter_frame().assign(
+        timestamp=pd.Timestamp("2024-01-02"),
+        factor=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        label=[5.0, 8.0, 11.0, 14.0, 17.0, 20.0],
+        eligible=True,
+    )
+    test_rows = _filter_frame().assign(
+        timestamp=pd.Timestamp("2024-01-03"),
+        factor=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        label=[-10.0, -20.0, -30.0, -40.0, -50.0, -60.0],
+        eligible=True,
+    )
+    frame = pd.concat([train_rows, test_rows], ignore_index=True)
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog, frame)
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo_filter",
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+    )
+    model_catalog = ModelCatalog()
+    model_catalog.register(
+        ModelSpec(
+            model_id="linear_eligible",
+            model_family="linear",
+            feature_columns=("factor",),
+            label_column="label",
+        )
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="pred_no_leakage",
+            model_id="linear_eligible",
+            research_dataset_id="demo_filter",
+            prediction_column=default_prediction_column(),
+            primary_key=platform_entity_time_key(),
+            train_end="2024-01-02",
+            test_start="2024-01-03",
+            test_end="2024-01-03",
+        )
+    )
+
+    run_root = run_prediction_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        model_catalog=model_catalog,
+        prediction_catalog=prediction_catalog,
+        prediction_id="pred_no_leakage",
+    )
+    prediction = pd.read_parquet(run_root / "prediction.parquet").sort_values(
+        "asset_id",
+        kind="mergesort",
+    )
+
+    assert prediction[default_prediction_column()].tolist() == pytest.approx(
+        [5.0, 8.0, 11.0, 14.0, 17.0, 20.0]
+    )
 
 
 def _write_processed_inputs(
@@ -1051,6 +1128,112 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
             train_end="2024-01-02",
             test_start="2024-01-03",
             sample_filter_mode="tradable",
+        )
+
+
+def test_prediction_bundle_fail_closed_errors_are_specific() -> None:
+    with pytest.raises(
+        ValueError,
+        match="prediction_train_end_must_precede_test_start",
+    ):
+        build_prediction_bundle(
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            PredictionSpec(
+                prediction_id="pred_bad_order",
+                model_id="linear_eligible",
+                research_dataset_id="demo_filter",
+                prediction_column=default_prediction_column(),
+                primary_key=platform_entity_time_key(),
+                train_end="2024-01-03",
+                test_start="2024-01-03",
+            ),
+            coefficients=np.asarray([0.0, 0.01]),
+            feature_columns=("factor",),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="prediction_test_end_must_not_precede_test_start",
+    ):
+        build_prediction_bundle(
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            PredictionSpec(
+                prediction_id="pred_bad_test_end",
+                model_id="linear_eligible",
+                research_dataset_id="demo_filter",
+                prediction_column=default_prediction_column(),
+                primary_key=platform_entity_time_key(),
+                train_end="2024-01-02",
+                test_start="2024-01-04",
+                test_end="2024-01-03",
+            ),
+            coefficients=np.asarray([0.0, 0.01]),
+            feature_columns=("factor",),
+        )
+
+    with pytest.raises(ValueError, match="empty_prediction_window"):
+        build_prediction_bundle(
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
+            PredictionSpec(
+                prediction_id="pred_empty_test",
+                model_id="linear_eligible",
+                research_dataset_id="demo_filter",
+                prediction_column=default_prediction_column(),
+                primary_key=platform_entity_time_key(),
+                train_end="2024-01-02",
+                test_start="2024-01-03",
+                test_end="2024-01-03",
+            ),
+            coefficients=np.asarray([0.0, 0.01]),
+            feature_columns=("factor",),
+        )
+
+
+def test_prediction_handoff_empty_training_window_fails_closed(
+    tmp_path: Path,
+) -> None:
+    frame = _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03"))
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog, frame)
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo_filter",
+        time_window=TimeWindow("2024-01-03", "2024-01-03"),
+    )
+    model_catalog = ModelCatalog()
+    model_catalog.register(
+        ModelSpec(
+            model_id="linear_eligible",
+            model_family="linear",
+            feature_columns=("factor",),
+            label_column="label",
+        )
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="pred_empty_train",
+            model_id="linear_eligible",
+            research_dataset_id="demo_filter",
+            prediction_column=default_prediction_column(),
+            primary_key=platform_entity_time_key(),
+            train_end="2024-01-02",
+            test_start="2024-01-03",
+            test_end="2024-01-03",
+        )
+    )
+
+    with pytest.raises(ValueError, match="empty_training_window"):
+        run_prediction_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            model_catalog=model_catalog,
+            prediction_catalog=prediction_catalog,
+            prediction_id="pred_empty_train",
         )
 
 

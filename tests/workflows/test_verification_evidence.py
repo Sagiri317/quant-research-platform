@@ -80,8 +80,8 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
                 output_root=tmp_path / "verification-output" / "bad-prediction",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
-                prediction_train_end="2018-01-01",
-                prediction_test_start="2018-01-01",
+                prediction_train_end="2015-01-02",
+                prediction_test_start="2015-01-02",
                 profile=research_profile(),
             )
         )
@@ -96,12 +96,74 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
                 output_root=tmp_path / "verification-output" / "bad-prediction-end",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
-                prediction_test_start="2018-01-02",
-                prediction_test_end="2018-01-01",
+                prediction_test_start="2015-01-02",
+                prediction_test_end="2015-01-01",
                 profile=research_profile(),
             )
         )
     assert not (tmp_path / "verification-output" / "bad-prediction-end").exists()
+
+
+def test_verification_evidence_workflow_rejects_override_windows_outside_evidence_range(
+    tmp_path,
+) -> None:
+    cases = [
+        (
+            "bad-evaluation-start",
+            {
+                "evaluation_start_date": "2013-12-31",
+                "evaluation_end_date": "2014-01-02",
+            },
+            "evaluation_window_out_of_evidence_range",
+        ),
+        (
+            "bad-evaluation-end",
+            {
+                "evaluation_start_date": "2014-01-02",
+                "evaluation_end_date": "2017-01-01",
+            },
+            "evaluation_window_out_of_evidence_range",
+        ),
+        (
+            "bad-prediction-train",
+            {
+                "prediction_train_end": "2013-12-31",
+                "prediction_test_start": "2014-01-02",
+            },
+            "prediction_window_out_of_evidence_range",
+        ),
+        (
+            "bad-prediction-test-start",
+            {
+                "prediction_train_end": "2014-01-02",
+                "prediction_test_start": "2017-01-01",
+            },
+            "prediction_window_out_of_evidence_range",
+        ),
+        (
+            "bad-prediction-test-end",
+            {
+                "prediction_train_end": "2014-01-02",
+                "prediction_test_start": "2014-01-03",
+                "prediction_test_end": "2017-01-01",
+            },
+            "prediction_window_out_of_evidence_range",
+        ),
+    ]
+
+    for run_name, overrides, match in cases:
+        output_root = tmp_path / "verification-output" / run_name
+        with pytest.raises(ValueError, match=match):
+            run_verification_evidence(
+                VerificationEvidenceRunConfig(
+                    output_root=output_root,
+                    start_date="2014-01-01",
+                    end_date="2016-12-31",
+                    profile=research_profile(),
+                    **overrides,
+                )
+            )
+        assert not output_root.exists()
 
 
 def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_path):

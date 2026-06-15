@@ -472,7 +472,10 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     )
 
     evaluation = evaluate_factor_frame(frame, eval_spec)
-    model_result = fit_linear_baseline_result(frame, model_spec)
+    model_result = fit_linear_baseline_result(
+        frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],
+        model_spec,
+    )
     prediction = build_prediction_bundle(
         frame,
         prediction_spec,
@@ -565,8 +568,12 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     assert manifest["model_metadata"]["contract_version"] == "0.1"
     assert manifest["model_metadata"]["feature_count"] == 1
     assert manifest["model_metadata"]["coefficient_count"] == 2
+    assert manifest["model_metadata"]["train_start"] == "2014-01-02"
+    assert manifest["model_metadata"]["train_end"] == "2014-01-02"
     assert manifest["prediction_metadata"]["contract_version"] == "0.1"
     assert manifest["prediction_metadata"]["prediction_rows"] == 2
+    assert manifest["prediction_metadata"]["requested_test_end"] == "2014-01-03"
+    assert manifest["prediction_metadata"]["effective_test_end"] == "2014-01-03"
     assert "metadata" not in manifest
 
 

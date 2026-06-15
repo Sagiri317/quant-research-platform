@@ -359,9 +359,14 @@ def _average_ranks(values: np.ndarray) -> np.ndarray:
     return pd.Series(values).rank(method="average").to_numpy(dtype="float64")
 
 
-def _safe_ratio(numerator: float, denominator: float) -> float:
-    if denominator == 0 or not np.isfinite(numerator) or not np.isfinite(denominator):
-        return 0.0
+def _safe_ratio(numerator: float, denominator: float, *, valid_count: int) -> float:
+    if (
+        valid_count < 2
+        or not np.isfinite(numerator)
+        or not np.isfinite(denominator)
+        or np.isclose(denominator, 0.0)
+    ):
+        return np.nan
     return float(numerator / denominator)
 
 
@@ -380,7 +385,7 @@ def _summarize_correlation_values(values: pd.Series) -> dict[str, float | int]:
     return {
         "mean": mean,
         "std": std,
-        "ratio": _safe_ratio(mean, std),
+        "ratio": _safe_ratio(mean, std, valid_count=valid_count),
         "positive_rate": float((values > 0).mean()),
         "valid_count": valid_count,
     }

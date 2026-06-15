@@ -14,6 +14,10 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
 )
+from quant_research_platform.contracts.filtering import (
+    filter_definition,
+    required_filter_columns,
+)
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.catalog import report_catalog
@@ -80,6 +84,8 @@ _MODEL_METADATA_KEYS = frozenset(
         "rows_input",
         "rows_after_filter_mode",
         "rows_after_feature_label_dropna",
+        "train_start",
+        "train_end",
         "feature_columns",
         "feature_count",
         "label_column",
@@ -99,7 +105,8 @@ _PREDICTION_METADATA_KEYS = frozenset(
         "prediction_rows",
         "train_end",
         "test_start",
-        "test_end",
+        "requested_test_end",
+        "effective_test_end",
         "is_oos",
         "is_final_oos_window",
         "feature_columns",
@@ -185,11 +192,15 @@ def write_prediction_report_artifacts(
             error_name="missing_prediction_metadata",
         )
     )
-    _validate_model_metadata_consistency(model_metadata)
+    _validate_model_metadata_consistency(model_metadata, spec=spec)
     _validate_prediction_metadata_consistency(
         prediction_metadata,
         spec=spec,
         frame=frame,
+    )
+    _validate_model_prediction_metadata_consistency(
+        model_metadata,
+        prediction_metadata,
     )
 
     def _write(temp_root: Path) -> None:
@@ -252,6 +263,14 @@ def write_evaluation_report_artifacts(
         group_spread_summary,
         required=_EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
         error_name="evaluation_group_spread_summary",
+    )
+    _validate_evaluation_artifact_structure(
+        metrics=metrics,
+        grouped_label_values=grouped_label_values,
+        ic_summary=ic_summary,
+        group_spread_summary=group_spread_summary,
+        spec=spec,
+        n_groups=evaluation_diagnostics.n_groups,
     )
     _validate_evaluation_diagnostics_consistency(
         metrics=metrics,
@@ -420,6 +439,8 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
     _require_metadata_string(metadata, "sample_filter_mode", "invalid_model_metadata")
     _require_metadata_string(metadata, "filter_definition", "invalid_model_metadata")
     _require_metadata_string(metadata, "label_column", "invalid_model_metadata")
+    _require_metadata_string(metadata, "train_start", "invalid_model_metadata")
+    _require_metadata_string(metadata, "train_end", "invalid_model_metadata")
     _require_metadata_string_list(
         metadata,
         "filter_columns_used",
@@ -483,10 +504,19 @@ def _validate_prediction_metadata_shape(
         "filter_definition",
         "invalid_prediction_metadata",
     )
-    _require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
     _require_metadata_string(metadata, "test_start", "invalid_prediction_metadata")
-    if metadata["test_end"] is not None:
-        _require_metadata_string(metadata, "test_end", "invalid_prediction_metadata")
+    _require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
+    if metadata["requested_test_end"] is not None:
+        _require_metadata_string(
+            metadata,
+            "requested_test_end",
+            "invalid_prediction_metadata",
+        )
+    _require_metadata_string(
+        metadata,
+        "effective_test_end",
+        "invalid_prediction_metadata",
+    )
     _require_metadata_string(
         metadata,
         "prediction_column",
@@ -506,10 +536,29 @@ def _validate_prediction_metadata_shape(
     return metadata
 
 
-def _validate_model_metadata_consistency(metadata: dict[str, object]) -> None:
+def _validate_model_metadata_consistency(
+    metadata: dict[str, object],
+    *,
+    spec: PredictionSpec,
+) -> None:
     feature_count = int(metadata["feature_count"])
     feature_columns = metadata["feature_columns"]
     if not isinstance(feature_columns, list) or feature_count != len(feature_columns):
+        raise ValueError("model_metadata_inconsistent")
+    _validate_metadata_row_count_chain(
+        metadata,
+        ("rows_input", "rows_after_filter_mode", "rows_after_feature_label_dropna"),
+        "model_metadata_inconsistent",
+    )
+    _validate_filter_metadata(
+        mode=str(metadata["sample_filter_mode"]),
+        columns=metadata["filter_columns_used"],
+        definition=str(metadata["filter_definition"]),
+        error_name="model_metadata_inconsistent",
+    )
+    train_start = pd.Timestamp(metadata["train_start"])
+    train_end = pd.Timestamp(metadata["train_end"])
+    if train_start > train_end or train_end > pd.Timestamp(spec.train_end):
         raise ValueError("model_metadata_inconsistent")
     if (
         metadata["model_family"] == "linear"
@@ -531,13 +580,47 @@ def _validate_prediction_metadata_consistency(
         "sample_filter_mode": spec.sample_filter_mode,
         "train_end": spec.train_end,
         "test_start": spec.test_start,
-        "test_end": spec.test_end,
+        "requested_test_end": spec.test_end,
         "is_oos": spec.is_oos,
         "is_final_oos_window": spec.is_final_oos_window,
     }
     for key, value in expected.items():
         if metadata[key] != value:
             raise ValueError("prediction_metadata_inconsistent")
+    _validate_metadata_row_count_chain(
+        metadata,
+        ("rows_input", "rows_after_filter_mode", "rows_after_feature_dropna"),
+        "prediction_metadata_inconsistent",
+    )
+    if int(metadata["prediction_rows"]) > int(metadata["rows_after_feature_dropna"]):
+        raise ValueError("prediction_metadata_inconsistent")
+    _validate_filter_metadata(
+        mode=str(metadata["sample_filter_mode"]),
+        columns=metadata["filter_columns_used"],
+        definition=str(metadata["filter_definition"]),
+        error_name="prediction_metadata_inconsistent",
+    )
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    if bool(timestamps.isna().any()):
+        raise ValueError("prediction_metadata_inconsistent")
+    effective_test_end = pd.Timestamp(timestamps.max()).date().isoformat()
+    if metadata["effective_test_end"] != effective_test_end:
+        raise ValueError("prediction_metadata_inconsistent")
+    requested_test_end = metadata["requested_test_end"]
+    if requested_test_end is not None and pd.Timestamp(
+        effective_test_end
+    ) > pd.Timestamp(requested_test_end):
+        raise ValueError("prediction_metadata_inconsistent")
+
+
+def _validate_model_prediction_metadata_consistency(
+    model_metadata: dict[str, object],
+    prediction_metadata: dict[str, object],
+) -> None:
+    if model_metadata["feature_columns"] != prediction_metadata["feature_columns"]:
+        raise ValueError("prediction_metadata_inconsistent")
+    if model_metadata["feature_count"] != prediction_metadata["feature_count"]:
+        raise ValueError("prediction_metadata_inconsistent")
 
 
 def _validate_evaluation_diagnostics_consistency(
@@ -549,7 +632,20 @@ def _validate_evaluation_diagnostics_consistency(
     evaluation_diagnostics: EvaluationDiagnostics,
     spec: EvaluationSpec,
 ) -> None:
-    timestamps = pd.to_datetime(metrics["timestamp"], errors="coerce").dropna()
+    _validate_metadata_row_count_chain(
+        asdict(evaluation_diagnostics),
+        ("rows_input", "rows_after_filter_mode", "rows_after_feature_label_dropna"),
+        "evaluation_diagnostics_inconsistent",
+    )
+    _validate_filter_metadata(
+        mode=evaluation_diagnostics.filter_mode,
+        columns=list(evaluation_diagnostics.filter_columns_used),
+        definition=evaluation_diagnostics.filter_definition,
+        error_name="evaluation_diagnostics_inconsistent",
+    )
+    timestamps = pd.to_datetime(metrics["timestamp"], errors="coerce")
+    if bool(timestamps.isna().any()):
+        raise ValueError("evaluation_diagnostics_inconsistent")
     expected_timestamp_count = int(timestamps.nunique()) if not timestamps.empty else 0
     expected_min_timestamp = (
         pd.Timestamp(timestamps.min()).date().isoformat()
@@ -562,9 +658,17 @@ def _validate_evaluation_diagnostics_consistency(
         else None
     )
     n_obs = pd.to_numeric(metrics["n_obs"], errors="coerce")
-    expected_skipped_timestamp_count = int(n_obs.lt(2).sum())
+    if bool(n_obs.isna().any()):
+        raise ValueError("evaluation_diagnostics_inconsistent")
+    expected_skipped_timestamp_count = int(
+        metrics.loc[n_obs.lt(2), "timestamp"].nunique()
+    )
+    expected_rows_after_feature_label_dropna = int(n_obs.sum())
     expected = {
         "filter_mode": spec.filter_mode,
+        "filter_columns_used": tuple(required_filter_columns(spec.filter_mode)),
+        "filter_definition": filter_definition(spec.filter_mode),
+        "rows_after_feature_label_dropna": expected_rows_after_feature_label_dropna,
         "metric_rows": len(metrics),
         "grouped_label_value_rows": len(grouped_label_values),
         "ic_summary_rows": len(ic_summary),
@@ -577,6 +681,81 @@ def _validate_evaluation_diagnostics_consistency(
     for key, value in expected.items():
         if getattr(evaluation_diagnostics, key) != value:
             raise ValueError("evaluation_diagnostics_inconsistent")
+
+
+def _validate_evaluation_artifact_structure(
+    *,
+    metrics: pd.DataFrame,
+    grouped_label_values: pd.DataFrame,
+    ic_summary: pd.DataFrame,
+    group_spread_summary: pd.DataFrame,
+    spec: EvaluationSpec,
+    n_groups: int,
+) -> None:
+    _reject_duplicate_keys(metrics, ("timestamp", "feature", "label"), "metrics")
+    _reject_duplicate_keys(
+        grouped_label_values,
+        ("timestamp", "feature", "label", "group"),
+        "grouped_label_values",
+    )
+    _reject_duplicate_keys(ic_summary, ("feature", "label"), "ic_summary")
+    _reject_duplicate_keys(
+        group_spread_summary,
+        ("feature", "label"),
+        "group_spread_summary",
+    )
+    for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
+        _validate_feature_label_membership(frame, spec=spec)
+    groups = pd.to_numeric(grouped_label_values["group"], errors="coerce")
+    if bool(groups.isna().any()):
+        raise ValueError("evaluation_group_out_of_range")
+    if bool((groups % 1 != 0).any()) or bool(groups.lt(1).any()) or bool(
+        groups.gt(n_groups).any()
+    ):
+        raise ValueError("evaluation_group_out_of_range")
+
+
+def _reject_duplicate_keys(
+    frame: pd.DataFrame,
+    keys: tuple[str, ...],
+    artifact_name: str,
+) -> None:
+    if bool(frame.duplicated(list(keys)).any()):
+        raise ValueError(f"duplicate_evaluation_{artifact_name}_keys")
+
+
+def _validate_feature_label_membership(
+    frame: pd.DataFrame,
+    *,
+    spec: EvaluationSpec,
+) -> None:
+    if not set(frame["feature"]).issubset(set(spec.feature_columns)) or not set(
+        frame["label"]
+    ).issubset(set(spec.label_columns)):
+        raise ValueError("evaluation_artifact_feature_label_mismatch")
+
+
+def _validate_metadata_row_count_chain(
+    metadata: dict[str, object],
+    keys: tuple[str, str, str],
+    error_name: str,
+) -> None:
+    first, second, third = (int(metadata[key]) for key in keys)
+    if not (0 <= third <= second <= first):
+        raise ValueError(error_name)
+
+
+def _validate_filter_metadata(
+    *,
+    mode: str,
+    columns: object,
+    definition: str,
+    error_name: str,
+) -> None:
+    if list(columns) != list(required_filter_columns(mode)):
+        raise ValueError(error_name)
+    if definition != filter_definition(mode):
+        raise ValueError(error_name)
 
 
 def _require_metadata_string(
