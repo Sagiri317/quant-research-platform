@@ -132,6 +132,23 @@ class DatasetComparison:
     layout_delta: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _DatasetReadContext:
+    root: Path
+    data_root: Path
+    spec: dict[str, Any]
+    manifest: dict[str, Any]
+    all_paths: tuple[Path, ...]
+    read_paths: tuple[Path, ...]
+    logical_columns: tuple[str, ...]
+    physical_columns: tuple[str, ...]
+    timestamp_column: str | None
+    time_window: TimeWindow | None
+    schema: tuple[tuple[str, str], ...]
+    schema_hash: str
+    parquet_filters: list[tuple[str, str, Any]] | None
+
+
 @dataclass
 class _WriteStats:
     spec: DataSpec
@@ -329,23 +346,20 @@ def read_dataset(
     time_window: TimeWindow | None = None,
     mode: DatasetReadMode = DatasetReadMode.MATERIALIZED,
 ) -> pd.DataFrame | Iterator[pd.DataFrame]:
-    root = _require_artifact_root(Path(dataset_root))
-    inspection = inspect_dataset(root)
-    selected_columns = _resolve_columns(inspection, columns)
-
-    chunks = _read_dataset_chunks(
-        root,
-        columns=selected_columns,
+    context = _build_dataset_read_context(
+        dataset_root,
+        columns=columns,
         time_window=time_window,
-        inspection=inspection,
     )
+
+    chunks = _read_dataset_chunks(context)
     if mode is DatasetReadMode.CHUNKED:
         return chunks
     if mode is not DatasetReadMode.MATERIALIZED:
         raise ValueError("unsupported_dataset_read_mode")
     frames = list(chunks)
     if not frames:
-        return pd.DataFrame(columns=list(selected_columns))
+        return pd.DataFrame(columns=list(context.logical_columns))
     return pd.concat(frames, ignore_index=True)
 
 
@@ -354,56 +368,27 @@ def inspect_dataset(
     *,
     time_window: TimeWindow | None = None,
 ) -> DatasetInspection:
-    root = _require_artifact_root(Path(dataset_root))
-    spec_path = root / "spec.json"
-    data_root = root / "data"
-    manifest_path = root / "_manifest" / "manifest.json"
-    if not spec_path.is_file():
-        raise ValueError("dataset_spec_missing")
-    if not data_root.is_dir():
-        raise ValueError("dataset_data_dir_missing")
-    spec_payload = read_manifest(spec_path)
-    if not manifest_path.is_file():
-        raise ValueError("dataset_manifest_missing")
-    manifest = read_manifest(manifest_path)
-    if not _manifest_has_runtime_metadata(manifest):
-        raise ValueError("manifest_runtime_metadata_missing")
-    paths = _candidate_data_files(data_root, spec=spec_payload)
-    if not paths:
-        raise ValueError("dataset_data_dir_missing")
-    schema = _validated_schema(paths)
-    columns = tuple(name for name, _ in schema)
-    schema_hash = _sha256_json(schema)
-    _validate_manifest_runtime_metadata(
-        manifest,
-        data_root=data_root,
-        paths=paths,
-        validate_row_counts=True,
-    )
-    if tuple(str(column) for column in manifest["columns"]) != columns:
-        raise ValueError("manifest_columns_mismatch")
-    if str(manifest["schema_hash"]) != schema_hash:
-        raise ValueError("manifest_schema_hash_mismatch")
-    runtime = _inspection_runtime_metadata(
-        data_root,
-        paths,
-        spec=spec_payload,
-        manifest=manifest,
+    context = _build_dataset_read_context(
+        dataset_root,
+        columns=None,
         time_window=time_window,
     )
+    runtime = _inspection_runtime_metadata(
+        context,
+    )
     return DatasetInspection(
-        root=root,
-        data_root=data_root,
-        spec=spec_payload,
-        columns=columns,
-        schema_hash=schema_hash,
+        root=context.root,
+        data_root=context.data_root,
+        spec=context.spec,
+        columns=tuple(name for name, _ in context.schema),
+        schema_hash=context.schema_hash,
         file_count=int(runtime["file_count"]),
         row_count=int(runtime["row_count"]),
         partitions=tuple(runtime["partitions"]),
         partition_row_counts=dict(runtime["partition_row_counts"]),
         date_min=runtime["date_min"],
         date_max=runtime["date_max"],
-        manifest=manifest,
+        manifest=context.manifest,
     )
 
 
@@ -413,12 +398,12 @@ def fingerprint_dataset(
     columns: tuple[str, ...] | list[str] | None = None,
     time_window: TimeWindow | None = None,
 ) -> DatasetFingerprint:
-    root = _require_artifact_root(Path(dataset_root))
-    inspection = inspect_dataset(root)
-    selected_columns = _resolve_columns(inspection, columns)
-    paths = _candidate_data_files(inspection.data_root, spec=inspection.spec)
-    schema_hash = _sha256_json(_validated_schema(paths))
-    key_columns = tuple(str(column) for column in inspection.spec["primary_key"])
+    context = _build_dataset_read_context(
+        dataset_root,
+        columns=columns,
+        time_window=time_window,
+    )
+    key_columns = tuple(str(column) for column in context.spec["primary_key"])
     row_count = 0
     row_hash_sum = 0
     row_hash_xor = 0
@@ -426,28 +411,28 @@ def fingerprint_dataset(
     partition_hash_sum: dict[str, int] = {}
     partition_hash_xor: dict[str, int] = {}
 
-    for path in paths:
-        read_columns = _read_columns_for_time_window(
-            selected_columns,
-            spec=inspection.spec,
-            time_window=time_window,
+    for path in context.read_paths:
+        chunk = pd.read_parquet(
+            path,
+            columns=list(context.physical_columns),
+            engine="pyarrow",
+            filters=context.parquet_filters,
         )
-        chunk = pd.read_parquet(path, columns=list(read_columns), engine="pyarrow")
         chunk = _filter_frame_by_time_window(
             chunk,
-            spec=inspection.spec,
-            time_window=time_window,
+            spec=context.spec,
+            time_window=context.time_window,
         )
-        chunk = chunk.loc[:, list(selected_columns)]
+        chunk = chunk.loc[:, list(context.logical_columns)]
         if chunk.empty:
             continue
         hashes = pd.util.hash_pandas_object(
-            chunk.loc[:, list(selected_columns)],
+            chunk.loc[:, list(context.logical_columns)],
             index=False,
         ).to_numpy("uint64")
         chunk_sum = int(hashes.sum(dtype=np.uint64))
         chunk_xor = int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
-        partition = _relative_partition_label(inspection.data_root, path)
+        partition = _relative_partition_label(context.data_root, path)
         row_count += int(len(chunk))
         row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
         row_hash_xor ^= chunk_xor
@@ -462,7 +447,7 @@ def fingerprint_dataset(
             "row_hash_sum": row_hash_sum,
             "row_hash_xor": row_hash_xor,
             "row_count": row_count,
-            "columns": list(selected_columns),
+            "columns": list(context.logical_columns),
         }
     )
     partition_fingerprints = tuple(
@@ -481,13 +466,13 @@ def fingerprint_dataset(
     )
     return DatasetFingerprint(
         fingerprint_schema_version="0.1",
-        schema_hash=schema_hash,
+        schema_hash=context.schema_hash,
         row_count=row_count,
         key_columns=key_columns,
         content_hash=content_hash,
         partition_fingerprints=partition_fingerprints,
-        file_count=len(paths),
-        column_names=tuple(selected_columns),
+        file_count=len(context.read_paths),
+        column_names=tuple(context.logical_columns),
     )
 
 
@@ -731,48 +716,112 @@ def _iter_input_chunks(
         yield chunk
 
 
-def _read_dataset_chunks(
-    root: Path,
+def _build_dataset_read_context(
+    dataset_root: Path,
     *,
-    columns: tuple[str, ...],
+    columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
-    inspection: DatasetInspection,
-) -> Iterator[pd.DataFrame]:
-    paths = _candidate_data_files(inspection.data_root, spec=inspection.spec)
-    for path in paths:
-        read_columns = _read_columns_for_time_window(
-            columns,
-            spec=inspection.spec,
+) -> _DatasetReadContext:
+    root = _require_artifact_root(Path(dataset_root))
+    spec_path = root / "spec.json"
+    data_root = root / "data"
+    manifest_path = root / "_manifest" / "manifest.json"
+    if not spec_path.is_file():
+        raise ValueError("dataset_spec_missing")
+    if not data_root.is_dir():
+        raise ValueError("dataset_data_dir_missing")
+    spec_payload = read_manifest(spec_path)
+    if not manifest_path.is_file():
+        raise ValueError("dataset_manifest_missing")
+    manifest = read_manifest(manifest_path)
+    if not _manifest_has_runtime_metadata(manifest):
+        raise ValueError("manifest_runtime_metadata_missing")
+    all_paths = tuple(_candidate_data_files(data_root, spec=spec_payload))
+    if not all_paths:
+        raise ValueError("dataset_data_dir_missing")
+    schema = _validated_schema(list(all_paths))
+    schema_columns = tuple(name for name, _ in schema)
+    schema_hash = _sha256_json(schema)
+    _validate_manifest_runtime_metadata(
+        manifest,
+        data_root=data_root,
+        paths=list(all_paths),
+        validate_row_counts=True,
+    )
+    if tuple(str(column) for column in manifest["columns"]) != schema_columns:
+        raise ValueError("manifest_columns_mismatch")
+    if str(manifest["schema_hash"]) != schema_hash:
+        raise ValueError("manifest_schema_hash_mismatch")
+    logical_columns = _resolve_columns_from_schema(
+        schema_columns,
+        spec=spec_payload,
+        columns=columns,
+    )
+    timestamp_column = _timestamp_column_from_spec_payload(spec_payload)
+    physical_columns = _read_columns_for_time_window(
+        logical_columns,
+        spec=spec_payload,
+        time_window=time_window,
+    )
+    return _DatasetReadContext(
+        root=root,
+        data_root=data_root,
+        spec=spec_payload,
+        manifest=manifest,
+        all_paths=all_paths,
+        read_paths=tuple(
+            _prune_paths_for_time_window(
+                data_root,
+                all_paths,
+                spec=spec_payload,
+                time_window=time_window,
+            )
+        ),
+        logical_columns=logical_columns,
+        physical_columns=physical_columns,
+        timestamp_column=timestamp_column,
+        time_window=time_window,
+        schema=schema,
+        schema_hash=schema_hash,
+        parquet_filters=_parquet_filters_for_time_window(
+            timestamp_column=timestamp_column,
             time_window=time_window,
+        ),
+    )
+
+
+def _read_dataset_chunks(
+    context: _DatasetReadContext,
+) -> Iterator[pd.DataFrame]:
+    for path in context.read_paths:
+        frame = pd.read_parquet(
+            path,
+            columns=list(context.physical_columns),
+            engine="pyarrow",
+            filters=context.parquet_filters,
         )
-        frame = pd.read_parquet(path, columns=list(read_columns), engine="pyarrow")
         filtered = _filter_frame_by_time_window(
             frame,
-            spec=inspection.spec,
-            time_window=time_window,
+            spec=context.spec,
+            time_window=context.time_window,
         )
-        yield filtered.loc[:, list(columns)]
+        yield filtered.loc[:, list(context.logical_columns)]
 
 
 def _inspection_runtime_metadata(
-    data_root: Path,
-    paths: list[Path],
-    *,
-    spec: Mapping[str, Any],
-    manifest: Mapping[str, Any],
-    time_window: TimeWindow | None,
+    context: _DatasetReadContext,
 ) -> dict[str, Any]:
-    if time_window is None:
-        partition_row_counts = _manifest_partition_row_counts(manifest)
+    if context.time_window is None:
+        partition_row_counts = _manifest_partition_row_counts(context.manifest)
         return {
-            "file_count": int(manifest["file_count"]),
-            "row_count": int(manifest["row_count"]),
+            "file_count": int(context.manifest["file_count"]),
+            "row_count": int(context.manifest["row_count"]),
             "partitions": tuple(sorted(partition_row_counts)),
             "partition_row_counts": partition_row_counts,
-            "date_min": manifest.get("date_min"),
-            "date_max": manifest.get("date_max"),
+            "date_min": context.manifest.get("date_min"),
+            "date_max": context.manifest.get("date_max"),
         }
-    timestamp_column = _timestamp_column_from_spec_payload(spec)
+    timestamp_column = context.timestamp_column
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
     row_count = 0
@@ -780,17 +829,22 @@ def _inspection_runtime_metadata(
     partition_row_counts: dict[str, int] = {}
     date_min: pd.Timestamp | None = None
     date_max: pd.Timestamp | None = None
-    for path in paths:
-        frame = pd.read_parquet(path, columns=[timestamp_column], engine="pyarrow")
+    for path in context.read_paths:
+        frame = pd.read_parquet(
+            path,
+            columns=[timestamp_column],
+            engine="pyarrow",
+            filters=context.parquet_filters,
+        )
         filtered = _filter_frame_by_time_window(
             frame,
-            spec=spec,
-            time_window=time_window,
+            spec=context.spec,
+            time_window=context.time_window,
         )
         if filtered.empty:
             continue
         file_count += 1
-        partition = _relative_partition_label(data_root, path)
+        partition = _relative_partition_label(context.data_root, path)
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + len(
             filtered
         )
@@ -830,6 +884,51 @@ def _filter_frame_by_time_window(
     return frame.loc[mask.fillna(False)].copy()
 
 
+def _prune_paths_for_time_window(
+    data_root: Path,
+    paths: tuple[Path, ...],
+    *,
+    spec: Mapping[str, Any],
+    time_window: TimeWindow | None,
+) -> tuple[Path, ...]:
+    if time_window is None:
+        return paths
+    timestamp_column = _timestamp_column_from_spec_payload(spec)
+    if timestamp_column is None:
+        raise ValueError("time_window_not_supported")
+    partition_columns = tuple(
+        str(column) for column in spec.get("partition_columns", ())
+    )
+    if partition_columns != ("year",):
+        return paths
+    years = {
+        f"year={year}"
+        for year in range(int(time_window.start.year), int(time_window.end.year) + 1)
+    }
+    return tuple(
+        path
+        for path in paths
+        if _relative_partition_label(data_root, path) in years
+    )
+
+
+def _parquet_filters_for_time_window(
+    *,
+    timestamp_column: str | None,
+    time_window: TimeWindow | None,
+) -> list[tuple[str, str, Any]] | None:
+    if time_window is None:
+        return None
+    if timestamp_column is None:
+        raise ValueError("time_window_not_supported")
+    start = pd.Timestamp(time_window.start)
+    exclusive_end = pd.Timestamp(time_window.end) + pd.Timedelta(days=1)
+    return [
+        (timestamp_column, ">=", start),
+        (timestamp_column, "<", exclusive_end),
+    ]
+
+
 def _resolve_columns(
     inspection: DatasetInspection,
     columns: tuple[str, ...] | list[str] | None,
@@ -839,6 +938,22 @@ def _resolve_columns(
     else:
         requested = tuple(str(column) for column in columns)
     missing = [column for column in requested if column not in inspection.columns]
+    if missing:
+        raise ValueError("dataset_column_not_found")
+    return requested
+
+
+def _resolve_columns_from_schema(
+    schema_columns: tuple[str, ...],
+    *,
+    spec: Mapping[str, Any],
+    columns: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
+    if columns is None:
+        requested = tuple(str(column) for column in spec["required_columns"])
+    else:
+        requested = tuple(str(column) for column in columns)
+    missing = [column for column in requested if column not in schema_columns]
     if missing:
         raise ValueError("dataset_column_not_found")
     return requested

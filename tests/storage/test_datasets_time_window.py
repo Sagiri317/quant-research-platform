@@ -38,6 +38,41 @@ def test_read_dataset_time_window_uses_closed_interval(tmp_path: Path) -> None:
     assert list(result["value"]) == [1.0, 2.0]
 
 
+def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path, "read_pruned")
+    write_dataset(root, _frame(), spec=_factor_spec("read_pruned"))
+    full = read_dataset(root)
+    original_read_parquet = pd.read_parquet
+    read_paths: list[Path] = []
+
+    def spy_read_parquet(path, *args, **kwargs):
+        read_paths.append(Path(path))
+        return original_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.pd.read_parquet",
+        spy_read_parquet,
+    )
+
+    result = read_dataset(
+        root,
+        columns=["asset_id", "value"],
+        time_window=TimeWindow("2015-01-01", "2015-01-05"),
+    )
+    manual = full.loc[
+        (full["timestamp"].dt.date >= pd.Timestamp("2015-01-01").date())
+        & (full["timestamp"].dt.date <= pd.Timestamp("2015-01-05").date()),
+        ["asset_id", "value"],
+    ].reset_index(drop=True)
+
+    assert list(result.columns) == ["asset_id", "value"]
+    pd.testing.assert_frame_equal(result, manual)
+    assert {path.parent.name for path in read_paths} == {"year=2015"}
+
+
 def test_inspect_dataset_time_window_reports_window_scoped_counts(
     tmp_path: Path,
 ) -> None:
@@ -74,6 +109,35 @@ def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> N
     assert windowed.content_hash != full.content_hash
 
 
+def test_fingerprint_dataset_time_window_prunes_year_partitions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path, "fingerprint_pruned")
+    write_dataset(root, _frame(), spec=_factor_spec("fingerprint_pruned"))
+    original_read_parquet = pd.read_parquet
+    read_paths: list[Path] = []
+
+    def spy_read_parquet(path, *args, **kwargs):
+        read_paths.append(Path(path))
+        return original_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.pd.read_parquet",
+        spy_read_parquet,
+    )
+
+    fingerprint = fingerprint_dataset(
+        root,
+        columns=["asset_id", "value"],
+        time_window=TimeWindow("2015-01-01", "2015-01-05"),
+    )
+
+    assert fingerprint.row_count == 1
+    assert fingerprint.partition_fingerprints[0]["partition"] == "year=2015"
+    assert {path.parent.name for path in read_paths} == {"year=2015"}
+
+
 def test_compare_datasets_time_window_compares_window_only(tmp_path: Path) -> None:
     left = _artifact_root(tmp_path, "left")
     right = _artifact_root(tmp_path, "right")
@@ -91,6 +155,27 @@ def test_compare_datasets_time_window_compares_window_only(tmp_path: Path) -> No
 
     assert comparison.matches is True
     assert comparison.status == "MATCH"
+
+
+def test_compare_datasets_time_window_detects_window_differences(
+    tmp_path: Path,
+) -> None:
+    left = _artifact_root(tmp_path, "left_window_diff")
+    right = _artifact_root(tmp_path, "right_window_diff")
+    write_dataset(left, _frame(), spec=_factor_spec("left_window_diff"))
+    changed = _frame()
+    changed.loc[changed["timestamp"] == pd.Timestamp("2015-01-05"), "value"] = 99.0
+    write_dataset(right, changed, spec=_factor_spec("right_window_diff"))
+
+    comparison = compare_datasets(
+        left,
+        right,
+        columns=["asset_id", "timestamp", "value"],
+        time_window=TimeWindow("2015-01-01", "2015-01-05"),
+    )
+
+    assert comparison.matches is False
+    assert comparison.status == "CONTENT_MISMATCH"
 
 
 def test_time_window_without_timestamp_role_raises(tmp_path: Path) -> None:

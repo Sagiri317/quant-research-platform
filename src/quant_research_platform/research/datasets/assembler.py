@@ -57,13 +57,13 @@ def assemble_research_dataset(
         dataset_spec=spec,
         processed_catalog=processed_catalog,
         time_window=time_window,
-        resource_policy=resource_policy,
     )
     chunks = _iter_joined_processed_chunks(
         layout=layout,
         dataset_spec=spec,
         processed_catalog=processed_catalog,
         time_window=time_window,
+        resource_policy=resource_policy,
     )
     artifact_root = layout.research_dataset_root(spec.market_id, spec.data_id)
     write_dataset(

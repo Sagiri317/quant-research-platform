@@ -315,6 +315,56 @@ def test_read_dataset_materialized_chunked_projection_and_time_window(
     assert all(isinstance(chunk, pd.DataFrame) for chunk in chunks)
 
 
+def test_read_dataset_reuses_one_candidate_file_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path, "read_plan_reuse")
+    write_dataset(root, _frame(), spec=_spec("read_plan_reuse"))
+    calls = 0
+    original = datasets._candidate_data_files
+
+    def spy_candidate_data_files(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(datasets, "_candidate_data_files", spy_candidate_data_files)
+
+    read_dataset(
+        root,
+        columns=["asset_id", "value"],
+        time_window=TimeWindow("2015-01-01", "2015-01-05"),
+    )
+
+    assert calls == 1
+
+
+def test_fingerprint_dataset_reuses_one_candidate_file_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _artifact_root(tmp_path, "fingerprint_plan_reuse")
+    write_dataset(root, _frame(), spec=_spec("fingerprint_plan_reuse"))
+    calls = 0
+    original = datasets._candidate_data_files
+
+    def spy_candidate_data_files(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(datasets, "_candidate_data_files", spy_candidate_data_files)
+
+    fingerprint_dataset(
+        root,
+        columns=["asset_id", "value"],
+        time_window=TimeWindow("2015-01-01", "2015-01-05"),
+    )
+
+    assert calls == 1
+
+
 def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
     root = _artifact_root(tmp_path)
     write_dataset(root, _frame(), spec=_spec())
