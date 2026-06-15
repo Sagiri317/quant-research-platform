@@ -116,3 +116,14 @@ near-term evaluation/model/prediction roadmap.
 | PRIV-01 | candidate / investigation-only | aggregate verification | `src/quant_research_platform/markets/implementations/a_share/verification/private_aggregate.py` is useful for private smoke/report aggregate comparison, but its lifecycle should be more formal. | Later connect it to the verification evidence workflow or migrate it to a clearer aggregate/report verification module while preserving the private-output boundary. |
 | RT-01 | candidate / investigation-only | runtime | `src/quant_research_platform/runtime/logging.py` is a thin runtime logging wrapper and may not justify a module. | Confirm there is no structured logging roadmap before any inline/delete decision. Do not change now. |
 | NAM-01 | closed | naming | Runtime resource sizing and market session planning now use distinct names. | `ResourceChunkPlanner` owns memory sizing; `SessionWindowPlanner` owns trading-session windows and halo planning. |
+
+## Agent Governance Follow-ups
+
+All items in this section are governance follow-ups. They are not business-code implementation approval.
+
+| ID | Status | Area | Finding | Follow-up |
+|---|---|---|---|---|
+| GOV-01 | done | governance/path authority | global `.codex/`, repo `.agents/`, and repo-local `.codex/` needed explicit separation. | Root `AGENTS.md`, `.agents/briefs`, and `agent-governance.md` now define `.agents/` as project governance root, global `.codex/` as read-only evidence, and repo-local `.codex` as draft-only unless approved. |
+| GOV-02 | open | `.run` tooling | `.run` remains ignored workflow/evidence tooling; handoff package safety should not rely on memory. | Keep `.run` official tools for handoff tasks and use tracked package safety script as an additional public-safe check. Do not make `.run` architecture source of truth. |
+| GOV-03 | draft-only | hooks/MCP/subagents/plugins | Codex/Claude adapters could enforce some gates, but they add trust, config, token, and platform cost. | Keep hooks/MCP/plugins/repo-local `.codex`/`.claude` as draft-only until repeated evidence justifies activation and sandbox tests pass. |
+| GOV-04 | open | external prompt templates | External Codex/GPT prompts may still reference deleted old template paths. | Update external prompt templates to use `task-modes.md` and the merged template names after this governance redesign is applied. |

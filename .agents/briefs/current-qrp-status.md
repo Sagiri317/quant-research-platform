@@ -1,120 +1,88 @@
-# Current QRP Status
+# QRP 当前状态简报
 
-P0/P1/P2/P3 architecture and rebuild follow-ups are tracked in
-`docs/architecture/open-issues-register.md`.
+本文件是日常任务的短上下文，不是 Git 日志、handoff 记录或完整架构文档。任务开始后仍必须以 `git status --short --branch`、代码、tests 和用户本轮指令为事实源。
 
-This is a short current task context primer. It is not a Git log, changelog, or
-replacement for `PROJECT_STATUS.md`.
+## 当前定位
 
-## Current Phase
+- 项目：QRP / Quant Research Platform，本地量化研究平台。
+- 当前基线：`feature/qrp-clean-rewrite`。
+- 当前阶段：Clean Rewrite `0.1.0`，Local Research Platform（本地研究平台）。
+- API/spec/contract version：`0.1`。
+- Python：`>=3.13,<3.14`；用户本地 Python 为 `3.13.14`，主要验证环境是 Windows 11 + conda `quantlab313`。macOS/Linux/WSL 是兼容目标，但未实际运行不能声称 PASS。
 
-- QRP Clean Rewrite `0.1.0`.
-- Current architecture style: Stable Core + High-Velocity Research Edge.
-- Current work stays local-only and centered on contracts, storage layout,
-  catalogs, A-share market semantics, research workflows, reports, and
-  private-boundary reliability.
+## 当前公共边界
 
-## Current Implementation Context
+公共 API：
 
-- Target source topology is `contracts`, `storage`, `catalog`, `sources`,
-  `markets`, `research`, `workflows`, `compute`, `agents`, `interfaces`,
-  `reports`, and `runtime`.
-- Project version is `0.1.0`; API/spec/contract version is `0.1`.
-- Official Python is `>=3.13,<3.14`; the primary verified environment is
-  Windows 11 + conda `quantlab313`. macOS/Linux are cross-platform compatible
-  targets, but PASS must not be claimed unless tests run there.
-- API paths use `/api/0.1/...`; do not add a version-letter prefix.
-- Current public CLI contract is `qrp catalog factors`,
-  `qrp catalog labels`, and `qrp research-datasets requirements`.
-- Source/interim/processed materialization is internal; private real-data
-  execution is not exposed through API/CLI in `0.1.0`.
-- Future-only public-contract work remains outside this slice:
-  `processed-data-runs`, `workflow-runs`, `report index/show`,
-  `RunRepository`, `ReportRepository`, and `private plugin`.
-- Active private local-data CLI is limited to
-  `qrp-private schema-inventory --project-root . --output <path>`.
-- Report writers derive paths from `StorageLayout + ReportSpec + run_id`.
-- Runtime resource planning is split from market-session planning:
-  `ResourceChunkPlanner` derives internal resource chunk sizes, while
-  `SessionWindowPlanner` derives trading-session core/read windows and halos.
-- Processed A-share materialization and research dataset assembly are
-  session-chunked internally; public API/CLI surfaces do not expose chunk-size,
-  year, partition, force, overwrite, or dependency-policy controls.
-- First-stage data-layer closure is the active sealed path:
-  `source/raw -> interim -> A-share processed facts -> A-share annotations/masks/context -> factor data -> label data -> research dataset`.
-- `catalog/profiles.py` is the research profile composition root. The public
-  builder is `research_profile()` returning `ResearchProfile`;
-  retired default-profile entrypoints are replaced and are no longer active
-  public entrypoints.
-- A-share owner modules are split by responsibility. Stable IDs remain in
-  `markets/implementations/a_share/ids.py`; calendar helpers remain in
-  `markets/implementations/a_share/calendar.py`.
-- `daily_panel` is the A-share fact layer. It does not emit derived
-  `eligible*`, `next_day*`, `can_enter`, or `can_exit` masks.
-- A-share trading semantics are owned by
-  `markets/implementations/a_share/processed/annotations.py`; labels,
-  evaluation, model, and prediction code must consume annotation outputs rather
-  than recomputing ST, suspension, limit, eligibility, or execution rules.
-- `ResearchDatasetSpec.base_input_data_id` is required. The assembler is
-  market-agnostic, reads the explicit base first, left-joins the other inputs
-  on `market_id, asset_id, timestamp`, validates strict input key coverage by
-  default, allows sparse input keys only through explicit `key_coverage`
-  opt-in, and orders output columns as primary key, features, labels, filters,
-  context.
-- A-share processed annotation, factor, and label materializers consume
-  `ProcessedDataSpec.processed_input_data_ids` through internal input
-  contracts. Current `price_volume` factors and `forward_return` labels use
-  `daily_panel` as their primary processed input by contract, not as an
-  implicit writer fallback.
-- Data-layer correctness evidence is evaluated from current semantics:
-  golden/reference tests, session-chunk parity, invariants, and key-diff
-  diagnostics. Older local materialized runs are comparison inputs only, not
-  correctness baselines.
-- Prior local private aggregate verification covered full historical
-  `daily_panel` aggregate coverage for `2014-01-01` through `2025-12-31`
-  without committed row-level output; full evidence/report regeneration remains
-  pending after the factor catalog refactor.
-- Evaluation and prediction evidence is 2014 smoke scope only; it is not a
-  2014-2025 full historical evaluation or prediction run.
-- Evaluation/model/prediction registries, diagnostics, workflow execute/resume,
-  dashboards, high-frequency, multi-market implementation, and paper/live
-  trading remain outside the first-stage data-layer closure. Demo
-  evaluation/model/prediction catalogs are research profile components only.
-- Full-horizon private rerun is not required for the first-stage structural
-  closure unless a generated run artifact explicitly records that it occurred.
-- `eligible[t]` is the single EOD-as-of-t ResearchDataset universe mask, known
-  after signal-date close and intended for t+1 open research prediction and
-  evaluation. Model and prediction default sample filtering may use
-  `eligible`, but they do not use `can_enter` or `can_exit`.
-- Before the next verification evidence/full-data run, processed panel as-of joins should fail
-  closed on conflicting duplicate `stock_master` and `market_cap` keys while
-  exact duplicate rows are deterministically deduped.
-- A-share is the first enabled market. Other markets are future design only.
-- `agents/` is proposal-only in this phase; it does not call external LLM APIs
-  and does not write private row-level data.
+```text
+GET /api/0.1/catalog/factors
+GET /api/0.1/catalog/labels
+GET /api/0.1/research-datasets/{dataset_id}/requirements
+```
 
-## Private Boundaries
+公共 CLI：
+
+```text
+qrp catalog factors
+qrp catalog labels
+qrp research-datasets requirements <dataset_id>
+```
+
+当前私有本地 CLI 仅限：
+
+```text
+qrp-private schema-inventory --project-root . --output <path>
+```
+
+不要把 source/interim/processed materialization、private evidence regeneration、evaluation/prediction execution 暴露成公共 API/CLI。
+
+## 当前 owner layer（归属层）
+
+```text
+contracts/   stable specs and IDs
+storage/     layout, dataset IO, manifests, partitions, checksums, storage privacy
+catalog/     queryable registries and research profile composition
+sources/     vendor/source ingestion into canonical interim data
+markets/     market semantics; first active implementation is a_share
+research/    factors, labels, datasets, evaluations, models, predictions, portfolios
+workflows/   local DAG planning/execution/checkpoints
+compute/     dataframe/tensor math helpers
+agents/      proposal-only planning/spec boundaries
+interfaces/  API/CLI adapters
+reports/     report catalog and private report artifact writers
+runtime/     privacy, sanitization, logging, profiling, errors, resources
+```
+
+新功能应优先局部落在 owner layer；如果必须跨 storage/evaluation/report/workflow/interfaces 大改，先停下做 architecture closure（架构收口）。
+
+## 当前 A-share / research 事实
+
+- A-share 是第一个启用市场；其他市场是未来设计，不新增空实现包。
+- `daily_panel` 是 A-share fact layer（事实层），不拥有派生 eligibility/execution masks。
+- A-share trading semantics（交易语义）归 `markets/implementations/a_share/processed/annotations.py`；下游 labels/evaluation/model/prediction 应消费 annotation outputs，不重新计算 ST、停牌、涨跌停、eligibility 或 execution 规则。
+- `ResearchDatasetSpec.base_input_data_id` 必填；assembler market-agnostic，先读 explicit base，再按 `market_id, asset_id, timestamp` left join 其他输入。
+- 当前 `price_volume` factors 和 `forward_return` labels 按合同使用 `daily_panel` 作为 primary processed input。
+- Evaluation / prediction evidence 当前应视为 smoke-scoped（烟雾范围）证据，不是 2014-2025 全历史模型/绩效证明。
+
+## 当前私有边界
 
 ```text
 data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
+data/research/a_share/
 reports/private_real/
 ```
 
-Do not expose raw/interim/processed private rows, private reports, vendor
-markers, local absolute paths, credentials, or stock-code samples.
+禁止暴露 raw/interim/processed 私有行、私有 reports、vendor markers、stock-code samples、本地绝对路径、credentials、tokens、raw tracebacks with local/private context。
 
-## Current Next Step
+## 当前治理层事实
 
-- Complete data-layer residual closure, formal verification, and handoff
-  package verification before commit/push.
+- 项目治理根是 `.agents/`，不是 repo-local `.codex/`。
+- global `.codex/` 只可作为用户显式提供的只读证据源。
+- repo-local `.codex/`、hooks、MCP、plugins、subagent configs 默认不启用；只能作为 optional/draft adapter 提案。
+- `.run/` 是 ignored local workflow/evidence/tooling layer。使用 `.run` 工具时必须保留 PASS/FAIL/NOT_RUN 真实性，不让 handoff 反向定义架构。
 
-## Hard Reminders
+## 当前禁止扩张
 
-- No frontend, deployment, scheduler, worker, model registry, feature store,
-  broker/exchange connector, external data API, paper trading, or live trading
-  in this clean rewrite slice.
-- Do not delete `AGENTS.md` or `.agents/`.
-- Run narrow tests first; broader checks come after the touched surface is
-  internally consistent.
+未经明确批准，不新增：frontend/deployment/scheduler/worker/model registry/feature store/external data API/external LLM API/broker/exchange connector/paper trading/live trading/public run API/public artifact lifecycle API/compatibility shim/legacy alias/public facade。

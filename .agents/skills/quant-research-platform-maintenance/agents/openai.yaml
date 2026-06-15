@@ -1,7 +1,0 @@
-interface:
-  display_name: "Quant Research Platform Maintenance"
-  short_description: "Maintain QRP Clean Rewrite 0.1 contracts, topology, reports, API/CLI, private boundaries, docs/status, and branch workflow"
-  default_prompt: "Use $quant-research-platform-maintenance for QRP Clean Rewrite maintenance: 0.1 contracts, storage/catalog boundaries, A-share data flow, research datasets, reports, API/CLI, private-boundary checks, docs/status sync, branch/commit/push workflow, and subagent coordination."
-
-policy:
-  allow_implicit_invocation: true

@@ -1,87 +1,75 @@
 ---
 name: quant-research-platform-maintenance
-description: Use for QRP Clean Rewrite maintenance: 0.1 contracts, source topology, storage/catalog boundaries, A-share data flow, research datasets, reports, API/CLI, private-boundary checks, docs/status sync, branch/commit/push workflow, and read-only subagent coordination.
+description: Use for QRP governance, maintenance, implementation routing, review, handoff packaging, merge gates, private-safety checks, public API/CLI contract checks, owner-layer routing, and Codex/GPT/Claude agent workflow discipline. Do not use for live trading, deployment, vendor login, broad private-data access, or external API integration.
 ---
 
 # Quant Research Platform Maintenance
 
-## Purpose
+This skill is the operational routing layer for QRP. It keeps code, tests, docs, `.agents/`, `.run` evidence, and final reports aligned without loading every rule into every task.
 
-Keep QRP Clean Rewrite `0.1.0` aligned across code, tests, docs, and `.agents`
-governance. Current public API/spec/contract version is `0.1`.
+## Load order
 
-This skill is a routing and safety layer. It does not approve private-data
-exposure, dependency installs, deployment, website UI work, scheduler/worker
-runtime, broker/exchange connectors, paper/live trading, or external LLM APIs.
+1. Read repo `AGENTS.md`.
+2. Read the user task envelope.
+3. For current facts, read `.agents/briefs/current-qrp-status.md`.
+4. For user principles, read `.agents/briefs/user-principles.md` when the task touches architecture, naming, governance, public surface, or cross-layer scope.
+5. Use `references/task-modes.md` to classify the task.
+6. Use `references/context-routing.md` to load only the smallest relevant context.
+7. Use `references/governance-gates.md` for mandatory gates.
+8. Use `references/contracts-and-verification.md` for public API/CLI, artifacts, data, report, private-safety, or verification semantics.
+9. Use `references/owner-layer-routing.md` before changing or routing P2/P3 items.
 
-## Start Here
+## Default execution settings
 
-1. Read project `AGENTS.md`.
-2. Read `.agents/briefs/current-qrp-status.md` for the current compact context.
-3. Use `references/context-routing.md` to choose the smallest relevant context.
-4. Use `references/contracts-and-verification.md` when a task touches 0.1
-   contracts, storage/catalog boundaries, source/market semantics, reports,
-   API/CLI, or private-boundary checks.
+- Language: final user-facing responses are Chinese by default; keep code, paths, commands, API routes, field names, and error strings in English.
+- Branch: use `feature/<task-name>` for implementation, architecture, docs/rules, or governance changes unless the user explicitly approves another branch.
+- Context: targeted `rg` first, then narrow file reads. Do not broad-load private data, generated outputs, old handoff packages, or all docs by default.
+- Subagents: review-only unless the user explicitly approves write-capable subagents. The main agent owns shared contracts, integration, verification, commits, pushes, and handoff truthfulness.
+- Hooks/MCP/plugins/repo-local `.codex`: draft-only unless explicitly approved.
 
-## Execution Settings
+## Task modes
 
-- Default response language: Chinese; keep code, paths, commands, field names,
-  API paths, and error strings in English.
-- Reasoning: use high reasoning for cross-layer implementation and highest
-  available reasoning for clean rewrite architecture or long goal work.
-- Branch plan: use `feature/<task-name>` for code, tests, architecture, API/CLI,
-  data-flow, reports, or governance work.
-- Worktree: use a project-local Git worktree when the main checkout must remain
-  clean or a long goal needs isolation.
-- Subagents: read-only unless the user explicitly approves otherwise.
-
-## Goal Workflow
-
-Use this only inside an approved bounded envelope.
-
-1. Confirm branch/worktree and clean status.
-2. Keep shared contracts under the main agent.
-3. Split read-only subagents by disjoint review scopes only.
-4. Implement in small slices.
-5. Run narrow tests after each slice.
-6. Before commit/push, run targeted pytest, `ruff`, `git diff --check`, and the
-   clean rewrite stale-term gate.
-7. Stop on unexplained regression, private-boundary ambiguity, new dependency,
-   deployment/trading scope, unapproved private-data action, or unclear blast
-   radius.
-
-## Private Output Checklist
-
-Apply this whenever a command, API handler, workflow, report writer, exporter,
-or metadata writer can persist row-level or private-derived output.
-
-- Private-derived row-level output must write only under approved private roots.
-- Prediction/evaluation/diagnostics/portfolio run outputs write under
-  `reports/private_real/<market>/<run_type>/<run_id>/`.
-- Metadata, stdout, stderr, API errors, reports, manifests, and summaries must
-  be sanitized.
-- Do not expose local absolute paths, raw/interim/processed row samples,
-  stock-code samples, vendor/source markers, credentials, tokens, or raw
-  tracebacks with local/private context.
-
-## Current Clean Topology
+Classify before editing:
 
 ```text
-contracts/
-storage/
-catalog/
-sources/
-markets/
-research/
-workflows/
-compute/
-agents/
-interfaces/
-reports/
-runtime/
+small-fix | standard-implementation | goal-closure | independent-review |
+handoff-packaging | merge-gate | release-gate | docs-status-sync |
+governance-redesign | apply-only-validation | ambiguous
 ```
 
-The first active market is `markets/implementations/a_share`. Public-facing
-objects use `data_id`, `research_dataset_id`, `workflow_id`, or `artifact_id`
-according to their layer semantics. Future markets and sources must not be
-added as empty packages.
+If classification is ambiguous, stop and ask. Do not convert a review, handoff, merge, packaging, or governance task into business implementation.
+
+## Required gates
+
+For every medium+ task, run the relevant gates from `references/governance-gates.md`:
+
+```text
+Task Router | Scope | Context | Owner Layer | Blast Radius | Red Test |
+Same Issue Family Scan | Artifact Truth | Public Surface | Private Safety |
+Memory/Performance Awareness | Docs/Status Sync | .run Tooling |
+Script Portability | Handoff | Final Truthfulness
+```
+
+## Truth rules
+
+- `PASS` means the check ran and passed.
+- `FAIL` means the check ran and failed; do not relabel it.
+- `NOT_RUN` means no run evidence exists.
+- If a command was not available, mark the command as `NOT_RUN` or `BLOCKED`, not `PASS`.
+- Final reports must list checks actually run, checks not run, and residual risks.
+
+## Private output rule
+
+Any command, API handler, workflow, report writer, exporter, package builder, metadata writer, or handoff tool that can persist private-derived row-level output must use the Private Safety Gate. Public-safe bundles must exclude private data and blocked file types.
+
+## Validation scripts
+
+Use the cross-platform scripts in `scripts/` when relevant:
+
+```text
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --help
+python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py --help
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --help
+```
+
+Scripts are deterministic helpers. They do not replace tests, code review, or task-specific validation.

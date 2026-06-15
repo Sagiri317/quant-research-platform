@@ -1,72 +1,79 @@
-# Contracts And Verification
+# Contracts and Verification / 合同与验证
 
-This is the change-prone contract map for QRP Clean Rewrite `0.1.0`.
+本文件是高变动 contract map（合同地图）。具体行为以代码、tests 和 schema/manifest contracts 为准；本文用于路由和 gates。
 
 ## Versions
 
 - Project version: `0.1.0`.
 - API/spec/contract version: `0.1`.
-- API paths use `/api/0.1/...`.
+- Python: `>=3.13,<3.14`.
 - Environment contract: `docs/architecture/environment-contract.md`.
 
-## Source Map
-
-| Surface | Start here |
-|---|---|
-| Stable definitions/specs | `src/quant_research_platform/contracts/` |
-| Storage layout/manifests/privacy | `src/quant_research_platform/storage/` |
-| Catalog registries | `src/quant_research_platform/catalog/` |
-| Internal provider adapters | `src/quant_research_platform/sources/` |
-| A-share semantics | `src/quant_research_platform/markets/implementations/a_share/` |
-| Research domain | `src/quant_research_platform/research/` |
-| Workflows | `src/quant_research_platform/workflows/` |
-| Compute backends | `src/quant_research_platform/compute/` |
-| Proposal boundaries | `src/quant_research_platform/agents/` |
-| API and CLI | `src/quant_research_platform/interfaces/` |
-| Reports | `src/quant_research_platform/reports/` |
-| Runtime safety | `src/quant_research_platform/runtime/` |
-
-## API Contract
+## Public API / CLI contract
 
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
-```
 
-## CLI Contract
-
-```text
 qrp catalog factors
 qrp catalog labels
 qrp research-datasets requirements <dataset_id>
 ```
 
-Future-only public contract items: `processed-data-runs`, `workflow-runs`,
-`report index/show`, `RunRepository`, `ReportRepository`, and `private plugin`.
+Future-only public items are not active contracts: `processed-data-runs`, `workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`, `private plugin`, universal artifact lifecycle API, model registry, feature store.
 
-Private local schema inventory is exposed only as:
+Private local CLI is narrow:
 
 ```text
 qrp-private schema-inventory --project-root . --output <path>
 ```
 
-## Private Roots
+## Private roots
 
 ```text
 data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
+data/research/a_share/
 reports/private_real/
 ```
 
-Do not expose local absolute paths, private rows, stock-code samples,
-vendor markers, credentials, tokens, or raw tracebacks with local/private
-context.
+Public-safe outputs must not include row-level private data, raw vendor exports, stock-code samples, local absolute paths, vendor markers, credentials, tokens, or raw tracebacks with local/private context.
 
-## Verification
+## Artifact truth statuses
 
-Use the setup and common check commands in `README.md` and the environment
-contract in `docs/architecture/environment-contract.md`. Run targeted pytest,
-`ruff`, `git diff --check`, and the clean rewrite stale-term gate before
-commit. Only claim PASS for OS/Python/dependency combinations actually run.
+Use only these meanings:
+
+| Status | Meaning |
+|---|---|
+| `PASS` | Check ran and passed. |
+| `FAIL` | Check ran and failed. Keep failure visible. |
+| `NOT_RUN` | Check did not run, or evidence is absent. |
+| `NOT_APPLICABLE` | Check is structurally irrelevant to this task. |
+| `BLOCKED` | Check was required but blocked by environment, dependency, approval, or missing tool. |
+
+Forbidden: marking skipped checks as `PASS`; converting official compare `FAIL` to `PASS`; presenting smoke-scoped evaluation/prediction evidence as full-horizon evidence.
+
+## Verification ladder
+
+1. Pre-edit: `git status --short --branch`; classify task mode and owner layer.
+2. Red test / expectation: when changing behavior, identify the failing or missing test/guard before implementation.
+3. Narrow checks: direct unit/contract tests for touched owner layer.
+4. Same issue family scan: `rg` same-family terms across owner layer and direct dependents.
+5. Public surface gate: ensure API/CLI/schema/report/display surfaces did not expand unless approved.
+6. Private safety gate: no private data, blocked file types, or local paths in outputs.
+7. Docs/status sync gate: update only active docs that reflect changed current truth.
+8. Final truthfulness gate: report run/not-run/fail status exactly.
+
+## Common commands
+
+Use the commands documented in `README.md` and task-specific tests. For governance-only changes, use:
+
+```text
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only
+python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py <zip-or-dir>
+git diff --check
+```
+
+Only claim OS/platform PASS after running on that OS/platform.
