@@ -26,6 +26,7 @@ from quant_research_platform.runtime.resources import (
     ChunkAxis,
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
+    active_runtime_resource_policy,
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -45,6 +46,7 @@ def assemble_research_dataset(
     processed_catalog: ProcessedDataCatalog,
     dataset_id: str,
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     """Assemble one registered research dataset from processed inputs."""
 
@@ -55,6 +57,7 @@ def assemble_research_dataset(
         dataset_spec=spec,
         processed_catalog=processed_catalog,
         time_window=time_window,
+        resource_policy=resource_policy,
     )
     chunks = _iter_joined_processed_chunks(
         layout=layout,
@@ -78,6 +81,7 @@ def _iter_joined_processed_chunks(
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy | None,
 ) -> Iterator[pd.DataFrame]:
     base_data_id = _base_input_data_id(dataset_spec)
     base_spec = processed_catalog.get(base_data_id)
@@ -101,9 +105,8 @@ def _iter_joined_processed_chunks(
         time_window=time_window,
         base_data_id=base_data_id,
     )
-    resource_plan = ResourceChunkPlanner(
-        RuntimeResourcePolicy.from_environment()
-    ).plan_sessions(
+    policy = resource_policy or active_runtime_resource_policy()
+    resource_plan = ResourceChunkPlanner(policy).plan_sessions(
         axis=ChunkAxis.TIME,
         session_count=len(sessions),
         estimated_bytes_per_session=estimated,

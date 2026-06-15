@@ -51,6 +51,7 @@ from quant_research_platform.runtime.resources import (
     ChunkAxis,
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
+    active_runtime_resource_policy,
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
@@ -93,7 +94,7 @@ def materialize_processed_data(
 ) -> dict[str, DatasetInspection]:
     """Materialize registered A-share processed datasets."""
 
-    policy = resource_policy or RuntimeResourcePolicy.from_environment()
+    policy = resource_policy or active_runtime_resource_policy()
     if (data_ids is None) == (kinds is None):
         raise ValueError("data_ids_xor_kinds_required")
     catalog = a_share_processed_catalog()

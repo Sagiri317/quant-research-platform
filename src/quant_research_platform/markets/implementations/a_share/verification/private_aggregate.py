@@ -31,6 +31,8 @@ from quant_research_platform.runtime.resources import (
     ChunkAxis,
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -143,17 +145,20 @@ def generate_public_safe_aggregate_evidence(
     project_root: Path = Path("."),
     *,
     generated_at: datetime | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> dict[str, Any]:
     """Generate public-safe aggregate evidence from local private artifacts."""
 
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
+    policy = resource_policy or active_runtime_resource_policy()
     summary_cache: _SummaryCache = {}
-    return _generate_public_safe_aggregate_evidence_with_cache(
-        root,
-        generated_at=generated_at,
-        summary_cache=summary_cache,
-    )
+    with runtime_resource_policy_scope(policy):
+        return _generate_public_safe_aggregate_evidence_with_cache(
+            root,
+            generated_at=generated_at,
+            summary_cache=summary_cache,
+        )
 
 
 def generate_private_verification_summary(
@@ -161,17 +166,21 @@ def generate_private_verification_summary(
     *,
     evidence_payload: dict[str, Any] | None = None,
     generated_at: datetime | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> dict[str, Any]:
     """Generate a public-safe inventory summary for sealed dataset artifacts."""
 
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
+    policy = resource_policy or active_runtime_resource_policy()
     if evidence_payload is None:
         evidence_payload = generate_public_safe_aggregate_evidence(
             root,
             generated_at=generated_at,
+            resource_policy=policy,
         )
-    inventory = _dataset_inventory(root, summary_cache={})
+    with runtime_resource_policy_scope(policy):
+        inventory = _dataset_inventory(root, summary_cache={})
     covered_roots = [
         item["logical_root"]
         for item in inventory
@@ -211,21 +220,24 @@ def _generate_private_aggregate_payloads(
     project_root: Path = Path("."),
     *,
     generated_at: datetime | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
+    policy = resource_policy or active_runtime_resource_policy()
     summary_cache: _SummaryCache = {}
-    evidence_payload = _generate_public_safe_aggregate_evidence_with_cache(
-        root,
-        generated_at=generated_at,
-        summary_cache=summary_cache,
-    )
-    inventory_payload = _generate_private_verification_summary_with_cache(
-        root,
-        evidence_payload=evidence_payload,
-        generated_at=generated_at,
-        summary_cache=summary_cache,
-    )
+    with runtime_resource_policy_scope(policy):
+        evidence_payload = _generate_public_safe_aggregate_evidence_with_cache(
+            root,
+            generated_at=generated_at,
+            summary_cache=summary_cache,
+        )
+        inventory_payload = _generate_private_verification_summary_with_cache(
+            root,
+            evidence_payload=evidence_payload,
+            generated_at=generated_at,
+            summary_cache=summary_cache,
+        )
     return evidence_payload, inventory_payload
 
 
@@ -566,18 +578,34 @@ def _summarize_area_input(
     )
 
 
-def _summarize_generated_full_daily_panel(project_root: Path) -> AggregateSummary:
-    return _summarize_frames(_iter_generated_full_daily_panel_chunks(project_root))
+def _summarize_generated_full_daily_panel(
+    project_root: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> AggregateSummary:
+    return _summarize_frames(
+        _iter_generated_full_daily_panel_chunks(
+            project_root,
+            resource_policy=resource_policy,
+        )
+    )
 
 
 def _iter_generated_full_daily_panel_chunks(
     project_root: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
-    yield from _iter_generated_full_daily_panel_session_chunks(project_root)
+    yield from _iter_generated_full_daily_panel_session_chunks(
+        project_root,
+        resource_policy=resource_policy,
+    )
 
 
 def _iter_generated_full_daily_panel_session_chunks(
     project_root: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog as processed_catalog,
@@ -609,9 +637,8 @@ def _iter_generated_full_daily_panel_session_chunks(
         1,
         ceil(estimated_bytes / max(1, len(target_sessions))),
     )
-    resource_plan = ResourceChunkPlanner(
-        RuntimeResourcePolicy.from_environment()
-    ).plan_sessions(
+    policy = resource_policy or active_runtime_resource_policy()
+    resource_plan = ResourceChunkPlanner(policy).plan_sessions(
         axis=ChunkAxis.TIME,
         session_count=len(target_sessions),
         estimated_bytes_per_session=estimated_bytes_per_session,
@@ -980,7 +1007,7 @@ def _key_hash_blocks(
 
 def _hash_block_rows(*, value_width: int) -> int:
     try:
-        effective_bytes = RuntimeResourcePolicy.from_environment().effective_chunk_bytes
+        effective_bytes = active_runtime_resource_policy().effective_chunk_bytes
     except Exception:
         effective_bytes = 16 * 1024 * 1024
     bytes_per_row = max(1, value_width) * HASH_BLOCK_BYTES_PER_VALUE

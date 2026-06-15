@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from math import ceil
@@ -108,6 +110,22 @@ class RuntimeResourcePolicy:
     def require_valid_chunk_budget(self) -> None:
         _ = self.effective_chunk_bytes
 
+    def to_payload(self) -> dict[str, int | float | None]:
+        """Return public-safe resource policy metadata for evidence summaries."""
+
+        return {
+            "available_memory_bytes": self.available_memory_bytes,
+            "memory_budget_fraction": self.memory_budget_fraction,
+            "memory_budget_bytes": self.memory_budget_bytes,
+            "memory_budget_bytes_override": self.memory_budget_bytes_override,
+            "chunk_target_fraction": self.chunk_target_fraction,
+            "chunk_target_cap_bytes": self.chunk_target_cap_bytes,
+            "chunk_target_bytes": self._resolved_chunk_target_bytes(),
+            "effective_chunk_bytes": self.effective_chunk_bytes,
+            "memory_safety_factor": self.memory_safety_factor,
+            "min_free_disk_bytes": self.min_free_disk_bytes,
+        }
+
     def has_minimum_free_disk(self, path: Path) -> bool:
         candidate = Path(path)
         while not candidate.exists() and candidate != candidate.parent:
@@ -128,6 +146,33 @@ class RuntimeResourcePolicy:
         )
 
 
+_ACTIVE_RUNTIME_RESOURCE_POLICY: ContextVar[RuntimeResourcePolicy | None] = (
+    ContextVar("qrp_active_runtime_resource_policy", default=None)
+)
+
+
+def active_runtime_resource_policy() -> RuntimeResourcePolicy:
+    """Return the active runtime resource snapshot or create one."""
+
+    policy = _ACTIVE_RUNTIME_RESOURCE_POLICY.get()
+    if policy is not None:
+        return policy
+    return RuntimeResourcePolicy.from_environment()
+
+
+@contextmanager
+def runtime_resource_policy_scope(
+    policy: RuntimeResourcePolicy,
+) -> Iterator[RuntimeResourcePolicy]:
+    """Temporarily make one resource policy snapshot active."""
+
+    token = _ACTIVE_RUNTIME_RESOURCE_POLICY.set(policy)
+    try:
+        yield policy
+    finally:
+        _ACTIVE_RUNTIME_RESOURCE_POLICY.reset(token)
+
+
 @dataclass(frozen=True)
 class ResourceChunkPlan:
     """Resource-derived chunk target for one semantic axis."""
@@ -144,7 +189,7 @@ class ResourceChunkPlanner:
     """Plan resource chunk sizes from runtime policy and data shape."""
 
     def __init__(self, policy: RuntimeResourcePolicy | None = None) -> None:
-        self.policy = policy or RuntimeResourcePolicy.from_environment()
+        self.policy = policy or active_runtime_resource_policy()
 
     def plan_sessions(
         self,

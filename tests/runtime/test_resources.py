@@ -9,6 +9,8 @@ from quant_research_platform.runtime.resources import (
     ResourceChunkPlan,
     ResourceChunkPlanner,
     RuntimeResourcePolicy,
+    active_runtime_resource_policy,
+    runtime_resource_policy_scope,
 )
 
 MIB = 1024 * 1024
@@ -28,6 +30,34 @@ def test_runtime_resource_policy_uses_required_defaults() -> None:
     assert policy.memory_budget_bytes == 8 * GIB
     assert policy.chunk_target_bytes == 2 * GIB
     assert policy.effective_chunk_bytes == int(2 * GIB * 0.60)
+
+
+def test_runtime_resource_policy_payload_and_scope_are_public_safe() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=10 * GIB,
+        environ={"QRP_MEMORY_BUDGET_MB": "1024"},
+    )
+
+    payload = policy.to_payload()
+
+    assert payload == {
+        "available_memory_bytes": 10 * GIB,
+        "memory_budget_fraction": 0.80,
+        "memory_budget_bytes": 1024 * MIB,
+        "memory_budget_bytes_override": 1024 * MIB,
+        "chunk_target_fraction": 0.30,
+        "chunk_target_cap_bytes": 2 * GIB,
+        "chunk_target_bytes": int(1024 * MIB * 0.30),
+        "effective_chunk_bytes": int(1024 * MIB * 0.30 * 0.60),
+        "memory_safety_factor": 0.60,
+        "min_free_disk_bytes": 0,
+    }
+    assert all("path" not in key for key in payload)
+
+    with runtime_resource_policy_scope(policy):
+        assert active_runtime_resource_policy() is policy
+
+    assert active_runtime_resource_policy() is not policy
 
 
 def test_memory_budget_override_drives_derived_chunk_target() -> None:

@@ -190,20 +190,28 @@ def test_qrp_private_schema_inventory_empty_roots_fail_without_output_file(
     assert not output.exists()
 
 
-def test_qrp_private_schema_inventory_help_exposes_only_schema_inventory() -> None:
+def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     runner = CliRunner()
 
     root_help = runner.invoke(private_app, ["--help"])
-    command_help = runner.invoke(private_app, ["schema-inventory", "--help"])
+    schema_inventory_help = runner.invoke(
+        private_app,
+        ["schema-inventory", "--help"],
+    )
+    evidence_run_help = runner.invoke(private_app, ["evidence", "run", "--help"])
 
     assert root_help.exit_code == 0
     assert "schema-inventory" in root_help.output
     assert "evidence" in root_help.output
     assert "private-rebuild" not in root_help.output
-    assert command_help.exit_code == 0
-    assert "--project-root" in command_help.output
-    assert "--output" in command_help.output
-    assert "--overwrite" not in command_help.output
+    assert schema_inventory_help.exit_code == 0
+    assert "--project-root" in schema_inventory_help.output
+    assert "--output" in schema_inventory_help.output
+    assert "--overwrite" not in schema_inventory_help.output
+    assert evidence_run_help.exit_code == 0
+    assert "--output-root" in evidence_run_help.output
+    assert "--start-date" in evidence_run_help.output
+    assert "--end-date" in evidence_run_help.output
 
 
 def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> None:

@@ -37,6 +37,10 @@ from quant_research_platform.runtime.execution_metrics import (
     write_execution_metrics_csv,
     write_execution_metrics_json,
 )
+from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -87,6 +91,7 @@ def run_verification_evidence(
     run_id = config.run_id or output_root.name
     layout = VerificationEvidenceLayout.from_output_root(output_root)
     _create_layout_directories(layout)
+    resource_policy = RuntimeResourcePolicy.from_environment()
     atomic_write_json(
         layout.config_root / "run_config.json",
         {
@@ -103,12 +108,37 @@ def run_verification_evidence(
             "effective_windows": effective_windows,
             "output_root": _logical_path(output_root),
             "replace_output": config.replace_output,
+            "runtime_resource_policy": resource_policy.to_payload(),
             "workflow_id": _OWNERSHIP_MARKER,
             "contract_version": _OWNERSHIP_CONTRACT_VERSION,
             "created_at": _utc_now(),
         },
     )
 
+    policy_scope = runtime_resource_policy_scope(resource_policy)
+    policy_scope.__enter__()
+    try:
+        return _run_verification_evidence_with_policy(
+            config=config,
+            effective_windows=effective_windows,
+            output_root=output_root,
+            run_id=run_id,
+            layout=layout,
+            resource_policy=resource_policy,
+        )
+    finally:
+        policy_scope.__exit__(None, None, None)
+
+
+def _run_verification_evidence_with_policy(
+    *,
+    config: VerificationEvidenceRunConfig,
+    effective_windows: dict[str, str | None],
+    output_root: Path,
+    run_id: str,
+    layout: VerificationEvidenceLayout,
+    resource_policy: RuntimeResourcePolicy,
+) -> VerificationEvidenceRunResult:
     recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=output_root)
     time_window = TimeWindow(config.start_date, config.end_date)
@@ -147,6 +177,7 @@ def run_verification_evidence(
             processed_catalog=catalogs.processed,
             dataset_id="a_share_price_volume_forward_returns",
             time_window=time_window,
+            resource_policy=resource_policy,
         )
     with recorder.record("evaluation_generation", logical_layer="evidence"):
         evaluation_root = run_evaluation_from_research_dataset(
@@ -262,6 +293,7 @@ def run_verification_evidence(
         timings=timings_payload,
         validation_summary=validation_summary,
         output_root=output_root,
+        runtime_resource_policy=resource_policy.to_payload(),
     )
     write_verification_evidence_summary_json(
         layout.evidence_root / "evidence_summary.json",

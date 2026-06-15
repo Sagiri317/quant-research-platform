@@ -21,6 +21,8 @@ from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.reports.verification_evidence import (
     VerificationEvidenceLayout,
 )
+from quant_research_platform.runtime import resources as resource_module
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.workflows import verification_evidence as module
 from quant_research_platform.workflows.verification_evidence import (
@@ -29,6 +31,8 @@ from quant_research_platform.workflows.verification_evidence import (
 )
 
 LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
+MIB = 1024 * 1024
+GIB = 1024 * 1024 * 1024
 
 
 def test_verification_evidence_workflow_rejects_existing_output_root(tmp_path):
@@ -310,6 +314,95 @@ def test_verification_evidence_workflow_resolves_independent_windows(
         "prediction_test_start": "2018-01-01",
         "prediction_test_end": "2019-12-31",
     }
+
+
+def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    snapshots: list[RuntimeResourcePolicy] = []
+    from_environment_calls = 0
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=10 * GIB,
+        memory_budget_fraction=0.5,
+        chunk_target_bytes=128 * MIB,
+        memory_safety_factor=0.5,
+    )
+
+    def fake_from_environment() -> RuntimeResourcePolicy:
+        nonlocal from_environment_calls
+        from_environment_calls += 1
+        return policy
+
+    def capture_policy() -> None:
+        snapshots.append(resource_module.active_runtime_resource_policy())
+
+    def import_interim(layout, raw_root, start_date, end_date):
+        del raw_root, start_date, end_date
+        capture_policy()
+        artifact_root = (
+            layout.project_root
+            / "data"
+            / "interim"
+            / "csmar"
+            / "daily_market"
+        )
+        _persist_fake_artifact(artifact_root, "daily_market", "interim")
+        return type("Result", (), {"artifact_roots": {"daily_market": artifact_root}})()
+
+    def build_processed(layout, source_id, time_window, kinds):
+        del source_id, time_window, kinds
+        capture_policy()
+        artifact_root = (
+            layout.project_root
+            / "data"
+            / "processed"
+            / "a_share"
+            / "factor"
+            / "price_volume"
+        )
+        _persist_fake_artifact(artifact_root, "price_volume", "processed")
+        return {"price_volume": inspect_dataset(artifact_root)}
+
+    def assemble_dataset(**kwargs):
+        capture_policy()
+        return _persist_fake_research_root(**kwargs)
+
+    monkeypatch.setattr(
+        resource_module.RuntimeResourcePolicy,
+        "from_environment",
+        staticmethod(fake_from_environment),
+    )
+    monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    monkeypatch.setattr(
+        module,
+        "run_evaluation_from_research_dataset",
+        lambda **kwargs: capture_policy() or Path("evaluation"),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_prediction_from_research_dataset",
+        lambda **kwargs: capture_policy() or Path("prediction"),
+    )
+
+    output_root = tmp_path / "verification-output" / "s-policy"
+    result = run_verification_evidence(
+        VerificationEvidenceRunConfig(
+            output_root=output_root,
+            start_date="2014-01-01",
+            end_date="2016-12-31",
+            profile=_profile_with_materializers(import_interim, build_processed),
+        )
+    )
+    run_config = json.loads(
+        (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
+    )
+
+    assert result.status == "PASS"
+    assert from_environment_calls == 1
+    assert snapshots == [policy, policy, policy, policy, policy]
+    assert run_config["runtime_resource_policy"] == policy.to_payload()
+    assert result.summary["runtime_resource_policy"] == policy.to_payload()
 
 
 def test_verification_evidence_workflow_runs_injected_generation_and_writes_artifacts(

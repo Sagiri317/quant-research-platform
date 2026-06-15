@@ -139,10 +139,15 @@ APPROVED_WRITER_MODULES = {
 }
 
 PUBLIC_CONTRACT_DOCS = (
+    Path("AGENTS.md"),
     Path("README.md"),
     Path("docs/api/README.md"),
     Path("docs/code-map/platform-flow.md"),
     Path(".agents/briefs/current-qrp-status.md"),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/references/"
+        "contracts-and-verification.md"
+    ),
     Path("PROJECT_STATUS.md"),
 )
 
@@ -263,6 +268,14 @@ FUTURE_PUBLIC_TODO_TERMS = (
 )
 PRIVATE_LOCAL_CLI_LINES = (
     "qrp-private schema-inventory --project-root . --output <path>",
+    "qrp-private evidence run",
+    "private local verification harness",
+    "not a public CLI",
+    "not a public execution mode",
+    "not a public evaluate, predict, or report command",
+    "not paper or live trading",
+    "does not promise returns",
+    "does not output row-level private data",
 )
 
 FORBIDDEN_WRITER_METHODS = {

@@ -28,7 +28,17 @@ qrp catalog labels
 qrp research-datasets requirements <dataset_id>
 ```
 
-`qrp-private schema-inventory --project-root . --output <path>` 是窄 private local CLI（私有本地命令行），不代表公共接口扩张。
+Approved private local CLI（获批私有本地命令行）只有：
+
+```text
+qrp-private schema-inventory --project-root . --output <path>
+qrp-private evidence run
+```
+
+`qrp-private evidence run` 是 private local verification harness，用于本地
+smoke/evidence generation；不是 public CLI；不是 public execution mode；不是
+public evaluate、predict 或 report command；不是 paper/live trading；不承诺收益；
+不输出 row-level private data。
 
 ## 治理入口
 

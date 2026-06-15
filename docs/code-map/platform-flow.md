@@ -98,7 +98,10 @@ the same thing as public-safe aggregate evidence.
 The existing private verification evidence harness is exposed through
 `qrp-private evidence run` for local smoke/evidence generation only. It supports
 optional internal evaluation and prediction window overrides, but this does not
-create public `evaluate`, `predict`, or `report` commands.
+create public `evaluate`, `predict`, or `report` commands. It is a private local
+verification harness, not a public CLI, not a public execution mode, not a
+public evaluate, predict, or report command, not paper or live trading, does not
+promise returns, and does not output row-level private data.
 
 ## Narrow Follow-up Notes
 

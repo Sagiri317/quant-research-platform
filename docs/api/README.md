@@ -67,15 +67,21 @@ The following are not active `0.1.0` public contracts: `processed-data-runs`,
 
 ## Private Local CLI
 
-The only active private local-data CLI command is:
+The approved private local CLI commands are:
 
 ```text
 qrp-private schema-inventory --project-root . --output <path>
+qrp-private evidence run
 ```
 
-It writes sanitized aggregate schema metadata for sealed dataset roots. It does
-not scan `data/raw` or `reports/private_real`, and it does not run private
-import, private rebuild, or verification evidence regeneration.
+`qrp-private schema-inventory` writes sanitized aggregate schema metadata for
+sealed dataset roots. It does not scan `data/raw` or `reports/private_real`, and
+it does not run private import or private rebuild.
+
+`qrp-private evidence run` is a private local verification harness for local
+smoke/evidence generation. It is not a public CLI, not a public execution mode,
+not a public evaluate, predict, or report command, not paper or live trading,
+does not promise returns, and does not output row-level private data.
 
 ## Privacy
 
