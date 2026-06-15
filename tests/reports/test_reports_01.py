@@ -167,6 +167,57 @@ def test_report_artifact_writers_do_not_accept_output_root() -> None:
     )
 
 
+def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) -> None:
+    frame = _two_row_prediction_frame()
+    materialized_root = write_prediction_report_artifacts(
+        frame,
+        spec=_prediction_spec(),
+        report_spec=_prediction_report_spec(),
+        layout=StorageLayout(project_root=tmp_path / "materialized"),
+    )
+    chunked_writer = (
+        report_artifacts_module._write_prediction_report_artifacts_from_chunks
+    )
+    chunked_root = chunked_writer(
+        (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
+        spec=_prediction_spec(),
+        report_spec=_prediction_report_spec(),
+        layout=StorageLayout(project_root=tmp_path / "chunked"),
+        model_metadata=frame.attrs["model_metadata"],
+        prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
+    )
+
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(materialized_root / "prediction.parquet"),
+        pd.read_parquet(chunked_root / "prediction.parquet"),
+    )
+    assert json.loads((chunked_root / "manifest.json").read_text(encoding="utf-8")) == (
+        json.loads((materialized_root / "manifest.json").read_text(encoding="utf-8"))
+    )
+
+
+def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> None:
+    frame = _prediction_frame()
+    with pytest.raises(ValueError, match="duplicate_prediction_keys"):
+        report_artifacts_module._write_prediction_report_artifacts_from_chunks(
+            (frame.copy(), frame.copy()),
+            spec=_prediction_spec(),
+            report_spec=_prediction_report_spec(),
+            layout=StorageLayout(project_root=tmp_path),
+            model_metadata=frame.attrs["model_metadata"],
+            prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
+        )
+
+    assert not (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "prediction"
+        / "pred-run"
+    ).exists()
+
+
 def test_report_manifest_payload_builders_are_private_and_local() -> None:
     assert hasattr(report_artifacts_module, "_stage_profile_report_manifest_payload")
     assert hasattr(report_artifacts_module, "_prediction_report_manifest_payload")
@@ -483,6 +534,20 @@ def _prediction_frame() -> pd.DataFrame:
         "feature_columns": ["mom_20d"],
         "feature_count": 1,
         "prediction_column": "prediction",
+    }
+    return frame
+
+
+def _two_row_prediction_frame() -> pd.DataFrame:
+    first = _prediction_frame()
+    second = first.copy()
+    second["asset_id"] = ["asset-b"]
+    second["prediction"] = [0.35]
+    frame = pd.concat([first, second], ignore_index=True)
+    frame.attrs["model_metadata"] = dict(first.attrs["model_metadata"])
+    frame.attrs["prediction_metadata"] = {
+        **first.attrs["prediction_metadata"],
+        "prediction_rows": 2,
     }
     return frame
 

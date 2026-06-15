@@ -10,7 +10,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research._memory import iter_time_sized_frames
+from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.runtime.resources import ChunkAxis
 
@@ -98,55 +98,54 @@ def _fit_linear_coefficients(
     train_start: str | None = None
     train_end: str | None = None
 
-    for frame in frames:
-        for chunk in iter_time_sized_frames(
-            frame,
-            timestamp_column="timestamp",
-            axis=ChunkAxis.TIME,
-        ):
-            chunk_count += 1
-            filtered, metadata = apply_filter_mode(
-                chunk,
-                mode=spec.sample_filter_mode,
-                metadata_key="sample_filter_mode",
-            )
-            rows_input += int(metadata["rows_input"])
-            rows_after_filter += int(metadata["rows_after_filter_mode"])
-            filter_columns_used = list(metadata["filter_columns_used"])
-            filter_definition = str(metadata["filter_definition"])
-            usable = filtered.dropna(
-                subset=[*spec.feature_columns, spec.label_column]
-            ).loc[:, list(fit_columns)]
-            if first_usable is None:
-                first_usable = usable
-            elif not first_usable.empty:
-                first_usable = pd.DataFrame()
-            y = usable.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
-            row_count += int(len(y))
-            if len(y) == 0:
-                continue
-            usable_timestamps = pd.to_datetime(usable["timestamp"], errors="coerce")
-            chunk_start = _date_string(usable_timestamps.min())
-            chunk_end = _date_string(usable_timestamps.max())
-            train_start = (
-                chunk_start
-                if train_start is None
-                else min(train_start, chunk_start)
-            )
-            train_end = (
-                chunk_end
-                if train_end is None
-                else max(train_end, chunk_end)
-            )
-            chunk_design = _linear_design_matrix(usable, spec)
-            if r_factor is None or qt_y is None:
-                stacked_design = chunk_design
-                stacked_y = y
-            else:
-                stacked_design = np.vstack([r_factor, chunk_design])
-                stacked_y = np.concatenate([qt_y, y])
-            q_factor, r_factor = np.linalg.qr(stacked_design, mode="reduced")
-            qt_y = q_factor.T @ stacked_y
+    for chunk in iter_complete_time_sized_frames(
+        iter(frames),
+        timestamp_column="timestamp",
+        axis=ChunkAxis.TIME,
+    ):
+        chunk_count += 1
+        filtered, metadata = apply_filter_mode(
+            chunk,
+            mode=spec.sample_filter_mode,
+            metadata_key="sample_filter_mode",
+        )
+        rows_input += int(metadata["rows_input"])
+        rows_after_filter += int(metadata["rows_after_filter_mode"])
+        filter_columns_used = list(metadata["filter_columns_used"])
+        filter_definition = str(metadata["filter_definition"])
+        usable = filtered.dropna(
+            subset=[*spec.feature_columns, spec.label_column]
+        ).loc[:, list(fit_columns)]
+        if first_usable is None:
+            first_usable = usable
+        elif not first_usable.empty:
+            first_usable = pd.DataFrame()
+        y = usable.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
+        row_count += int(len(y))
+        if len(y) == 0:
+            continue
+        usable_timestamps = pd.to_datetime(usable["timestamp"], errors="coerce")
+        chunk_start = _date_string(usable_timestamps.min())
+        chunk_end = _date_string(usable_timestamps.max())
+        train_start = (
+            chunk_start
+            if train_start is None
+            else min(train_start, chunk_start)
+        )
+        train_end = (
+            chunk_end
+            if train_end is None
+            else max(train_end, chunk_end)
+        )
+        chunk_design = _linear_design_matrix(usable, spec)
+        if r_factor is None or qt_y is None:
+            stacked_design = chunk_design
+            stacked_y = y
+        else:
+            stacked_design = np.vstack([r_factor, chunk_design])
+            stacked_y = np.concatenate([qt_y, y])
+        q_factor, r_factor = np.linalg.qr(stacked_design, mode="reduced")
+        qt_y = q_factor.T @ stacked_y
 
     row_counts = {
         "rows_input": rows_input,

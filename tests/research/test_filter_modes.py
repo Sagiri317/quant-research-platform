@@ -345,6 +345,82 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
     assert result.diagnostics == expected.diagnostics
 
 
+def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.models import baseline as model_baseline
+
+    frame = _filter_frame()
+    spec = ModelSpec(
+        model_id="linear_split_timestamp",
+        model_family="linear",
+        feature_columns=("factor",),
+        label_column="label",
+    )
+    expected = model_baseline._fit_linear_baseline_result_from_frames((frame,), spec)
+    original_filter = model_baseline.apply_filter_mode
+    filtered_chunk_rows: list[int] = []
+
+    def wrapped_filter(frame, *, mode, metadata_key):
+        filtered_chunk_rows.append(len(frame))
+        return original_filter(frame, mode=mode, metadata_key=metadata_key)
+
+    monkeypatch.setattr(model_baseline, "apply_filter_mode", wrapped_filter)
+    result = model_baseline._fit_linear_baseline_result_from_frames(
+        (frame.iloc[:3], frame.iloc[3:]),
+        spec,
+    )
+
+    assert filtered_chunk_rows == [len(frame)]
+    assert result.coefficients.tolist() == pytest.approx(
+        expected.coefficients.tolist()
+    )
+    assert result.metadata == expected.metadata
+
+
+def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.predictions import bundle as bundle_module
+
+    frame = _filter_frame().drop(columns=["label"])
+    spec = PredictionSpec(
+        prediction_id="pred_split_timestamp",
+        model_id="linear_split_timestamp",
+        research_dataset_id="demo_filter",
+        prediction_column=default_prediction_column(),
+        primary_key=platform_entity_time_key(),
+        train_end="2024-01-01",
+        test_start="2024-01-02",
+        test_end="2024-01-02",
+    )
+    coefficients = np.asarray([0.0, 0.01])
+    expected = bundle_module._build_prediction_bundle_from_frames(
+        (frame,),
+        spec,
+        coefficients,
+        ("factor",),
+    )
+    original_filter = bundle_module.apply_filter_mode
+    filtered_chunk_rows: list[int] = []
+
+    def wrapped_filter(frame, *, mode, metadata_key):
+        filtered_chunk_rows.append(len(frame))
+        return original_filter(frame, mode=mode, metadata_key=metadata_key)
+
+    monkeypatch.setattr(bundle_module, "apply_filter_mode", wrapped_filter)
+    result = bundle_module._build_prediction_bundle_from_frames(
+        (frame.iloc[:3], frame.iloc[3:]),
+        spec,
+        coefficients,
+        ("factor",),
+    )
+
+    assert filtered_chunk_rows == [len(frame)]
+    pd.testing.assert_frame_equal(result, expected)
+    assert result.attrs["prediction_metadata"] == expected.attrs["prediction_metadata"]
+
+
 def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
     from quant_research_platform.research.evaluations import engine as eval_engine
 

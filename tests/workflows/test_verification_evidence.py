@@ -403,6 +403,17 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
     assert snapshots == [policy, policy, policy, policy, policy]
     assert run_config["runtime_resource_policy"] == policy.to_payload()
     assert result.summary["runtime_resource_policy"] == policy.to_payload()
+    execution_plan = result.summary["runtime_execution_plan"]
+    assert execution_plan["storage_read"]["read_context"] == "_DatasetReadContext"
+    assert execution_plan["storage_read"]["time_window_year_partition_pruning"] is True
+    assert execution_plan["storage_read"]["row_group_streaming"] == "NOT_LANDED"
+    assert execution_plan["timestamp_sessions"] == {
+        "evaluation": "complete_timestamp_sessions",
+        "model": "complete_timestamp_sessions",
+        "prediction": "complete_timestamp_sessions",
+    }
+    assert execution_plan["report_writing"]["prediction_parquet"] == "chunked_internal"
+    assert execution_plan["full_horizon_tiling"]["status"] == "NOT_LANDED"
 
 
 def test_verification_evidence_workflow_runs_injected_generation_and_writes_artifacts(

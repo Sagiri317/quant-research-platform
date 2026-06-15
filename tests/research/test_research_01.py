@@ -577,6 +577,65 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     assert "metadata" not in manifest
 
 
+def test_prediction_handoff_writes_prediction_report_without_materialized_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _research_dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog)
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+    )
+    model_catalog = ModelCatalog()
+    model_catalog.register(
+        ModelSpec(
+            model_id="linear_demo",
+            model_family="linear",
+            feature_columns=("mom_20d",),
+            label_column="forward_return_20d",
+        )
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="pred_demo",
+            model_id="linear_demo",
+            research_dataset_id="demo",
+            prediction_column=default_prediction_column(),
+            primary_key=platform_entity_time_key(),
+            train_end="2014-01-02",
+            test_start="2014-01-03",
+            test_end="2014-01-03",
+        )
+    )
+
+    def reject_materialized_builder(*_args, **_kwargs):
+        raise AssertionError("materialized_prediction_bundle_builder_called")
+
+    monkeypatch.setattr(
+        prediction_handoff_module,
+        "_build_prediction_bundle_from_frames",
+        reject_materialized_builder,
+        raising=False,
+    )
+
+    run_root = run_prediction_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        model_catalog=model_catalog,
+        prediction_catalog=prediction_catalog,
+        prediction_id="pred_demo",
+    )
+
+    assert (run_root / "prediction.parquet").is_file()
+
+
 def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -627,7 +686,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
 
     original_iter = prediction_handoff_module._iter_research_dataset_chunks
     original_fit = prediction_handoff_module._fit_linear_baseline_result_from_frames
-    original_build = prediction_handoff_module._build_prediction_bundle_from_frames
+    original_write = prediction_handoff_module._write_prediction_bundle_from_frames
     read_chunk_rows: list[int] = []
     fit_chunk_rows: list[int] = []
     prediction_chunk_rows: list[int] = []
@@ -642,10 +701,19 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         fit_chunk_rows.extend(len(chunk) for chunk in chunks)
         return original_fit(iter(chunks), spec)
 
-    def wrapped_build(frames, spec, coefficients, feature_columns):
-        chunks = list(frames)
-        prediction_chunk_rows.extend(len(chunk) for chunk in chunks)
-        return original_build(iter(chunks), spec, coefficients, feature_columns)
+    def wrapped_write(frames, spec, coefficients, feature_columns, **kwargs):
+        def counted_frames():
+            for chunk in frames:
+                prediction_chunk_rows.append(len(chunk))
+                yield chunk
+
+        return original_write(
+            counted_frames(),
+            spec,
+            coefficients,
+            feature_columns,
+            **kwargs,
+        )
 
     monkeypatch.setattr(
         prediction_handoff_module,
@@ -659,8 +727,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     monkeypatch.setattr(
         prediction_handoff_module,
-        "_build_prediction_bundle_from_frames",
-        wrapped_build,
+        "_write_prediction_bundle_from_frames",
+        wrapped_write,
     )
 
     run_root = run_prediction_from_research_dataset(

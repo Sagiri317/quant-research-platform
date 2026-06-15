@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
-from dataclasses import asdict
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
@@ -116,6 +118,12 @@ _PREDICTION_METADATA_KEYS = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class _PredictionReportWriteSummary:
+    row_count: int
+    effective_test_end: str
+
+
 def write_stage_profile_report_artifacts(
     frame: pd.DataFrame,
     *,
@@ -216,6 +224,67 @@ def write_prediction_report_artifacts(
             _prediction_report_manifest_payload(
                 spec=spec,
                 model_metadata=model_metadata,
+                prediction_metadata=prediction_metadata,
+            ),
+        )
+
+    atomic_write_directory(run_root, _write)
+    return run_root
+
+
+def _write_prediction_report_artifacts_from_chunks(
+    frames: Iterable[pd.DataFrame],
+    *,
+    spec: PredictionSpec,
+    report_spec: ReportSpec,
+    layout: StorageLayout,
+    model_metadata: Mapping[str, object],
+    prediction_metadata_factory: Callable[[], Mapping[str, object]],
+) -> Path:
+    run_root = _derive_report_run_root(
+        report_spec=report_spec,
+        layout=layout,
+        expected_definition_id="prediction_bundle_private",
+        expected_run_id=spec.prediction_id,
+    )
+    required = (*spec.primary_key, spec.prediction_column)
+    model_metadata_payload = _validate_model_metadata_shape(
+        _sanitize_required_metadata(
+            model_metadata,
+            error_name="missing_model_metadata",
+        )
+    )
+    _validate_model_metadata_consistency(model_metadata_payload, spec=spec)
+
+    def _write(temp_root: Path) -> None:
+        write_summary = _atomic_write_report_parquet_chunks(
+            frames,
+            temp_root / "prediction.parquet",
+            required=required,
+            key_columns=tuple(spec.primary_key),
+            compression="zstd",
+        )
+        prediction_metadata = _validate_prediction_metadata_shape(
+            _sanitize_required_metadata(
+                prediction_metadata_factory(),
+                error_name="missing_prediction_metadata",
+            )
+        )
+        _validate_prediction_metadata_consistency_from_summary(
+            prediction_metadata,
+            spec=spec,
+            row_count=write_summary.row_count,
+            effective_test_end=write_summary.effective_test_end,
+        )
+        _validate_model_prediction_metadata_consistency(
+            model_metadata_payload,
+            prediction_metadata,
+        )
+        write_manifest(
+            temp_root / "manifest.json",
+            _prediction_report_manifest_payload(
+                spec=spec,
+                model_metadata=model_metadata_payload,
                 prediction_metadata=prediction_metadata,
             ),
         )
@@ -393,7 +462,14 @@ def _required_frame_metadata(
 ) -> dict[str, object]:
     if key not in frame.attrs:
         raise ValueError(error_name)
-    value = frame.attrs[key]
+    return _sanitize_required_metadata(frame.attrs[key], error_name=error_name)
+
+
+def _sanitize_required_metadata(
+    value: object,
+    *,
+    error_name: str,
+) -> dict[str, object]:
     if not isinstance(value, Mapping) or not value:
         raise ValueError(error_name)
     sanitized = sanitize_public_object(dict(value))
@@ -573,8 +649,27 @@ def _validate_prediction_metadata_consistency(
     spec: PredictionSpec,
     frame: pd.DataFrame,
 ) -> None:
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    if bool(timestamps.isna().any()):
+        raise ValueError("prediction_metadata_inconsistent")
+    effective_test_end = pd.Timestamp(timestamps.max()).date().isoformat()
+    _validate_prediction_metadata_consistency_from_summary(
+        metadata,
+        spec=spec,
+        row_count=len(frame),
+        effective_test_end=effective_test_end,
+    )
+
+
+def _validate_prediction_metadata_consistency_from_summary(
+    metadata: dict[str, object],
+    *,
+    spec: PredictionSpec,
+    row_count: int,
+    effective_test_end: str,
+) -> None:
     expected = {
-        "prediction_rows": len(frame),
+        "prediction_rows": row_count,
         "prediction_column": spec.prediction_column,
         "prediction_mode": spec.prediction_mode,
         "sample_filter_mode": spec.sample_filter_mode,
@@ -600,10 +695,6 @@ def _validate_prediction_metadata_consistency(
         definition=str(metadata["filter_definition"]),
         error_name="prediction_metadata_inconsistent",
     )
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    if bool(timestamps.isna().any()):
-        raise ValueError("prediction_metadata_inconsistent")
-    effective_test_end = pd.Timestamp(timestamps.max()).date().isoformat()
     if metadata["effective_test_end"] != effective_test_end:
         raise ValueError("prediction_metadata_inconsistent")
     requested_test_end = metadata["requested_test_end"]
@@ -844,6 +935,92 @@ def _derive_report_run_root(
     if "data/processed" in run_root.as_posix():
         raise ValueError("report_output_must_be_report_root")
     return run_root
+
+
+def _atomic_write_report_parquet_chunks(
+    frames: Iterable[pd.DataFrame],
+    path: Path,
+    *,
+    required: tuple[str, ...],
+    key_columns: tuple[str, ...],
+    compression: str,
+) -> _PredictionReportWriteSummary:
+    final_path = Path(path)
+    reject_if_exists(final_path)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = final_path.with_name(f".{final_path.name}.tmp-{uuid4().hex[:12]}")
+    temp_path.parent.mkdir(parents=True, exist_ok=True)
+    writer: pq.ParquetWriter | None = None
+    seen_keys: set[tuple[object, ...]] = set()
+    row_count = 0
+    effective_test_end: str | None = None
+    try:
+        for frame in frames:
+            selected = _prediction_report_chunk_frame(
+                frame,
+                required=required,
+                key_columns=key_columns,
+                seen_keys=seen_keys,
+            )
+            if selected.empty:
+                continue
+            timestamps = pd.to_datetime(selected["timestamp"], errors="coerce")
+            if bool(timestamps.isna().any()):
+                raise ValueError("prediction_metadata_inconsistent")
+            current_end = pd.Timestamp(timestamps.max()).date().isoformat()
+            if effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
+                effective_test_end
+            ):
+                effective_test_end = current_end
+            table = pa.Table.from_pandas(selected, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(
+                    temp_path,
+                    table.schema,
+                    compression=compression,
+                )
+            writer.write_table(table)
+            row_count += len(selected)
+        if writer is None or row_count == 0 or effective_test_end is None:
+            raise ValueError("empty_prediction_window")
+        writer.close()
+        writer = None
+        reject_if_exists(final_path)
+        _rename_with_transient_permission_retry(temp_path, final_path)
+    except Exception:
+        if writer is not None:
+            writer.close()
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+    return _PredictionReportWriteSummary(
+        row_count=row_count,
+        effective_test_end=effective_test_end,
+    )
+
+
+def _prediction_report_chunk_frame(
+    frame: pd.DataFrame,
+    *,
+    required: tuple[str, ...],
+    key_columns: tuple[str, ...],
+    seen_keys: set[tuple[object, ...]],
+) -> pd.DataFrame:
+    missing = sorted(set(required).difference(frame.columns))
+    if missing:
+        raise ValueError(f"missing_prediction_bundle_columns: {', '.join(missing)}")
+    extra = sorted(set(frame.columns).difference(required))
+    if extra:
+        raise ValueError(f"unregistered_prediction_bundle_columns: {', '.join(extra)}")
+    selected = frame.loc[:, list(required)]
+    if bool(selected.duplicated(list(key_columns)).any()):
+        raise ValueError("duplicate_prediction_keys")
+    for key in selected.loc[:, list(key_columns)].itertuples(index=False, name=None):
+        normalized_key = tuple(key)
+        if normalized_key in seen_keys:
+            raise ValueError("duplicate_prediction_keys")
+        seen_keys.add(normalized_key)
+    return selected
 
 
 def _atomic_write_report_parquet(

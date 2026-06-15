@@ -231,6 +231,7 @@ def build_verification_evidence_summary(
     compare_evidence: dict[str, object] | None = None,
     full_horizon_evidence: dict[str, object] | None = None,
     runtime_resource_policy: dict[str, object] | None = None,
+    runtime_execution_plan: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     statuses = _validate_verification_statuses(
         smoke_status=smoke_status,
@@ -250,6 +251,7 @@ def build_verification_evidence_summary(
         **statuses,
         "manifest_status": manifests,
         "runtime_resource_policy": runtime_resource_policy or {},
+        "runtime_execution_plan": runtime_execution_plan or {},
         "timings": timings,
         "validation_summary": validation_summary,
         "privacy_level": "private_aggregate_only",

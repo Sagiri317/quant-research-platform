@@ -20,8 +20,7 @@ from quant_research_platform.research.models.baseline import (
     _fit_linear_baseline_result_from_frames,
 )
 from quant_research_platform.research.predictions.bundle import (
-    _build_prediction_bundle_from_frames,
-    write_prediction_bundle,
+    _write_prediction_bundle_from_frames,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -91,13 +90,6 @@ def run_prediction_from_research_dataset(
         if str(exc) == "model_training_sample_empty":
             raise ValueError("empty_training_window") from exc
         raise
-    prediction = _build_prediction_bundle_from_frames(
-        _chunks(),
-        prediction_spec,
-        model_result.coefficients,
-        model_spec.feature_columns,
-    )
-    prediction.attrs["model_metadata"] = model_result.metadata
     report_spec = ReportSpec(
         report_id="prediction_bundle",
         report_definition_id="prediction_bundle_private",
@@ -105,9 +97,12 @@ def run_prediction_from_research_dataset(
         market_id=dataset_spec.market_id,
         run_type=prediction_spec.run_type,
     )
-    return write_prediction_bundle(
-        prediction,
+    return _write_prediction_bundle_from_frames(
+        _chunks(),
         prediction_spec,
+        model_result.coefficients,
+        model_spec.feature_columns,
+        model_metadata=model_result.metadata,
         report_spec=report_spec,
         layout=layout,
     )

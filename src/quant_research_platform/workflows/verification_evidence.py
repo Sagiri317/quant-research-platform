@@ -294,6 +294,7 @@ def _run_verification_evidence_with_policy(
         validation_summary=validation_summary,
         output_root=output_root,
         runtime_resource_policy=resource_policy.to_payload(),
+        runtime_execution_plan=_runtime_execution_plan_payload(),
     )
     write_verification_evidence_summary_json(
         layout.evidence_root / "evidence_summary.json",
@@ -382,6 +383,30 @@ def _resolve_effective_windows(
         "prediction_train_end": prediction_train_end,
         "prediction_test_start": prediction_test_start,
         "prediction_test_end": prediction_test_end,
+    }
+
+
+def _runtime_execution_plan_payload() -> dict[str, object]:
+    return {
+        "storage_read": {
+            "read_context": "_DatasetReadContext",
+            "time_window_year_partition_pruning": True,
+            "chunked_read_granularity": "parquet_file",
+            "row_group_streaming": "NOT_LANDED",
+        },
+        "timestamp_sessions": {
+            "evaluation": "complete_timestamp_sessions",
+            "model": "complete_timestamp_sessions",
+            "prediction": "complete_timestamp_sessions",
+        },
+        "report_writing": {
+            "prediction_parquet": "chunked_internal",
+            "evaluation_parquet": "materialized",
+        },
+        "full_horizon_tiling": {
+            "status": "NOT_LANDED",
+            "reason": "no_external_time_parameters_added",
+        },
     }
 
 
