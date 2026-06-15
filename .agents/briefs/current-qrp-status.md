@@ -6,7 +6,7 @@
 
 - 项目：QRP / Quant Research Platform，本地量化研究平台。
 - 当前 clean baseline：`feature/qrp-clean-rewrite`。
-- 当前治理修补分支：`feature/agent-governance-redesign`。
+- Agent governance redesign 已 fast-forward merge 到 `feature/qrp-clean-rewrite`。
 - 当前阶段：Clean Rewrite `0.1.0`，Local Research Platform（本地研究平台）。
 - API/spec/contract version：`0.1`。
 - Python：`>=3.13,<3.14`；用户本地 Python 是 `3.13.14`。

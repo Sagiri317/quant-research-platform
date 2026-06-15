@@ -121,7 +121,7 @@ near-term evaluation/model/prediction roadmap.
 
 | ID | Priority | Owner layer | Issue | Status |
 |---|---|---|---|---|
-| GOV-001 | P1 | `.agents` | 在用户 Win11 + Python 3.13.14 环境验证治理脚本；Linux/macOS/WSL 结果不能替代用户本机。 | open |
+| GOV-001 | P1 | `.agents` | 在用户 Win11 + Python 3.13.14 环境验证治理脚本；Linux/macOS/WSL 结果不能替代用户本机。 | done |
 | GOV-002 | P2 | `.agents` / `.run` | 将稳定的 package safety / governance checks 与 `.run` 官方 handoff 工具进一步对齐，但不让 `.run` 反向定义架构。 | open |
 | GOV-003 | P2 | optional adapters | 评估 hooks、MCP、plugins、custom subagents、`codex exec`、GitHub Action 是否需要从 draft-only 进入启用阶段。 | draft-only |
 | GOV-004 | P2 | `.agents` | 周期性检查短提示词示例是否仍能精准命中 task mode，并记录高返工案例。 | open |

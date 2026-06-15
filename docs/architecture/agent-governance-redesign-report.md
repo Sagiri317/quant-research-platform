@@ -64,5 +64,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/agents tests/architectur
 ## 7. 迁移计划
 
 - Phase 1：中文化人读文件、修正代码事实冲突、统一 mode ID、删除一次性 apply brief、补 token economy 和外部工具共存规则。
-- Phase 2：在用户 Win11 + Python 3.13.14 环境验证脚本。
+- Phase 2：在用户 Win11 + Python 3.13.14 环境验证脚本；post-merge status sync 通过后视为完成。
 - Phase 3：必要时把稳定脚本转成 draft hooks / `codex exec` 示例；仍不默认启用 repo-local `.codex/`。
