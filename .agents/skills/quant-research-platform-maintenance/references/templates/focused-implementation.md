@@ -1,42 +1,37 @@
-# Focused Implementation Template
+# 聚焦实现（Focused implementation）
 
-## Pre-edit
+用于 `standard-implementation`。目标是局部、可验证、一遍过，不做跨层顺手重构。
 
-- Task mode: `standard-implementation` or approved small slice of `goal-closure`.
-- Read `AGENTS.md`, current status, user principles if architecture/naming/public surface is touched.
-- Declare owner layer and expected changed files.
-- Identify public/private/artifact impacts.
-- Identify red test or existing failing guard. If no test is appropriate, explain why.
-
-## Implementation rules
-
-- Modify owner layer first.
-- Do not add public API/CLI/registry/store/facade/compatibility shim unless approved.
-- Do not fix unrelated P2/P3 items; route them to owner layer follow-up.
-- Keep names semantic and stable.
-- Keep private-derived outputs under approved private roots.
-
-## Verification
+## 开工前
 
 ```text
-git status --short --branch
-git diff --name-only
-git diff --check
-<targeted pytest for touched owner layer>
-<ruff if Python files changed>
-<same issue family scan>
-```
-
-## Final report
-
-```text
-Changed:
-Not changed:
+Task mode: standard-implementation
 Owner layer:
-Public surface:
-Private safety:
-Tests/checks run:
-Checks not run:
-Docs/status sync:
-Residual risks:
+Context budget: medium
+Allowed files:
+Forbidden files:
+Public surface impact: none / requires approval
+Private data impact: none / requires approval
 ```
+
+## 执行规则
+
+1. 先读 `AGENTS.md`、current status、repo-map、owner-layer routing。
+2. 只读 owner layer 相关代码和 tests。
+3. 如果需要 public API/CLI、registry、store、facade、artifact type，停止并请求批准。
+4. 先写或定位 red test（红测），证明问题存在；无法做 red test 时说明原因。
+5. 用 `rg` 做 same issue family scan，只打开相关文件。
+6. 最小实现，删除被替代路径，不新增 legacy shim。
+7. 同步必要 docs/status，但不要大改无关文档。
+
+## 验证
+
+```text
+targeted pytest for touched owner layer
+ruff / py_compile if Python files changed
+git diff --check
+public surface check if interfaces/contracts touched
+private safety check if data/report/package touched
+```
+
+未运行检查写 `NOT_RUN` 或 `BLOCKED`。

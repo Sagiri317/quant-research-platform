@@ -1,41 +1,32 @@
-# Context Routing / 上下文路由
+# 上下文路由（Context routing）
 
-目标：少读、读准、读到 owner layer。不要为了“全面”每次加载全 repo、全 docs、全 templates 或 `.run` 原始输出。
+本文件说明 QRP 任务应该读什么、不读什么。原则是：先读最小上下文，只有证据显示不够时才扩展。
 
-## 通用规则
+## 基础规则
 
-1. 先读 `AGENTS.md` 和用户任务 envelope。
-2. 先 `rg` 定位，再读取窄片段。
-3. 不默认读取 private data、generated outputs、old handoff zip/json、完整 `.run`、完整历史会话日志。
-4. Expanded Prompt Mode（用户给了完整任务书）下，不重新读取全部模板来重建流程；只读取 named/relevant files。
-5. Repo Router Mode（短 prompt）下，先读 `task-modes.md` 和 `templates/auto-task-router.md`。
-6. 如果需要扩大上下文到 public API/schema/artifact/private data/dependency/跨层 owner，先触发 stop condition。
+1. 每次任务先读 `AGENTS.md` 和用户本轮指令。
+2. 用 `task-modes.md` 选 mode ID。
+3. 用 `token-economy.md` 定预算。
+4. 用 `repo-map.md` 判断 owner layer。
+5. 按 mode 只读一个 primary template。
+6. 用 `rg` 摘要做 issue-family scan，再决定是否打开更多文件。
 
-## 路由表
+## 任务到上下文
 
-| 任务/表面 | 首选上下文 |
-|---|---|
-| 当前项目事实 | `.agents/briefs/current-qrp-status.md` |
-| 用户长期偏好/架构原则 | `.agents/briefs/user-principles.md` |
-| 任务分类 | `references/task-modes.md`, `references/templates/auto-task-router.md` |
-| 强制 gates | `references/governance-gates.md` |
-| owner layer 判定/P2/P3 路由 | `references/owner-layer-routing.md`, `docs/architecture/open-issues-register.md` |
-| public API/CLI | `docs/api/README.md`, `src/quant_research_platform/interfaces/`, `tests/interfaces/` |
-| contracts/schema | `src/quant_research_platform/contracts/`, `tests/contracts/`, `tests/architecture/` |
-| storage/dataset IO | `src/quant_research_platform/storage/`, relevant dataset tests |
-| source/interim data | `src/quant_research_platform/sources/`, `docs/data/README.md`, relevant source tests |
-| A-share semantics | `src/quant_research_platform/markets/implementations/a_share/`, `docs/code-map/a-share-data-and-pipeline.md`, relevant market tests |
-| research datasets/evaluation/prediction | `src/quant_research_platform/research/`, `src/quant_research_platform/reports/`, relevant tests |
-| workflow | `src/quant_research_platform/workflows/`, `tests/workflows/` |
-| proposal agents/factor factory | `src/quant_research_platform/agents/`, relevant tests; no external LLM API |
-| docs/status sync | changed files + active docs map; avoid archive/full-history reads |
-| governance changes | `AGENTS.md`, `.agents/**`, governance docs, input evidence summaries |
-| handoff packaging | `.run` official local tool docs/scripts if present; package rules; safety script |
-| apply-only patch | patch/zip + changed-file list + validation checklist; no redesign |
+| 任务 | 首读 | 按需扩展 | 禁止默认读取 |
+|---|---|---|---|
+| 小修 | 目标文件、最小测试 | 相邻文件 | 全 repo、全部 docs |
+| 标准实现 | owner layer 文件、相关 tests | contracts/docs | private data、无关 layer |
+| 独立审查 | diff/stat、changed files | issue-family 命中文件 | 自动改代码 |
+| handoff | `.run` summary、package rules | package manifest、safety result | raw logs、row-level data |
+| merge gate | git status/log/merge-base | compare summary | 源码全文 |
+| docs sync | active status/docs | code facts | private roots |
+| governance | `AGENTS.md`、`.agents/**`、治理 docs | 官方 docs、代码事实 | 业务实现大范围读取 |
 
-## Context budget hints
+## 代码事实校验
 
-- Small fix：通常 <5 files。
-- Standard implementation：owner layer files + direct tests/docs，通常 <15 files。
-- Goal closure：按 slice 读取；每个 slice 只加载当前 owner surface。
-- Governance redesign：读取 governance layer + evidence summaries；业务代码只读作 source-of-truth，不做 broad implementation scan。
+治理文件写到具体数字、路径或 public surface 时，必须回到代码或 tests 校验。例：内存预算应以 `src/quant_research_platform/runtime/resources.py` 的 `DEFAULT_MEMORY_BUDGET_FRACTION` 为准。
+
+## 停止扩展条件
+
+当已能明确回答任务、定位 owner layer、给出验证结果时，停止继续读取。不要为了“更全面”读取旧 handoff、全量 docs 或无关业务代码。

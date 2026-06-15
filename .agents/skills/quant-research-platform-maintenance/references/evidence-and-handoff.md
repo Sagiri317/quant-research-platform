@@ -1,47 +1,35 @@
-# Evidence and Handoff Rules
+# 证据与交接（Evidence and handoff）
 
-This reference controls public-safe evidence, review bundles, and final status
-claims.
+本文件用于 review bundle、handoff package、public-safe evidence 和 `.run` 工具任务。
 
-## Truth Statuses
+## `.run` 的定位
 
-- `PASS`: command/check ran and passed. Include command or manifest evidence.
-- `FAIL`: command/check ran and failed. Do not relabel as PASS without rerun
-  evidence.
-- `NOT_RUN`: command/check did not run. Keep as `NOT_RUN`.
-- `NOT_APPLICABLE`: check does not apply to this task; explain why.
+`.run/` 是 ignored local workflow/evidence/tooling layer（本地工作流/证据/工具层）。它可以证明任务做过什么，但不能反向定义架构。架构事实仍以代码、contracts、tests、active docs 为准。
 
-## Public-Safe Package Rules
+## 读取顺序
 
-Allowed:
+1. 先读 `.run` 的 README、package rules、summary、manifest、index。
+2. 再读 safety report、verification summary、comparison summary。
+3. 只有 summary 指向失败或缺口时，才读相关 raw log 的最小片段。
+4. 不读 row-level private data、raw vendor data、旧 handoff zip/json。
 
-- implementation summary;
-- decisions and open questions;
-- public-safe aggregate evidence summaries;
-- smoke/compare/performance/test summaries;
-- manifest and safety reports;
-- git bundle when explicitly requested for branch reconstruction.
+## package safety（包安全）
 
-Blocked:
+Review/handoff 包默认禁止：
 
-- raw/interim/processed private data;
-- private report rows;
-- parquet/csv/pkl/pickle/feather/arrow/raw vendor files;
-- credentials, secrets, cookies, tokens, `.env` files;
-- local absolute paths and stock-code samples;
-- old handoff artifacts unless explicitly requested as evidence inputs.
+```text
+.parquet .csv .pkl .pickle .feather .arrow .orc .db .sqlite .sqlite3
+raw vendor data
+row-level private data
+credentials / tokens / auth.json / .env
+local absolute paths
+old handoff zips/json unless sanitized summary is explicitly allowed
+```
 
-## Handoff Workflow
+## Git bundle 与 review bundle
 
-1. Confirm task mode and branch.
-2. Collect only public-safe evidence.
-3. Preserve `PASS`/`FAIL`/`NOT_RUN` as recorded.
-4. Run package safety scan if a package is generated.
-5. Include manifest with source commit, branch, file list, and check statuses.
-6. Final response must list checks run and checks not run.
+Git bundle 是可复现当前分支的 repo 状态；review bundle 是证据包。若任务要求 handoff，Git bundle 应放在 review bundle 内，但不得包含 private data。
 
-## `.run` Boundary
+## truthfulness（真实性）
 
-The local run workspace is a workflow/evidence layer, not a source of
-architecture. Use its official tools when available, but do not let handoff
-layout drive public architecture or repo governance layout.
+Manifest 必须区分 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。不能为了显得完整把缺失验证写成通过。

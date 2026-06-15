@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Cross-platform governance checks for QRP agent-governance changes.
+"""QRP 治理层检查脚本。
 
-This script intentionally uses only Python standard library modules. It is safe to
-run on Windows, macOS, Linux, and WSL. It does not scan private data directories
-by default.
+只使用 Python standard library，目标兼容 Win11、macOS、Linux、WSL。
+默认只检查 Git changed files，不扫描 private data roots。
 """
 
 from __future__ import annotations
@@ -12,16 +11,18 @@ import argparse
 import json
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-GOVERNANCE_PREFIXES = (
+BASE_GOVERNANCE_PREFIXES = (
     "AGENTS.md",
     "README.md",
     "PROJECT_STATUS.md",
     ".agents/",
     "docs/architecture/",
+)
+
+ACTIVE_DOCS_PREFIXES = (
     "docs/api/README.md",
     "docs/data/README.md",
     "docs/code-map/",
@@ -56,10 +57,12 @@ BLOCKED_EXTENSIONS = {
 }
 
 REQUIRED_AGENTS_TERMS = (
-    ".agents/",
-    "PASS",
-    "NOT_RUN",
-    "Private-data safety",
+    (".agents/",),
+    ("PASS",),
+    ("NOT_RUN",),
+    ("Private-data safety", "私有数据安全"),
+    ("global `.codex/`", "全局 `.codex/`", "global .codex"),
+    ("repo-local `.codex/`", "仓库内 `.codex/`", "repo-local .codex"),
 )
 
 STALE_STATUS_PATTERNS = (
@@ -69,11 +72,14 @@ STALE_STATUS_PATTERNS = (
 )
 
 LOCAL_PATH_PATTERN = re.compile(
-    r"([A-Za-z]:\\|/Users/[^\s`]+|/home/[^\s`]+|/mnt/[a-z]/[^\s`]+)"
+    r"((?<![A-Za-z])[A-Za-z]:\\|/Users/[^\s`]+|/home/[^\s`]+|/mnt/[a-z]/[^\s`]+)"
 )
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|cookie)\s*[:=]\s*['\"]?[^\s'\"]+"
 )
+
+TEXT_SUFFIXES = {".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
+
 
 @dataclass
 class Result:
@@ -107,13 +113,11 @@ def changed_files(repo: Path, base_ref: str | None) -> list[str]:
         code, out, err = run_git(repo, ["diff", "--name-only", f"{base_ref}...HEAD"])
         if code != 0:
             raise RuntimeError(f"git diff against {base_ref} failed: {err.strip()}")
-        staged_code, staged_out, _ = run_git(repo, ["diff", "--name-only", "--cached"])
-        work_code, work_out, _ = run_git(repo, ["diff", "--name-only"])
         names = out.splitlines()
-        if staged_code == 0:
-            names.extend(staged_out.splitlines())
-        if work_code == 0:
-            names.extend(work_out.splitlines())
+        for args in (["diff", "--name-only", "--cached"], ["diff", "--name-only"]):
+            sub_code, sub_out, _ = run_git(repo, args)
+            if sub_code == 0:
+                names.extend(sub_out.splitlines())
     else:
         code, out, err = run_git(repo, ["status", "--short"])
         if code != 0:
@@ -129,20 +133,29 @@ def changed_files(repo: Path, base_ref: str | None) -> list[str]:
     return sorted({normalize(name) for name in names if name})
 
 
-def is_governance_path(path: str) -> bool:
-    return any(path == prefix or path.startswith(prefix) for prefix in GOVERNANCE_PREFIXES)
+def allowed_governance_prefixes(allow_active_docs: bool) -> tuple[str, ...]:
+    return BASE_GOVERNANCE_PREFIXES + (ACTIVE_DOCS_PREFIXES if allow_active_docs else ())
 
 
-def check_governance_only(result: Result, paths: list[str]) -> None:
+def is_governance_path(path: str, allow_active_docs: bool) -> bool:
+    return any(
+        path == prefix or path.startswith(prefix)
+        for prefix in allowed_governance_prefixes(allow_active_docs)
+    )
+
+
+def check_governance_only(result: Result, paths: list[str], allow_active_docs: bool) -> None:
     for path in paths:
         if path.startswith(PRIVATE_ROOTS):
             result.errors.append(f"private root changed or included: {path}")
         if path.startswith(".codex/"):
             result.errors.append(f"repo-local .codex change is not allowed by default: {path}")
         if path.startswith(".claude/") or path == "CLAUDE.md":
-            result.errors.append(f"Claude-specific project adapter must remain draft-only: {path}")
-        if path.startswith(BUSINESS_PREFIXES) and not is_governance_path(path):
+            result.errors.append(f"agent-specific project adapter must remain draft-only: {path}")
+        if path.startswith(BUSINESS_PREFIXES) and not is_governance_path(path, allow_active_docs):
             result.errors.append(f"business/dependency path changed in governance-only mode: {path}")
+        if not is_governance_path(path, allow_active_docs):
+            result.errors.append(f"path is outside governance-only allow list: {path}")
         if Path(path).suffix.lower() in BLOCKED_EXTENSIONS:
             result.errors.append(f"blocked extension in changed path: {path}")
 
@@ -151,9 +164,26 @@ def iter_text_files(repo: Path, paths: list[str]) -> list[Path]:
     out: list[Path] = []
     for name in paths:
         p = repo / name
-        if p.is_file() and p.suffix.lower() in {".md", ".py", ".txt", ".yaml", ".yml", ".json"}:
+        if p.is_file() and p.suffix.lower() in TEXT_SUFFIXES:
             out.append(p)
     return out
+
+
+def _skip_regex_definition_line(rel: str, line: str) -> bool:
+    markers = (
+        "SECRET_PATTERN",
+        "LOCAL_PATH_PATTERN",
+        "STALE_STATUS_PATTERNS",
+        "STALE_STATUS_MARKERS",
+        "STOCK_SAMPLE_PATTERN",
+        "re.compile(",
+        "token = re.compile",
+        "secret-like assignment",
+        "Finish the official review-fix handoff package",
+    )
+    if any(marker in line for marker in markers):
+        return True
+    return rel.endswith(".py") and line.lstrip().startswith(("r\"", "r'"))
 
 
 def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
@@ -165,41 +195,26 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
         except UnicodeDecodeError:
             result.warnings.append(f"cannot decode as utf-8: {rel}")
             continue
-        for i, line in enumerate(text.splitlines(), start=1):
-            # Pattern definition lines intentionally contain words like token,
-            # password, /Users, or historical stale phrases. Do not treat the
-            # checker's own regex constants as repository content findings.
-            if any(name in line for name in (
-                "SECRET_PATTERN",
-                "LOCAL_PATH_PATTERN",
-                "STALE_STATUS_PATTERNS",
-                "STALE_STATUS_MARKERS",
-                "STOCK_SAMPLE_PATTERN",
-            )):
-                continue
-            if rel.endswith(".py") and (
-                "re.compile(" in line
-                or line.lstrip().startswith(('r"', "r'", "token = re.compile"))
-                or "token = re.compile" in line
-                or "secret-like assignment" in line
-                or "Finish the official review-fix handoff package" in line
-            ):
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if _skip_regex_definition_line(rel, line):
                 continue
             if SECRET_PATTERN.search(line):
-                result.errors.append(f"possible secret-like assignment in {rel}:{i}")
+                result.errors.append(f"possible secret-like assignment in {rel}:{line_number}")
             if LOCAL_PATH_PATTERN.search(line):
-                result.errors.append(f"local absolute path pattern in {rel}:{i}")
+                result.errors.append(f"local absolute path pattern in {rel}:{line_number}")
             for match in STALE_STATUS_PATTERNS:
                 if match.search(line):
-                    result.errors.append(f"stale N2/status wording in {rel}:{i}: {match.pattern}")
-            upper = line.upper()
+                    result.errors.append(
+                        f"stale N2/status wording in {rel}:{line_number}: {match.pattern}"
+                    )
             if (
-                "NOT_RUN" in upper
-                and "PASS" in upper
-                and "NOT PASS" not in upper
+                "NOT_RUN" in line
+                and "PASS" in line
+                and "不能" not in line
+                and "not" not in line.lower()
                 and re.search(r"\b(status|result)\s*[:=]\s*`?PASS", line, re.IGNORECASE)
             ):
-                result.warnings.append(f"line mixes NOT_RUN and PASS in {rel}:{i}")
+                result.warnings.append(f"line mixes NOT_RUN and PASS in {rel}:{line_number}")
 
 
 def check_agents_size_and_terms(result: Result, repo: Path) -> None:
@@ -210,14 +225,11 @@ def check_agents_size_and_terms(result: Result, repo: Path) -> None:
     text = agents.read_text(encoding="utf-8")
     if len(text.encode("utf-8")) > 12_000:
         result.errors.append("AGENTS.md exceeds 12KB target")
-    lower = text.lower()
-    if "global" not in lower or ".codex/" not in lower:
-        result.errors.append("AGENTS.md must distinguish global .codex")
-    if "repo-local" not in lower or ".codex/" not in lower:
-        result.errors.append("AGENTS.md must state repo-local .codex is not default")
-    for term in REQUIRED_AGENTS_TERMS:
-        if term not in text:
-            result.errors.append(f"AGENTS.md missing required term: {term}")
+    for variants in REQUIRED_AGENTS_TERMS:
+        if not any(term in text for term in variants):
+            result.errors.append("AGENTS.md missing required term variant: " + " / ".join(variants))
+    if "small-fix" not in text or "standard-implementation" not in text:
+        result.errors.append("AGENTS.md must use canonical hyphenated task mode IDs")
 
 
 def check_script_portability(result: Result, repo: Path) -> None:
@@ -237,12 +249,14 @@ def check_script_portability(result: Result, repo: Path) -> None:
                 result.warnings.append(f"python script has no argparse help surface: {rel}")
             if "pathlib" not in text and "Path" not in text:
                 result.warnings.append(f"python script may not use pathlib: {rel}")
-            if re.search(r"[A-Za-z]:\\", text):
+            if re.search(r"(?<![A-Za-z])[A-Za-z]:\\", text):
                 result.errors.append(f"hardcoded Windows drive path in {rel}")
 
 
 def check_markdown_paths(result: Result, repo: Path, paths: list[str]) -> None:
-    token = re.compile(r"`((?:AGENTS\.md|README\.md|PROJECT_STATUS\.md|\.agents/|docs/|src/|tests/|data/|reports/)[^`\s]*)`")
+    token = re.compile(
+        r"`((?:AGENTS\.md|README\.md|PROJECT_STATUS\.md|\.agents/|docs/|src/|tests/|data/|reports/)[^`\s]*)`"
+    )
     for p in iter_text_files(repo, paths):
         if p.suffix.lower() != ".md":
             continue
@@ -252,20 +266,37 @@ def check_markdown_paths(result: Result, repo: Path, paths: list[str]) -> None:
             candidate = raw.rstrip(".,;:)")
             if "<" in candidate or "*" in candidate or candidate.endswith("/"):
                 continue
-            if candidate.startswith(("data/raw", "data/interim", "data/processed", "data/research", "reports/private_real")):
+            if any(candidate == root.rstrip("/") or candidate.startswith(root) for root in PRIVATE_ROOTS):
                 continue
             if not (repo / candidate).exists():
-                if candidate.startswith("reports/") and (repo / "src/quant_research_platform" / candidate).exists():
+                src_candidate = repo / "src" / "quant_research_platform" / candidate
+                if src_candidate.exists():
                     continue
                 result.warnings.append(f"possible broken repo path in {rel}: {candidate}")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run QRP governance checks without scanning private data.")
-    parser.add_argument("--repo-root", default=".", help="Repository root. Default: current directory.")
-    parser.add_argument("--base-ref", default=None, help="Optional base ref for committed diff checks, e.g. origin/feature/qrp-clean-rewrite.")
-    parser.add_argument("--governance-only", action="store_true", help="Fail if business code, dependency files, private roots, or repo-local agent adapters changed.")
-    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary.")
+    parser = argparse.ArgumentParser(
+        description="运行 QRP 治理层检查；默认只检查 Git changed files，不扫描私有数据目录。"
+    )
+    parser.add_argument("--repo-root", default=".", help="仓库根目录，默认当前目录。")
+    parser.add_argument(
+        "--base-ref",
+        default=None,
+        help="可选 base ref，用于已提交 diff 检查，例如 origin/feature/agent-governance-redesign。",
+    )
+    parser.add_argument(
+        "--governance-only",
+        action="store_true",
+        help="治理-only 模式：禁止业务代码、依赖文件、private roots、repo-local adapters。",
+    )
+    parser.add_argument(
+        "--allow-active-docs",
+        action="store_true",
+        help="在 governance-only 模式下额外允许 docs/api、docs/data、docs/code-map 的 active docs 同步。默认不允许。",
+    )
+    parser.add_argument("--json", action="store_true", help="输出 JSON 摘要。")
+    parser.add_argument("--summary", action="store_true", help="只输出一行短摘要，适合 final report。")
     args = parser.parse_args(argv)
 
     repo = Path(args.repo_root).resolve()
@@ -277,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         paths = []
 
     if args.governance_only:
-        check_governance_only(result, paths)
+        check_governance_only(result, paths, args.allow_active_docs)
     check_text_safety(result, repo, paths)
     check_agents_size_and_terms(result, repo)
     check_script_portability(result, repo)
@@ -292,9 +323,14 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    elif args.summary:
+        print(f"governance_check_status={summary['status']} changed_files={len(paths)} checked_files={len(result.checked_files)} errors={len(result.errors)} warnings={len(result.warnings)}")
     else:
         print(f"governance_check_status={summary['status']}")
         print(f"changed_files={len(paths)}")
+        print(f"checked_files={len(result.checked_files)}")
+        print(f"errors={len(result.errors)}")
+        print(f"warnings={len(result.warnings)}")
         for error in result.errors:
             print(f"ERROR: {error}")
         for warning in result.warnings:

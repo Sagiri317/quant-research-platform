@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the platform flow code map contains current QRP anchors."""
+"""检查 QRP platform-flow code map 是否包含当前关键锚点。"""
 
 from __future__ import annotations
 
@@ -27,17 +27,17 @@ FORBIDDEN_TERMS = (
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify QRP platform flow code map.")
-    parser.add_argument("--repo-root", default=".", help="Repository root path.")
+    parser = argparse.ArgumentParser(description="验证 QRP platform-flow code map 的当前路径和接口锚点。")
+    parser.add_argument("--repo-root", default=".", help="仓库根目录。")
     parser.add_argument(
         "--markdown-path",
         default="docs/code-map/platform-flow.md",
-        help="Markdown file to verify, relative to repo root unless absolute.",
+        help="要验证的 markdown 文件；相对 repo root 或绝对路径。",
     )
     parser.add_argument(
         "--skip-git-diff-check",
         action="store_true",
-        help="Skip git diff whitespace checks for the markdown file.",
+        help="跳过该 markdown 文件的 git diff whitespace 检查。",
     )
     args = parser.parse_args()
 

@@ -1,14 +1,15 @@
 # QRP 当前状态简报
 
-本文件是日常任务的短上下文，不是 Git 日志、handoff 记录或完整架构文档。任务开始后仍必须以 `git status --short --branch`、代码、tests 和用户本轮指令为事实源。
+本文件是日常任务的短上下文，不是 Git 日志、handoff 记录或完整架构文档。任务开始后仍以用户本轮指令、`git status --short --branch`、代码、tests、contracts 为事实源。
 
 ## 当前定位
 
 - 项目：QRP / Quant Research Platform，本地量化研究平台。
-- 当前基线：`feature/qrp-clean-rewrite`。
+- 当前 clean baseline：`feature/qrp-clean-rewrite`。
+- 当前治理修补分支：`feature/agent-governance-redesign`。
 - 当前阶段：Clean Rewrite `0.1.0`，Local Research Platform（本地研究平台）。
 - API/spec/contract version：`0.1`。
-- Python：`>=3.13,<3.14`；用户本地 Python 为 `3.13.14`，主要验证环境是 Windows 11 + conda `quantlab313`。macOS/Linux/WSL 是兼容目标，但未实际运行不能声称 PASS。
+- Python：`>=3.13,<3.14`；用户本地 Python 是 `3.13.14`。
 
 ## 当前公共边界
 
@@ -28,7 +29,7 @@ qrp catalog labels
 qrp research-datasets requirements <dataset_id>
 ```
 
-当前私有本地 CLI 仅限：
+当前 private local CLI 仅限：
 
 ```text
 qrp-private schema-inventory --project-root . --output <path>
@@ -64,6 +65,10 @@ runtime/     privacy, sanitization, logging, profiling, errors, resources
 - 当前 `price_volume` factors 和 `forward_return` labels 按合同使用 `daily_panel` 作为 primary processed input。
 - Evaluation / prediction evidence 当前应视为 smoke-scoped（烟雾范围）证据，不是 2014-2025 全历史模型/绩效证明。
 
+## 当前资源事实
+
+内存预算以代码为事实源：`src/quant_research_platform/runtime/resources.py` 中 `DEFAULT_MEMORY_BUDGET_FRACTION = 0.80`，可由 `QRP_MEMORY_BUDGET_FRACTION` 覆盖。不要在治理文档中维护另一套默认百分比。
+
 ## 当前私有边界
 
 ```text
@@ -80,8 +85,8 @@ reports/private_real/
 
 - 项目治理根是 `.agents/`，不是 repo-local `.codex/`。
 - global `.codex/` 只可作为用户显式提供的只读证据源。
-- repo-local `.codex/`、hooks、MCP、plugins、subagent configs 默认不启用；只能作为 optional/draft adapter 提案。
-- `.run/` 是 ignored local workflow/evidence/tooling layer。使用 `.run` 工具时必须保留 PASS/FAIL/NOT_RUN 真实性，不让 handoff 反向定义架构。
+- repo-local `.codex/`、hooks、MCP、plugins、subagent runtime config 默认不启用；只能作为 optional/draft adapter 提案。
+- `.run/` 是 ignored local workflow/evidence/tooling layer。使用 `.run` 工具时必须保留 `PASS/FAIL/NOT_RUN/BLOCKED` 真实性，不让 handoff 反向定义架构。
 
 ## 当前禁止扩张
 

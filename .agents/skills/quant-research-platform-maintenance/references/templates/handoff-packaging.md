@@ -1,33 +1,32 @@
-# Handoff Packaging Template
+# 交接打包（Handoff packaging）
 
-Use for review bundle, handoff zip/json, git bundle inclusion, or public-safe evidence package generation.
+用于 review bundle / handoff package。目标是 public-safe、可复现、证据真实。
 
-## Rules
+## 执行规则
 
-- Use the repo/local `.run` official handoff tooling when available.
-- If `.run` tooling is missing, report `BLOCKED` or `NOT_RUN`; do not invent PASS.
-- Include implementation summary, decisions, evidence, tests/smoke/compare results, performance notes, open issues, and review artifacts as required by the task.
-- Include a git bundle only when the handoff rules require it.
-- Exclude private data and blocked file types.
-- Old handoff zip/json is not a source of truth unless explicitly named.
+1. 使用 repo/local `.run` 官方 handoff 工具；不要临时拼包。
+2. 先读 `.run` summary/package rules/manifest，不读 raw logs。
+3. Git bundle 应放入 review bundle（如果项目规则要求），但 bundle 不得包含 private data。
+4. Package manifest 必须真实记录 `PASS/FAIL/NOT_RUN/BLOCKED`。
+5. 不把 handoff 结构反向写成架构规则。
 
-## Safety checks
+## 包安全
+
+运行：
 
 ```text
-python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py <zip-or-dir>
-<repo .run verify_handoff_package.py command, if available>
-<repo .run handoff_safety.py command, if available>
+python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py <bundle-or-dir> --json
 ```
 
-## Output
+禁止包含 parquet/csv/pkl/pickle/feather/arrow/orc/db/sqlite、raw vendor data、row-level private data、credentials、tokens、本地绝对路径、旧 handoff zip/json。
+
+## Final report
 
 ```text
-Package path:
-Manifest path:
-Git bundle included: yes/no/not applicable
-Package safety: PASS/FAIL/NOT_RUN/BLOCKED
-Verification: PASS/FAIL/NOT_RUN/BLOCKED
-Excluded private data: yes/no
-Checks not run:
-Residual risks:
+package path
+manifest path
+package safety: PASS/FAIL
+checks run / not run
+private-safe evidence summary
+open issues
 ```

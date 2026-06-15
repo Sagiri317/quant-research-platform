@@ -1,45 +1,39 @@
-# Git Operations Template
+# Git 操作门（Git operations）
 
-Use for commit, push, merge gate, release gate, or branch cleanup. Do not combine with business implementation unless the user explicitly approved a closed-loop envelope.
+用于 commit、push、merge、branch cleanup。Git 操作不能顺手改业务代码。
 
-## Common checks
+## 基础检查
 
 ```text
 git status --short --branch
 git branch --show-current
-git log --oneline --decorate -5
+git log --oneline -5
+git diff --stat
 git diff --name-only
 ```
 
-## Commit/push rules
+## Commit / push
 
-- Confirm changed files are in scope.
-- Do not commit unrelated changes.
-- Do not push `main` unless explicitly approved.
-- No amend/rebase/squash/force-push unless explicitly approved.
+- 只 add 明确允许路径；不要 `git add .`。
+- commit 前运行相关验证和 `git diff --check`。
+- push 前确认目标 remote branch。
+- 不 force push。
 
-## Merge gate rules
+## Merge gate
 
-- Fetch remote.
-- Verify source branch and target branch exactly.
-- Verify target branch cleanliness.
-- Prefer fast-forward merge when user requested it.
-- Do not resolve merge conflicts by redesigning code unless explicitly approved.
+- 先确认 base/head 和 review evidence。
+- 优先 fast-forward merge。
+- 不在 merge gate 中修业务 bug。
+- merge 到 `main` 必须单独获得用户明确批准。
 
-## Branch cleanup rules
-
-- Delete only explicitly named branches.
-- Verify branch is merged before deletion.
-- No batch deletion or pattern deletion.
-- No `git branch -D` unless explicitly approved.
-
-## Output
+## Final report
 
 ```text
-Operation:
-Branch/source/target:
-Changed files:
-Checks run:
-Checks not run:
-Result:
+branch
+base/head
+changed files
+checks run
+commit hash
+push result
+remaining risks
 ```

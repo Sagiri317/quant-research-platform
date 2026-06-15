@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Public-safe package scanner for QRP review/handoff bundles.
+"""QRP public-safe package scanner.
 
-The scanner accepts either a zip file or a directory. It checks paths and, for
-small text files, content. It does not require third-party dependencies and does
-not scan private data directories unless the caller explicitly points at them.
+扫描 zip 或目录，检查 review/handoff 包是否包含私有数据路径、危险文件格式、疑似 secret、本地绝对路径或 stock-code samples。
+只使用 Python standard library，目标兼容 Win11、macOS、Linux、WSL。
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -45,9 +43,10 @@ PACKAGE_EXTENSIONS = {".zip", ".bundle"}
 TEXT_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}
 MAX_TEXT_SCAN_BYTES = 2_000_000
 
-LOCAL_PATH_PATTERN = re.compile(r"([A-Za-z]:\\|/Users/[^\s`]+|/home/[^\s`]+|/mnt/[a-z]/[^\s`]+)")
+LOCAL_PATH_PATTERN = re.compile(r"((?<![A-Za-z])[A-Za-z]:\\|/Users/[^\s`]+|/home/[^\s`]+|/mnt/[a-z]/[^\s`]+)")
 SECRET_PATTERN = re.compile(r"(?i)(api[_-]?key|secret|token|password|cookie)\s*[:=]\s*['\"]?[^\s'\"]+")
 STOCK_SAMPLE_PATTERN = re.compile(r"\b(?:00|30|60|68)\d{4}\.(?:SZ|SH)\b")
+
 
 @dataclass
 class SafetyResult:
@@ -84,6 +83,20 @@ def check_entry_path(result: SafetyResult, name: str, allow_nested_packages: boo
             result.errors.append(f"blocked private/sensitive path: {norm}")
 
 
+def _skip_pattern_line(line: str) -> bool:
+    markers = (
+        "SECRET_PATTERN",
+        "LOCAL_PATH_PATTERN",
+        "STOCK_SAMPLE_PATTERN",
+        "STALE_STATUS_PATTERNS",
+        "STALE_STATUS_MARKERS",
+        "re.compile(",
+        "token = re.compile",
+        "secret-like assignment",
+    )
+    return any(marker in line for marker in markers) or line.lstrip().startswith(("r\"", "r'"))
+
+
 def check_text(result: SafetyResult, name: str, data: bytes) -> None:
     if len(data) > MAX_TEXT_SCAN_BYTES:
         result.warnings.append(f"text scan skipped for large file: {name}")
@@ -95,21 +108,7 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
         return
     result.text_entries_scanned += 1
     for line_number, line in enumerate(text.splitlines(), start=1):
-        # The scanner scripts themselves define regex constants that contain
-        # words such as token/password or examples such as /Users. Do not flag
-        # those pattern-definition lines as package findings.
-        if any(marker in line for marker in (
-            "SECRET_PATTERN",
-            "LOCAL_PATH_PATTERN",
-            "STOCK_SAMPLE_PATTERN",
-            "STALE_STATUS_PATTERNS",
-            "STALE_STATUS_MARKERS",
-            "re.compile(",
-            "token = re.compile",
-            "secret-like assignment",
-        )):
-            continue
-        if line.lstrip().startswith(('r"', "r'")):
+        if _skip_pattern_line(line):
             continue
         if SECRET_PATTERN.search(line):
             result.errors.append(f"possible secret-like assignment in {name}:{line_number}")
@@ -149,15 +148,15 @@ def scan_dir(path: Path, allow_nested_packages: bool) -> SafetyResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Scan a QRP handoff/review package for public-safe constraints.")
-    parser.add_argument("target", help="Zip file or directory to scan.")
-    parser.add_argument("--allow-nested-packages", action="store_true", help="Allow nested .zip/.bundle entries. Default: fail closed.")
-    parser.add_argument("--json", action="store_true", help="Print JSON summary.")
+    parser = argparse.ArgumentParser(description="扫描 QRP handoff/review 包，检查 public-safe 约束。")
+    parser.add_argument("target", help="要扫描的 zip 文件或目录。")
+    parser.add_argument("--allow-nested-packages", action="store_true", help="允许嵌套 .zip/.bundle。默认 fail closed。")
+    parser.add_argument("--json", action="store_true", help="输出 JSON 摘要。")
     args = parser.parse_args(argv)
 
     target = Path(args.target).resolve()
     if not target.exists():
-        print(f"ERROR: target not found: {target}", file=sys.stderr)
+        print(f"ERROR: target not found: {target}")
         return 2
 
     try:
@@ -166,10 +165,10 @@ def main(argv: list[str] | None = None) -> int:
         elif zipfile.is_zipfile(target):
             result = scan_zip(target, args.allow_nested_packages)
         else:
-            print(f"ERROR: target is neither a directory nor zip file: {target}", file=sys.stderr)
+            print(f"ERROR: target is neither a directory nor zip file: {target}")
             return 2
     except zipfile.BadZipFile as exc:
-        print(f"ERROR: invalid zip file: {exc}", file=sys.stderr)
+        print(f"ERROR: invalid zip file: {exc}")
         return 2
 
     summary = {
@@ -186,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"package_safety_status={summary['status']}")
         print(f"entries_scanned={result.entries_scanned}")
         print(f"text_entries_scanned={result.text_entries_scanned}")
+        print(f"errors={len(result.errors)}")
+        print(f"warnings={len(result.warnings)}")
         for error in result.errors:
             print(f"ERROR: {error}")
         for warning in result.warnings:

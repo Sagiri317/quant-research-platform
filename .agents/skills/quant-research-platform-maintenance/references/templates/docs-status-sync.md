@@ -1,27 +1,36 @@
-# Docs / Status Sync Template
+# 文档状态同步（Docs/status sync）
 
-Use when current truth changes and active docs need synchronization.
+用于 active docs、status、brief、code-map 的同步。默认 docs-only，不改业务代码。
 
-## Active docs map
+## 同步范围
 
-- `README.md`: project entry and stable public boundary.
-- `PROJECT_STATUS.md`: current operational truth and current blockers/next steps.
-- `docs/api/README.md`: public API/CLI contract.
-- `docs/code-map/`: implementation maps.
-- `docs/architecture/`: durable architecture and governance rationale.
-- `.agents/briefs/`: short operational context and user principles.
-- `.agents/skills/`: execution workflow and deterministic helper scripts.
-
-## Rules
-
-- Do not write one-time run logs, real commit SHAs, private paths, or debug traces into durable docs.
-- Do not preserve stale N1/N2/N3 branch claims as current truth.
-- Do not update all docs by default; update only docs whose current truth changed.
-- Historical or superseded notes should be marked as such or moved only when the task approves archival work.
-
-## Checks
+常见文件：
 
 ```text
+README.md
+PROJECT_STATUS.md
+AGENTS.md
+.agents/briefs/current-qrp-status.md
+.agents/briefs/repo-map.md
+.agents/briefs/user-principles.md
+docs/architecture/README.md
+docs/architecture/open-issues-register.md
+```
+
+不要默认翻旧 archive、旧 handoff、全量 docs。
+
+## 检查点
+
+- 分支和 next step 是否过期。
+- public API/CLI 是否和代码一致。
+- private roots 是否一致。
+- Python / memory budget 等数字是否以代码为事实源。
+- 人读文件是否中文为主。
+- 旧 N1/N2/N3 status 是否误保留为当前事实。
+
+## 验证
+
+```text
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --repo-root . --governance-only
 git diff --check
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only
 ```

@@ -1,79 +1,53 @@
-# Contracts and Verification / 合同与验证
+# 合同与验证（Contracts and verification）
 
-本文件是高变动 contract map（合同地图）。具体行为以代码、tests 和 schema/manifest contracts 为准；本文用于路由和 gates。
+本文件用于 public API/CLI、contracts、artifacts、private safety、验证真实性相关任务。
 
-## Versions
+## Public surface（公共接口面）
 
-- Project version: `0.1.0`.
-- API/spec/contract version: `0.1`.
-- Python: `>=3.13,<3.14`.
-- Environment contract: `docs/architecture/environment-contract.md`.
-
-## Public API / CLI contract
+当前公共 API/CLI 只有：
 
 ```text
-GET  /api/0.1/catalog/factors
-GET  /api/0.1/catalog/labels
-GET  /api/0.1/research-datasets/{dataset_id}/requirements
-
+GET /api/0.1/catalog/factors
+GET /api/0.1/catalog/labels
+GET /api/0.1/research-datasets/{dataset_id}/requirements
 qrp catalog factors
 qrp catalog labels
 qrp research-datasets requirements <dataset_id>
 ```
 
-Future-only public items are not active contracts: `processed-data-runs`, `workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`, `private plugin`, universal artifact lifecycle API, model registry, feature store.
+`qrp-private schema-inventory --project-root . --output <path>` 是窄 private local CLI，不是公共接口扩张。
 
-Private local CLI is narrow:
+新增任何 public API、CLI、registry、store、facade、artifact lifecycle API、execution mode、compatibility shim、legacy alias，都必须先停止并取得用户明确批准。
 
-```text
-qrp-private schema-inventory --project-root . --output <path>
-```
+## Artifact truth（产物真实性）
 
-## Private roots
+- `PASS`：检查实际运行且通过。
+- `FAIL`：检查实际运行且失败。
+- `NOT_RUN`：没有运行证据。
+- `BLOCKED`：环境、依赖、权限或输入缺失导致无法运行。
 
-```text
-data/raw/<internal-provider>/
-data/interim/<internal-provider>/
-data/processed/a_share/
-data/research/a_share/
-reports/private_real/
-```
+禁止把 smoke result 写成 full-horizon evidence；禁止把 partial compare 写成 official parity；禁止把未运行检查写成 `PASS`。
 
-Public-safe outputs must not include row-level private data, raw vendor exports, stock-code samples, local absolute paths, vendor markers, credentials, tokens, or raw tracebacks with local/private context.
+## Private safety（私有安全）
 
-## Artifact truth statuses
+Public-safe evidence 只能包含聚合、脱敏、manifest、schema、统计摘要或路径安全信息。禁止包含 row-level private data、vendor markers、stock-code samples、private file names、credentials、tokens、本地绝对路径、raw tracebacks with private context。
 
-Use only these meanings:
+## Verification ladder（验证阶梯）
 
-| Status | Meaning |
-|---|---|
-| `PASS` | Check ran and passed. |
-| `FAIL` | Check ran and failed. Keep failure visible. |
-| `NOT_RUN` | Check did not run, or evidence is absent. |
-| `NOT_APPLICABLE` | Check is structurally irrelevant to this task. |
-| `BLOCKED` | Check was required but blocked by environment, dependency, approval, or missing tool. |
+1. 静态检查：path、public surface、private roots、blocked extensions。
+2. 窄测试：改动 owner layer 对应 tests。
+3. 集成测试：触及 contract/artifact/workflow/interface 时运行相关跨层 tests。
+4. 私有数据验证：只有用户明确授权且在本地执行；结果只输出 public-safe 摘要。
+5. Handoff：只打包 public-safe evidence，manifest 真实记录 `PASS/FAIL/NOT_RUN/BLOCKED`。
 
-Forbidden: marking skipped checks as `PASS`; converting official compare `FAIL` to `PASS`; presenting smoke-scoped evaluation/prediction evidence as full-horizon evidence.
-
-## Verification ladder
-
-1. Pre-edit: `git status --short --branch`; classify task mode and owner layer.
-2. Red test / expectation: when changing behavior, identify the failing or missing test/guard before implementation.
-3. Narrow checks: direct unit/contract tests for touched owner layer.
-4. Same issue family scan: `rg` same-family terms across owner layer and direct dependents.
-5. Public surface gate: ensure API/CLI/schema/report/display surfaces did not expand unless approved.
-6. Private safety gate: no private data, blocked file types, or local paths in outputs.
-7. Docs/status sync gate: update only active docs that reflect changed current truth.
-8. Final truthfulness gate: report run/not-run/fail status exactly.
-
-## Common commands
-
-Use the commands documented in `README.md` and task-specific tests. For governance-only changes, use:
+## Final report 最低字段
 
 ```text
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only
-python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py <zip-or-dir>
-git diff --check
+changed files
+checks actually run
+checks not run
+PASS/FAIL/NOT_RUN/BLOCKED
+private-safety result
+public-surface result
+remaining risks
 ```
-
-Only claim OS/platform PASS after running on that OS/platform.

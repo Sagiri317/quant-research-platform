@@ -1,30 +1,33 @@
-# Goal Closure Template
+# 目标闭环（Goal closure）
 
-Use only inside an approved bounded envelope for long work, overnight work, or review-fix loops.
+用于长任务、review-fix loop、overnight goal。必须有用户批准的 envelope。
 
-## Required envelope
+## Slice 机制
+
+把目标切成小 slice。每个 slice 必须有：
 
 ```text
-Goal:
-Branch/worktree:
-Allowed files/layers:
-Forbidden files/layers:
-Subagents allowed: yes/no + roles
-Checks required:
-Handoff required: yes/no
-Stop conditions:
+slice goal
+allowed files
+owner layer
+red/targeted validation
+open risks
 ```
 
-## Loop
+完成一个 slice 后先验证，再进入下一个。不要在长任务中无限扩 scope。
 
-1. Pre-goal blocker discovery.
-2. Slice plan by owner layer.
-3. Implement one slice.
-4. Run narrow tests.
-5. Same issue family scan.
-6. Review/fix loop only for in-scope findings.
-7. Repeat until definition of done or stop condition.
-8. Final truthfulness report.
-9. Handoff package if required.
+## Review-fix loop
 
-Subagents must get narrow context packets and default to read-only. Main agent owns integration and final truth.
+1. 把 review findings 分成 issue family。
+2. 每个 family 路由到 owner layer。
+3. 用 `rg` 做同族扫描。
+4. 修复后跑 targeted checks。
+5. 记录未修项和原因。
+
+## Subagents
+
+只有复杂 read-only review 可使用 subagents。每个 subagent 一个 issue family，输出上限明确；main agent 汇总并负责 final truthfulness。
+
+## 最终报告
+
+列出完成的 slices、变更、验证、`NOT_RUN/BLOCKED`、剩余 open issues、handoff/package 位置。不要粘贴长日志。

@@ -1,21 +1,77 @@
-# Quant Research Platform
+# Quant Research Platform（QRP）
 
-Local multi-market quantitative research platform. Current implementation phase: QRP Clean Rewrite `0.1.0`.
+QRP 是一个面向多市场扩展的本地量化研究平台。当前启用市场是 A-share（A 股），当前阶段是 local research platform（本地研究平台），不是 paper trading（模拟交易）、live trading（实盘交易）或生产交易系统。
 
-This project is local research infrastructure, not investment advice, paper trading, live trading, broker/exchange connectivity, production deployment, or a performance guarantee. It does not log in to vendors, download vendor data, manage credentials, or connect external market-data APIs.
+## 当前目标
 
-## Current Boundary
+当前 clean rewrite 的目标是建立一条可验证、可扩展、private-safe（私有数据安全）的研究链路：
 
-- Project version: `0.1.0`.
-- Public API/spec/contract version: `0.1`.
-- Current development baseline: `feature/qrp-clean-rewrite`.
-- Current enabled market module: A-share.
-- Public user-facing data objects: cataloged factors, labels, and research dataset requirements.
-- Current website UI, deployment, scheduler, worker, model registry, and feature store work: out of scope for this clean rewrite slice.
-- Current research profile composition lives in `catalog/profiles.py`; public composition root is `research_profile()`, returning `ResearchProfile`.
-- Current A-share daily price-volume factors and `forward_return` labels use valid-bar semantics: `d` means each asset's own valid daily bars, not calendar sessions, and missing/suspended rows are not filled.
+```text
+market/source data
+-> processed dataset
+-> factor / label / filter / context
+-> research dataset
+-> evaluation / diagnostics
+-> model / prediction
+-> report artifacts
+-> public-safe evidence / handoff
+```
 
-Private boundaries:
+当前 public surface（公共接口面）保持最小：
+
+```text
+GET  /api/0.1/catalog/factors
+GET  /api/0.1/catalog/labels
+GET  /api/0.1/research-datasets/{dataset_id}/requirements
+qrp catalog factors
+qrp catalog labels
+qrp research-datasets requirements <dataset_id>
+```
+
+`qrp-private schema-inventory --project-root . --output <path>` 是窄 private local CLI（私有本地命令行），不代表公共接口扩张。
+
+## 治理入口
+
+AI agents 必须先读根目录 `AGENTS.md`。项目内治理根是 `.agents/`，不是 repo-local `.codex/`。
+
+常用入口：
+
+```text
+AGENTS.md
+.agents/briefs/current-qrp-status.md
+.agents/briefs/repo-map.md
+.agents/briefs/user-principles.md
+.agents/skills/quant-research-platform-maintenance/SKILL.md
+.agents/skills/quant-research-platform-maintenance/references/task-modes.md
+.agents/skills/quant-research-platform-maintenance/references/token-economy.md
+.agents/skills/quant-research-platform-maintenance/references/templates/README.md
+```
+
+日常任务不要默认读取所有 docs、templates、`.run` evidence 或旧 handoff。先做 task mode routing（任务模式路由），再按需加载最小上下文。
+
+## 工程原则
+
+- Semantic closure（语义收口）：接口、命名、contracts、tests、docs、artifacts、handoff 证据必须一致。
+- Naming first-class（命名一等）：命名是架构问题。
+- Replace over parallel（替代优先）：替代旧结构时删除旧路径，不保留 legacy alias / compatibility shim。
+- Minimal public API（最小公共接口）：不默认新增 API、CLI、registry、store、facade。
+- Evidence over claims（证据优先）：未运行就是 `NOT_RUN`，失败就是 `FAIL`。
+- Private-data safety（私有数据安全）：public-safe evidence 不包含行级私有数据。
+- Layer-local change（局部改动）：新功能主要改 owner layer，跨层大改先做架构收口。
+
+## Python 与资源策略
+
+项目 Python 要求以 `pyproject.toml` 为准。当前 clean baseline 使用 `>=3.13,<3.14`；用户本地 Python 为 `3.13.14`。
+
+运行时内存预算以代码事实源为准：`src/quant_research_platform/runtime/resources.py` 中 `DEFAULT_MEMORY_BUDGET_FRACTION = 0.80`，并可通过 `QRP_MEMORY_BUDGET_FRACTION` 覆盖。不要在治理文档中维护第二套不同数字。
+
+## 外部工具边界
+
+用户本地可能已有 Context7 MCP、GitHub MCP、Binance plugin、superpowers skills 和其他 global skills。QRP repo 不修改这些全局能力，也不创建 repo-local `.codex/`。外部工具可以辅助查询和审查，但不能绕过 QRP 的 task mode、owner layer、public surface、private safety 和 artifact truth gates。
+
+## 私有数据边界
+
+以下路径只用于本地私有数据或私有报告，不进入 public-safe bundle：
 
 ```text
 data/raw/<internal-provider>/
@@ -25,103 +81,11 @@ data/research/a_share/
 reports/private_real/
 ```
 
-These directories are local/private. Do not commit, publish, copy, or expose raw vendor rows, row-level processed data, private reports, credentials, secrets, vendor markers, local absolute paths, or stock-code samples.
+review / handoff 包不得包含 parquet、csv、pkl、pickle、feather、arrow、raw vendor data、row-level private data、credentials、tokens 或本地绝对路径。
 
-## Source Topology
+## 进一步阅读
 
-```text
-src/quant_research_platform/
-  contracts/        Stable 0.1 definitions and specs
-  storage/          Layout, parquet, manifests, partitions, checksums, privacy
-  catalog/          Queryable registries for platform objects
-  sources/          Internal provider adapters
-  markets/          Market semantics; first active implementation is a_share
-  research/         Factors, labels, features, datasets, evaluations, models,
-                    predictions, portfolios
-  workflows/        Simple DAG specs, planner, executor, checkpoints
-  compute/          DataFrame/tensor compute backends
-  agents/           Proposal-only Factor/Label/Dataset/Workflow boundaries
-  interfaces/       CLI and local API adapters
-  reports/          Report catalog and private report artifact writers
-  runtime/          Privacy, sanitization, logging, profiling, errors
-```
-
-Retired compatibility structure is not the target contract. Its retained responsibilities move under the domains above.
-
-## API And CLI
-
-The clean API uses `/api/0.1/...`, without a `v` prefix:
-
-```text
-GET  /api/0.1/catalog/factors
-GET  /api/0.1/catalog/labels
-GET  /api/0.1/research-datasets/{dataset_id}/requirements
-```
-
-The clean CLI surface is:
-
-```text
-qrp catalog factors
-qrp catalog labels
-qrp research-datasets requirements <dataset_id>
-```
-
-These public routes are read-only. Source/interim/processed materialization and private real-data execution are internal workflows and are not exposed through the API/CLI.
-
-Removed public placeholders are not compatibility requirements. Future-only work remains explicit: `processed-data-runs`, `workflow-runs`, `report index/show`, `RunRepository`, `ReportRepository`, and `private plugin`.
-
-Private local-data CLI:
-
-```text
-qrp-private schema-inventory --project-root . --output <path>
-```
-
-`qrp-private` currently exposes only sanitized schema inventory. It does not run private import, private rebuild, or verification evidence regeneration.
-
-## Development Checks
-
-The environment contract is documented in `docs/architecture/environment-contract.md`.
-
-Create or update the project Conda environment from `environment.yml`:
-
-```powershell
-conda env update -f environment.yml
-```
-
-Do not use `--prune` by default for `quantlab313`. Use `--prune` only when intentionally rebuilding a `qrp-minimal` environment. `quantlab313` is the user's broader quant research environment, and `--prune` may remove packages installed for notebooks, research, visualization, ML/DL experiments, or other projects.
-
-Then run checks:
-
-```powershell
-$env:PYTHONPATH="src"
-conda run -n quantlab313 python -m pytest -q tests/architecture tests/contracts tests/interfaces/test_api_cli_01_contract.py
-conda run -n quantlab313 python -m ruff check src tests
-git diff --check
-```
-
-Run broader tests only when the active slice owns the affected surfaces. For governance-only changes, run:
-
-```text
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only
-python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py --help
-git diff --check
-```
-
-## Agent Governance
-
-- `AGENTS.md`: hard execution boundaries, task router, path authority, stop conditions.
-- `.agents/briefs/current-qrp-status.md`: short current context.
-- `.agents/briefs/user-principles.md`: stable user engineering principles.
-- `.agents/skills/quant-research-platform-maintenance/`: operational workflow, task modes, gates, context routing, owner-layer routing, templates, and deterministic helper scripts.
-- `docs/architecture/agent-governance.md`: durable governance architecture.
-- `docs/architecture/agent-governance-redesign-report.md`: redesign diagnosis, decisions, and migration plan.
-
-Project governance root is `.agents/`. Global `.codex/` is only a read-only external evidence source when explicitly supplied. Repo-local `.codex/`, hooks, MCP, plugins, and agent-specific configs are not created by default.
-
-## Documentation Map
-
-- `PROJECT_STATUS.md`: current operational status and handoff signal.
-- `docs/api/README.md`: clean API/CLI contract.
-- `docs/code-map/`: implementation maps.
-- `docs/data/`: public-safe data layout notes.
-- `docs/architecture/`: architecture, standards, governance, and roadmap references.
+- `PROJECT_STATUS.md`：当前阶段和下一步。
+- `docs/architecture/agent-governance.md`：智能体治理架构。
+- `docs/architecture/agent-governance-file-guide.md`：用人话解释治理目录和文件。
+- `docs/architecture/open-issues-register.md`：开放问题登记。

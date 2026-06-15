@@ -1,33 +1,31 @@
-# Review-Fix Loop
+# 审查—修复闭环（Review-fix loop）
 
-Use this reference for independent review, goal closure, or review-after-fix
-work.
+本文件用于减少 review 后返工。核心是把问题按 issue family（问题族）处理，不只修一个点。
 
-## Loop
+## 流程
 
-1. Record review scope and issue families.
-2. Review by issue family, not only by changed file.
-3. For each finding, record severity, evidence, owner layer, and required fix.
-4. Fix only in approved scope.
-5. Rerun the narrow check or rereview that proves the finding closed.
-6. Keep unresolved issues as open; do not hide them in a PASS summary.
+1. 从 review findings 提取 issue family，而不是逐条孤立修。
+2. 每个 issue family 先定位 owner layer。
+3. 用 `rg -n` 做同族扫描，先看命中摘要。
+4. 只打开最相关文件，判断是否同类问题。
+5. 修复后补 red test 或 regression check。
+6. final report 写清：修了哪些 family，哪些 NOT_RUN/BLOCKED，哪些登记为 open issue。
 
-## Issue Families
+## 常见 issue family
 
-Use families relevant to the diff, for example:
+```text
+public API/CLI expansion
+private data leakage
+artifact truthfulness
+stale docs/status
+owner layer drift
+naming inconsistency
+legacy alias / compatibility shim
+script portability
+run package safety
+memory/performance regression
+```
 
-- public surface expansion;
-- private-output boundary;
-- artifact truth or stale artifact;
-- metadata/status truthfulness;
-- optional/default semantics;
-- owner-layer leakage;
-- script portability;
-- docs/status drift;
-- performance or memory regression risk.
+## Subagent 使用
 
-## Subagent Use
-
-Subagents are read-only unless explicitly approved. Assign them by issue family
-and require concise evidence-backed findings. The main agent integrates results,
-chooses fixes, reruns checks, and owns final claims.
+复杂 review 可让 subagent read-only 检查单一 issue family。每个 subagent 必须有范围、输出上限和关闭要求；main agent 负责最终整合，不让 subagent 直接 commit/push。

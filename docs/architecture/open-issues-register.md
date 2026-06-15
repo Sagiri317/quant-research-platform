@@ -119,11 +119,9 @@ near-term evaluation/model/prediction roadmap.
 
 ## Agent Governance Follow-ups
 
-All items in this section are governance follow-ups. They are not business-code implementation approval.
-
-| ID | Status | Area | Finding | Follow-up |
+| ID | Priority | Owner layer | Issue | Status |
 |---|---|---|---|---|
-| GOV-01 | done | governance/path authority | global `.codex/`, repo `.agents/`, and repo-local `.codex/` needed explicit separation. | Root `AGENTS.md`, `.agents/briefs`, and `agent-governance.md` now define `.agents/` as project governance root, global `.codex/` as read-only evidence, and repo-local `.codex` as draft-only unless approved. |
-| GOV-02 | open | `.run` tooling | `.run` remains ignored workflow/evidence tooling; handoff package safety should not rely on memory. | Keep `.run` official tools for handoff tasks and use tracked package safety script as an additional public-safe check. Do not make `.run` architecture source of truth. |
-| GOV-03 | draft-only | hooks/MCP/subagents/plugins | Codex/Claude adapters could enforce some gates, but they add trust, config, token, and platform cost. | Keep hooks/MCP/plugins/repo-local `.codex`/`.claude` as draft-only until repeated evidence justifies activation and sandbox tests pass. |
-| GOV-04 | open | external prompt templates | External Codex/GPT prompts may still reference deleted old template paths. | Update external prompt templates to use `task-modes.md` and the merged template names after this governance redesign is applied. |
+| GOV-001 | P1 | `.agents` | 在用户 Win11 + Python 3.13.14 环境验证治理脚本；Linux/macOS/WSL 结果不能替代用户本机。 | open |
+| GOV-002 | P2 | `.agents` / `.run` | 将稳定的 package safety / governance checks 与 `.run` 官方 handoff 工具进一步对齐，但不让 `.run` 反向定义架构。 | open |
+| GOV-003 | P2 | optional adapters | 评估 hooks、MCP、plugins、custom subagents、`codex exec`、GitHub Action 是否需要从 draft-only 进入启用阶段。 | draft-only |
+| GOV-004 | P2 | `.agents` | 周期性检查短提示词示例是否仍能精准命中 task mode，并记录高返工案例。 | open |

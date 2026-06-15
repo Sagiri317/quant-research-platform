@@ -1,41 +1,31 @@
-# Owner Layer Routing / 归属层路由
+# 归属层路由（Owner layer routing）
 
-本文件用于防止 P2/P3 顺手乱修和跨层扩张。先确认 owner layer，再决定是否改代码。
+本文件帮助把任务路由到正确 owner layer，避免 P2/P3 或未来能力被顺手跨层修。
 
-## Owner map
+## 核心规则
 
-| Owner layer | Owns | 不应顺手拥有 |
-|---|---|---|
-| `contracts/` | stable specs, IDs, column contracts, run/workflow/report contracts | market-specific logic, storage IO |
-| `storage/` | layout, dataset IO, manifests, checksums, partitions, storage privacy | research semantics, A-share trading rules |
-| `catalog/` | queryable registries, research profile composition | private path helpers, dynamic source fallback |
-| `sources/` | provider/source ingestion into interim canonical data | A-share eligibility/trading semantics |
-| `markets/` | market-specific semantics, A-share annotations, calendars, IDs | generic research assembler logic |
-| `research/` | factors, labels, research datasets, evaluation/model/prediction/portfolio research workflows | public API/CLI adapters, report path layout |
-| `workflows/` | local DAG specs/executor/checkpoints | production scheduler/worker |
-| `compute/` | dataframe/tensor math helpers | storage planning, public contract ownership |
-| `agents/` | proposal-only specs/planners | external LLM calls, private row-level writes, execution authority |
-| `interfaces/` | local API/CLI adapters | business semantics beyond adapters |
-| `reports/` | report catalog and private report artifact writers | public run repository/facade/store |
-| `runtime/` | privacy, sanitization, logging, profiling, resource policy, errors | market-session semantics |
+1. 先定位 owner layer，再改文件。
+2. 能在 owner layer 局部完成，就不要跨 storage/evaluation/report/workflow/interfaces 大改。
+3. 如果必须跨三层以上，先停下写 architecture closure（架构收口）说明。
+4. P2/P3 默认登记到 owner layer，不在无关任务中顺手修。
 
-## P2/P3 routing rule
+## 常见路由
 
-- P2/P3 issue 默认不在当前任务顺手修。
-- 如果 task owner layer 与 P2/P3 owner layer 不一致：记录 follow-up，不实现。
-- 如果修复需要新增 public API / registry / store / facade / compatibility shim：停止并升级为 architecture closure。
-- 如果修复需要跨 storage/evaluation/report/workflow/interfaces：先产出 architecture decision，再实现。
-- 如果命名问题影响 contract/API/docs/tests：命名是架构问题，不能当作 cosmetic commit。
+| 需求 | 首选 owner | 典型触及 | 不应默认触及 |
+|---|---|---|---|
+| public API/CLI | `interfaces/` + contracts | API/CLI adapters, tests | storage internals |
+| dataset IO/manifest | `storage/` | layout, dataset IO, manifest | evaluation/report |
+| A-share 交易语义 | `markets/implementations/a_share/` | annotations, masks, calendar | labels/evaluation 重算规则 |
+| factor | `research/factors/` | factor spec/materializer/tests | interfaces/public API |
+| label | `research/labels/` | label spec/materializer/tests | market semantics 重写 |
+| research dataset | `research/datasets/` | assembler/spec/tests | source ingestion |
+| evaluation diagnostics | `research/evaluations/` | metrics/diagnostics/tests | report storage API 扩张 |
+| model/prediction | `research/models/`, `research/predictions/` | model/pred contract/tests | live trading |
+| reports | `reports/` | report writer/catalog/private-safe output | public artifact lifecycle API |
+| runtime memory | `runtime/resources.py` | runtime policy/chunk planning | market session semantics |
+| workflow execution | `workflows/` | DAG/plan/checkpoint | broker/scheduler |
+| agent governance | `.agents/`, `AGENTS.md`, governance docs | skill/templates/scripts | business implementation |
 
-## Same issue family scan / 同族问题扫描
+## Future capability routing
 
-高风险改动完成前，按同族而不是同文件搜索：
-
-- status truth：`PASS`, `FAIL`, `NOT_RUN`, `NOT_APPLICABLE`, `BLOCKED`
-- private safety：`private`, `raw`, `interim`, `processed`, `reports/private_real`, `stock_code`, `trade_date`
-- public surface：`api`, `cli`, `registry`, `store`, `facade`, `Repository`, `run`, `workflow`
-- compatibility：`legacy`, `compat`, `alias`, `wrapper`, `re-export`, `retired`
-- path governance：`.agents`, `.codex`, `.claude`, `hooks`, `MCP`, `plugins`, `subagent`
-- platform/script：`.ps1`, `powershell`, `bash`, `sh`, `conda`, `python`
-
-同族扫描发现 owner mismatch 时，报告 candidate，不扩大当前实现范围。
+ML/DL、time-series、factor factory、多市场、高频、frontend、website、speed/memory 优化都要先落 owner layer。不能因为“未来会用”而新增 universal registry/store/facade。

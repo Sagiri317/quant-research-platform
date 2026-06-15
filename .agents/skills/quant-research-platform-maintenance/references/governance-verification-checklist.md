@@ -1,30 +1,37 @@
-# Governance Verification Checklist
+# 治理验证清单（Governance verification checklist）
 
-Use this after applying governance changes.
+治理层变更后，至少检查以下项目。未运行必须写 `NOT_RUN` 或 `BLOCKED`。
 
-## Required Checks
+## 路径与范围
 
-- `git status --short --branch`
-- `git diff --name-only`
-- `git diff --check`
-- `python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --repo-root . --governance-only`
-- `python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .`
-- `python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py --help`
-- targeted architecture tests relevant to governance/docs if dependencies are
-  installed.
+- 只改治理层：`AGENTS.md`、`README.md`、`PROJECT_STATUS.md`、`.agents/**`、治理相关 `docs/architecture/**`。
+- 不改 `src/**`、业务 `tests/**`、`pyproject.toml`、`environment.yml`。
+- 不创建 repo-local `.codex/`、`.claude/`、`CLAUDE.md`、hooks/MCP/plugin runtime config。
+- 不加入 private data、blocked extensions、旧 handoff zip/json。
 
-## Review Questions
+## 内容一致性
 
-- Is `AGENTS.md` still short and hard-boundary focused?
-- Are `.agents/` skills and references agent-neutral?
-- Are global `.codex/` and repo `.agents/` clearly separated?
-- Was repo-local `.codex/` avoided?
-- Are skill triggers clear enough for progressive disclosure?
-- Are task modes and context routing unambiguous?
-- Are PASS/FAIL/NOT_RUN claims backed by evidence?
-- Are private roots and blocked package extensions excluded from packages?
-- Did the diff avoid business code and business tests?
-- Did the diff avoid new public API/CLI/registry/store/facade surface?
-- Are scripts Python-first and portable across Win11/macOS/Linux?
-- Are stale N2/branch/next-step claims removed or updated?
-- Are hooks/MCP/subagents draft-only unless explicitly approved?
+- 人读文件中文为主，路径/命令/API/code symbol/mode ID/status token 保留英文。
+- `AGENTS.md` 足够短且包含 hard boundaries、task router、stop conditions。
+- task mode ID 在 `AGENTS.md`、`SKILL.md`、`task-modes.md`、templates 中一致。
+- current status 不保留旧 branch/next step。
+- 内存预算等具体数字以代码事实为准。
+- templates 支持短提示词精准路由，不要求用户每次写长 prompt。
+
+## 建议命令
+
+```text
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --repo-root . --governance-only
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
+python -c "from pathlib import Path; import py_compile; [py_compile.compile(str(p), doraise=True) for p in Path('.agents/skills/quant-research-platform-maintenance/scripts').glob('*.py')]"
+git diff --check
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/agents tests/architecture -q
+```
+
+Windows PowerShell 下设置 pytest 环境变量：
+
+```powershell
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD="1"
+python -m pytest tests/agents tests/architecture -q
+Remove-Item Env:\PYTEST_DISABLE_PLUGIN_AUTOLOAD
+```
