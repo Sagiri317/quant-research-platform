@@ -97,8 +97,7 @@ def run_git(repo: Path, args: list[str]) -> tuple[int, str, str]:
         ["git", *args],
         cwd=repo,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     return proc.returncode, proc.stdout, proc.stderr
@@ -134,7 +133,9 @@ def changed_files(repo: Path, base_ref: str | None) -> list[str]:
 
 
 def allowed_governance_prefixes(allow_active_docs: bool) -> tuple[str, ...]:
-    return BASE_GOVERNANCE_PREFIXES + (ACTIVE_DOCS_PREFIXES if allow_active_docs else ())
+    return BASE_GOVERNANCE_PREFIXES + (
+        ACTIVE_DOCS_PREFIXES if allow_active_docs else ()
+    )
 
 
 def is_governance_path(path: str, allow_active_docs: bool) -> bool:
@@ -144,16 +145,30 @@ def is_governance_path(path: str, allow_active_docs: bool) -> bool:
     )
 
 
-def check_governance_only(result: Result, paths: list[str], allow_active_docs: bool) -> None:
+def check_governance_only(
+    result: Result,
+    paths: list[str],
+    allow_active_docs: bool,
+) -> None:
     for path in paths:
         if path.startswith(PRIVATE_ROOTS):
             result.errors.append(f"private root changed or included: {path}")
         if path.startswith(".codex/"):
-            result.errors.append(f"repo-local .codex change is not allowed by default: {path}")
+            result.errors.append(
+                f"repo-local .codex change is not allowed by default: {path}"
+            )
         if path.startswith(".claude/") or path == "CLAUDE.md":
-            result.errors.append(f"agent-specific project adapter must remain draft-only: {path}")
-        if path.startswith(BUSINESS_PREFIXES) and not is_governance_path(path, allow_active_docs):
-            result.errors.append(f"business/dependency path changed in governance-only mode: {path}")
+            result.errors.append(
+                f"agent-specific project adapter must remain draft-only: {path}"
+            )
+        if path.startswith(BUSINESS_PREFIXES) and not is_governance_path(
+            path,
+            allow_active_docs,
+        ):
+            result.errors.append(
+                "business/dependency path changed in governance-only mode: "
+                f"{path}"
+            )
         if not is_governance_path(path, allow_active_docs):
             result.errors.append(f"path is outside governance-only allow list: {path}")
         if Path(path).suffix.lower() in BLOCKED_EXTENSIONS:
@@ -199,22 +214,33 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
             if _skip_regex_definition_line(rel, line):
                 continue
             if SECRET_PATTERN.search(line):
-                result.errors.append(f"possible secret-like assignment in {rel}:{line_number}")
+                result.errors.append(
+                    f"possible secret-like assignment in {rel}:{line_number}"
+                )
             if LOCAL_PATH_PATTERN.search(line):
-                result.errors.append(f"local absolute path pattern in {rel}:{line_number}")
+                result.errors.append(
+                    f"local absolute path pattern in {rel}:{line_number}"
+                )
             for match in STALE_STATUS_PATTERNS:
                 if match.search(line):
                     result.errors.append(
-                        f"stale N2/status wording in {rel}:{line_number}: {match.pattern}"
+                        "stale N2/status wording in "
+                        f"{rel}:{line_number}: {match.pattern}"
                     )
             if (
                 "NOT_RUN" in line
                 and "PASS" in line
                 and "不能" not in line
                 and "not" not in line.lower()
-                and re.search(r"\b(status|result)\s*[:=]\s*`?PASS", line, re.IGNORECASE)
+                and re.search(
+                    r"\b(status|result)\s*[:=]\s*`?PASS",
+                    line,
+                    re.IGNORECASE,
+                )
             ):
-                result.warnings.append(f"line mixes NOT_RUN and PASS in {rel}:{line_number}")
+                result.warnings.append(
+                    f"line mixes NOT_RUN and PASS in {rel}:{line_number}"
+                )
 
 
 def check_agents_size_and_terms(result: Result, repo: Path) -> None:
@@ -227,13 +253,22 @@ def check_agents_size_and_terms(result: Result, repo: Path) -> None:
         result.errors.append("AGENTS.md exceeds 12KB target")
     for variants in REQUIRED_AGENTS_TERMS:
         if not any(term in text for term in variants):
-            result.errors.append("AGENTS.md missing required term variant: " + " / ".join(variants))
+            result.errors.append(
+                "AGENTS.md missing required term variant: "
+                + " / ".join(variants)
+            )
     if "small-fix" not in text or "standard-implementation" not in text:
         result.errors.append("AGENTS.md must use canonical hyphenated task mode IDs")
 
 
 def check_script_portability(result: Result, repo: Path) -> None:
-    script_root = repo / ".agents" / "skills" / "quant-research-platform-maintenance" / "scripts"
+    script_root = (
+        repo
+        / ".agents"
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+    )
     if not script_root.exists():
         result.warnings.append("script directory missing")
         return
@@ -242,11 +277,15 @@ def check_script_portability(result: Result, repo: Path) -> None:
         if p.is_file() and p.suffix.lower() == ".ps1":
             result.errors.append(f"ps1-only script remains in governance skill: {rel}")
         if p.is_file() and p.suffix.lower() in {".sh", ".bash"}:
-            result.errors.append(f"shell-only script remains in governance skill: {rel}")
+            result.errors.append(
+                f"shell-only script remains in governance skill: {rel}"
+            )
         if p.is_file() and p.suffix.lower() == ".py":
             text = p.read_text(encoding="utf-8")
             if "argparse" not in text:
-                result.warnings.append(f"python script has no argparse help surface: {rel}")
+                result.warnings.append(
+                    f"python script has no argparse help surface: {rel}"
+                )
             if "pathlib" not in text and "Path" not in text:
                 result.warnings.append(f"python script may not use pathlib: {rel}")
             if re.search(r"(?<![A-Za-z])[A-Za-z]:\\", text):
@@ -266,37 +305,49 @@ def check_markdown_paths(result: Result, repo: Path, paths: list[str]) -> None:
             candidate = raw.rstrip(".,;:)")
             if "<" in candidate or "*" in candidate or candidate.endswith("/"):
                 continue
-            if any(candidate == root.rstrip("/") or candidate.startswith(root) for root in PRIVATE_ROOTS):
+            if any(
+                candidate == root.rstrip("/") or candidate.startswith(root)
+                for root in PRIVATE_ROOTS
+            ):
                 continue
             if not (repo / candidate).exists():
                 src_candidate = repo / "src" / "quant_research_platform" / candidate
                 if src_candidate.exists():
                     continue
-                result.warnings.append(f"possible broken repo path in {rel}: {candidate}")
+                result.warnings.append(
+                    f"possible broken repo path in {rel}: {candidate}"
+                )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="运行 QRP 治理层检查；默认只检查 Git changed files，不扫描私有数据目录。"
+        description=(
+            "Run QRP governance checks. By default, only Git changed files are "
+            "checked and private data roots are not scanned."
+        )
     )
-    parser.add_argument("--repo-root", default=".", help="仓库根目录，默认当前目录。")
+    parser.add_argument("--repo-root", default=".", help="Repository root.")
     parser.add_argument(
         "--base-ref",
         default=None,
-        help="可选 base ref，用于已提交 diff 检查，例如 origin/feature/agent-governance-redesign。",
+        help="Optional base ref for committed diff checks.",
     )
     parser.add_argument(
         "--governance-only",
         action="store_true",
-        help="治理-only 模式：禁止业务代码、依赖文件、private roots、repo-local adapters。",
+        help="Governance-only mode forbids business code and private roots.",
     )
     parser.add_argument(
         "--allow-active-docs",
         action="store_true",
-        help="在 governance-only 模式下额外允许 docs/api、docs/data、docs/code-map 的 active docs 同步。默认不允许。",
+        help="Allow active docs in governance-only mode.",
     )
-    parser.add_argument("--json", action="store_true", help="输出 JSON 摘要。")
-    parser.add_argument("--summary", action="store_true", help="只输出一行短摘要，适合 final report。")
+    parser.add_argument("--json", action="store_true", help="Print JSON summary.")
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print a one-line summary for final reports.",
+    )
     args = parser.parse_args(argv)
 
     repo = Path(args.repo_root).resolve()
@@ -324,7 +375,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     elif args.summary:
-        print(f"governance_check_status={summary['status']} changed_files={len(paths)} checked_files={len(result.checked_files)} errors={len(result.errors)} warnings={len(result.warnings)}")
+        print(
+            f"governance_check_status={summary['status']} "
+            f"changed_files={len(paths)} "
+            f"checked_files={len(result.checked_files)} "
+            f"errors={len(result.errors)} "
+            f"warnings={len(result.warnings)}"
+        )
     else:
         print(f"governance_check_status={summary['status']}")
         print(f"changed_files={len(paths)}")
