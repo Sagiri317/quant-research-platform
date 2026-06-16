@@ -281,7 +281,7 @@ def test_full_historical_daily_panel_summary_streams_generated_chunks(
         ),
     )
 
-    def iter_chunks(project_root: Path):
+    def iter_chunks(project_root: Path, *, resource_policy=None):
         assert project_root == Path(".")
         return iter(frames)
 
@@ -315,7 +315,7 @@ def test_full_historical_daily_panel_generation_always_uses_chunks(
         }
     )
 
-    def iter_session_chunks(project_root: Path):
+    def iter_session_chunks(project_root: Path, *, resource_policy=None):
         assert project_root == Path(".")
         return iter((chunk,))
 
