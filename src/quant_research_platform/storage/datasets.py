@@ -410,6 +410,7 @@ def fingerprint_dataset(
     partition_rows: dict[str, int] = {}
     partition_hash_sum: dict[str, int] = {}
     partition_hash_xor: dict[str, int] = {}
+    file_count = 0
 
     for path in context.read_paths:
         chunk = pd.read_parquet(
@@ -426,6 +427,7 @@ def fingerprint_dataset(
         chunk = chunk.loc[:, list(context.logical_columns)]
         if chunk.empty:
             continue
+        file_count += 1
         hashes = pd.util.hash_pandas_object(
             chunk.loc[:, list(context.logical_columns)],
             index=False,
@@ -471,7 +473,7 @@ def fingerprint_dataset(
         key_columns=key_columns,
         content_hash=content_hash,
         partition_fingerprints=partition_fingerprints,
-        file_count=len(context.read_paths),
+        file_count=file_count,
         column_names=tuple(context.logical_columns),
     )
 
@@ -1297,7 +1299,6 @@ def _matches_artifact_segment(segment: str, expected: str) -> bool:
     return (
         segment == expected
         or segment.startswith(f".{expected}.tmp-")
-        or segment.startswith(".tmp-")
     )
 
 

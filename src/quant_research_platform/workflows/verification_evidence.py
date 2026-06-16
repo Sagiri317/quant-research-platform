@@ -115,9 +115,7 @@ def run_verification_evidence(
         },
     )
 
-    policy_scope = runtime_resource_policy_scope(resource_policy)
-    policy_scope.__enter__()
-    try:
+    with runtime_resource_policy_scope(resource_policy):
         return _run_verification_evidence_with_policy(
             config=config,
             effective_windows=effective_windows,
@@ -126,8 +124,6 @@ def run_verification_evidence(
             layout=layout,
             resource_policy=resource_policy,
         )
-    finally:
-        policy_scope.__exit__(None, None, None)
 
 
 def _run_verification_evidence_with_policy(

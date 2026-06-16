@@ -179,10 +179,14 @@ def _with_a_share_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
     )
     result["filling_flag"] = pd.to_numeric(result["filling_flag"], errors="coerce")
     result["market_type"] = pd.to_numeric(result["market_type"], errors="coerce")
-    result["limit_status"] = pd.to_numeric(
-        result["limit_status"],
-        errors="coerce",
+    raw_limit_status = result["limit_status"]
+    result["limit_status"] = pd.to_numeric(raw_limit_status, errors="coerce")
+    invalid_non_null = result["limit_status"].isna() & raw_limit_status.notna()
+    invalid_value = result["limit_status"].notna() & ~result["limit_status"].isin(
+        [-1, 0, 1]
     )
+    if invalid_non_null.any() or invalid_value.any():
+        raise ValueError("invalid_limit_status")
     filled_limit_status = result["limit_status"].fillna(0)
     result["is_limit_up"] = filled_limit_status.eq(1)
     result["is_limit_down"] = filled_limit_status.eq(-1)

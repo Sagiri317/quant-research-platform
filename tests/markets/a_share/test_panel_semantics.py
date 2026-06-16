@@ -187,6 +187,16 @@ def test_compute_daily_panel_preserves_missing_limit_status_context() -> None:
     assert bool(panel.loc[0, "is_limit_down"]) is False
 
 
+def test_compute_daily_panel_rejects_invalid_limit_status_context() -> None:
+    with pytest.raises(ValueError, match="invalid_limit_status"):
+        compute_daily_panel(
+            pd.DataFrame([_daily_market_row("2020-01-02", limit_status=2)]),
+            stock_master=_stock_master_frame(),
+            market_cap=_market_cap_frame(),
+            trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
+        )
+
+
 def test_annotations_mask_only_next_day_one_word_limits() -> None:
     rows = [
         _daily_market_row("2020-01-01"),

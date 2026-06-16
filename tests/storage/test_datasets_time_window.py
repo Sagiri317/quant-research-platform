@@ -109,6 +109,22 @@ def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> N
     assert windowed.content_hash != full.content_hash
 
 
+def test_fingerprint_and_inspect_time_window_file_count_match_contributing_files(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path, "empty_window")
+    write_dataset(root, _frame(), spec=_factor_spec("empty_window"))
+
+    window = TimeWindow("2015-02-01", "2015-02-02")
+    inspection = inspect_dataset(root, time_window=window)
+    fingerprint = fingerprint_dataset(root, time_window=window)
+
+    assert inspection.row_count == 0
+    assert fingerprint.row_count == 0
+    assert inspection.file_count == 0
+    assert fingerprint.file_count == inspection.file_count
+
+
 def test_fingerprint_dataset_time_window_prunes_year_partitions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

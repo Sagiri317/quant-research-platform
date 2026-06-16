@@ -219,6 +219,10 @@ def test_annotations_accept_explicit_one_word_limit_columns() -> None:
             "invalid_one_word_limit_status",
         ),
         (
+            "bad_numeric_status",
+            "invalid_one_word_limit_status",
+        ),
+        (
             "null_explicit",
             "null_one_word_limit_column: one_word_limit_up",
         ),
@@ -244,6 +248,9 @@ def test_annotations_fail_closed_on_invalid_mask_inputs(
         "bad_status": lambda: _annotation_panel_frame().assign(
             limit_status=["bad", 0, 0]
         ),
+        "bad_numeric_status": lambda: _annotation_panel_frame().assign(
+            limit_status=[2, 0, 0]
+        ),
         "null_explicit": lambda: _annotation_panel_frame().assign(
             one_word_limit_up=[1, None, 0],
             one_word_limit_down=[0, 0, 0],
@@ -255,6 +262,21 @@ def test_annotations_fail_closed_on_invalid_mask_inputs(
     }
     with pytest.raises(ValueError, match=expected):
         annotations.derive_annotations(builders[case]())
+
+
+def test_annotations_treat_null_limit_status_as_no_one_word_limit_signal() -> None:
+    result = annotations.derive_annotations(
+        _annotation_panel_frame().assign(
+            limit_status=[pd.NA, 0, 0],
+            open=[10.0, 9.0, 11.0],
+            high=[10.0, 9.0, 11.0],
+            low=[10.0, 9.0, 11.0],
+            close=[10.0, 9.0, 11.0],
+        )
+    )["a_share_execution"]
+
+    assert result["can_enter"].tolist() == [True, True, False]
+    assert result["can_exit"].tolist() == [True, True, False]
 
 
 def test_label_calculation_source_does_not_recompute_a_share_trading_rules() -> None:

@@ -145,7 +145,8 @@ def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("invalid_one_word_limit_inference_values")
     status = pd.to_numeric(result["limit_status"], errors="coerce")
     invalid_non_null = status.isna() & result["limit_status"].notna()
-    if invalid_non_null.any():
+    invalid_value = status.notna() & ~status.isin([-1, 0, 1])
+    if invalid_non_null.any() or invalid_value.any():
         raise ValueError("invalid_one_word_limit_status")
     status = status.fillna(0)
     equal_prices = (
