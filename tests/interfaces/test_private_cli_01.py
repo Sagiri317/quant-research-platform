@@ -201,14 +201,17 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     evidence_run_help = runner.invoke(private_app, ["evidence", "run", "--help"])
 
     assert root_help.exit_code == 0
+    assert "Private local verification harness commands." in root_help.output
     assert "schema-inventory" in root_help.output
     assert "evidence" in root_help.output
     assert "private-rebuild" not in root_help.output
     assert schema_inventory_help.exit_code == 0
+    assert "private local verification harness" in schema_inventory_help.output
     assert "--project-root" in schema_inventory_help.output
     assert "--output" in schema_inventory_help.output
     assert "--overwrite" not in schema_inventory_help.output
     assert evidence_run_help.exit_code == 0
+    assert "private local verification harness" in evidence_run_help.output
     assert "--output-root" in evidence_run_help.output
     assert "--start-date" in evidence_run_help.output
     assert "--end-date" in evidence_run_help.output

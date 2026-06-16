@@ -69,6 +69,18 @@ handoff packages, or private reports. Real-data smoke, full-horizon rebuilds,
 and generated private reports are outside this environment contract unless a
 separate task explicitly runs and compares them.
 
+The default pytest gate excludes `private_slow` cases. These are slow/private
+verification cases for heavyweight chunk parity and similar evidence work. Run
+them explicitly only when the task calls for the slow/private gate:
+
+```powershell
+conda run -n quantlab313 python -m pytest -m private_slow -q
+```
+
+```bash
+conda run -n quantlab313 python -m pytest -m private_slow -q
+```
+
 ## PASS Semantics
 
 A formal verification PASS is valid only for the exact Python, OS, and
@@ -78,7 +90,7 @@ dependency versions recorded with the run. Record at minimum:
 - `python -c "import sys; print(sys.version)"`
 - core dependency versions for `numpy`, `pandas`, `pyarrow`, `scikit-learn`,
   `pydantic`, `fastapi`, `typer`, `uvicorn`, `pytest`, `ruff`, `coverage`,
-  `hypothesis`, `httpx2`, and `psutil`
+  `hypothesis`, `httpx`, and `psutil`
 - Conda BLAS provider versions for `libblas`, `liblapack`, and `libopenblas`
 - OS name/version
 - exact commands run

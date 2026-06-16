@@ -227,11 +227,12 @@ def _write_panel(
     market_cap = source_inputs["market_cap"]
     trading_calendar = source_inputs["trading_calendar"]
     daily_market_root = layout.interim_data_root(source_id, "daily_market")
+    daily_market_inspection = inspect_dataset(daily_market_root)
     estimated = _estimate_panel_bytes_per_session(
         sessions,
         time_window=time_window,
         daily_market_root=daily_market_root,
-        inspection=inspect_dataset(daily_market_root),
+        inspection=daily_market_inspection,
         stock_master=stock_master,
         market_cap=market_cap,
         trading_calendar=trading_calendar,
@@ -241,7 +242,7 @@ def _write_panel(
         sessions,
         time_window=time_window,
         policy=policy,
-        inspection=inspect_dataset(daily_market_root),
+        inspection=daily_market_inspection,
         estimated_bytes_per_session=estimated,
         lookahead_sessions=1,
         reason="panel_next_session",
@@ -297,7 +298,7 @@ def _write_annotation(
         policy=policy,
         inspection=inspect_dataset(panel_root),
         lookahead_sessions=1,
-        reason="research_assembly",
+        reason="annotation_lookahead",
     )
 
     def chunks() -> Iterable[pd.DataFrame]:

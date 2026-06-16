@@ -60,6 +60,13 @@ public evaluate、predict 或 report command；不是 paper/live trading；不�
 2. 决定 clean -> main merge gate / release gate 是否启动。
 3. 后续功能或治理修补从 `feature/qrp-clean-rewrite` 新开分支。
 
+## Merge gate notes
+
+- Default pytest excludes `private_slow` verification cases; run
+  `python -m pytest -m private_slow -q` only for the slow/private gate.
+- Runtime resource exact-byte payloads are private evidence only. Public-facing
+  verification summaries use coarse resource buckets.
+
 ## Root handoff / 根目录回传信号
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |

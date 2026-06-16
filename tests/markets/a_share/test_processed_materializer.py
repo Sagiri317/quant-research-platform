@@ -59,6 +59,34 @@ def test_materialize_processed_data_writes_requested_panel_and_dependencies(
     assert "source_asset_id" not in panel.columns
 
 
+def test_panel_materializer_reuses_daily_market_inspection(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout)
+    daily_market_root = layout.interim_data_root(SYNTHETIC_SOURCE_ID, "daily_market")
+    calls = 0
+    original = materializer.inspect_dataset
+
+    def spy_inspect_dataset(*args, **kwargs):
+        nonlocal calls
+        if Path(args[0]) == daily_market_root and "time_window" not in kwargs:
+            calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(materializer, "inspect_dataset", spy_inspect_dataset)
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SYNTHETIC_SOURCE_ID,
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+        data_ids=("daily_panel",),
+    )
+
+    assert calls == 1
+
+
 def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
@@ -618,24 +646,43 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
 
 
 @pytest.mark.parametrize(
-    ("data_id", "kind"),
+    ("data_id", "kind", "end_date", "time_window"),
     [
-        ("a_share_execution", "annotation"),
-        ("price_volume", "factor"),
-        ("forward_returns", "label"),
+        (
+            "a_share_execution",
+            "annotation",
+            "2014-01-08",
+            TimeWindow("2014-01-02", "2014-01-07"),
+        ),
+        pytest.param(
+            "price_volume",
+            "factor",
+            "2014-08-29",
+            TimeWindow("2014-01-02", "2014-02-28"),
+            marks=pytest.mark.private_slow,
+        ),
+        pytest.param(
+            "forward_returns",
+            "label",
+            "2014-08-29",
+            TimeWindow("2014-01-02", "2014-02-28"),
+            marks=pytest.mark.private_slow,
+        ),
     ],
 )
 def test_materialize_processed_data_downstream_forced_tiny_chunks_equal_default_output(
     tmp_path,
     data_id: str,
     kind: str,
+    end_date: str,
+    time_window: TimeWindow,
 ) -> None:
     _assert_forced_tiny_chunks_match_default(
         tmp_path,
         data_id=data_id,
         kind=kind,
-        end_date="2014-08-29",
-        time_window=TimeWindow("2014-01-02", "2014-02-28"),
+        end_date=end_date,
+        time_window=time_window,
     )
 
 

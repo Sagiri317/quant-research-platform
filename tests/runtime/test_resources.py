@@ -32,7 +32,7 @@ def test_runtime_resource_policy_uses_required_defaults() -> None:
     assert policy.effective_chunk_bytes == int(2 * GIB * 0.60)
 
 
-def test_runtime_resource_policy_payload_and_scope_are_public_safe() -> None:
+def test_runtime_resource_policy_private_payload_keeps_exact_bytes() -> None:
     policy = RuntimeResourcePolicy.from_environment(
         available_memory_bytes=10 * GIB,
         environ={"QRP_MEMORY_BUDGET_MB": "1024"},
@@ -53,6 +53,35 @@ def test_runtime_resource_policy_payload_and_scope_are_public_safe() -> None:
         "min_free_disk_bytes": 0,
     }
     assert all("path" not in key for key in payload)
+
+
+def test_runtime_resource_policy_public_payload_uses_coarse_buckets() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=10 * GIB,
+        environ={"QRP_MEMORY_BUDGET_MB": "1024"},
+    )
+
+    payload = policy.to_public_summary_payload()
+
+    assert payload == {
+        "memory_budget_fraction": 0.80,
+        "memory_safety_factor": 0.60,
+        "available_memory_bucket": "8-16GiB",
+        "memory_budget_bucket": "1-2GiB",
+        "chunk_target_bucket": "256-512MiB",
+        "effective_chunk_bucket": "128-256MiB",
+        "has_memory_budget_override": True,
+        "min_free_disk_bucket": "0",
+    }
+    assert not any(key.endswith("_bytes") for key in payload)
+    assert 10 * GIB not in payload.values()
+
+
+def test_runtime_resource_policy_scope_restores_active_snapshot() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=10 * GIB,
+        environ={"QRP_MEMORY_BUDGET_MB": "1024"},
+    )
 
     with runtime_resource_policy_scope(policy):
         assert active_runtime_resource_policy() is policy
@@ -110,6 +139,28 @@ def test_invalid_env_values_fail_closed() -> None:
             available_memory_bytes=8 * GIB,
             environ={"QRP_CHUNK_TARGET_MB": "-1"},
         )
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {"QRP_MEMORY_BUDGET_FRACTION": "1.1"},
+        {"QRP_MEMORY_SAFETY_FACTOR": "1.1"},
+    ],
+)
+def test_runtime_resource_policy_rejects_fraction_env_values_above_one(
+    environ: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError, match="invalid_runtime_resource_env"):
+        RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=8 * GIB,
+            environ=environ,
+        )
+
+
+def test_runtime_resource_policy_rejects_invalid_available_memory() -> None:
+    with pytest.raises(ValueError, match="invalid_runtime_resource_available_memory"):
+        RuntimeResourcePolicy(available_memory_bytes=0)
 
 
 def test_runtime_resource_policy_falls_back_without_psutil() -> None:

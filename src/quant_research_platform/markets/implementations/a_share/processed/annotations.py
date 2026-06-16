@@ -148,6 +148,7 @@ def _add_one_word_limit_masks(panel: pd.DataFrame) -> pd.DataFrame:
     invalid_value = status.notna() & ~status.isin([-1, 0, 1])
     if invalid_non_null.any() or invalid_value.any():
         raise ValueError("invalid_one_word_limit_status")
+    # Null limit_status is unknown/no signal, not an explicit neutral status.
     status = status.fillna(0)
     equal_prices = (
         np.isclose(prices["open"], prices["high"], rtol=1e-7, atol=1e-8)

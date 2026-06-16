@@ -22,7 +22,7 @@ dev = [
   "pytest-cov>=7,<8",
   "coverage>=7.14,<8",
   "hypothesis>=6.155,<7",
-  "httpx2>=2.3,<3",
+  "httpx>=0.28,<1",
 ]
 
 [project.scripts]
@@ -33,7 +33,10 @@ qrp-private = "quant_research_platform.interfaces.private_cli:main"
 pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = ["--import-mode=importlib"]
+addopts = ["--import-mode=importlib", "-m", "not private_slow"]
+markers = [
+  "private_slow: private or slow verification cases excluded from the default merge gate",
+]
 
 [tool.ruff]
 line-length = 88

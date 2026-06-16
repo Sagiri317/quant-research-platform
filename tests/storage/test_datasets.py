@@ -296,13 +296,25 @@ def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -
     pd.testing.assert_frame_equal(read_dataset(root), original)
 
 
-def test_write_dataset_rejects_generic_tmp_artifact_root(tmp_path: Path) -> None:
+def test_write_dataset_rejects_generic_tmp_artifact_root_fail_closed(
+    tmp_path: Path,
+) -> None:
     with pytest.raises(ValueError, match="invalid_processed_output_root"):
         write_dataset(
             tmp_path / "data" / "processed" / "a_share" / "factor" / ".tmp-user",
             _frame(),
             spec=_spec(),
         )
+
+
+def test_write_dataset_allows_writer_owned_tmp_artifact_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data" / "processed" / "a_share" / "factor" / ".x.tmp-user"
+
+    write_dataset(root, _frame(), spec=_spec())
+
+    assert inspect_dataset(root).spec["data_id"] == "x"
 
 
 def test_read_dataset_materialized_chunked_projection_and_time_window(

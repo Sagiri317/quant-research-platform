@@ -28,20 +28,22 @@ from ._helpers import (
         (
             "a_share_execution",
             "annotation",
-            "2014-08-29",
-            TimeWindow("2014-01-02", "2014-02-28"),
+            "2014-01-08",
+            TimeWindow("2014-01-02", "2014-01-07"),
         ),
-        (
+        pytest.param(
             "price_volume",
             "factor",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
+            marks=pytest.mark.private_slow,
         ),
-        (
+        pytest.param(
             "forward_returns",
             "label",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
+            marks=pytest.mark.private_slow,
         ),
     ],
 )

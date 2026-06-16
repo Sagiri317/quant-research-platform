@@ -29,7 +29,7 @@ RUNTIME_DEPENDENCIES = {
 }
 DEV_DEPENDENCIES = {
     "coverage",
-    "httpx2",
+    "httpx",
     "hypothesis",
     "pytest",
     "pytest-cov",

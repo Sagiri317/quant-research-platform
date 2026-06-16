@@ -289,7 +289,7 @@ def _run_verification_evidence_with_policy(
         timings=timings_payload,
         validation_summary=validation_summary,
         output_root=output_root,
-        runtime_resource_policy=resource_policy.to_payload(),
+        runtime_resource_policy=resource_policy.to_public_summary_payload(),
         runtime_execution_plan=_runtime_execution_plan_payload(),
     )
     write_verification_evidence_summary_json(
@@ -385,7 +385,7 @@ def _resolve_effective_windows(
 def _runtime_execution_plan_payload() -> dict[str, object]:
     return {
         "storage_read": {
-            "read_context": "_DatasetReadContext",
+            "time_window_read_planning": "manifest_backed",
             "time_window_year_partition_pruning": True,
             "chunked_read_granularity": "parquet_file",
             "row_group_streaming": "NOT_LANDED",

@@ -17,10 +17,13 @@ from quant_research_platform.workflows.verification_evidence import (
     run_verification_evidence,
 )
 
-app = typer.Typer(add_completion=False)
+app = typer.Typer(
+    add_completion=False,
+    help="Private local verification harness commands.",
+)
 evidence_app = typer.Typer(
     add_completion=False,
-    help="Verification evidence commands.",
+    help="Private local verification harness evidence commands.",
 )
 PROJECT_ROOT_DEFAULT = Path(".")
 
@@ -29,7 +32,7 @@ app.add_typer(evidence_app, name="evidence")
 
 @app.callback()
 def _root() -> None:
-    """Private local-data commands."""
+    """Private local verification harness commands."""
 
 
 @app.command("schema-inventory")
@@ -49,7 +52,7 @@ def schema_inventory(
         ),
     ] = ...,
 ) -> None:
-    """Write sanitized aggregate schema inventory JSON."""
+    """Write private local verification harness schema inventory JSON."""
 
     if output.exists():
         typer.echo("output_already_exists", err=True)
@@ -125,7 +128,7 @@ def evidence_run(
         ),
     ] = False,
 ) -> None:
-    """Run the verification evidence verification harness."""
+    """Run the private local verification harness."""
 
     try:
         result = run_verification_evidence(
