@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -161,6 +162,46 @@ def test_runtime_resource_policy_rejects_fraction_env_values_above_one(
 def test_runtime_resource_policy_rejects_invalid_available_memory() -> None:
     with pytest.raises(ValueError, match="invalid_runtime_resource_available_memory"):
         RuntimeResourcePolicy(available_memory_bytes=0)
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, 0.0, -0.1, 1.1])
+def test_runtime_resource_policy_rejects_invalid_fraction_boundaries(
+    value: float,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_runtime_resource_fraction"):
+        RuntimeResourcePolicy(
+            available_memory_bytes=8 * GIB,
+            memory_budget_fraction=value,
+        )
+
+
+def test_runtime_resource_policy_accepts_fraction_boundary_one() -> None:
+    policy = RuntimeResourcePolicy(
+        available_memory_bytes=8 * GIB,
+        memory_budget_fraction=1.0,
+    )
+
+    assert policy.memory_budget_bytes == 8 * GIB
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-0.1", "1.1"])
+def test_runtime_resource_policy_rejects_invalid_fraction_env_boundaries(
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_runtime_resource_env"):
+        RuntimeResourcePolicy.from_environment(
+            available_memory_bytes=8 * GIB,
+            environ={"QRP_MEMORY_BUDGET_FRACTION": value},
+        )
+
+
+def test_runtime_resource_policy_accepts_fraction_env_boundary_one() -> None:
+    policy = RuntimeResourcePolicy.from_environment(
+        available_memory_bytes=8 * GIB,
+        environ={"QRP_MEMORY_BUDGET_FRACTION": "1"},
+    )
+
+    assert policy.memory_budget_bytes == 8 * GIB
 
 
 def test_runtime_resource_policy_falls_back_without_psutil() -> None:

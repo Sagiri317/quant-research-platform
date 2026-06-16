@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
 
 DEFAULT_AVAILABLE_MEMORY_BYTES = 4 * 1024 * 1024 * 1024
@@ -293,13 +293,13 @@ def _float_env(env: Mapping[str, str], name: str, default: float) -> float:
 
 def _fraction_env(env: Mapping[str, str], name: str, default: float) -> float:
     parsed = _float_env(env, name, default)
-    if parsed > 1:
+    if not isfinite(parsed) or parsed > 1:
         raise ValueError(f"invalid_runtime_resource_env: {name}")
     return parsed
 
 
 def _require_fraction(name: str, value: float) -> None:
-    if value <= 0 or value > 1:
+    if not isfinite(value) or value <= 0 or value > 1:
         raise ValueError(f"invalid_runtime_resource_fraction: {name}")
 
 
