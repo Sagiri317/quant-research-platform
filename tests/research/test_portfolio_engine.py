@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+from quant_research_platform.catalog.portfolios import PortfolioCatalog
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import DataFrequency, DataGrain
+from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.evaluations import SignalSpec
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.portfolios import (
+    run_portfolio_from_research_dataset,
+    simulate_portfolio_frame,
+)
+from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.layout import StorageLayout
+
+
+def test_portfolio_engine_produces_required_signal_artifacts() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b", "c", "d"] * 2,
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4
+            + [pd.Timestamp("2024-02-02")] * 4,
+            "raw_risk": [4.0, 3.0, 2.0, 1.0, 4.0, 2.5, 2.0, 1.0],
+            "forward_return": [0.00, 0.01, 0.02, 0.04, -0.01, 0.01, 0.02, 0.05],
+            "eligible": [True] * 8,
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id="risk_signal_portfolio",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="risk_signal",
+                column="raw_risk",
+                source_kind="factor",
+                direction="lower",
+                transform="rank",
+            ),
+        ),
+        label_column="forward_return",
+        weight_config=WeightConfig(
+            method="rank_weighted_quantile",
+            top_quantile=0.25,
+            bottom_quantile=0.25,
+            cost_bps=10.0,
+        ),
+    )
+
+    result = simulate_portfolio_frame(frame, spec)
+
+    assert set(result.positions["signal"]) == {"risk_signal"}
+    assert result.turnover["turnover"].tolist() == pytest.approx([2.0, 0.0])
+    assert result.cost_breakdown["total_cost"].tolist() == pytest.approx([0.002, 0.0])
+    assert result.portfolio_returns["net_portfolio_return"].tolist() == pytest.approx(
+        [0.038, 0.06]
+    )
+    assert result.cumulative_returns["cumulative_net_return"].tolist() == pytest.approx(
+        [0.038, 0.098]
+    )
+    assert result.performance_summary.loc[0, "max_drawdown"] == pytest.approx(0.0)
+    assert result.performance_summary.loc[0, "win_rate"] == pytest.approx(1.0)
+    assert result.exposure_summary.loc[0, "mean_gross_exposure"] == pytest.approx(2.0)
+    assert result.concentration.loc[0, "mean_hhi"] == pytest.approx(0.5)
+    assert result.period_breakdown["year"].tolist() == [2024, 2024]
+    assert result.period_breakdown["month"].tolist() == [1, 2]
+    assert result.period_breakdown["hit_rate"].tolist() == pytest.approx([1.0, 1.0])
+    assert result.diagnostics["method"].tolist() == [
+        "rank_weighted_quantile",
+        "rank_weighted_quantile",
+    ]
+
+
+def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b", "c", "d"],
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4,
+            "raw_a": [1.0, 2.0, 3.0, 4.0],
+            "raw_b": [4.0, 3.0, 2.0, 1.0],
+            "forward_return": [0.00, 0.01, 0.02, 0.04],
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id="two_signal_portfolio",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="raw_a",
+                column="raw_a",
+                source_kind="factor",
+                transform="rank",
+            ),
+            SignalSpec(
+                signal_id="ranked_raw_b",
+                column="raw_b",
+                source_kind="factor",
+                transform="rank",
+            ),
+        ),
+        label_column="forward_return",
+        weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
+    )
+
+    result = simulate_portfolio_frame(frame, spec)
+
+    assert set(result.positions["signal"]) == {"raw_a", "ranked_raw_b"}
+    assert set(result.portfolio_returns["signal"]) == {"raw_a", "ranked_raw_b"}
+    assert result.performance_summary["periods"].tolist() == [1, 1]
+
+
+def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(_dataset_spec())
+    portfolio_catalog = PortfolioCatalog()
+    portfolio_catalog.register(_portfolio_spec())
+    dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
+    write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
+
+    run_root = run_portfolio_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        portfolio_catalog=portfolio_catalog,
+        portfolio_id="risk_signal_portfolio",
+        time_window=TimeWindow("2024-01-02", "2024-02-02"),
+    )
+
+    assert run_root.as_posix().endswith(
+        "reports/private_real/a_share/portfolio/risk_signal_portfolio"
+    )
+    for filename in (
+        "positions.parquet",
+        "turnover.parquet",
+        "cost_breakdown.parquet",
+        "portfolio_returns.parquet",
+        "cumulative_returns.parquet",
+        "performance_summary.parquet",
+        "exposure_summary.parquet",
+        "concentration.parquet",
+        "period_breakdown.parquet",
+        "diagnostics.parquet",
+        "manifest.json",
+    ):
+        assert (run_root / filename).is_file()
+
+
+def _portfolio_spec() -> PortfolioSpec:
+    return PortfolioSpec(
+        portfolio_id="risk_signal_portfolio",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="risk_signal",
+                column="raw_risk",
+                source_kind="factor",
+                direction="lower",
+                transform="rank",
+            ),
+        ),
+        label_column="forward_return",
+        weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
+    )
+
+
+def _dataset_spec() -> ResearchDatasetSpec:
+    return ResearchDatasetSpec(
+        data_id="demo",
+        market_id=MarketId("a_share"),
+        input_data_ids=("factor", "label"),
+        base_input_data_id="factor",
+        factor_columns=("raw_risk",),
+        label_columns=("forward_return",),
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.RESEARCH_ROW,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "raw_risk": ColumnRole.FACTOR,
+            "forward_return": ColumnRole.LABEL,
+        },
+        primary_key=("market_id", "asset_id", "timestamp"),
+        partition_columns=("year",),
+    )
+
+
+def _portfolio_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 8,
+            "asset_id": ["a", "b", "c", "d"] * 2,
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4
+            + [pd.Timestamp("2024-02-02")] * 4,
+            "raw_risk": [4.0, 3.0, 2.0, 1.0, 4.0, 2.5, 2.0, 1.0],
+            "forward_return": [0.00, 0.01, 0.02, 0.04, -0.01, 0.01, 0.02, 0.05],
+        }
+    )

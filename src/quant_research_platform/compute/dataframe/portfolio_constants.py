@@ -1,10 +1,10 @@
 """Portfolio dataframe output column contracts."""
 
-POSITION_COLUMNS = ["timestamp", "asset", "feature", "position"]
-TURNOVER_COLUMNS = ["timestamp", "feature", "turnover"]
+POSITION_COLUMNS = ["timestamp", "asset", "signal", "position"]
+TURNOVER_COLUMNS = ["timestamp", "signal", "turnover"]
 RETURNS_COLUMNS = [
     "timestamp",
-    "feature",
+    "signal",
     "label",
     "portfolio_mode",
     "long_return",
@@ -18,7 +18,7 @@ RETURNS_COLUMNS = [
 ]
 COST_BREAKDOWN_COLUMNS = [
     "timestamp",
-    "feature",
+    "signal",
     "buy_turnover",
     "sell_turnover",
     "turnover",
@@ -31,7 +31,7 @@ COST_BREAKDOWN_COLUMNS = [
     "cost_model",
 ]
 EXPOSURE_SUMMARY_COLUMNS = [
-    "feature",
+    "signal",
     "mean_gross_exposure",
     "mean_net_exposure",
     "max_gross_exposure",
@@ -42,9 +42,8 @@ EXPOSURE_SUMMARY_COLUMNS = [
 ]
 WEIGHT_DIAGNOSTIC_COLUMNS = [
     "timestamp",
-    "feature",
+    "signal",
     "method",
-    "direction",
     "universe_count",
     "eligible_count",
     "can_enter_count",

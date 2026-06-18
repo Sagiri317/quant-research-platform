@@ -13,6 +13,7 @@ from quant_research_platform.catalog.fields import FieldCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.catalog.models import ModelCatalog
+from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import (
     PredictionCatalog,
 )
@@ -26,9 +27,10 @@ from quant_research_platform.catalog.processed import (
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.evaluations import EvaluationSpec, SignalSpec
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import MODEL_ALGORITHMS, ModelSpec
+from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
@@ -78,6 +80,7 @@ class ResearchProfile:
     evaluations: EvaluationCatalog
     models: ModelCatalog
     predictions: PredictionCatalog
+    portfolios: PortfolioCatalog
     sources: SourceRegistry
     markets: MarketRegistry
     reports: ReportCatalog
@@ -106,6 +109,7 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         evaluations=_a_share_evaluation_catalog(),
         models=_a_share_model_catalog(),
         predictions=_a_share_prediction_catalog(),
+        portfolios=_a_share_portfolio_catalog(),
         sources=_a_share_csmar_source_registry(),
         markets=_a_share_market_registry(),
         reports=report_catalog(),
@@ -123,7 +127,26 @@ def _a_share_evaluation_catalog() -> EvaluationCatalog:
             run_id="a_share_mom_20d_forward_return_20d_2014",
             market_id=A_SHARE_MARKET_ID,
             research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            feature_columns=("mom_20d",),
+            signals=(
+                SignalSpec(
+                    signal_id="mom_20d",
+                    column="mom_20d",
+                    source_kind="factor",
+                    direction="higher",
+                ),
+                SignalSpec(
+                    signal_id="rev_1d",
+                    column="rev_1d",
+                    source_kind="factor",
+                    direction="lower",
+                ),
+                SignalSpec(
+                    signal_id="mom_20d_zscore",
+                    column="mom_20d_zscore",
+                    source_kind="feature",
+                    direction="higher",
+                ),
+            ),
             label_columns=("forward_return_20d",),
         )
     )
@@ -132,28 +155,67 @@ def _a_share_evaluation_catalog() -> EvaluationCatalog:
 
 def _a_share_model_catalog() -> ModelCatalog:
     catalog = ModelCatalog()
-    catalog.register(
-        ModelSpec(
-            model_id="a_share_linear_mom_20d_forward_return_20d",
-            model_family="linear",
-            feature_columns=("mom_20d",),
-            label_column="forward_return_20d",
+    for model_algorithm in sorted(MODEL_ALGORITHMS):
+        catalog.register(
+            ModelSpec(
+                model_id=_a_share_model_id(model_algorithm),
+                model_algorithm=model_algorithm,
+                input_factor_columns=_a_share_model_factor_inputs(model_algorithm),
+                input_feature_columns=_a_share_model_feature_inputs(model_algorithm),
+                label_column="forward_return_20d",
+                hyperparameters=_a_share_model_hyperparameters(model_algorithm),
+                random_seed=7,
+                max_train_rows=5000,
+            )
         )
-    )
     return catalog
 
 
 def _a_share_prediction_catalog() -> PredictionCatalog:
     catalog = PredictionCatalog()
+    for model_algorithm in sorted(MODEL_ALGORITHMS):
+        catalog.register(
+            PredictionSpec(
+                prediction_id=_a_share_prediction_id(model_algorithm),
+                model_id=_a_share_model_id(model_algorithm),
+                research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+                prediction_column=_prediction_column_name(),
+                primary_key=("market_id", "asset_id", "timestamp"),
+                train_end="2014-06-30",
+                test_start="2014-07-01",
+            )
+        )
+    return catalog
+
+
+def _a_share_portfolio_catalog() -> PortfolioCatalog:
+    catalog = PortfolioCatalog()
     catalog.register(
-        PredictionSpec(
-            prediction_id="a_share_linear_mom_20d_prediction_2014",
-            model_id="a_share_linear_mom_20d_forward_return_20d",
+        PortfolioSpec(
+            portfolio_id="a_share_mom_20d_portfolio_2014",
+            market_id=A_SHARE_MARKET_ID,
             research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            prediction_column=_prediction_column_name(),
-            primary_key=("market_id", "asset_id", "timestamp"),
-            train_end="2014-06-30",
-            test_start="2014-07-01",
+            signals=(
+                SignalSpec(
+                    signal_id="mom_20d",
+                    column="mom_20d",
+                    source_kind="factor",
+                    direction="higher",
+                ),
+                SignalSpec(
+                    signal_id="rev_1d",
+                    column="rev_1d",
+                    source_kind="factor",
+                    direction="lower",
+                ),
+                SignalSpec(
+                    signal_id="mom_20d_zscore",
+                    column="mom_20d_zscore",
+                    source_kind="feature",
+                    direction="higher",
+                ),
+            ),
+            label_column="forward_return_20d",
         )
     )
     return catalog
@@ -181,6 +243,40 @@ def _a_share_csmar_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]
 
 def _a_share_csmar_source_id() -> SourceId:
     return SourceId(next(iter(_a_share_csmar_source_interim_catalogs())))
+
+
+def _a_share_model_id(model_algorithm: str) -> str:
+    return f"a_share_{model_algorithm}_mom_20d_forward_return_20d"
+
+
+def _a_share_prediction_id(model_algorithm: str) -> str:
+    return f"a_share_{model_algorithm}_mom_20d_prediction_2014"
+
+
+def _a_share_model_factor_inputs(model_algorithm: str) -> tuple[str, ...]:
+    if model_algorithm == "single_factor_baseline":
+        return ("mom_20d",)
+    return ("mom_20d", "rev_1d")
+
+
+def _a_share_model_feature_inputs(model_algorithm: str) -> tuple[str, ...]:
+    if model_algorithm == "single_factor_baseline":
+        return ()
+    return ("mom_20d_zscore",)
+
+
+def _a_share_model_hyperparameters(model_algorithm: str) -> dict[str, object]:
+    if model_algorithm in {"random_forest", "extra_trees"}:
+        return {"n_estimators": 5, "max_depth": 3, "n_jobs": 1}
+    if model_algorithm == "gradient_boosting":
+        return {"n_estimators": 5, "max_depth": 2}
+    if model_algorithm == "hist_gradient_boosting":
+        return {"max_iter": 5, "max_leaf_nodes": 7}
+    if model_algorithm == "xgboost":
+        return {"n_estimators": 5, "max_depth": 2, "n_jobs": 1}
+    if model_algorithm == "lightgbm":
+        return {"n_estimators": 5, "num_leaves": 7, "n_jobs": 1, "verbosity": -1}
+    return {}
 
 
 def _materialize_a_share_csmar_interim_data(

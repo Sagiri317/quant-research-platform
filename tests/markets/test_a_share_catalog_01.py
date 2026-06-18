@@ -289,6 +289,7 @@ def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() ->
     )
     assert dataset.required_columns == (
         *platform_entity_time_key(),
+        *dataset.factor_columns,
         *dataset.feature_columns,
         *dataset.label_columns,
         *dataset.filter_columns,

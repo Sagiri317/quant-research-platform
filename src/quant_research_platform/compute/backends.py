@@ -34,19 +34,19 @@ BACKEND_REGISTRY: dict[str, BackendDescriptor] = {
 
 
 def supported_backend_names() -> tuple[str, ...]:
-    """返回注册表声明的 compute backend 名称。"""
+    """             compute backend     ?"""
 
     return tuple(sorted(BACKEND_REGISTRY))
 
 
 def get_backend_descriptor(backend: str | None) -> BackendDescriptor:
-    """返回规范化后的 compute backend descriptor。"""
+    """          ?compute backend descriptor ?"""
 
     return BACKEND_REGISTRY[normalize_backend_name(backend)]
 
 
 def normalize_backend_name(backend: str | None) -> str:
-    """返回规范化后的 compute backend 名称。"""
+    """          ?compute backend     ?"""
 
     if backend is None:
         return DATAFRAME_BACKEND

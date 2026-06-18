@@ -10,9 +10,9 @@ from quant_research_platform.compute.panels import (
     validate_compute_panel,
 )
 
-IC_RESULT_COLUMNS = ["timestamp", "feature", "label", "ic", "rankic", "n_obs"]
+IC_RESULT_COLUMNS = ["timestamp", "signal", "label", "ic", "rankic", "n_obs"]
 IC_SUMMARY_COLUMNS = [
-    "feature",
+    "signal",
     "label",
     "mean_ic",
     "std_ic",
@@ -27,14 +27,14 @@ IC_SUMMARY_COLUMNS = [
 ]
 GROUPED_LABEL_VALUE_COLUMNS = [
     "timestamp",
-    "feature",
+    "signal",
     "label",
     "group",
     "mean_label_value",
     "n_obs",
 ]
 GROUP_SPREAD_SUMMARY_COLUMNS = [
-    "feature",
+    "signal",
     "label",
     "top_group_mean_label_value",
     "bottom_group_mean_label_value",
@@ -48,26 +48,26 @@ def compute_ic_by_timestamp(
     frame: pd.DataFrame,
     spec: ComputePanelSpec,
 ) -> pd.DataFrame:
-    """按 timestamp 和 feature 计算 cross-sectional IC 与 RankIC。"""
+    """ ?timestamp  ?signal     cross-sectional IC  ?RankIC ?"""
 
     panel = validate_compute_panel(frame, spec)
     records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
-        for feature in spec.feature_columns:
-            pair = _finite_pair(timestamp_frame, feature, spec.label_column)
+        for signal in spec.signal_columns:
+            pair = _finite_pair(timestamp_frame, signal, spec.label_column)
             n_obs = len(pair)
             ic = np.nan
             rankic = np.nan
             if n_obs >= 2:
-                ic = _pearson_correlation(pair[feature], pair[spec.label_column])
+                ic = _pearson_correlation(pair[signal], pair[spec.label_column])
                 rankic = _pearson_correlation(
-                    pair[feature].rank(method="average"),
+                    pair[signal].rank(method="average"),
                     pair[spec.label_column].rank(method="average"),
                 )
             records.append(
                 {
                     "timestamp": timestamp,
-                    "feature": feature,
+                    "signal": signal,
                     "label": spec.label_column,
                     "ic": ic,
                     "rankic": rankic,
@@ -84,7 +84,7 @@ def compute_ic_and_grouped_label_values(
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """在一次 timestamp/feature 扫描中计算 IC 和 grouped label values。"""
+    """    ?timestamp/signal        ?IC  ?grouped label values ?"""
 
     panel = validate_compute_panel(frame, spec)
     return compute_ic_and_grouped_label_values_from_validated_panel(
@@ -100,7 +100,7 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """基于上游已校验的 panel 计算 IC 和 grouped label values。"""
+    """             panel     IC  ?grouped label values ?"""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -110,8 +110,8 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
     ic_records: list[dict[str, object]] = []
     grouped_records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
-        for feature in spec.feature_columns:
-            feature_values = timestamp_frame[feature].to_numpy(
+        for signal in spec.signal_columns:
+            signal_values = timestamp_frame[signal].to_numpy(
                 dtype="float64",
                 copy=False,
             )
@@ -119,25 +119,25 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
                 dtype="float64",
                 copy=False,
             )
-            valid_mask = np.isfinite(feature_values) & np.isfinite(label_values)
-            feature_valid = feature_values[valid_mask]
+            valid_mask = np.isfinite(signal_values) & np.isfinite(label_values)
+            signal_valid = signal_values[valid_mask]
             label_valid = label_values[valid_mask]
-            n_obs = len(feature_valid)
+            n_obs = len(signal_valid)
             ic = np.nan
             rankic = np.nan
             if n_obs >= 2:
-                ic = _pearson_correlation_values(feature_valid, label_valid)
+                ic = _pearson_correlation_values(signal_valid, label_valid)
                 rankic = _pearson_correlation_values(
-                    _average_ranks(feature_valid),
+                    _average_ranks(signal_valid),
                     _average_ranks(label_valid),
                 )
-                groups = _assign_groups_array(feature_valid, n_groups)
+                groups = _assign_groups_array(signal_valid, n_groups)
                 for group in range(1, int(groups.max()) + 1):
                     group_mask = groups == group
                     grouped_records.append(
                         {
                             "timestamp": timestamp,
-                            "feature": feature,
+                            "signal": signal,
                             "label": spec.label_column,
                             "group": group,
                             "mean_label_value": float(label_valid[group_mask].mean()),
@@ -147,7 +147,7 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
             ic_records.append(
                 {
                     "timestamp": timestamp,
-                    "feature": feature,
+                    "signal": signal,
                     "label": spec.label_column,
                     "ic": ic,
                     "rankic": rankic,
@@ -166,7 +166,7 @@ def compute_grouped_label_values(
     spec: ComputePanelSpec,
     n_groups: int = 5,
 ) -> pd.DataFrame:
-    """按 feature rank group 计算 timestamp-level mean label value。"""
+    """ ?signal rank group     timestamp-level mean label value ?"""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -176,18 +176,18 @@ def compute_grouped_label_values(
     panel = validate_compute_panel(frame, spec)
     records: list[dict[str, object]] = []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
-        for feature in spec.feature_columns:
-            pair = _finite_pair(timestamp_frame, feature, spec.label_column)
+        for signal in spec.signal_columns:
+            pair = _finite_pair(timestamp_frame, signal, spec.label_column)
             if len(pair) < 2:
                 continue
-            groups = _assign_groups(pair[feature], n_groups).to_numpy()
+            groups = _assign_groups(pair[signal], n_groups).to_numpy()
             label_values = pair[spec.label_column].to_numpy(dtype="float64", copy=False)
             for group in sorted(np.unique(groups)):
                 group_mask = groups == group
                 records.append(
                     {
                         "timestamp": timestamp,
-                        "feature": feature,
+                        "signal": signal,
                         "label": spec.label_column,
                         "group": int(group),
                         "mean_label_value": float(label_values[group_mask].mean()),
@@ -198,9 +198,9 @@ def compute_grouped_label_values(
     return pd.DataFrame.from_records(records, columns=GROUPED_LABEL_VALUE_COLUMNS)
 
 
-def _finite_pair(frame: pd.DataFrame, feature: str, label: str) -> pd.DataFrame:
-    pair = frame[[feature, label]].apply(pd.to_numeric, errors="coerce")
-    return pair[np.isfinite(pair[feature]) & np.isfinite(pair[label])]
+def _finite_pair(frame: pd.DataFrame, signal: str, label: str) -> pd.DataFrame:
+    pair = frame[[signal, label]].apply(pd.to_numeric, errors="coerce")
+    return pair[np.isfinite(pair[signal]) & np.isfinite(pair[label])]
 
 
 def summarize_ic(
@@ -208,7 +208,7 @@ def summarize_ic(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """按 feature 汇总 IC stability 和 sign diagnostics。"""
+    """ ?signal    ?IC stability  ?sign diagnostics ?"""
 
     required_columns = {*segment_columns, *IC_RESULT_COLUMNS}
     missing_columns = sorted(required_columns.difference(ic.columns))
@@ -220,7 +220,7 @@ def summarize_ic(
         return pd.DataFrame(columns=output_columns)
 
     records: list[dict[str, object]] = []
-    group_columns = [*segment_columns, "feature", "label"]
+    group_columns = [*segment_columns, "signal", "label"]
     for group_key, group in ic.groupby(group_columns, sort=True, dropna=False):
         group_values = _normalize_group_key(group_key, group_columns)
         ic_values = pd.to_numeric(group["ic"], errors="coerce").dropna()
@@ -230,7 +230,7 @@ def summarize_ic(
         records.append(
             {
                 **{column: group_values[column] for column in segment_columns},
-                "feature": group_values["feature"],
+                "signal": group_values["signal"],
                 "label": group_values["label"],
                 "mean_ic": ic_stats["mean"],
                 "std_ic": ic_stats["std"],
@@ -252,7 +252,7 @@ def summarize_group_spread(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """按 feature 汇总 top-bottom group label-value spread diagnostics。"""
+    """ ?signal    ?top-bottom group label-value spread diagnostics ?"""
 
     required_columns = {*segment_columns, *GROUPED_LABEL_VALUE_COLUMNS}
     missing_columns = sorted(required_columns.difference(grouped_label_values.columns))
@@ -265,7 +265,7 @@ def summarize_group_spread(
     if grouped_label_values.empty:
         return pd.DataFrame(columns=output_columns)
 
-    timestamp_group_columns = [*segment_columns, "feature", "label", "timestamp"]
+    timestamp_group_columns = [*segment_columns, "signal", "label", "timestamp"]
     ordered = grouped_label_values[
         [*timestamp_group_columns, "group", "mean_label_value"]
     ].copy()
@@ -299,7 +299,7 @@ def summarize_group_spread(
         timestamp_frame["top_label_value"] - timestamp_frame["bottom_label_value"]
     )
 
-    summary_group_columns = [*segment_columns, "feature", "label"]
+    summary_group_columns = [*segment_columns, "signal", "label"]
     summary = (
         timestamp_frame.groupby(
             summary_group_columns,

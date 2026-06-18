@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.config import TradabilityConfig
 from quant_research_platform.compute.panels import ComputePanelSpec
+from quant_research_platform.contracts.portfolios import TradabilityConfig
 
 
 def _validate_tradability_columns(
@@ -62,11 +62,11 @@ def _filter_new_entry_blocked_assets(
 def _tradability_diagnostic_counts(
     *,
     timestamp_frame: pd.DataFrame,
-    feature: str,
+    signal: str,
     spec: ComputePanelSpec,
     tradability_config: TradabilityConfig,
 ) -> dict[str, int]:
-    signal_available = timestamp_frame[feature].notna()
+    signal_available = timestamp_frame[signal].notna()
     universe_count = int(len(timestamp_frame))
     eligible_mask = signal_available.copy()
     if tradability_config.eligibility_column is not None:

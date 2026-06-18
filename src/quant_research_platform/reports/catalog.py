@@ -29,6 +29,13 @@ def report_catalog() -> ReportCatalog:
             run_type="evaluation",
         )
     )
+    catalog.register(
+        ReportDefinition(
+            report_definition_id="portfolio_report_private",
+            display_name="Private portfolio report",
+            run_type="portfolio",
+        )
+    )
     return catalog
 
 

@@ -17,6 +17,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
@@ -846,7 +847,26 @@ def correctness_processed_catalog() -> ProcessedDataCatalog:
     return catalog
 
 
-def correctness_research_dataset_catalog() -> ResearchDatasetCatalog:
+def correctness_research_dataset_catalog(
+    *,
+    include_feature_transform: bool = False,
+) -> ResearchDatasetCatalog:
+    feature_columns = (
+        ("mom_20d_zscore",) if include_feature_transform else ()
+    )
+    feature_transforms = (
+        (
+            FeatureTransformSpec(
+                transform_id="mom_20d_zscore",
+                market_id=MarketId("a_share"),
+                source_factor_columns=("mom_20d",),
+                output_feature_columns=("mom_20d_zscore",),
+                transform="zscore",
+            ),
+        )
+        if include_feature_transform
+        else ()
+    )
     catalog = ResearchDatasetCatalog()
     catalog.register(
         ResearchDatasetSpec(
@@ -854,7 +874,9 @@ def correctness_research_dataset_catalog() -> ResearchDatasetCatalog:
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
             base_input_data_id="demo_annotations",
-            feature_columns=("mom_20d",),
+            factor_columns=("mom_20d",),
+            feature_columns=feature_columns,
+            feature_transforms=feature_transforms,
             label_columns=("forward_return_20d",),
             filter_columns=("eligible", "can_enter", "can_exit"),
             context_columns=("market_type",),
@@ -864,7 +886,12 @@ def correctness_research_dataset_catalog() -> ResearchDatasetCatalog:
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FEATURE,
+                "mom_20d": ColumnRole.FACTOR,
+                **(
+                    {"mom_20d_zscore": ColumnRole.FEATURE}
+                    if include_feature_transform
+                    else {}
+                ),
                 "forward_return_20d": ColumnRole.LABEL,
                 "eligible": ColumnRole.UNIVERSE,
                 "can_enter": ColumnRole.MASK,

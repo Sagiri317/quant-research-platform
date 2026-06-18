@@ -16,7 +16,7 @@ from quant_research_platform.research.datasets import validate_evaluation_input
 from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
 from quant_research_platform.research.evaluations.engine import (
     EvaluationResult,
-    _evaluate_factor_frame_chunks,
+    _evaluate_signal_frame_chunks,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -32,9 +32,10 @@ def run_evaluation_from_research_dataset(
 ) -> Path:
     spec = evaluation_catalog.get(run_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
+    signal_columns = tuple(signal.column for signal in spec.signals)
     read_columns = (
         *dataset_spec.primary_key,
-        *spec.feature_columns,
+        *signal_columns,
         *spec.label_columns,
         *required_filter_columns(spec.filter_mode),
     )
@@ -45,11 +46,11 @@ def run_evaluation_from_research_dataset(
         time_window=time_window,
         columns=read_columns,
     )
-    result = _evaluate_factor_frame_chunks(
+    result = _evaluate_signal_frame_chunks(
         _validated_evaluation_chunks(
             chunks,
             dataset_spec=dataset_spec,
-            feature_columns=spec.feature_columns,
+            signal_columns=signal_columns,
             label_columns=spec.label_columns,
         ),
         spec,
@@ -86,14 +87,14 @@ def _validated_evaluation_chunks(
     chunks,
     *,
     dataset_spec,
-    feature_columns: tuple[str, ...],
+    signal_columns: tuple[str, ...],
     label_columns: tuple[str, ...],
 ):
     for chunk in chunks:
         validate_evaluation_input(
             chunk,
             dataset_spec,
-            feature_columns=feature_columns,
+            signal_columns=signal_columns,
             label_columns=label_columns,
         )
         yield chunk

@@ -26,20 +26,28 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
+    SignalSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import assemble_research_dataset
-from quant_research_platform.research.evaluations.engine import evaluate_factor_frame
-from quant_research_platform.research.models import fit_linear_baseline_result
+from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
+from quant_research_platform.research.models import (
+    fit_linear_baseline_result,
+    fit_model_result,
+)
 from quant_research_platform.research.predictions import (
     build_prediction_bundle,
     run_prediction_from_research_dataset,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+
+
+def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
+    return SignalSpec(signal_id=column, column=column, source_kind=source_kind)
 
 
 def _filter_frame() -> pd.DataFrame:
@@ -65,7 +73,7 @@ def _dataset_catalog() -> ResearchDatasetCatalog:
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factor", "demo_label", "demo_annotation"),
             base_input_data_id="demo_annotation",
-            feature_columns=("factor",),
+            factor_columns=("factor",),
             label_columns=("label",),
             filter_columns=("eligible", "can_enter", "can_exit"),
             frequency=DataFrequency.DAILY,
@@ -74,7 +82,7 @@ def _dataset_catalog() -> ResearchDatasetCatalog:
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "factor": ColumnRole.FEATURE,
+                "factor": ColumnRole.FACTOR,
                 "label": ColumnRole.LABEL,
                 "eligible": ColumnRole.MASK,
                 "can_enter": ColumnRole.MASK,
@@ -162,14 +170,14 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         run_id="eval_eligible",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
     )
     tradable_spec = EvaluationSpec(
         run_id="eval_tradable",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
         filter_mode="tradable",
     )
@@ -177,14 +185,14 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         run_id="eval_unfiltered",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
         filter_mode="unfiltered",
     )
 
-    eligible = evaluate_factor_frame(frame, eligible_spec, n_groups=2)
-    tradable = evaluate_factor_frame(frame, tradable_spec, n_groups=2)
-    unfiltered = evaluate_factor_frame(frame, unfiltered_spec, n_groups=2)
+    eligible = evaluate_signal_frame(frame, eligible_spec, n_groups=2)
+    tradable = evaluate_signal_frame(frame, tradable_spec, n_groups=2)
+    unfiltered = evaluate_signal_frame(frame, unfiltered_spec, n_groups=2)
 
     assert not hasattr(eligible, "metadata")
     assert eligible.diagnostics.filter_mode == "eligible"
@@ -192,7 +200,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
     assert eligible.diagnostics.filter_definition == "eligible == True"
     assert eligible.diagnostics.rows_input == 6
     assert eligible.diagnostics.rows_after_filter_mode == 5
-    assert eligible.diagnostics.rows_after_feature_label_dropna == 4
+    assert eligible.diagnostics.rows_after_signal_label_dropna == 4
     assert eligible.diagnostics.metric_rows == 1
     assert eligible.diagnostics.grouped_label_value_rows == 2
     assert eligible.diagnostics.ic_summary_rows == 1
@@ -208,15 +216,15 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         "can_exit",
     )
     assert tradable.diagnostics.rows_after_filter_mode == 3
-    assert tradable.diagnostics.rows_after_feature_label_dropna == 2
+    assert tradable.diagnostics.rows_after_signal_label_dropna == 2
     assert unfiltered.diagnostics.filter_columns_used == ()
     assert unfiltered.diagnostics.rows_after_filter_mode == 6
-    assert unfiltered.diagnostics.rows_after_feature_label_dropna == 5
+    assert unfiltered.diagnostics.rows_after_signal_label_dropna == 5
 
     assert eligible.metrics.loc[0, "ic"] == pytest.approx(1.0)
     assert eligible.metrics.loc[0, "rankic"] == pytest.approx(1.0)
     assert list(eligible.ic_summary.columns) == [
-        "feature",
+        "signal",
         "label",
         "mean_ic",
         "std_ic",
@@ -230,7 +238,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         "valid_rankic_count",
     ]
     assert list(eligible.group_spread_summary.columns) == [
-        "feature",
+        "signal",
         "label",
         "top_group_mean_label_value",
         "bottom_group_mean_label_value",
@@ -249,6 +257,80 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
     assert unfiltered.grouped_label_values[
         "mean_label_value"
     ].tolist() == pytest.approx([0.02, 0.045])
+
+
+def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["asset_a", "asset_b", "asset_c", "asset_d"],
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4,
+            "risk_raw": [4.0, 3.0, 2.0, 1.0],
+            "label": [0.01, 0.02, 0.03, 0.04],
+            "eligible": [True, True, True, True],
+        }
+    )
+    spec = EvaluationSpec(
+        run_id="eval_lower_rank_signal",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        signals=(
+            SignalSpec(
+                signal_id="risk_signal",
+                column="risk_raw",
+                source_kind="factor",
+                direction="lower",
+                transform="rank",
+            ),
+        ),
+        label_columns=("label",),
+    )
+
+    result = evaluate_signal_frame(frame, spec, n_groups=2)
+
+    assert result.metrics.loc[0, "signal"] == "risk_signal"
+    assert result.metrics.loc[0, "ic"] == pytest.approx(1.0)
+    assert result.metrics.loc[0, "rankic"] == pytest.approx(1.0)
+    assert set(result.grouped_label_values["signal"]) == {"risk_signal"}
+    assert result.group_spread_summary.loc[
+        0,
+        "top_bottom_label_value_spread_mean",
+    ] > 0
+
+
+def test_evaluation_computes_multiple_signals_in_one_run() -> None:
+    frame = _filter_frame().assign(
+        reverse_factor=[6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+    )
+    spec = EvaluationSpec(
+        run_id="eval_multi_signal",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        signals=(
+            SignalSpec(
+                signal_id="factor_signal",
+                column="factor",
+                source_kind="factor",
+            ),
+            SignalSpec(
+                signal_id="reverse_signal",
+                column="reverse_factor",
+                source_kind="factor",
+                direction="lower",
+            ),
+        ),
+        label_columns=("label",),
+    )
+
+    result = evaluate_signal_frame(frame, spec, n_groups=2)
+
+    assert set(result.metrics["signal"]) == {"factor_signal", "reverse_signal"}
+    assert set(result.ic_summary["signal"]) == {"factor_signal", "reverse_signal"}
+    assert set(result.group_spread_summary["signal"]) == {
+        "factor_signal",
+        "reverse_signal",
+    }
+    assert result.diagnostics.rows_after_filter_mode == 5
+    assert result.diagnostics.rows_after_signal_label_dropna == 8
 
 
 def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
@@ -275,10 +357,10 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         run_id="eval_memory_safe",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
     )
-    expected = evaluate_factor_frame(frame, spec, n_groups=2)
+    expected = evaluate_signal_frame(frame, spec, n_groups=2)
     original = eval_engine.compute_ic_and_grouped_label_values
     seen_columns: list[tuple[str, ...]] = []
 
@@ -294,14 +376,14 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
     )
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
 
-    result = evaluate_factor_frame(frame, spec, n_groups=2)
+    result = evaluate_signal_frame(frame, spec, n_groups=2)
 
     assert len(seen_columns) > 1
     pd.testing.assert_frame_equal(
-        result.metrics.sort_values(["timestamp", "feature", "label"]).reset_index(
+        result.metrics.sort_values(["timestamp", "signal", "label"]).reset_index(
             drop=True
         ),
-        expected.metrics.sort_values(["timestamp", "feature", "label"]).reset_index(
+        expected.metrics.sort_values(["timestamp", "signal", "label"]).reset_index(
             drop=True
         ),
     )
@@ -321,12 +403,12 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
         run_id="eval_split_timestamp",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
     )
-    expected = evaluate_factor_frame(frame, spec, n_groups=2)
+    expected = evaluate_signal_frame(frame, spec, n_groups=2)
 
-    result = eval_engine._evaluate_factor_frame_chunks(
+    result = eval_engine._evaluate_signal_frame_chunks(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
         n_groups=2,
@@ -348,25 +430,25 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
 def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import baseline as model_baseline
+    from quant_research_platform.research.models import supervised as model_supervised
 
     frame = _filter_frame()
     spec = ModelSpec(
         model_id="linear_split_timestamp",
-        model_family="linear",
-        feature_columns=("factor",),
+        model_algorithm="linear",
+        input_factor_columns=("factor",),
         label_column="label",
     )
-    expected = model_baseline._fit_linear_baseline_result_from_frames((frame,), spec)
-    original_filter = model_baseline.apply_filter_mode
+    expected = model_supervised._fit_linear_baseline_result_from_frames((frame,), spec)
+    original_filter = model_supervised.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
     def wrapped_filter(frame, *, mode, metadata_key):
         filtered_chunk_rows.append(len(frame))
         return original_filter(frame, mode=mode, metadata_key=metadata_key)
 
-    monkeypatch.setattr(model_baseline, "apply_filter_mode", wrapped_filter)
-    result = model_baseline._fit_linear_baseline_result_from_frames(
+    monkeypatch.setattr(model_supervised, "apply_filter_mode", wrapped_filter)
+    result = model_supervised._fit_linear_baseline_result_from_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
     )
@@ -381,7 +463,7 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
 def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.predictions import bundle as bundle_module
+    import quant_research_platform.research.predictions.artifacts as artifacts_module
 
     frame = _filter_frame().drop(columns=["label"])
     spec = PredictionSpec(
@@ -395,21 +477,21 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
         test_end="2024-01-02",
     )
     coefficients = np.asarray([0.0, 0.01])
-    expected = bundle_module._build_prediction_bundle_from_frames(
+    expected = artifacts_module._build_prediction_bundle_from_frames(
         (frame,),
         spec,
         coefficients,
         ("factor",),
     )
-    original_filter = bundle_module.apply_filter_mode
+    original_filter = artifacts_module.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
     def wrapped_filter(frame, *, mode, metadata_key):
         filtered_chunk_rows.append(len(frame))
         return original_filter(frame, mode=mode, metadata_key=metadata_key)
 
-    monkeypatch.setattr(bundle_module, "apply_filter_mode", wrapped_filter)
-    result = bundle_module._build_prediction_bundle_from_frames(
+    monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
+    result = artifacts_module._build_prediction_bundle_from_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
         coefficients,
@@ -432,12 +514,12 @@ def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
         run_id="eval_non_monotonic_chunks",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
     )
 
     with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        eval_engine._evaluate_factor_frame_chunks(
+        eval_engine._evaluate_signal_frame_chunks(
             (first, second, late_overlap),
             spec,
             n_groups=2,
@@ -454,12 +536,12 @@ def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
         run_id="eval_pending_non_monotonic_chunks",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
     )
 
     with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        eval_engine._evaluate_factor_frame_chunks(
+        eval_engine._evaluate_signal_frame_chunks(
             (first, earlier),
             spec,
             n_groups=2,
@@ -476,7 +558,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         run_id="eval_boundary_over_budget",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
     )
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
@@ -485,7 +567,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         ValueError,
         match="time_chunk_boundary_overlap_exceeds_memory_budget",
     ):
-        eval_engine._evaluate_factor_frame_chunks(
+        eval_engine._evaluate_signal_frame_chunks(
             (frame.iloc[:3], frame.iloc[3:]),
             spec,
             n_groups=2,
@@ -499,7 +581,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
         filter_definition="eligible == True",
         rows_input=6,
         rows_after_filter_mode=5,
-        rows_after_feature_label_dropna=4,
+        rows_after_signal_label_dropna=4,
         metric_rows=1,
         grouped_label_value_rows=2,
         ic_summary_rows=1,
@@ -520,7 +602,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
             filter_definition="none",
             rows_input=0,
             rows_after_filter_mode=0,
-            rows_after_feature_label_dropna=0,
+            rows_after_signal_label_dropna=0,
             metric_rows=0,
             grouped_label_value_rows=0,
             ic_summary_rows=0,
@@ -539,7 +621,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
             filter_definition="none",
             rows_input=-1,
             rows_after_filter_mode=0,
-            rows_after_feature_label_dropna=0,
+            rows_after_signal_label_dropna=0,
             metric_rows=0,
             grouped_label_value_rows=0,
             ic_summary_rows=0,
@@ -557,7 +639,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
             filter_definition="none",
             rows_input=0,
             rows_after_filter_mode=0,
-            rows_after_feature_label_dropna=0,
+            rows_after_signal_label_dropna=0,
             metric_rows=0,
             grouped_label_value_rows=0,
             ic_summary_rows=0,
@@ -578,7 +660,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 run_id="missing_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
-                feature_columns=("factor",),
+                signals=(_signal("factor"),),
                 label_columns=("label",),
                 filter_mode="tradable",
             ),
@@ -590,7 +672,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 run_id="null_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
-                feature_columns=("factor",),
+                signals=(_signal("factor"),),
                 label_columns=("label",),
             ),
             _filter_frame().assign(eligible=[True, None, True, True, True, True]),
@@ -601,7 +683,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
                 run_id="bad_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
-                feature_columns=("factor",),
+                signals=(_signal("factor"),),
                 label_columns=("label",),
             ),
             _filter_frame().assign(eligible=["yes"] * 6),
@@ -615,7 +697,7 @@ def test_evaluation_filter_columns_fail_closed(
     match: str,
 ) -> None:
     with pytest.raises(ValueError, match=match):
-        evaluate_factor_frame(frame, spec)
+        evaluate_signal_frame(frame, spec)
 
 
 def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
@@ -623,31 +705,31 @@ def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
         run_id="bad_timestamp",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
-        feature_columns=("factor",),
+        signals=(_signal("factor"),),
         label_columns=("label",),
     )
 
     with pytest.raises(ValueError, match="invalid_time_chunk_timestamp_values"):
-        evaluate_factor_frame(
+        evaluate_signal_frame(
             _filter_frame().assign(timestamp=[pd.NaT] * len(_filter_frame())),
             spec,
         )
 
 
 def test_filter_columns_cannot_be_features() -> None:
-    with pytest.raises(ValueError, match="filter_column_in_feature_columns: eligible"):
+    with pytest.raises(ValueError, match="filter_column_in_input_columns: eligible"):
         EvaluationSpec(
             run_id="bad_eval_features",
             market_id=MarketId("a_share"),
             research_dataset_id="demo_filter",
-            feature_columns=("eligible",),
+            signals=(_signal("eligible"),),
             label_columns=("label",),
         )
-    with pytest.raises(ValueError, match="filter_column_in_feature_columns: can_exit"):
+    with pytest.raises(ValueError, match="filter_column_in_input_columns: can_exit"):
         ModelSpec(
             model_id="bad_model_features",
-            model_family="linear",
-            feature_columns=("can_exit",),
+            model_algorithm="linear",
+            input_factor_columns=("can_exit",),
             label_column="label",
         )
 
@@ -656,14 +738,14 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     frame = _filter_frame()
     eligible_spec = ModelSpec(
         model_id="linear_eligible",
-        model_family="linear",
-        feature_columns=("factor",),
+        model_algorithm="linear",
+        input_factor_columns=("factor",),
         label_column="label",
     )
     unfiltered_spec = ModelSpec(
         model_id="linear_unfiltered",
-        model_family="linear",
-        feature_columns=("factor",),
+        model_algorithm="linear",
+        input_factor_columns=("factor",),
         label_column="label",
         sample_filter_mode="unfiltered",
     )
@@ -673,34 +755,198 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
 
     assert eligible.metadata == {
         "contract_version": "0.1",
-        "model_family": "linear",
+        "model_algorithm": "linear",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
         "rows_input": 6,
         "rows_after_filter_mode": 5,
-        "rows_after_feature_label_dropna": 4,
+        "rows_after_input_label_dropna": 4,
         "train_start": "2024-01-02",
         "train_end": "2024-01-02",
-        "feature_columns": ["factor"],
-        "feature_count": 1,
+        "input_factor_columns": ["factor"],
+        "input_feature_columns": [],
+        "input_columns": ["factor"],
+        "input_count": 1,
         "label_column": "label",
         "coefficient_count": 2,
     }
     assert unfiltered.metadata["rows_after_filter_mode"] == 6
-    assert unfiltered.metadata["rows_after_feature_label_dropna"] == 5
+    assert unfiltered.metadata["rows_after_input_label_dropna"] == 5
     assert eligible.coefficients.tolist() == pytest.approx([0.0, 0.01])
     assert unfiltered.coefficients.tolist() == pytest.approx([0.0, 0.01])
 
     all_tradability_blocked = frame.assign(can_enter=False, can_exit=False)
     still_trains = fit_linear_baseline_result(all_tradability_blocked, eligible_spec)
-    assert still_trains.metadata["rows_after_feature_label_dropna"] == 4
+    assert still_trains.metadata["rows_after_input_label_dropna"] == 4
+
+
+@pytest.mark.parametrize(
+    "model_algorithm",
+    [
+        "linear",
+        "ridge",
+        "lasso",
+        "elastic_net",
+        "huber",
+        "decision_tree",
+        "random_forest",
+        "extra_trees",
+        "gradient_boosting",
+        "hist_gradient_boosting",
+        "xgboost",
+        "lightgbm",
+        "single_factor_baseline",
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    ],
+)
+def test_required_model_algorithms_fit_and_predict(model_algorithm: str) -> None:
+    train = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 8,
+            "asset_id": [f"asset_{idx}" for idx in range(8)],
+            "timestamp": [pd.Timestamp("2024-01-02")] * 8,
+            "factor": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+            "feature": [0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
+            "label": [0.11, 0.19, 0.31, 0.41, 0.49, 0.61, 0.69, 0.81],
+            "eligible": [True] * 8,
+        }
+    )
+    test = train.assign(
+        timestamp=pd.Timestamp("2024-01-03"),
+        label=np.nan,
+    )
+    frame = pd.concat([train, test], ignore_index=True)
+    spec = ModelSpec(
+        model_id=f"{model_algorithm}_demo",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+        random_seed=7,
+        hyperparameters=_model_hyperparameters(model_algorithm),
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id=f"{model_algorithm}_pred",
+        model_id=spec.model_id,
+        research_dataset_id="demo_filter",
+        prediction_column=default_prediction_column(),
+        primary_key=platform_entity_time_key(),
+        train_end="2024-01-02",
+        test_start="2024-01-03",
+        test_end="2024-01-03",
+    )
+
+    result = fit_model_result(frame.loc[frame["timestamp"].lt("2024-01-03")], spec)
+    prediction = build_prediction_bundle(
+        frame,
+        prediction_spec,
+        result.coefficients,
+        spec.input_columns,
+        prediction_model=result.prediction_model,
+    )
+
+    assert result.metadata["model_algorithm"] == model_algorithm
+    assert result.metadata["input_columns"] == ["factor", "feature"]
+    assert result.metadata["rows_after_input_label_dropna"] == 8
+    assert len(prediction) == 8
+    assert prediction[default_prediction_column()].notna().all()
+
+
+@pytest.mark.parametrize("model_algorithm", ["linear", "ridge"])
+def test_model_training_controls_apply_to_linear_and_estimators(
+    model_algorithm: str,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-01", "2024-01-02", "2024-01-03"]
+            ),
+            "asset_id": ["asset_a", "asset_a", "asset_a"],
+            "factor": [1.0, 2.0, 3.0],
+            "label": [1.0, 2.0, 3.0],
+            "eligible": [True, True, True],
+        }
+    )
+    max_rows_spec = ModelSpec(
+        model_id=f"{model_algorithm}_max_rows",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("factor",),
+        label_column="label",
+        max_train_rows=1,
+    )
+    purge_spec = ModelSpec(
+        model_id=f"{model_algorithm}_purge",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("factor",),
+        label_column="label",
+        purge_gap_steps=1,
+    )
+
+    max_rows = fit_model_result(frame, max_rows_spec)
+    purge = fit_model_result(frame, purge_spec)
+
+    assert max_rows.metadata["rows_after_input_label_dropna"] == 1
+    assert max_rows.metadata["train_start"] == "2024-01-03"
+    assert max_rows.metadata["train_end"] == "2024-01-03"
+    assert purge.metadata["rows_after_input_label_dropna"] == 2
+    assert purge.metadata["train_start"] == "2024-01-01"
+    assert purge.metadata["train_end"] == "2024-01-02"
+
+
+@pytest.mark.parametrize(
+    "model_algorithm",
+    ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],
+)
+def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
+    model_algorithm: str,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
+            ),
+            "asset_id": ["asset_a", "asset_b", "asset_a", "asset_b"],
+            "factor": [1.0, 2.0, 1.0, 2.0],
+            "feature": [10.0, 20.0, 10.0, 20.0],
+            "label": [0.0, 1.0, 0.0, 1.0],
+            "eligible": [True, True, True, True],
+        }
+    )
+    spec = ModelSpec(
+        model_id=f"{model_algorithm}_rank_scope",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+    )
+
+    result = fit_model_result(frame, spec)
+    predicted = result.prediction_model.predict(frame)
+
+    assert predicted.tolist() == pytest.approx([0.5, 1.0, 0.5, 1.0])
+
+
+def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
+    if model_algorithm in {"random_forest", "extra_trees"}:
+        return {"n_estimators": 3, "max_depth": 3}
+    if model_algorithm in {"gradient_boosting", "hist_gradient_boosting"}:
+        return {"max_iter": 3} if model_algorithm.startswith("hist") else {
+            "n_estimators": 3,
+            "max_depth": 2,
+        }
+    if model_algorithm == "xgboost":
+        return {"n_estimators": 3, "max_depth": 2, "verbosity": 0}
+    if model_algorithm == "lightgbm":
+        return {"n_estimators": 3, "min_data_in_leaf": 1}
+    return {}
 
 
 def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.models import baseline as model_baseline
+    from quant_research_platform.research.models import supervised as model_supervised
 
     frame = pd.concat(
         [
@@ -719,12 +965,12 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     )
     spec = ModelSpec(
         model_id="linear_memory_safe",
-        model_family="linear",
-        feature_columns=("factor",),
+        model_algorithm="linear",
+        input_factor_columns=("factor",),
         label_column="label",
     )
     expected = fit_linear_baseline_result(frame, spec)
-    original_filter = model_baseline.apply_filter_mode
+    original_filter = model_supervised.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
     def wrapped_filter(frame, *, mode, metadata_key):
@@ -734,7 +980,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     def fail_column_stack(*args, **kwargs):
         raise AssertionError("model fit must not allocate a full intercept matrix")
 
-    monkeypatch.setattr(model_baseline, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(model_supervised, "apply_filter_mode", wrapped_filter)
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
 
@@ -804,16 +1050,16 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design(
     )
     spec = ModelSpec(
         model_id="linear_rank_deficient",
-        model_family="linear",
-        feature_columns=("factor", "factor_shadow"),
+        model_algorithm="linear",
+        input_factor_columns=("factor", "factor_shadow"),
         label_column="label",
     )
     usable = frame.loc[frame["eligible"]].dropna(
-        subset=[*spec.feature_columns, spec.label_column]
+        subset=[*spec.input_columns, spec.label_column]
     )
-    x = usable.loc[:, spec.feature_columns].to_numpy(dtype="float64")
+    x = usable.loc[:, spec.input_columns].to_numpy(dtype="float64")
     y = usable.loc[:, spec.label_column].to_numpy(dtype="float64")
-    design = np.empty((len(x), len(spec.feature_columns) + 1), dtype="float64")
+    design = np.empty((len(x), len(spec.input_columns) + 1), dtype="float64")
     design[:, 0] = 1.0
     design[:, 1:] = x
     expected, *_ = np.linalg.lstsq(design, y, rcond=None)
@@ -835,8 +1081,8 @@ def test_model_rejects_tradable_sample_filter_mode() -> None:
     with pytest.raises(ValueError, match="unsupported_model_sample_filter_mode"):
         ModelSpec(
             model_id="linear_tradable",
-            model_family="linear",
-            feature_columns=("factor",),
+            model_algorithm="linear",
+            input_factor_columns=("factor",),
             label_column="label",
             sample_filter_mode="tradable",
         )
@@ -846,8 +1092,8 @@ def test_model_rejects_unsupported_contract_version() -> None:
     with pytest.raises(ValueError, match="unsupported_model_contract_version"):
         ModelSpec(
             model_id="linear_bad_contract",
-            model_family="linear",
-            feature_columns=("factor",),
+            model_algorithm="linear",
+            input_factor_columns=("factor",),
             label_column="label",
             contract_version="9.9",
         )
@@ -877,7 +1123,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
-        feature_columns=("factor",),
+        input_columns=("factor",),
     )
 
     assert "metadata" not in prediction.attrs
@@ -889,7 +1135,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         "filter_definition": "eligible == True",
         "rows_input": 12,
         "rows_after_filter_mode": 10,
-        "rows_after_feature_dropna": 10,
+        "rows_after_input_dropna": 10,
         "prediction_rows": 5,
         "train_end": "2024-01-02",
         "test_start": "2024-01-03",
@@ -897,8 +1143,8 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         "effective_test_end": "2024-01-03",
         "is_oos": True,
         "is_final_oos_window": False,
-        "feature_columns": ["factor"],
-        "feature_count": 1,
+        "input_columns": ["factor"],
+        "input_count": 1,
         "prediction_column": default_prediction_column(),
     }
     assert len(prediction) == 5
@@ -924,8 +1170,8 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_family="linear",
-            feature_columns=("factor",),
+            model_algorithm="linear",
+            input_factor_columns=("factor",),
             label_column="label",
         )
     )
@@ -941,16 +1187,16 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     )
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["model_metadata"]["contract_version"] == "0.1"
-    assert manifest["model_metadata"]["feature_count"] == 1
+    assert manifest["model_metadata"]["input_count"] == 1
     assert manifest["model_metadata"]["coefficient_count"] == 2
     assert manifest["model_metadata"]["sample_filter_mode"] == "eligible"
-    assert manifest["model_metadata"]["rows_after_feature_label_dropna"] == 4
+    assert manifest["model_metadata"]["rows_after_input_label_dropna"] == 4
     assert manifest["model_metadata"]["train_start"] == "2024-01-02"
     assert manifest["model_metadata"]["train_end"] == "2024-01-02"
     assert manifest["prediction_metadata"]["contract_version"] == "0.1"
     assert manifest["prediction_metadata"]["prediction_rows"] == 5
     assert manifest["prediction_metadata"]["sample_filter_mode"] == "eligible"
-    assert manifest["prediction_metadata"]["rows_after_feature_dropna"] == 10
+    assert manifest["prediction_metadata"]["rows_after_input_dropna"] == 10
     assert manifest["prediction_metadata"]["train_end"] == "2024-01-02"
     assert manifest["prediction_metadata"]["requested_test_end"] == "2024-01-03"
     assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-03"
@@ -959,7 +1205,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
 def test_prediction_forced_tiny_resource_chunks_match_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from quant_research_platform.research.predictions import bundle as bundle_module
+    import quant_research_platform.research.predictions.artifacts as artifacts_module
 
     frame = pd.concat(
         [
@@ -990,9 +1236,9 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
-        feature_columns=("factor",),
+        input_columns=("factor",),
     )
-    original_filter = bundle_module.apply_filter_mode
+    original_filter = artifacts_module.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
     def wrapped_filter(frame, *, mode, metadata_key):
@@ -1000,12 +1246,12 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         return original_filter(frame, mode=mode, metadata_key=metadata_key)
 
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
-    monkeypatch.setattr(bundle_module, "apply_filter_mode", wrapped_filter)
+    monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
     result = build_prediction_bundle(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
-        feature_columns=("factor",),
+        input_columns=("factor",),
     )
 
     assert len(filtered_chunk_rows) > 1
@@ -1037,8 +1283,8 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_family="linear",
-            feature_columns=("factor",),
+            model_algorithm="linear",
+            input_factor_columns=("factor",),
             label_column="label",
         )
     )
@@ -1110,8 +1356,8 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_family="linear",
-            feature_columns=("factor",),
+            model_algorithm="linear",
+            input_factor_columns=("factor",),
             label_column="label",
         )
     )
@@ -1187,12 +1433,12 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
         _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
-        feature_columns=("factor",),
+        input_columns=("factor",),
     )
 
     assert "metadata" not in prediction.attrs
     assert prediction.attrs["prediction_metadata"]["rows_after_filter_mode"] == 6
-    assert prediction.attrs["prediction_metadata"]["rows_after_feature_dropna"] == 6
+    assert prediction.attrs["prediction_metadata"]["rows_after_input_dropna"] == 6
 
     with pytest.raises(ValueError, match="unsupported_prediction_sample_filter_mode"):
         PredictionSpec(
@@ -1224,7 +1470,7 @@ def test_prediction_bundle_fail_closed_errors_are_specific() -> None:
                 test_start="2024-01-03",
             ),
             coefficients=np.asarray([0.0, 0.01]),
-            feature_columns=("factor",),
+            input_columns=("factor",),
         )
 
     with pytest.raises(
@@ -1244,7 +1490,7 @@ def test_prediction_bundle_fail_closed_errors_are_specific() -> None:
                 test_end="2024-01-03",
             ),
             coefficients=np.asarray([0.0, 0.01]),
-            feature_columns=("factor",),
+            input_columns=("factor",),
         )
 
     with pytest.raises(ValueError, match="empty_prediction_window"):
@@ -1261,7 +1507,7 @@ def test_prediction_bundle_fail_closed_errors_are_specific() -> None:
                 test_end="2024-01-03",
             ),
             coefficients=np.asarray([0.0, 0.01]),
-            feature_columns=("factor",),
+            input_columns=("factor",),
         )
 
 
@@ -1284,8 +1530,8 @@ def test_prediction_handoff_empty_training_window_fails_closed(
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_family="linear",
-            feature_columns=("factor",),
+            model_algorithm="linear",
+            input_factor_columns=("factor",),
             label_column="label",
         )
     )
@@ -1325,10 +1571,10 @@ def test_prediction_bundle_rejects_filter_columns_as_direct_features() -> None:
         sample_filter_mode="unfiltered",
     )
 
-    with pytest.raises(ValueError, match="filter_column_in_feature_columns: eligible"):
+    with pytest.raises(ValueError, match="filter_column_in_input_columns: eligible"):
         build_prediction_bundle(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             spec,
             coefficients=np.asarray([0.0, 0.01]),
-            feature_columns=("eligible",),
+            input_columns=("eligible",),
         )

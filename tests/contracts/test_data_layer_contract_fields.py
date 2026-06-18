@@ -13,6 +13,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
 
@@ -140,7 +141,17 @@ def test_research_dataset_spec_requires_explicit_base_input() -> None:
         market_id=MarketId("dummy_market"),
         input_data_ids=("base", "features", "labels"),
         base_input_data_id="base",
+        factor_columns=("factor_1",),
         feature_columns=("feature_1",),
+        feature_transforms=(
+            FeatureTransformSpec(
+                transform_id="feature_1_from_factor_1",
+                market_id=MarketId("dummy_market"),
+                source_factor_columns=("factor_1",),
+                output_feature_columns=("feature_1",),
+                transform="zscore",
+            ),
+        ),
         label_columns=("label_1",),
         frequency=DataFrequency.DAILY,
         grain=DataGrain.RESEARCH_ROW,
@@ -148,6 +159,7 @@ def test_research_dataset_spec_requires_explicit_base_input() -> None:
             "market_id": ColumnRole.KEY,
             "asset_id": ColumnRole.KEY,
             "timestamp": ColumnRole.TIMESTAMP,
+            "factor_1": ColumnRole.FACTOR,
             "feature_1": ColumnRole.FEATURE,
             "label_1": ColumnRole.LABEL,
         },

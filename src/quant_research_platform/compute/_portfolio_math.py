@@ -6,12 +6,12 @@ from math import floor
 
 import pandas as pd
 
-from quant_research_platform.compute.config import (
+from quant_research_platform.compute.panels import ComputePanelSpec
+from quant_research_platform.contracts.portfolios import (
     CostConfig,
     TradabilityConfig,
     WeightConfig,
 )
-from quant_research_platform.compute.panels import ComputePanelSpec
 
 
 def _normalize_group_key(
@@ -25,18 +25,18 @@ def _normalize_group_key(
     return dict(zip(group_columns, values, strict=True))
 
 
-def _select_features(
+def _select_signals(
     spec: ComputePanelSpec,
-    portfolio_features: tuple[str, ...] | None,
+    portfolio_signals: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
-    if portfolio_features is None:
-        return spec.feature_columns
-    missing_features = [
-        feature for feature in portfolio_features if feature not in spec.feature_columns
+    if portfolio_signals is None:
+        return spec.signal_columns
+    missing_signals = [
+        signal for signal in portfolio_signals if signal not in spec.signal_columns
     ]
-    if missing_features:
-        raise ValueError(f"portfolio features are not in spec: {missing_features}.")
-    return portfolio_features
+    if missing_signals:
+        raise ValueError(f"portfolio signals are not in spec: {missing_signals}.")
+    return portfolio_signals
 
 
 def _selection_count(n_obs: int, quantile: float) -> int:

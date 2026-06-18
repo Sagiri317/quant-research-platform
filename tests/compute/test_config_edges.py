@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.compute.config import (
+from quant_research_platform.contracts.portfolios import (
     CostConfig,
     TradabilityConfig,
     WeightConfig,
@@ -13,7 +13,6 @@ from quant_research_platform.compute.config import (
     ("kwargs", "error"),
     [
         ({"method": "bad"}, "method must be"),
-        ({"direction": "bad"}, "direction must be"),
         ({"portfolio_mode": "bad"}, "portfolio_mode must be"),
         ({"top_quantile": True}, "top_quantile must be numeric"),
         ({"bottom_quantile": 0}, "bottom_quantile must be greater"),

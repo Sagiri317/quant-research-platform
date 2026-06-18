@@ -2,7 +2,7 @@
 
 EXPOSURE_PATH_COLUMNS = [
     "timestamp",
-    "feature",
+    "signal",
     "gross_exposure",
     "net_exposure",
     "position_count",

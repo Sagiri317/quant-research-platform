@@ -1,34 +1,26 @@
-"""提供 Tensor portfolio weighting 和 tradability helpers。"""
+"""    Tensor portfolio weighting  ?tradability helpers ?"""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.config import WeightConfig
-
-
-def _directed_signal_values(values: np.ndarray, direction: str) -> np.ndarray:
-    if direction == "long_high":
-        return values
-    if direction == "long_low":
-        return -values
-    raise ValueError("direction must be 'long_high' or 'long_low'.")
+from quant_research_platform.contracts.portfolios import WeightConfig
 
 
 def _leg_weight_values(
     *,
     asset_indices: np.ndarray,
-    feature_values: np.ndarray,
+    signal_values: np.ndarray,
     risk_values: np.ndarray | None,
-    feature: str,
+    signal: str,
     weight_config: WeightConfig,
     sign: float,
 ) -> tuple[np.ndarray, str]:
     if len(asset_indices) == 0:
         return np.array([], dtype="float64"), ""
     fallback_reason = ""
-    leg_values = feature_values[asset_indices]
+    leg_values = signal_values[asset_indices]
     if weight_config.method == "equal_weight_quantile":
         return np.full(
             len(asset_indices),
@@ -52,7 +44,7 @@ def _leg_weight_values(
         raw = np.abs(leg_values)
     elif weight_config.method == "inverse_vol_scaled_quantile":
         if risk_values is None:
-            raise ValueError(f"risk_column is required for feature {feature!r}.")
+            raise ValueError(f"risk_column is required for signal {signal!r}.")
         risk = risk_values[asset_indices]
         if (risk <= 0).any():
             raise ValueError("risk_column values must be positive.")

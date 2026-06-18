@@ -15,12 +15,13 @@ OLD_STORAGE_PROTOCOL = "Data" + "Spec" + "Catalog"
 
 def test_compute_protocols_module_is_removed() -> None:
     assert not (PROJECT_SRC / "compute" / "protocols.py").exists()
+    assert not (PROJECT_SRC / "compute" / "config.py").exists()
 
 
 def test_compute_ownership_symbols_live_in_owner_modules() -> None:
     panels_tree = _parse(PROJECT_SRC / "compute" / "panels.py")
-    config_tree = _parse(PROJECT_SRC / "compute" / "config.py")
     backends_tree = _parse(PROJECT_SRC / "compute" / "backends.py")
+    portfolios_tree = _parse(PROJECT_SRC / "contracts" / "portfolios.py")
 
     assert "ComputePanelSpec" in _top_level_classes(panels_tree)
     assert "validate_compute_panel" in _top_level_functions(panels_tree)
@@ -28,7 +29,7 @@ def test_compute_ownership_symbols_live_in_owner_modules() -> None:
         "WeightConfig",
         "TradabilityConfig",
         "CostConfig",
-    }.issubset(_top_level_classes(config_tree))
+    }.issubset(_top_level_classes(portfolios_tree))
     assert {
         "DATAFRAME_BACKEND",
         "TENSOR_BACKEND",
@@ -157,17 +158,17 @@ def test_evaluation_result_and_report_writer_do_not_use_generic_metadata() -> No
     assert "metrics.attrs" not in report_text
 
 
-def test_prediction_bundle_and_report_writer_do_not_use_generic_metadata_attr() -> None:
-    bundle_text = (
-        PROJECT_SRC / "research/predictions/bundle.py"
+def test_prediction_artifacts_report_writer_use_specific_metadata_attrs() -> None:
+    artifacts_text = (
+        PROJECT_SRC / "research/predictions/artifacts.py"
     ).read_text(encoding="utf-8")
     report_text = (PROJECT_SRC / "reports/report_artifacts.py").read_text(
         encoding="utf-8"
     )
 
-    assert 'attrs["metadata"]' not in bundle_text
+    assert 'attrs["metadata"]' not in artifacts_text
     assert 'attrs.get("metadata"' not in report_text
-    assert 'attrs["prediction_metadata"]' in bundle_text
+    assert 'attrs["prediction_metadata"]' in artifacts_text
     assert '"prediction_metadata"' in report_text
 
 

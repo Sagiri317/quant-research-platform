@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.evaluations import EvaluationSpec, SignalSpec
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -57,7 +57,13 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
             run_id="run 01",
             market_id=MarketId("a_share"),
             research_dataset_id="dataset",
-            feature_columns=("factor",),
+            signals=(
+                SignalSpec(
+                    signal_id="factor",
+                    column="factor",
+                    source_kind="factor",
+                ),
+            ),
             label_columns=("label",),
         )
 

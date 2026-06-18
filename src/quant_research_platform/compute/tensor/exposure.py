@@ -15,12 +15,12 @@ def summarize_tensor_exposure_from_path(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """基于 streamed timestamp exposure path 汇总 Tensor exposure。"""
+    """    streamed timestamp exposure path    ?Tensor exposure ?"""
 
     output_columns = [*segment_columns, *EXPOSURE_SUMMARY_COLUMNS]
     if exposure_path.empty:
         return pd.DataFrame(columns=output_columns)
-    group_columns = [*segment_columns, "feature"]
+    group_columns = [*segment_columns, "signal"]
     exposure_summary = (
         exposure_path.groupby(group_columns, sort=True, dropna=False)
         .agg(
@@ -63,14 +63,14 @@ def _exposure_record_from_arrays(
     *,
     context: dict[str, object],
     timestamp: object,
-    feature: str,
+    signal: str,
     exposure_values: dict[str, float | int],
     segment_columns: tuple[str, ...],
 ) -> dict[str, object]:
     return {
         **{column: context[column] for column in segment_columns},
         "timestamp": timestamp,
-        "feature": feature,
+        "signal": signal,
         **exposure_values,
     }
 

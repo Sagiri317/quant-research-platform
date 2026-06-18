@@ -1,4 +1,4 @@
-"""提供内部 tensor evaluation 的 mask helpers。"""
+"""       tensor evaluation  ?mask helpers ?"""
 
 from __future__ import annotations
 
@@ -8,6 +8,6 @@ from quant_research_platform.compute.tensor.layout import PanelTensor
 
 
 def valid_observation_mask(tensor: PanelTensor) -> np.ndarray:
-    """返回有限 feature-label observation mask。"""
+    """       signal-label observation mask ?"""
 
     return np.asarray(tensor.valid_mask, dtype=bool)

@@ -14,6 +14,7 @@ from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import (
     SessionWindowPlanner,
@@ -174,6 +175,7 @@ def _join_processed_inputs(
         )
     if assembled is None:
         raise ValueError("empty_research_dataset_inputs")
+    assembled = _apply_feature_transforms(assembled, dataset_spec)
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
 
 
@@ -349,11 +351,25 @@ def _validate_research_input_specs(
             kind_by_column.setdefault(column, set()).add(processed_spec.kind)
 
     _require_columns_from_roles_or_kinds(
-        dataset_spec.feature_columns,
+        dataset_spec.factor_columns,
         role_by_column=role_by_column,
         kind_by_column=kind_by_column,
-        allowed_roles={ColumnRole.FEATURE, ColumnRole.FACTOR},
+        allowed_roles={ColumnRole.FACTOR},
         allowed_kinds={ProcessedDataKind.FACTOR},
+        error_name="invalid_research_factor_columns",
+    )
+    generated_feature_columns = set(_generated_feature_columns(dataset_spec))
+    stored_feature_columns = tuple(
+        column
+        for column in dataset_spec.feature_columns
+        if column not in generated_feature_columns
+    )
+    _require_columns_from_roles_or_kinds(
+        stored_feature_columns,
+        role_by_column=role_by_column,
+        kind_by_column=kind_by_column,
+        allowed_roles={ColumnRole.FEATURE},
+        allowed_kinds=set(),
         error_name="invalid_research_feature_columns",
     )
     _require_columns_from_roles_or_kinds(
@@ -405,8 +421,10 @@ def _require_no_duplicate_output_columns(
     dataset_spec: ResearchDatasetSpec,
     processed_specs: dict[str, ProcessedDataSpec],
 ) -> None:
-    requested = set(_ordered_output_columns(dataset_spec)).difference(
-        dataset_spec.primary_key
+    requested = (
+        set(_ordered_output_columns(dataset_spec))
+        .difference(dataset_spec.primary_key)
+        .difference(_generated_feature_columns(dataset_spec))
     )
     producers: dict[str, list[str]] = {}
     for data_id, processed_spec in processed_specs.items():
@@ -430,7 +448,11 @@ def _require_research_required_columns_available(
         for processed_spec in processed_specs.values()
         for column in processed_spec.required_columns
     }
-    missing = sorted(set(_ordered_output_columns(dataset_spec)).difference(available))
+    missing = sorted(
+        set(_ordered_output_columns(dataset_spec))
+        .difference(available)
+        .difference(_generated_feature_columns(dataset_spec))
+    )
     if missing:
         raise ValueError("missing_research_required_columns: " + ", ".join(missing))
 
@@ -440,6 +462,7 @@ def _ordered_output_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...
         dict.fromkeys(
             (
                 *dataset_spec.primary_key,
+                *dataset_spec.factor_columns,
                 *dataset_spec.feature_columns,
                 *dataset_spec.label_columns,
                 *dataset_spec.filter_columns,
@@ -447,6 +470,60 @@ def _ordered_output_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...
             )
         )
     )
+
+
+def _generated_feature_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...]:
+    return tuple(
+        column
+        for transform in dataset_spec.feature_transforms
+        for column in transform.output_feature_columns
+    )
+
+
+def _apply_feature_transforms(
+    frame: pd.DataFrame,
+    dataset_spec: ResearchDatasetSpec,
+) -> pd.DataFrame:
+    if not dataset_spec.feature_transforms:
+        return frame
+    result = frame.copy()
+    for transform in dataset_spec.feature_transforms:
+        _apply_feature_transform(result, transform)
+    return result
+
+
+def _apply_feature_transform(
+    frame: pd.DataFrame,
+    transform: FeatureTransformSpec,
+) -> None:
+    for source_column, output_column in zip(
+        transform.source_factor_columns,
+        transform.output_feature_columns,
+        strict=True,
+    ):
+        values = pd.to_numeric(frame[source_column], errors="coerce")
+        grouped = values.groupby(frame["timestamp"], sort=False)
+        if transform.transform == "rank":
+            transformed = grouped.rank(method="average")
+        elif transform.transform == "zscore":
+            transformed = _zscore(values, grouped)
+        elif transform.transform == "rank_zscore":
+            ranks = grouped.rank(method="average")
+            transformed = _zscore(ranks, ranks.groupby(frame["timestamp"], sort=False))
+        elif transform.transform in {"standardize", "winsorize"}:
+            transformed = _zscore(values, grouped)
+        else:
+            raise ValueError(f"unsupported_feature_transform: {transform.transform}")
+        frame[output_column] = transformed
+
+
+def _zscore(
+    values: pd.Series,
+    grouped: pd.core.groupby.SeriesGroupBy,
+) -> pd.Series:
+    mean = grouped.transform("mean")
+    std = grouped.transform(lambda item: item.std(ddof=0))
+    return (values - mean) / std.replace(0, pd.NA)
 
 
 def _input_fingerprints(

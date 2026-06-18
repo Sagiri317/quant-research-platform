@@ -9,13 +9,13 @@ from quant_research_platform.compute._portfolio_math import (
     _cost_components,
     _normalize_group_key,
 )
-from quant_research_platform.compute.config import (
-    CostConfig,
-    WeightConfig,
-)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
     TURNOVER_COLUMNS,
+)
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    WeightConfig,
 )
 
 
@@ -26,7 +26,7 @@ def calculate_tensor_turnover_and_cost(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """基于 tensor-shaped position matrices 计算 turnover 和 cost。"""
+    """    tensor-shaped position matrices     turnover  ?cost ?"""
 
     if cost_config is None:
         cost_config = CostConfig()
@@ -37,7 +37,7 @@ def calculate_tensor_turnover_and_cost(
         )
     turnover_records: list[dict[str, object]] = []
     cost_records: list[dict[str, object]] = []
-    group_columns = [*segment_columns, "feature"]
+    group_columns = [*segment_columns, "signal"]
     for group_key, group in positions.groupby(group_columns, sort=True, dropna=False):
         group_values = _normalize_group_key(group_key, group_columns)
         matrix = (
@@ -58,7 +58,7 @@ def calculate_tensor_turnover_and_cost(
             base = {
                 **{column: group_values[column] for column in segment_columns},
                 "timestamp": timestamp,
-                "feature": group_values["feature"],
+                "signal": group_values["signal"],
             }
             costs = _cost_components(
                 buy_turnover=float(buy_turnover[row_offset]),
@@ -97,7 +97,7 @@ def _path_turnover_and_cost_records(
     *,
     context: dict[str, object],
     timestamp: object,
-    feature: str,
+    signal: str,
     previous_positions: dict[str, float],
     current_positions: dict[str, float],
     weight_config: WeightConfig,
@@ -124,7 +124,7 @@ def _path_turnover_and_cost_records(
     base = {
         **{column: context[column] for column in segment_columns},
         "timestamp": timestamp,
-        "feature": feature,
+        "signal": signal,
     }
     costs = _cost_components(
         buy_turnover=buy_turnover,
@@ -151,7 +151,7 @@ def _path_turnover_and_cost_records_from_arrays(
     *,
     context: dict[str, object],
     timestamp: object,
-    feature: str,
+    signal: str,
     previous_values: np.ndarray,
     current_values: np.ndarray,
     previous_positions: dict[str, float],
@@ -181,7 +181,7 @@ def _path_turnover_and_cost_records_from_arrays(
     base = {
         **{column: context[column] for column in segment_columns},
         "timestamp": timestamp,
-        "feature": feature,
+        "signal": signal,
     }
     costs = _cost_components(
         buy_turnover=buy_turnover,

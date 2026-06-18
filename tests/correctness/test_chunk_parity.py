@@ -125,3 +125,65 @@ def test_research_assembly_session_chunks_equal_default_and_keep_nan_positions(
         inspect_dataset(tiny_root).file_count
         > inspect_dataset(default_root).file_count
     )
+
+
+def test_research_feature_transform_session_chunks_equal_default(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = research_rows_for_dates(
+        ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07", "2014-01-08"]
+    )
+    default_layout = StorageLayout(project_root=tmp_path / "default")
+    tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
+    processed_catalog = correctness_processed_catalog()
+    dataset_catalog = correctness_research_dataset_catalog(
+        include_feature_transform=True
+    )
+    write_correctness_processed_inputs(
+        default_layout,
+        processed_catalog,
+        frame=frame,
+    )
+    write_correctness_processed_inputs(
+        tiny_layout,
+        processed_catalog,
+        frame=frame,
+    )
+
+    assemble_research_dataset(
+        layout=default_layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    )
+    monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
+    assemble_research_dataset(
+        layout=tiny_layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    )
+
+    default = read_research_dataset(
+        default_layout,
+        market_id=MarketId("a_share"),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    ).sort_values(["market_id", "asset_id", "timestamp"])
+    tiny = read_research_dataset(
+        tiny_layout,
+        market_id=MarketId("a_share"),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+    ).sort_values(["market_id", "asset_id", "timestamp"])
+
+    pd.testing.assert_frame_equal(
+        default.reset_index(drop=True),
+        tiny.reset_index(drop=True),
+    )
+    grouped_feature_mean = default.groupby("timestamp")["mom_20d_zscore"].mean()
+    assert grouped_feature_mean.abs().max() == pytest.approx(0.0)
+    assert set(default["mom_20d_zscore"].dropna().abs()) == {1.0}

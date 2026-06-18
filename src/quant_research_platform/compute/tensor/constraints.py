@@ -7,12 +7,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.config import (
+from quant_research_platform.contracts.portfolios import (
     TradabilityConfig,
     WeightConfig,
-)
-from quant_research_platform.compute.tensor.portfolio_helpers import (
-    _directed_signal_values,
 )
 
 
@@ -25,14 +22,14 @@ def _optional_bool_array(frame: pd.DataFrame, column: str | None) -> np.ndarray 
 def _ranked_asset_indices(
     *,
     assets: tuple[str, ...],
-    feature_values: np.ndarray,
+    signal_values: np.ndarray,
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,
     timestamp_input: Any,
     previous_positions: dict[str, float],
     previous_values: np.ndarray | None = None,
 ) -> np.ndarray:
-    valid = np.isfinite(feature_values)
+    valid = np.isfinite(signal_values)
     if timestamp_input.eligible is not None:
         valid &= timestamp_input.eligible
     if (
@@ -46,11 +43,7 @@ def _ranked_asset_indices(
         )
         valid &= timestamp_input.can_enter | (previous_vector != 0.0)
     candidate_indices = np.flatnonzero(valid)
-    directed = _directed_signal_values(
-        feature_values[candidate_indices],
-        weight_config.direction,
-    )
-    order = np.argsort(directed, kind="mergesort")
+    order = np.argsort(signal_values[candidate_indices], kind="mergesort")
     return candidate_indices[order]
 
 

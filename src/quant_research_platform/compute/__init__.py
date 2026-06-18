@@ -1,1 +1,1 @@
-"""提供 evaluation 计算内核入口。"""
+"""Compute kernels for signal evaluation and portfolio simulation."""

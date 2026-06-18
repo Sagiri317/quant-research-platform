@@ -27,18 +27,18 @@ from quant_research_platform.storage.layout import StorageLayout
 def test_research_dataset_spec_requires_base_input_in_inputs() -> None:
     with pytest.raises(ValueError, match="base_input_data_id_not_in_inputs: base"):
         _dataset_spec(
-            input_data_ids=("features", "labels"),
+            input_data_ids=("factors", "labels"),
             base_input_data_id="base",
         )
 
 
 def test_research_dataset_key_coverage_is_defensively_copied() -> None:
-    source = {"features": "sparse"}
+    source = {"factors": "sparse"}
 
     spec = _dataset_spec(key_coverage=source)
-    source["features"] = "strict"
+    source["factors"] = "strict"
 
-    assert spec.key_coverage["features"] == "sparse"
+    assert spec.key_coverage["factors"] == "sparse"
 
 
 def test_research_dataset_validation_rejects_noncanonical_primary_key() -> None:
@@ -51,7 +51,7 @@ def test_research_dataset_validation_rejects_noncanonical_primary_key() -> None:
     spec = replace(_dataset_spec(), primary_key=("asset_id", "market_id", "timestamp"))
 
     with pytest.raises(ValueError, match="invalid_research_dataset_primary_key"):
-        validate_research_dataset(_base_frame().assign(feature_1=[1.0, 2.0]), spec)
+        validate_research_dataset(_base_frame().assign(factor_1=[1.0, 2.0]), spec)
 
 
 def test_research_dataset_assembler_uses_explicit_base_not_input_order(
@@ -62,7 +62,7 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
         _dataset_spec(
-            input_data_ids=("features", "base", "labels", "filters", "context"),
+            input_data_ids=("factors", "base", "labels", "filters", "context"),
             base_input_data_id="base",
         )
     )
@@ -82,7 +82,7 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
         "market_id",
         "asset_id",
         "timestamp",
-        "feature_1",
+        "factor_1",
         "label_1",
         "eligible",
         "context_1",
@@ -97,7 +97,7 @@ def test_research_dataset_columns_extend_without_assembler_change(
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
         _dataset_spec(
-            feature_columns=("feature_1", "feature_2"),
+            factor_columns=("factor_1", "factor_2"),
             label_columns=("label_1", "label_2"),
             context_columns=("context_1", "context_2"),
             include_extensions=True,
@@ -118,8 +118,8 @@ def test_research_dataset_columns_extend_without_assembler_change(
         "market_id",
         "asset_id",
         "timestamp",
-        "feature_1",
-        "feature_2",
+        "factor_1",
+        "factor_2",
         "label_1",
         "label_2",
         "eligible",
@@ -149,14 +149,14 @@ def test_dummy_market_assembles_without_a_share_import(tmp_path: Path) -> None:
 
 def test_missing_join_key_fails_closed(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = _processed_catalog(missing_feature_key=True)
+    processed_catalog = _processed_catalog(missing_factor_key=True)
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(_dataset_spec())
-    _write_processed_inputs(layout, processed_catalog, drop_feature_key="asset_id")
+    _write_processed_inputs(layout, processed_catalog, drop_factor_key="asset_id")
 
     with pytest.raises(
         ValueError,
-        match="missing_research_join_key: features: asset_id",
+        match="missing_research_join_key: factors: asset_id",
     ):
         assemble_research_dataset(
             layout=layout,
@@ -168,12 +168,19 @@ def test_missing_join_key_fails_closed(tmp_path: Path) -> None:
 
 
 def test_duplicate_output_column_fails_closed() -> None:
-    processed_catalog = _processed_catalog(duplicate_feature_context=True)
-    spec = _dataset_spec(context_columns=("feature_1",))
+    processed_catalog = _processed_catalog(
+        include_extensions=True,
+        duplicate_factor_context=True,
+    )
+    spec = _dataset_spec(
+        factor_columns=("factor_2",),
+        context_columns=("factor_1",),
+        include_extensions=True,
+    )
 
     with pytest.raises(
         ValueError,
-        match="duplicate_research_output_columns: feature_1",
+        match="duplicate_research_output_columns: factor_1",
     ):
         _validate_inputs(spec, processed_catalog)
 
@@ -181,8 +188,8 @@ def test_duplicate_output_column_fails_closed() -> None:
 @pytest.mark.parametrize(
     ("field_name", "bad_column", "expected_error"),
     [
-        ("feature_columns", "eligible", "invalid_research_feature_columns"),
-        ("label_columns", "feature_1", "invalid_research_label_columns"),
+        ("factor_columns", "eligible", "research_input_column_overlap"),
+        ("label_columns", "factor_1", "research_input_column_overlap"),
         ("filter_columns", "context_1", "invalid_research_filter_columns"),
         ("context_columns", "label_1", "invalid_research_context_columns"),
     ],
@@ -194,15 +201,15 @@ def test_research_dataset_role_separation_is_enforced(
 ) -> None:
     processed_catalog = _processed_catalog()
     kwargs = {
-        "feature_columns": ("feature_1",),
+        "factor_columns": ("factor_1",),
         "label_columns": ("label_1",),
         "filter_columns": ("eligible",),
         "context_columns": ("context_1",),
     }
     kwargs[field_name] = (bad_column,)
-    spec = _dataset_spec(**kwargs)
 
     with pytest.raises(ValueError, match=expected_error):
+        spec = _dataset_spec(**kwargs)
         _validate_inputs(spec, processed_catalog)
 
 
@@ -260,9 +267,9 @@ def test_strict_research_input_missing_base_key_fails_in_assembler(
     processed_catalog = _processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(_dataset_spec())
-    _write_processed_inputs(layout, processed_catalog, truncate_features=True)
+    _write_processed_inputs(layout, processed_catalog, truncate_factors=True)
 
-    with pytest.raises(ValueError, match="missing_research_input_keys: features: 1"):
+    with pytest.raises(ValueError, match="missing_research_input_keys: factors: 1"):
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -279,9 +286,9 @@ def test_sparse_research_input_missing_base_key_passes_with_nan(
     processed_catalog = _processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
-        _dataset_spec(key_coverage={"features": "sparse"})
+        _dataset_spec(key_coverage={"factors": "sparse"})
     )
-    _write_processed_inputs(layout, processed_catalog, truncate_features=True)
+    _write_processed_inputs(layout, processed_catalog, truncate_factors=True)
 
     assemble_research_dataset(
         layout=layout,
@@ -292,8 +299,8 @@ def test_sparse_research_input_missing_base_key_passes_with_nan(
     )
 
     result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
-    assert result.loc[result["asset_id"].eq("asset_a"), "feature_1"].tolist() == [1.0]
-    assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "feature_1"]).all()
+    assert result.loc[result["asset_id"].eq("asset_a"), "factor_1"].tolist() == [1.0]
+    assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "factor_1"]).all()
 
 
 def test_research_dataset_key_coverage_is_persisted_for_all_inputs(
@@ -302,8 +309,8 @@ def test_research_dataset_key_coverage_is_persisted_for_all_inputs(
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = _processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
-    dataset_catalog.register(_dataset_spec(key_coverage={"features": "sparse"}))
-    _write_processed_inputs(layout, processed_catalog, truncate_features=True)
+    dataset_catalog.register(_dataset_spec(key_coverage={"factors": "sparse"}))
+    _write_processed_inputs(layout, processed_catalog, truncate_factors=True)
 
     assemble_research_dataset(
         layout=layout,
@@ -320,7 +327,7 @@ def test_research_dataset_key_coverage_is_persisted_for_all_inputs(
     )
     expected = {
         "base": "strict",
-        "features": "sparse",
+        "factors": "sparse",
         "labels": "strict",
         "filters": "strict",
         "context": "strict",
@@ -336,7 +343,7 @@ def test_strict_research_input_value_nan_does_not_count_as_missing_key(
     processed_catalog = _processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(_dataset_spec())
-    _write_processed_inputs(layout, processed_catalog, feature_values=[1.0, None])
+    _write_processed_inputs(layout, processed_catalog, factor_values=[1.0, None])
 
     assemble_research_dataset(
         layout=layout,
@@ -347,7 +354,7 @@ def test_strict_research_input_value_nan_does_not_count_as_missing_key(
     )
 
     result = read_dataset(tmp_path / "data/research/dummy_market/dummy_dataset")
-    assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "feature_1"]).all()
+    assert pd.isna(result.loc[result["asset_id"].eq("asset_b"), "factor_1"]).all()
 
 
 @pytest.mark.parametrize("coverage_policy", ["strict", "sparse"])
@@ -359,11 +366,11 @@ def test_research_input_extra_key_outside_base_fails_closed(
     processed_catalog = _processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(
-        _dataset_spec(key_coverage={"features": coverage_policy})
+        _dataset_spec(key_coverage={"factors": coverage_policy})
     )
-    _write_processed_inputs(layout, processed_catalog, extra_feature_key=True)
+    _write_processed_inputs(layout, processed_catalog, extra_factor_key=True)
 
-    with pytest.raises(ValueError, match="extra_research_input_keys: features: 1"):
+    with pytest.raises(ValueError, match="extra_research_input_keys: factors: 1"):
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -375,19 +382,19 @@ def test_research_input_extra_key_outside_base_fails_closed(
 
 def test_research_dataset_reports_incompatible_and_missing_required_specs() -> None:
     incompatible = _processed_catalog()
-    bad_features = _processed_spec(
-        "features",
+    bad_factors = _processed_spec(
+        "factors",
         ProcessedDataKind.FACTOR,
-        (*platform_entity_time_key(), "feature_1"),
+        (*platform_entity_time_key(), "factor_1"),
         role=ColumnRole.FACTOR,
         primary_key=("asset_id", "market_id", "timestamp"),
     )
     incompatible = ProcessedDataCatalog()
     for data_id in ("base", "labels", "filters", "context"):
         incompatible.register(_processed_catalog().get(data_id))
-    incompatible.register(bad_features)
+    incompatible.register(bad_factors)
     spec = _dataset_spec()
-    with pytest.raises(ValueError, match="incompatible_research_input_keys: features"):
+    with pytest.raises(ValueError, match="incompatible_research_input_keys: factors"):
         _validate_inputs(spec, incompatible)
 
     missing_label = _processed_catalog()
@@ -426,13 +433,13 @@ def _dataset_spec(
     *,
     input_data_ids: tuple[str, ...] = (
         "base",
-        "features",
+        "factors",
         "labels",
         "filters",
         "context",
     ),
     base_input_data_id: str = "base",
-    feature_columns: tuple[str, ...] = ("feature_1",),
+    factor_columns: tuple[str, ...] = ("factor_1",),
     label_columns: tuple[str, ...] = ("label_1",),
     filter_columns: tuple[str, ...] = ("eligible",),
     context_columns: tuple[str, ...] = ("context_1",),
@@ -444,7 +451,7 @@ def _dataset_spec(
         market_id=MarketId("dummy_market"),
         input_data_ids=input_data_ids,
         base_input_data_id=base_input_data_id,
-        feature_columns=feature_columns,
+        factor_columns=factor_columns,
         label_columns=label_columns,
         filter_columns=filter_columns,
         context_columns=context_columns,
@@ -455,7 +462,7 @@ def _dataset_spec(
             "market_id": ColumnRole.KEY,
             "asset_id": ColumnRole.KEY,
             "timestamp": ColumnRole.TIMESTAMP,
-            **_roles(feature_columns, ColumnRole.FEATURE),
+            **_roles(factor_columns, ColumnRole.FACTOR),
             **_roles(label_columns, ColumnRole.LABEL),
             **_roles(filter_columns, ColumnRole.MASK),
             **_roles(context_columns, ColumnRole.CONTEXT),
@@ -468,27 +475,27 @@ def _dataset_spec(
 def _processed_catalog(
     *,
     include_extensions: bool = False,
-    duplicate_feature_context: bool = False,
-    missing_feature_key: bool = False,
+    duplicate_factor_context: bool = False,
+    missing_factor_key: bool = False,
 ) -> ProcessedDataCatalog:
     specs = (
         _processed_spec("base", ProcessedDataKind.PANEL, platform_entity_time_key()),
         _processed_spec(
-            "features",
+            "factors",
             ProcessedDataKind.FACTOR,
             (
                 *(
                     ("market_id", "timestamp")
-                    if missing_feature_key
+                    if missing_factor_key
                     else platform_entity_time_key()
                 ),
-                "feature_1",
-                *(("feature_2",) if include_extensions else ()),
+                "factor_1",
+                *(("factor_2",) if include_extensions else ()),
             ),
             role=ColumnRole.FACTOR,
             primary_key=(
                 ("market_id", "timestamp")
-                if missing_feature_key
+                if missing_factor_key
                 else platform_entity_time_key()
             ),
         ),
@@ -515,7 +522,7 @@ def _processed_catalog(
                 *platform_entity_time_key(),
                 "context_1",
                 *(("context_2",) if include_extensions else ()),
-                *(("feature_1",) if duplicate_feature_context else ()),
+                *(("factor_1",) if duplicate_factor_context else ()),
             ),
             role=ColumnRole.CONTEXT,
         ),
@@ -563,33 +570,33 @@ def _write_processed_inputs(
     processed_catalog: ProcessedDataCatalog,
     *,
     include_extensions: bool = False,
-    drop_feature_key: str | None = None,
+    drop_factor_key: str | None = None,
     reverse_base: bool = False,
-    truncate_features: bool = False,
-    extra_feature_key: bool = False,
-    feature_values: list[object] | None = None,
+    truncate_factors: bool = False,
+    extra_factor_key: bool = False,
+    factor_values: list[object] | None = None,
 ) -> None:
     base = _base_frame()
     if reverse_base:
         base = base.iloc[::-1].reset_index(drop=True)
-    feature_frame = _with_optional_columns(
-        _base_frame().assign(feature_1=feature_values or [1.0, 2.0]),
+    factor_frame = _with_optional_columns(
+        _base_frame().assign(factor_1=factor_values or [1.0, 2.0]),
         include_extensions=include_extensions,
-        extension_column="feature_2",
+        extension_column="factor_2",
         values=[10.0, 20.0],
     )
-    if truncate_features:
-        feature_frame = feature_frame.iloc[[0]].reset_index(drop=True)
-    if extra_feature_key:
-        feature_frame = pd.concat(
+    if truncate_factors:
+        factor_frame = factor_frame.iloc[[0]].reset_index(drop=True)
+    if extra_factor_key:
+        factor_frame = pd.concat(
             [
-                feature_frame,
+                factor_frame,
                 pd.DataFrame(
                     {
                         "market_id": ["dummy_market"],
                         "asset_id": ["asset_extra"],
                         "timestamp": [pd.Timestamp("2024-01-03")],
-                        "feature_1": [3.0],
+                        "factor_1": [3.0],
                     }
                 ),
             ],
@@ -597,7 +604,7 @@ def _write_processed_inputs(
         )
     frames = {
         "base": base,
-        "features": feature_frame,
+        "factors": factor_frame,
         "labels": _with_optional_columns(
             _base_frame().assign(label_1=[0.1, 0.2]),
             include_extensions=include_extensions,
@@ -612,8 +619,8 @@ def _write_processed_inputs(
             values=["u", "v"],
         ),
     }
-    if drop_feature_key is not None:
-        frames["features"] = frames["features"].drop(columns=[drop_feature_key])
+    if drop_factor_key is not None:
+        frames["factors"] = frames["factors"].drop(columns=[drop_factor_key])
     for data_id, frame in frames.items():
         spec = processed_catalog.get(data_id)
         write_dataset(

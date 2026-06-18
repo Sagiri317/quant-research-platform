@@ -20,3 +20,5 @@ dependencies:
   - coverage>=7.14,<8
   - hypothesis>=6.155,<7
   - httpx>=0.28,<1
+  - xgboost>=3,<4
+  - lightgbm>=4.6,<5

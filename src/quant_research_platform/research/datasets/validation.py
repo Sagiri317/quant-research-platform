@@ -35,10 +35,19 @@ def validate_research_dataset(
     if bool(duplicates.any()):
         raise ValueError("duplicate_research_dataset_keys")
 
+    invalid_factors = [
+        column
+        for column in spec.factor_columns
+        if spec.column_roles.get(column) is not ColumnRole.FACTOR
+    ]
+    if invalid_factors:
+        joined = ", ".join(invalid_factors)
+        raise ValueError(f"invalid_research_dataset_factors: {joined}")
+
     invalid_features = [
         column
         for column in spec.feature_columns
-        if spec.column_roles.get(column) not in {ColumnRole.FEATURE, ColumnRole.FACTOR}
+        if spec.column_roles.get(column) is not ColumnRole.FEATURE
     ]
     if invalid_features:
         joined = ", ".join(invalid_features)
@@ -53,13 +62,13 @@ def validate_research_dataset(
         joined = ", ".join(invalid_labels)
         raise ValueError(f"invalid_research_dataset_labels: {joined}")
 
-    mask_features = [
+    mask_inputs = [
         column
-        for column in spec.feature_columns
+        for column in (*spec.factor_columns, *spec.feature_columns)
         if spec.column_roles.get(column) is ColumnRole.MASK
     ]
-    if mask_features:
-        raise ValueError(f"mask_column_in_feature_set: {', '.join(mask_features)}")
+    if mask_inputs:
+        raise ValueError(f"mask_column_in_research_inputs: {', '.join(mask_inputs)}")
 
     invalid_filters = [
         column
@@ -84,15 +93,15 @@ def validate_evaluation_input(
     frame: pd.DataFrame,
     spec: ResearchDatasetSpec,
     *,
-    feature_columns: tuple[str, ...],
+    signal_columns: tuple[str, ...],
     label_columns: tuple[str, ...],
 ) -> None:
     validate_research_dataset(frame, spec, require_all_columns=False)
     _require_declared_columns(
-        feature_columns,
-        declared=spec.feature_columns,
+        signal_columns,
+        declared=(*spec.factor_columns, *spec.feature_columns),
         frame=frame,
-        error_name="invalid_evaluation_feature_columns",
+        error_name="invalid_evaluation_signal_columns",
     )
     _require_declared_columns(
         label_columns,
@@ -106,14 +115,14 @@ def validate_prediction_input(
     frame: pd.DataFrame,
     spec: ResearchDatasetSpec,
     *,
-    feature_columns: tuple[str, ...],
+    input_columns: tuple[str, ...],
 ) -> None:
     validate_research_dataset(frame, spec, require_all_columns=False)
     _require_declared_columns(
-        feature_columns,
-        declared=spec.feature_columns,
+        input_columns,
+        declared=(*spec.factor_columns, *spec.feature_columns),
         frame=frame,
-        error_name="invalid_prediction_feature_columns",
+        error_name="invalid_prediction_input_columns",
     )
 
 

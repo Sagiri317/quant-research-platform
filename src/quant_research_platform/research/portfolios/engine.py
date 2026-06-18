@@ -1,0 +1,234 @@
+"""Portfolio simulation engine for SignalSpec-driven research panels."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from quant_research_platform.compute.dataframe.exposure import summarize_exposure
+from quant_research_platform.compute.dataframe.performance import (
+    calculate_cumulative_returns,
+    summarize_performance,
+)
+from quant_research_platform.compute.dataframe.portfolio_returns import (
+    _simulate_weighted_long_short_returns_and_cost_from_validated_panel,
+)
+from quant_research_platform.compute.panels import ComputePanelSpec
+from quant_research_platform.contracts.evaluations import SignalSpec
+from quant_research_platform.contracts.portfolios import PortfolioSpec
+
+
+@dataclass(frozen=True)
+class PortfolioResult:
+    spec: PortfolioSpec
+    positions: pd.DataFrame
+    turnover: pd.DataFrame
+    cost_breakdown: pd.DataFrame
+    portfolio_returns: pd.DataFrame
+    cumulative_returns: pd.DataFrame
+    performance_summary: pd.DataFrame
+    exposure_summary: pd.DataFrame
+    concentration: pd.DataFrame
+    period_breakdown: pd.DataFrame
+    diagnostics: pd.DataFrame
+
+
+def simulate_portfolio_frame(
+    frame: pd.DataFrame,
+    spec: PortfolioSpec,
+) -> PortfolioResult:
+    """Simulate portfolio returns from normalized SignalSpec scores."""
+
+    panel = _portfolio_panel(frame, spec)
+    signal_ids = tuple(signal.signal_id for signal in spec.signals)
+    compute_spec = ComputePanelSpec(
+        signal_columns=signal_ids,
+        label_column=spec.label_column,
+        timestamp_column="timestamp",
+        asset_column="asset_id",
+    )
+    positions, turnover, portfolio_returns, diagnostics, cost_breakdown = (
+        _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+            panel,
+            compute_spec,
+            spec.weight_config,
+            portfolio_signals=signal_ids,
+            tradability_config=spec.tradability_config,
+            cost_config=spec.cost_config,
+        )
+    )
+    cumulative_returns = calculate_cumulative_returns(portfolio_returns)
+    performance_summary = summarize_performance(
+        portfolio_returns,
+        cumulative_returns,
+    )
+    exposure_summary = summarize_exposure(positions, portfolio_returns)
+    concentration = summarize_concentration(positions)
+    period_breakdown = summarize_period_breakdown(portfolio_returns)
+    return PortfolioResult(
+        spec=spec,
+        positions=positions,
+        turnover=turnover,
+        cost_breakdown=cost_breakdown,
+        portfolio_returns=portfolio_returns,
+        cumulative_returns=cumulative_returns,
+        performance_summary=performance_summary,
+        exposure_summary=exposure_summary,
+        concentration=concentration,
+        period_breakdown=period_breakdown,
+        diagnostics=diagnostics,
+    )
+
+
+def summarize_concentration(
+    positions: pd.DataFrame,
+    *,
+    segment_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    output_columns = [
+        *segment_columns,
+        "signal",
+        "periods",
+        "mean_hhi",
+        "max_hhi",
+        "mean_top_weight",
+        "max_top_weight",
+        "mean_position_count",
+    ]
+    if positions.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    frame = positions.copy()
+    frame["abs_position"] = pd.to_numeric(frame["position"], errors="coerce").abs()
+    period_columns = [*segment_columns, "signal", "timestamp"]
+    totals = frame.groupby(period_columns, sort=True)["abs_position"].transform("sum")
+    frame["abs_weight_share"] = frame["abs_position"].div(totals.replace(0, np.nan))
+    period = (
+        frame.groupby(period_columns, sort=True)
+        .agg(
+            hhi=("abs_weight_share", lambda values: float(np.square(values).sum())),
+            top_weight=("abs_weight_share", "max"),
+            position_count=("abs_position", lambda values: int((values > 0).sum())),
+        )
+        .reset_index()
+    )
+    records: list[dict[str, object]] = []
+    group_columns = [*segment_columns, "signal"]
+    for group_key, group in period.groupby(group_columns, sort=True, dropna=False):
+        group_values = _normalize_group_key(group_key, group_columns)
+        records.append(
+            {
+                **{column: group_values[column] for column in segment_columns},
+                "signal": group_values["signal"],
+                "periods": int(len(group)),
+                "mean_hhi": float(group["hhi"].mean()),
+                "max_hhi": float(group["hhi"].max()),
+                "mean_top_weight": float(group["top_weight"].mean()),
+                "max_top_weight": float(group["top_weight"].max()),
+                "mean_position_count": float(group["position_count"].mean()),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=output_columns)
+
+
+def summarize_period_breakdown(
+    portfolio_returns: pd.DataFrame,
+    *,
+    segment_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    output_columns = [
+        *segment_columns,
+        "signal",
+        "year",
+        "month",
+        "periods",
+        "gross_portfolio_return",
+        "net_portfolio_return",
+        "cost",
+        "turnover",
+        "hit_rate",
+    ]
+    if portfolio_returns.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    frame = portfolio_returns.copy()
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame["year"] = timestamps.dt.year.astype("int64")
+    frame["month"] = timestamps.dt.month.astype("int64")
+    group_columns = [*segment_columns, "signal", "year", "month"]
+    result = (
+        frame.groupby(group_columns, sort=True, dropna=False)
+        .agg(
+            periods=("net_portfolio_return", "size"),
+            gross_portfolio_return=("gross_portfolio_return", "sum"),
+            net_portfolio_return=("net_portfolio_return", "sum"),
+            cost=("cost", "sum"),
+            turnover=("turnover", "mean"),
+            hit_rate=(
+                "net_portfolio_return",
+                lambda values: float((values > 0).mean()),
+            ),
+        )
+        .reset_index()
+    )
+    return result.loc[:, output_columns]
+
+
+def _portfolio_panel(frame: pd.DataFrame, spec: PortfolioSpec) -> pd.DataFrame:
+    optional_columns = (
+        spec.weight_config.risk_column,
+        spec.tradability_config.eligibility_column,
+        spec.tradability_config.can_enter_column,
+        spec.tradability_config.can_exit_column,
+    )
+    required = {
+        "asset_id",
+        "timestamp",
+        spec.label_column,
+        *(signal.column for signal in spec.signals),
+        *(column for column in optional_columns if column is not None),
+    }
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"missing_portfolio_columns: {', '.join(missing)}")
+    result = frame.copy()
+    for signal in spec.signals:
+        result[signal.signal_id] = _normalize_signal_values(result, signal)
+        if signal.signal_id != signal.column:
+            result = result.drop(columns=[signal.column])
+    return result
+
+
+def _normalize_signal_values(frame: pd.DataFrame, signal: SignalSpec) -> pd.Series:
+    values = pd.to_numeric(frame[signal.column], errors="coerce")
+    if signal.transform == "rank":
+        values = values.groupby(frame["timestamp"]).rank(method="average")
+    elif signal.transform == "zscore":
+        grouped = values.groupby(frame["timestamp"])
+        mean = grouped.transform("mean")
+        std = grouped.transform(lambda item: item.std(ddof=0))
+        values = (values - mean) / std.replace(0, pd.NA)
+    if signal.direction == "lower":
+        values = -values
+    return values
+
+
+def _normalize_group_key(
+    group_key: object,
+    group_columns: list[str],
+) -> dict[str, object]:
+    if len(group_columns) == 1:
+        values = group_key if isinstance(group_key, tuple) else (group_key,)
+    else:
+        values = tuple(group_key)
+    return dict(zip(group_columns, values, strict=True))
+
+
+__all__ = [
+    "PortfolioResult",
+    "simulate_portfolio_frame",
+    "summarize_concentration",
+    "summarize_period_breakdown",
+]

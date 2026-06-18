@@ -155,12 +155,15 @@ def test_compute_portfolio_compatibility_facades_are_absent() -> None:
     assert [str(path) for path in retired if path.exists()] == []
 
 
-def test_report_placeholder_modules_and_generic_bundle_module_are_absent() -> None:
+def test_report_placeholder_and_retired_research_modules_are_absent() -> None:
     retired = (
         SOURCE_ROOT / "reports/bundles.py",
         SOURCE_ROOT / "reports/index.py",
         SOURCE_ROOT / "reports/manifests.py",
         SOURCE_ROOT / "reports/summaries.py",
+        SOURCE_ROOT / "research/models/baseline.py",
+        SOURCE_ROOT / "research/predictions/bundle.py",
+        SOURCE_ROOT / "research/predictions/handoff.py",
     )
 
     assert [str(path) for path in retired if path.exists()] == []

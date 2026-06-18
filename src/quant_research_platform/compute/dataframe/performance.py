@@ -1,4 +1,4 @@
-"""提供 portfolio returns 的 cumulative return 和 performance diagnostics。"""
+"""    portfolio returns  ?cumulative return  ?performance diagnostics ?"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import pandas as pd
 
 CUMULATIVE_RETURN_COLUMNS = [
     "timestamp",
-    "feature",
+    "signal",
     "gross_portfolio_return",
     "net_portfolio_return",
     "cost",
@@ -18,7 +18,7 @@ CUMULATIVE_RETURN_COLUMNS = [
     "drawdown",
 ]
 PERFORMANCE_SUMMARY_COLUMNS = [
-    "feature",
+    "signal",
     "periods",
     "final_cumulative_gross_return",
     "final_cumulative_net_return",
@@ -64,7 +64,7 @@ def calculate_cumulative_returns(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """基于 portfolio returns 构造 cumulative return 和 drawdown series。"""
+    """    portfolio returns    ?cumulative return  ?drawdown series ?"""
 
     _validate_returns_frame(
         returns,
@@ -75,7 +75,7 @@ def calculate_cumulative_returns(
     if returns.empty:
         return pd.DataFrame(columns=output_columns)
 
-    sort_columns = [*segment_columns, "feature", "timestamp"]
+    sort_columns = [*segment_columns, "signal", "timestamp"]
     result = returns.copy()
     result["timestamp"] = pd.to_datetime(result["timestamp"])
     result["net_portfolio_return"] = pd.to_numeric(
@@ -92,7 +92,7 @@ def calculate_cumulative_returns(
     )
     result["cost"] = pd.to_numeric(result["cost"], errors="coerce")
     result = result.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
-    group_columns = [*segment_columns, "feature"]
+    group_columns = [*segment_columns, "signal"]
     result["cumulative_gross_return"] = result.groupby(group_columns, sort=False)[
         "gross_portfolio_return"
     ].cumsum()
@@ -115,7 +115,7 @@ def summarize_performance(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """汇总 frequency-neutral portfolio performance diagnostics。"""
+    """   ?frequency-neutral portfolio performance diagnostics ?"""
 
     _validate_returns_frame(
         returns,
@@ -126,16 +126,16 @@ def summarize_performance(
     if returns.empty:
         return pd.DataFrame(columns=output_columns)
 
-    sort_columns = [*segment_columns, "feature", "timestamp"]
+    sort_columns = [*segment_columns, "signal", "timestamp"]
     frame = returns.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"])
     frame = frame.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
     cumulative_frame = cumulative_returns.copy()
     records: list[dict[str, object]] = []
-    group_columns = [*segment_columns, "feature"]
+    group_columns = [*segment_columns, "signal"]
     for group_key, group in frame.groupby(group_columns, sort=True, dropna=False):
         group_values = _normalize_group_key(group_key, group_columns)
-        filters = cumulative_frame["feature"] == group_values["feature"]
+        filters = cumulative_frame["signal"] == group_values["signal"]
         for segment in segment_columns:
             filters &= cumulative_frame[segment] == group_values[segment]
 
@@ -161,7 +161,7 @@ def summarize_performance(
         records.append(
             {
                 **{column: group_values[column] for column in segment_columns},
-                "feature": group_values["feature"],
+                "signal": group_values["signal"],
                 "periods": int(len(group)),
                 "final_cumulative_gross_return": total_gross,
                 "final_cumulative_net_return": total_net,
@@ -303,7 +303,7 @@ def _validate_returns_frame(
     required_columns = {
         *segment_columns,
         "timestamp",
-        "feature",
+        "signal",
         "net_portfolio_return",
     }
     if include_performance_columns:

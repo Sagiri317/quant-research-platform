@@ -24,10 +24,10 @@ def validate_sample_filter_mode(mode: str, *, owner: str) -> SampleFilterMode:
     return mode  # type: ignore[return-value]
 
 
-def reject_filter_feature_columns(feature_columns: tuple[str, ...]) -> None:
-    invalid = [column for column in feature_columns if column in FILTER_COLUMNS]
+def reject_filter_input_columns(input_columns: tuple[str, ...]) -> None:
+    invalid = [column for column in input_columns if column in FILTER_COLUMNS]
     if invalid:
-        raise ValueError(f"filter_column_in_feature_columns: {', '.join(invalid)}")
+        raise ValueError(f"filter_column_in_input_columns: {', '.join(invalid)}")
 
 
 def required_filter_columns(mode: str) -> tuple[str, ...]:
@@ -54,7 +54,7 @@ __all__ = [
     "EvaluationFilterMode",
     "SampleFilterMode",
     "filter_definition",
-    "reject_filter_feature_columns",
+    "reject_filter_input_columns",
     "required_filter_columns",
     "validate_evaluation_filter_mode",
     "validate_sample_filter_mode",

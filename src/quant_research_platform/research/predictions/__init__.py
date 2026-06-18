@@ -1,10 +1,10 @@
-"""Prediction bundle helpers."""
+"""Prediction artifact helpers."""
 
-from quant_research_platform.research.predictions.bundle import (
+from quant_research_platform.research.predictions.artifacts import (
     build_prediction_bundle,
     write_prediction_bundle,
 )
-from quant_research_platform.research.predictions.handoff import (
+from quant_research_platform.research.predictions.runner import (
     run_prediction_from_research_dataset,
 )
 

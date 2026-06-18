@@ -46,7 +46,7 @@ def test_backend_constants_import_from_backend_owner() -> None:
 
 
 def test_validate_compute_panel_normalizes_and_sorts_valid_panel() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
     result = validate_compute_panel(_perfect_panel().iloc[::-1], spec)
 
@@ -54,15 +54,15 @@ def test_validate_compute_panel_normalizes_and_sorts_valid_panel() -> None:
     assert result["asset"].tolist()[:3] == ["A", "B", "C"]
 
 
-def test_validate_compute_panel_rejects_missing_feature_column() -> None:
-    spec = ComputePanelSpec(feature_columns=("missing",), label_column="forward_return")
+def test_validate_compute_panel_rejects_missing_signal_column() -> None:
+    spec = ComputePanelSpec(signal_columns=("missing",), label_column="forward_return")
 
     with pytest.raises(ValueError, match="panel is missing columns"):
         validate_compute_panel(_perfect_panel(), spec)
 
 
 def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
     panel = pd.concat([_perfect_panel(), _perfect_panel().head(1)], ignore_index=True)
 
     with pytest.raises(ValueError, match="unique timestamp-asset keys"):
@@ -70,12 +70,12 @@ def test_validate_compute_panel_rejects_duplicate_timestamp_asset_keys() -> None
 
 
 def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
     result = compute_ic_by_timestamp(_perfect_panel(), spec)
 
     assert result["timestamp"].nunique() == 2
-    assert result["feature"].tolist() == ["factor", "factor"]
+    assert result["signal"].tolist() == ["factor", "factor"]
     assert result["ic"].round(6).tolist() == [1.0, 1.0]
     assert result["rankic"].round(6).tolist() == [1.0, 1.0]
     assert result["n_obs"].tolist() == [3, 3]
@@ -91,7 +91,7 @@ def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
 
     result = compute_ic_by_timestamp(
         _perfect_panel(),
-        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
     )
 
     assert result["ic"].round(6).tolist() == [1.0, 1.0]
@@ -99,7 +99,7 @@ def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
 
 
 def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
     result = compute_grouped_label_values(_perfect_panel(), spec, n_groups=3)
 
@@ -122,7 +122,7 @@ def test_compute_grouped_label_values_does_not_call_pandas_qcut(monkeypatch) -> 
 
     result = compute_grouped_label_values(
         _perfect_panel(),
-        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         n_groups=3,
     )
 
@@ -141,7 +141,7 @@ def test_compute_grouped_label_values_does_not_group_assigned_pairs(
 
     result = compute_grouped_label_values(
         _perfect_panel(),
-        ComputePanelSpec(feature_columns=("factor",), label_column="forward_return"),
+        ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         n_groups=3,
     )
 
@@ -152,7 +152,7 @@ def test_summarize_ic_reports_icir_and_positive_rates() -> None:
     ic = pd.DataFrame(
         {
             "timestamp": ["2026-01-01", "2026-01-02", "2026-01-03"],
-            "feature": ["factor", "factor", "factor"],
+            "signal": ["factor", "factor", "factor"],
             "label": ["forward_return", "forward_return", "forward_return"],
             "ic": [0.2, -0.1, 0.4],
             "rankic": [0.3, 0.1, -0.2],
@@ -177,7 +177,7 @@ def test_summarize_ic_uses_nan_when_no_valid_ic_or_rankic() -> None:
     ic = pd.DataFrame(
         {
             "timestamp": ["2026-01-01", "2026-01-02"],
-            "feature": ["factor", "factor"],
+            "signal": ["factor", "factor"],
             "label": ["forward_return", "forward_return"],
             "ic": [np.nan, np.nan],
             "rankic": [np.nan, np.nan],
@@ -204,7 +204,7 @@ def test_summarize_ic_uses_nan_icir_when_valid_count_or_std_is_insufficient() ->
     one_valid = pd.DataFrame(
         {
             "timestamp": ["2026-01-01"],
-            "feature": ["factor"],
+            "signal": ["factor"],
             "label": ["forward_return"],
             "ic": [0.4],
             "rankic": [-0.3],
@@ -214,7 +214,7 @@ def test_summarize_ic_uses_nan_icir_when_valid_count_or_std_is_insufficient() ->
     constant_valid = pd.DataFrame(
         {
             "timestamp": ["2026-01-01", "2026-01-02"],
-            "feature": ["factor", "factor"],
+            "signal": ["factor", "factor"],
             "label": ["forward_return", "forward_return"],
             "ic": [0.4, 0.4],
             "rankic": [-0.3, -0.3],
@@ -246,7 +246,7 @@ def test_summarize_group_spread_reports_top_bottom_spread() -> None:
                 "2026-01-02",
                 "2026-01-02",
             ],
-            "feature": ["factor", "factor", "factor", "factor"],
+            "signal": ["factor", "factor", "factor", "factor"],
             "label": ["forward_return"] * 4,
             "group": [1, 2, 1, 2],
             "mean_label_value": [-0.01, 0.03, 0.02, 0.01],
@@ -278,7 +278,7 @@ def test_summarize_group_spread_uses_dataframe_aggregation(monkeypatch) -> None:
                 "2026-01-02",
                 "2026-01-02",
             ],
-            "feature": ["factor", "factor", "factor", "factor"],
+            "signal": ["factor", "factor", "factor", "factor"],
             "label": ["forward_return"] * 4,
             "group": [1, 2, 1, 2],
             "mean_label_value": [-0.01, 0.03, 0.02, 0.01],

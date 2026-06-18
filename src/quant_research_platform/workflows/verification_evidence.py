@@ -29,7 +29,10 @@ from quant_research_platform.research.datasets import (
 from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
 )
-from quant_research_platform.research.predictions.handoff import (
+from quant_research_platform.research.portfolios.runner import (
+    run_portfolio_from_research_dataset,
+)
+from quant_research_platform.research.predictions.runner import (
     run_prediction_from_research_dataset,
 )
 from quant_research_platform.runtime.execution_metrics import (
@@ -184,16 +187,27 @@ def _run_verification_evidence_with_policy(
             time_window=evaluation_time_window,
         )
     with recorder.record("prediction_generation", logical_layer="evidence"):
-        prediction_root = run_prediction_from_research_dataset(
+        prediction_roots = tuple(
+            run_prediction_from_research_dataset(
+                layout=storage_layout,
+                dataset_catalog=catalogs.research_datasets,
+                model_catalog=catalogs.models,
+                prediction_catalog=catalogs.predictions,
+                prediction_id=prediction_spec.prediction_id,
+                time_window=time_window,
+                prediction_train_end=effective_windows["prediction_train_end"],
+                prediction_test_start=effective_windows["prediction_test_start"],
+                prediction_test_end=effective_windows["prediction_test_end"],
+            )
+            for prediction_spec in catalogs.predictions.list()
+        )
+    with recorder.record("portfolio_generation", logical_layer="evidence"):
+        portfolio_root = run_portfolio_from_research_dataset(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
-            model_catalog=catalogs.models,
-            prediction_catalog=catalogs.predictions,
-            prediction_id="a_share_linear_mom_20d_prediction_2014",
-            time_window=time_window,
-            prediction_train_end=effective_windows["prediction_train_end"],
-            prediction_test_start=effective_windows["prediction_test_start"],
-            prediction_test_end=effective_windows["prediction_test_end"],
+            portfolio_catalog=catalogs.portfolios,
+            portfolio_id="a_share_mom_20d_portfolio_2014",
+            time_window=evaluation_time_window,
         )
 
     dataset_roots = _dataset_roots(
@@ -202,7 +216,11 @@ def _run_verification_evidence_with_policy(
         processed_roots=tuple(item.root for item in processed_result.values()),
         research_roots=(Path(research_root),),
     )
-    report_roots = (Path(evaluation_root), Path(prediction_root))
+    report_roots = (
+        Path(evaluation_root),
+        *(Path(prediction_root) for prediction_root in prediction_roots),
+        Path(portfolio_root),
+    )
     layer_manifest_paths = (
         write_layer_manifest(
             layer_root=layout.interim_root,
@@ -342,17 +360,19 @@ def _resolve_effective_windows(
     if evaluation_start < evidence_start or evaluation_end > evidence_end:
         raise ValueError("evaluation_window_out_of_evidence_range")
 
-    prediction_spec = config.profile.predictions.get(
-        "a_share_linear_mom_20d_prediction_2014"
+    prediction_defaults = _prediction_catalog_default_windows(config.profile)
+    prediction_train_end = (
+        config.prediction_train_end
+        or prediction_defaults["prediction_train_end"]
     )
-    prediction_train_end = config.prediction_train_end or prediction_spec.train_end
     prediction_test_start = (
-        config.prediction_test_start or prediction_spec.test_start
+        config.prediction_test_start
+        or prediction_defaults["prediction_test_start"]
     )
     prediction_test_end = (
         config.prediction_test_end
         if config.prediction_test_end is not None
-        else prediction_spec.test_end
+        else prediction_defaults["prediction_test_end"]
     )
     train_end = pd.Timestamp(prediction_train_end)
     test_start = pd.Timestamp(prediction_test_start)
@@ -382,6 +402,30 @@ def _resolve_effective_windows(
     }
 
 
+def _prediction_catalog_default_windows(
+    profile: ResearchProfile,
+) -> dict[str, str | None]:
+    prediction_specs = tuple(profile.predictions.list())
+    if not prediction_specs:
+        raise ValueError("prediction_catalog_required")
+    windows = {
+        (
+            prediction.train_end,
+            prediction.test_start,
+            prediction.test_end,
+        )
+        for prediction in prediction_specs
+    }
+    if len(windows) != 1:
+        raise ValueError("prediction_catalog_default_windows_must_match")
+    train_end, test_start, test_end = next(iter(windows))
+    return {
+        "prediction_train_end": train_end,
+        "prediction_test_start": test_start,
+        "prediction_test_end": test_end,
+    }
+
+
 def _runtime_execution_plan_payload() -> dict[str, object]:
     return {
         "storage_read": {
@@ -394,10 +438,12 @@ def _runtime_execution_plan_payload() -> dict[str, object]:
             "evaluation": "complete_timestamp_sessions",
             "model": "complete_timestamp_sessions",
             "prediction": "complete_timestamp_sessions",
+            "portfolio": "complete_timestamp_sessions",
         },
         "report_writing": {
             "prediction_parquet": "chunked_internal",
             "evaluation_parquet": "materialized",
+            "portfolio_parquet": "materialized",
         },
         "full_horizon_tiling": {
             "status": "NOT_LANDED",

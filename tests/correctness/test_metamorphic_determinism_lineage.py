@@ -150,10 +150,15 @@ def test_column_lineage_and_roles_stay_in_data_layer_boundaries() -> None:
     assert execution.column_roles["can_exit"] is ColumnRole.MASK
     assert all(
         factors.column_roles[column] is ColumnRole.FACTOR
+        for column in research_spec.factor_columns
+    )
+    assert all(
+        research_spec.column_roles[column] is ColumnRole.FEATURE
         for column in research_spec.feature_columns
     )
     assert all(
         labels.column_roles[column] is ColumnRole.LABEL
         for column in research_spec.label_columns
     )
+    assert not set(research_spec.factor_columns) & set(research_spec.feature_columns)
     assert not set(research_spec.feature_columns) & set(research_spec.label_columns)

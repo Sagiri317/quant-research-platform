@@ -1,4 +1,4 @@
-"""把已校验的 DataFrame panels 转为内部 dense tensors。"""
+"""       ?DataFrame panels        dense tensors ?"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def panel_to_tensor(
     *,
     value_dtype: str = "float64",
 ) -> PanelTensor:
-    """把 long panel 转为 time x asset x feature arrays。"""
+    """ ?long panel     time x asset x signal arrays ?"""
 
     dtype = _validate_value_dtype(value_dtype)
     panel = validate_compute_panel(frame, spec)
@@ -31,9 +31,9 @@ def panel_to_tensor(
         pd.Timestamp(value) for value in panel[spec.timestamp_column].unique()
     )
     assets = tuple(str(value) for value in panel[spec.asset_column].unique())
-    features = tuple(spec.feature_columns)
-    feature_values = np.full(
-        (len(timestamps), len(assets), len(features)),
+    signals = tuple(spec.signal_columns)
+    signal_values = np.full(
+        (len(timestamps), len(assets), len(signals)),
         np.nan,
         dtype=dtype,
     )
@@ -44,7 +44,7 @@ def panel_to_tensor(
         categories=timestamps,
     ).codes
     asset_codes = pd.Categorical(panel[spec.asset_column], categories=assets).codes
-    feature_values[time_codes, asset_codes, :] = panel[list(features)].to_numpy(
+    signal_values[time_codes, asset_codes, :] = panel[list(signals)].to_numpy(
         dtype=dtype,
         copy=False,
     )
@@ -53,15 +53,15 @@ def panel_to_tensor(
         copy=False,
     )
 
-    valid_mask = np.isfinite(feature_values) & np.isfinite(label_values[:, :, None])
+    valid_mask = np.isfinite(signal_values) & np.isfinite(label_values[:, :, None])
     return PanelTensor(
         layout=TensorLayout(
             timestamps=timestamps,
             assets=assets,
-            features=features,
+            signals=signals,
             label=spec.label_column,
         ),
-        feature_values=feature_values,
+        signal_values=signal_values,
         label_values=label_values,
         valid_mask=valid_mask,
     )
@@ -76,7 +76,7 @@ def panel_to_tensor_batch(
     label_columns: tuple[str, ...],
     value_dtype: str = "float64",
 ) -> TensorBatch:
-    """把 long panel 转为 time x asset x signal x label tensor arrays。"""
+    """ ?long panel     time x asset x signal x label tensor arrays ?"""
 
     dtype = _validate_value_dtype(value_dtype)
     _validate_batch_columns(

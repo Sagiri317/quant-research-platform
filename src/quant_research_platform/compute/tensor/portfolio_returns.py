@@ -6,10 +6,6 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute._portfolio_math import _normalize_group_key
-from quant_research_platform.compute.config import (
-    CostConfig,
-    WeightConfig,
-)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     RETURNS_COLUMNS,
 )
@@ -21,6 +17,10 @@ from quant_research_platform.compute.tensor.portfolio_helpers import (
 from quant_research_platform.compute.tensor.turnover import (
     _path_current_state,
     _path_turnover_and_cost_records_from_arrays,
+)
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    WeightConfig,
 )
 from quant_research_platform.runtime.profiling import measure_stage
 
@@ -35,17 +35,17 @@ def calculate_tensor_long_short(
     weight_config: WeightConfig | None = None,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """基于 tensor-shaped positions 计算 portfolio return path。"""
+    """    tensor-shaped positions     portfolio return path ?"""
 
     if weight_config is None:
         weight_config = WeightConfig()
     if positions.empty:
         return pd.DataFrame(columns=[*segment_columns, *RETURNS_COLUMNS])
     records: list[dict[str, object]] = []
-    metric_index = [*segment_columns, "timestamp", "feature"]
+    metric_index = [*segment_columns, "timestamp", "signal"]
     turnover_lookup = turnover.set_index(metric_index)["turnover"].to_dict()
     cost_lookup = cost_breakdown.set_index(metric_index)["total_cost"].to_dict()
-    group_columns = [*segment_columns, "feature"]
+    group_columns = [*segment_columns, "signal"]
     for group_key, group in positions.groupby(group_columns, sort=True, dropna=False):
         group_values = _normalize_group_key(group_key, group_columns)
         position_matrix = (
@@ -95,7 +95,7 @@ def calculate_tensor_long_short(
                 [
                     *[group_values[column] for column in segment_columns],
                     timestamp,
-                    group_values["feature"],
+                    group_values["signal"],
                 ]
             )
             cost = float(cost_lookup[metric_key])
@@ -103,7 +103,7 @@ def calculate_tensor_long_short(
                 {
                     **{column: group_values[column] for column in segment_columns},
                     "timestamp": timestamp,
-                    "feature": group_values["feature"],
+                    "signal": group_values["signal"],
                     "label": spec.label_column,
                     "portfolio_mode": weight_config.portfolio_mode,
                     "long_return": float(long_returns[row_offset]),
@@ -125,7 +125,7 @@ def _long_short_record_from_arrays(
     *,
     context: dict[str, object],
     timestamp: object,
-    feature: str,
+    signal: str,
     label: str,
     portfolio_mode: str,
     position_values: np.ndarray,
@@ -151,7 +151,7 @@ def _long_short_record_from_arrays(
     return {
         **{column: context[column] for column in segment_columns},
         "timestamp": timestamp,
-        "feature": feature,
+        "signal": signal,
         "label": label,
         "portfolio_mode": portfolio_mode,
         "long_return": long_return,
@@ -168,7 +168,7 @@ def _build_path_records_from_arrays(
     *,
     context: dict[str, object],
     timestamp: object,
-    feature: str,
+    signal: str,
     label: str,
     assets: tuple[str, ...],
     position_values: np.ndarray,
@@ -202,7 +202,7 @@ def _build_path_records_from_arrays(
         lambda: _path_turnover_and_cost_records_from_arrays(
             context=context,
             timestamp=timestamp,
-            feature=feature,
+            signal=signal,
             previous_values=previous_values,
             current_values=position_values,
             previous_positions=previous_positions,
@@ -220,7 +220,7 @@ def _build_path_records_from_arrays(
         lambda: _long_short_record_from_arrays(
             context=context,
             timestamp=timestamp,
-            feature=feature,
+            signal=signal,
             label=label,
             portfolio_mode=weight_config.portfolio_mode,
             position_values=position_values,
@@ -237,7 +237,7 @@ def _build_path_records_from_arrays(
         lambda: _exposure_record_from_arrays(
             context=context,
             timestamp=timestamp,
-            feature=feature,
+            signal=signal,
             exposure_values=exposure_values,
             segment_columns=segment_columns,
         ),

@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.compute.config import (
-    TradabilityConfig,
-    WeightConfig,
-)
 from quant_research_platform.compute.dataframe.constraints import (
     _build_tradability_context,
     _validate_tradability_columns,
@@ -18,17 +14,21 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _normalize_group_key,
-    _select_feature,
-    _select_features,
+    _select_signal,
+    _select_signals,
     _validate_segment_columns,
     _validate_weight_columns,
 )
 from quant_research_platform.compute.dataframe.position_math import (
-    _build_feature_positions,
+    _build_signal_positions,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
+)
+from quant_research_platform.contracts.portfolios import (
+    TradabilityConfig,
+    WeightConfig,
 )
 
 
@@ -38,10 +38,10 @@ def build_weighted_positions(
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
-    portfolio_features: tuple[str, ...] | None = None,
+    portfolio_signals: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """为每个请求的 signal feature 构造 timestamp-level positions。"""
+    """          signal signal    ?timestamp-level positions ?"""
 
     panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
     return _build_weighted_positions_from_validated_panel(
@@ -49,7 +49,7 @@ def build_weighted_positions(
         spec,
         weight_config,
         segment_columns=segment_columns,
-        portfolio_features=portfolio_features,
+        portfolio_signals=portfolio_signals,
         tradability_config=tradability_config,
     )
 
@@ -59,17 +59,17 @@ def _build_weighted_positions_from_validated_panel(
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
-    portfolio_features: tuple[str, ...] | None = None,
+    portfolio_signals: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """基于调用方已校验且按 timestamp/asset 排序的 panel 构造 positions。"""
+    """                timestamp/asset     ?panel    ?positions ?"""
 
     _validate_segment_columns(panel, segment_columns)
     _validate_weight_columns(panel, weight_config)
     if tradability_config is None:
         tradability_config = TradabilityConfig()
     _validate_tradability_columns(panel, tradability_config)
-    features = _select_features(spec, portfolio_features)
+    signals = _select_signals(spec, portfolio_signals)
     group_columns = [*segment_columns, spec.timestamp_column]
 
     position_records: list[dict[str, object]] = []
@@ -79,24 +79,24 @@ def _build_weighted_positions_from_validated_panel(
         group_values = _normalize_group_key(group_key, group_columns)
         timestamp = group_values[spec.timestamp_column]
         segment_key = tuple(group_values[column] for column in segment_columns)
-        feature_previous = previous_positions.setdefault(segment_key, {})
+        signal_previous = previous_positions.setdefault(segment_key, {})
         tradability_context = _build_tradability_context(
             timestamp_frame=timestamp_frame,
             spec=spec,
             tradability_config=tradability_config,
         )
-        for feature in features:
-            records, diagnostic = _build_feature_positions(
+        for signal in signals:
+            records, diagnostic = _build_signal_positions(
                 timestamp_frame=timestamp_frame,
                 spec=spec,
-                feature=feature,
+                signal=signal,
                 weight_config=weight_config,
                 tradability_config=tradability_config,
                 tradability_context=tradability_context,
                 group_values=group_values,
-                previous_positions=feature_previous.get(feature, {}),
+                previous_positions=signal_previous.get(signal, {}),
             )
-            feature_previous[feature] = {
+            signal_previous[signal] = {
                 str(record["asset"]): float(record["position"]) for record in records
             }
             position_records.extend(records)
@@ -120,11 +120,11 @@ def build_long_short_positions(
     spec: ComputePanelSpec,
     top_quantile: float = 0.2,
     bottom_quantile: float | None = None,
-    feature_column: str | None = None,
+    signal_column: str | None = None,
 ) -> pd.DataFrame:
-    """基于 timestamp-level ranks 构造 equal-weight long-short positions。"""
+    """    timestamp-level ranks    ?equal-weight long-short positions ?"""
 
-    feature = _select_feature(spec, feature_column)
+    signal = _select_signal(spec, signal_column)
     config = WeightConfig(
         method="equal_weight_quantile",
         top_quantile=top_quantile,
@@ -134,7 +134,7 @@ def build_long_short_positions(
         frame,
         spec,
         config,
-        portfolio_features=(feature,),
+        portfolio_signals=(signal,),
     )
     return positions[POSITION_COLUMNS]
 

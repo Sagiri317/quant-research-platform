@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.config import TradabilityConfig, WeightConfig
 from quant_research_platform.compute.dataframe.constraints import (
     _apply_tradability_constraints,
     _tradability_diagnostic_counts,
@@ -14,18 +13,18 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     POSITION_COLUMNS,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
-    _direct_signal_array,
     _risk_values,
     _selection_count,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
+from quant_research_platform.contracts.portfolios import TradabilityConfig, WeightConfig
 
 
-def _build_feature_positions(
+def _build_signal_positions(
     *,
     timestamp_frame: pd.DataFrame,
     spec: ComputePanelSpec,
-    feature: str,
+    signal: str,
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,
     tradability_context: dict[str, object] | None = None,
@@ -33,8 +32,8 @@ def _build_feature_positions(
     previous_positions: dict[str, float],
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     asset_values = timestamp_frame[spec.asset_column].astype(str).to_numpy()
-    feature_values = timestamp_frame[feature].to_numpy(dtype="float64", copy=False)
-    valid_mask = ~pd.isna(feature_values)
+    signal_values = timestamp_frame[signal].to_numpy(dtype="float64", copy=False)
+    valid_mask = ~pd.isna(signal_values)
     if tradability_config.eligibility_column is not None:
         valid_mask &= timestamp_frame[tradability_config.eligibility_column].to_numpy(
             dtype=bool,
@@ -55,10 +54,9 @@ def _build_feature_positions(
         )
         valid_mask &= can_enter | has_previous
 
-    directed_signal = _direct_signal_array(feature_values, weight_config.direction)
     eligible_indices = np.flatnonzero(valid_mask)
     sorted_indices = eligible_indices[
-        np.argsort(directed_signal[eligible_indices], kind="mergesort")
+        np.argsort(signal_values[eligible_indices], kind="mergesort")
     ]
     positions: dict[str, float] = {}
     fallback_reason = ""
@@ -77,9 +75,9 @@ def _build_feature_positions(
             risk_values = _risk_values(timestamp_frame, weight_config)
             long_weights, long_fallback = _leg_weights(
                 asset_values=asset_values[long_leg],
-                feature_values=feature_values[long_leg],
+                signal_values=signal_values[long_leg],
                 risk_values=None if risk_values is None else risk_values[long_leg],
-                feature=feature,
+                signal=signal,
                 weight_config=weight_config,
                 sign=1.0,
             )
@@ -88,13 +86,13 @@ def _build_feature_positions(
                 if weight_config.portfolio_mode == "long_only"
                 else _leg_weights(
                     asset_values=asset_values[sorted_indices[:short_count]],
-                    feature_values=feature_values[sorted_indices[:short_count]],
+                    signal_values=signal_values[sorted_indices[:short_count]],
                     risk_values=(
                         None
                         if risk_values is None
                         else risk_values[sorted_indices[:short_count]]
                     ),
-                    feature=feature,
+                    signal=signal,
                     weight_config=weight_config,
                     sign=-1.0,
                 )
@@ -131,18 +129,17 @@ def _build_feature_positions(
             },
             "timestamp": group_values[spec.timestamp_column],
             "asset": asset,
-            "feature": feature,
+            "signal": signal,
             "position": float(position),
         }
         for asset, position in nonzero_positions
     ]
     diagnostic = {
-        "feature": feature,
+        "signal": signal,
         "method": weight_config.method,
-        "direction": weight_config.direction,
         **_tradability_diagnostic_counts(
             timestamp_frame=timestamp_frame,
-            feature=feature,
+            signal=signal,
             spec=spec,
             tradability_config=tradability_config,
         ),
@@ -156,9 +153,9 @@ def _build_feature_positions(
 def _leg_weights(
     *,
     asset_values: np.ndarray,
-    feature_values: np.ndarray,
+    signal_values: np.ndarray,
     risk_values: np.ndarray | None,
-    feature: str,
+    signal: str,
     weight_config: WeightConfig,
     sign: float,
 ) -> tuple[dict[str, float], str]:
@@ -174,20 +171,20 @@ def _leg_weights(
             else np.arange(1, len(asset_values) + 1, dtype="float64")
         )
     elif weight_config.method == "zscore_weighted_quantile":
-        std = float(np.std(feature_values, ddof=0))
+        std = float(np.std(signal_values, ddof=0))
         raw = (
-            np.abs(feature_values - float(np.mean(feature_values))) / std
+            np.abs(signal_values - float(np.mean(signal_values))) / std
             if std > 0
-            else feature_values * 0
+            else signal_values * 0
         )
     elif weight_config.method == "signal_abs_weighted_quantile":
-        raw = np.abs(feature_values)
+        raw = np.abs(signal_values)
     elif weight_config.method == "inverse_vol_scaled_quantile":
         if risk_values is None:
             raise ValueError("risk_column is required for inverse_vol_scaled_quantile.")
         if (risk_values <= 0).any():
             raise ValueError("risk_column values must be positive.")
-        raw = np.abs(feature_values) / risk_values
+        raw = np.abs(signal_values) / risk_values
     else:
         raise ValueError(f"unsupported weight method {weight_config.method!r}.")
 
@@ -221,12 +218,12 @@ def _validate_positions(
     result = positions.copy()
     result["timestamp"] = pd.to_datetime(result["timestamp"])
     result["asset"] = result["asset"].astype(str)
-    result["feature"] = result["feature"].astype(str)
+    result["signal"] = result["signal"].astype(str)
     if not pd.api.types.is_numeric_dtype(result["position"]):
         raise TypeError("position must be numeric.")
-    key_columns = [*segment_columns, "timestamp", "asset", "feature"]
+    key_columns = [*segment_columns, "timestamp", "asset", "signal"]
     if result.duplicated(key_columns).any():
         raise ValueError(
-            "positions must have unique segment-timestamp-asset-feature rows."
+            "positions must have unique segment-timestamp-asset-signal rows."
         )
     return result.sort_values(key_columns, kind="mergesort").reset_index(drop=True)

@@ -1,4 +1,4 @@
-"""Spec-driven prediction handoff from ResearchDataset inputs."""
+"""Spec-driven prediction runner from ResearchDataset inputs."""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import validate_prediction_input
 from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
-from quant_research_platform.research.models.baseline import (
-    _fit_linear_baseline_result_from_frames,
+from quant_research_platform.research.models.supervised import (
+    _fit_model_result_from_frames,
 )
-from quant_research_platform.research.predictions.bundle import (
+from quant_research_platform.research.predictions.artifacts import (
     _write_prediction_bundle_from_frames,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -55,18 +55,27 @@ def run_prediction_from_research_dataset(
         )
     model_spec = model_catalog.get(prediction_spec.model_id)
     dataset_spec = dataset_catalog.get(prediction_spec.research_dataset_id)
-    read_columns = tuple(
+    train_read_columns = tuple(
         dict.fromkeys(
             (
                 *prediction_spec.primary_key,
-                *model_spec.feature_columns,
+                *model_spec.input_columns,
                 model_spec.label_column,
                 *required_filter_columns(model_spec.sample_filter_mode),
+            )
+        )
+    )
+    prediction_read_columns = tuple(
+        dict.fromkeys(
+            (
+                *prediction_spec.primary_key,
+                *model_spec.input_columns,
                 *required_filter_columns(prediction_spec.sample_filter_mode),
             )
         )
     )
-    def _chunks() -> Iterable[pd.DataFrame]:
+
+    def _chunks(read_columns: tuple[str, ...]) -> Iterable[pd.DataFrame]:
         return _validated_prediction_chunks(
             _iter_research_dataset_chunks(
                 layout,
@@ -76,14 +85,17 @@ def run_prediction_from_research_dataset(
                 columns=read_columns,
             ),
             dataset_spec=dataset_spec,
-            feature_columns=model_spec.feature_columns,
-    )
+            input_columns=model_spec.input_columns,
+        )
 
     _validate_prediction_window_order(prediction_spec)
     train_end = pd.Timestamp(prediction_spec.train_end)
     try:
-        model_result = _fit_linear_baseline_result_from_frames(
-            _prediction_train_chunks(_chunks(), train_end=train_end),
+        model_result = _fit_model_result_from_frames(
+            _prediction_train_chunks(
+                _chunks(train_read_columns),
+                train_end=train_end,
+            ),
             model_spec,
         )
     except ValueError as exc:
@@ -98,10 +110,11 @@ def run_prediction_from_research_dataset(
         run_type=prediction_spec.run_type,
     )
     return _write_prediction_bundle_from_frames(
-        _chunks(),
+        _chunks(prediction_read_columns),
         prediction_spec,
         model_result.coefficients,
-        model_spec.feature_columns,
+        model_spec.input_columns,
+        prediction_model=model_result.prediction_model,
         model_metadata=model_result.metadata,
         report_spec=report_spec,
         layout=layout,
@@ -112,13 +125,13 @@ def _validated_prediction_chunks(
     chunks: Iterable[pd.DataFrame],
     *,
     dataset_spec,
-    feature_columns: tuple[str, ...],
+    input_columns: tuple[str, ...],
 ) -> Iterable[pd.DataFrame]:
     for chunk in chunks:
         validate_prediction_input(
             chunk,
             dataset_spec,
-            feature_columns=feature_columns,
+            input_columns=input_columns,
         )
         yield chunk
 

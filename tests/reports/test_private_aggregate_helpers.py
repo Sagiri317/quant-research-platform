@@ -5,10 +5,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.markets.implementations.a_share.verification import (
     private_aggregate,
 )
-from quant_research_platform.catalog.profiles import research_profile
 
 
 def test_private_aggregate_summarizes_frames_without_row_level_output() -> None:

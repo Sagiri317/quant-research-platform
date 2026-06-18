@@ -16,16 +16,16 @@ from quant_research_platform.compute.tensor.masks import valid_observation_mask
 
 
 def compute_ic_by_timestamp_tensor(tensor: PanelTensor) -> pd.DataFrame:
-    """基于 PanelTensor 计算 IC 和 RankIC。"""
+    """    PanelTensor     IC  ?RankIC ?"""
 
     records: list[dict[str, object]] = []
     mask = valid_observation_mask(tensor)
     for t_offset, timestamp in enumerate(tensor.layout.timestamps):
         labels = tensor.label_values[t_offset]
         label_rank_cache: dict[bytes, np.ndarray] = {}
-        for f_offset, feature in enumerate(tensor.layout.features):
+        for f_offset, signal in enumerate(tensor.layout.signals):
             valid = mask[t_offset, :, f_offset]
-            factor = tensor.feature_values[t_offset, valid, f_offset]
+            factor = tensor.signal_values[t_offset, valid, f_offset]
             label = labels[valid]
             n_obs = len(factor)
             ic = np.nan
@@ -39,7 +39,7 @@ def compute_ic_by_timestamp_tensor(tensor: PanelTensor) -> pd.DataFrame:
             records.append(
                 {
                     "timestamp": timestamp,
-                    "feature": feature,
+                    "signal": signal,
                     "label": tensor.layout.label,
                     "ic": ic,
                     "rankic": rankic,
@@ -54,7 +54,7 @@ def compute_ic_and_grouped_label_values_tensor(
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """在一次 tensor timestamp/feature 扫描中计算 IC 和 grouped label values。"""
+    """    ?tensor timestamp/signal        ?IC  ?grouped label values ?"""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -67,9 +67,9 @@ def compute_ic_and_grouped_label_values_tensor(
     for t_offset, timestamp in enumerate(tensor.layout.timestamps):
         labels = tensor.label_values[t_offset]
         label_rank_cache: dict[bytes, np.ndarray] = {}
-        for f_offset, feature in enumerate(tensor.layout.features):
+        for f_offset, signal in enumerate(tensor.layout.signals):
             valid = mask[t_offset, :, f_offset]
-            factor = tensor.feature_values[t_offset, valid, f_offset]
+            factor = tensor.signal_values[t_offset, valid, f_offset]
             label = labels[valid]
             n_obs = len(factor)
             ic = np.nan
@@ -84,7 +84,7 @@ def compute_ic_and_grouped_label_values_tensor(
                 _append_grouped_label_value_records(
                     grouped_records,
                     timestamp=timestamp,
-                    feature=feature,
+                    signal=signal,
                     label_name=tensor.layout.label,
                     label_values=label,
                     groups=groups,
@@ -92,7 +92,7 @@ def compute_ic_and_grouped_label_values_tensor(
             ic_records.append(
                 {
                     "timestamp": timestamp,
-                    "feature": feature,
+                    "signal": signal,
                     "label": tensor.layout.label,
                     "ic": ic,
                     "rankic": rankic,
@@ -109,7 +109,7 @@ def compute_grouped_label_values_tensor(
     tensor: PanelTensor,
     n_groups: int = 5,
 ) -> pd.DataFrame:
-    """按 tensor feature rank group 计算 timestamp-level mean label value。"""
+    """ ?tensor signal rank group     timestamp-level mean label value ?"""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -120,9 +120,9 @@ def compute_grouped_label_values_tensor(
     mask = valid_observation_mask(tensor)
     for t_offset, timestamp in enumerate(tensor.layout.timestamps):
         labels = tensor.label_values[t_offset]
-        for f_offset, feature in enumerate(tensor.layout.features):
+        for f_offset, signal in enumerate(tensor.layout.signals):
             valid = mask[t_offset, :, f_offset]
-            factor = tensor.feature_values[t_offset, valid, f_offset]
+            factor = tensor.signal_values[t_offset, valid, f_offset]
             label = labels[valid]
             if len(factor) < 2:
                 continue
@@ -130,7 +130,7 @@ def compute_grouped_label_values_tensor(
             _append_grouped_label_value_records(
                 records,
                 timestamp=timestamp,
-                feature=feature,
+                signal=signal,
                 label_name=tensor.layout.label,
                 label_values=label,
                 groups=groups,
@@ -139,7 +139,7 @@ def compute_grouped_label_values_tensor(
 
 
 def summarize_group_spread_tensor(grouped_label_values: pd.DataFrame) -> pd.DataFrame:
-    """使用 DataFrame policy 汇总 tensor grouped label-value output。"""
+    """    DataFrame policy    ?tensor grouped label-value output ?"""
 
     summary = summarize_group_spread(grouped_label_values)
     return summary[GROUP_SPREAD_SUMMARY_COLUMNS]
@@ -158,7 +158,7 @@ def _append_grouped_label_value_records(
     records: list[dict[str, object]],
     *,
     timestamp: object,
-    feature: str,
+    signal: str,
     label_name: str,
     label_values: np.ndarray,
     groups: np.ndarray,
@@ -174,7 +174,7 @@ def _append_grouped_label_value_records(
         records.append(
             {
                 "timestamp": timestamp,
-                "feature": feature,
+                "signal": signal,
                 "label": label_name,
                 "group": group_offset,
                 "mean_label_value": float(mean_label_value),

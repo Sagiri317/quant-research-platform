@@ -6,11 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.compute.config import (
-    CostConfig,
-    TradabilityConfig,
-    WeightConfig,
-)
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.compute.tensor import constraints
 from quant_research_platform.compute.tensor.conversion import (
@@ -28,7 +23,6 @@ from quant_research_platform.compute.tensor.exposure import (
     summarize_tensor_exposure_from_path,
 )
 from quant_research_platform.compute.tensor.portfolio_helpers import (
-    _directed_signal_values,
     _filter_panel_group,
     _leg_weight_values,
 )
@@ -45,17 +39,22 @@ from quant_research_platform.compute.tensor.turnover import (
     _position_map_from_arrays,
     calculate_tensor_turnover_and_cost,
 )
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    TradabilityConfig,
+    WeightConfig,
+)
 
 
 def test_tensor_conversion_and_cross_section_outputs() -> None:
     panel = _panel()
     spec = ComputePanelSpec(
-        feature_columns=("factor", "factor_alt"),
+        signal_columns=("factor", "factor_alt"),
         label_column="forward_return",
     )
 
     tensor = panel_to_tensor(panel, spec, value_dtype="float32")
-    assert tensor.feature_values.shape == (2, 3, 2)
+    assert tensor.signal_values.shape == (2, 3, 2)
     assert tensor.label_values.shape == (2, 3)
     assert tensor.valid_mask.shape == (2, 3, 2)
 
@@ -72,7 +71,7 @@ def test_tensor_conversion_and_cross_section_outputs() -> None:
     assert not grouped.empty
     assert grouped_only.equals(grouped)
     assert {
-        "feature",
+        "signal",
         "top_group_mean_label_value",
         "bottom_group_mean_label_value",
     }.issubset(spread.columns)
@@ -129,15 +128,11 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
     assets = np.array([0, 1, 2])
     values = np.array([1.0, 2.0, 4.0])
 
-    assert _directed_signal_values(values, "long_low").tolist() == [-1.0, -2.0, -4.0]
-    with pytest.raises(ValueError, match="direction"):
-        _directed_signal_values(values, "bad")
-
     equal, reason = _leg_weight_values(
         asset_indices=assets,
-        feature_values=values,
+        signal_values=values,
         risk_values=None,
-        feature="factor",
+        signal="factor",
         weight_config=WeightConfig(method="equal_weight_quantile"),
         sign=1.0,
     )
@@ -146,32 +141,20 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
 
     ranked, _ = _leg_weight_values(
         asset_indices=assets,
-        feature_values=values,
+        signal_values=values,
         risk_values=None,
-        feature="factor",
+        signal="factor",
         weight_config=WeightConfig(method="rank_weighted_quantile"),
         sign=-1.0,
     )
     assert ranked.sum() == pytest.approx(-1.0)
     assert abs(ranked[0]) > abs(ranked[1]) > abs(ranked[2])
 
-    ranked_long_low_short, _ = _leg_weight_values(
-        asset_indices=np.array([2, 1, 0]),
-        feature_values=values,
-        risk_values=None,
-        feature="factor",
-        weight_config=WeightConfig(method="rank_weighted_quantile"),
-        sign=-1.0,
-    )
-    assert abs(ranked_long_low_short[0]) > abs(ranked_long_low_short[1]) > abs(
-        ranked_long_low_short[2]
-    )
-
     zscore, fallback = _leg_weight_values(
         asset_indices=assets,
-        feature_values=np.array([1.0, 1.0, 1.0]),
+        signal_values=np.array([1.0, 1.0, 1.0]),
         risk_values=None,
-        feature="factor",
+        signal="factor",
         weight_config=WeightConfig(method="zscore_weighted_quantile"),
         sign=1.0,
     )
@@ -180,9 +163,9 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
 
     inverse, _ = _leg_weight_values(
         asset_indices=assets,
-        feature_values=values,
+        signal_values=values,
         risk_values=np.array([1.0, 2.0, 4.0]),
-        feature="factor",
+        signal="factor",
         weight_config=WeightConfig(
             method="inverse_vol_scaled_quantile",
             risk_column="risk",
@@ -193,9 +176,9 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
     with pytest.raises(ValueError, match="risk_column values"):
         _leg_weight_values(
             asset_indices=assets,
-            feature_values=values,
+            signal_values=values,
             risk_values=np.array([1.0, 0.0, 1.0]),
-            feature="factor",
+            signal="factor",
             weight_config=WeightConfig(
                 method="inverse_vol_scaled_quantile",
                 risk_column="risk",
@@ -212,8 +195,8 @@ def test_tensor_constraints_rank_and_apply_tradability() -> None:
     )
     ranked = constraints._ranked_asset_indices(
         assets=("A", "B", "C"),
-        feature_values=np.array([1.0, 2.0, np.nan]),
-        weight_config=WeightConfig(direction="long_high"),
+        signal_values=np.array([1.0, 2.0, np.nan]),
+        weight_config=WeightConfig(),
         tradability_config=TradabilityConfig(blocked_entry_policy="redistribute"),
         timestamp_input=timestamp_input,
         previous_positions={"B": -0.5},
@@ -244,7 +227,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
             "asset": ["A", "A"],
-            "feature": ["factor", "factor"],
+            "signal": ["factor", "factor"],
             "position": [1.0, -0.5],
             "segment": ["s1", "s1"],
         }
@@ -267,7 +250,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     turnover_record, cost_record = _path_turnover_and_cost_records(
         context={"segment": "s1"},
         timestamp=pd.Timestamp("2024-01-02"),
-        feature="factor",
+        signal="factor",
         previous_positions={"A": -0.5},
         current_positions={"A": 1.0, "B": -0.25},
         weight_config=WeightConfig(cost_bps=10),
@@ -280,7 +263,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     array_turnover, _array_cost = _path_turnover_and_cost_records_from_arrays(
         context={},
         timestamp=pd.Timestamp("2024-01-03"),
-        feature="factor",
+        signal="factor",
         previous_values=np.array([0.5, 0.0]),
         current_values=np.array([0.0, 1.0]),
         previous_positions={"C": 0.25},
@@ -311,7 +294,7 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
 
 def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
     spec = ComputePanelSpec(
-        feature_columns=("factor",),
+        signal_columns=("factor",),
         label_column="forward_return",
     )
     panel = _panel()
@@ -321,14 +304,14 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
                 ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
             ),
             "asset": ["A", "C", "A", "C"],
-            "feature": ["factor"] * 4,
+            "signal": ["factor"] * 4,
             "position": [1.0, -1.0, 0.5, -0.5],
         }
     )
     turnover = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "feature": ["factor", "factor"],
+            "signal": ["factor", "factor"],
             "turnover": [2.0, 1.0],
         }
     )
@@ -354,7 +337,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         _long_short_record_from_arrays(
             context={},
             timestamp=pd.Timestamp("2024-01-02"),
-            feature="factor",
+            signal="factor",
             label="forward_return",
             portfolio_mode="long_short",
             position_values=np.array([1.0, 0.0]),
@@ -368,7 +351,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
     path = _build_path_records_from_arrays(
         context={"segment": "s1"},
         timestamp=pd.Timestamp("2024-01-02"),
-        feature="factor",
+        signal="factor",
         label="forward_return",
         assets=("A", "B"),
         position_values=np.array([1.0, -1.0]),
@@ -388,7 +371,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         pd.DataFrame(
             {
                 "timestamp": pd.to_datetime(["2024-01-02"]),
-                "feature": ["factor"],
+                "signal": ["factor"],
                 "gross_exposure": [2.0],
                 "net_exposure": [0.0],
                 "position_count": [2],
@@ -404,7 +387,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
     assert _exposure_record_from_arrays(
         context={"segment": "s1"},
         timestamp="2024-01-02",
-        feature="factor",
+        signal="factor",
         exposure_values={"gross_exposure": 1.0},
         segment_columns=("segment",),
     )["segment"] == "s1"

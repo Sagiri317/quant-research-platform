@@ -31,6 +31,7 @@ def describe_research_dataset_requirements(
         dataset_id=spec.data_id,
         market_id=str(spec.market_id),
         input_data_ids=list(spec.input_data_ids),
+        factor_count=len(spec.factor_columns),
         feature_count=len(spec.feature_columns),
         label_count=len(spec.label_columns),
     )

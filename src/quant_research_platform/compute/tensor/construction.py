@@ -10,16 +10,11 @@ import pandas as pd
 
 from quant_research_platform.compute._portfolio_math import (
     _normalize_group_key,
-    _select_features,
+    _select_signals,
     _selection_count,
     _validate_segment_columns,
     _validate_tradability_columns,
     _validate_weight_columns,
-)
-from quant_research_platform.compute.config import (
-    CostConfig,
-    TradabilityConfig,
-    WeightConfig,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -48,6 +43,11 @@ from quant_research_platform.compute.tensor.portfolio_returns import (
     _build_path_records_from_arrays,
 )
 from quant_research_platform.compute.tensor.turnover import _position_map_from_arrays
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    TradabilityConfig,
+    WeightConfig,
+)
 from quant_research_platform.runtime.profiling import measure_stage
 
 
@@ -55,7 +55,7 @@ from quant_research_platform.runtime.profiling import measure_stage
 class _TimestampPositionInput:
     assets: tuple[str, ...]
     asset_to_offset: dict[str, int]
-    feature_values: dict[str, np.ndarray]
+    signal_values: dict[str, np.ndarray]
     label_values: np.ndarray
     risk_values: np.ndarray | None
     eligible: np.ndarray | None
@@ -65,7 +65,7 @@ class _TimestampPositionInput:
 
 @dataclass(frozen=True)
 class TensorPortfolioArtifacts:
-    """一次 chunked pass 构造的内部 tensor portfolio artifacts。"""
+    """   ?chunked pass          tensor portfolio artifacts ?"""
 
     positions: pd.DataFrame
     diagnostics: pd.DataFrame
@@ -80,23 +80,21 @@ def build_tensor_weighted_positions(
     weight_config: WeightConfig,
     *,
     segment_columns: tuple[str, ...] = (),
-    portfolio_features: tuple[str, ...] | None = None,
+    portfolio_signals: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     return_source_column: str | None = None,
     value_dtype: str = "float64",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """从 tensor signal arrays 构建 timestamp-level positions。
-
-    当前 tensor compute backend 保持 public artifact contract
-    与 DataFrame backend 一致，因此返回相同结构的 positions 和 diagnostics frames。
-    """
+    """ ?tensor signal arrays     timestamp-level positions ?
+        tensor compute backend     public artifact contract
+     ?DataFrame backend                   ?positions  ?diagnostics frames ?    """
 
     artifacts = build_tensor_portfolio_artifacts(
         panel,
         spec,
         weight_config,
         segment_columns=segment_columns,
-        portfolio_features=portfolio_features,
+        portfolio_signals=portfolio_signals,
         tradability_config=tradability_config,
         return_source_column=return_source_column,
         value_dtype=value_dtype,
@@ -110,12 +108,12 @@ def build_tensor_portfolio_artifacts(
     cost_config: CostConfig | None = None,
     *,
     segment_columns: tuple[str, ...] = (),
-    portfolio_features: tuple[str, ...] | None = None,
+    portfolio_signals: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     return_source_column: str | None = None,
     value_dtype: str = "float64",
 ) -> TensorPortfolioArtifacts:
-    """构造 tensor portfolio artifacts，同时不保留 dense path matrices。"""
+    """   ?tensor portfolio artifacts          dense path matrices ?"""
 
     dtype = _validate_value_dtype(value_dtype)
     panel = validate_compute_panel(panel, spec, segment_columns=segment_columns)
@@ -127,7 +125,7 @@ def build_tensor_portfolio_artifacts(
         tradability_config = TradabilityConfig()
     _validate_tradability_columns(panel, tradability_config)
     return_source_column = return_source_column or spec.label_column
-    features = _select_features(spec, portfolio_features)
+    signals = _select_signals(spec, portfolio_signals)
     panel = panel.sort_values(
         [*segment_columns, spec.timestamp_column, spec.asset_column],
         kind="mergesort",
@@ -149,14 +147,14 @@ def build_tensor_portfolio_artifacts(
         timestamp = group_values[spec.timestamp_column]
         segment_context = {column: group_values[column] for column in segment_columns}
         segment_key = tuple(segment_context[column] for column in segment_columns)
-        feature_previous_arrays = previous_position_arrays.setdefault(segment_key, {})
+        signal_previous_arrays = previous_position_arrays.setdefault(segment_key, {})
         timestamp_input = measure_stage(
             "metric",
             "positions.prepare_timestamp",
             lambda timestamp_frame=timestamp_frame: _prepare_timestamp_position_input(
                 timestamp_frame=timestamp_frame,
                 spec=spec,
-                features=features,
+                signals=signals,
                 weight_config=weight_config,
                 tradability_config=tradability_config,
                 return_source_column=return_source_column,
@@ -165,8 +163,8 @@ def build_tensor_portfolio_artifacts(
             sample_memory=False,
         )
         reference_previous_assets = (
-            next(iter(feature_previous_arrays.values()))[0]
-            if feature_previous_arrays
+            next(iter(signal_previous_arrays.values()))[0]
+            if signal_previous_arrays
             else None
         )
         reference_assets_match = (
@@ -174,8 +172,8 @@ def build_tensor_portfolio_artifacts(
             if reference_previous_assets is not None
             else False
         )
-        for feature in features:
-            previous_array_state = feature_previous_arrays.get(feature)
+        for signal in signals:
+            previous_array_state = signal_previous_arrays.get(signal)
             previous_assets_match = (
                 previous_array_state is not None
                 and reference_assets_match
@@ -195,13 +193,13 @@ def build_tensor_portfolio_artifacts(
             diagnostic, position_values, previous_values = measure_stage(
                 "metric",
                 "positions.rank_select",
-                lambda feature=feature,
+                lambda signal=signal,
                 cached_previous_values=cached_previous_values,
                 previous_map=previous_map,
                 timestamp_input=timestamp_input: (
-                    _build_tensor_feature_positions(
+                    _build_tensor_signal_positions(
                         timestamp_input=timestamp_input,
-                        feature=feature,
+                        signal=signal,
                         weight_config=weight_config,
                         tradability_config=tradability_config,
                         previous_positions=previous_map,
@@ -219,7 +217,7 @@ def build_tensor_portfolio_artifacts(
             ) = measure_stage(
                 "metric",
                 "positions.path_records",
-                lambda feature=feature,
+                lambda signal=signal,
                 previous_map=previous_map,
                 previous_assets_match=previous_assets_match,
                 segment_context=segment_context,
@@ -230,7 +228,7 @@ def build_tensor_portfolio_artifacts(
                     _build_path_records_from_arrays(
                         context=segment_context,
                         timestamp=timestamp,
-                        feature=feature,
+                        signal=signal,
                         label=return_source_column,
                         assets=timestamp_input.assets,
                         position_values=position_values,
@@ -246,7 +244,7 @@ def build_tensor_portfolio_artifacts(
                 ),
                 sample_memory=False,
             )
-            feature_previous_arrays[feature] = (timestamp_input.assets, position_values)
+            signal_previous_arrays[signal] = (timestamp_input.assets, position_values)
             exposure_records.append(exposure_record)
             _append_position_columns(
                 columns=position_columns,
@@ -254,7 +252,7 @@ def build_tensor_portfolio_artifacts(
                 segment_columns=segment_columns,
                 timestamp=timestamp,
                 assets=timestamp_input.assets,
-                feature=feature,
+                signal=signal,
                 positions=position_values,
                 nonzero_offsets=nonzero_offsets,
             )
@@ -303,10 +301,10 @@ def build_tensor_portfolio_artifacts(
         exposure_path=exposure_path,
     )
 
-def _build_tensor_feature_positions(
+def _build_tensor_signal_positions(
     *,
     timestamp_input: _TimestampPositionInput,
-    feature: str,
+    signal: str,
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,
     previous_positions: dict[str, float],
@@ -327,13 +325,13 @@ def _build_tensor_feature_positions(
         ),
         sample_memory=False,
     )
-    feature_values = timestamp_input.feature_values[feature]
+    signal_values = timestamp_input.signal_values[signal]
     ranked_indices = measure_stage(
         "metric",
         "positions.rank_indices",
         lambda: _ranked_asset_indices(
             assets=assets,
-            feature_values=feature_values,
+            signal_values=signal_values,
             weight_config=weight_config,
             tradability_config=tradability_config,
             timestamp_input=timestamp_input,
@@ -347,8 +345,8 @@ def _build_tensor_feature_positions(
         "positions.rank_weight_assign",
         lambda: _assign_ranked_position_weights(
             assets=assets,
-            feature=feature,
-            feature_values=feature_values,
+            signal=signal,
+            signal_values=signal_values,
             risk_values=timestamp_input.risk_values,
             ranked_indices=ranked_indices,
             weight_config=weight_config,
@@ -369,10 +367,9 @@ def _build_tensor_feature_positions(
         sample_memory=False,
     )
     diagnostic = {
-        "feature": feature,
+        "signal": signal,
         "method": weight_config.method,
-        "direction": weight_config.direction,
-        **_tensor_tradability_diagnostic_counts(timestamp_input, feature),
+        **_tensor_tradability_diagnostic_counts(timestamp_input, signal),
         "long_count": int(long_count),
         "short_count": int(short_count),
         "fallback_reason": fallback_reason,
@@ -381,9 +378,9 @@ def _build_tensor_feature_positions(
 
 def _tensor_tradability_diagnostic_counts(
     timestamp_input: _TimestampPositionInput,
-    feature: str,
+    signal: str,
 ) -> dict[str, int]:
-    signal_available = np.isfinite(timestamp_input.feature_values[feature])
+    signal_available = np.isfinite(timestamp_input.signal_values[signal])
     universe_count = len(timestamp_input.assets)
     eligible_mask = signal_available.copy()
     if timestamp_input.eligible is not None:
@@ -410,13 +407,13 @@ def _tensor_tradability_diagnostic_counts(
 def _assign_ranked_position_weights(
     *,
     assets: tuple[str, ...],
-    feature: str,
-    feature_values: np.ndarray,
+    signal: str,
+    signal_values: np.ndarray,
     risk_values: np.ndarray | None,
     ranked_indices: np.ndarray,
     weight_config: WeightConfig,
 ) -> tuple[np.ndarray, int, int, str]:
-    positions = np.zeros(len(assets), dtype=feature_values.dtype)
+    positions = np.zeros(len(assets), dtype=signal_values.dtype)
     fallback_reason = ""
     long_count = 0
     short_count = 0
@@ -436,9 +433,9 @@ def _assign_ranked_position_weights(
     long_indices = ranked_indices[-long_count:]
     long_positions, long_fallback = _leg_weight_values(
         asset_indices=long_indices,
-        feature_values=feature_values,
+        signal_values=signal_values,
         risk_values=risk_values,
-        feature=feature,
+        signal=signal,
         weight_config=weight_config,
         sign=1.0,
     )
@@ -447,9 +444,9 @@ def _assign_ranked_position_weights(
         if weight_config.portfolio_mode == "long_only"
         else _leg_weight_values(
             asset_indices=ranked_indices[:short_count],
-            feature_values=feature_values,
+            signal_values=signal_values,
             risk_values=risk_values,
-            feature=feature,
+            signal=signal,
             weight_config=weight_config,
             sign=-1.0,
         )
@@ -474,7 +471,7 @@ def _append_position_columns(
     segment_columns: tuple[str, ...],
     timestamp: object,
     assets: tuple[str, ...],
-    feature: str,
+    signal: str,
     positions: np.ndarray,
     nonzero_offsets: np.ndarray | None = None,
 ) -> None:
@@ -487,7 +484,7 @@ def _append_position_columns(
             segment_columns=segment_columns,
             timestamp=timestamp,
             assets=assets,
-            feature=feature,
+            signal=signal,
             positions=positions,
             nonzero_offsets=nonzero_offsets,
         ),
@@ -501,7 +498,7 @@ def _append_position_columns_unprofiled(
     segment_columns: tuple[str, ...],
     timestamp: object,
     assets: tuple[str, ...],
-    feature: str,
+    signal: str,
     positions: np.ndarray,
     nonzero_offsets: np.ndarray | None = None,
 ) -> None:
@@ -514,7 +511,7 @@ def _append_position_columns_unprofiled(
         columns[column].extend([context[column]] * n_assets)
     columns["timestamp"].extend([timestamp] * n_assets)
     columns["asset"].extend(_selected_assets(assets, nonzero_offsets))
-    columns["feature"].extend([feature] * n_assets)
+    columns["signal"].extend([signal] * n_assets)
     columns["position"].extend(positions[nonzero_offsets].tolist())
 
 def _selected_assets(assets: tuple[str, ...], offsets: np.ndarray) -> list[str]:
@@ -529,7 +526,7 @@ def _prepare_timestamp_position_input(
     *,
     timestamp_frame: pd.DataFrame,
     spec: ComputePanelSpec,
-    features: tuple[str, ...],
+    signals: tuple[str, ...],
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,
     return_source_column: str | None = None,
@@ -542,16 +539,16 @@ def _prepare_timestamp_position_input(
         copy=False,
     )
     assets = tuple(asset_values.tolist())
-    feature_matrix = timestamp_frame.loc[:, list(features)].to_numpy(
+    signal_matrix = timestamp_frame.loc[:, list(signals)].to_numpy(
         dtype=dtype,
         copy=False,
     )
     return _TimestampPositionInput(
         assets=assets,
         asset_to_offset={asset: offset for offset, asset in enumerate(assets)},
-        feature_values={
-            feature: feature_matrix[:, offset]
-            for offset, feature in enumerate(features)
+        signal_values={
+            signal: signal_matrix[:, offset]
+            for offset, signal in enumerate(signals)
         },
         label_values=timestamp_frame[return_source_column].to_numpy(
             dtype=dtype,

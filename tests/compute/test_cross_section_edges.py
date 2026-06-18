@@ -20,7 +20,7 @@ from quant_research_platform.compute.panels import ComputePanelSpec
 
 def test_dataframe_cross_section_metrics_and_summaries() -> None:
     spec = ComputePanelSpec(
-        feature_columns=("factor", "factor_alt"),
+        signal_columns=("factor", "factor_alt"),
         label_column="forward_return",
     )
     frame = _panel()
@@ -38,12 +38,12 @@ def test_dataframe_cross_section_metrics_and_summaries() -> None:
     assert len(ic) == 4
     assert combined_ic.equals(ic)
     assert grouped_only.equals(grouped)
-    assert ic_summary["feature"].tolist() == ["factor", "factor_alt"]
-    assert set(spread_summary["feature"]) == {"factor", "factor_alt"}
+    assert ic_summary["signal"].tolist() == ["factor", "factor_alt"]
+    assert set(spread_summary["signal"]) == {"factor", "factor_alt"}
 
 
 def test_dataframe_cross_section_validated_panel_and_empty_summaries() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
     frame = _panel().assign(segment=["a", "a", "a", "b", "b", "b"])
 
     ic, grouped = compute_ic_and_grouped_label_values_from_validated_panel(
@@ -67,16 +67,16 @@ def test_dataframe_cross_section_validated_panel_and_empty_summaries() -> None:
 
 
 def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="forward_return")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
     with pytest.raises(TypeError, match="n_groups must be an integer"):
         compute_ic_and_grouped_label_values(_panel(), spec, n_groups=True)
     with pytest.raises(ValueError, match="n_groups must be at least 2"):
         compute_grouped_label_values(_panel(), spec, n_groups=1)
     with pytest.raises(ValueError, match="ic is missing columns"):
-        summarize_ic(pd.DataFrame({"feature": ["factor"]}))
+        summarize_ic(pd.DataFrame({"signal": ["factor"]}))
     with pytest.raises(ValueError, match="grouped_label_values is missing columns"):
-        summarize_group_spread(pd.DataFrame({"feature": ["factor"]}))
+        summarize_group_spread(pd.DataFrame({"signal": ["factor"]}))
 
 
 def test_dataframe_cross_section_numeric_helpers() -> None:

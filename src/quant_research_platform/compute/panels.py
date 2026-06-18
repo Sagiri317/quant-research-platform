@@ -13,20 +13,20 @@ class ComputePanelSpec(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    feature_columns: tuple[str, ...]
+    signal_columns: tuple[str, ...]
     label_column: str
     timestamp_column: str = "timestamp"
     asset_column: str = "asset"
 
-    @field_validator("feature_columns")
+    @field_validator("signal_columns")
     @classmethod
-    def _validate_feature_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+    def _validate_signal_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if not value:
-            raise ValueError("feature_columns must contain at least one column.")
+            raise ValueError("signal_columns must contain at least one column.")
         if any(not isinstance(column, str) or not column for column in value):
-            raise ValueError("feature_columns must contain non-empty strings.")
+            raise ValueError("signal_columns must contain non-empty strings.")
         if len(set(value)) != len(value):
-            raise ValueError("feature_columns must not contain duplicates.")
+            raise ValueError("signal_columns must not contain duplicates.")
         return value
 
     @field_validator("label_column", "timestamp_column", "asset_column")
@@ -37,11 +37,11 @@ class ComputePanelSpec(BaseModel):
         return value
 
     def model_post_init(self, __context: Any) -> None:
-        if self.label_column in self.feature_columns:
-            raise ValueError("label_column must not also be a feature column.")
+        if self.label_column in self.signal_columns:
+            raise ValueError("label_column must not also be a signal column.")
         reserved = {self.timestamp_column, self.asset_column}
         if self.label_column in reserved or any(
-            feature in reserved for feature in self.feature_columns
+            signal in reserved for signal in self.signal_columns
         ):
             raise ValueError(
                 "research columns must not reuse timestamp or asset columns."
@@ -64,7 +64,7 @@ def validate_compute_panel(
     required_columns = [
         spec.timestamp_column,
         spec.asset_column,
-        *spec.feature_columns,
+        *spec.signal_columns,
         spec.label_column,
     ]
     missing_columns = [
@@ -88,10 +88,12 @@ def validate_compute_panel(
     duplicated = result.duplicated(key_columns)
     if duplicated.any():
         if segment_columns:
-            raise ValueError("panel rows must have unique segment-timestamp-asset keys.")
+            raise ValueError(
+                "panel rows must have unique segment-timestamp-asset keys."
+            )
         raise ValueError("panel rows must have unique timestamp-asset keys.")
 
-    for column in (*spec.feature_columns, spec.label_column):
+    for column in (*spec.signal_columns, spec.label_column):
         if not pd.api.types.is_numeric_dtype(result[column]):
             raise TypeError(f"column {column!r} must be numeric.")
 

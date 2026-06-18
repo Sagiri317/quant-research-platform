@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.compute.config import (
-    CostConfig,
-    WeightConfig,
-)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
     TURNOVER_COLUMNS,
@@ -17,6 +13,10 @@ from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _normalize_group_key,
 )
 from quant_research_platform.compute.dataframe.position_math import _validate_positions
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    WeightConfig,
+)
 
 
 def calculate_turnover(
@@ -24,7 +24,7 @@ def calculate_turnover(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """基于 timestamp-by-asset position changes 计算 one-way turnover。"""
+    """    timestamp-by-asset position changes     one-way turnover ?"""
 
     validated = _validate_positions(positions, segment_columns=segment_columns)
     output_columns = [*segment_columns, *TURNOVER_COLUMNS]
@@ -32,8 +32,8 @@ def calculate_turnover(
         return pd.DataFrame(columns=output_columns)
 
     records: list[dict[str, object]] = []
-    for group_key, group in validated.groupby([*segment_columns, "feature"], sort=True):
-        group_values = _normalize_group_key(group_key, [*segment_columns, "feature"])
+    for group_key, group in validated.groupby([*segment_columns, "signal"], sort=True):
+        group_values = _normalize_group_key(group_key, [*segment_columns, "signal"])
         position_matrix = (
             group.pivot(index="timestamp", columns="asset", values="position")
             .fillna(0.0)
@@ -47,7 +47,7 @@ def calculate_turnover(
                 {
                     **{column: group_values[column] for column in segment_columns},
                     "timestamp": timestamp,
-                    "feature": group_values["feature"],
+                    "signal": group_values["signal"],
                     "turnover": float(value),
                 }
             )
@@ -60,7 +60,7 @@ def calculate_cost_breakdown(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """基于 position changes 计算 buy/sell turnover 和 cost components。"""
+    """    position changes     buy/sell turnover  ?cost components ?"""
 
     if cost_config is None:
         cost_config = CostConfig()
@@ -70,8 +70,8 @@ def calculate_cost_breakdown(
         return pd.DataFrame(columns=output_columns)
 
     records: list[dict[str, object]] = []
-    for group_key, group in validated.groupby([*segment_columns, "feature"], sort=True):
-        group_values = _normalize_group_key(group_key, [*segment_columns, "feature"])
+    for group_key, group in validated.groupby([*segment_columns, "signal"], sort=True):
+        group_values = _normalize_group_key(group_key, [*segment_columns, "signal"])
         position_matrix = (
             group.pivot(index="timestamp", columns="asset", values="position")
             .fillna(0.0)
@@ -94,7 +94,7 @@ def calculate_cost_breakdown(
                 {
                     **{column: group_values[column] for column in segment_columns},
                     "timestamp": timestamp,
-                    "feature": group_values["feature"],
+                    "signal": group_values["signal"],
                     "buy_turnover": buy_turnover,
                     "sell_turnover": sell_turnover,
                     "turnover": turnover,
@@ -132,7 +132,7 @@ def _lookup_turnover(
     segment_columns: tuple[str, ...],
 ) -> float:
     filters = (turnover["timestamp"] == group_values["timestamp"]) & (
-        turnover["feature"] == group_values["feature"]
+        turnover["signal"] == group_values["signal"]
     )
     for segment in segment_columns:
         filters &= turnover[segment] == group_values[segment]
@@ -145,7 +145,7 @@ def _lookup_cost(
     segment_columns: tuple[str, ...],
 ) -> float:
     filters = (cost_breakdown["timestamp"] == group_values["timestamp"]) & (
-        cost_breakdown["feature"] == group_values["feature"]
+        cost_breakdown["signal"] == group_values["signal"]
     )
     for segment in segment_columns:
         filters &= cost_breakdown[segment] == group_values[segment]

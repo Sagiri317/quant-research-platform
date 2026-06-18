@@ -1,27 +1,19 @@
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from quant_research_platform.compute.config import (
-    CostConfig,
-    TradabilityConfig,
-    WeightConfig,
-)
 from quant_research_platform.compute.dataframe import constraints
 from quant_research_platform.compute.dataframe.construction import (
     build_weighted_positions,
 )
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _cost_components,
-    _direct_signal,
-    _direct_signal_array,
     _normalize_group_key,
     _risk_values,
-    _select_feature,
-    _select_features,
+    _select_signal,
+    _select_signals,
     _selection_count,
     _uses_detailed_cost_config,
     _validate_segment_columns,
@@ -31,19 +23,24 @@ from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
 )
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    TradabilityConfig,
+    WeightConfig,
+)
 
 
 def test_compute_panel_spec_and_frame_validation_edges() -> None:
-    with pytest.raises(ValidationError, match="feature_columns"):
-        ComputePanelSpec(feature_columns=(), label_column="label")
+    with pytest.raises(ValidationError, match="signal_columns"):
+        ComputePanelSpec(signal_columns=(), label_column="label")
     with pytest.raises(ValidationError, match="duplicates"):
-        ComputePanelSpec(feature_columns=("feature", "feature"), label_column="label")
+        ComputePanelSpec(signal_columns=("signal", "signal"), label_column="label")
     with pytest.raises(ValidationError, match="label_column"):
-        ComputePanelSpec(feature_columns=("feature",), label_column="feature")
+        ComputePanelSpec(signal_columns=("signal",), label_column="signal")
     with pytest.raises(ValidationError, match="timestamp or asset"):
-        ComputePanelSpec(feature_columns=("timestamp",), label_column="label")
+        ComputePanelSpec(signal_columns=("timestamp",), label_column="label")
 
-    spec = ComputePanelSpec(feature_columns=("feature",), label_column="label")
+    spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
     frame = _compute_frame()
     assert validate_compute_panel(frame.iloc[::-1], spec)["asset"].tolist() == [
         "A",
@@ -54,7 +51,7 @@ def test_compute_panel_spec_and_frame_validation_edges() -> None:
     with pytest.raises(TypeError, match="spec must be"):
         validate_compute_panel(frame, object())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="panel is missing columns"):
-        validate_compute_panel(frame.drop(columns=["feature"]), spec)
+        validate_compute_panel(frame.drop(columns=["signal"]), spec)
     with pytest.raises(ValueError, match="missing timestamps"):
         validate_compute_panel(
             frame.assign(timestamp=[pd.NaT, pd.Timestamp("2024-01-02")]),
@@ -65,17 +62,17 @@ def test_compute_panel_spec_and_frame_validation_edges() -> None:
     with pytest.raises(ValueError, match="unique timestamp-asset keys"):
         validate_compute_panel(pd.concat([frame, frame.iloc[[0]]]), spec)
     with pytest.raises(TypeError, match="must be numeric"):
-        validate_compute_panel(frame.assign(feature=["x", "y"]), spec)
+        validate_compute_panel(frame.assign(signal=["x", "y"]), spec)
 
 
 def test_validate_compute_panel_uses_segment_aware_uniqueness() -> None:
-    spec = ComputePanelSpec(feature_columns=("feature",), label_column="label")
+    spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
     segmented = pd.DataFrame(
         {
             "segment": ["s1", "s2"],
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
             "asset": ["A", "A"],
-            "feature": [1.0, 2.0],
+            "signal": [1.0, 2.0],
             "label": [0.1, 0.2],
         }
     )
@@ -96,7 +93,7 @@ def test_validate_compute_panel_uses_segment_aware_uniqueness() -> None:
 def test_portfolio_helper_validation_and_selection_edges() -> None:
     panel = _compute_frame().assign(segment=["s1", "s2"], risk=[1.0, 2.0])
     spec = ComputePanelSpec(
-        feature_columns=("feature", "feature_alt"),
+        signal_columns=("signal", "signal_alt"),
         label_column="label",
     )
 
@@ -131,13 +128,13 @@ def test_portfolio_helper_validation_and_selection_edges() -> None:
         panel,
         WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
     ).tolist() == [1.0, 2.0]
-    assert _select_features(spec, None) == ("feature", "feature_alt")
-    assert _select_features(spec, ("feature_alt",)) == ("feature_alt",)
-    with pytest.raises(ValueError, match="portfolio features are not in spec"):
-        _select_features(spec, ("missing",))
-    assert _select_feature(spec, None) == "feature"
-    with pytest.raises(ValueError, match="feature_column"):
-        _select_feature(spec, "missing")
+    assert _select_signals(spec, None) == ("signal", "signal_alt")
+    assert _select_signals(spec, ("signal_alt",)) == ("signal_alt",)
+    with pytest.raises(ValueError, match="portfolio signals are not in spec"):
+        _select_signals(spec, ("missing",))
+    assert _select_signal(spec, None) == "signal"
+    with pytest.raises(ValueError, match="signal_column"):
+        _select_signal(spec, "missing")
 
 
 def test_portfolio_helper_costs_signals_and_group_keys() -> None:
@@ -167,17 +164,11 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
     assert _uses_detailed_cost_config(CostConfig(impact_model="custom")) is True
     assert detailed["cost_model"] == "custom"
     assert detailed["total_cost"] == pytest.approx(0.001 + 0.004 + 0.0003 + 0.0006)
-    assert _direct_signal(pd.Series([1.0, 2.0]), "long_low").tolist() == [-1.0, -2.0]
-    assert _direct_signal_array(np.array([1.0]), "long_high").tolist() == [1.0]
-    with pytest.raises(ValueError, match="direction"):
-        _direct_signal(pd.Series([1.0]), "bad")
-    with pytest.raises(ValueError, match="direction"):
-        _direct_signal_array(np.array([1.0]), "bad")
     assert _selection_count(3, 0.1) == 1
-    assert _normalize_group_key("feature", ["feature"]) == {"feature": "feature"}
-    assert _normalize_group_key(("s1", "feature"), ["segment", "feature"]) == {
+    assert _normalize_group_key("signal", ["signal"]) == {"signal": "signal"}
+    assert _normalize_group_key(("s1", "signal"), ["segment", "signal"]) == {
         "segment": "s1",
-        "feature": "feature",
+        "signal": "signal",
     }
 
 
@@ -186,11 +177,11 @@ def test_rank_weighted_short_leg_weights_more_extreme_signals_more_heavily() -> 
         {
             "timestamp": pd.to_datetime(["2024-01-02"] * 4),
             "asset": ["A", "B", "C", "D"],
-            "feature": [0.0, 1.0, 2.0, 3.0],
+            "signal": [0.0, 1.0, 2.0, 3.0],
             "label": [0.0, 0.0, 0.0, 0.0],
         }
     )
-    spec = ComputePanelSpec(feature_columns=("feature",), label_column="label")
+    spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
 
     positions, _diagnostics = build_weighted_positions(
         panel,
@@ -199,30 +190,15 @@ def test_rank_weighted_short_leg_weights_more_extreme_signals_more_heavily() -> 
             method="rank_weighted_quantile",
             top_quantile=0.5,
             bottom_quantile=0.5,
-            direction="long_high",
         ),
     )
-    long_high = positions.set_index("asset")["position"]
-    assert abs(long_high["A"]) > abs(long_high["B"])
-    assert abs(long_high["D"]) > abs(long_high["C"])
-
-    positions, _diagnostics = build_weighted_positions(
-        panel,
-        spec,
-        WeightConfig(
-            method="rank_weighted_quantile",
-            top_quantile=0.5,
-            bottom_quantile=0.5,
-            direction="long_low",
-        ),
-    )
-    long_low = positions.set_index("asset")["position"]
-    assert abs(long_low["D"]) > abs(long_low["C"])
-    assert abs(long_low["A"]) > abs(long_low["B"])
+    weights = positions.set_index("asset")["position"]
+    assert abs(weights["A"]) > abs(weights["B"])
+    assert abs(weights["D"]) > abs(weights["C"])
 
 
 def test_dataframe_tradability_helper_edges() -> None:
-    spec = ComputePanelSpec(feature_columns=("feature",), label_column="label")
+    spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
     frame = _compute_frame().assign(
         eligible=[True, False],
         can_enter=[True, False],
@@ -257,7 +233,7 @@ def test_dataframe_tradability_helper_edges() -> None:
     ) == 2
     counts = constraints._tradability_diagnostic_counts(
         timestamp_frame=frame,
-        feature="feature",
+        signal="signal",
         spec=spec,
         tradability_config=tradability,
     )
@@ -290,8 +266,8 @@ def _compute_frame() -> pd.DataFrame:
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
             "asset": ["A", "B"],
-            "feature": [1.0, 2.0],
-            "feature_alt": [2.0, 1.0],
+            "signal": [1.0, 2.0],
+            "signal_alt": [2.0, 1.0],
             "label": [0.1, 0.2],
         }
     )

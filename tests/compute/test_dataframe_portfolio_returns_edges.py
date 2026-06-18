@@ -3,23 +3,23 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from quant_research_platform.compute.config import WeightConfig
 from quant_research_platform.compute.dataframe.portfolio_returns import (
     _build_portfolio_return_record_from_positions,
     _calculate_long_short_from_positions,
     _timestamp_label_lookup,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
+from quant_research_platform.contracts.portfolios import WeightConfig
 
 
 def test_dataframe_portfolio_returns_calculates_returns_from_positions() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="label")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="label")
     panel = _panel()
     positions = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
             "asset": ["A", "B"],
-            "feature": ["factor", "factor"],
+            "signal": ["factor", "factor"],
             "position": [1.0, -1.0],
             "segment": ["s1", "s1"],
         }
@@ -27,7 +27,7 @@ def test_dataframe_portfolio_returns_calculates_returns_from_positions() -> None
     turnover = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02"]),
-            "feature": ["factor"],
+            "signal": ["factor"],
             "turnover": [2.0],
             "segment": ["s1"],
         }
@@ -49,7 +49,7 @@ def test_dataframe_portfolio_returns_calculates_returns_from_positions() -> None
 
 
 def test_dataframe_portfolio_return_record_handles_empty_or_missing_legs() -> None:
-    group_values = {"timestamp": pd.Timestamp("2024-01-02"), "feature": "factor"}
+    group_values = {"timestamp": pd.Timestamp("2024-01-02"), "signal": "factor"}
     label_lookup = {"A": 0.01, "B": -0.02}
 
     assert _build_portfolio_return_record_from_positions(
@@ -81,7 +81,7 @@ def test_dataframe_portfolio_return_record_handles_empty_or_missing_legs() -> No
 
 
 def test_dataframe_portfolio_return_timestamp_label_lookup_uses_asset_strings() -> None:
-    spec = ComputePanelSpec(feature_columns=("factor",), label_column="label")
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="label")
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),

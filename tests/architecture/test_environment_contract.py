@@ -24,6 +24,8 @@ RUNTIME_DEPENDENCIES = {
     "pydantic",
     "psutil",
     "scikit-learn",
+    "xgboost",
+    "lightgbm",
     "typer",
     "uvicorn",
 }

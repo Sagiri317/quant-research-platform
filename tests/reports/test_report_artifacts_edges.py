@@ -10,8 +10,10 @@ import pytest
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
+    SignalSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports import report_artifacts
@@ -201,7 +203,7 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
     bad_feature_columns = _prediction_frame(with_metadata=True)
     bad_feature_columns.attrs["prediction_metadata"] = {
         **_prediction_metadata(),
-        "feature_columns": ["other_feature"],
+        "input_columns": ["factor", "other_input"],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
         report_artifacts.write_prediction_report_artifacts(
@@ -226,7 +228,7 @@ def test_prediction_report_artifacts_reject_bad_row_count_chain_and_filter_contr
     bad_prediction_counts = _prediction_frame(with_metadata=True)
     bad_prediction_counts.attrs["prediction_metadata"] = {
         **_prediction_metadata(),
-        "rows_after_feature_dropna": 0,
+        "rows_after_input_dropna": 0,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
         report_artifacts.write_prediction_report_artifacts(
@@ -423,7 +425,7 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        feature_columns=("feature",),
+        signals=(_signal_spec(),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
@@ -444,7 +446,7 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
         report_artifacts.write_evaluation_report_artifacts(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
-            ic_summary=pd.DataFrame({"feature": ["feature"]}),
+            ic_summary=pd.DataFrame({"signal": ["signal"]}),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
@@ -457,7 +459,7 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
-            group_spread_summary=pd.DataFrame({"feature": ["feature"]}),
+            group_spread_summary=pd.DataFrame({"signal": ["signal"]}),
             evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
             report_spec=report_spec,
@@ -470,7 +472,7 @@ def test_evaluation_report_rejects_inconsistent_diagnostics(tmp_path: Path) -> N
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        feature_columns=("feature",),
+        signals=(_signal_spec(),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
@@ -556,7 +558,7 @@ def test_evaluation_report_rejects_bad_keys_features_groups_and_counts(
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        feature_columns=("feature",),
+        signals=(_signal_spec(),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
@@ -569,7 +571,7 @@ def test_evaluation_report_rejects_bad_keys_features_groups_and_counts(
     duplicate_diagnostics = replace(
         _evaluation_diagnostics(),
         metric_rows=2,
-        rows_after_feature_label_dropna=4,
+        rows_after_signal_label_dropna=4,
     )
     with pytest.raises(ValueError, match="duplicate_evaluation_metrics_keys"):
         report_artifacts.write_evaluation_report_artifacts(
@@ -583,8 +585,8 @@ def test_evaluation_report_rejects_bad_keys_features_groups_and_counts(
             layout=layout,
         )
 
-    bad_feature_metrics = _evaluation_metrics_frame().assign(feature="other")
-    with pytest.raises(ValueError, match="evaluation_artifact_feature_label_mismatch"):
+    bad_feature_metrics = _evaluation_metrics_frame().assign(signal="other")
+    with pytest.raises(ValueError, match="evaluation_artifact_signal_label_mismatch"):
         report_artifacts.write_evaluation_report_artifacts(
             bad_feature_metrics,
             _evaluation_grouped_label_values_frame(),
@@ -628,7 +630,7 @@ def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> N
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
-        feature_columns=("feature",),
+        signals=(_signal_spec(),),
         label_columns=("label",),
     )
     report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
@@ -657,6 +659,122 @@ def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> N
     ]
     assert manifest["evaluation_diagnostics"]["contract_version"] == "0.1"
     assert "metadata" not in manifest
+
+
+def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
+    tmp_path: Path,
+) -> None:
+    spec = _portfolio_spec()
+    artifacts = _portfolio_artifacts()
+    run_root = report_artifacts.write_portfolio_report_artifacts(
+        **artifacts,
+        spec=spec,
+        report_spec=_report_spec(
+            "portfolio_report_private",
+            spec.portfolio_id,
+            "portfolio",
+        ),
+        layout=StorageLayout(project_root=tmp_path),
+    )
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert run_root.as_posix().endswith(
+        "reports/private_real/a_share/portfolio/portfolio_demo"
+    )
+    assert manifest["portfolio_id"] == "portfolio_demo"
+    assert manifest["research_dataset_id"] == "research_demo"
+    assert manifest["signals"] == [
+        {
+            "signal_id": "signal",
+            "column": "feature",
+            "source_kind": "feature",
+            "direction": "higher",
+            "transform": "identity",
+            "contract_version": "0.1",
+        }
+    ]
+    assert manifest["row_counts"]["positions"] == 2
+    assert manifest["row_counts"]["portfolio_returns"] == 1
+    assert manifest["weight_config"]["method"] == "rank_weighted_quantile"
+    assert manifest["artifacts"] == [
+        "positions.parquet",
+        "turnover.parquet",
+        "cost_breakdown.parquet",
+        "portfolio_returns.parquet",
+        "cumulative_returns.parquet",
+        "performance_summary.parquet",
+        "exposure_summary.parquet",
+        "concentration.parquet",
+        "period_breakdown.parquet",
+        "diagnostics.parquet",
+    ]
+
+
+def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
+    spec = _portfolio_spec()
+    report_spec = _report_spec(
+        "portfolio_report_private",
+        spec.portfolio_id,
+        "portfolio",
+    )
+    layout = StorageLayout(project_root=tmp_path)
+
+    missing_positions = _portfolio_artifacts()
+    missing_positions["positions"] = missing_positions["positions"].drop(
+        columns=["asset"]
+    )
+    with pytest.raises(ValueError, match="missing_portfolio_positions_columns"):
+        report_artifacts.write_portfolio_report_artifacts(
+            **missing_positions,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    extra_returns = _portfolio_artifacts()
+    extra_returns["portfolio_returns"] = extra_returns["portfolio_returns"].assign(
+        extra=1
+    )
+    with pytest.raises(ValueError, match="unregistered_portfolio_portfolio_returns"):
+        report_artifacts.write_portfolio_report_artifacts(
+            **extra_returns,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+
+def test_portfolio_report_artifacts_clean_temp_run_directory_on_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    spec = _portfolio_spec()
+    layout = StorageLayout(project_root=tmp_path)
+    report_spec = _report_spec(
+        "portfolio_report_private",
+        spec.portfolio_id,
+        "portfolio",
+    )
+    run_parent = (
+        tmp_path / "reports" / "private_real" / "a_share" / "portfolio"
+    )
+
+    def fail_write(frame, path, **kwargs):  # noqa: ANN001
+        del frame, kwargs
+        Path(path).write_text("partial", encoding="utf-8")
+        raise RuntimeError("portfolio parquet failed")
+
+    monkeypatch.setattr(report_artifacts, "_atomic_write_report_parquet", fail_write)
+
+    with pytest.raises(RuntimeError, match="portfolio parquet failed"):
+        report_artifacts.write_portfolio_report_artifacts(
+            **_portfolio_artifacts(),
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+    assert not (run_parent / spec.portfolio_id).exists()
+    assert not list(run_parent.glob(".tmp-*"))
 
 
 def test_report_parquet_writer_cleans_temp_on_failure(
@@ -691,6 +809,178 @@ def _prediction_spec() -> PredictionSpec:
     )
 
 
+def _portfolio_spec() -> PortfolioSpec:
+    return PortfolioSpec(
+        portfolio_id="portfolio_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(_signal_spec(),),
+        label_column="label",
+        weight_config=WeightConfig(method="rank_weighted_quantile"),
+    )
+
+
+def _portfolio_artifacts() -> dict[str, pd.DataFrame]:
+    timestamp = pd.Timestamp("2024-01-02")
+    return {
+        "positions": pd.DataFrame(
+            {
+                "timestamp": [timestamp, timestamp],
+                "asset": ["asset_a", "asset_b"],
+                "signal": ["signal", "signal"],
+                "position": [1.0, -1.0],
+            }
+        ),
+        "turnover": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "turnover": [2.0],
+            }
+        ),
+        "cost_breakdown": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "buy_turnover": [1.0],
+                "sell_turnover": [1.0],
+                "turnover": [2.0],
+                "buy_cost": [0.0],
+                "sell_cost": [0.0],
+                "slippage_cost": [0.0],
+                "spread_cost": [0.0],
+                "impact_cost": [0.0],
+                "total_cost": [0.0],
+                "cost_model": ["scalar_cost_bps"],
+            }
+        ),
+        "portfolio_returns": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "label": ["label"],
+                "portfolio_mode": ["long_short"],
+                "long_return": [0.02],
+                "short_return": [-0.01],
+                "gross_portfolio_return": [0.03],
+                "turnover": [2.0],
+                "cost": [0.0],
+                "net_portfolio_return": [0.03],
+                "long_count": [1],
+                "short_count": [1],
+            }
+        ),
+        "cumulative_returns": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "gross_portfolio_return": [0.03],
+                "net_portfolio_return": [0.03],
+                "cost": [0.0],
+                "cumulative_gross_return": [0.03],
+                "cumulative_net_return": [0.03],
+                "cumulative_cost": [0.0],
+                "high_water_mark": [0.03],
+                "drawdown": [0.0],
+            }
+        ),
+        "performance_summary": pd.DataFrame(
+            {
+                "signal": ["signal"],
+                "periods": [1],
+                "final_cumulative_gross_return": [0.03],
+                "final_cumulative_net_return": [0.03],
+                "mean_net_portfolio_return": [0.03],
+                "volatility_net_portfolio_return": [0.0],
+                "downside_volatility": [0.0],
+                "sharpe_like": [0.0],
+                "sortino_like": [0.0],
+                "calmar_like": [0.0],
+                "best_period_return": [0.03],
+                "worst_period_return": [0.03],
+                "skew": [0.0],
+                "kurtosis": [0.0],
+                "var_95": [0.03],
+                "cvar_95": [0.03],
+                "tail_ratio": [0.0],
+                "positive_return_rate": [1.0],
+                "negative_return_rate": [0.0],
+                "win_rate": [1.0],
+                "loss_rate": [0.0],
+                "profit_factor": [0.0],
+                "payoff_ratio": [0.0],
+                "average_win": [0.03],
+                "average_loss": [0.0],
+                "max_consecutive_wins": [1],
+                "max_consecutive_losses": [0],
+                "max_drawdown": [0.0],
+                "drawdown_duration": [0],
+                "max_drawdown_start": [None],
+                "max_drawdown_valley": [None],
+                "max_drawdown_recovery": [None],
+                "mean_turnover": [2.0],
+                "max_turnover": [2.0],
+                "total_cost": [0.0],
+                "mean_cost": [0.0],
+                "cost_to_gross_return": [0.0],
+                "cost_to_net_return": [0.0],
+            }
+        ),
+        "exposure_summary": pd.DataFrame(
+            {
+                "signal": ["signal"],
+                "mean_gross_exposure": [2.0],
+                "mean_net_exposure": [0.0],
+                "max_gross_exposure": [2.0],
+                "max_abs_net_exposure": [0.0],
+                "mean_long_count": [1.0],
+                "mean_short_count": [1.0],
+                "mean_position_count": [2.0],
+            }
+        ),
+        "concentration": pd.DataFrame(
+            {
+                "signal": ["signal"],
+                "periods": [1],
+                "mean_hhi": [0.5],
+                "max_hhi": [0.5],
+                "mean_top_weight": [0.5],
+                "max_top_weight": [0.5],
+                "mean_position_count": [2.0],
+            }
+        ),
+        "period_breakdown": pd.DataFrame(
+            {
+                "signal": ["signal"],
+                "year": [2024],
+                "month": [1],
+                "periods": [1],
+                "gross_portfolio_return": [0.03],
+                "net_portfolio_return": [0.03],
+                "cost": [0.0],
+                "turnover": [2.0],
+                "hit_rate": [1.0],
+            }
+        ),
+        "diagnostics": pd.DataFrame(
+            {
+                "timestamp": [timestamp],
+                "signal": ["signal"],
+                "method": ["rank_weighted_quantile"],
+                "universe_count": [2],
+                "eligible_count": [2],
+                "can_enter_count": [2],
+                "can_exit_count": [2],
+                "entry_blocked_count": [0],
+                "exit_blocked_count": [0],
+                "long_count": [1],
+                "short_count": [1],
+                "fallback_reason": [None],
+            }
+        ),
+    }
+
+
 def _prediction_frame(*, with_metadata: bool) -> pd.DataFrame:
     frame = pd.DataFrame(
         {
@@ -709,19 +999,21 @@ def _prediction_frame(*, with_metadata: bool) -> pd.DataFrame:
 def _model_metadata() -> dict[str, object]:
     return {
         "contract_version": "0.1",
-        "model_family": "linear",
+        "model_algorithm": "linear",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
         "rows_input": 2,
         "rows_after_filter_mode": 2,
-        "rows_after_feature_label_dropna": 2,
+        "rows_after_input_label_dropna": 2,
         "train_start": "2024-01-01",
         "train_end": "2024-01-01",
-        "feature_columns": ["feature"],
-        "feature_count": 1,
+        "input_factor_columns": ["factor"],
+        "input_feature_columns": ["feature"],
+        "input_columns": ["factor", "feature"],
+        "input_count": 2,
         "label_column": "label",
-        "coefficient_count": 2,
+        "coefficient_count": 3,
     }
 
 
@@ -734,7 +1026,7 @@ def _prediction_metadata() -> dict[str, object]:
         "filter_definition": "eligible == True",
         "rows_input": 2,
         "rows_after_filter_mode": 2,
-        "rows_after_feature_dropna": 2,
+        "rows_after_input_dropna": 2,
         "prediction_rows": 1,
         "train_end": "2024-01-01",
         "test_start": "2024-01-02",
@@ -742,10 +1034,18 @@ def _prediction_metadata() -> dict[str, object]:
         "effective_test_end": "2024-01-02",
         "is_oos": True,
         "is_final_oos_window": True,
-        "feature_columns": ["feature"],
-        "feature_count": 1,
+        "input_columns": ["factor", "feature"],
+        "input_count": 2,
         "prediction_column": "prediction",
     }
+
+
+def _signal_spec() -> SignalSpec:
+    return SignalSpec(
+        signal_id="signal",
+        column="feature",
+        source_kind="feature",
+    )
 
 
 def _report_spec(
@@ -766,7 +1066,7 @@ def _evaluation_metrics_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": [pd.Timestamp("2024-01-02")],
-            "feature": ["feature"],
+            "signal": ["signal"],
             "label": ["label"],
             "ic": [0.1],
             "rankic": [0.2],
@@ -779,7 +1079,7 @@ def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": [pd.Timestamp("2024-01-02")],
-            "feature": ["feature"],
+            "signal": ["signal"],
             "label": ["label"],
             "group": [1],
             "mean_label_value": [0.1],
@@ -791,7 +1091,7 @@ def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
 def _evaluation_ic_summary_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "feature": ["feature"],
+            "signal": ["signal"],
             "label": ["label"],
             "mean_ic": [0.1],
             "std_ic": [0.0],
@@ -810,7 +1110,7 @@ def _evaluation_ic_summary_frame() -> pd.DataFrame:
 def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "feature": ["feature"],
+            "signal": ["signal"],
             "label": ["label"],
             "top_group_mean_label_value": [0.1],
             "bottom_group_mean_label_value": [0.0],
@@ -828,7 +1128,7 @@ def _evaluation_diagnostics() -> EvaluationDiagnostics:
         filter_definition="eligible == True",
         rows_input=2,
         rows_after_filter_mode=2,
-        rows_after_feature_label_dropna=2,
+        rows_after_signal_label_dropna=2,
         metric_rows=1,
         grouped_label_value_rows=1,
         ic_summary_rows=1,

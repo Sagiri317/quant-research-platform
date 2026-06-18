@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from quant_research_platform.contracts.data import DataSpec
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 
 
@@ -13,7 +14,9 @@ class ResearchDatasetSpec(DataSpec):
     market_id: MarketId
     input_data_ids: tuple[str, ...]
     base_input_data_id: str
-    feature_columns: tuple[str, ...]
+    factor_columns: tuple[str, ...] = ()
+    feature_columns: tuple[str, ...] = ()
+    feature_transforms: tuple[FeatureTransformSpec, ...] = ()
     label_columns: tuple[str, ...]
     filter_columns: tuple[str, ...] = ()
     context_columns: tuple[str, ...] = ()
@@ -41,11 +44,107 @@ class ResearchDatasetSpec(DataSpec):
             )
         if self.key_coverage.get(self.base_input_data_id, "strict") != "strict":
             raise ValueError("base_input_key_coverage_must_be_strict")
+        _validate_column_tuple(self.factor_columns, "factor_columns", required=False)
+        _validate_column_tuple(self.feature_columns, "feature_columns", required=False)
+        _validate_column_tuple(self.label_columns, "label_columns")
+        _validate_column_tuple(self.filter_columns, "filter_columns", required=False)
+        _validate_column_tuple(self.context_columns, "context_columns", required=False)
+        if not self.factor_columns and not self.feature_columns:
+            raise ValueError("research_factor_or_feature_columns_required")
+        factor_feature_overlap = sorted(
+            set(self.factor_columns).intersection(self.feature_columns)
+        )
+        if factor_feature_overlap:
+            raise ValueError(
+                "research_factor_feature_overlap: "
+                + ", ".join(factor_feature_overlap)
+            )
+        _validate_feature_transforms(
+            self.feature_transforms,
+            factor_columns=self.factor_columns,
+            feature_columns=self.feature_columns,
+            market_id=self.market_id,
+        )
+        reserved = set(self.label_columns).union(
+            self.filter_columns,
+            self.context_columns,
+        )
+        invalid_research_inputs = sorted(
+            set(self.factor_columns).union(self.feature_columns).intersection(reserved)
+        )
+        if invalid_research_inputs:
+            raise ValueError(
+                "research_input_column_overlap: " + ", ".join(invalid_research_inputs)
+            )
         normalized = {
             data_id: self.key_coverage.get(data_id, "strict")
             for data_id in self.input_data_ids
         }
         object.__setattr__(self, "key_coverage", normalized)
+
+
+def _validate_column_tuple(
+    columns: tuple[str, ...],
+    field_name: str,
+    *,
+    required: bool = True,
+) -> None:
+    if required and not columns:
+        raise ValueError(f"{field_name}_required")
+    if any(not isinstance(column, str) or not column for column in columns):
+        raise ValueError(f"{field_name}_must_be_non_empty_strings")
+    if len(set(columns)) != len(columns):
+        raise ValueError(f"{field_name}_must_not_contain_duplicates")
+
+
+def _validate_feature_transforms(
+    feature_transforms: tuple[FeatureTransformSpec, ...],
+    *,
+    factor_columns: tuple[str, ...],
+    feature_columns: tuple[str, ...],
+    market_id: MarketId,
+) -> None:
+    transform_ids = [transform.transform_id for transform in feature_transforms]
+    if len(set(transform_ids)) != len(transform_ids):
+        raise ValueError("feature_transform_ids_must_not_contain_duplicates")
+    source_columns = {
+        column
+        for transform in feature_transforms
+        for column in transform.source_factor_columns
+    }
+    missing_sources = sorted(source_columns.difference(factor_columns))
+    if missing_sources:
+        raise ValueError(
+            "feature_transform_source_not_in_factor_columns: "
+            + ", ".join(missing_sources)
+        )
+    transformed_features = tuple(
+        column
+        for transform in feature_transforms
+        for column in transform.output_feature_columns
+    )
+    if len(set(transformed_features)) != len(transformed_features):
+        raise ValueError("feature_transform_outputs_must_not_contain_duplicates")
+    missing_outputs = sorted(set(feature_columns).difference(transformed_features))
+    if missing_outputs:
+        raise ValueError(
+            "feature_columns_without_transform: " + ", ".join(missing_outputs)
+        )
+    undeclared_outputs = sorted(set(transformed_features).difference(feature_columns))
+    if undeclared_outputs:
+        raise ValueError(
+            "feature_transform_output_not_in_feature_columns: "
+            + ", ".join(undeclared_outputs)
+        )
+    market_mismatches = sorted(
+        transform.transform_id
+        for transform in feature_transforms
+        if transform.market_id != market_id
+    )
+    if market_mismatches:
+        raise ValueError(
+            "feature_transform_market_mismatch: " + ", ".join(market_mismatches)
+        )
 
 
 __all__ = ["ResearchDatasetSpec"]

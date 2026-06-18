@@ -65,6 +65,55 @@ def test_research_profile_contains_active_catalogs() -> None:
     assert callable(profile.materialize_processed_data)
 
 
+def test_research_profile_covers_required_models_predictions_and_signals() -> None:
+    from quant_research_platform.catalog.profiles import research_profile
+    from quant_research_platform.contracts.models import MODEL_ALGORITHMS
+
+    profile = research_profile()
+    dataset = profile.research_datasets.get("a_share_price_volume_forward_returns")
+    evaluation = profile.evaluations.get("a_share_mom_20d_forward_return_20d_2014")
+    portfolio = profile.portfolios.get("a_share_mom_20d_portfolio_2014")
+    models = tuple(profile.models.list())
+    predictions = tuple(profile.predictions.list())
+    model_ids = {model.model_id for model in models}
+
+    assert sorted(model.model_algorithm for model in models) == sorted(
+        MODEL_ALGORITHMS
+    )
+    assert len(predictions) == len(MODEL_ALGORITHMS)
+    assert {prediction.model_id for prediction in predictions} == model_ids
+    assert all(
+        prediction.research_dataset_id == dataset.data_id
+        for prediction in predictions
+    )
+    assert dataset.factor_columns
+    assert dataset.feature_columns == ("mom_20d_zscore",)
+    assert [
+        (
+            transform.source_factor_columns,
+            transform.output_feature_columns,
+            transform.transform,
+        )
+        for transform in dataset.feature_transforms
+    ] == [(("mom_20d",), ("mom_20d_zscore",), "zscore")]
+    assert [
+        (signal.signal_id, signal.column, signal.source_kind)
+        for signal in evaluation.signals
+    ] == [
+        ("mom_20d", "mom_20d", "factor"),
+        ("rev_1d", "rev_1d", "factor"),
+        ("mom_20d_zscore", "mom_20d_zscore", "feature"),
+    ]
+    assert [
+        (signal.signal_id, signal.column, signal.source_kind)
+        for signal in portfolio.signals
+    ] == [
+        ("mom_20d", "mom_20d", "factor"),
+        ("rev_1d", "rev_1d", "factor"),
+        ("mom_20d_zscore", "mom_20d_zscore", "feature"),
+    ]
+
+
 def test_a_share_research_profiles_do_not_import_csmar() -> None:
     path = PROJECT_SRC / "markets/implementations/a_share/research_profiles.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

@@ -20,6 +20,7 @@ from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
+from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.reports.catalog import report_catalog
@@ -38,17 +39,17 @@ from quant_research_platform.storage.atomic import (
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 
-_EVALUATION_METRICS_COLUMNS = ("timestamp", "feature", "label", "ic", "rankic", "n_obs")
+_EVALUATION_METRICS_COLUMNS = ("timestamp", "signal", "label", "ic", "rankic", "n_obs")
 _EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
     "timestamp",
-    "feature",
+    "signal",
     "label",
     "group",
     "mean_label_value",
     "n_obs",
 )
 _EVALUATION_IC_SUMMARY_COLUMNS = (
-    "feature",
+    "signal",
     "label",
     "mean_ic",
     "std_ic",
@@ -62,7 +63,7 @@ _EVALUATION_IC_SUMMARY_COLUMNS = (
     "valid_rankic_count",
 )
 _EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
-    "feature",
+    "signal",
     "label",
     "top_group_mean_label_value",
     "bottom_group_mean_label_value",
@@ -76,20 +77,160 @@ _EVALUATION_ARTIFACTS = [
     "ic_summary.parquet",
     "group_spread_summary.parquet",
 ]
+_PORTFOLIO_ARTIFACTS = {
+    "positions": "positions.parquet",
+    "turnover": "turnover.parquet",
+    "cost_breakdown": "cost_breakdown.parquet",
+    "portfolio_returns": "portfolio_returns.parquet",
+    "cumulative_returns": "cumulative_returns.parquet",
+    "performance_summary": "performance_summary.parquet",
+    "exposure_summary": "exposure_summary.parquet",
+    "concentration": "concentration.parquet",
+    "period_breakdown": "period_breakdown.parquet",
+    "diagnostics": "diagnostics.parquet",
+}
+_PORTFOLIO_POSITION_COLUMNS = ("timestamp", "asset", "signal", "position")
+_PORTFOLIO_TURNOVER_COLUMNS = ("timestamp", "signal", "turnover")
+_PORTFOLIO_COST_BREAKDOWN_COLUMNS = (
+    "timestamp",
+    "signal",
+    "buy_turnover",
+    "sell_turnover",
+    "turnover",
+    "buy_cost",
+    "sell_cost",
+    "slippage_cost",
+    "spread_cost",
+    "impact_cost",
+    "total_cost",
+    "cost_model",
+)
+_PORTFOLIO_RETURN_COLUMNS = (
+    "timestamp",
+    "signal",
+    "label",
+    "portfolio_mode",
+    "long_return",
+    "short_return",
+    "gross_portfolio_return",
+    "turnover",
+    "cost",
+    "net_portfolio_return",
+    "long_count",
+    "short_count",
+)
+_PORTFOLIO_CUMULATIVE_RETURN_COLUMNS = (
+    "timestamp",
+    "signal",
+    "gross_portfolio_return",
+    "net_portfolio_return",
+    "cost",
+    "cumulative_gross_return",
+    "cumulative_net_return",
+    "cumulative_cost",
+    "high_water_mark",
+    "drawdown",
+)
+_PORTFOLIO_PERFORMANCE_SUMMARY_COLUMNS = (
+    "signal",
+    "periods",
+    "final_cumulative_gross_return",
+    "final_cumulative_net_return",
+    "mean_net_portfolio_return",
+    "volatility_net_portfolio_return",
+    "downside_volatility",
+    "sharpe_like",
+    "sortino_like",
+    "calmar_like",
+    "best_period_return",
+    "worst_period_return",
+    "skew",
+    "kurtosis",
+    "var_95",
+    "cvar_95",
+    "tail_ratio",
+    "positive_return_rate",
+    "negative_return_rate",
+    "win_rate",
+    "loss_rate",
+    "profit_factor",
+    "payoff_ratio",
+    "average_win",
+    "average_loss",
+    "max_consecutive_wins",
+    "max_consecutive_losses",
+    "max_drawdown",
+    "drawdown_duration",
+    "max_drawdown_start",
+    "max_drawdown_valley",
+    "max_drawdown_recovery",
+    "mean_turnover",
+    "max_turnover",
+    "total_cost",
+    "mean_cost",
+    "cost_to_gross_return",
+    "cost_to_net_return",
+)
+_PORTFOLIO_EXPOSURE_SUMMARY_COLUMNS = (
+    "signal",
+    "mean_gross_exposure",
+    "mean_net_exposure",
+    "max_gross_exposure",
+    "max_abs_net_exposure",
+    "mean_long_count",
+    "mean_short_count",
+    "mean_position_count",
+)
+_PORTFOLIO_CONCENTRATION_COLUMNS = (
+    "signal",
+    "periods",
+    "mean_hhi",
+    "max_hhi",
+    "mean_top_weight",
+    "max_top_weight",
+    "mean_position_count",
+)
+_PORTFOLIO_PERIOD_BREAKDOWN_COLUMNS = (
+    "signal",
+    "year",
+    "month",
+    "periods",
+    "gross_portfolio_return",
+    "net_portfolio_return",
+    "cost",
+    "turnover",
+    "hit_rate",
+)
+_PORTFOLIO_DIAGNOSTIC_COLUMNS = (
+    "timestamp",
+    "signal",
+    "method",
+    "universe_count",
+    "eligible_count",
+    "can_enter_count",
+    "can_exit_count",
+    "entry_blocked_count",
+    "exit_blocked_count",
+    "long_count",
+    "short_count",
+    "fallback_reason",
+)
 _MODEL_METADATA_KEYS = frozenset(
     {
         "contract_version",
-        "model_family",
+        "model_algorithm",
         "sample_filter_mode",
         "filter_columns_used",
         "filter_definition",
         "rows_input",
         "rows_after_filter_mode",
-        "rows_after_feature_label_dropna",
+        "rows_after_input_label_dropna",
         "train_start",
         "train_end",
-        "feature_columns",
-        "feature_count",
+        "input_factor_columns",
+        "input_feature_columns",
+        "input_columns",
+        "input_count",
         "label_column",
         "coefficient_count",
     }
@@ -103,7 +244,7 @@ _PREDICTION_METADATA_KEYS = frozenset(
         "filter_definition",
         "rows_input",
         "rows_after_filter_mode",
-        "rows_after_feature_dropna",
+        "rows_after_input_dropna",
         "prediction_rows",
         "train_end",
         "test_start",
@@ -111,8 +252,8 @@ _PREDICTION_METADATA_KEYS = frozenset(
         "effective_test_end",
         "is_oos",
         "is_final_oos_window",
-        "feature_columns",
-        "feature_count",
+        "input_columns",
+        "input_count",
         "prediction_column",
     }
 )
@@ -391,6 +532,82 @@ def write_evaluation_report_artifacts(
     return run_root
 
 
+def write_portfolio_report_artifacts(
+    *,
+    positions: pd.DataFrame,
+    turnover: pd.DataFrame,
+    cost_breakdown: pd.DataFrame,
+    portfolio_returns: pd.DataFrame,
+    cumulative_returns: pd.DataFrame,
+    performance_summary: pd.DataFrame,
+    exposure_summary: pd.DataFrame,
+    concentration: pd.DataFrame,
+    period_breakdown: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    spec: PortfolioSpec,
+    report_spec: ReportSpec,
+    layout: StorageLayout,
+) -> Path:
+    """Write private portfolio simulation artifacts under reports/private_real."""
+
+    run_root = _derive_report_run_root(
+        report_spec=report_spec,
+        layout=layout,
+        expected_definition_id="portfolio_report_private",
+        expected_run_id=spec.portfolio_id,
+    )
+    artifacts = {
+        "positions": positions,
+        "turnover": turnover,
+        "cost_breakdown": cost_breakdown,
+        "portfolio_returns": portfolio_returns,
+        "cumulative_returns": cumulative_returns,
+        "performance_summary": performance_summary,
+        "exposure_summary": exposure_summary,
+        "concentration": concentration,
+        "period_breakdown": period_breakdown,
+        "diagnostics": diagnostics,
+    }
+    required_columns = {
+        "positions": _PORTFOLIO_POSITION_COLUMNS,
+        "turnover": _PORTFOLIO_TURNOVER_COLUMNS,
+        "cost_breakdown": _PORTFOLIO_COST_BREAKDOWN_COLUMNS,
+        "portfolio_returns": _PORTFOLIO_RETURN_COLUMNS,
+        "cumulative_returns": _PORTFOLIO_CUMULATIVE_RETURN_COLUMNS,
+        "performance_summary": _PORTFOLIO_PERFORMANCE_SUMMARY_COLUMNS,
+        "exposure_summary": _PORTFOLIO_EXPOSURE_SUMMARY_COLUMNS,
+        "concentration": _PORTFOLIO_CONCENTRATION_COLUMNS,
+        "period_breakdown": _PORTFOLIO_PERIOD_BREAKDOWN_COLUMNS,
+        "diagnostics": _PORTFOLIO_DIAGNOSTIC_COLUMNS,
+    }
+    for artifact_name, frame in artifacts.items():
+        _validate_report_frame(
+            frame,
+            required=required_columns[artifact_name],
+            error_name=f"portfolio_{artifact_name}",
+        )
+
+    def _write(temp_root: Path) -> None:
+        for artifact_name, filename in _PORTFOLIO_ARTIFACTS.items():
+            _atomic_write_report_parquet(
+                artifacts[artifact_name],
+                temp_root / filename,
+                engine="pyarrow",
+                compression="zstd",
+                index=False,
+            )
+        write_manifest(
+            temp_root / "manifest.json",
+            _portfolio_report_manifest_payload(
+                spec=spec,
+                artifacts=artifacts,
+            ),
+        )
+
+    atomic_write_directory(run_root, _write)
+    return run_root
+
+
 def _stage_profile_report_manifest_payload(*, spec: ReportSpec) -> dict[str, object]:
     return {
         "contract_version": spec.contract_version,
@@ -444,13 +661,37 @@ def _evaluation_report_manifest_payload(
         "run_type": spec.run_type,
         "market_id": str(spec.market_id),
         "research_dataset_id": spec.research_dataset_id,
-        "feature_columns": list(spec.feature_columns),
+        "signals": [asdict(signal) for signal in spec.signals],
         "label_columns": list(spec.label_columns),
         "filter_mode": spec.filter_mode,
         "evaluation_diagnostics": sanitize_public_object(
             asdict(evaluation_diagnostics)
         ),
         "artifacts": list(_EVALUATION_ARTIFACTS),
+    }
+
+
+def _portfolio_report_manifest_payload(
+    *,
+    spec: PortfolioSpec,
+    artifacts: Mapping[str, pd.DataFrame],
+) -> dict[str, object]:
+    return {
+        "contract_version": spec.contract_version,
+        "portfolio_id": spec.portfolio_id,
+        "market_id": str(spec.market_id),
+        "research_dataset_id": spec.research_dataset_id,
+        "run_type": spec.run_type,
+        "signals": [asdict(signal) for signal in spec.signals],
+        "label_column": spec.label_column,
+        "weight_config": asdict(spec.weight_config),
+        "tradability_config": asdict(spec.tradability_config),
+        "cost_config": asdict(spec.cost_config),
+        "artifacts": list(_PORTFOLIO_ARTIFACTS.values()),
+        "row_counts": {
+            artifact_name: int(len(frame))
+            for artifact_name, frame in artifacts.items()
+        },
     }
 
 
@@ -491,17 +732,29 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
     )
     _require_non_negative_metadata_int(
         metadata,
-        "rows_after_feature_label_dropna",
+        "rows_after_input_label_dropna",
         "invalid_model_metadata",
     )
-    feature_columns = _require_metadata_string_list(
+    input_factor_columns = _require_metadata_string_list(
         metadata,
-        "feature_columns",
+        "input_factor_columns",
+        "invalid_model_metadata",
+        allow_empty=True,
+    )
+    input_feature_columns = _require_metadata_string_list(
+        metadata,
+        "input_feature_columns",
+        "invalid_model_metadata",
+        allow_empty=True,
+    )
+    input_columns = _require_metadata_string_list(
+        metadata,
+        "input_columns",
         "invalid_model_metadata",
     )
-    feature_count = _require_non_negative_metadata_int(
+    input_count = _require_non_negative_metadata_int(
         metadata,
-        "feature_count",
+        "input_count",
         "invalid_model_metadata",
     )
     coefficient_count = _require_non_negative_metadata_int(
@@ -509,9 +762,13 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
         "coefficient_count",
         "invalid_model_metadata",
     )
-    if feature_count != len(feature_columns) or coefficient_count < 1:
+    if (
+        input_columns != [*input_factor_columns, *input_feature_columns]
+        or input_count != len(input_columns)
+        or coefficient_count < 1
+    ):
         raise ValueError("invalid_model_metadata")
-    _require_metadata_string(metadata, "model_family", "invalid_model_metadata")
+    _require_metadata_string(metadata, "model_algorithm", "invalid_model_metadata")
     _require_metadata_string(metadata, "sample_filter_mode", "invalid_model_metadata")
     _require_metadata_string(metadata, "filter_definition", "invalid_model_metadata")
     _require_metadata_string(metadata, "label_column", "invalid_model_metadata")
@@ -545,7 +802,7 @@ def _validate_prediction_metadata_shape(
     )
     _require_non_negative_metadata_int(
         metadata,
-        "rows_after_feature_dropna",
+        "rows_after_input_dropna",
         "invalid_prediction_metadata",
     )
     _require_non_negative_metadata_int(
@@ -553,17 +810,17 @@ def _validate_prediction_metadata_shape(
         "prediction_rows",
         "invalid_prediction_metadata",
     )
-    feature_columns = _require_metadata_string_list(
+    input_columns = _require_metadata_string_list(
         metadata,
-        "feature_columns",
+        "input_columns",
         "invalid_prediction_metadata",
     )
-    feature_count = _require_non_negative_metadata_int(
+    input_count = _require_non_negative_metadata_int(
         metadata,
-        "feature_count",
+        "input_count",
         "invalid_prediction_metadata",
     )
-    if feature_count != len(feature_columns):
+    if input_count != len(input_columns):
         raise ValueError("invalid_prediction_metadata")
     _require_metadata_string(
         metadata,
@@ -617,13 +874,13 @@ def _validate_model_metadata_consistency(
     *,
     spec: PredictionSpec,
 ) -> None:
-    feature_count = int(metadata["feature_count"])
-    feature_columns = metadata["feature_columns"]
-    if not isinstance(feature_columns, list) or feature_count != len(feature_columns):
+    input_count = int(metadata["input_count"])
+    input_columns = metadata["input_columns"]
+    if not isinstance(input_columns, list) or input_count != len(input_columns):
         raise ValueError("model_metadata_inconsistent")
     _validate_metadata_row_count_chain(
         metadata,
-        ("rows_input", "rows_after_filter_mode", "rows_after_feature_label_dropna"),
+        ("rows_input", "rows_after_filter_mode", "rows_after_input_label_dropna"),
         "model_metadata_inconsistent",
     )
     _validate_filter_metadata(
@@ -637,8 +894,8 @@ def _validate_model_metadata_consistency(
     if train_start > train_end or train_end > pd.Timestamp(spec.train_end):
         raise ValueError("model_metadata_inconsistent")
     if (
-        metadata["model_family"] == "linear"
-        and int(metadata["coefficient_count"]) != feature_count + 1
+        metadata["model_algorithm"] == "linear"
+        and int(metadata["coefficient_count"]) != input_count + 1
     ):
         raise ValueError("model_metadata_inconsistent")
 
@@ -684,10 +941,10 @@ def _validate_prediction_metadata_consistency_from_summary(
             raise ValueError("prediction_metadata_inconsistent")
     _validate_metadata_row_count_chain(
         metadata,
-        ("rows_input", "rows_after_filter_mode", "rows_after_feature_dropna"),
+        ("rows_input", "rows_after_filter_mode", "rows_after_input_dropna"),
         "prediction_metadata_inconsistent",
     )
-    if int(metadata["prediction_rows"]) > int(metadata["rows_after_feature_dropna"]):
+    if int(metadata["prediction_rows"]) > int(metadata["rows_after_input_dropna"]):
         raise ValueError("prediction_metadata_inconsistent")
     _validate_filter_metadata(
         mode=str(metadata["sample_filter_mode"]),
@@ -708,9 +965,9 @@ def _validate_model_prediction_metadata_consistency(
     model_metadata: dict[str, object],
     prediction_metadata: dict[str, object],
 ) -> None:
-    if model_metadata["feature_columns"] != prediction_metadata["feature_columns"]:
+    if model_metadata["input_columns"] != prediction_metadata["input_columns"]:
         raise ValueError("prediction_metadata_inconsistent")
-    if model_metadata["feature_count"] != prediction_metadata["feature_count"]:
+    if model_metadata["input_count"] != prediction_metadata["input_count"]:
         raise ValueError("prediction_metadata_inconsistent")
 
 
@@ -723,11 +980,20 @@ def _validate_evaluation_diagnostics_consistency(
     evaluation_diagnostics: EvaluationDiagnostics,
     spec: EvaluationSpec,
 ) -> None:
-    _validate_metadata_row_count_chain(
-        asdict(evaluation_diagnostics),
-        ("rows_input", "rows_after_filter_mode", "rows_after_feature_label_dropna"),
-        "evaluation_diagnostics_inconsistent",
+    diagnostics_payload = asdict(evaluation_diagnostics)
+    rows_input = int(diagnostics_payload["rows_input"])
+    rows_after_filter_mode = int(diagnostics_payload["rows_after_filter_mode"])
+    rows_after_signal_label_dropna = int(
+        diagnostics_payload["rows_after_signal_label_dropna"]
     )
+    max_signal_label_rows = (
+        rows_after_filter_mode * len(spec.signals) * len(spec.label_columns)
+    )
+    if not (
+        0 <= rows_after_filter_mode <= rows_input
+        and 0 <= rows_after_signal_label_dropna <= max_signal_label_rows
+    ):
+        raise ValueError("evaluation_diagnostics_inconsistent")
     _validate_filter_metadata(
         mode=evaluation_diagnostics.filter_mode,
         columns=list(evaluation_diagnostics.filter_columns_used),
@@ -754,12 +1020,12 @@ def _validate_evaluation_diagnostics_consistency(
     expected_skipped_timestamp_count = int(
         metrics.loc[n_obs.lt(2), "timestamp"].nunique()
     )
-    expected_rows_after_feature_label_dropna = int(n_obs.sum())
+    expected_rows_after_signal_label_dropna = int(n_obs.sum())
     expected = {
         "filter_mode": spec.filter_mode,
         "filter_columns_used": tuple(required_filter_columns(spec.filter_mode)),
         "filter_definition": filter_definition(spec.filter_mode),
-        "rows_after_feature_label_dropna": expected_rows_after_feature_label_dropna,
+        "rows_after_signal_label_dropna": expected_rows_after_signal_label_dropna,
         "metric_rows": len(metrics),
         "grouped_label_value_rows": len(grouped_label_values),
         "ic_summary_rows": len(ic_summary),
@@ -783,20 +1049,20 @@ def _validate_evaluation_artifact_structure(
     spec: EvaluationSpec,
     n_groups: int,
 ) -> None:
-    _reject_duplicate_keys(metrics, ("timestamp", "feature", "label"), "metrics")
+    _reject_duplicate_keys(metrics, ("timestamp", "signal", "label"), "metrics")
     _reject_duplicate_keys(
         grouped_label_values,
-        ("timestamp", "feature", "label", "group"),
+        ("timestamp", "signal", "label", "group"),
         "grouped_label_values",
     )
-    _reject_duplicate_keys(ic_summary, ("feature", "label"), "ic_summary")
+    _reject_duplicate_keys(ic_summary, ("signal", "label"), "ic_summary")
     _reject_duplicate_keys(
         group_spread_summary,
-        ("feature", "label"),
+        ("signal", "label"),
         "group_spread_summary",
     )
     for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
-        _validate_feature_label_membership(frame, spec=spec)
+        _validate_signal_label_membership(frame, spec=spec)
     groups = pd.to_numeric(grouped_label_values["group"], errors="coerce")
     if bool(groups.isna().any()):
         raise ValueError("evaluation_group_out_of_range")
@@ -815,15 +1081,16 @@ def _reject_duplicate_keys(
         raise ValueError(f"duplicate_evaluation_{artifact_name}_keys")
 
 
-def _validate_feature_label_membership(
+def _validate_signal_label_membership(
     frame: pd.DataFrame,
     *,
     spec: EvaluationSpec,
 ) -> None:
-    if not set(frame["feature"]).issubset(set(spec.feature_columns)) or not set(
+    signal_ids = {signal.signal_id for signal in spec.signals}
+    if not set(frame["signal"]).issubset(signal_ids) or not set(
         frame["label"]
     ).issubset(set(spec.label_columns)):
-        raise ValueError("evaluation_artifact_feature_label_mismatch")
+        raise ValueError("evaluation_artifact_signal_label_mismatch")
 
 
 def _validate_metadata_row_count_chain(
@@ -1063,6 +1330,7 @@ def _rename_with_transient_permission_retry(
 
 __all__ = [
     "write_evaluation_report_artifacts",
+    "write_portfolio_report_artifacts",
     "write_prediction_report_artifacts",
     "write_stage_profile_report_artifacts",
 ]

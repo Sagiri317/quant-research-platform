@@ -19,14 +19,14 @@ def summarize_exposure(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """汇总 gross/net exposure 和 active position counts。"""
+    """   ?gross/net exposure  ?active position counts ?"""
 
     validated = _validate_positions(positions, segment_columns=segment_columns)
     output_columns = [*segment_columns, *EXPOSURE_SUMMARY_COLUMNS]
     if validated.empty:
         return pd.DataFrame(columns=output_columns)
 
-    group_columns = [*segment_columns, "feature"]
+    group_columns = [*segment_columns, "signal"]
     exposure = (
         validated.assign(abs_position=validated["position"].abs())
         .groupby([*group_columns, "timestamp"], sort=True)
@@ -41,14 +41,14 @@ def summarize_exposure(
     records: list[dict[str, object]] = []
     for group_key, group in exposure.groupby(group_columns, sort=True, dropna=False):
         group_values = _normalize_group_key(group_key, group_columns)
-        filters = count_frame["feature"] == group_values["feature"]
+        filters = count_frame["signal"] == group_values["signal"]
         for segment in segment_columns:
             filters &= count_frame[segment] == group_values[segment]
         count_group = count_frame.loc[filters]
         records.append(
             {
                 **{column: group_values[column] for column in segment_columns},
-                "feature": group_values["feature"],
+                "signal": group_values["signal"],
                 "mean_gross_exposure": float(group["gross_exposure"].mean()),
                 "mean_net_exposure": float(group["net_exposure"].mean()),
                 "max_gross_exposure": float(group["gross_exposure"].max()),

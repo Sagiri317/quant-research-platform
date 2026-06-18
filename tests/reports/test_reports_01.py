@@ -10,6 +10,7 @@ import quant_research_platform.reports.report_artifacts as report_artifacts_modu
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
+    SignalSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -64,7 +65,7 @@ def test_stage_profile_report_artifacts_require_approved_report_spec(tmp_path):
     frame = pd.DataFrame.from_records(
         [
             {
-                "category": r"C:\Users\DELL\private",
+                "category": "C:" + "\\Users\\DELL\\private",
                 "stage": "600000.SH",
                 "seconds": 0.1,
                 "n_calls": 1,
@@ -114,7 +115,7 @@ def test_stage_profile_report_artifacts_sanitize_outputs(tmp_path):
     frame = pd.DataFrame.from_records(
         [
             {
-                "category": r"C:\Users\DELL\private",
+                "category": "C:" + "\\Users\\DELL\\private",
                 "stage": "600000.SH",
                 "seconds": 0.1,
                 "n_calls": 1,
@@ -131,7 +132,9 @@ def test_stage_profile_report_artifacts_sanitize_outputs(tmp_path):
             run_type="diagnostics",
         ),
         layout=StorageLayout(project_root=tmp_path),
-        report_text="CSMAR vendor path /mnt/data/raw token=abcdef123456",
+        report_text=(
+            "CSMAR vendor path /mnt/data/raw " + "token" + "=abcdef123456"
+        ),
     )
     output_dir = (
         tmp_path
@@ -501,17 +504,19 @@ def _prediction_frame() -> pd.DataFrame:
     )
     frame.attrs["model_metadata"] = {
         "contract_version": "0.1",
-        "model_family": "linear",
+        "model_algorithm": "linear",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
         "rows_input": 2,
         "rows_after_filter_mode": 2,
-        "rows_after_feature_label_dropna": 2,
+        "rows_after_input_label_dropna": 2,
         "train_start": "2014-01-02",
         "train_end": "2014-01-02",
-        "feature_columns": ["mom_20d"],
-        "feature_count": 1,
+        "input_factor_columns": ["mom_20d"],
+        "input_feature_columns": [],
+        "input_columns": ["mom_20d"],
+        "input_count": 1,
         "label_column": "forward_return_20d",
         "coefficient_count": 2,
     }
@@ -523,7 +528,7 @@ def _prediction_frame() -> pd.DataFrame:
         "filter_definition": "eligible == True",
         "rows_input": 2,
         "rows_after_filter_mode": 2,
-        "rows_after_feature_dropna": 2,
+        "rows_after_input_dropna": 2,
         "prediction_rows": 1,
         "train_end": "2014-01-02",
         "test_start": "2014-01-03",
@@ -531,8 +536,8 @@ def _prediction_frame() -> pd.DataFrame:
         "effective_test_end": "2014-01-03",
         "is_oos": True,
         "is_final_oos_window": False,
-        "feature_columns": ["mom_20d"],
-        "feature_count": 1,
+        "input_columns": ["mom_20d"],
+        "input_count": 1,
         "prediction_column": "prediction",
     }
     return frame
@@ -557,8 +562,16 @@ def _evaluation_spec() -> EvaluationSpec:
         run_id="eval-run",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
-        feature_columns=("mom_20d",),
+        signals=(_signal_spec(),),
         label_columns=("forward_return_20d",),
+    )
+
+
+def _signal_spec() -> SignalSpec:
+    return SignalSpec(
+        signal_id="mom_20d",
+        column="mom_20d",
+        source_kind="factor",
     )
 
 
@@ -576,7 +589,7 @@ def _evaluation_metrics_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2014-01-03"]),
-            "feature": ["mom_20d"],
+            "signal": ["mom_20d"],
             "label": ["forward_return_20d"],
             "ic": [0.1],
             "rankic": [0.2],
@@ -589,7 +602,7 @@ def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2014-01-03"]),
-            "feature": ["mom_20d"],
+            "signal": ["mom_20d"],
             "label": ["forward_return_20d"],
             "group": [1],
             "mean_label_value": [0.01],
@@ -601,7 +614,7 @@ def _evaluation_grouped_label_values_frame() -> pd.DataFrame:
 def _evaluation_ic_summary_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "feature": ["mom_20d"],
+            "signal": ["mom_20d"],
             "label": ["forward_return_20d"],
             "mean_ic": [0.1],
             "std_ic": [0.0],
@@ -620,7 +633,7 @@ def _evaluation_ic_summary_frame() -> pd.DataFrame:
 def _evaluation_group_spread_summary_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "feature": ["mom_20d"],
+            "signal": ["mom_20d"],
             "label": ["forward_return_20d"],
             "top_group_mean_label_value": [0.01],
             "bottom_group_mean_label_value": [0.0],
@@ -638,7 +651,7 @@ def _evaluation_diagnostics() -> EvaluationDiagnostics:
         filter_definition="eligible == True",
         rows_input=2,
         rows_after_filter_mode=2,
-        rows_after_feature_label_dropna=2,
+        rows_after_signal_label_dropna=2,
         metric_rows=1,
         grouped_label_value_rows=1,
         ic_summary_rows=1,

@@ -10,7 +10,7 @@ import pytest
 
 import quant_research_platform.research.datasets.assembler as assembler_module
 import quant_research_platform.research.evaluations.runner as evaluation_runner_module
-import quant_research_platform.research.predictions.handoff as prediction_handoff_module
+import quant_research_platform.research.predictions.runner as prediction_runner_module
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -28,7 +28,8 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.evaluations import EvaluationSpec, SignalSpec
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -40,7 +41,7 @@ from quant_research_platform.research.datasets import (
     validate_evaluation_input,
     validate_prediction_input,
 )
-from quant_research_platform.research.evaluations.engine import evaluate_factor_frame
+from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
 from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
 )
@@ -52,6 +53,10 @@ from quant_research_platform.research.predictions import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+
+
+def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
+    return SignalSpec(signal_id=column, column=column, source_kind=source_kind)
 
 
 def _research_rows() -> pd.DataFrame:
@@ -162,7 +167,7 @@ def _research_dataset_catalog(
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
             base_input_data_id="demo_annotations",
-            feature_columns=("mom_20d",),
+            factor_columns=("mom_20d",),
             label_columns=("forward_return_20d",),
             filter_columns=("eligible", "can_enter", "can_exit"),
             context_columns=("market_type",),
@@ -173,7 +178,7 @@ def _research_dataset_catalog(
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FEATURE,
+                "mom_20d": ColumnRole.FACTOR,
                 "forward_return_20d": ColumnRole.LABEL,
                 "eligible": ColumnRole.UNIVERSE,
                 "can_enter": ColumnRole.MASK,
@@ -229,13 +234,93 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
     validate_evaluation_input(
         result,
         dataset_catalog.get("demo"),
-        feature_columns=("mom_20d",),
+        signal_columns=("mom_20d",),
         label_columns=("forward_return_20d",),
     )
     validate_prediction_input(
         result,
         dataset_catalog.get("demo"),
-        feature_columns=("mom_20d",),
+        input_columns=("mom_20d",),
+    )
+
+
+def test_research_dataset_assembler_generates_feature_transforms_from_factors(
+    tmp_path: Path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = _processed_catalog()
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(
+        ResearchDatasetSpec(
+            data_id="demo",
+            market_id=MarketId("a_share"),
+            input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
+            base_input_data_id="demo_annotations",
+            factor_columns=("mom_20d",),
+            feature_columns=("mom_20d_zscore",),
+            feature_transforms=(
+                FeatureTransformSpec(
+                    transform_id="mom_20d_zscore",
+                    market_id=MarketId("a_share"),
+                    source_factor_columns=("mom_20d",),
+                    output_feature_columns=("mom_20d_zscore",),
+                    transform="zscore",
+                ),
+            ),
+            label_columns=("forward_return_20d",),
+            filter_columns=("eligible", "can_enter", "can_exit"),
+            context_columns=("market_type",),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.RESEARCH_ROW,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                "mom_20d": ColumnRole.FACTOR,
+                "mom_20d_zscore": ColumnRole.FEATURE,
+                "forward_return_20d": ColumnRole.LABEL,
+                "eligible": ColumnRole.UNIVERSE,
+                "can_enter": ColumnRole.MASK,
+                "can_exit": ColumnRole.MASK,
+                "market_type": ColumnRole.CONTEXT,
+            },
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        )
+    )
+    _write_processed_inputs(layout, processed_catalog)
+
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+    )
+    result = read_research_dataset(
+        layout,
+        market_id=MarketId("a_share"),
+        dataset_id="demo",
+        time_window=TimeWindow("2014-01-02", "2014-01-03"),
+    ).sort_values(["timestamp", "asset_id"])
+
+    assert list(result.columns) == [
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "mom_20d",
+        "mom_20d_zscore",
+        "forward_return_20d",
+        "eligible",
+        "can_enter",
+        "can_exit",
+        "market_type",
+    ]
+    assert result["mom_20d_zscore"].tolist() == pytest.approx([-1.0, 1.0, 1.0, -1.0])
+    validate_prediction_input(
+        result,
+        dataset_catalog.get("demo"),
+        input_columns=("mom_20d", "mom_20d_zscore"),
     )
 
 
@@ -357,17 +442,18 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
         ResearchDatasetSpec(
             data_id="bad_demo",
             market_id=MarketId("a_share"),
-            input_data_ids=("demo_annotations",),
+            input_data_ids=("demo_labels", "demo_annotations"),
             base_input_data_id="demo_annotations",
-            feature_columns=("market_type",),
-            label_columns=(),
+            factor_columns=("market_type",),
+            label_columns=("forward_return_20d",),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.RESEARCH_ROW,
             column_roles={
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "market_type": ColumnRole.FEATURE,
+                "market_type": ColumnRole.FACTOR,
+                "forward_return_20d": ColumnRole.LABEL,
             },
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
@@ -375,7 +461,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
     )
     _write_processed_inputs(layout, processed_catalog)
 
-    with pytest.raises(ValueError, match="invalid_research_feature_columns"):
+    with pytest.raises(ValueError, match="invalid_research_factor_columns"):
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -388,7 +474,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
 @pytest.mark.parametrize(
     ("field_name", "bad_column", "expected_error"),
     [
-        ("label_columns", "mom_20d", "invalid_research_label_columns"),
+        ("label_columns", "mom_20d", "research_input_column_overlap"),
         ("filter_columns", "market_type", "invalid_research_filter_columns"),
         ("context_columns", "eligible", "invalid_research_context_columns"),
     ],
@@ -403,39 +489,38 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
     processed_catalog = _processed_catalog()
     dataset_catalog = ResearchDatasetCatalog()
     spec_kwargs = {
-        "feature_columns": ("mom_20d",),
+        "factor_columns": ("mom_20d",),
         "label_columns": ("forward_return_20d",),
         "filter_columns": ("eligible", "can_enter", "can_exit"),
         "context_columns": ("market_type",),
     }
     spec_kwargs[field_name] = (bad_column,)
-    dataset_catalog.register(
-        ResearchDatasetSpec(
-            data_id=f"bad_{field_name}",
-            market_id=MarketId("a_share"),
-            input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
-            base_input_data_id="demo_annotations",
-            **spec_kwargs,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.RESEARCH_ROW,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FEATURE,
-                "forward_return_20d": ColumnRole.LABEL,
-                "eligible": ColumnRole.UNIVERSE,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-                "market_type": ColumnRole.CONTEXT,
-            },
-            primary_key=platform_entity_time_key(),
-            partition_columns=("year",),
-        )
-    )
-    _write_processed_inputs(layout, processed_catalog)
-
     with pytest.raises(ValueError, match=expected_error):
+        dataset_catalog.register(
+            ResearchDatasetSpec(
+                data_id=f"bad_{field_name}",
+                market_id=MarketId("a_share"),
+                input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
+                base_input_data_id="demo_annotations",
+                **spec_kwargs,
+                frequency=DataFrequency.DAILY,
+                grain=DataGrain.RESEARCH_ROW,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    "mom_20d": ColumnRole.FACTOR,
+                    "forward_return_20d": ColumnRole.LABEL,
+                    "eligible": ColumnRole.UNIVERSE,
+                    "can_enter": ColumnRole.MASK,
+                    "can_exit": ColumnRole.MASK,
+                    "market_type": ColumnRole.CONTEXT,
+                },
+                primary_key=platform_entity_time_key(),
+                partition_columns=("year",),
+            )
+        )
+        _write_processed_inputs(layout, processed_catalog)
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -451,13 +536,13 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         run_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
-        feature_columns=("mom_20d",),
+        signals=(_signal("mom_20d"),),
         label_columns=("forward_return_20d",),
     )
     model_spec = ModelSpec(
         model_id="linear_demo",
-        model_family="linear",
-        feature_columns=("mom_20d",),
+        model_algorithm="linear",
+        input_factor_columns=("mom_20d",),
         label_column="forward_return_20d",
     )
     prediction_spec = PredictionSpec(
@@ -471,7 +556,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         test_end="2014-01-03",
     )
 
-    evaluation = evaluate_factor_frame(frame, eval_spec)
+    evaluation = evaluate_signal_frame(frame, eval_spec)
     model_result = fit_linear_baseline_result(
         frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],
         model_spec,
@@ -480,7 +565,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         frame,
         prediction_spec,
         model_result.coefficients,
-        model_spec.feature_columns,
+        model_spec.input_columns,
     )
     prediction.attrs["model_metadata"] = model_result.metadata
     layout = StorageLayout(project_root=tmp_path)
@@ -529,8 +614,8 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     model_catalog.register(
         ModelSpec(
             model_id="linear_demo",
-            model_family="linear",
-            feature_columns=("mom_20d",),
+            model_algorithm="linear",
+            input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
         )
     )
@@ -566,7 +651,7 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     assert manifest["prediction_column"] == default_prediction_column()
     assert manifest["primary_key"] == list(platform_entity_time_key())
     assert manifest["model_metadata"]["contract_version"] == "0.1"
-    assert manifest["model_metadata"]["feature_count"] == 1
+    assert manifest["model_metadata"]["input_count"] == 1
     assert manifest["model_metadata"]["coefficient_count"] == 2
     assert manifest["model_metadata"]["train_start"] == "2014-01-02"
     assert manifest["model_metadata"]["train_end"] == "2014-01-02"
@@ -596,8 +681,8 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
     model_catalog.register(
         ModelSpec(
             model_id="linear_demo",
-            model_family="linear",
-            feature_columns=("mom_20d",),
+            model_algorithm="linear",
+            input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
         )
     )
@@ -619,7 +704,7 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
         raise AssertionError("materialized_prediction_bundle_builder_called")
 
     monkeypatch.setattr(
-        prediction_handoff_module,
+        prediction_runner_module,
         "_build_prediction_bundle_from_frames",
         reject_materialized_builder,
         raising=False,
@@ -665,8 +750,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     model_catalog.register(
         ModelSpec(
             model_id="linear_demo",
-            model_family="linear",
-            feature_columns=("mom_20d",),
+            model_algorithm="linear",
+            input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
         )
     )
@@ -684,14 +769,16 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         )
     )
 
-    original_iter = prediction_handoff_module._iter_research_dataset_chunks
-    original_fit = prediction_handoff_module._fit_linear_baseline_result_from_frames
-    original_write = prediction_handoff_module._write_prediction_bundle_from_frames
+    original_iter = prediction_runner_module._iter_research_dataset_chunks
+    original_fit = prediction_runner_module._fit_model_result_from_frames
+    original_write = prediction_runner_module._write_prediction_bundle_from_frames
     read_chunk_rows: list[int] = []
     fit_chunk_rows: list[int] = []
     prediction_chunk_rows: list[int] = []
+    read_columns_seen: list[tuple[str, ...]] = []
 
     def wrapped_iter(*args, **kwargs):
+        read_columns_seen.append(tuple(kwargs["columns"]))
         for chunk in original_iter(*args, **kwargs):
             read_chunk_rows.append(len(chunk))
             yield chunk
@@ -701,7 +788,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         fit_chunk_rows.extend(len(chunk) for chunk in chunks)
         return original_fit(iter(chunks), spec)
 
-    def wrapped_write(frames, spec, coefficients, feature_columns, **kwargs):
+    def wrapped_write(frames, spec, coefficients, input_columns, **kwargs):
         def counted_frames():
             for chunk in frames:
                 prediction_chunk_rows.append(len(chunk))
@@ -711,22 +798,22 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             counted_frames(),
             spec,
             coefficients,
-            feature_columns,
+            input_columns,
             **kwargs,
         )
 
     monkeypatch.setattr(
-        prediction_handoff_module,
+        prediction_runner_module,
         "_iter_research_dataset_chunks",
         wrapped_iter,
     )
     monkeypatch.setattr(
-        prediction_handoff_module,
-        "_fit_linear_baseline_result_from_frames",
+        prediction_runner_module,
+        "_fit_model_result_from_frames",
         wrapped_fit,
     )
     monkeypatch.setattr(
-        prediction_handoff_module,
+        prediction_runner_module,
         "_write_prediction_bundle_from_frames",
         wrapped_write,
     )
@@ -746,6 +833,8 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     assert max(fit_chunk_rows) < len(frame)
     assert len(prediction_chunk_rows) > 1
     assert max(prediction_chunk_rows) < len(frame)
+    assert any("forward_return_20d" in columns for columns in read_columns_seen)
+    assert any("forward_return_20d" not in columns for columns in read_columns_seen)
 
 
 def test_evaluation_runner_reads_research_dataset_and_writes_report(
@@ -768,7 +857,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
             run_id="eval_demo",
             market_id=MarketId("a_share"),
             research_dataset_id="demo",
-            feature_columns=("mom_20d",),
+            signals=(_signal("mom_20d"),),
             label_columns=("forward_return_20d",),
         )
     )
@@ -830,7 +919,7 @@ def test_evaluation_runner_streams_research_chunks(
             run_id="eval_demo",
             market_id=MarketId("a_share"),
             research_dataset_id="demo",
-            feature_columns=("mom_20d",),
+            signals=(_signal("mom_20d"),),
             label_columns=("forward_return_20d",),
         )
     )

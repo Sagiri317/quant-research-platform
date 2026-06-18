@@ -1,4 +1,4 @@
-"""提供 DataFrame portfolio weighting 和 tradability helpers。"""
+"""    DataFrame portfolio weighting  ?tradability helpers ?"""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from math import floor
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.config import (
+from quant_research_platform.compute.panels import ComputePanelSpec
+from quant_research_platform.contracts.portfolios import (
     CostConfig,
     WeightConfig,
 )
-from quant_research_platform.compute.panels import ComputePanelSpec
 
 
 def _cost_components(
@@ -94,41 +94,25 @@ def _risk_values(
 
 
 
-def _select_features(
+def _select_signals(
     spec: ComputePanelSpec,
-    portfolio_features: tuple[str, ...] | None,
+    portfolio_signals: tuple[str, ...] | None,
 ) -> tuple[str, ...]:
-    if portfolio_features is None:
-        return spec.feature_columns
-    missing_features = [
-        feature for feature in portfolio_features if feature not in spec.feature_columns
+    if portfolio_signals is None:
+        return spec.signal_columns
+    missing_signals = [
+        signal for signal in portfolio_signals if signal not in spec.signal_columns
     ]
-    if missing_features:
-        raise ValueError(f"portfolio features are not in spec: {missing_features}.")
-    return portfolio_features
+    if missing_signals:
+        raise ValueError(f"portfolio signals are not in spec: {missing_signals}.")
+    return portfolio_signals
 
 
-def _select_feature(spec: ComputePanelSpec, feature_column: str | None) -> str:
-    feature = spec.feature_columns[0] if feature_column is None else feature_column
-    if feature not in spec.feature_columns:
-        raise ValueError(f"feature_column {feature!r} is not in the panel spec.")
-    return feature
-
-
-def _direct_signal(values: pd.Series, direction: str) -> pd.Series:
-    if direction == "long_high":
-        return values
-    if direction == "long_low":
-        return -values
-    raise ValueError("direction must be 'long_high' or 'long_low'.")
-
-
-def _direct_signal_array(values: np.ndarray, direction: str) -> np.ndarray:
-    if direction == "long_high":
-        return values
-    if direction == "long_low":
-        return -values
-    raise ValueError("direction must be 'long_high' or 'long_low'.")
+def _select_signal(spec: ComputePanelSpec, signal_column: str | None) -> str:
+    signal = spec.signal_columns[0] if signal_column is None else signal_column
+    if signal not in spec.signal_columns:
+        raise ValueError(f"signal_column {signal!r} is not in the panel spec.")
+    return signal
 
 
 def _selection_count(n_obs: int, quantile: float) -> int:

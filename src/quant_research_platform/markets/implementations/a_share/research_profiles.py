@@ -7,6 +7,7 @@ from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
@@ -38,6 +39,16 @@ RESEARCH_DATASET_CONTEXT_COLUMNS: tuple[str, ...] = (
     "total_market_cap",
     "float_market_cap",
 )
+RESEARCH_DATASET_FEATURE_COLUMNS: tuple[str, ...] = ("mom_20d_zscore",)
+RESEARCH_DATASET_FEATURE_TRANSFORMS: tuple[FeatureTransformSpec, ...] = (
+    FeatureTransformSpec(
+        transform_id="mom_20d_zscore",
+        market_id=A_SHARE_MARKET_ID,
+        source_factor_columns=("mom_20d",),
+        output_feature_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
+        transform="zscore",
+    ),
+)
 
 
 def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
@@ -48,6 +59,7 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
     columns = (
         *platform_entity_time_key(),
         *factor_columns,
+        *RESEARCH_DATASET_FEATURE_COLUMNS,
         *label_columns,
         *RESEARCH_DATASET_FILTER_COLUMNS,
         *RESEARCH_DATASET_CONTEXT_COLUMNS,
@@ -65,7 +77,9 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
                 A_SHARE_EXECUTION_MASK_ID,
             ),
             base_input_data_id=A_SHARE_DEFAULT_UNIVERSE_ID,
-            feature_columns=factor_columns,
+            factor_columns=factor_columns,
+            feature_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
+            feature_transforms=RESEARCH_DATASET_FEATURE_TRANSFORMS,
             label_columns=label_columns,
             filter_columns=RESEARCH_DATASET_FILTER_COLUMNS,
             context_columns=RESEARCH_DATASET_CONTEXT_COLUMNS,
@@ -74,6 +88,7 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
             column_roles=_research_dataset_column_roles(
                 columns,
                 factor_columns=factor_columns,
+                feature_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
                 label_columns=label_columns,
             ),
             primary_key=platform_entity_time_key(),
@@ -87,15 +102,20 @@ def _research_dataset_column_roles(
     columns: tuple[str, ...],
     *,
     factor_columns: tuple[str, ...],
+    feature_columns: tuple[str, ...],
     label_columns: tuple[str, ...],
 ) -> dict[str, ColumnRole]:
     fields = a_share_field_catalog()
     factor_set = set(factor_columns)
+    feature_set = set(feature_columns)
     label_set = set(label_columns)
     filter_set = set(RESEARCH_DATASET_FILTER_COLUMNS)
     roles: dict[str, ColumnRole] = {}
     for column in columns:
         if column in factor_set:
+            roles[column] = ColumnRole.FACTOR
+            continue
+        if column in feature_set:
             roles[column] = ColumnRole.FEATURE
             continue
         if column in label_set:
