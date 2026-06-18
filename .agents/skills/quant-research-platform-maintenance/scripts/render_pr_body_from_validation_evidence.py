@@ -24,12 +24,52 @@ def render_pr_body(
         f"- final head: `{task_metadata.get('final_sha', '')}`",
         f"- PR: `{task_metadata.get('pr_url', '')}`",
         "- PR status: `draft`",
+    ]
+    lines.extend(
+        _paragraph_section("Scope Summary", task_metadata.get("scope_summary"))
+    )
+    lines.extend(_list_section("Commit List", task_metadata.get("commit_list")))
+    lines.extend(_list_section("Fixed Blockers", task_metadata.get("fixed_blockers")))
+    lines.extend(_mapping_section("Layer Summary", task_metadata.get("layer_summary")))
+    lines.extend(
+        _paragraph_section(
+            "Old Naming Cleanup",
+            task_metadata.get("old_naming_cleanup_summary"),
+        )
+    )
+    lines.extend(
+        _paragraph_section(
+            "Semantic Scan",
+            task_metadata.get("semantic_scan_summary"),
+        )
+    )
+    lines.extend(
+        _mapping_section("Smoke And Compare", task_metadata.get("smoke_compare"))
+    )
+    non_pass_rows = [row for row in rows if row["status"] != "PASS"]
+    lines.extend(
+        [
+            "",
+            "## NOT_RUN / BLOCKED / FAIL",
+            "",
+        ]
+    )
+    if non_pass_rows:
+        for row in non_pass_rows:
+            lines.append(
+                f"- `{row['check']}`: `{row['status']}` - {row['details']}"
+            )
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
         "",
         "## Validation",
         "",
         "| Check | Status | Details |",
         "| --- | --- | --- |",
-    ]
+        ]
+    )
     for row in rows:
         lines.append(
             f"| `{row['check']}` | `{row['status']}` | {row['details']} |"
@@ -52,6 +92,31 @@ def render_pr_body(
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _paragraph_section(title: str, value: object) -> list[str]:
+    text = _clean_cell(str(value or ""))
+    if not text:
+        return []
+    return ["", f"## {title}", "", text]
+
+
+def _list_section(title: str, values: object) -> list[str]:
+    if not isinstance(values, list | tuple) or not values:
+        return []
+    lines = ["", f"## {title}", ""]
+    for value in values:
+        lines.append(f"- {_clean_cell(str(value))}")
+    return lines
+
+
+def _mapping_section(title: str, values: object) -> list[str]:
+    if not isinstance(values, dict) or not values:
+        return []
+    lines = ["", f"## {title}", ""]
+    for key in sorted(values):
+        lines.append(f"- `{_clean_cell(str(key))}`: {_clean_cell(str(values[key]))}")
+    return lines
 
 
 def validate_pr_body_against_evidence(

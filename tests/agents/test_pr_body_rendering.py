@@ -32,6 +32,13 @@ def test_pr_body_is_rendered_from_validation_evidence_statuses() -> None:
         "base_commit_before_task": "9666c9d",
         "final_sha": "abc123",
         "pr_url": "https://github.com/Sagiri317/quant-research-platform/pull/1",
+        "scope_summary": "Semantic closure without public API expansion.",
+        "commit_list": ["abc123 Fix research foundation semantic closure"],
+        "fixed_blockers": ["Removed prediction bundle vocabulary."],
+        "layer_summary": {"contracts": "SignalSpec moved to contracts/signals.py"},
+        "old_naming_cleanup_summary": "Retired names scanned clean.",
+        "semantic_scan_summary": "Architecture semantic gate passed.",
+        "smoke_compare": {"three_year_smoke": "PASS"},
     }
     validation_evidence = {
         "validation_table": [
@@ -46,6 +53,11 @@ def test_pr_body_is_rendered_from_validation_evidence_statuses() -> None:
     assert "| `semantic_scan` | `PASS` | ok |" in body
     assert "| `ruff` | `FAIL` | E501 |" in body
     assert "| `private_slow` | `NOT_RUN` |  |" in body
+    assert "Semantic closure without public API expansion." in body
+    assert "abc123 Fix research foundation semantic closure" in body
+    assert "`contracts`: SignalSpec moved to contracts/signals.py" in body
+    assert "`three_year_smoke`: PASS" in body
+    assert "`private_slow`: `NOT_RUN`" in body
     module.validate_pr_body_against_evidence(body, validation_evidence)
 
 
