@@ -51,6 +51,8 @@ class ComputePanelSpec(BaseModel):
 def validate_compute_panel(
     frame: pd.DataFrame,
     spec: ComputePanelSpec,
+    *,
+    segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """Validate and normalize a long-format compute panel."""
 
@@ -70,6 +72,9 @@ def validate_compute_panel(
     ]
     if missing_columns:
         raise ValueError(f"panel is missing columns: {missing_columns}.")
+    missing_segments = [column for column in segment_columns if column not in frame]
+    if missing_segments:
+        raise ValueError(f"segment columns are missing: {missing_segments}.")
 
     result = frame.copy()
     result[spec.timestamp_column] = pd.to_datetime(result[spec.timestamp_column])
@@ -79,18 +84,18 @@ def validate_compute_panel(
         raise ValueError("asset column contains missing assets.")
     result[spec.asset_column] = result[spec.asset_column].astype(str)
 
-    duplicated = result.duplicated([spec.timestamp_column, spec.asset_column])
+    key_columns = [*segment_columns, spec.timestamp_column, spec.asset_column]
+    duplicated = result.duplicated(key_columns)
     if duplicated.any():
+        if segment_columns:
+            raise ValueError("panel rows must have unique segment-timestamp-asset keys.")
         raise ValueError("panel rows must have unique timestamp-asset keys.")
 
     for column in (*spec.feature_columns, spec.label_column):
         if not pd.api.types.is_numeric_dtype(result[column]):
             raise TypeError(f"column {column!r} must be numeric.")
 
-    return result.sort_values(
-        [spec.timestamp_column, spec.asset_column],
-        kind="mergesort",
-    ).reset_index(drop=True)
+    return result.sort_values(key_columns, kind="mergesort").reset_index(drop=True)
 
 
 __all__ = ["ComputePanelSpec", "validate_compute_panel"]

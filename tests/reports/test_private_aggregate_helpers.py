@@ -8,6 +8,7 @@ import pytest
 from quant_research_platform.markets.implementations.a_share.verification import (
     private_aggregate,
 )
+from quant_research_platform.catalog.profiles import research_profile
 
 
 def test_private_aggregate_summarizes_frames_without_row_level_output() -> None:
@@ -153,6 +154,15 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         "evaluation_parity": "report_artifacts",
         "prediction_oos_smoke_parity": "report_artifacts",
     }
+    prediction_spec = research_profile().predictions.get(
+        "a_share_linear_mom_20d_prediction_2014"
+    )
+    prediction_area = next(
+        item for item in area_inputs if item.area == "prediction_oos_smoke_parity"
+    )
+    assert prediction_area.expected_period == (
+        f"{prediction_spec.test_start} through 2014-12-31"
+    )
 
     artifact_root = (
         tmp_path

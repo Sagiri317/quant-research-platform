@@ -36,6 +36,7 @@ web/test-results/
 data/raw/
 data/interim/
 data/processed/
+data/research/
 data/reference_docs/
 reports/private_real/
 secrets.*

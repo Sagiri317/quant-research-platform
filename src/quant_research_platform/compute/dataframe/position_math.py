@@ -168,7 +168,11 @@ def _leg_weights(
     if weight_config.method == "equal_weight_quantile":
         raw = np.ones(len(asset_values), dtype="float64")
     elif weight_config.method == "rank_weighted_quantile":
-        raw = np.arange(1, len(asset_values) + 1, dtype="float64")
+        raw = (
+            np.arange(len(asset_values), 0, -1, dtype="float64")
+            if sign < 0
+            else np.arange(1, len(asset_values) + 1, dtype="float64")
+        )
     elif weight_config.method == "zscore_weighted_quantile":
         std = float(np.std(feature_values, ddof=0))
         raw = (

@@ -20,6 +20,11 @@ _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
 _POSIX_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?<!\w)/(?:mnt|home|Users|tmp|var/tmp|private/tmp)/[^\r\n\t\"'<>|]+"
 )
+_ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
+    r"(?i)(?<!\w)/(?:[^\s,;\"'<>|]+/)*"
+    r"(?:data/(?:raw|interim|processed|research|reference_docs)"
+    r"(?:/[^\s,;\"'<>|]+)?|reports/private_real(?:/[^\s,;\"'<>|]+)?)"
+)
 _REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)\b(?:data/(?:raw|interim|processed|research|reference_docs)"
     r"(?:/[^\s,;\"'<>|]+)?|reports/private_real(?:/[^\s,;\"'<>|]+)?)"
@@ -70,6 +75,7 @@ def sanitize_public_text(text: object) -> str:
     result = _WINDOWS_DRIVE_PATH_RE.sub("[local-path]", result)
     result = _UNC_PATH_RE.sub("[local-path]", result)
     result = _POSIX_PRIVATE_PATH_RE.sub("[local-path]", result)
+    result = _ABSOLUTE_REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _PRIVATE_MARKER_RE.sub("[private]", result)
     result = _STOCK_CODE_RE.sub("[asset-id]", result)

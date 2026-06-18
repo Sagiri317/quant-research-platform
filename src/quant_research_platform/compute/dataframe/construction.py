@@ -43,7 +43,7 @@ def build_weighted_positions(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """为每个请求的 signal feature 构造 timestamp-level positions。"""
 
-    panel = validate_compute_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
     return _build_weighted_positions_from_validated_panel(
         panel,
         spec,

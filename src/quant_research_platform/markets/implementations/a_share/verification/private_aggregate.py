@@ -63,6 +63,7 @@ FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 # Local verification evidence runner source fixture; not an A-share market contract.
 LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"
+PREDICTION_OOS_SMOKE_ID = "a_share_linear_mom_20d_prediction_2014"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/panel/daily_panel": "full_historical_daily_panel_status",
@@ -348,9 +349,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     evaluation = (
         reports_root / "evaluation" / "a_share_mom_20d_forward_return_20d_2014"
     )
-    prediction = (
-        reports_root / "prediction" / "a_share_linear_mom_20d_prediction_2014"
-    )
+    prediction = reports_root / "prediction" / PREDICTION_OOS_SMOKE_ID
     return (
         AggregateInput(
             "processed_panel_parity",
@@ -393,7 +392,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         AggregateInput(
             "prediction_oos_smoke_parity",
             (prediction,),
-            "2014-01-01 through 2014-12-31",
+            _prediction_oos_expected_period(),
             "prediction OOS smoke",
             summary_kind="report_artifacts",
         ),
@@ -410,6 +409,13 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             "full historical daily panel",
         ),
     )
+
+
+def _prediction_oos_expected_period() -> str:
+    from quant_research_platform.catalog.profiles import research_profile
+
+    spec = research_profile().predictions.get(PREDICTION_OOS_SMOKE_ID)
+    return f"{spec.test_start} through {spec.test_end or '2014-12-31'}"
 
 
 def _dataset_inventory(

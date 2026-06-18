@@ -29,6 +29,15 @@ def test_sanitizer_redacts_windows_unc_and_posix_paths() -> None:
     assert "/tmp/" not in sanitized
 
 
+def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:
+    text = "/workspace/qrp/data/research/a_share/demo/_manifest/manifest.json"
+
+    sanitized = sanitize_public_text(text)
+
+    assert sanitized == "[private-path]"
+    assert "/workspace/qrp/[private-path]" not in sanitized
+
+
 def test_sanitizer_redacts_private_markers_stock_codes_and_credentials() -> None:
     text = (
         "data/raw/csmar/export.csv stock code 600000.SH "

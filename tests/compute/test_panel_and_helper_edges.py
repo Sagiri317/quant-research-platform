@@ -11,6 +11,9 @@ from quant_research_platform.compute.config import (
     WeightConfig,
 )
 from quant_research_platform.compute.dataframe import constraints
+from quant_research_platform.compute.dataframe.construction import (
+    build_weighted_positions,
+)
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     _cost_components,
     _direct_signal,
@@ -63,6 +66,31 @@ def test_compute_panel_spec_and_frame_validation_edges() -> None:
         validate_compute_panel(pd.concat([frame, frame.iloc[[0]]]), spec)
     with pytest.raises(TypeError, match="must be numeric"):
         validate_compute_panel(frame.assign(feature=["x", "y"]), spec)
+
+
+def test_validate_compute_panel_uses_segment_aware_uniqueness() -> None:
+    spec = ComputePanelSpec(feature_columns=("feature",), label_column="label")
+    segmented = pd.DataFrame(
+        {
+            "segment": ["s1", "s2"],
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            "asset": ["A", "A"],
+            "feature": [1.0, 2.0],
+            "label": [0.1, 0.2],
+        }
+    )
+
+    result = validate_compute_panel(segmented, spec, segment_columns=("segment",))
+
+    assert result["segment"].tolist() == ["s1", "s2"]
+    with pytest.raises(ValueError, match="unique segment-timestamp-asset keys"):
+        validate_compute_panel(
+            segmented.assign(segment=["s1", "s1"]),
+            spec,
+            segment_columns=("segment",),
+        )
+    with pytest.raises(ValueError, match="unique timestamp-asset keys"):
+        validate_compute_panel(segmented, spec)
 
 
 def test_portfolio_helper_validation_and_selection_edges() -> None:
@@ -151,6 +179,46 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
         "segment": "s1",
         "feature": "feature",
     }
+
+
+def test_rank_weighted_short_leg_weights_more_extreme_signals_more_heavily() -> None:
+    panel = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02"] * 4),
+            "asset": ["A", "B", "C", "D"],
+            "feature": [0.0, 1.0, 2.0, 3.0],
+            "label": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    spec = ComputePanelSpec(feature_columns=("feature",), label_column="label")
+
+    positions, _diagnostics = build_weighted_positions(
+        panel,
+        spec,
+        WeightConfig(
+            method="rank_weighted_quantile",
+            top_quantile=0.5,
+            bottom_quantile=0.5,
+            direction="long_high",
+        ),
+    )
+    long_high = positions.set_index("asset")["position"]
+    assert abs(long_high["A"]) > abs(long_high["B"])
+    assert abs(long_high["D"]) > abs(long_high["C"])
+
+    positions, _diagnostics = build_weighted_positions(
+        panel,
+        spec,
+        WeightConfig(
+            method="rank_weighted_quantile",
+            top_quantile=0.5,
+            bottom_quantile=0.5,
+            direction="long_low",
+        ),
+    )
+    long_low = positions.set_index("asset")["position"]
+    assert abs(long_low["D"]) > abs(long_low["C"])
+    assert abs(long_low["A"]) > abs(long_low["B"])
 
 
 def test_dataframe_tradability_helper_edges() -> None:

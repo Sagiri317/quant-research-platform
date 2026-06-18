@@ -56,7 +56,7 @@ def simulate_weighted_long_short_returns(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """基于 weighted positions 评估 portfolio returns。"""
 
-    panel = validate_compute_panel(frame, spec)
+    panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
     return _simulate_weighted_long_short_returns_from_validated_panel(
         panel,
         spec,

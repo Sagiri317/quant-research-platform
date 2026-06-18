@@ -153,6 +153,19 @@ def test_tensor_portfolio_helpers_cover_weight_methods_and_errors() -> None:
         sign=-1.0,
     )
     assert ranked.sum() == pytest.approx(-1.0)
+    assert abs(ranked[0]) > abs(ranked[1]) > abs(ranked[2])
+
+    ranked_long_low_short, _ = _leg_weight_values(
+        asset_indices=np.array([2, 1, 0]),
+        feature_values=values,
+        risk_values=None,
+        feature="factor",
+        weight_config=WeightConfig(method="rank_weighted_quantile"),
+        sign=-1.0,
+    )
+    assert abs(ranked_long_low_short[0]) > abs(ranked_long_low_short[1]) > abs(
+        ranked_long_low_short[2]
+    )
 
     zscore, fallback = _leg_weight_values(
         asset_indices=assets,
