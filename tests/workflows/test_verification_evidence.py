@@ -104,6 +104,7 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
                 output_root=tmp_path / "verification-output" / "bad-prediction-end",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
+                prediction_train_end="2015-01-01",
                 prediction_test_start="2015-01-02",
                 prediction_test_end="2015-01-01",
                 profile=research_profile(),
