@@ -41,7 +41,7 @@ and `EvaluationSpec`. IC and RankIC summaries use explicit valid-count fields;
 when no valid IC or RankIC exists, the corresponding summary statistics are
 `NaN` rather than `0.0`. Supported evaluation filter modes are `eligible`,
 `tradable`, and `unfiltered`; `tradable` is an execution-aware evaluation
-diagnostic only, not a backtest, live tradable PnL, or production trading
+diagnostic only, not a backtest, real-money-executable PnL, or production order execution
 result.
 
 Prediction bundles record fixed-shape `model_metadata` and
@@ -57,9 +57,9 @@ remains a historical research handoff, not label-free live inference. Missing
 model or prediction metadata fails closed in the report writer.
 
 Report manifest payload construction is private to
-`reports/report_artifacts.py`. Retired `reports/manifests.py`,
-`reports/bundles.py`, report repositories, report stores, and public report
-lookup remain outside the active `0.1.0` surface.
+`reports/report_artifacts.py`. Retired manifest/bundle helper modules, report
+repositories, report stores, and public report lookup remain outside the active
+`0.1.0` surface.
 
 ## Privacy
 

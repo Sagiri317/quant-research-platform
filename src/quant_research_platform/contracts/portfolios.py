@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from quant_research_platform.contracts.evaluations import SignalSpec
 from quant_research_platform.contracts.filtering import reject_filter_input_columns
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.signals import SignalSpec
 
 WEIGHT_METHODS = {
     "equal_weight_quantile",
@@ -28,7 +28,6 @@ class WeightConfig:
     portfolio_mode: str = "long_short"
     top_quantile: float = 0.2
     bottom_quantile: float = 0.2
-    cost_bps: float = 0.0
     risk_column: str | None = None
 
     def __post_init__(self) -> None:
@@ -44,7 +43,6 @@ class WeightConfig:
             raise ValueError(
                 "top_quantile + bottom_quantile must be less than or equal to 1."
             )
-        _validate_nonnegative(self.cost_bps, "cost_bps")
         if self.method == "inverse_vol_scaled_quantile" and not self.risk_column:
             raise ValueError("risk_column is required for inverse_vol_scaled_quantile.")
         _validate_optional_column_name(self.risk_column, "risk_column")
@@ -99,11 +97,12 @@ class PortfolioSpec:
     market_id: MarketId
     research_dataset_id: str
     signals: tuple[SignalSpec, ...]
-    label_column: str
+    return_source_column: str
+    frequency: str = "daily"
+    execution_lag_steps: int = 0
     weight_config: WeightConfig = field(default_factory=WeightConfig)
-    tradability_config: TradabilityConfig = field(default_factory=TradabilityConfig)
     cost_config: CostConfig = field(default_factory=CostConfig)
-    weight_column: str = "weight"
+    tradability_config: TradabilityConfig = field(default_factory=TradabilityConfig)
     run_type: str = "portfolio"
     contract_version: str = "0.1"
 
@@ -115,7 +114,7 @@ class PortfolioSpec:
         signal_ids = [signal.signal_id for signal in self.signals]
         if len(set(signal_ids)) != len(signal_ids):
             raise ValueError("portfolio_signal_ids_must_not_contain_duplicates")
-        signal_columns = [signal.column for signal in self.signals]
+        signal_columns = [signal.source_column for signal in self.signals]
         if len(set(signal_columns)) != len(signal_columns):
             raise ValueError("portfolio_signal_columns_must_not_contain_duplicates")
         overlaps = _cross_signal_id_column_overlaps(self.signals)
@@ -123,24 +122,31 @@ class PortfolioSpec:
             raise ValueError(
                 "portfolio_signal_id_column_overlap: " + ", ".join(overlaps)
             )
-        if not isinstance(self.label_column, str) or not self.label_column:
-            raise ValueError("portfolio_label_column_required")
-        if not isinstance(self.weight_column, str) or not self.weight_column:
-            raise ValueError("portfolio_weight_column_required")
+        if (
+            not isinstance(self.return_source_column, str)
+            or not self.return_source_column
+        ):
+            raise ValueError("portfolio_return_source_column_required")
+        if not isinstance(self.frequency, str) or not self.frequency:
+            raise ValueError("portfolio_frequency_required")
+        if self.frequency != "daily":
+            raise ValueError("unsupported_portfolio_frequency")
+        if not isinstance(self.execution_lag_steps, int) or isinstance(
+            self.execution_lag_steps,
+            bool,
+        ):
+            raise TypeError("execution_lag_steps must be an integer")
+        if self.execution_lag_steps < 0:
+            raise ValueError("execution_lag_steps_must_be_nonnegative")
         reject_filter_input_columns((*signal_ids, *signal_columns))
         invalid_labels = sorted(
-            set((*signal_ids, *signal_columns)).intersection({self.label_column})
+            set((*signal_ids, *signal_columns)).intersection(
+                {self.return_source_column}
+            )
         )
         if invalid_labels:
             raise ValueError(
-                "portfolio_signal_label_overlap: " + ", ".join(invalid_labels)
-            )
-        invalid_weights = sorted(
-            set((*signal_ids, *signal_columns)).intersection({self.weight_column})
-        )
-        if invalid_weights:
-            raise ValueError(
-                "portfolio_signal_weight_overlap: " + ", ".join(invalid_weights)
+                "portfolio_signal_return_overlap: " + ", ".join(invalid_labels)
             )
 
 
@@ -168,7 +174,7 @@ def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[st
         signal.signal_id
         for index, signal in enumerate(signals)
         for other_index, other in enumerate(signals)
-        if index != other_index and signal.signal_id == other.column
+        if index != other_index and signal.signal_id == other.source_column
     }
     return sorted(overlaps)
 

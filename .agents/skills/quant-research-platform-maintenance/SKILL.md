@@ -1,6 +1,6 @@
 ---
 name: quant-research-platform-maintenance
-description: 用于 QRP / quant-research-platform 仓库内的治理、维护、任务路由、实现边界、审查、handoff 包装、merge gate、private-safety、公有 API/CLI 合同检查、owner-layer routing，以及 Codex/GPT/Claude 工作流纪律。不要用于 live trading、deployment、vendor login、广泛 private data access 或外部 API 集成。
+description: 用于 QRP / quant-research-platform 仓库内的治理、维护、任务路由、实现边界、审查、handoff 包装、merge gate、private-safety、公有 API/CLI 合同检查、owner-layer routing，以及 Codex/GPT/Claude 工作流纪律。不要用于 real-money order execution、deployment、vendor login、广泛 private data access 或外部 API 集成。
 ---
 
 # QRP 维护与治理 skill（Quant Research Platform Maintenance）

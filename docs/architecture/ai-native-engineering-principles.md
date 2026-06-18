@@ -15,6 +15,6 @@ This project uses AI agents for local implementation work, but QRP Clean Rewrite
 
 ## Guardrails
 
-- Do not add frontend, deployment, scheduler, worker, broker, exchange, or live-trading surfaces in this phase.
+- Do not add frontend, deployment, scheduler, worker, execution-venue, market-access, or real-money execution surfaces in this phase.
 - Do not turn old generated artifacts or old command names into source of truth.
 - Mechanical contract checks belong in tests or scripts, not only in prose.

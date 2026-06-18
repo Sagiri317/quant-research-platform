@@ -26,8 +26,4 @@ class PredictionCatalog:
         return tuple(self._items[key] for key in sorted(self._items))
 
 
-def default_prediction_column() -> str:
-    return "prediction_score"
-
-
-__all__ = ["PredictionCatalog", "default_prediction_column"]
+__all__ = ["PredictionCatalog"]

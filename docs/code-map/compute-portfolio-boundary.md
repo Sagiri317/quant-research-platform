@@ -14,7 +14,7 @@ Focused portfolio compute entry points are split into owner modules:
 - `compute/tensor/portfolio_returns.py`
 
 These modules must not gain storage, catalog, API, workflow, market,
-broker/exchange, paper trading, or live trading responsibilities. New portfolio
+external execution venue, simulated order execution, or real-money order execution responsibilities. New portfolio
 logic should be assigned to the focused module that owns the behavior. The old
 `compute/dataframe/portfolio.py` and `compute/tensor/portfolio.py` facade modules
 are retired clean-rewrite entrypoints.

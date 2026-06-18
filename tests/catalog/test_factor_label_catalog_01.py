@@ -5,8 +5,12 @@ import pytest
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.profiles import research_profile
+from quant_research_platform.catalog.reports import ReportCatalog
+from quant_research_platform.catalog.workflows import WorkflowCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
+from quant_research_platform.contracts.reports import ReportDefinition
+from quant_research_platform.contracts.workflows import WorkflowSpec
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
@@ -100,8 +104,36 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
     with pytest.raises(ValueError, match="duplicate_label_definition"):
         catalog.register(definition)
 
-    catalog.register(definition, replace=True)
+    assert catalog.get("forward_return_20d") == definition
     assert catalog.list() == (definition,)
+
+
+def test_report_catalog_rejects_duplicate_definitions() -> None:
+    catalog = ReportCatalog()
+    definition = ReportDefinition(
+        report_definition_id="evaluation_report_private",
+        display_name="Evaluation report",
+        run_type="evaluation",
+    )
+
+    catalog.register(definition)
+    with pytest.raises(ValueError, match="duplicate_report_definition"):
+        catalog.register(definition)
+
+    assert catalog.get("evaluation_report_private") == definition
+    assert catalog.list() == (definition,)
+
+
+def test_workflow_catalog_is_register_get_list_with_duplicate_validation() -> None:
+    catalog = WorkflowCatalog()
+    spec = WorkflowSpec(workflow_id="research_workflow", step_ids=("build",))
+
+    catalog.register(spec)
+    with pytest.raises(ValueError, match="duplicate_workflow"):
+        catalog.register(spec)
+
+    assert catalog.get("research_workflow") == spec
+    assert catalog.list() == (spec,)
 
 
 def test_source_registry_entries_are_internal_only() -> None:

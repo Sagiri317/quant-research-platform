@@ -17,8 +17,8 @@ def report_catalog() -> ReportCatalog:
     )
     catalog.register(
         ReportDefinition(
-            report_definition_id="prediction_bundle_private",
-            display_name="Private prediction bundle",
+            report_definition_id="prediction_artifacts_private",
+            display_name="Private prediction artifacts",
             run_type="prediction",
         )
     )

@@ -42,6 +42,7 @@ def test_dataframe_portfolio_returns_calculates_returns_from_positions() -> None
         cost_breakdown=cost,
         weight_config=WeightConfig(),
         segment_columns=("segment",),
+        return_source_column="label",
     )
 
     assert returns["net_portfolio_return"].round(6).tolist() == [0.028]
@@ -57,7 +58,7 @@ def test_dataframe_portfolio_return_record_handles_empty_or_missing_legs() -> No
         portfolio_mode="long_short",
         positions={"A": 1.0},
         label_lookup=label_lookup,
-        label_column="label",
+        return_source_column="label",
         turnover=1.0,
         cost=0.0,
         segment_columns=(),
@@ -68,7 +69,7 @@ def test_dataframe_portfolio_return_record_handles_empty_or_missing_legs() -> No
         portfolio_mode="long_only",
         positions={"A": 1.0, "C": -1.0},
         label_lookup=label_lookup,
-        label_column="label",
+        return_source_column="label",
         turnover=1.0,
         cost=0.001,
         segment_columns=(),

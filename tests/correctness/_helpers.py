@@ -856,13 +856,12 @@ def correctness_research_dataset_catalog(
     )
     feature_transforms = (
         (
-            FeatureTransformSpec(
-                transform_id="mom_20d_zscore",
-                market_id=MarketId("a_share"),
-                source_factor_columns=("mom_20d",),
-                output_feature_columns=("mom_20d_zscore",),
-                transform="zscore",
-            ),
+                FeatureTransformSpec(
+                    transform_id="mom_20d_zscore",
+                    source_columns=("mom_20d",),
+                    output_columns=("mom_20d_zscore",),
+                    transform="cross_sectional_zscore",
+                ),
         )
         if include_feature_transform
         else ()

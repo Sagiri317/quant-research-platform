@@ -73,7 +73,7 @@ metadata. The research dataset requirements route is read-only and does not
 build artifacts. Source/interim/processed materialization is internal. The API
 does not
 expose private real-data execution, deployment, scheduler, worker, paper/live
-trading, external data, broker/exchange, or website UI contracts.
+trading, external data, external execution venue, or website UI contracts.
 
 ## CLI Flow
 
@@ -103,7 +103,7 @@ The existing private verification evidence harness is exposed through
 optional internal evaluation and prediction window overrides, but this does not
 create public `evaluate`, `predict`, or `report` commands. It is a private local
 verification harness, not a public CLI, not a public execution mode, not a
-public evaluate, predict, or report command, not paper or live trading, does not
+public evaluate, predict, or report command, not simulated or real-money order execution, does not
 promise returns, and does not output row-level private data.
 
 ## Narrow Follow-up Notes

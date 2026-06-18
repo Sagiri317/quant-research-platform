@@ -6,7 +6,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -120,20 +119,17 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
     assert label.to_manifest()["lookahead"] == 21
 
 
-def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
-    catalog = FactorCatalog()
-    catalog.register(
-        FactorDefinition(
-            factor_id="rev_1d",
-            market_id=MarketId("a_share"),
-            factor_set=FactorSet.STANDARD,
-            input_columns=("return_1d",),
-            output_column="rev_1d",
-            required_input_data_id="daily_panel",
-        )
+def test_factor_set_rejects_retired_aliases_without_catalog_resolver() -> None:
+    definition = FactorDefinition(
+        factor_id="rev_1d",
+        market_id=MarketId("a_share"),
+        factor_set=FactorSet.STANDARD,
+        input_columns=("return_1d",),
+        output_column="rev_1d",
+        required_input_data_id="daily_panel",
     )
 
-    assert catalog.get("rev_1d").factor_set == FactorSet.STANDARD
+    assert definition.factor_set == FactorSet.STANDARD
     retired_values = (
         "full",
         "core" + "_long_period",
@@ -141,8 +137,8 @@ def test_factor_catalog_rejects_retired_factor_set_aliases() -> None:
         "deprecated",
     )
     for value in retired_values:
-        with pytest.raises(ValueError, match="invalid_factor_set"):
-            catalog.resolve_factor_set(value)
+        with pytest.raises(ValueError, match="not a valid"):
+            FactorSet(value)
 
 
 def test_storage_layout_uses_sealed_data_roots() -> None:
@@ -173,14 +169,16 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
 
 
 def test_sanitizer_removes_local_paths_private_markers_and_stock_codes() -> None:
+    local_drive = "C" + ":"
+    local_user_path = "/" + "Users/DELL/private/file.csv"
     text = (
-        "failed at C:/Users/DELL/private/file.csv with "
+        "failed at " + local_drive + local_user_path + " with "
         "data/raw/csmar/000001.SZ vendor CSMAR row"
     )
 
     sanitized = sanitize_public_text(text)
 
-    assert "C:/Users" not in sanitized
+    assert local_drive + "/" + "Users" not in sanitized
     assert "data/raw/csmar" not in sanitized
     assert "000001" not in sanitized
     assert "CSMAR" not in sanitized

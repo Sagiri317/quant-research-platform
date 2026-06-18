@@ -56,6 +56,7 @@ def simulate_weighted_long_short_returns(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """    weighted positions     portfolio returns ?"""
 
+    return_source_column = _require_return_source_column(return_source_column)
     panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
     return _simulate_weighted_long_short_returns_from_validated_panel(
         panel,
@@ -143,7 +144,7 @@ def _stream_weighted_portfolio_from_validated_panel(
     if cost_config is None:
         cost_config = CostConfig()
     _validate_tradability_columns(panel, tradability_config)
-    return_source_column = return_source_column or spec.label_column
+    return_source_column = _require_return_source_column(return_source_column)
     signals = _select_signals(spec, portfolio_signals)
     group_columns = [*segment_columns, spec.timestamp_column]
 
@@ -190,7 +191,6 @@ def _stream_weighted_portfolio_from_validated_panel(
                 buy_turnover=buy_turnover,
                 sell_turnover=sell_turnover,
                 turnover=turnover,
-                weight_config=weight_config,
                 cost_config=cost_config,
             )
             base_values = {
@@ -221,7 +221,7 @@ def _stream_weighted_portfolio_from_validated_panel(
                 portfolio_mode=weight_config.portfolio_mode,
                 positions=current,
                 label_lookup=label_lookup,
-                label_column=return_source_column,
+                return_source_column=return_source_column,
                 turnover=turnover,
                 cost=float(costs["total_cost"]),
                 segment_columns=segment_columns,
@@ -248,8 +248,9 @@ def simulate_long_short_returns(
     spec: ComputePanelSpec,
     top_quantile: float = 0.2,
     bottom_quantile: float = 0.2,
-    cost_bps: float = 0.0,
+    cost_config: CostConfig | None = None,
     signal_column: str | None = None,
+    return_source_column: str | None = None,
 ) -> pd.DataFrame:
     """    turnover-based costs     equal-weight long-short returns ?"""
 
@@ -261,9 +262,10 @@ def simulate_long_short_returns(
             method="equal_weight_quantile",
             top_quantile=top_quantile,
             bottom_quantile=bottom_quantile,
-            cost_bps=cost_bps,
         ),
+        cost_config=cost_config,
         portfolio_signals=(signal,),
+        return_source_column=return_source_column,
     )
     return returns[RETURNS_COLUMNS]
 
@@ -279,7 +281,7 @@ def _calculate_long_short_from_positions(
     return_source_column: str | None = None,
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
-    return_source_column = return_source_column or spec.label_column
+    return_source_column = _require_return_source_column(return_source_column)
     lookup_columns = [*segment_columns, spec.timestamp_column, spec.asset_column]
     lookup_index = [*segment_columns, "timestamp", "asset"]
     label_lookup = (
@@ -340,7 +342,7 @@ def _calculate_long_short_from_positions(
                 **{column: group_values[column] for column in segment_columns},
                 "timestamp": group_values["timestamp"],
                 "signal": group_values["signal"],
-                "label": return_source_column,
+                "return_source_column": return_source_column,
                 "portfolio_mode": weight_config.portfolio_mode,
                 "long_return": long_return,
                 "short_return": short_return,
@@ -361,11 +363,20 @@ def _calculate_long_short_from_positions(
 def _timestamp_label_lookup(
     timestamp_frame: pd.DataFrame,
     spec: ComputePanelSpec,
-    label_column: str,
+    return_source_column: str,
 ) -> dict[str, float]:
     assets = timestamp_frame[spec.asset_column].astype(str).to_numpy(copy=False)
-    labels = timestamp_frame[label_column].to_numpy(dtype="float64", copy=False)
+    labels = timestamp_frame[return_source_column].to_numpy(
+        dtype="float64",
+        copy=False,
+    )
     return dict(zip(assets, labels, strict=True))
+
+
+def _require_return_source_column(return_source_column: str | None) -> str:
+    if not isinstance(return_source_column, str) or not return_source_column:
+        raise ValueError("portfolio_return_source_column_required")
+    return return_source_column
 
 def _build_portfolio_return_record_from_positions(
     *,
@@ -373,7 +384,7 @@ def _build_portfolio_return_record_from_positions(
     portfolio_mode: str,
     positions: dict[str, float],
     label_lookup: dict[str, float],
-    label_column: str,
+    return_source_column: str,
     turnover: float,
     cost: float,
     segment_columns: tuple[str, ...],
@@ -401,7 +412,7 @@ def _build_portfolio_return_record_from_positions(
         **{column: group_values[column] for column in segment_columns},
         "timestamp": group_values["timestamp"],
         "signal": group_values["signal"],
-        "label": label_column,
+        "return_source_column": return_source_column,
         "portfolio_mode": portfolio_mode,
         "long_return": float(long_return),
         "short_return": float(short_return),

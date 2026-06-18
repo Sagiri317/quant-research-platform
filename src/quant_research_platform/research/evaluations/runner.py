@@ -28,11 +28,11 @@ def run_evaluation_from_research_dataset(
     evaluation_catalog: EvaluationCatalog,
     run_id: str,
     time_window: TimeWindow | None = None,
-    n_groups: int = 5,
+    n_groups: int | None = None,
 ) -> Path:
     spec = evaluation_catalog.get(run_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
-    signal_columns = tuple(signal.column for signal in spec.signals)
+    signal_columns = tuple(signal.source_column for signal in spec.signals)
     read_columns = (
         *dataset_spec.primary_key,
         *signal_columns,
@@ -50,11 +50,12 @@ def run_evaluation_from_research_dataset(
         _validated_evaluation_chunks(
             chunks,
             dataset_spec=dataset_spec,
-            signal_columns=signal_columns,
+            signals=spec.signals,
             label_columns=spec.label_columns,
         ),
         spec,
-        n_groups=n_groups,
+        n_groups=spec.n_groups if n_groups is None else n_groups,
+        source_columns_by_kind=_signal_source_columns_by_kind(dataset_spec),
     )
     return write_evaluation_result(result, layout=layout)
 
@@ -87,17 +88,25 @@ def _validated_evaluation_chunks(
     chunks,
     *,
     dataset_spec,
-    signal_columns: tuple[str, ...],
+    signals,
     label_columns: tuple[str, ...],
 ):
     for chunk in chunks:
         validate_evaluation_input(
             chunk,
             dataset_spec,
-            signal_columns=signal_columns,
+            signals=signals,
             label_columns=label_columns,
         )
         yield chunk
+
+
+def _signal_source_columns_by_kind(dataset_spec) -> dict[str, tuple[str, ...]]:
+    return {
+        "factor": tuple(dataset_spec.factor_columns),
+        "feature": tuple(dataset_spec.feature_columns),
+        "prediction": tuple(dataset_spec.context_columns),
+    }
 
 
 __all__ = ["run_evaluation_from_research_dataset", "write_evaluation_result"]

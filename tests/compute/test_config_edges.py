@@ -17,7 +17,6 @@ from quant_research_platform.contracts.portfolios import (
         ({"top_quantile": True}, "top_quantile must be numeric"),
         ({"bottom_quantile": 0}, "bottom_quantile must be greater"),
         ({"top_quantile": 0.8, "bottom_quantile": 0.8}, "less than or equal"),
-        ({"cost_bps": -1}, "cost_bps must be nonnegative"),
         (
             {"method": "inverse_vol_scaled_quantile"},
             "risk_column is required",

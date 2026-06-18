@@ -10,11 +10,11 @@ import quant_research_platform.reports.report_artifacts as report_artifacts_modu
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
-    SignalSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.reports.report_artifacts import (
     write_evaluation_report_artifacts,
     write_prediction_report_artifacts,
@@ -475,8 +475,6 @@ def _prediction_spec() -> PredictionSpec:
         prediction_id="pred-run",
         model_id="linear-demo",
         research_dataset_id="demo",
-        prediction_column="prediction",
-        primary_key=("market_id", "asset_id", "timestamp"),
         train_end="2014-01-02",
         test_start="2014-01-03",
         test_end="2014-01-03",
@@ -485,8 +483,8 @@ def _prediction_spec() -> PredictionSpec:
 
 def _prediction_report_spec() -> ReportSpec:
     return ReportSpec(
-        report_id="prediction_bundle",
-        report_definition_id="prediction_bundle_private",
+        report_id="prediction_artifacts",
+        report_definition_id="prediction_artifacts_private",
         run_id="pred-run",
         market_id=MarketId("a_share"),
         run_type="prediction",
@@ -496,15 +494,14 @@ def _prediction_report_spec() -> ReportSpec:
 def _prediction_frame() -> pd.DataFrame:
     frame = pd.DataFrame(
         {
-            "market_id": ["a_share"],
             "asset_id": ["asset-a"],
             "timestamp": pd.to_datetime(["2014-01-03"]),
-            "prediction": [0.25],
+            "prediction_score": [0.25],
         }
     )
     frame.attrs["model_metadata"] = {
         "contract_version": "0.1",
-        "model_algorithm": "linear",
+        "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
@@ -513,12 +510,22 @@ def _prediction_frame() -> pd.DataFrame:
         "rows_after_input_label_dropna": 2,
         "train_start": "2014-01-02",
         "train_end": "2014-01-02",
+        "test_start": "2014-01-03",
+        "test_end": "2014-01-03",
+        "oos_start": "2014-01-03",
+        "oos_end": "2014-01-03",
         "input_factor_columns": ["mom_20d"],
         "input_feature_columns": [],
         "input_columns": ["mom_20d"],
         "input_count": 1,
         "label_column": "forward_return_20d",
+        "hyperparameters": {},
+        "random_seed": None,
+        "max_train_rows": None,
+        "purge_gap_steps": 0,
+        "dependency_status": {"status": "available", "package": "sklearn"},
         "coefficient_count": 2,
+        "feature_importance": {"mom_20d": 1.0},
     }
     frame.attrs["prediction_metadata"] = {
         "contract_version": "0.1",
@@ -538,7 +545,7 @@ def _prediction_frame() -> pd.DataFrame:
         "is_final_oos_window": False,
         "input_columns": ["mom_20d"],
         "input_count": 1,
-        "prediction_column": "prediction",
+        "prediction_column": "prediction_score",
     }
     return frame
 
@@ -547,7 +554,7 @@ def _two_row_prediction_frame() -> pd.DataFrame:
     first = _prediction_frame()
     second = first.copy()
     second["asset_id"] = ["asset-b"]
-    second["prediction"] = [0.35]
+    second["prediction_score"] = [0.35]
     frame = pd.concat([first, second], ignore_index=True)
     frame.attrs["model_metadata"] = dict(first.attrs["model_metadata"])
     frame.attrs["prediction_metadata"] = {
@@ -570,7 +577,7 @@ def _evaluation_spec() -> EvaluationSpec:
 def _signal_spec() -> SignalSpec:
     return SignalSpec(
         signal_id="mom_20d",
-        column="mom_20d",
+        source_column="mom_20d",
         source_kind="factor",
     )
 

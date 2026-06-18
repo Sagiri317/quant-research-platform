@@ -4,7 +4,7 @@
 
 ## 1. 项目边界
 
-QRP / Quant Research Platform 是本地量化研究平台，不是投资建议、paper trading（模拟交易）、live trading（实盘交易）、broker/exchange connector（券商/交易所连接器）或生产部署系统。
+QRP / Quant Research Platform 是本地量化研究平台，不是投资建议、simulated order execution（模拟交易）、real-money order execution（实盘交易）、external execution-venue connector（券商/交易所连接器）或生产部署系统。
 
 当前开发基线是 `feature/qrp-clean-rewrite`。除非用户明确提出 merge/release 任务，不要把 `main` 当作当前实现目标。
 
@@ -36,7 +36,7 @@ qrp-private evidence run
 
 `qrp-private evidence run` 是 private local verification harness，用于本地
 smoke/evidence generation；不是 public CLI；不是 public execution mode；不是
-public evaluate、predict 或 report command；不是 paper/live trading；不承诺收益；
+public evaluate、predict 或 report command；不是 simulated or real-money order execution；不承诺收益；
 不输出 row-level private data。
 
 ## 2. 不可违反原则
@@ -88,7 +88,7 @@ governance-redesign | apply-only-validation | ambiguous
 - 新增 public registry、store、facade、service、compatibility layer、execution mode、artifact type 或 dependency。
 - 新增顶层包、目录搬迁、跨层重构。
 - 需要访问 private data，但任务授权不清。
-- 涉及 deployment、scheduler、worker、model registry、feature store、external LLM API、vendor API、broker/exchange connector、paper/live trading 或交易自动化。
+- 涉及 deployment、scheduler、worker、model registry、feature store、external LLM API、vendor API、external execution-venue connector、simulated or real-money order execution 或交易自动化。
 - 验证失败或未知，但继续推进必须把它写成 `PASS`。
 - 同类测试失败反复不清，或出现性能/内存回退。
 

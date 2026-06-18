@@ -10,17 +10,21 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 
+PREDICTION_SCORE_COLUMN = "prediction_score"
+PREDICTION_PRIMARY_KEY = ("timestamp", "asset_id")
+PREDICTION_OUTPUT_COLUMNS = (*PREDICTION_PRIMARY_KEY, PREDICTION_SCORE_COLUMN)
+
 
 @dataclass(frozen=True)
 class PredictionSpec:
     prediction_id: str
     model_id: str
     research_dataset_id: str
-    prediction_column: str
-    primary_key: tuple[str, ...]
     train_end: str
     test_start: str
     test_end: str | None = None
+    prediction_column: str = PREDICTION_SCORE_COLUMN
+    primary_key: tuple[str, ...] = PREDICTION_PRIMARY_KEY
     run_type: str = "prediction"
     prediction_mode: str = "minimal_oos"
     sample_filter_mode: SampleFilterMode = "eligible"
@@ -32,6 +36,11 @@ class PredictionSpec:
         if self.contract_version != "0.1":
             raise ValueError("unsupported_prediction_contract_version")
         validate_run_id(self.prediction_id)
+        if (
+            self.prediction_column != PREDICTION_SCORE_COLUMN
+            or self.primary_key != PREDICTION_PRIMARY_KEY
+        ):
+            raise ValueError("prediction_output_columns_must_be_fixed")
         if self.prediction_mode not in {"minimal_oos", "oos_smoke"}:
             raise ValueError("unsupported_prediction_mode")
         validate_sample_filter_mode(self.sample_filter_mode, owner="prediction")
@@ -43,4 +52,9 @@ class PredictionSpec:
             object.__setattr__(self, "is_final_oos_window", False)
 
 
-__all__ = ["PredictionSpec"]
+__all__ = [
+    "PREDICTION_OUTPUT_COLUMNS",
+    "PREDICTION_PRIMARY_KEY",
+    "PREDICTION_SCORE_COLUMN",
+    "PredictionSpec",
+]

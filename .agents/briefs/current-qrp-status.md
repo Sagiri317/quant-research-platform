@@ -38,7 +38,7 @@ qrp-private evidence run
 
 `qrp-private evidence run` 是 private local verification harness，用于本地
 smoke/evidence generation；不是 public CLI；不是 public execution mode；不是
-public evaluate、predict 或 report command；不是 paper/live trading；不承诺收益；
+public evaluate、predict 或 report command；不是 simulated or real-money order execution；不承诺收益；
 不输出 row-level private data。
 
 不要把 source/interim/processed materialization、private evidence regeneration、evaluation/prediction execution 暴露成公共 API/CLI。
@@ -96,4 +96,4 @@ reports/private_real/
 
 ## 当前禁止扩张
 
-未经明确批准，不新增：frontend/deployment/scheduler/worker/model registry/feature store/external data API/external LLM API/broker/exchange connector/paper trading/live trading/public run API/public artifact lifecycle API/compatibility shim/legacy alias/public facade。
+未经明确批准，不新增：frontend/deployment/scheduler/worker/model registry/feature store/external data API/external LLM API/external execution-venue connector/simulated order execution/real-money order execution/public run API/public artifact lifecycle API/compatibility shim/legacy alias/public facade。

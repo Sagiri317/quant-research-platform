@@ -23,6 +23,12 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
+from quant_research_platform.markets.implementations.a_share.research_scenarios import (
+    default_a_share_evaluation_period,
+    default_a_share_evaluation_run_id,
+    default_a_share_prediction_oos_period,
+    default_a_share_prediction_smoke_id,
+)
 from quant_research_platform.reports.verification_evidence import (
     render_private_verification_summary_markdown,
     render_public_safe_evidence_markdown,
@@ -63,7 +69,6 @@ FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 # Local verification evidence runner source fixture; not an A-share market contract.
 LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"
-PREDICTION_OOS_SMOKE_ID = "a_share_linear_mom_20d_prediction_2014"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/panel/daily_panel": "full_historical_daily_panel_status",
@@ -346,10 +351,16 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         / MARKET_ID
         / A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
-    evaluation = (
-        reports_root / "evaluation" / "a_share_mom_20d_forward_return_20d_2014"
+    evaluation_roots = _report_category_roots(
+        reports_root,
+        category="evaluation",
+        preferred_id=default_a_share_evaluation_run_id(),
     )
-    prediction = reports_root / "prediction" / PREDICTION_OOS_SMOKE_ID
+    prediction_roots = _report_category_roots(
+        reports_root,
+        category="prediction",
+        preferred_id=default_a_share_prediction_smoke_id(),
+    )
     return (
         AggregateInput(
             "processed_panel_parity",
@@ -384,14 +395,14 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         ),
         AggregateInput(
             "evaluation_parity",
-            (evaluation,),
-            "2014-01-29 through 2014-12-31",
+            evaluation_roots,
+            default_a_share_evaluation_period(),
             "evaluation",
             summary_kind="report_artifacts",
         ),
         AggregateInput(
             "prediction_oos_smoke_parity",
-            (prediction,),
+            prediction_roots,
             _prediction_oos_expected_period(),
             "prediction OOS smoke",
             summary_kind="report_artifacts",
@@ -411,11 +422,26 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     )
 
 
-def _prediction_oos_expected_period() -> str:
-    from quant_research_platform.catalog.profiles import research_profile
+def _report_category_roots(
+    reports_root: Path,
+    *,
+    category: str,
+    preferred_id: str,
+) -> tuple[Path, ...]:
+    preferred = reports_root / category / preferred_id
+    if preferred.exists():
+        return (preferred,)
+    category_root = reports_root / category
+    if not category_root.exists():
+        return (preferred,)
+    discovered = tuple(
+        sorted(path for path in category_root.iterdir() if path.is_dir())
+    )
+    return discovered if discovered else (preferred,)
 
-    spec = research_profile().predictions.get(PREDICTION_OOS_SMOKE_ID)
-    return f"{spec.test_start} through {spec.test_end or '2014-12-31'}"
+
+def _prediction_oos_expected_period() -> str:
+    return default_a_share_prediction_oos_period()
 
 
 def _dataset_inventory(
@@ -1135,7 +1161,7 @@ def _available_key_columns(frame: pd.DataFrame) -> list[str]:
     if "timestamp" in frame.columns:
         secondary = [
             column
-            for column in ("timestamp", "feature", "label", "group")
+            for column in ("timestamp", "signal", "label", "group")
             if column in frame.columns
         ]
         return secondary if secondary else ["timestamp"]

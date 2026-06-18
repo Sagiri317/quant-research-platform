@@ -130,6 +130,10 @@ APPROVED_FIELD_SPEC_FILES = {
 }
 
 APPROVED_WRITER_MODULES = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "render_pr_body_from_validation_evidence.py"
+    ),
     Path("src/quant_research_platform/storage/atomic.py"),
     Path("src/quant_research_platform/storage/datasets.py"),
     Path("src/quant_research_platform/storage/manifests.py"),
@@ -273,7 +277,7 @@ PRIVATE_LOCAL_CLI_LINES = (
     "not a public CLI",
     "not a public execution mode",
     "not a public evaluate, predict, or report command",
-    "not paper or live trading",
+    "not simulated or real-money order execution",
     "does not promise returns",
     "does not output row-level private data",
 )
@@ -451,6 +455,96 @@ def test_active_tree_has_no_retired_data_layer_structure_vocabulary() -> None:
             for name, pattern in RETIRED_DATA_LAYER_STRUCTURE_PATTERNS:
                 if pattern.search(line):
                     hits.append(f"{path}:{line_number}: {name}: {line.strip()}")
+
+    assert hits == []
+
+
+def test_research_foundation_semantic_closure_terms_are_retired() -> None:
+    forbidden_terms = (
+        "model" + "_family",
+        "Model" + "Family",
+        "EvaluationSpec." + "feature_columns",
+        "ComputePanelSpec." + "feature_columns",
+        "evaluate" + "_factor_frame",
+        "feature" + "_ic",
+        "feature" + "_rankic",
+        "grouped" + "_feature",
+        "fit_linear" + "_baseline_result",
+        "_fit_linear" + "_baseline_result_from_frames",
+        "linear" + "_baseline",
+        "research/models/" + "base" + "line.py",
+        "base" + "line.py",
+        "prediction" + "_bundle",
+        "Prediction" + "Bundle",
+        "PREDICTION" + "_BUNDLE",
+        "bundle" + "_private",
+        "bundle" + "_columns",
+        "bundle" + "_schema",
+        "bundle" + "_metadata",
+        "build_prediction" + "_bundle",
+        "write_prediction" + "_bundle",
+        "missing_prediction" + "_" + "bundle" + "_columns",
+        "unregistered_prediction" + "_" + "bundle" + "_columns",
+        "prediction" + "_" + "bundle" + "_private",
+        "compute/" + "config.py",
+        "quant_research_platform.compute." + "config",
+        "from quant_research_platform.compute." + "config import",
+        "PortfolioSpec." + "label_column",
+        "portfolio." + "label_column",
+        "WeightConfig." + "cost_bps",
+        "weight_config." + "cost_bps",
+        "cost_bps in weight " + "config",
+        "SignalSpec(" + "column=",
+        'direction="' + "higher" + '"',
+        'direction="' + "lower" + '"',
+        "Backtest" + "Spec",
+        "Backtest" + "Engine",
+        "daily" + "_backtest",
+        "daily" + "_rebalance",
+        "daily" + "_open",
+        "open" + "_backtest",
+        "paper" + "_trading",
+        "live" + "_trading",
+        "br" + "oker",
+    )
+    negative_assertion_allowlist = {
+        Path("tests/contracts/test_research_semantics_contracts.py"): (
+            "model" + "_family",
+        ),
+        Path("tests/compute/test_cost_config_semantic_ownership.py"): (
+            "weight_config." + "cost_bps",
+        ),
+        Path("tests/reports/test_prediction_artifact_semantic_names.py"): (
+            "prediction" + "_" + "bundle" + "_private",
+            "missing_prediction" + "_" + "bundle" + "_columns",
+            "unregistered_prediction" + "_" + "bundle" + "_columns",
+        ),
+        Path("tests/research/test_model_prediction_semantic_names.py"): (
+            "build_prediction" + "_bundle",
+            "write_prediction" + "_bundle",
+        ),
+        Path("tests/contracts/test_research_foundation_semantic_contracts.py"): (
+            'direction="' + "higher" + '"',
+        ),
+    }
+
+    current_file = Path(__file__).resolve()
+    hits: list[str] = []
+    for path in _iter_text_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        allowed = negative_assertion_allowlist.get(path, ())
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for term in forbidden_terms:
+                if term not in line:
+                    continue
+                if any(allowed_term in line for allowed_term in allowed):
+                    continue
+                hits.append(f"{path}:{line_number}: {term}: {line.strip()}")
 
     assert hits == []
 

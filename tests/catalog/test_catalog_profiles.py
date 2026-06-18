@@ -23,7 +23,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     catalog as processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.research_profiles import (
-    a_share_research_dataset_catalog,
+    build_a_share_research_dataset_catalog,
 )
 
 
@@ -61,7 +61,7 @@ def test_local_profile_research_dataset_catalog_delegates_to_a_share_owner() -> 
     profile_spec = catalogs.research_datasets.get(
         A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
-    owner_spec = a_share_research_dataset_catalog().get(
+    owner_spec = build_a_share_research_dataset_catalog().get(
         A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 

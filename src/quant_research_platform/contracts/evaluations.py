@@ -3,44 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING
 
 from quant_research_platform.contracts.filtering import (
     EvaluationFilterMode,
-    reject_filter_input_columns,
     validate_evaluation_filter_mode,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.run_id import validate_run_id
 
-SignalSourceKind = Literal["factor", "feature", "prediction"]
-SignalDirection = Literal["higher", "lower"]
-SignalTransform = Literal["identity", "rank", "zscore"]
-
-
-@dataclass(frozen=True)
-class SignalSpec:
-    signal_id: str
-    column: str
-    source_kind: SignalSourceKind
-    direction: SignalDirection = "higher"
-    transform: SignalTransform = "identity"
-    contract_version: str = "0.1"
-
-    def __post_init__(self) -> None:
-        if self.contract_version != "0.1":
-            raise ValueError("unsupported_signal_contract_version")
-        if not isinstance(self.signal_id, str) or not self.signal_id:
-            raise ValueError("signal_id_required")
-        if not isinstance(self.column, str) or not self.column:
-            raise ValueError("signal_column_required")
-        if self.source_kind not in {"factor", "feature", "prediction"}:
-            raise ValueError("unsupported_signal_source_kind")
-        if self.direction not in {"higher", "lower"}:
-            raise ValueError("unsupported_signal_direction")
-        if self.transform not in {"identity", "rank", "zscore"}:
-            raise ValueError("unsupported_signal_transform")
-        reject_filter_input_columns((self.signal_id, self.column))
+if TYPE_CHECKING:
+    from quant_research_platform.contracts.signals import SignalSpec as _SignalSpec
 
 
 @dataclass(frozen=True)
@@ -48,9 +21,12 @@ class EvaluationSpec:
     run_id: str
     market_id: MarketId
     research_dataset_id: str
-    signals: tuple[SignalSpec, ...]
+    signals: tuple[_SignalSpec, ...]
     label_columns: tuple[str, ...]
     filter_mode: EvaluationFilterMode = "eligible"
+    n_groups: int = 5
+    segment_columns: tuple[str, ...] = ()
+    time_breakdowns: tuple[str, ...] = ("year", "month")
     run_type: str = "evaluation"
     contract_version: str = "0.1"
 
@@ -61,6 +37,20 @@ class EvaluationSpec:
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
         _validate_column_tuple(self.label_columns, "label_columns")
+        _validate_column_tuple(
+            self.segment_columns,
+            "segment_columns",
+            required=False,
+        )
+        _validate_column_tuple(
+            self.time_breakdowns,
+            "time_breakdowns",
+            required=False,
+        )
+        if not isinstance(self.n_groups, int) or isinstance(self.n_groups, bool):
+            raise TypeError("n_groups must be an integer")
+        if self.n_groups < 2:
+            raise ValueError("evaluation_n_groups_too_small")
         _validate_signal_label_separation(self.signals, self.label_columns)
 
 
@@ -108,13 +98,13 @@ class EvaluationDiagnostics:
             raise ValueError("evaluation_diagnostics_n_groups_too_small")
 
 
-def _validate_signals(signals: tuple[SignalSpec, ...]) -> None:
+def _validate_signals(signals: tuple[_SignalSpec, ...]) -> None:
     if not signals:
         raise ValueError("evaluation_signals_required")
     signal_ids = [signal.signal_id for signal in signals]
     if len(set(signal_ids)) != len(signal_ids):
         raise ValueError("evaluation_signal_ids_must_not_contain_duplicates")
-    columns = [signal.column for signal in signals]
+    columns = [signal.source_column for signal in signals]
     if len(set(columns)) != len(columns):
         raise ValueError("evaluation_signal_columns_must_not_contain_duplicates")
     overlaps = _cross_signal_id_column_overlaps(signals)
@@ -123,29 +113,34 @@ def _validate_signals(signals: tuple[SignalSpec, ...]) -> None:
 
 
 def _validate_signal_label_separation(
-    signals: tuple[SignalSpec, ...],
+    signals: tuple[_SignalSpec, ...],
     label_columns: tuple[str, ...],
 ) -> None:
     signal_names = {signal.signal_id for signal in signals}.union(
-        signal.column for signal in signals
+        signal.source_column for signal in signals
     )
     invalid = sorted(signal_names.intersection(label_columns))
     if invalid:
         raise ValueError("evaluation_signal_label_overlap: " + ", ".join(invalid))
 
 
-def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[str]:
+def _cross_signal_id_column_overlaps(signals: tuple[_SignalSpec, ...]) -> list[str]:
     overlaps = {
         signal.signal_id
         for index, signal in enumerate(signals)
         for other_index, other in enumerate(signals)
-        if index != other_index and signal.signal_id == other.column
+        if index != other_index and signal.signal_id == other.source_column
     }
     return sorted(overlaps)
 
 
-def _validate_column_tuple(columns: tuple[str, ...], field_name: str) -> None:
-    if not columns:
+def _validate_column_tuple(
+    columns: tuple[str, ...],
+    field_name: str,
+    *,
+    required: bool = True,
+) -> None:
+    if required and not columns:
         raise ValueError(f"{field_name}_required")
     if any(not isinstance(column, str) or not column for column in columns):
         raise ValueError(f"{field_name}_must_be_non_empty_strings")
@@ -156,8 +151,4 @@ def _validate_column_tuple(columns: tuple[str, ...], field_name: str) -> None:
 __all__ = [
     "EvaluationDiagnostics",
     "EvaluationSpec",
-    "SignalDirection",
-    "SignalSourceKind",
-    "SignalSpec",
-    "SignalTransform",
 ]

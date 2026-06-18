@@ -5,7 +5,7 @@ TURNOVER_COLUMNS = ["timestamp", "signal", "turnover"]
 RETURNS_COLUMNS = [
     "timestamp",
     "signal",
-    "label",
+    "return_source_column",
     "portfolio_mode",
     "long_return",
     "short_return",

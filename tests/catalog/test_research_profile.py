@@ -71,8 +71,10 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
 
     profile = research_profile()
     dataset = profile.research_datasets.get("a_share_price_volume_forward_returns")
-    evaluation = profile.evaluations.get("a_share_mom_20d_forward_return_20d_2014")
-    portfolio = profile.portfolios.get("a_share_mom_20d_portfolio_2014")
+    evaluation = profile.evaluations.get("a_share_signal_forward_return_20d_2014")
+    portfolio = profile.portfolios.get(
+        "a_share_signal_forward_return_20d_portfolio_2014"
+    )
     models = tuple(profile.models.list())
     predictions = tuple(profile.predictions.list())
     model_ids = {model.model_id for model in models}
@@ -90,14 +92,14 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     assert dataset.feature_columns == ("mom_20d_zscore",)
     assert [
         (
-            transform.source_factor_columns,
-            transform.output_feature_columns,
+            transform.source_columns,
+            transform.output_columns,
             transform.transform,
         )
         for transform in dataset.feature_transforms
-    ] == [(("mom_20d",), ("mom_20d_zscore",), "zscore")]
+    ] == [(("mom_20d",), ("mom_20d_zscore",), "cross_sectional_zscore")]
     assert [
-        (signal.signal_id, signal.column, signal.source_kind)
+        (signal.signal_id, signal.source_column, signal.source_kind)
         for signal in evaluation.signals
     ] == [
         ("mom_20d", "mom_20d", "factor"),
@@ -105,7 +107,7 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
         ("mom_20d_zscore", "mom_20d_zscore", "feature"),
     ]
     assert [
-        (signal.signal_id, signal.column, signal.source_kind)
+        (signal.signal_id, signal.source_column, signal.source_kind)
         for signal in portfolio.signals
     ] == [
         ("mom_20d", "mom_20d", "factor"),
@@ -145,24 +147,22 @@ def test_catalog_profiles_is_only_prod_module_composing_csmar_and_a_share() -> N
     assert composers == ["src/quant_research_platform/catalog/profiles.py"]
 
 
-def test_demo_eval_model_prediction_catalogs_not_in_a_share_market_modules() -> None:
-    a_share_root = PROJECT_SRC / "markets/implementations/a_share"
+def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
+    profile_source = (PROJECT_SRC / "catalog/profiles.py").read_text(encoding="utf-8")
+    scenario_source = (
+        PROJECT_SRC / "markets/implementations/a_share/research_scenarios.py"
+    ).read_text(encoding="utf-8")
     forbidden = (
         "EvaluationSpec(",
         "ModelSpec(",
         "PredictionSpec(",
-        "a_share_evaluation_catalog",
-        "a_share_model_catalog",
-        "a_share_prediction_catalog",
+        "build_a_share_evaluation_catalog",
+        "build_a_share_model_catalog",
+        "build_a_share_prediction_catalog",
     )
-    hits = [
-        f"{path}:{token}"
-        for path in sorted(a_share_root.rglob("*.py"))
-        for token in forbidden
-        if token in path.read_text(encoding="utf-8")
-    ]
 
-    assert hits == []
+    assert [token for token in forbidden[:3] if token in profile_source] == []
+    assert all(token in scenario_source for token in forbidden)
 
 
 def test_reports_bundles_uses_report_local_catalog_not_profile_bundle() -> None:

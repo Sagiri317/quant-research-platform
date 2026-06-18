@@ -87,7 +87,6 @@ def calculate_cost_breakdown(
                 buy_turnover=buy_turnover,
                 sell_turnover=sell_turnover,
                 turnover=turnover,
-                weight_config=weight_config,
                 cost_config=cost_config,
             )
             records.append(

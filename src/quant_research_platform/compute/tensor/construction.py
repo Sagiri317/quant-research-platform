@@ -89,6 +89,7 @@ def build_tensor_weighted_positions(
         tensor compute backend     public artifact contract
      ?DataFrame backend                   ?positions  ?diagnostics frames ?    """
 
+    return_source_column = _require_return_source_column(return_source_column)
     artifacts = build_tensor_portfolio_artifacts(
         panel,
         spec,
@@ -115,6 +116,7 @@ def build_tensor_portfolio_artifacts(
 ) -> TensorPortfolioArtifacts:
     """   ?tensor portfolio artifacts          dense path matrices ?"""
 
+    return_source_column = _require_return_source_column(return_source_column)
     dtype = _validate_value_dtype(value_dtype)
     panel = validate_compute_panel(panel, spec, segment_columns=segment_columns)
     _validate_segment_columns(panel, segment_columns)
@@ -124,7 +126,6 @@ def build_tensor_portfolio_artifacts(
     if tradability_config is None:
         tradability_config = TradabilityConfig()
     _validate_tradability_columns(panel, tradability_config)
-    return_source_column = return_source_column or spec.label_column
     signals = _select_signals(spec, portfolio_signals)
     panel = panel.sort_values(
         [*segment_columns, spec.timestamp_column, spec.asset_column],
@@ -532,7 +533,7 @@ def _prepare_timestamp_position_input(
     return_source_column: str | None = None,
     value_dtype: np.dtype | str = "float64",
 ) -> _TimestampPositionInput:
-    return_source_column = return_source_column or spec.label_column
+    return_source_column = _require_return_source_column(return_source_column)
     dtype = _validate_value_dtype(str(value_dtype))
     asset_values = timestamp_frame[spec.asset_column].to_numpy(
         dtype=str,
@@ -580,6 +581,12 @@ def _validate_value_dtype(value_dtype: str) -> np.dtype:
     if value_dtype not in {"float32", "float64"}:
         raise ValueError("value_dtype must be one of ['float32', 'float64'].")
     return np.dtype(value_dtype)
+
+
+def _require_return_source_column(return_source_column: str | None) -> str:
+    if not isinstance(return_source_column, str) or not return_source_column:
+        raise ValueError("portfolio_return_source_column_required")
+    return return_source_column
 
 __all__ = [
     "TensorPortfolioArtifacts",

@@ -20,10 +20,10 @@
 | label | `research/labels/` | label spec/materializer/tests | market semantics 重写 |
 | research dataset | `research/datasets/` | assembler/spec/tests | source ingestion |
 | evaluation diagnostics | `research/evaluations/` | metrics/diagnostics/tests | report storage API 扩张 |
-| model/prediction | `research/models/`, `research/predictions/` | model/pred contract/tests | live trading |
+| model/prediction | `research/models/`, `research/predictions/` | model/pred contract/tests | real-money order execution |
 | reports | `reports/` | report writer/catalog/private-safe output | public artifact lifecycle API |
 | runtime memory | `runtime/resources.py` | runtime policy/chunk planning | market session semantics |
-| workflow execution | `workflows/` | DAG/plan/checkpoint | broker/scheduler |
+| workflow execution | `workflows/` | DAG/plan/checkpoint | execution-venue/scheduler |
 | agent governance | `.agents/`, `AGENTS.md`, governance docs | skill/templates/scripts | business implementation |
 
 ## Future capability routing

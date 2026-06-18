@@ -610,11 +610,12 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         "portfolio",
     ]
     assert evidence_years == [(2014,)] * (expected_prediction_count + 2)
-    assert evaluation_run_ids == ["a_share_mom_20d_forward_return_20d_2014"]
+    assert evaluation_run_ids == ["a_share_signal_forward_return_20d_2014"]
     assert prediction_ids == expected_prediction_ids
-    assert portfolio_ids == ["a_share_mom_20d_portfolio_2014"]
+    assert portfolio_ids == ["a_share_signal_forward_return_20d_portfolio_2014"]
     assert result.status == "PASS"
     assert result.run_id == "s1"
+    assert result.output_root == "s1"
     assert (output_root / "config" / "run_config.json").is_file()
     assert (output_root / "manifests" / "run_manifest.json").is_file()
     assert (output_root / "timings" / "timings.json").is_file()
@@ -850,9 +851,13 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
     evaluation_root = (
         reports_root
         / "evaluation"
-        / "a_share_mom_20d_forward_return_20d_2014"
+        / "a_share_signal_forward_return_20d_2014"
     )
-    portfolio_root = reports_root / "portfolio" / "a_share_mom_20d_portfolio_2014"
+    portfolio_root = (
+        reports_root
+        / "portfolio"
+        / "a_share_signal_forward_return_20d_portfolio_2014"
+    )
     prediction_root = reports_root / "prediction"
     metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
     research = read_research_dataset(
@@ -906,9 +911,8 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
         )
         assert not prediction.empty
         assert list(prediction.columns) == [
-            "market_id",
-            "asset_id",
             "timestamp",
+            "asset_id",
             "prediction_score",
         ]
         assert prediction_scores.notna().all()

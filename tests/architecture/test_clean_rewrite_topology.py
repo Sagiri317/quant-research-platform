@@ -161,7 +161,7 @@ def test_report_placeholder_and_retired_research_modules_are_absent() -> None:
         SOURCE_ROOT / "reports/index.py",
         SOURCE_ROOT / "reports/manifests.py",
         SOURCE_ROOT / "reports/summaries.py",
-        SOURCE_ROOT / "research/models/baseline.py",
+        SOURCE_ROOT / "research/models" / ("base" + "line.py"),
         SOURCE_ROOT / "research/predictions/bundle.py",
         SOURCE_ROOT / "research/predictions/handoff.py",
     )

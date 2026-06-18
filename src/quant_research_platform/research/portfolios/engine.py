@@ -1,7 +1,8 @@
-"""Portfolio simulation engine for SignalSpec-driven research panels."""
+"""Portfolio construction engine for SignalSpec-driven research panels."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,8 +17,10 @@ from quant_research_platform.compute.dataframe.portfolio_returns import (
     _simulate_weighted_long_short_returns_and_cost_from_validated_panel,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
-from quant_research_platform.contracts.evaluations import SignalSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.research.signals.materialization import (
+    materialize_signal_frame,
+)
 
 
 @dataclass(frozen=True)
@@ -35,17 +38,23 @@ class PortfolioResult:
     diagnostics: pd.DataFrame
 
 
-def simulate_portfolio_frame(
+def construct_portfolio_positions(
     frame: pd.DataFrame,
     spec: PortfolioSpec,
+    *,
+    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> PortfolioResult:
-    """Simulate portfolio returns from normalized SignalSpec scores."""
+    """Construct portfolio diagnostics from normalized SignalSpec scores."""
 
-    panel = _portfolio_panel(frame, spec)
+    panel = _portfolio_panel(
+        frame,
+        spec,
+        source_columns_by_kind=source_columns_by_kind,
+    )
     signal_ids = tuple(signal.signal_id for signal in spec.signals)
     compute_spec = ComputePanelSpec(
         signal_columns=signal_ids,
-        label_column=spec.label_column,
+        label_column=spec.return_source_column,
         timestamp_column="timestamp",
         asset_column="asset_id",
     )
@@ -57,14 +66,15 @@ def simulate_portfolio_frame(
             portfolio_signals=signal_ids,
             tradability_config=spec.tradability_config,
             cost_config=spec.cost_config,
+            return_source_column=spec.return_source_column,
         )
     )
-    cumulative_returns = calculate_cumulative_returns(portfolio_returns)
-    performance_summary = summarize_performance(
+    cumulative_returns = compute_cumulative_returns(portfolio_returns)
+    performance_summary = compute_performance_summary(
         portfolio_returns,
         cumulative_returns,
     )
-    exposure_summary = summarize_exposure(positions, portfolio_returns)
+    exposure_summary = compute_exposure_summary(positions, portfolio_returns)
     concentration = summarize_concentration(positions)
     period_breakdown = summarize_period_breakdown(portfolio_returns)
     return PortfolioResult(
@@ -80,6 +90,45 @@ def simulate_portfolio_frame(
         period_breakdown=period_breakdown,
         diagnostics=diagnostics,
     )
+
+
+def compute_portfolio_turnover(result: PortfolioResult) -> pd.DataFrame:
+    return result.turnover.copy()
+
+
+def compute_portfolio_costs(result: PortfolioResult) -> pd.DataFrame:
+    return result.cost_breakdown.copy()
+
+
+def compute_portfolio_returns(result: PortfolioResult) -> pd.DataFrame:
+    return result.portfolio_returns.copy()
+
+
+def compute_cumulative_returns(portfolio_returns: pd.DataFrame) -> pd.DataFrame:
+    return calculate_cumulative_returns(portfolio_returns)
+
+
+def compute_drawdowns(cumulative_returns: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        column
+        for column in ("timestamp", "signal", "high_water_mark", "drawdown")
+        if column in cumulative_returns.columns
+    ]
+    return cumulative_returns.loc[:, columns].copy()
+
+
+def compute_performance_summary(
+    portfolio_returns: pd.DataFrame,
+    cumulative_returns: pd.DataFrame,
+) -> pd.DataFrame:
+    return summarize_performance(portfolio_returns, cumulative_returns)
+
+
+def compute_exposure_summary(
+    positions: pd.DataFrame,
+    portfolio_returns: pd.DataFrame,
+) -> pd.DataFrame:
+    return summarize_exposure(positions, portfolio_returns)
 
 
 def summarize_concentration(
@@ -176,7 +225,12 @@ def summarize_period_breakdown(
     return result.loc[:, output_columns]
 
 
-def _portfolio_panel(frame: pd.DataFrame, spec: PortfolioSpec) -> pd.DataFrame:
+def _portfolio_panel(
+    frame: pd.DataFrame,
+    spec: PortfolioSpec,
+    *,
+    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+) -> pd.DataFrame:
     optional_columns = (
         spec.weight_config.risk_column,
         spec.tradability_config.eligibility_column,
@@ -186,33 +240,27 @@ def _portfolio_panel(frame: pd.DataFrame, spec: PortfolioSpec) -> pd.DataFrame:
     required = {
         "asset_id",
         "timestamp",
-        spec.label_column,
-        *(signal.column for signal in spec.signals),
+        spec.return_source_column,
+        *(signal.source_column for signal in spec.signals),
         *(column for column in optional_columns if column is not None),
     }
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_portfolio_columns: {', '.join(missing)}")
-    result = frame.copy()
-    for signal in spec.signals:
-        result[signal.signal_id] = _normalize_signal_values(result, signal)
-        if signal.signal_id != signal.column:
-            result = result.drop(columns=[signal.column])
-    return result
-
-
-def _normalize_signal_values(frame: pd.DataFrame, signal: SignalSpec) -> pd.Series:
-    values = pd.to_numeric(frame[signal.column], errors="coerce")
-    if signal.transform == "rank":
-        values = values.groupby(frame["timestamp"]).rank(method="average")
-    elif signal.transform == "zscore":
-        grouped = values.groupby(frame["timestamp"])
-        mean = grouped.transform("mean")
-        std = grouped.transform(lambda item: item.std(ddof=0))
-        values = (values - mean) / std.replace(0, pd.NA)
-    if signal.direction == "lower":
-        values = -values
-    return values
+    panel = materialize_signal_frame(
+        frame,
+        spec.signals,
+        source_columns_by_kind=source_columns_by_kind,
+    )
+    if spec.execution_lag_steps:
+        signal_ids = [signal.signal_id for signal in spec.signals]
+        ordered = panel.sort_values(["asset_id", "timestamp"])
+        panel.loc[ordered.index, signal_ids] = (
+            ordered.groupby("asset_id", sort=False)[signal_ids]
+            .shift(spec.execution_lag_steps)
+            .to_numpy()
+        )
+    return panel
 
 
 def _normalize_group_key(
@@ -228,7 +276,14 @@ def _normalize_group_key(
 
 __all__ = [
     "PortfolioResult",
-    "simulate_portfolio_frame",
+    "construct_portfolio_positions",
+    "compute_portfolio_turnover",
+    "compute_portfolio_costs",
+    "compute_portfolio_returns",
+    "compute_cumulative_returns",
+    "compute_drawdowns",
+    "compute_performance_summary",
+    "compute_exposure_summary",
     "summarize_concentration",
     "summarize_period_breakdown",
 ]

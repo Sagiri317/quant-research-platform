@@ -2,8 +2,14 @@
 
 from quant_research_platform.research.models.supervised import (
     ModelFitResult,
-    fit_linear_baseline_result,
+    build_estimator_from_model_spec,
     fit_model_result,
+    predict_model_frame,
 )
 
-__all__ = ["ModelFitResult", "fit_linear_baseline_result", "fit_model_result"]
+__all__ = [
+    "ModelFitResult",
+    "build_estimator_from_model_spec",
+    "fit_model_result",
+    "predict_model_frame",
+]

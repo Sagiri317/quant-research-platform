@@ -34,9 +34,11 @@ def calculate_tensor_long_short(
     cost_breakdown: pd.DataFrame,
     weight_config: WeightConfig | None = None,
     segment_columns: tuple[str, ...] = (),
+    return_source_column: str | None = None,
 ) -> pd.DataFrame:
     """    tensor-shaped positions     portfolio return path ?"""
 
+    return_source_column = _require_return_source_column(return_source_column)
     if weight_config is None:
         weight_config = WeightConfig()
     if positions.empty:
@@ -62,7 +64,7 @@ def calculate_tensor_long_short(
             panel_group.pivot(
                 index=spec.timestamp_column,
                 columns=spec.asset_column,
-                values=spec.label_column,
+                values=return_source_column,
             )
             .reindex(index=position_matrix.index, columns=position_matrix.columns)
             .sort_index()
@@ -104,7 +106,7 @@ def calculate_tensor_long_short(
                     **{column: group_values[column] for column in segment_columns},
                     "timestamp": timestamp,
                     "signal": group_values["signal"],
-                    "label": spec.label_column,
+                    "return_source_column": return_source_column,
                     "portfolio_mode": weight_config.portfolio_mode,
                     "long_return": float(long_returns[row_offset]),
                     "short_return": float(short_returns[row_offset]),
@@ -152,7 +154,7 @@ def _long_short_record_from_arrays(
         **{column: context[column] for column in segment_columns},
         "timestamp": timestamp,
         "signal": signal,
-        "label": label,
+        "return_source_column": label,
         "portfolio_mode": portfolio_mode,
         "long_return": long_return,
         "short_return": short_return,
@@ -254,3 +256,9 @@ def _build_path_records_from_arrays(
 __all__ = [
     "calculate_tensor_long_short",
 ]
+
+
+def _require_return_source_column(return_source_column: str | None) -> str:
+    if not isinstance(return_source_column, str) or not return_source_column:
+        raise ValueError("portfolio_return_source_column_required")
+    return return_source_column

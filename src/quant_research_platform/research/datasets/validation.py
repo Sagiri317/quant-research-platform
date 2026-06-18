@@ -6,6 +6,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.datasets._contracts import (
     RESEARCH_DATASET_PRIMARY_KEY_COLUMNS,
 )
@@ -93,16 +94,25 @@ def validate_evaluation_input(
     frame: pd.DataFrame,
     spec: ResearchDatasetSpec,
     *,
-    signal_columns: tuple[str, ...],
+    signal_columns: tuple[str, ...] = (),
+    signals: tuple[SignalSpec, ...] = (),
     label_columns: tuple[str, ...],
 ) -> None:
     validate_research_dataset(frame, spec, require_all_columns=False)
-    _require_declared_columns(
-        signal_columns,
-        declared=(*spec.factor_columns, *spec.feature_columns),
-        frame=frame,
-        error_name="invalid_evaluation_signal_columns",
-    )
+    if signals:
+        _require_declared_signal_sources(
+            signals,
+            spec=spec,
+            frame=frame,
+            error_name="invalid_evaluation_signal_columns",
+        )
+    else:
+        _require_declared_columns(
+            signal_columns,
+            declared=(*spec.factor_columns, *spec.feature_columns),
+            frame=frame,
+            error_name="invalid_evaluation_signal_columns",
+        )
     _require_declared_columns(
         label_columns,
         declared=spec.label_columns,
@@ -138,6 +148,28 @@ def _require_declared_columns(
         column
         for column in columns
         if column not in declared_set or column not in frame.columns
+    ]
+    if missing_or_undeclared:
+        raise ValueError(f"{error_name}: {', '.join(missing_or_undeclared)}")
+
+
+def _require_declared_signal_sources(
+    signals: tuple[SignalSpec, ...],
+    *,
+    spec: ResearchDatasetSpec,
+    frame: pd.DataFrame,
+    error_name: str,
+) -> None:
+    declared_by_kind = {
+        "factor": set(spec.factor_columns),
+        "feature": set(spec.feature_columns),
+        "prediction": set(spec.context_columns),
+    }
+    missing_or_undeclared = [
+        signal.source_column
+        for signal in signals
+        if signal.source_column not in declared_by_kind[signal.source_kind]
+        or signal.source_column not in frame.columns
     ]
     if missing_or_undeclared:
         raise ValueError(f"{error_name}: {', '.join(missing_or_undeclared)}")

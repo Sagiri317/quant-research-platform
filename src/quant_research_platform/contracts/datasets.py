@@ -62,8 +62,8 @@ class ResearchDatasetSpec(DataSpec):
         _validate_feature_transforms(
             self.feature_transforms,
             factor_columns=self.factor_columns,
+            context_columns=self.context_columns,
             feature_columns=self.feature_columns,
-            market_id=self.market_id,
         )
         reserved = set(self.label_columns).union(
             self.filter_columns,
@@ -101,8 +101,8 @@ def _validate_feature_transforms(
     feature_transforms: tuple[FeatureTransformSpec, ...],
     *,
     factor_columns: tuple[str, ...],
+    context_columns: tuple[str, ...],
     feature_columns: tuple[str, ...],
-    market_id: MarketId,
 ) -> None:
     transform_ids = [transform.transform_id for transform in feature_transforms]
     if len(set(transform_ids)) != len(transform_ids):
@@ -110,18 +110,19 @@ def _validate_feature_transforms(
     source_columns = {
         column
         for transform in feature_transforms
-        for column in transform.source_factor_columns
+        for column in transform.source_columns
     }
-    missing_sources = sorted(source_columns.difference(factor_columns))
+    allowed_sources = set(factor_columns).union(context_columns)
+    missing_sources = sorted(source_columns.difference(allowed_sources))
     if missing_sources:
         raise ValueError(
-            "feature_transform_source_not_in_factor_columns: "
+            "feature_transform_source_not_in_factor_or_context_columns: "
             + ", ".join(missing_sources)
         )
     transformed_features = tuple(
         column
         for transform in feature_transforms
-        for column in transform.output_feature_columns
+        for column in transform.output_columns
     )
     if len(set(transformed_features)) != len(transformed_features):
         raise ValueError("feature_transform_outputs_must_not_contain_duplicates")
@@ -136,15 +137,5 @@ def _validate_feature_transforms(
             "feature_transform_output_not_in_feature_columns: "
             + ", ".join(undeclared_outputs)
         )
-    market_mismatches = sorted(
-        transform.transform_id
-        for transform in feature_transforms
-        if transform.market_id != market_id
-    )
-    if market_mismatches:
-        raise ValueError(
-            "feature_transform_market_mismatch: " + ", ".join(market_mismatches)
-        )
-
 
 __all__ = ["ResearchDatasetSpec"]

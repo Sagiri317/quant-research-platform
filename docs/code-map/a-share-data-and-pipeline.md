@@ -2,7 +2,7 @@
 
 This map records the current A-share clean-rewrite direction. It does not
 authorize private data exposure, website UI work, deployment, workers, schedulers,
-external APIs, paper trading, or live trading.
+external APIs, simulated order execution, or real-money order execution.
 
 ## Private Data Layers
 
@@ -136,8 +136,8 @@ profile.
   states it was rerun.
 - Evaluation supports `eligible`, `tradable`, and `unfiltered` filter modes.
   `tradable` means `eligible and can_enter and can_exit` and is an
-  execution-aware evaluation diagnostic only, not a backtest, live tradable PnL,
-  or production trading result.
+  execution-aware evaluation diagnostic only, not a backtest, real-money-executable PnL,
+  or production order execution result.
 - Model training and historical prediction handoff support only `eligible` and
   `unfiltered` sample filter modes. They do not use `can_enter` or `can_exit`
   for sample filtering.

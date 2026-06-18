@@ -10,6 +10,7 @@ from quant_research_platform.agents.proposals import (
     LabelProposal,
     ResearchDatasetProposal,
     WorkflowProposal,
+    factor_definition_from_proposal,
 )
 from quant_research_platform.agents.safety import (
     ProposalSafetyError,
@@ -164,11 +165,12 @@ def test_factor_catalog_registers_valid_factor_proposal() -> None:
     )
     catalog = FactorCatalog()
 
-    definition = catalog.register_proposal(
+    definition = factor_definition_from_proposal(
         proposal,
         market_id=MarketId("a_share"),
         field_names=set(a_share_field_catalog().list_names()),
     )
+    catalog.register(definition)
 
     assert isinstance(definition, FactorDefinition)
     assert definition.factor_id == "candidate_factor"
@@ -187,7 +189,7 @@ def test_factor_proposal_registration_rejects_duplicate_output_columns() -> None
     )
 
     with pytest.raises(ValueError, match="duplicate_factor_output_column"):
-        FactorCatalog().register_proposal(
+        factor_definition_from_proposal(
             proposal,
             market_id=MarketId("a_share"),
             field_names=set(a_share_field_catalog().list_names()),
@@ -207,7 +209,7 @@ def test_factor_proposal_registration_rejects_unresolved_derived_input() -> None
     )
 
     with pytest.raises(ValueError, match="unresolved_factor_derived_input"):
-        FactorCatalog().register_proposal(
+        factor_definition_from_proposal(
             proposal,
             market_id=MarketId("a_share"),
             field_names=set(a_share_field_catalog().list_names()),

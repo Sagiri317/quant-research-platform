@@ -1,1 +1,1 @@
-"""Evaluation package."""
+"""Evaluation research package."""

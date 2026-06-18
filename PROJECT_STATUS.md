@@ -11,7 +11,7 @@
 | 治理重构状态 | 已 fast-forward merge 到 `feature/qrp-clean-rewrite` |
 | 当前阶段 | Clean Rewrite `0.1.0`，Local Research Platform（本地研究平台） |
 | 当前启用市场 | A-share（A 股） |
-| 非目标 | paper trading、live trading、production trading、broker/exchange connector、deployment |
+| 非目标 | simulated order execution、real-money order execution、production order execution、external execution-venue connector、deployment |
 
 ## 当前公共接口
 
@@ -33,10 +33,10 @@ qrp-private evidence run
 
 `qrp-private evidence run` 是 private local verification harness，用于本地
 smoke/evidence generation；不是 public CLI；不是 public execution mode；不是
-public evaluate、predict 或 report command；不是 paper/live trading；不承诺收益；
+public evaluate、predict 或 report command；不是 simulated or real-money order execution；不承诺收益；
 不输出 row-level private data。
 
-未经明确批准，不新增 public API、CLI、registry、store、facade、artifact lifecycle API、model registry、feature store、scheduler、worker、external API、broker/exchange connector、paper/live trading 入口。
+未经明确批准，不新增 public API、CLI、registry、store、facade、artifact lifecycle API、model registry、feature store、scheduler、worker、external API、external execution-venue connector、simulated or real-money order execution 入口。
 
 ## 当前治理状态
 

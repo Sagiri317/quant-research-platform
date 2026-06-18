@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.contracts.ids import MarketId
+
 
 class ProposalPayloadMixin:
     def to_spec_payload(self) -> dict[str, Any]:
@@ -64,10 +67,61 @@ class WorkflowProposal(ProposalPayloadMixin):
     approved: bool = False
 
 
+def factor_definition_from_proposal(
+    proposal: FactorProposal,
+    *,
+    market_id: MarketId,
+    field_names: set[str],
+) -> FactorDefinition:
+    output_columns = tuple(proposal.output_columns or (proposal.factor_id,))
+    if len(set(output_columns)) != len(output_columns):
+        raise ValueError("duplicate_factor_output_column")
+    if len(output_columns) != 1:
+        raise ValueError("factor_proposal_single_output_required")
+
+    base_inputs = tuple(proposal.base_input_columns or proposal.input_columns)
+    derived_inputs = tuple(proposal.derived_input_columns)
+    expected_inputs = tuple(dict.fromkeys((*base_inputs, *derived_inputs)))
+    if expected_inputs != tuple(proposal.input_columns):
+        raise ValueError("factor_input_columns_must_match_base_and_derived")
+
+    unknown_base = sorted(set(base_inputs).difference(field_names))
+    if unknown_base:
+        raise ValueError(f"unknown_factor_input_columns: {', '.join(unknown_base)}")
+    producers = dict(proposal.derived_input_producers or {})
+    unresolved_derived = [
+        column
+        for column in derived_inputs
+        if column not in field_names and not producers.get(column)
+    ]
+    if unresolved_derived:
+        raise ValueError(
+            "unresolved_factor_derived_input: "
+            + ", ".join(sorted(unresolved_derived))
+        )
+    if not proposal.required_input_data_id:
+        raise ValueError("factor_required_input_data_id_required")
+
+    return FactorDefinition(
+        factor_id=proposal.factor_id,
+        market_id=market_id,
+        factor_set=FactorSet.EXPERIMENTAL,
+        input_columns=tuple(proposal.input_columns),
+        base_input_columns=base_inputs,
+        derived_input_columns=derived_inputs,
+        output_column=output_columns[0],
+        display_name=proposal.factor_id,
+        description=proposal.rationale,
+        family="proposal",
+        required_input_data_id=proposal.required_input_data_id,
+    )
+
+
 __all__ = [
     "FactorProposal",
     "LabelProposal",
     "ProposalPayloadMixin",
     "ResearchDatasetProposal",
     "WorkflowProposal",
+    "factor_definition_from_proposal",
 ]

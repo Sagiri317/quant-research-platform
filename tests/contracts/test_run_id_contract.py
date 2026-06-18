@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.contracts.evaluations import EvaluationSpec, SignalSpec
+import quant_research_platform.contracts.evaluations as evaluations_contracts
+from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.execution import ExecutionMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.workflows import WorkflowRunSummary
 
 
@@ -20,6 +22,10 @@ def test_run_id_accepts_public_safe_lowercase_identifiers() -> None:
     )
 
     assert report.run_id == "run-01.alpha_beta"
+
+
+def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
+    assert not hasattr(evaluations_contracts, "SignalSpec")
 
 
 @pytest.mark.parametrize(
@@ -60,8 +66,8 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
             signals=(
                 SignalSpec(
                     signal_id="factor",
-                    column="factor",
                     source_kind="factor",
+                    source_column="factor",
                 ),
             ),
             label_columns=("label",),
@@ -72,8 +78,6 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
             prediction_id="data/raw/run",
             model_id="model",
             research_dataset_id="dataset",
-            prediction_column="prediction",
-            primary_key=("market_id", "asset_id", "timestamp"),
             train_end="2014-01-02",
             test_start="2014-01-03",
         )

@@ -15,7 +15,9 @@ from quant_research_platform.reports.report_artifacts import (
     write_portfolio_report_artifacts,
 )
 from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
-from quant_research_platform.research.portfolios.engine import simulate_portfolio_frame
+from quant_research_platform.research.portfolios.engine import (
+    construct_portfolio_positions,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -40,7 +42,15 @@ def run_portfolio_from_research_dataset(
     frame = pd.concat(chunks, ignore_index=True)
     if frame.empty:
         raise ValueError("empty_portfolio_input")
-    result = simulate_portfolio_frame(frame, spec)
+    result = construct_portfolio_positions(
+        frame,
+        spec,
+        source_columns_by_kind={
+            "factor": tuple(dataset_spec.factor_columns),
+            "feature": tuple(dataset_spec.feature_columns),
+            "prediction": tuple(dataset_spec.context_columns),
+        },
+    )
     report_spec = ReportSpec(
         report_id="portfolio_report",
         report_definition_id="portfolio_report_private",
@@ -78,8 +88,8 @@ def _portfolio_read_columns(spec: PortfolioSpec) -> tuple[str, ...]:
                 "market_id",
                 "asset_id",
                 "timestamp",
-                *(signal.column for signal in spec.signals),
-                spec.label_column,
+                *(signal.source_column for signal in spec.signals),
+                spec.return_source_column,
                 *(column for column in optional_columns if column is not None),
             )
         )

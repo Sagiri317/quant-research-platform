@@ -1,8 +1,8 @@
 # QRP API 0.1
 
 This document records the clean rewrite API and CLI contract. It is local-only
-and does not describe deployment, external access, broker/exchange connectivity,
-paper trading, live trading, or investment advice.
+and does not describe deployment, external access, external execution-venue connectivity,
+simulated order execution, real-money order execution, or investment advice.
 
 ## Versioning
 
@@ -80,7 +80,7 @@ it does not run private import or private rebuild.
 
 `qrp-private evidence run` is a private local verification harness for local
 smoke/evidence generation. It is not a public CLI, not a public execution mode,
-not a public evaluate, predict, or report command, not paper or live trading,
+not a public evaluate, predict, or report command, not simulated or real-money order execution,
 does not promise returns, and does not output row-level private data.
 
 ## Privacy

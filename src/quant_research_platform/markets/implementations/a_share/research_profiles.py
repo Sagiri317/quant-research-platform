@@ -43,16 +43,15 @@ RESEARCH_DATASET_FEATURE_COLUMNS: tuple[str, ...] = ("mom_20d_zscore",)
 RESEARCH_DATASET_FEATURE_TRANSFORMS: tuple[FeatureTransformSpec, ...] = (
     FeatureTransformSpec(
         transform_id="mom_20d_zscore",
-        market_id=A_SHARE_MARKET_ID,
-        source_factor_columns=("mom_20d",),
-        output_feature_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
-        transform="zscore",
+        source_columns=("mom_20d",),
+        output_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
+        transform="cross_sectional_zscore",
     ),
 )
 
 
-def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
-    """Register A-share research dataset specs assembled from processed data."""
+def build_a_share_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
+    """Return A-share research dataset specs assembled from processed data."""
 
     factor_columns = _registered_factor_columns()
     label_columns = _registered_label_columns()
@@ -64,8 +63,7 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
         *RESEARCH_DATASET_FILTER_COLUMNS,
         *RESEARCH_DATASET_CONTEXT_COLUMNS,
     )
-    catalog = ResearchDatasetCatalog()
-    catalog.register(
+    return (
         ResearchDatasetSpec(
             data_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             market_id=A_SHARE_MARKET_ID,
@@ -93,8 +91,16 @@ def a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
             ),
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
-        )
+        ),
     )
+
+
+def build_a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
+    """Register A-share research dataset specs assembled from processed data."""
+
+    catalog = ResearchDatasetCatalog()
+    for spec in build_a_share_research_dataset_specs():
+        catalog.register(spec)
     return catalog
 
 
@@ -148,5 +154,6 @@ def _registered_label_columns() -> tuple[str, ...]:
 __all__ = [
     "RESEARCH_DATASET_CONTEXT_COLUMNS",
     "RESEARCH_DATASET_FILTER_COLUMNS",
-    "a_share_research_dataset_catalog",
+    "build_a_share_research_dataset_catalog",
+    "build_a_share_research_dataset_specs",
 ]

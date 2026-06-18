@@ -10,10 +10,7 @@ import pytest
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.predictions import (
-    PredictionCatalog,
-    default_prediction_column,
-)
+from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -26,20 +23,20 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
-    SignalSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.predictions import (
+    PREDICTION_SCORE_COLUMN,
+    PredictionSpec,
+)
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
-from quant_research_platform.research.models import (
-    fit_linear_baseline_result,
-    fit_model_result,
-)
+from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
-    build_prediction_bundle,
+    build_prediction_frame,
     run_prediction_from_research_dataset,
 )
 from quant_research_platform.storage.datasets import write_dataset
@@ -47,7 +44,11 @@ from quant_research_platform.storage.layout import StorageLayout
 
 
 def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
-    return SignalSpec(signal_id=column, column=column, source_kind=source_kind)
+    return SignalSpec(
+        signal_id=column,
+        source_column=column,
+        source_kind=source_kind,
+    )
 
 
 def _filter_frame() -> pd.DataFrame:
@@ -276,9 +277,9 @@ def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None
         signals=(
             SignalSpec(
                 signal_id="risk_signal",
-                column="risk_raw",
+                source_column="risk_raw",
                 source_kind="factor",
-                direction="lower",
+                direction="lower_is_better",
                 transform="rank",
             ),
         ),
@@ -308,14 +309,14 @@ def test_evaluation_computes_multiple_signals_in_one_run() -> None:
         signals=(
             SignalSpec(
                 signal_id="factor_signal",
-                column="factor",
+                source_column="factor",
                 source_kind="factor",
             ),
             SignalSpec(
                 signal_id="reverse_signal",
-                column="reverse_factor",
+                source_column="reverse_factor",
                 source_kind="factor",
-                direction="lower",
+                direction="lower_is_better",
             ),
         ),
         label_columns=("label",),
@@ -331,6 +332,39 @@ def test_evaluation_computes_multiple_signals_in_one_run() -> None:
     }
     assert result.diagnostics.rows_after_filter_mode == 5
     assert result.diagnostics.rows_after_signal_label_dropna == 8
+
+
+def test_evaluation_computes_signal_by_label_cross_product() -> None:
+    frame = _filter_frame().assign(
+        reverse_factor=[6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+        label_alt=[0.06, 0.05, 0.04, 0.03, 0.02, 0.01],
+    )
+    spec = EvaluationSpec(
+        run_id="eval_multi_signal_label",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo_filter",
+        signals=(
+            SignalSpec(
+                signal_id="factor_signal",
+                source_column="factor",
+                source_kind="factor",
+            ),
+            SignalSpec(
+                signal_id="reverse_signal",
+                source_column="reverse_factor",
+                source_kind="factor",
+                direction="lower_is_better",
+            ),
+        ),
+        label_columns=("label", "label_alt"),
+    )
+
+    result = evaluate_signal_frame(frame, spec, n_groups=2)
+
+    assert set(result.metrics["signal"]) == {"factor_signal", "reverse_signal"}
+    assert set(result.metrics["label"]) == {"label", "label_alt"}
+    assert len(result.metrics) == 4
+    assert result.diagnostics.rows_after_signal_label_dropna == 18
 
 
 def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
@@ -435,11 +469,11 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     frame = _filter_frame()
     spec = ModelSpec(
         model_id="linear_split_timestamp",
-        model_algorithm="linear",
+        model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
     )
-    expected = model_supervised._fit_linear_baseline_result_from_frames((frame,), spec)
+    expected = model_supervised._fit_model_result_from_frames((frame,), spec)
     original_filter = model_supervised.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
@@ -448,7 +482,7 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
         return original_filter(frame, mode=mode, metadata_key=metadata_key)
 
     monkeypatch.setattr(model_supervised, "apply_filter_mode", wrapped_filter)
-    result = model_supervised._fit_linear_baseline_result_from_frames(
+    result = model_supervised._fit_model_result_from_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
     )
@@ -457,7 +491,12 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     assert result.coefficients.tolist() == pytest.approx(
         expected.coefficients.tolist()
     )
-    assert result.metadata == expected.metadata
+    result_metadata = dict(result.metadata)
+    expected_metadata = dict(expected.metadata)
+    assert result_metadata.pop("feature_importance") == pytest.approx(
+        expected_metadata.pop("feature_importance")
+    )
+    assert result_metadata == expected_metadata
 
 
 def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
@@ -470,14 +509,12 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
         prediction_id="pred_split_timestamp",
         model_id="linear_split_timestamp",
         research_dataset_id="demo_filter",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
         train_end="2024-01-01",
         test_start="2024-01-02",
         test_end="2024-01-02",
     )
     coefficients = np.asarray([0.0, 0.01])
-    expected = artifacts_module._build_prediction_bundle_from_frames(
+    expected = artifacts_module._build_prediction_frame_from_frames(
         (frame,),
         spec,
         coefficients,
@@ -491,7 +528,7 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
         return original_filter(frame, mode=mode, metadata_key=metadata_key)
 
     monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
-    result = artifacts_module._build_prediction_bundle_from_frames(
+    result = artifacts_module._build_prediction_frame_from_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
         coefficients,
@@ -728,7 +765,7 @@ def test_filter_columns_cannot_be_features() -> None:
     with pytest.raises(ValueError, match="filter_column_in_input_columns: can_exit"):
         ModelSpec(
             model_id="bad_model_features",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("can_exit",),
             label_column="label",
         )
@@ -738,24 +775,55 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     frame = _filter_frame()
     eligible_spec = ModelSpec(
         model_id="linear_eligible",
-        model_algorithm="linear",
+        model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
     )
     unfiltered_spec = ModelSpec(
         model_id="linear_unfiltered",
-        model_algorithm="linear",
+        model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
         sample_filter_mode="unfiltered",
     )
 
-    eligible = fit_linear_baseline_result(frame, eligible_spec)
-    unfiltered = fit_linear_baseline_result(frame, unfiltered_spec)
+    eligible = fit_model_result(frame, eligible_spec)
+    unfiltered = fit_model_result(frame, unfiltered_spec)
 
-    assert eligible.metadata == {
+    assert eligible.metadata | {
+        key: eligible.metadata[key]
+        for key in (
+            "dependency_status",
+            "feature_importance",
+            "hyperparameters",
+            "max_train_rows",
+            "purge_gap_steps",
+            "random_seed",
+        )
+    } == eligible.metadata
+    assert {
+        key: eligible.metadata[key]
+        for key in (
+            "contract_version",
+            "model_algorithm",
+            "sample_filter_mode",
+            "filter_columns_used",
+            "filter_definition",
+            "rows_input",
+            "rows_after_filter_mode",
+            "rows_after_input_label_dropna",
+            "train_start",
+            "train_end",
+            "input_factor_columns",
+            "input_feature_columns",
+            "input_columns",
+            "input_count",
+            "label_column",
+            "coefficient_count",
+        )
+    } == {
         "contract_version": "0.1",
-        "model_algorithm": "linear",
+        "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
@@ -771,31 +839,37 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
         "label_column": "label",
         "coefficient_count": 2,
     }
+    assert eligible.metadata["dependency_status"]["status"] == "available"
+    assert eligible.metadata["hyperparameters"] == {}
+    assert eligible.metadata["random_seed"] is None
+    assert eligible.metadata["max_train_rows"] is None
+    assert eligible.metadata["purge_gap_steps"] == 0
+    assert eligible.metadata["feature_importance"] == pytest.approx({"factor": 0.01})
     assert unfiltered.metadata["rows_after_filter_mode"] == 6
     assert unfiltered.metadata["rows_after_input_label_dropna"] == 5
     assert eligible.coefficients.tolist() == pytest.approx([0.0, 0.01])
     assert unfiltered.coefficients.tolist() == pytest.approx([0.0, 0.01])
 
     all_tradability_blocked = frame.assign(can_enter=False, can_exit=False)
-    still_trains = fit_linear_baseline_result(all_tradability_blocked, eligible_spec)
+    still_trains = fit_model_result(all_tradability_blocked, eligible_spec)
     assert still_trains.metadata["rows_after_input_label_dropna"] == 4
 
 
 @pytest.mark.parametrize(
     "model_algorithm",
     [
-        "linear",
-        "ridge",
-        "lasso",
+        "linear_regression",
+        "ridge_regression",
+        "lasso_regression",
         "elastic_net",
-        "huber",
-        "decision_tree",
-        "random_forest",
-        "extra_trees",
-        "gradient_boosting",
-        "hist_gradient_boosting",
-        "xgboost",
-        "lightgbm",
+        "huber_regression",
+        "decision_tree_regressor",
+        "random_forest_regressor",
+        "extra_trees_regressor",
+        "gradient_boosting_regressor",
+        "hist_gradient_boosting_regressor",
+        "xgboost_regressor",
+        "lightgbm_regressor",
         "single_factor_baseline",
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",
@@ -831,15 +905,13 @@ def test_required_model_algorithms_fit_and_predict(model_algorithm: str) -> None
         prediction_id=f"{model_algorithm}_pred",
         model_id=spec.model_id,
         research_dataset_id="demo_filter",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
         train_end="2024-01-02",
         test_start="2024-01-03",
         test_end="2024-01-03",
     )
 
     result = fit_model_result(frame.loc[frame["timestamp"].lt("2024-01-03")], spec)
-    prediction = build_prediction_bundle(
+    prediction = build_prediction_frame(
         frame,
         prediction_spec,
         result.coefficients,
@@ -851,10 +923,10 @@ def test_required_model_algorithms_fit_and_predict(model_algorithm: str) -> None
     assert result.metadata["input_columns"] == ["factor", "feature"]
     assert result.metadata["rows_after_input_label_dropna"] == 8
     assert len(prediction) == 8
-    assert prediction[default_prediction_column()].notna().all()
+    assert prediction[PREDICTION_SCORE_COLUMN].notna().all()
 
 
-@pytest.mark.parametrize("model_algorithm", ["linear", "ridge"])
+@pytest.mark.parametrize("model_algorithm", ["linear_regression", "ridge_regression"])
 def test_model_training_controls_apply_to_linear_and_estimators(
     model_algorithm: str,
 ) -> None:
@@ -929,16 +1001,19 @@ def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
 
 
 def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
-    if model_algorithm in {"random_forest", "extra_trees"}:
+    if model_algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
         return {"n_estimators": 3, "max_depth": 3}
-    if model_algorithm in {"gradient_boosting", "hist_gradient_boosting"}:
+    if model_algorithm in {
+        "gradient_boosting_regressor",
+        "hist_gradient_boosting_regressor",
+    }:
         return {"max_iter": 3} if model_algorithm.startswith("hist") else {
             "n_estimators": 3,
             "max_depth": 2,
         }
-    if model_algorithm == "xgboost":
+    if model_algorithm == "xgboost_regressor":
         return {"n_estimators": 3, "max_depth": 2, "verbosity": 0}
-    if model_algorithm == "lightgbm":
+    if model_algorithm == "lightgbm_regressor":
         return {"n_estimators": 3, "min_data_in_leaf": 1}
     return {}
 
@@ -965,11 +1040,11 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     )
     spec = ModelSpec(
         model_id="linear_memory_safe",
-        model_algorithm="linear",
+        model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
     )
-    expected = fit_linear_baseline_result(frame, spec)
+    expected = fit_model_result(frame, spec)
     original_filter = model_supervised.apply_filter_mode
     filtered_chunk_rows: list[int] = []
 
@@ -984,14 +1059,19 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
 
-    result = fit_linear_baseline_result(frame, spec)
+    result = fit_model_result(frame, spec)
 
     assert len(filtered_chunk_rows) > 1
     assert max(filtered_chunk_rows) < len(frame)
     assert result.coefficients.tolist() == pytest.approx(
         expected.coefficients.tolist()
     )
-    assert result.metadata == expected.metadata
+    result_metadata = dict(result.metadata)
+    expected_metadata = dict(expected.metadata)
+    assert result_metadata.pop("feature_importance") == pytest.approx(
+        expected_metadata.pop("feature_importance")
+    )
+    assert result_metadata == expected_metadata
 
 
 def test_model_rank_deficient_fit_matches_direct_lstsq_design(
@@ -1050,7 +1130,7 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design(
     )
     spec = ModelSpec(
         model_id="linear_rank_deficient",
-        model_algorithm="linear",
+        model_algorithm="linear_regression",
         input_factor_columns=("factor", "factor_shadow"),
         label_column="label",
     )
@@ -1064,12 +1144,12 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design(
     design[:, 1:] = x
     expected, *_ = np.linalg.lstsq(design, y, rcond=None)
 
-    result = fit_linear_baseline_result(frame, spec)
+    result = fit_model_result(frame, spec)
 
     assert result.coefficients.tolist() == pytest.approx(expected.tolist())
 
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
-    tiny_result = fit_linear_baseline_result(frame, spec)
+    tiny_result = fit_model_result(frame, spec)
 
     assert tiny_result.coefficients.tolist() == pytest.approx(
         expected.tolist(),
@@ -1081,7 +1161,7 @@ def test_model_rejects_tradable_sample_filter_mode() -> None:
     with pytest.raises(ValueError, match="unsupported_model_sample_filter_mode"):
         ModelSpec(
             model_id="linear_tradable",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("factor",),
             label_column="label",
             sample_filter_mode="tradable",
@@ -1092,7 +1172,7 @@ def test_model_rejects_unsupported_contract_version() -> None:
     with pytest.raises(ValueError, match="unsupported_model_contract_version"):
         ModelSpec(
             model_id="linear_bad_contract",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("factor",),
             label_column="label",
             contract_version="9.9",
@@ -1113,13 +1193,11 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         prediction_id="pred_eligible",
         model_id="linear_eligible",
         research_dataset_id="demo_filter",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
         train_end="2024-01-02",
         test_start="2024-01-03",
         test_end="2024-01-03",
     )
-    prediction = build_prediction_bundle(
+    prediction = build_prediction_frame(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1145,14 +1223,13 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         "is_final_oos_window": False,
         "input_columns": ["factor"],
         "input_count": 1,
-        "prediction_column": default_prediction_column(),
+        "prediction_column": PREDICTION_SCORE_COLUMN,
     }
     assert len(prediction) == 5
     assert set(prediction.columns) == {
-        "market_id",
         "asset_id",
         "timestamp",
-        default_prediction_column(),
+        PREDICTION_SCORE_COLUMN,
     }
 
     layout = StorageLayout(project_root=tmp_path)
@@ -1170,7 +1247,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("factor",),
             label_column="label",
         )
@@ -1226,13 +1303,11 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         prediction_id="pred_memory_safe",
         model_id="linear_memory_safe",
         research_dataset_id="demo_filter",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
         train_end="2024-01-02",
         test_start="2024-01-03",
         test_end="2024-01-05",
     )
-    expected = build_prediction_bundle(
+    expected = build_prediction_frame(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1247,7 +1322,7 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
 
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
-    result = build_prediction_bundle(
+    result = build_prediction_frame(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1283,7 +1358,7 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("factor",),
             label_column="label",
         )
@@ -1294,8 +1369,6 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
             prediction_id="pred_override",
             model_id="linear_eligible",
             research_dataset_id="demo_filter",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
             train_end="2024-01-01",
             test_start="2024-01-04",
             test_end="2024-01-04",
@@ -1356,7 +1429,7 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("factor",),
             label_column="label",
         )
@@ -1367,8 +1440,6 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
             prediction_id="pred_no_leakage",
             model_id="linear_eligible",
             research_dataset_id="demo_filter",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
             train_end="2024-01-02",
             test_start="2024-01-03",
             test_end="2024-01-03",
@@ -1387,7 +1458,7 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
         kind="mergesort",
     )
 
-    assert prediction[default_prediction_column()].tolist() == pytest.approx(
+    assert prediction[PREDICTION_SCORE_COLUMN].tolist() == pytest.approx(
         [5.0, 8.0, 11.0, 14.0, 17.0, 20.0]
     )
 
@@ -1423,13 +1494,11 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
         prediction_id="pred_unfiltered",
         model_id="linear_unfiltered",
         research_dataset_id="demo_filter",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
         train_end="2024-01-02",
         test_start="2024-01-03",
         sample_filter_mode="unfiltered",
     )
-    prediction = build_prediction_bundle(
+    prediction = build_prediction_frame(
         _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1445,27 +1514,23 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
             prediction_id="pred_tradable",
             model_id="linear_eligible",
             research_dataset_id="demo_filter",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
             train_end="2024-01-02",
             test_start="2024-01-03",
             sample_filter_mode="tradable",
         )
 
 
-def test_prediction_bundle_fail_closed_errors_are_specific() -> None:
+def test_prediction_artifacts_fail_closed_errors_are_specific() -> None:
     with pytest.raises(
         ValueError,
         match="prediction_train_end_must_precede_test_start",
     ):
-        build_prediction_bundle(
+        build_prediction_frame(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             PredictionSpec(
                 prediction_id="pred_bad_order",
                 model_id="linear_eligible",
                 research_dataset_id="demo_filter",
-                prediction_column=default_prediction_column(),
-                primary_key=platform_entity_time_key(),
                 train_end="2024-01-03",
                 test_start="2024-01-03",
             ),
@@ -1477,14 +1542,12 @@ def test_prediction_bundle_fail_closed_errors_are_specific() -> None:
         ValueError,
         match="prediction_test_end_must_not_precede_test_start",
     ):
-        build_prediction_bundle(
+        build_prediction_frame(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             PredictionSpec(
                 prediction_id="pred_bad_test_end",
                 model_id="linear_eligible",
                 research_dataset_id="demo_filter",
-                prediction_column=default_prediction_column(),
-                primary_key=platform_entity_time_key(),
                 train_end="2024-01-02",
                 test_start="2024-01-04",
                 test_end="2024-01-03",
@@ -1494,14 +1557,12 @@ def test_prediction_bundle_fail_closed_errors_are_specific() -> None:
         )
 
     with pytest.raises(ValueError, match="empty_prediction_window"):
-        build_prediction_bundle(
+        build_prediction_frame(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
             PredictionSpec(
                 prediction_id="pred_empty_test",
                 model_id="linear_eligible",
                 research_dataset_id="demo_filter",
-                prediction_column=default_prediction_column(),
-                primary_key=platform_entity_time_key(),
                 train_end="2024-01-02",
                 test_start="2024-01-03",
                 test_end="2024-01-03",
@@ -1530,7 +1591,7 @@ def test_prediction_handoff_empty_training_window_fails_closed(
     model_catalog.register(
         ModelSpec(
             model_id="linear_eligible",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("factor",),
             label_column="label",
         )
@@ -1541,8 +1602,6 @@ def test_prediction_handoff_empty_training_window_fails_closed(
             prediction_id="pred_empty_train",
             model_id="linear_eligible",
             research_dataset_id="demo_filter",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
             train_end="2024-01-02",
             test_start="2024-01-03",
             test_end="2024-01-03",
@@ -1559,20 +1618,18 @@ def test_prediction_handoff_empty_training_window_fails_closed(
         )
 
 
-def test_prediction_bundle_rejects_filter_columns_as_direct_features() -> None:
+def test_prediction_artifacts_rejects_filter_columns_as_direct_features() -> None:
     spec = PredictionSpec(
         prediction_id="pred_bad_feature",
         model_id="linear_unfiltered",
         research_dataset_id="demo_filter",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
         train_end="2024-01-02",
         test_start="2024-01-03",
         sample_filter_mode="unfiltered",
     )
 
     with pytest.raises(ValueError, match="filter_column_in_input_columns: eligible"):
-        build_prediction_bundle(
+        build_prediction_frame(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             spec,
             coefficients=np.asarray([0.0, 0.01]),

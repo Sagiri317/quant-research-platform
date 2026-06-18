@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 import pandas as pd
@@ -16,10 +16,12 @@ from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
-    SignalSpec,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
+from quant_research_platform.research.signals.materialization import (
+    materialize_signal_frame,
+)
 from quant_research_platform.runtime.resources import ChunkAxis
 
 
@@ -37,13 +39,13 @@ def evaluate_signal_frame(
     frame: pd.DataFrame,
     spec: EvaluationSpec,
     *,
-    n_groups: int = 5,
+    n_groups: int | None = None,
 ) -> EvaluationResult:
     asset_column = "asset_id" if "asset_id" in frame else "asset"
     return _evaluate_signal_frame_chunks(
         (frame,),
         spec,
-        n_groups=n_groups,
+        n_groups=spec.n_groups if n_groups is None else n_groups,
         asset_column=asset_column,
     )
 
@@ -54,22 +56,17 @@ def _evaluate_signal_frame_chunks(
     *,
     n_groups: int = 5,
     asset_column: str = "asset_id",
+    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> EvaluationResult:
-    if len(spec.label_columns) != 1:
-        raise ValueError("minimal_evaluation_requires_one_label")
-    label = spec.label_columns[0]
-    compute_spec = ComputePanelSpec(
-        signal_columns=tuple(signal.signal_id for signal in spec.signals),
-        label_column=label,
-        timestamp_column="timestamp",
-        asset_column=asset_column,
-    )
     metrics, grouped_label_values, filter_metadata, rows_after_dropna = (
         _compute_evaluation_frames(
             frames,
             spec=spec,
-            compute_spec=compute_spec,
+            signal_columns=tuple(signal.signal_id for signal in spec.signals),
+            label_columns=spec.label_columns,
             n_groups=n_groups,
+            asset_column=asset_column,
+            source_columns_by_kind=source_columns_by_kind,
         )
     )
     ic_summary = summarize_ic(metrics)
@@ -83,7 +80,7 @@ def _evaluate_signal_frame_chunks(
         ic_summary=ic_summary,
         group_spread_summary=group_spread_summary,
         n_groups=n_groups,
-        timestamp_column=compute_spec.timestamp_column,
+        timestamp_column="timestamp",
     )
     return EvaluationResult(
         spec=spec,
@@ -99,8 +96,11 @@ def _compute_evaluation_frames(
     frames: Iterable[pd.DataFrame],
     *,
     spec: EvaluationSpec,
-    compute_spec: ComputePanelSpec,
+    signal_columns: tuple[str, ...],
+    label_columns: tuple[str, ...],
     n_groups: int,
+    asset_column: str,
+    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], int]:
     from quant_research_platform.research.filtering import apply_filter_mode
 
@@ -111,20 +111,17 @@ def _compute_evaluation_frames(
     rows_after_dropna = 0
     filter_columns_used: list[str] = []
     filter_definition = ""
-    compute_columns = (
-        compute_spec.timestamp_column,
-        compute_spec.asset_column,
-        *compute_spec.signal_columns,
-        compute_spec.label_column,
-    )
 
     for chunk in iter_complete_time_sized_frames(
         _iter_evaluation_work_frames(
             frames,
             spec=spec,
-            compute_spec=compute_spec,
+            signal_columns=signal_columns,
+            label_columns=label_columns,
+            asset_column=asset_column,
+            source_columns_by_kind=source_columns_by_kind,
         ),
-        timestamp_column=compute_spec.timestamp_column,
+        timestamp_column="timestamp",
         axis=ChunkAxis.TIME,
     ):
         filtered, metadata = apply_filter_mode(
@@ -136,23 +133,33 @@ def _compute_evaluation_frames(
         rows_after_filter += int(metadata["rows_after_filter_mode"])
         filter_columns_used = list(metadata["filter_columns_used"])
         filter_definition = str(metadata["filter_definition"])
-        usable = (
-            filtered.dropna(
-                subset=[compute_spec.label_column]
+        for label_column in label_columns:
+            compute_spec = ComputePanelSpec(
+                signal_columns=signal_columns,
+                label_column=label_column,
+                timestamp_column="timestamp",
+                asset_column=asset_column,
             )
-            .loc[:, list(compute_columns)]
-            .copy()
-        )
-        metrics, grouped_label_values = compute_ic_and_grouped_label_values(
-            usable,
-            compute_spec,
-            n_groups=n_groups,
-        )
-        rows_after_dropna += int(
-            pd.to_numeric(metrics["n_obs"], errors="coerce").fillna(0).sum()
-        )
-        metric_parts.append(metrics)
-        grouped_parts.append(grouped_label_values)
+            compute_columns = (
+                compute_spec.timestamp_column,
+                compute_spec.asset_column,
+                *compute_spec.signal_columns,
+                compute_spec.label_column,
+            )
+            usable = filtered.dropna(subset=[label_column]).loc[
+                :,
+                list(compute_columns),
+            ].copy()
+            metrics, grouped_label_values = compute_ic_and_grouped_label_values(
+                usable,
+                compute_spec,
+                n_groups=n_groups,
+            )
+            rows_after_dropna += int(
+                pd.to_numeric(metrics["n_obs"], errors="coerce").fillna(0).sum()
+            )
+            metric_parts.append(metrics)
+            grouped_parts.append(grouped_label_values)
 
     filter_metadata = {
         "filter_mode": spec.filter_mode,
@@ -173,21 +180,24 @@ def _iter_evaluation_work_frames(
     frames: Iterable[pd.DataFrame],
     *,
     spec: EvaluationSpec,
-    compute_spec: ComputePanelSpec,
+    signal_columns: tuple[str, ...],
+    label_columns: tuple[str, ...],
+    asset_column: str,
+    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> Iterator[pd.DataFrame]:
     required = {
-        compute_spec.timestamp_column,
-        compute_spec.asset_column,
-        *(signal.column for signal in spec.signals),
-        compute_spec.label_column,
+        "timestamp",
+        asset_column,
+        *(signal.source_column for signal in spec.signals),
+        *label_columns,
     }
     work_columns = tuple(
         dict.fromkeys(
             (
-                compute_spec.timestamp_column,
-                compute_spec.asset_column,
-                *(signal.column for signal in spec.signals),
-                compute_spec.label_column,
+                "timestamp",
+                asset_column,
+                *(signal.source_column for signal in spec.signals),
+                *label_columns,
                 *required_filter_columns(spec.filter_mode),
             )
         )
@@ -200,9 +210,10 @@ def _iter_evaluation_work_frames(
             :,
             [column for column in work_columns if column in frame.columns],
         ].pipe(
-            _normalize_signal_columns,
+            materialize_signal_frame,
             signals=spec.signals,
-            timestamp_column=compute_spec.timestamp_column,
+            timestamp_column="timestamp",
+            source_columns_by_kind=source_columns_by_kind,
         )
 
 
@@ -255,47 +266,6 @@ def _evaluation_diagnostics(
 
 def _date_string(value: pd.Timestamp) -> str:
     return pd.Timestamp(value).date().isoformat()
-
-
-def _normalize_signal_column(
-    frame: pd.DataFrame,
-    *,
-    signal: SignalSpec,
-    output_column: str,
-    timestamp_column: str,
-) -> pd.DataFrame:
-    result = frame.copy()
-    values = pd.to_numeric(result[signal.column], errors="coerce")
-    if signal.transform == "rank":
-        values = values.groupby(result[timestamp_column]).rank(method="average")
-    elif signal.transform == "zscore":
-        grouped = values.groupby(result[timestamp_column])
-        mean = grouped.transform("mean")
-        std = grouped.transform(lambda item: item.std(ddof=0))
-        values = (values - mean) / std.replace(0, pd.NA)
-    if signal.direction == "lower":
-        values = -values
-    if output_column != signal.column:
-        result = result.drop(columns=[signal.column])
-    result[output_column] = values
-    return result
-
-
-def _normalize_signal_columns(
-    frame: pd.DataFrame,
-    *,
-    signals: tuple[SignalSpec, ...],
-    timestamp_column: str,
-) -> pd.DataFrame:
-    result = frame
-    for signal in signals:
-        result = _normalize_signal_column(
-            result,
-            signal=signal,
-            output_column=signal.signal_id,
-            timestamp_column=timestamp_column,
-        )
-    return result
 
 
 __all__ = ["EvaluationResult", "evaluate_signal_frame"]

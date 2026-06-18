@@ -1,23 +1,45 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.portfolios as portfolios_package
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.evaluations import SignalSpec
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
+from quant_research_platform.contracts.portfolios import (
+    CostConfig,
+    PortfolioSpec,
+    WeightConfig,
+)
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios import (
+    construct_portfolio_positions,
     run_portfolio_from_research_dataset,
-    simulate_portfolio_frame,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+
+
+def test_research_portfolio_package_exports_final_names() -> None:
+    assert not hasattr(portfolios_package, "construct_portfolio_frame")
+    for name in (
+        "construct_portfolio_positions",
+        "compute_portfolio_turnover",
+        "compute_portfolio_costs",
+        "compute_portfolio_returns",
+        "compute_cumulative_returns",
+        "compute_drawdowns",
+        "compute_performance_summary",
+        "compute_exposure_summary",
+    ):
+        assert hasattr(portfolios_package, name)
 
 
 def test_portfolio_engine_produces_required_signal_artifacts() -> None:
@@ -38,22 +60,22 @@ def test_portfolio_engine_produces_required_signal_artifacts() -> None:
         signals=(
             SignalSpec(
                 signal_id="risk_signal",
-                column="raw_risk",
+                source_column="raw_risk",
                 source_kind="factor",
-                direction="lower",
+                direction="lower_is_better",
                 transform="rank",
             ),
         ),
-        label_column="forward_return",
+        return_source_column="forward_return",
         weight_config=WeightConfig(
             method="rank_weighted_quantile",
             top_quantile=0.25,
             bottom_quantile=0.25,
-            cost_bps=10.0,
         ),
+        cost_config=CostConfig(slippage_bps=10.0),
     )
 
-    result = simulate_portfolio_frame(frame, spec)
+    result = construct_portfolio_positions(frame, spec)
 
     assert set(result.positions["signal"]) == {"risk_signal"}
     assert result.turnover["turnover"].tolist() == pytest.approx([2.0, 0.0])
@@ -94,26 +116,81 @@ def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
         signals=(
             SignalSpec(
                 signal_id="raw_a",
-                column="raw_a",
+                source_column="raw_a",
                 source_kind="factor",
                 transform="rank",
             ),
             SignalSpec(
                 signal_id="ranked_raw_b",
-                column="raw_b",
+                source_column="raw_b",
                 source_kind="factor",
                 transform="rank",
             ),
         ),
-        label_column="forward_return",
+        return_source_column="forward_return",
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
 
-    result = simulate_portfolio_frame(frame, spec)
+    result = construct_portfolio_positions(frame, spec)
 
     assert set(result.positions["signal"]) == {"raw_a", "ranked_raw_b"}
     assert set(result.portfolio_returns["signal"]) == {"raw_a", "ranked_raw_b"}
     assert result.performance_summary["periods"].tolist() == [1, 1]
+
+
+def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b", "c", "d"] * 2,
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4
+            + [pd.Timestamp("2024-01-03")] * 4,
+            "raw_signal": [1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0],
+            "forward_return": [0.0, 0.0, 0.0, 0.0, 0.00, 0.01, 0.02, 0.06],
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id="lagged_signal_portfolio",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="ranked_signal",
+                source_column="raw_signal",
+                source_kind="factor",
+                transform="rank",
+            ),
+        ),
+        return_source_column="forward_return",
+        execution_lag_steps=1,
+        weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
+    )
+
+    result = construct_portfolio_positions(frame, spec)
+
+    assert result.portfolio_returns["timestamp"].tolist() == [
+        pd.Timestamp("2024-01-03")
+    ]
+    assert result.portfolio_returns["gross_portfolio_return"].tolist() == pytest.approx(
+        [0.06]
+    )
+
+
+def test_portfolio_spec_rejects_unsupported_frequency_instead_of_ignoring_it() -> None:
+    with pytest.raises(ValueError, match="unsupported_portfolio_frequency"):
+        PortfolioSpec(
+            portfolio_id="weekly_portfolio",
+            market_id=MarketId("a_share"),
+            research_dataset_id="demo",
+            signals=(
+                SignalSpec(
+                    signal_id="ranked_signal",
+                    source_column="raw_signal",
+                    source_kind="factor",
+                ),
+            ),
+            return_source_column="forward_return",
+            frequency="weekly",
+        )
 
 
 def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
@@ -150,6 +227,12 @@ def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
         "manifest.json",
     ):
         assert (run_root / filename).is_file()
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["frequency"] == "daily"
+    assert manifest["execution_lag_steps"] == 0
+    returns = pd.read_parquet(run_root / "portfolio_returns.parquet")
+    assert "return_source_column" in returns.columns
+    assert "label" not in returns.columns
 
 
 def _portfolio_spec() -> PortfolioSpec:
@@ -160,13 +243,13 @@ def _portfolio_spec() -> PortfolioSpec:
         signals=(
             SignalSpec(
                 signal_id="risk_signal",
-                column="raw_risk",
+                source_column="raw_risk",
                 source_kind="factor",
-                direction="lower",
+                direction="lower_is_better",
                 transform="rank",
             ),
         ),
-        label_column="forward_return",
+        return_source_column="forward_return",
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
 

@@ -17,9 +17,6 @@ from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import (
     PredictionCatalog,
 )
-from quant_research_platform.catalog.predictions import (
-    default_prediction_column as _prediction_column_name,
-)
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
@@ -27,14 +24,13 @@ from quant_research_platform.catalog.processed import (
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.contracts.evaluations import EvaluationSpec, SignalSpec
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.models import MODEL_ALGORITHMS, ModelSpec
-from quant_research_platform.contracts.portfolios import PortfolioSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_profiles as a_share_research_profiles,
+)
+from quant_research_platform.markets.implementations.a_share import (
+    research_scenarios as a_share_research_scenarios,
 )
 from quant_research_platform.markets.implementations.a_share.definition import (
     a_share_market_definition,
@@ -44,10 +40,6 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 )
 from quant_research_platform.markets.implementations.a_share.fields import (
     a_share_field_catalog,
-)
-from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_MARKET_ID,
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as a_share_label_definitions,
@@ -105,11 +97,13 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         factors=a_share_factor_definitions.a_share_factor_catalog(),
         labels=a_share_label_definitions.a_share_label_catalog(),
         processed=a_share_processed_catalog_module.a_share_processed_catalog(),
-        research_datasets=a_share_research_profiles.a_share_research_dataset_catalog(),
-        evaluations=_a_share_evaluation_catalog(),
-        models=_a_share_model_catalog(),
-        predictions=_a_share_prediction_catalog(),
-        portfolios=_a_share_portfolio_catalog(),
+        research_datasets=(
+            a_share_research_profiles.build_a_share_research_dataset_catalog()
+        ),
+        evaluations=a_share_research_scenarios.build_a_share_evaluation_catalog(),
+        models=a_share_research_scenarios.build_a_share_model_catalog(),
+        predictions=a_share_research_scenarios.build_a_share_prediction_catalog(),
+        portfolios=a_share_research_scenarios.build_a_share_portfolio_catalog(),
         sources=_a_share_csmar_source_registry(),
         markets=_a_share_market_registry(),
         reports=report_catalog(),
@@ -118,107 +112,6 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         materialize_interim_data=_materialize_a_share_csmar_interim_data,
         materialize_processed_data=_materialize_a_share_processed_data,
     )
-
-
-def _a_share_evaluation_catalog() -> EvaluationCatalog:
-    catalog = EvaluationCatalog()
-    catalog.register(
-        EvaluationSpec(
-            run_id="a_share_mom_20d_forward_return_20d_2014",
-            market_id=A_SHARE_MARKET_ID,
-            research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            signals=(
-                SignalSpec(
-                    signal_id="mom_20d",
-                    column="mom_20d",
-                    source_kind="factor",
-                    direction="higher",
-                ),
-                SignalSpec(
-                    signal_id="rev_1d",
-                    column="rev_1d",
-                    source_kind="factor",
-                    direction="lower",
-                ),
-                SignalSpec(
-                    signal_id="mom_20d_zscore",
-                    column="mom_20d_zscore",
-                    source_kind="feature",
-                    direction="higher",
-                ),
-            ),
-            label_columns=("forward_return_20d",),
-        )
-    )
-    return catalog
-
-
-def _a_share_model_catalog() -> ModelCatalog:
-    catalog = ModelCatalog()
-    for model_algorithm in sorted(MODEL_ALGORITHMS):
-        catalog.register(
-            ModelSpec(
-                model_id=_a_share_model_id(model_algorithm),
-                model_algorithm=model_algorithm,
-                input_factor_columns=_a_share_model_factor_inputs(model_algorithm),
-                input_feature_columns=_a_share_model_feature_inputs(model_algorithm),
-                label_column="forward_return_20d",
-                hyperparameters=_a_share_model_hyperparameters(model_algorithm),
-                random_seed=7,
-                max_train_rows=5000,
-            )
-        )
-    return catalog
-
-
-def _a_share_prediction_catalog() -> PredictionCatalog:
-    catalog = PredictionCatalog()
-    for model_algorithm in sorted(MODEL_ALGORITHMS):
-        catalog.register(
-            PredictionSpec(
-                prediction_id=_a_share_prediction_id(model_algorithm),
-                model_id=_a_share_model_id(model_algorithm),
-                research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-                prediction_column=_prediction_column_name(),
-                primary_key=("market_id", "asset_id", "timestamp"),
-                train_end="2014-06-30",
-                test_start="2014-07-01",
-            )
-        )
-    return catalog
-
-
-def _a_share_portfolio_catalog() -> PortfolioCatalog:
-    catalog = PortfolioCatalog()
-    catalog.register(
-        PortfolioSpec(
-            portfolio_id="a_share_mom_20d_portfolio_2014",
-            market_id=A_SHARE_MARKET_ID,
-            research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            signals=(
-                SignalSpec(
-                    signal_id="mom_20d",
-                    column="mom_20d",
-                    source_kind="factor",
-                    direction="higher",
-                ),
-                SignalSpec(
-                    signal_id="rev_1d",
-                    column="rev_1d",
-                    source_kind="factor",
-                    direction="lower",
-                ),
-                SignalSpec(
-                    signal_id="mom_20d_zscore",
-                    column="mom_20d_zscore",
-                    source_kind="feature",
-                    direction="higher",
-                ),
-            ),
-            label_column="forward_return_20d",
-        )
-    )
-    return catalog
 
 
 def _a_share_csmar_source_registry() -> SourceRegistry:
@@ -243,40 +136,6 @@ def _a_share_csmar_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]
 
 def _a_share_csmar_source_id() -> SourceId:
     return SourceId(next(iter(_a_share_csmar_source_interim_catalogs())))
-
-
-def _a_share_model_id(model_algorithm: str) -> str:
-    return f"a_share_{model_algorithm}_mom_20d_forward_return_20d"
-
-
-def _a_share_prediction_id(model_algorithm: str) -> str:
-    return f"a_share_{model_algorithm}_mom_20d_prediction_2014"
-
-
-def _a_share_model_factor_inputs(model_algorithm: str) -> tuple[str, ...]:
-    if model_algorithm == "single_factor_baseline":
-        return ("mom_20d",)
-    return ("mom_20d", "rev_1d")
-
-
-def _a_share_model_feature_inputs(model_algorithm: str) -> tuple[str, ...]:
-    if model_algorithm == "single_factor_baseline":
-        return ()
-    return ("mom_20d_zscore",)
-
-
-def _a_share_model_hyperparameters(model_algorithm: str) -> dict[str, object]:
-    if model_algorithm in {"random_forest", "extra_trees"}:
-        return {"n_estimators": 5, "max_depth": 3, "n_jobs": 1}
-    if model_algorithm == "gradient_boosting":
-        return {"n_estimators": 5, "max_depth": 2}
-    if model_algorithm == "hist_gradient_boosting":
-        return {"max_iter": 5, "max_leaf_nodes": 7}
-    if model_algorithm == "xgboost":
-        return {"n_estimators": 5, "max_depth": 2, "n_jobs": 1}
-    if model_algorithm == "lightgbm":
-        return {"n_estimators": 5, "num_leaves": 7, "n_jobs": 1, "verbosity": -1}
-    return {}
 
 
 def _materialize_a_share_csmar_interim_data(

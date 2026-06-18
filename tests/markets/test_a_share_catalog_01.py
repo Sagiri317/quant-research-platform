@@ -31,7 +31,7 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
     a_share_processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.research_profiles import (
-    a_share_research_dataset_catalog,
+    build_a_share_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.validation import (
     factor_tables,
@@ -276,7 +276,7 @@ def test_a_share_processed_annotation_contracts_are_role_based() -> None:
 
 
 def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() -> None:
-    dataset = a_share_research_dataset_catalog().get(
+    dataset = build_a_share_research_dataset_catalog().get(
         A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 

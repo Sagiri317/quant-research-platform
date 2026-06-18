@@ -123,11 +123,13 @@ def test_tensor_weighted_positions_builds_artifacts_from_execution_path() -> Non
         panel,
         spec,
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
     )
     positions, diagnostics = tensor_construction.build_tensor_weighted_positions(
         panel,
         spec,
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
     )
 
     assert isinstance(artifacts, tensor_construction.TensorPortfolioArtifacts)
@@ -176,6 +178,7 @@ def test_tensor_weighted_positions_accepts_string_timestamps_like_dataframe() ->
         panel,
         spec,
         weight_config,
+        return_source_column="forward_return",
     )
 
     assert dataframe_positions["timestamp"].map(type).eq(pd.Timestamp).all()
@@ -194,6 +197,7 @@ def test_tensor_weighted_positions_rejects_duplicate_keys_like_dataframe() -> No
             panel,
             spec,
             weight_config,
+            return_source_column="forward_return",
         )
 
 
@@ -603,13 +607,31 @@ def test_simulate_long_short_returns_applies_turnover_costs() -> None:
         spec,
         top_quantile=1 / 3,
         bottom_quantile=1 / 3,
-        cost_bps=10,
+        cost_config=CostConfig(slippage_bps=10),
+        return_source_column="forward_return",
     )
 
     assert result["gross_portfolio_return"].round(6).tolist() == [0.02, 0.02]
     assert result["turnover"].tolist() == [2.0, 4.0]
     assert result["cost"].round(6).tolist() == [0.002, 0.004]
     assert result["net_portfolio_return"].round(6).tolist() == [0.018, 0.016]
+
+
+def test_portfolio_construction_requires_explicit_return_source_column() -> None:
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+
+    with pytest.raises(ValueError, match="portfolio_return_source_column_required"):
+        simulate_weighted_long_short_returns(
+            _ranking_panel(),
+            spec,
+            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        )
+    with pytest.raises(ValueError, match="portfolio_return_source_column_required"):
+        tensor_construction.build_tensor_portfolio_artifacts(
+            _ranking_panel(),
+            spec,
+            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        )
 
 
 def test_simulate_weighted_returns_keeps_long_only_rows_without_short_leg() -> None:
@@ -622,8 +644,9 @@ def test_simulate_weighted_returns_keeps_long_only_rows_without_short_leg() -> N
             portfolio_mode="long_only",
             top_quantile=1 / 3,
             bottom_quantile=1 / 3,
-            cost_bps=10,
         ),
+        cost_config=CostConfig(slippage_bps=10),
+        return_source_column="forward_return",
     )
 
     assert returns["gross_portfolio_return"].round(6).tolist() == [0.03, 0.03]
@@ -643,7 +666,7 @@ def test_detailed_cost_config_splits_buy_sell_slippage_and_spread_costs() -> Non
 
     breakdown = calculate_cost_breakdown(
         positions,
-        WeightConfig(cost_bps=99),
+        WeightConfig(),
         CostConfig(
             buy_cost_bps=10,
             sell_cost_bps=20,
@@ -670,7 +693,6 @@ def test_simulation_uses_detailed_cost_config_when_provided() -> None:
         WeightConfig(
             top_quantile=1 / 3,
             bottom_quantile=1 / 3,
-            cost_bps=99,
         ),
         cost_config=CostConfig(
             buy_cost_bps=10,
@@ -678,6 +700,7 @@ def test_simulation_uses_detailed_cost_config_when_provided() -> None:
             slippage_bps=2,
             spread_bps=1,
         ),
+        return_source_column="forward_return",
     )
 
     assert returns["cost"].round(6).tolist() == [0.0036, 0.0072]
@@ -701,6 +724,7 @@ def test_simulation_does_not_build_timestamp_asset_label_lookup(monkeypatch) -> 
         _ranking_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
     )
 
     assert set_index_calls == 0
@@ -722,6 +746,7 @@ def test_simulation_does_not_join_timestamp_asset_labels(monkeypatch) -> None:
         _ranking_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
     )
 
     assert join_calls == 0
@@ -737,6 +762,7 @@ def test_simulation_does_not_scan_turnover_and_cost_per_return_group(
         _ranking_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
     )
 
 
@@ -758,6 +784,7 @@ def test_simulation_streams_portfolio_path_without_rebuilding_from_positions(
         _ranking_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
     )
 
     assert turnover["turnover"].tolist() == [2.0, 4.0]
@@ -779,6 +806,7 @@ def test_simulation_calculates_long_short_legs_without_dataframe_dropna(
         _ranking_panel(),
         ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
         WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
     )
 
     assert returns["gross_portfolio_return"].round(6).tolist() == [0.02, 0.02]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from importlib import import_module
 
 import numpy as np
 import pandas as pd
@@ -22,26 +23,50 @@ class ModelFitResult:
     prediction_model: object | None = field(default=None, compare=False, repr=False)
 
 
-def fit_linear_baseline_result(frame: pd.DataFrame, spec: ModelSpec) -> ModelFitResult:
-    return _fit_linear_baseline_result_from_frames((frame,), spec)
+def build_estimator_from_model_spec(spec: ModelSpec) -> object:
+    _dependency_status(spec.model_algorithm)
+    algorithm = spec.model_algorithm
+    if algorithm == "linear_regression":
+        from sklearn.linear_model import LinearRegression
+
+        return LinearRegression()
+    if algorithm == "single_factor_baseline":
+        return _SingleFactorBaseline(spec.input_columns[0])
+    if algorithm == "equal_weight_rank_ensemble":
+        return _RankEnsemblePredictor(spec.input_columns)
+    if algorithm == "ic_weighted_rank_ensemble":
+        return _ICWeightedRankEnsembleFactory(spec.input_columns, spec.label_column)
+    return _build_regression_estimator(spec)
 
 
 def fit_model_result(frame: pd.DataFrame, spec: ModelSpec) -> ModelFitResult:
     return _fit_model_result_from_frames((frame,), spec)
 
 
-def _fit_linear_baseline_result_from_frames(
-    frames: Iterable[pd.DataFrame],
+def predict_model_frame(
+    frame: pd.DataFrame,
     spec: ModelSpec,
-) -> ModelFitResult:
-    return _fit_model_result_from_frames(frames, spec)
+    result: ModelFitResult,
+) -> pd.DataFrame:
+    required = set(spec.input_columns)
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError(f"missing_model_columns: {', '.join(missing)}")
+    output = frame.copy()
+    output["prediction_score"] = _predict_scores(
+        frame,
+        coefficients=result.coefficients,
+        input_columns=spec.input_columns,
+        prediction_model=result.prediction_model,
+    )
+    return output
 
 
 def _fit_model_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
 ) -> ModelFitResult:
-    if spec.model_algorithm != "linear":
+    if spec.model_algorithm != "linear_regression":
         return _fit_estimator_model_result_from_frames(frames, spec)
     if spec.max_train_rows is not None or spec.purge_gap_steps > 0:
         return _fit_controlled_linear_model_result_from_frames(frames, spec)
@@ -75,7 +100,26 @@ def _fit_model_result_from_frames(
     )
     if row_counts["rows_after_input_label_dropna"] == 0:
         raise ValueError("model_training_sample_empty")
-    metadata = {
+    metadata = _model_metadata(
+        spec,
+        filter_metadata=filter_metadata,
+        row_counts=row_counts,
+        coefficient_count=int(len(beta)),
+        feature_importance=_linear_feature_importance(spec, beta),
+    )
+    return ModelFitResult(coefficients=beta, metadata=metadata)
+
+
+def _model_metadata(
+    spec: ModelSpec,
+    *,
+    filter_metadata: dict[str, object],
+    row_counts: dict[str, object],
+    coefficient_count: int,
+    feature_importance: dict[str, float] | None = None,
+    feature_importance_status: str | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
         "contract_version": spec.contract_version,
         "model_algorithm": spec.model_algorithm,
         "sample_filter_mode": spec.sample_filter_mode,
@@ -88,14 +132,108 @@ def _fit_model_result_from_frames(
         ),
         "train_start": row_counts["train_start"],
         "train_end": row_counts["train_end"],
+        "test_start": None,
+        "test_end": None,
+        "oos_start": None,
+        "oos_end": None,
         "input_factor_columns": list(spec.input_factor_columns),
         "input_feature_columns": list(spec.input_feature_columns),
-        "input_columns": list(input_columns),
-        "input_count": len(input_columns),
+        "input_columns": list(spec.input_columns),
+        "input_count": len(spec.input_columns),
         "label_column": spec.label_column,
-        "coefficient_count": int(len(beta)),
+        "hyperparameters": dict(spec.hyperparameters),
+        "random_seed": spec.random_seed,
+        "max_train_rows": spec.max_train_rows,
+        "purge_gap_steps": spec.purge_gap_steps,
+        "dependency_status": _dependency_status(spec.model_algorithm),
+        "coefficient_count": coefficient_count,
     }
-    return ModelFitResult(coefficients=beta, metadata=metadata)
+    if feature_importance is not None:
+        metadata["feature_importance"] = feature_importance
+    else:
+        metadata["feature_importance_status"] = (
+            feature_importance_status or "not_available_for_model_algorithm"
+        )
+    return metadata
+
+
+def _dependency_status(algorithm: str) -> dict[str, str]:
+    dependency_by_algorithm = {
+        "linear_regression": "sklearn",
+        "ridge_regression": "sklearn",
+        "lasso_regression": "sklearn",
+        "elastic_net": "sklearn",
+        "huber_regression": "sklearn",
+        "decision_tree_regressor": "sklearn",
+        "random_forest_regressor": "sklearn",
+        "extra_trees_regressor": "sklearn",
+        "gradient_boosting_regressor": "sklearn",
+        "hist_gradient_boosting_regressor": "sklearn",
+        "xgboost_regressor": "xgboost",
+        "lightgbm_regressor": "lightgbm",
+    }
+    package = dependency_by_algorithm.get(algorithm)
+    if package is None:
+        return {"status": "available", "package": "internal"}
+    try:
+        import_module(package)
+    except ImportError as exc:
+        raise ImportError(f"model_dependency_unavailable: {package}") from exc
+    return {"status": "available", "package": package}
+
+
+def _linear_feature_importance(
+    spec: ModelSpec,
+    coefficients: np.ndarray,
+) -> dict[str, float]:
+    values = coefficients[1 : len(spec.input_columns) + 1]
+    return {
+        column: float(abs(value))
+        for column, value in zip(spec.input_columns, values, strict=True)
+    }
+
+
+def _estimator_feature_importance(
+    spec: ModelSpec,
+    predictor: object,
+) -> dict[str, float] | None:
+    if isinstance(predictor, _SingleFactorBaseline):
+        return {predictor.column: 1.0}
+    if isinstance(predictor, _RankEnsemblePredictor):
+        weight = 1.0 / len(predictor.columns)
+        return {column: weight for column in predictor.columns}
+    if isinstance(predictor, _ICWeightedRankEnsemble):
+        return {
+            column: float(abs(weight))
+            for column, weight in zip(predictor.columns, predictor.weights, strict=True)
+        }
+    if hasattr(predictor, "feature_importances_"):
+        values = np.asarray(predictor.feature_importances_, dtype="float64")
+        return {
+            column: float(value)
+            for column, value in zip(spec.input_columns, values, strict=True)
+        }
+    if hasattr(predictor, "coef_"):
+        values = np.ravel(np.asarray(predictor.coef_, dtype="float64"))
+        return {
+            column: float(abs(value))
+            for column, value in zip(spec.input_columns, values, strict=True)
+        }
+    return None
+
+
+def _predict_scores(
+    frame: pd.DataFrame,
+    *,
+    coefficients: np.ndarray,
+    input_columns: tuple[str, ...],
+    prediction_model: object | None,
+) -> np.ndarray:
+    if prediction_model is not None:
+        predicted = prediction_model.predict(frame.loc[:, input_columns])
+        return np.asarray(predicted, dtype="float64")
+    x = frame.loc[:, input_columns].to_numpy(dtype="float64", copy=False)
+    return np.asarray(float(coefficients[0]) + x @ coefficients[1:])
 
 
 def _fit_controlled_linear_model_result_from_frames(
@@ -106,26 +244,13 @@ def _fit_controlled_linear_model_result_from_frames(
     if row_counts["rows_after_input_label_dropna"] == 0:
         raise ValueError("model_training_sample_empty")
     beta = _fit_linear_coefficients_exact(training, spec)
-    metadata = {
-        "contract_version": spec.contract_version,
-        "model_algorithm": spec.model_algorithm,
-        "sample_filter_mode": spec.sample_filter_mode,
-        "filter_columns_used": list(filter_metadata["filter_columns_used"]),
-        "filter_definition": str(filter_metadata["filter_definition"]),
-        "rows_input": int(filter_metadata["rows_input"]),
-        "rows_after_filter_mode": int(filter_metadata["rows_after_filter_mode"]),
-        "rows_after_input_label_dropna": int(
-            row_counts["rows_after_input_label_dropna"]
-        ),
-        "train_start": row_counts["train_start"],
-        "train_end": row_counts["train_end"],
-        "input_factor_columns": list(spec.input_factor_columns),
-        "input_feature_columns": list(spec.input_feature_columns),
-        "input_columns": list(spec.input_columns),
-        "input_count": len(spec.input_columns),
-        "label_column": spec.label_column,
-        "coefficient_count": int(len(beta)),
-    }
+    metadata = _model_metadata(
+        spec,
+        filter_metadata=filter_metadata,
+        row_counts=row_counts,
+        coefficient_count=int(len(beta)),
+        feature_importance=_linear_feature_importance(spec, beta),
+    )
     return ModelFitResult(coefficients=beta, metadata=metadata)
 
 
@@ -240,26 +365,13 @@ def _fit_estimator_model_result_from_frames(
     coefficient_count = int(
         getattr(predictor, "coefficient_count", len(spec.input_columns))
     )
-    metadata = {
-        "contract_version": spec.contract_version,
-        "model_algorithm": spec.model_algorithm,
-        "sample_filter_mode": spec.sample_filter_mode,
-        "filter_columns_used": list(filter_metadata["filter_columns_used"]),
-        "filter_definition": str(filter_metadata["filter_definition"]),
-        "rows_input": int(filter_metadata["rows_input"]),
-        "rows_after_filter_mode": int(filter_metadata["rows_after_filter_mode"]),
-        "rows_after_input_label_dropna": int(
-            row_counts["rows_after_input_label_dropna"]
-        ),
-        "train_start": row_counts["train_start"],
-        "train_end": row_counts["train_end"],
-        "input_factor_columns": list(spec.input_factor_columns),
-        "input_feature_columns": list(spec.input_feature_columns),
-        "input_columns": list(spec.input_columns),
-        "input_count": len(spec.input_columns),
-        "label_column": spec.label_column,
-        "coefficient_count": coefficient_count,
-    }
+    metadata = _model_metadata(
+        spec,
+        filter_metadata=filter_metadata,
+        row_counts=row_counts,
+        coefficient_count=coefficient_count,
+        feature_importance=_estimator_feature_importance(spec, predictor),
+    )
     coefficients = np.asarray(
         getattr(predictor, "coefficients", np.full(coefficient_count, np.nan)),
         dtype="float64",
@@ -376,19 +488,20 @@ def _fit_predictor(
             input_columns=spec.input_columns,
             label_column=spec.label_column,
         )
-    estimator = _build_sklearn_estimator(spec)
+    estimator = _build_regression_estimator(spec)
     estimator.fit(training.loc[:, spec.input_columns], y)
     return estimator
 
 
-def _build_sklearn_estimator(spec: ModelSpec) -> object:
+def _build_regression_estimator(spec: ModelSpec) -> object:
+    _dependency_status(spec.model_algorithm)
     params = dict(spec.hyperparameters)
-    if spec.model_algorithm == "ridge":
+    if spec.model_algorithm == "ridge_regression":
         from sklearn.linear_model import Ridge
 
         params.setdefault("alpha", 1.0)
         return Ridge(**params)
-    if spec.model_algorithm == "lasso":
+    if spec.model_algorithm == "lasso_regression":
         from sklearn.linear_model import Lasso
 
         params.setdefault("alpha", 0.001)
@@ -405,18 +518,18 @@ def _build_sklearn_estimator(spec: ModelSpec) -> object:
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return ElasticNet(**params)
-    if spec.model_algorithm == "huber":
+    if spec.model_algorithm == "huber_regression":
         from sklearn.linear_model import HuberRegressor
 
         params.setdefault("max_iter", 1_000)
         return HuberRegressor(**params)
-    if spec.model_algorithm == "decision_tree":
+    if spec.model_algorithm == "decision_tree_regressor":
         from sklearn.tree import DecisionTreeRegressor
 
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return DecisionTreeRegressor(**params)
-    if spec.model_algorithm == "random_forest":
+    if spec.model_algorithm == "random_forest_regressor":
         from sklearn.ensemble import RandomForestRegressor
 
         params.setdefault("n_estimators", 20)
@@ -424,7 +537,7 @@ def _build_sklearn_estimator(spec: ModelSpec) -> object:
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return RandomForestRegressor(**params)
-    if spec.model_algorithm == "extra_trees":
+    if spec.model_algorithm == "extra_trees_regressor":
         from sklearn.ensemble import ExtraTreesRegressor
 
         params.setdefault("n_estimators", 20)
@@ -432,19 +545,19 @@ def _build_sklearn_estimator(spec: ModelSpec) -> object:
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return ExtraTreesRegressor(**params)
-    if spec.model_algorithm == "gradient_boosting":
+    if spec.model_algorithm == "gradient_boosting_regressor":
         from sklearn.ensemble import GradientBoostingRegressor
 
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return GradientBoostingRegressor(**params)
-    if spec.model_algorithm == "hist_gradient_boosting":
+    if spec.model_algorithm == "hist_gradient_boosting_regressor":
         from sklearn.ensemble import HistGradientBoostingRegressor
 
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return HistGradientBoostingRegressor(**params)
-    if spec.model_algorithm == "xgboost":
+    if spec.model_algorithm == "xgboost_regressor":
         from xgboost import XGBRegressor
 
         params.setdefault("n_estimators", 20)
@@ -456,7 +569,7 @@ def _build_sklearn_estimator(spec: ModelSpec) -> object:
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return XGBRegressor(**params)
-    if spec.model_algorithm == "lightgbm":
+    if spec.model_algorithm == "lightgbm_regressor":
         from lightgbm import LGBMRegressor
 
         params.setdefault("n_estimators", 20)
@@ -485,6 +598,12 @@ class _RankEnsemblePredictor:
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         return _rank_ensemble_scores(frame, self.columns)
+
+
+@dataclass(frozen=True)
+class _ICWeightedRankEnsembleFactory:
+    columns: tuple[str, ...]
+    label_column: str
 
 
 @dataclass(frozen=True)
@@ -592,4 +711,9 @@ def _date_string(value: pd.Timestamp) -> str:
     return pd.Timestamp(value).date().isoformat()
 
 
-__all__ = ["ModelFitResult", "fit_linear_baseline_result", "fit_model_result"]
+__all__ = [
+    "ModelFitResult",
+    "build_estimator_from_model_spec",
+    "fit_model_result",
+    "predict_model_frame",
+]

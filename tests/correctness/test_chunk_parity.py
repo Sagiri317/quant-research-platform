@@ -184,6 +184,6 @@ def test_research_feature_transform_session_chunks_equal_default(
         default.reset_index(drop=True),
         tiny.reset_index(drop=True),
     )
-    grouped_feature_mean = default.groupby("timestamp")["mom_20d_zscore"].mean()
-    assert grouped_feature_mean.abs().max() == pytest.approx(0.0)
+    timestamp_feature_mean = default.groupby("timestamp")["mom_20d_zscore"].mean()
+    assert timestamp_feature_mean.abs().max() == pytest.approx(0.0)
     assert set(default["mom_20d_zscore"].dropna().abs()) == {1.0}

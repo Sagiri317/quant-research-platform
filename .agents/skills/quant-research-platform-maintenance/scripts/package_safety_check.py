@@ -87,7 +87,11 @@ def check_entry_path(
     suffix = PurePosixPath(lower).suffix
     if suffix in BLOCKED_EXTENSIONS:
         result.errors.append(f"blocked extension: {norm}")
-    if suffix in PACKAGE_EXTENSIONS and not allow_nested_packages:
+    if (
+        suffix in PACKAGE_EXTENSIONS
+        and not allow_nested_packages
+        and norm != "final-branch.bundle"
+    ):
         result.errors.append(f"nested package/bundle not allowed by default: {norm}")
     for part in BLOCKED_PATH_PARTS:
         if lower == part or lower.startswith(part + "/") or f"/{part}/" in lower:

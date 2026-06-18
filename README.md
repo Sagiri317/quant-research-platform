@@ -1,6 +1,6 @@
 # Quant Research Platform（QRP）
 
-QRP 是一个面向多市场扩展的本地量化研究平台。当前启用市场是 A-share（A 股），当前阶段是 local research platform（本地研究平台），不是 paper trading（模拟交易）、live trading（实盘交易）或生产交易系统。
+QRP 是一个面向多市场扩展的本地量化研究平台。当前启用市场是 A-share（A 股），当前阶段是 local research platform（本地研究平台），不是 simulated order execution（模拟交易）、real-money order execution（实盘交易）或生产交易系统。
 
 ## 当前目标
 
@@ -37,7 +37,7 @@ qrp-private evidence run
 
 `qrp-private evidence run` 是 private local verification harness，用于本地
 smoke/evidence generation；不是 public CLI；不是 public execution mode；不是
-public evaluate、predict 或 report command；不是 paper/live trading；不承诺收益；
+public evaluate、predict 或 report command；不是 simulated or real-money order execution；不承诺收益；
 不输出 row-level private data。
 
 ## 治理入口

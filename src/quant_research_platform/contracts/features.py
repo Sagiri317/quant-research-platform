@@ -2,48 +2,58 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from types import MappingProxyType
-
-from quant_research_platform.contracts.ids import MarketId
+from dataclasses import dataclass
 
 FEATURE_TRANSFORMS = {
-    "rank",
+    "cross_sectional_zscore",
+    "cross_sectional_rank",
     "winsorize",
-    "zscore",
-    "rank_zscore",
-    "standardize",
+    "winsorized_zscore",
+    "winsorized_rank",
+    "fillna_zero",
+    "fillna_median",
 }
+FILLNA_POLICIES = {"none", "zero", "median"}
 
 
 @dataclass(frozen=True)
 class FeatureTransformSpec:
     transform_id: str
-    market_id: MarketId
-    source_factor_columns: tuple[str, ...]
-    output_feature_columns: tuple[str, ...]
+    source_columns: tuple[str, ...]
     transform: str
-    parameters: Mapping[str, object] = field(default_factory=dict)
+    output_columns: tuple[str, ...]
+    winsorize_quantiles: tuple[float, float] | None = None
+    fillna_policy: str = "none"
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
         if self.contract_version != "0.1":
             raise ValueError("unsupported_feature_transform_contract_version")
-        _validate_column_tuple(self.source_factor_columns, "source_factor_columns")
-        _validate_column_tuple(self.output_feature_columns, "output_feature_columns")
-        if len(self.source_factor_columns) != len(self.output_feature_columns):
+        if not isinstance(self.transform_id, str) or not self.transform_id:
+            raise ValueError("feature_transform_id_required")
+        _validate_column_tuple(self.source_columns, "source_columns")
+        _validate_column_tuple(self.output_columns, "output_columns")
+        if len(self.source_columns) != len(self.output_columns):
             raise ValueError("feature_transform_source_output_count_mismatch")
         if self.transform not in FEATURE_TRANSFORMS:
             raise ValueError("unsupported_feature_transform")
+        if self.fillna_policy not in FILLNA_POLICIES:
+            raise ValueError("unsupported_feature_transform_fillna_policy")
         overlap = sorted(
-            set(self.source_factor_columns).intersection(self.output_feature_columns)
+            set(self.source_columns).intersection(self.output_columns)
         )
         if overlap:
             raise ValueError(
                 "feature_transform_raw_factor_passthrough: " + ", ".join(overlap)
             )
-        object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
+        if self.winsorize_quantiles is not None:
+            _validate_winsorize_quantiles(self.winsorize_quantiles)
+        elif self.transform in {
+            "winsorize",
+            "winsorized_zscore",
+            "winsorized_rank",
+        }:
+            object.__setattr__(self, "winsorize_quantiles", (0.01, 0.99))
 
 
 def _validate_column_tuple(columns: tuple[str, ...], field_name: str) -> None:
@@ -55,4 +65,20 @@ def _validate_column_tuple(columns: tuple[str, ...], field_name: str) -> None:
         raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
-__all__ = ["FEATURE_TRANSFORMS", "FeatureTransformSpec"]
+def _validate_winsorize_quantiles(value: tuple[float, float]) -> None:
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or any(
+            isinstance(item, bool) or not isinstance(item, int | float)
+            for item in value
+        )
+    ):
+        raise TypeError("winsorize_quantiles_must_be_numeric_pair")
+    lower = float(value[0])
+    upper = float(value[1])
+    if not 0.0 <= lower < upper <= 1.0:
+        raise ValueError("invalid_winsorize_quantiles")
+
+
+__all__ = ["FEATURE_TRANSFORMS", "FILLNA_POLICIES", "FeatureTransformSpec"]

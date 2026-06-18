@@ -6,6 +6,9 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.profiles import research_profile
+from quant_research_platform.markets.implementations.a_share.research_scenarios import (
+    default_a_share_prediction_smoke_id,
+)
 from quant_research_platform.markets.implementations.a_share.verification import (
     private_aggregate,
 )
@@ -45,7 +48,7 @@ def test_private_aggregate_combines_summaries_and_area_records(monkeypatch) -> N
             pd.DataFrame(
                 {
                     "timestamp": pd.to_datetime(["2024-01-02"]),
-                    "feature": ["mom"],
+                    "signal": ["mom_signal"],
                     "label": ["ret"],
                     "group": [1],
                     "value": [1.0],
@@ -155,7 +158,7 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         "prediction_oos_smoke_parity": "report_artifacts",
     }
     prediction_spec = research_profile().predictions.get(
-        "a_share_linear_mom_20d_prediction_2014"
+        default_a_share_prediction_smoke_id()
     )
     prediction_area = next(
         item for item in area_inputs if item.area == "prediction_oos_smoke_parity"

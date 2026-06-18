@@ -11,8 +11,8 @@ from quant_research_platform.contracts.reports import ReportDefinition
 class ReportCatalog:
     _items: dict[str, ReportDefinition] = field(default_factory=dict)
 
-    def register(self, definition: ReportDefinition, *, replace: bool = False) -> None:
-        if definition.report_definition_id in self._items and not replace:
+    def register(self, definition: ReportDefinition) -> None:
+        if definition.report_definition_id in self._items:
             raise ValueError(
                 f"duplicate_report_definition: {definition.report_definition_id}"
             )

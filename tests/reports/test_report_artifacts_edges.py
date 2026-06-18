@@ -10,12 +10,12 @@ import pytest
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
-    SignalSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.reports import report_artifacts
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -46,21 +46,21 @@ def test_prediction_report_artifact_validation_rejects_bad_frames(
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
     layout = StorageLayout(project_root=tmp_path)
     valid = _prediction_frame(with_metadata=True)
 
-    with pytest.raises(ValueError, match="missing_prediction_bundle_columns"):
+    with pytest.raises(ValueError, match="missing_prediction_artifact_columns"):
         report_artifacts.write_prediction_report_artifacts(
-            valid.drop(columns=["prediction"]),
+            valid.drop(columns=["prediction_score"]),
             spec=spec,
-            report_spec=report_spec,
-            layout=layout,
-        )
-    with pytest.raises(ValueError, match="unregistered_prediction_bundle_columns"):
+        report_spec=report_spec,
+        layout=layout,
+    )
+    with pytest.raises(ValueError, match="unregistered_prediction_artifact_columns"):
         report_artifacts.write_prediction_report_artifacts(
             valid.assign(extra=1),
             spec=spec,
@@ -81,7 +81,7 @@ def test_prediction_report_artifacts_require_standard_metadata_attrs(
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
@@ -142,7 +142,7 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
@@ -219,7 +219,7 @@ def test_prediction_report_artifacts_reject_bad_row_count_chain_and_filter_contr
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
@@ -283,7 +283,7 @@ def test_prediction_report_artifacts_reject_bad_effective_test_end(
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
@@ -307,7 +307,7 @@ def test_prediction_report_artifacts_reject_unparseable_prediction_timestamp(
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
@@ -330,21 +330,23 @@ def test_prediction_report_artifacts_reject_effective_test_end_after_requested_e
         prediction_id="prediction_demo",
         model_id="model_demo",
         research_dataset_id="research_demo",
-        prediction_column="prediction",
-        primary_key=("market_id", "asset_id", "timestamp"),
         train_end="2024-01-01",
         test_start="2024-01-02",
         test_end="2024-01-02",
     )
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
     late_prediction = _prediction_frame(with_metadata=True).assign(
         timestamp=pd.to_datetime(["2024-01-03"])
     )
-    late_prediction.attrs["model_metadata"] = _model_metadata()
+    late_prediction.attrs["model_metadata"] = {
+        **_model_metadata(),
+        "test_end": "2024-01-02",
+        "oos_end": "2024-01-02",
+    }
     late_prediction.attrs["prediction_metadata"] = {
         **_prediction_metadata(),
         "requested_test_end": "2024-01-02",
@@ -366,7 +368,7 @@ def test_prediction_report_artifacts_reject_model_train_window_after_spec_train_
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_bundle_private",
+        "prediction_artifacts_private",
         spec.prediction_id,
         "prediction",
     )
@@ -393,7 +395,7 @@ def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
         report_artifacts._derive_report_run_root(
             report_spec=_report_spec("unknown", "run_demo", "prediction"),
             layout=layout,
-            expected_definition_id="prediction_bundle_private",
+            expected_definition_id="prediction_artifacts_private",
             expected_run_id="run_demo",
     )
     with pytest.raises(ValueError, match="report_spec_mismatch"):
@@ -404,18 +406,18 @@ def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
                 "evaluation",
             ),
             layout=layout,
-            expected_definition_id="prediction_bundle_private",
+            expected_definition_id="prediction_artifacts_private",
             expected_run_id="run_demo",
         )
     with pytest.raises(ValueError, match="report_spec_mismatch"):
         report_artifacts._derive_report_run_root(
             report_spec=_report_spec(
-                "prediction_bundle_private",
+                "prediction_artifacts_private",
                 "other_run",
                 "prediction",
             ),
             layout=layout,
-            expected_definition_id="prediction_bundle_private",
+            expected_definition_id="prediction_artifacts_private",
             expected_run_id="run_demo",
         )
 
@@ -686,9 +688,9 @@ def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
     assert manifest["signals"] == [
         {
             "signal_id": "signal",
-            "column": "feature",
             "source_kind": "feature",
-            "direction": "higher",
+            "source_column": "feature",
+            "direction": "higher_is_better",
             "transform": "identity",
             "contract_version": "0.1",
         }
@@ -738,6 +740,30 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unregistered_portfolio_portfolio_returns"):
         report_artifacts.write_portfolio_report_artifacts(
             **extra_returns,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    wrong_return_source = _portfolio_artifacts()
+    wrong_return_source["portfolio_returns"] = wrong_return_source[
+        "portfolio_returns"
+    ].assign(return_source_column="other_return")
+    with pytest.raises(ValueError, match="portfolio_return_source_column_mismatch"):
+        report_artifacts.write_portfolio_report_artifacts(
+            **wrong_return_source,
+            spec=spec,
+            report_spec=report_spec,
+            layout=layout,
+        )
+
+    wrong_signal = _portfolio_artifacts()
+    wrong_signal["portfolio_returns"] = wrong_signal["portfolio_returns"].assign(
+        signal="other_signal"
+    )
+    with pytest.raises(ValueError, match="portfolio_artifact_signal_mismatch"):
+        report_artifacts.write_portfolio_report_artifacts(
+            **wrong_signal,
             spec=spec,
             report_spec=report_spec,
             layout=layout,
@@ -802,8 +828,6 @@ def _prediction_spec() -> PredictionSpec:
         prediction_id="prediction_demo",
         model_id="model_demo",
         research_dataset_id="research_demo",
-        prediction_column="prediction",
-        primary_key=("market_id", "asset_id", "timestamp"),
         train_end="2024-01-01",
         test_start="2024-01-02",
     )
@@ -815,7 +839,7 @@ def _portfolio_spec() -> PortfolioSpec:
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(_signal_spec(),),
-        label_column="label",
+        return_source_column="label",
         weight_config=WeightConfig(method="rank_weighted_quantile"),
     )
 
@@ -858,7 +882,7 @@ def _portfolio_artifacts() -> dict[str, pd.DataFrame]:
             {
                 "timestamp": [timestamp],
                 "signal": ["signal"],
-                "label": ["label"],
+                "return_source_column": ["label"],
                 "portfolio_mode": ["long_short"],
                 "long_return": [0.02],
                 "short_return": [-0.01],
@@ -984,10 +1008,9 @@ def _portfolio_artifacts() -> dict[str, pd.DataFrame]:
 def _prediction_frame(*, with_metadata: bool) -> pd.DataFrame:
     frame = pd.DataFrame(
         {
-            "market_id": ["a_share"],
             "asset_id": ["asset_a"],
             "timestamp": pd.to_datetime(["2024-01-02"]),
-            "prediction": [0.1],
+            "prediction_score": [0.1],
         }
     )
     if with_metadata:
@@ -999,7 +1022,7 @@ def _prediction_frame(*, with_metadata: bool) -> pd.DataFrame:
 def _model_metadata() -> dict[str, object]:
     return {
         "contract_version": "0.1",
-        "model_algorithm": "linear",
+        "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
         "filter_definition": "eligible == True",
@@ -1008,12 +1031,22 @@ def _model_metadata() -> dict[str, object]:
         "rows_after_input_label_dropna": 2,
         "train_start": "2024-01-01",
         "train_end": "2024-01-01",
+        "test_start": "2024-01-02",
+        "test_end": None,
+        "oos_start": "2024-01-02",
+        "oos_end": "2024-01-02",
         "input_factor_columns": ["factor"],
         "input_feature_columns": ["feature"],
         "input_columns": ["factor", "feature"],
         "input_count": 2,
         "label_column": "label",
+        "hyperparameters": {},
+        "random_seed": None,
+        "max_train_rows": None,
+        "purge_gap_steps": 0,
+        "dependency_status": {"status": "available", "package": "sklearn"},
         "coefficient_count": 3,
+        "feature_importance": {"factor": 0.1, "feature": 0.2},
     }
 
 
@@ -1036,14 +1069,14 @@ def _prediction_metadata() -> dict[str, object]:
         "is_final_oos_window": True,
         "input_columns": ["factor", "feature"],
         "input_count": 2,
-        "prediction_column": "prediction",
+        "prediction_column": "prediction_score",
     }
 
 
 def _signal_spec() -> SignalSpec:
     return SignalSpec(
         signal_id="signal",
-        column="feature",
+        source_column="feature",
         source_kind="feature",
     )
 

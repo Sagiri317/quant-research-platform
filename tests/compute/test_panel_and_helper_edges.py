@@ -142,14 +142,12 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
         buy_turnover=1.0,
         sell_turnover=1.0,
         turnover=2.0,
-        weight_config=WeightConfig(cost_bps=10),
         cost_config=CostConfig(),
     )
     detailed = _cost_components(
         buy_turnover=1.0,
         sell_turnover=2.0,
         turnover=3.0,
-        weight_config=WeightConfig(cost_bps=99),
         cost_config=CostConfig(
             buy_cost_bps=10,
             sell_cost_bps=20,
@@ -159,8 +157,8 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
         ),
     )
 
-    assert simple["cost_model"] == "scalar_cost_bps"
-    assert simple["total_cost"] == pytest.approx(0.002)
+    assert simple["cost_model"] == "zero_cost"
+    assert simple["total_cost"] == pytest.approx(0.0)
     assert _uses_detailed_cost_config(CostConfig(impact_model="custom")) is True
     assert detailed["cost_model"] == "custom"
     assert detailed["total_cost"] == pytest.approx(0.001 + 0.004 + 0.0003 + 0.0006)

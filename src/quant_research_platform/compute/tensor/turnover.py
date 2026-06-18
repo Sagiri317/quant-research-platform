@@ -64,7 +64,6 @@ def calculate_tensor_turnover_and_cost(
                 buy_turnover=float(buy_turnover[row_offset]),
                 sell_turnover=float(sell_turnover[row_offset]),
                 turnover=float(turnover[row_offset]),
-                weight_config=weight_config,
                 cost_config=cost_config,
             )
             turnover_records.append(
@@ -130,7 +129,6 @@ def _path_turnover_and_cost_records(
         buy_turnover=buy_turnover,
         sell_turnover=sell_turnover,
         turnover=turnover,
-        weight_config=weight_config,
         cost_config=cost_config,
     )
     return (
@@ -187,7 +185,6 @@ def _path_turnover_and_cost_records_from_arrays(
         buy_turnover=buy_turnover,
         sell_turnover=sell_turnover,
         turnover=turnover,
-        weight_config=weight_config,
         cost_config=cost_config,
     )
     return (

@@ -84,12 +84,14 @@ class StageProfiler:
         self._clock = time.perf_counter if clock is None else clock
         self._metadata = dict(metadata or {})
         self._records: dict[tuple[str, str], StageRecord] = {}
-        self._token: contextvars.Token[StageProfiler | None] | None = None
+        self._context_reset_handle: contextvars.Token[StageProfiler | None] | None = (
+            None
+        )
 
     def __enter__(self) -> StageProfiler:
         """把当前 profiler 绑定为上下文局部 active profiler。"""
 
-        self._token = _ACTIVE_STAGE_PROFILER.set(self)
+        self._context_reset_handle = _ACTIVE_STAGE_PROFILER.set(self)
         return self
 
     def __exit__(
@@ -100,9 +102,9 @@ class StageProfiler:
     ) -> None:
         """退出 profile 上下文并恢复前一个 profiler。"""
 
-        if self._token is not None:
-            _ACTIVE_STAGE_PROFILER.reset(self._token)
-            self._token = None
+        if self._context_reset_handle is not None:
+            _ACTIVE_STAGE_PROFILER.reset(self._context_reset_handle)
+            self._context_reset_handle = None
 
     @contextmanager
     def stage(
@@ -242,7 +244,8 @@ def _render_stage_profile_report(frame: pd.DataFrame) -> str:
             "",
             "Profiling records local runtime observations only. It does not "
             "download data, connect to vendor APIs, use credentials, or imply "
-            "paper trading, live trading, or investment advice.",
+            "simulated order execution, real-money order execution, or "
+            "investment advice.",
             "",
         ]
     )

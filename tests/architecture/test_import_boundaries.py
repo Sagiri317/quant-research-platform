@@ -39,10 +39,6 @@ PROFILE_A_SHARE_FIELDS = (
     "src/quant_research_platform/catalog/profiles.py",
     "quant_research_platform.markets.implementations.a_share.fields",
 )
-PROFILE_A_SHARE_IDS = (
-    "src/quant_research_platform/catalog/profiles.py",
-    "quant_research_platform.markets.implementations.a_share.ids",
-)
 PROFILE_A_SHARE_LABELS = (
     "src/quant_research_platform/catalog/profiles.py",
     "quant_research_platform.markets.implementations.a_share.labels",
@@ -72,7 +68,6 @@ KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
         "profiles.py composes the active A-share factor catalog."
     ),
     PROFILE_A_SHARE_FIELDS: "profiles.py composes the active A-share field catalog.",
-    PROFILE_A_SHARE_IDS: "profiles.py uses stable A-share identifiers.",
     PROFILE_A_SHARE_LABELS: (
         "profiles.py composes the active A-share label catalog."
     ),

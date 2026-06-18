@@ -108,7 +108,7 @@ _PORTFOLIO_COST_BREAKDOWN_COLUMNS = (
 _PORTFOLIO_RETURN_COLUMNS = (
     "timestamp",
     "signal",
-    "label",
+    "return_source_column",
     "portfolio_mode",
     "long_return",
     "short_return",
@@ -215,7 +215,7 @@ _PORTFOLIO_DIAGNOSTIC_COLUMNS = (
     "short_count",
     "fallback_reason",
 )
-_MODEL_METADATA_KEYS = frozenset(
+_MODEL_METADATA_BASE_KEYS = frozenset(
     {
         "contract_version",
         "model_algorithm",
@@ -227,12 +227,27 @@ _MODEL_METADATA_KEYS = frozenset(
         "rows_after_input_label_dropna",
         "train_start",
         "train_end",
+        "test_start",
+        "test_end",
+        "oos_start",
+        "oos_end",
         "input_factor_columns",
         "input_feature_columns",
         "input_columns",
         "input_count",
         "label_column",
+        "hyperparameters",
+        "random_seed",
+        "max_train_rows",
+        "purge_gap_steps",
+        "dependency_status",
         "coefficient_count",
+    }
+)
+_MODEL_METADATA_FEATURE_KEYS = frozenset(
+    {
+        "feature_importance",
+        "feature_importance_status",
     }
 )
 _PREDICTION_METADATA_KEYS = frozenset(
@@ -315,16 +330,18 @@ def write_prediction_report_artifacts(
     run_root = _derive_report_run_root(
         report_spec=report_spec,
         layout=layout,
-        expected_definition_id="prediction_bundle_private",
+        expected_definition_id="prediction_artifacts_private",
         expected_run_id=spec.prediction_id,
     )
     required = (*spec.primary_key, spec.prediction_column)
     missing = sorted(set(required).difference(frame.columns))
     if missing:
-        raise ValueError(f"missing_prediction_bundle_columns: {', '.join(missing)}")
+        raise ValueError(f"missing_prediction_artifact_columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(required))
     if extra:
-        raise ValueError(f"unregistered_prediction_bundle_columns: {', '.join(extra)}")
+        raise ValueError(
+            f"unregistered_prediction_artifact_columns: {', '.join(extra)}"
+        )
     if bool(frame.duplicated(list(spec.primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
     model_metadata = _validate_model_metadata_shape(
@@ -385,7 +402,7 @@ def _write_prediction_report_artifacts_from_chunks(
     run_root = _derive_report_run_root(
         report_spec=report_spec,
         layout=layout,
-        expected_definition_id="prediction_bundle_private",
+        expected_definition_id="prediction_artifacts_private",
         expected_run_id=spec.prediction_id,
     )
     required = (*spec.primary_key, spec.prediction_column)
@@ -548,7 +565,7 @@ def write_portfolio_report_artifacts(
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write private portfolio simulation artifacts under reports/private_real."""
+    """Write private portfolio construction artifacts under reports/private_real."""
 
     run_root = _derive_report_run_root(
         report_spec=report_spec,
@@ -586,6 +603,7 @@ def write_portfolio_report_artifacts(
             required=required_columns[artifact_name],
             error_name=f"portfolio_{artifact_name}",
         )
+    _validate_portfolio_artifact_semantics(artifacts, spec)
 
     def _write(temp_root: Path) -> None:
         for artifact_name, filename in _PORTFOLIO_ARTIFACTS.items():
@@ -683,7 +701,9 @@ def _portfolio_report_manifest_payload(
         "research_dataset_id": spec.research_dataset_id,
         "run_type": spec.run_type,
         "signals": [asdict(signal) for signal in spec.signals],
-        "label_column": spec.label_column,
+        "return_source_column": spec.return_source_column,
+        "frequency": spec.frequency,
+        "execution_lag_steps": spec.execution_lag_steps,
         "weight_config": asdict(spec.weight_config),
         "tradability_config": asdict(spec.tradability_config),
         "cost_config": asdict(spec.cost_config),
@@ -693,6 +713,33 @@ def _portfolio_report_manifest_payload(
             for artifact_name, frame in artifacts.items()
         },
     }
+
+
+def _validate_portfolio_artifact_semantics(
+    artifacts: Mapping[str, pd.DataFrame],
+    spec: PortfolioSpec,
+) -> None:
+    signal_ids = {signal.signal_id for signal in spec.signals}
+    for artifact_name, frame in artifacts.items():
+        if "signal" not in frame.columns:
+            continue
+        artifact_signals = {
+            str(value)
+            for value in frame["signal"].dropna().unique().tolist()
+        }
+        if not artifact_signals.issubset(signal_ids):
+            raise ValueError(
+                "portfolio_artifact_signal_mismatch: " + artifact_name
+            )
+    portfolio_returns = artifacts["portfolio_returns"]
+    return_sources = {
+        str(value)
+        for value in (
+            portfolio_returns["return_source_column"].dropna().unique().tolist()
+        )
+    }
+    if return_sources and return_sources != {spec.return_source_column}:
+        raise ValueError("portfolio_return_source_column_mismatch")
 
 
 def _required_frame_metadata(
@@ -720,7 +767,15 @@ def _sanitize_required_metadata(
 
 
 def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, object]:
-    if set(metadata) != _MODEL_METADATA_KEYS:
+    metadata_keys = set(metadata)
+    feature_keys = metadata_keys.intersection(_MODEL_METADATA_FEATURE_KEYS)
+    if (
+        not _MODEL_METADATA_BASE_KEYS.issubset(metadata_keys)
+        or len(feature_keys) != 1
+        or metadata_keys.difference(_MODEL_METADATA_BASE_KEYS).difference(
+            _MODEL_METADATA_FEATURE_KEYS
+        )
+    ):
         raise ValueError("invalid_model_metadata")
     if metadata["contract_version"] != "0.1":
         raise ValueError("invalid_model_metadata")
@@ -762,6 +817,39 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
         "coefficient_count",
         "invalid_model_metadata",
     )
+    _require_non_negative_metadata_int(
+        metadata,
+        "purge_gap_steps",
+        "invalid_model_metadata",
+    )
+    if metadata["max_train_rows"] is not None:
+        _require_non_negative_metadata_int(
+            metadata,
+            "max_train_rows",
+            "invalid_model_metadata",
+        )
+    if metadata["random_seed"] is not None and not isinstance(
+        metadata["random_seed"],
+        int,
+    ):
+        raise ValueError("invalid_model_metadata")
+    if not isinstance(metadata["hyperparameters"], dict):
+        raise ValueError("invalid_model_metadata")
+    if not isinstance(metadata["dependency_status"], dict):
+        raise ValueError("invalid_model_metadata")
+    if metadata["dependency_status"].get("status") != "available":
+        raise ValueError("invalid_model_metadata")
+    if "feature_importance" in metadata and not isinstance(
+        metadata["feature_importance"],
+        dict,
+    ):
+        raise ValueError("invalid_model_metadata")
+    if "feature_importance_status" in metadata:
+        _require_metadata_string(
+            metadata,
+            "feature_importance_status",
+            "invalid_model_metadata",
+        )
     if (
         input_columns != [*input_factor_columns, *input_feature_columns]
         or input_count != len(input_columns)
@@ -774,6 +862,14 @@ def _validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obj
     _require_metadata_string(metadata, "label_column", "invalid_model_metadata")
     _require_metadata_string(metadata, "train_start", "invalid_model_metadata")
     _require_metadata_string(metadata, "train_end", "invalid_model_metadata")
+    _require_optional_metadata_string(
+        metadata,
+        "test_start",
+        "invalid_model_metadata",
+    )
+    _require_optional_metadata_string(metadata, "test_end", "invalid_model_metadata")
+    _require_optional_metadata_string(metadata, "oos_start", "invalid_model_metadata")
+    _require_optional_metadata_string(metadata, "oos_end", "invalid_model_metadata")
     _require_metadata_string_list(
         metadata,
         "filter_columns_used",
@@ -894,7 +990,15 @@ def _validate_model_metadata_consistency(
     if train_start > train_end or train_end > pd.Timestamp(spec.train_end):
         raise ValueError("model_metadata_inconsistent")
     if (
-        metadata["model_algorithm"] == "linear"
+        metadata["test_start"] != spec.test_start
+        or metadata["test_end"] != spec.test_end
+        or metadata["oos_start"] != spec.test_start
+    ):
+        raise ValueError("model_metadata_inconsistent")
+    if spec.test_end is not None and metadata["oos_end"] != spec.test_end:
+        raise ValueError("model_metadata_inconsistent")
+    if (
+        metadata["model_algorithm"] == "linear_regression"
         and int(metadata["coefficient_count"]) != input_count + 1
     ):
         raise ValueError("model_metadata_inconsistent")
@@ -1127,6 +1231,19 @@ def _require_metadata_string(
     return value
 
 
+def _require_optional_metadata_string(
+    metadata: dict[str, object],
+    key: str,
+    error_name: str,
+) -> str | None:
+    value = metadata[key]
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(error_name)
+    return value
+
+
 def _require_metadata_string_list(
     metadata: dict[str, object],
     key: str,
@@ -1275,10 +1392,12 @@ def _prediction_report_chunk_frame(
 ) -> pd.DataFrame:
     missing = sorted(set(required).difference(frame.columns))
     if missing:
-        raise ValueError(f"missing_prediction_bundle_columns: {', '.join(missing)}")
+        raise ValueError(f"missing_prediction_artifact_columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(required))
     if extra:
-        raise ValueError(f"unregistered_prediction_bundle_columns: {', '.join(extra)}")
+        raise ValueError(
+            f"unregistered_prediction_artifact_columns: {', '.join(extra)}"
+        )
     selected = frame.loc[:, list(required)]
     if bool(selected.duplicated(list(key_columns)).any()):
         raise ValueError("duplicate_prediction_keys")

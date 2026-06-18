@@ -24,7 +24,7 @@ implementation priorities, not historical branch closeout.
 - Feature store.
 - Model registry.
 - External LLM API integration.
-- Paper trading or live trading.
+- Simulated or real-money order execution.
 - Broker/exchange connector.
 - Production backtester.
 - Full high-frequency implementation.

@@ -234,7 +234,8 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
     )
     turnover, cost = calculate_tensor_turnover_and_cost(
         positions,
-        WeightConfig(cost_bps=10),
+        WeightConfig(),
+        CostConfig(slippage_bps=10),
         segment_columns=("segment",),
     )
     assert turnover["turnover"].tolist() == [1.0, 1.5]
@@ -253,8 +254,8 @@ def test_tensor_turnover_cost_and_state_helpers() -> None:
         signal="factor",
         previous_positions={"A": -0.5},
         current_positions={"A": 1.0, "B": -0.25},
-        weight_config=WeightConfig(cost_bps=10),
-        cost_config=CostConfig(),
+        weight_config=WeightConfig(),
+        cost_config=CostConfig(slippage_bps=10),
         segment_columns=("segment",),
     )
     assert turnover_record["turnover"] == pytest.approx(1.75)
@@ -323,6 +324,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         positions=positions,
         turnover=turnover,
         cost_breakdown=cost,
+        return_source_column="forward_return",
     )
     assert returns["net_portfolio_return"].round(6).tolist() == [-0.022, 0.009]
     assert calculate_tensor_long_short(
@@ -331,6 +333,7 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         positions=positions.iloc[0:0],
         turnover=turnover,
         cost_breakdown=cost,
+        return_source_column="forward_return",
     ).empty
 
     assert (
@@ -359,8 +362,8 @@ def test_tensor_portfolio_returns_and_exposure_helpers() -> None:
         previous_values=np.array([0.0, 0.0]),
         previous_positions={},
         asset_to_offset={"A": 0, "B": 1},
-        weight_config=WeightConfig(cost_bps=10),
-        cost_config=CostConfig(),
+        weight_config=WeightConfig(),
+        cost_config=CostConfig(slippage_bps=10),
         segment_columns=("segment",),
     )
     assert path[1]["turnover"] == pytest.approx(2.0)

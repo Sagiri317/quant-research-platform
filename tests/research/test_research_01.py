@@ -15,10 +15,7 @@ from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.predictions import (
-    PredictionCatalog,
-    default_prediction_column,
-)
+from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -28,12 +25,17 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.evaluations import EvaluationSpec, SignalSpec
+from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.predictions import (
+    PREDICTION_PRIMARY_KEY,
+    PREDICTION_SCORE_COLUMN,
+    PredictionSpec,
+)
 from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
@@ -45,18 +47,22 @@ from quant_research_platform.research.evaluations.engine import evaluate_signal_
 from quant_research_platform.research.evaluations.runner import (
     run_evaluation_from_research_dataset,
 )
-from quant_research_platform.research.models import fit_linear_baseline_result
+from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
-    build_prediction_bundle,
+    build_prediction_frame,
     run_prediction_from_research_dataset,
-    write_prediction_bundle,
+    write_prediction_artifacts,
 )
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 
 def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
-    return SignalSpec(signal_id=column, column=column, source_kind=source_kind)
+    return SignalSpec(
+        signal_id=column,
+        source_column=column,
+        source_kind=source_kind,
+    )
 
 
 def _research_rows() -> pd.DataFrame:
@@ -261,10 +267,9 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
             feature_transforms=(
                 FeatureTransformSpec(
                     transform_id="mom_20d_zscore",
-                    market_id=MarketId("a_share"),
-                    source_factor_columns=("mom_20d",),
-                    output_feature_columns=("mom_20d_zscore",),
-                    transform="zscore",
+                    source_columns=("mom_20d",),
+                    output_columns=("mom_20d_zscore",),
+                    transform="cross_sectional_zscore",
                 ),
             ),
             label_columns=("forward_return_20d",),
@@ -541,7 +546,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     )
     model_spec = ModelSpec(
         model_id="linear_demo",
-        model_algorithm="linear",
+        model_algorithm="linear_regression",
         input_factor_columns=("mom_20d",),
         label_column="forward_return_20d",
     )
@@ -549,19 +554,17 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         prediction_id="pred_demo",
         model_id=model_spec.model_id,
         research_dataset_id="demo",
-        prediction_column=default_prediction_column(),
-        primary_key=platform_entity_time_key(),
         train_end="2014-01-02",
         test_start="2014-01-03",
         test_end="2014-01-03",
     )
 
     evaluation = evaluate_signal_frame(frame, eval_spec)
-    model_result = fit_linear_baseline_result(
+    model_result = fit_model_result(
         frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],
         model_spec,
     )
-    prediction = build_prediction_bundle(
+    prediction = build_prediction_frame(
         frame,
         prediction_spec,
         model_result.coefficients,
@@ -570,13 +573,13 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     prediction.attrs["model_metadata"] = model_result.metadata
     layout = StorageLayout(project_root=tmp_path)
     report_spec = ReportSpec(
-        report_id="prediction_bundle",
-        report_definition_id="prediction_bundle_private",
+        report_id="prediction_artifacts",
+        report_definition_id="prediction_artifacts_private",
         run_id=prediction_spec.prediction_id,
         market_id=MarketId("a_share"),
         run_type=prediction_spec.run_type,
     )
-    run_root = write_prediction_bundle(
+    run_root = write_prediction_artifacts(
         prediction,
         prediction_spec,
         report_spec=report_spec,
@@ -593,7 +596,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert run_root.as_posix().endswith(
         "reports/private_real/a_share/prediction/pred_demo"
     )
-    assert "output_root" not in inspect.signature(write_prediction_bundle).parameters
+    assert "output_root" not in inspect.signature(write_prediction_artifacts).parameters
 
 
 def test_prediction_handoff_reads_research_dataset_and_writes_report(
@@ -614,7 +617,7 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     model_catalog.register(
         ModelSpec(
             model_id="linear_demo",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
         )
@@ -625,8 +628,6 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
             prediction_id="pred_demo",
             model_id="linear_demo",
             research_dataset_id="demo",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
             train_end="2014-01-02",
             test_start="2014-01-03",
             test_end="2014-01-03",
@@ -648,8 +649,8 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["is_oos"] is True
     assert manifest["prediction_mode"] == "minimal_oos"
-    assert manifest["prediction_column"] == default_prediction_column()
-    assert manifest["primary_key"] == list(platform_entity_time_key())
+    assert manifest["prediction_column"] == PREDICTION_SCORE_COLUMN
+    assert manifest["primary_key"] == list(PREDICTION_PRIMARY_KEY)
     assert manifest["model_metadata"]["contract_version"] == "0.1"
     assert manifest["model_metadata"]["input_count"] == 1
     assert manifest["model_metadata"]["coefficient_count"] == 2
@@ -681,7 +682,7 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
     model_catalog.register(
         ModelSpec(
             model_id="linear_demo",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
         )
@@ -692,8 +693,6 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
             prediction_id="pred_demo",
             model_id="linear_demo",
             research_dataset_id="demo",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
             train_end="2014-01-02",
             test_start="2014-01-03",
             test_end="2014-01-03",
@@ -701,11 +700,11 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
     )
 
     def reject_materialized_builder(*_args, **_kwargs):
-        raise AssertionError("materialized_prediction_bundle_builder_called")
+        raise AssertionError("materialized_prediction_artifacts_builder_called")
 
     monkeypatch.setattr(
         prediction_runner_module,
-        "_build_prediction_bundle_from_frames",
+        "_build_prediction_frame_from_frames",
         reject_materialized_builder,
         raising=False,
     )
@@ -750,7 +749,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     model_catalog.register(
         ModelSpec(
             model_id="linear_demo",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
         )
@@ -761,8 +760,6 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             prediction_id="pred_demo",
             model_id="linear_demo",
             research_dataset_id="demo",
-            prediction_column=default_prediction_column(),
-            primary_key=platform_entity_time_key(),
             train_end="2014-01-03",
             test_start="2014-01-06",
             test_end="2014-01-08",
@@ -771,7 +768,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
 
     original_iter = prediction_runner_module._iter_research_dataset_chunks
     original_fit = prediction_runner_module._fit_model_result_from_frames
-    original_write = prediction_runner_module._write_prediction_bundle_from_frames
+    original_write = prediction_runner_module._write_prediction_artifacts_from_frames
     read_chunk_rows: list[int] = []
     fit_chunk_rows: list[int] = []
     prediction_chunk_rows: list[int] = []
@@ -814,7 +811,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     monkeypatch.setattr(
         prediction_runner_module,
-        "_write_prediction_bundle_from_frames",
+        "_write_prediction_artifacts_from_frames",
         wrapped_write,
     )
 

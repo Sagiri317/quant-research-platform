@@ -7,11 +7,12 @@ from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.evaluations import EvaluationSpec, SignalSpec
+from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
+from quant_research_platform.contracts.signals import SignalSpec
 
 
 def test_research_dataset_splits_factor_and_feature_columns_without_alias() -> None:
@@ -37,10 +38,9 @@ def test_research_dataset_splits_factor_and_feature_columns_without_alias() -> N
         feature_transforms=(
             FeatureTransformSpec(
                 transform_id="mom_20d_zscore",
-                market_id=MarketId("a_share"),
-                source_factor_columns=("mom_20d",),
-                output_feature_columns=("mom_20d_zscore",),
-                transform="zscore",
+                source_columns=("mom_20d",),
+                output_columns=("mom_20d_zscore",),
+                transform="cross_sectional_zscore",
             ),
         ),
         label_columns=("forward_return_20d",),
@@ -100,35 +100,33 @@ def test_research_dataset_splits_factor_and_feature_columns_without_alias() -> N
 def test_feature_transform_spec_rejects_raw_factor_pass_through() -> None:
     spec = FeatureTransformSpec(
         transform_id="mom_20d_zscore",
-        market_id=MarketId("a_share"),
-        source_factor_columns=("mom_20d",),
-        output_feature_columns=("mom_20d_zscore",),
-        transform="zscore",
+        source_columns=("mom_20d",),
+        output_columns=("mom_20d_zscore",),
+        transform="cross_sectional_zscore",
     )
 
-    assert spec.source_factor_columns == ("mom_20d",)
-    assert spec.output_feature_columns == ("mom_20d_zscore",)
+    assert spec.source_columns == ("mom_20d",)
+    assert spec.output_columns == ("mom_20d_zscore",)
 
     with pytest.raises(ValueError, match="feature_transform_raw_factor_passthrough"):
         FeatureTransformSpec(
             transform_id="bad_passthrough",
-            market_id=MarketId("a_share"),
-            source_factor_columns=("mom_20d",),
-            output_feature_columns=("mom_20d",),
-            transform="zscore",
+            source_columns=("mom_20d",),
+            output_columns=("mom_20d",),
+            transform="cross_sectional_zscore",
         )
 
 
 def test_model_spec_uses_algorithm_and_explicit_factor_feature_inputs() -> None:
     spec = ModelSpec(
         model_id="linear_mom",
-        model_algorithm="linear",
+        model_algorithm="linear_regression",
         input_factor_columns=("mom_20d",),
         input_feature_columns=("mom_20d_zscore",),
         label_column="forward_return_20d",
     )
 
-    assert spec.model_algorithm == "linear"
+    assert spec.model_algorithm == "linear_regression"
     assert spec.input_columns == ("mom_20d", "mom_20d_zscore")
     assert not hasattr(spec, "model_family")
     assert not hasattr(spec, "feature_columns")
@@ -136,7 +134,7 @@ def test_model_spec_uses_algorithm_and_explicit_factor_feature_inputs() -> None:
     with pytest.raises(ValueError, match="model_input_columns_required"):
         ModelSpec(
             model_id="empty_model",
-            model_algorithm="linear",
+            model_algorithm="linear_regression",
             input_factor_columns=(),
             input_feature_columns=(),
             label_column="forward_return_20d",
@@ -146,9 +144,9 @@ def test_model_spec_uses_algorithm_and_explicit_factor_feature_inputs() -> None:
 def test_evaluation_and_portfolio_specs_are_signal_owned() -> None:
     signal = SignalSpec(
         signal_id="linear_prediction_score",
-        column="prediction_score",
+        source_column="prediction_score",
         source_kind="prediction",
-        direction="higher",
+        direction="higher_is_better",
     )
     evaluation = EvaluationSpec(
         run_id="a_share_signal_eval",
@@ -162,7 +160,7 @@ def test_evaluation_and_portfolio_specs_are_signal_owned() -> None:
         market_id=MarketId("a_share"),
         research_dataset_id="a_share_research",
         signals=(signal,),
-        label_column="forward_return_20d",
+        return_source_column="forward_return_20d",
     )
 
     assert evaluation.signals == (signal,)
@@ -184,7 +182,7 @@ def test_signal_contracts_reject_filter_and_label_collisions() -> None:
     with pytest.raises(ValueError, match="filter_column_in_input_columns"):
         SignalSpec(
             signal_id="eligible",
-            column="prediction_score",
+            source_column="prediction_score",
             source_kind="prediction",
         )
 
@@ -196,7 +194,7 @@ def test_signal_contracts_reject_filter_and_label_collisions() -> None:
             signals=(
                 SignalSpec(
                     signal_id="prediction_score",
-                    column="forward_return_20d",
+                    source_column="forward_return_20d",
                     source_kind="prediction",
                 ),
             ),
@@ -211,7 +209,7 @@ def test_signal_contracts_reject_filter_and_label_collisions() -> None:
             signals=(
                 SignalSpec(
                     signal_id="forward_return_20d",
-                    column="prediction_score",
+                    source_column="prediction_score",
                     source_kind="prediction",
                 ),
             ),
@@ -222,7 +220,7 @@ def test_signal_contracts_reject_filter_and_label_collisions() -> None:
 def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
     own_name_signal = SignalSpec(
         signal_id="prediction_score",
-        column="prediction_score",
+        source_column="prediction_score",
         source_kind="prediction",
     )
     EvaluationSpec(
@@ -237,18 +235,18 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
         market_id=MarketId("a_share"),
         research_dataset_id="a_share_research",
         signals=(own_name_signal,),
-        label_column="forward_return_20d",
+        return_source_column="forward_return_20d",
     )
 
     cross_collision = (
         SignalSpec(
             signal_id="signal_a",
-            column="raw_a",
+            source_column="raw_a",
             source_kind="factor",
         ),
         SignalSpec(
             signal_id="raw_a",
-            column="raw_b",
+            source_column="raw_b",
             source_kind="factor",
         ),
     )
@@ -266,7 +264,7 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
             market_id=MarketId("a_share"),
             research_dataset_id="a_share_research",
             signals=cross_collision,
-            label_column="forward_return_20d",
+            return_source_column="forward_return_20d",
         )
 
 
@@ -282,19 +280,19 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
             signals=(
                 SignalSpec(
                     signal_id="signal_a",
-                    column="prediction_score",
+                    source_column="prediction_score",
                     source_kind="prediction",
                 ),
                 SignalSpec(
                     signal_id="signal_b",
-                    column="prediction_score",
+                    source_column="prediction_score",
                     source_kind="prediction",
                 ),
             ),
-            label_column="forward_return_20d",
+            return_source_column="forward_return_20d",
         )
 
-    with pytest.raises(ValueError, match="portfolio_signal_label_overlap"):
+    with pytest.raises(ValueError, match="portfolio_signal_return_overlap"):
         PortfolioSpec(
             portfolio_id="bad_label_overlap",
             market_id=MarketId("a_share"),
@@ -302,14 +300,14 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
             signals=(
                 SignalSpec(
                     signal_id="forward_return_20d",
-                    column="prediction_score",
+                    source_column="prediction_score",
                     source_kind="prediction",
                 ),
             ),
-            label_column="forward_return_20d",
+            return_source_column="forward_return_20d",
         )
 
-    with pytest.raises(ValueError, match="portfolio_signal_weight_overlap"):
+    with pytest.raises(TypeError):
         PortfolioSpec(
             portfolio_id="bad_weight_overlap",
             market_id=MarketId("a_share"),
@@ -317,11 +315,11 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
             signals=(
                 SignalSpec(
                     signal_id="prediction_score",
-                    column="prediction_score",
+                    source_column="prediction_score",
                     source_kind="prediction",
                 ),
             ),
-            label_column="forward_return_20d",
+            return_source_column="forward_return_20d",
             weight_column="prediction_score",
         )
 

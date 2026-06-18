@@ -19,7 +19,6 @@ def _cost_components(
     buy_turnover: float,
     sell_turnover: float,
     turnover: float,
-    weight_config: WeightConfig,
     cost_config: CostConfig,
 ) -> dict[str, object]:
     if not _uses_detailed_cost_config(cost_config):
@@ -29,8 +28,8 @@ def _cost_components(
             "slippage_cost": 0.0,
             "spread_cost": 0.0,
             "impact_cost": 0.0,
-            "total_cost": turnover * float(weight_config.cost_bps) / 10_000.0,
-            "cost_model": "scalar_cost_bps",
+            "total_cost": 0.0,
+            "cost_model": "zero_cost",
         }
 
     buy_cost = buy_turnover * float(cost_config.buy_cost_bps) / 10_000.0

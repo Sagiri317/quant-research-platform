@@ -20,7 +20,7 @@ from quant_research_platform.research.models.supervised import (
     _fit_model_result_from_frames,
 )
 from quant_research_platform.research.predictions.artifacts import (
-    _write_prediction_bundle_from_frames,
+    _write_prediction_artifacts_from_frames,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -58,7 +58,7 @@ def run_prediction_from_research_dataset(
     train_read_columns = tuple(
         dict.fromkeys(
             (
-                *prediction_spec.primary_key,
+                *dataset_spec.primary_key,
                 *model_spec.input_columns,
                 model_spec.label_column,
                 *required_filter_columns(model_spec.sample_filter_mode),
@@ -68,7 +68,7 @@ def run_prediction_from_research_dataset(
     prediction_read_columns = tuple(
         dict.fromkeys(
             (
-                *prediction_spec.primary_key,
+                *dataset_spec.primary_key,
                 *model_spec.input_columns,
                 *required_filter_columns(prediction_spec.sample_filter_mode),
             )
@@ -103,13 +103,13 @@ def run_prediction_from_research_dataset(
             raise ValueError("empty_training_window") from exc
         raise
     report_spec = ReportSpec(
-        report_id="prediction_bundle",
-        report_definition_id="prediction_bundle_private",
+        report_id="prediction_artifacts",
+        report_definition_id="prediction_artifacts_private",
         run_id=prediction_spec.prediction_id,
         market_id=dataset_spec.market_id,
         run_type=prediction_spec.run_type,
     )
-    return _write_prediction_bundle_from_frames(
+    return _write_prediction_artifacts_from_frames(
         _chunks(prediction_read_columns),
         prediction_spec,
         model_result.coefficients,
@@ -118,6 +118,34 @@ def run_prediction_from_research_dataset(
         model_metadata=model_result.metadata,
         report_spec=report_spec,
         layout=layout,
+    )
+
+
+def run_predictions_from_research_dataset(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    model_catalog: ModelCatalog,
+    prediction_catalog: PredictionCatalog,
+    prediction_ids: Iterable[str],
+    time_window: TimeWindow | None = None,
+    prediction_train_end: str | None = None,
+    prediction_test_start: str | None = None,
+    prediction_test_end: str | None = None,
+) -> tuple[Path, ...]:
+    return tuple(
+        run_prediction_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            model_catalog=model_catalog,
+            prediction_catalog=prediction_catalog,
+            prediction_id=prediction_id,
+            time_window=time_window,
+            prediction_train_end=prediction_train_end,
+            prediction_test_start=prediction_test_start,
+            prediction_test_end=prediction_test_end,
+        )
+        for prediction_id in prediction_ids
     )
 
 
@@ -167,4 +195,7 @@ def _prediction_timestamps(chunk: pd.DataFrame) -> pd.Series:
     return timestamps
 
 
-__all__ = ["run_prediction_from_research_dataset"]
+__all__ = [
+    "run_prediction_from_research_dataset",
+    "run_predictions_from_research_dataset",
+]

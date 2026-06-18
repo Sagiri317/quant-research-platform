@@ -146,10 +146,9 @@ def test_research_dataset_spec_requires_explicit_base_input() -> None:
         feature_transforms=(
             FeatureTransformSpec(
                 transform_id="feature_1_from_factor_1",
-                market_id=MarketId("dummy_market"),
-                source_factor_columns=("factor_1",),
-                output_feature_columns=("feature_1",),
-                transform="zscore",
+                source_columns=("factor_1",),
+                output_columns=("feature_1",),
+                transform="cross_sectional_zscore",
             ),
         ),
         label_columns=("label_1",),

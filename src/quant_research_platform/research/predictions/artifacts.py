@@ -25,7 +25,7 @@ from quant_research_platform.runtime.resources import ChunkAxis
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def build_prediction_bundle(
+def build_prediction_frame(
     frame: pd.DataFrame,
     spec: PredictionSpec,
     coefficients: np.ndarray,
@@ -33,7 +33,7 @@ def build_prediction_bundle(
     *,
     prediction_model: object | None = None,
 ) -> pd.DataFrame:
-    return _build_prediction_bundle_from_frames(
+    return _build_prediction_frame_from_frames(
         (frame,),
         spec,
         coefficients,
@@ -42,7 +42,7 @@ def build_prediction_bundle(
     )
 
 
-def _build_prediction_bundle_from_frames(
+def _build_prediction_frame_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: PredictionSpec,
     coefficients: np.ndarray,
@@ -63,7 +63,7 @@ def _build_prediction_bundle_from_frames(
         )
     )
     build_state = _PredictionBuildState()
-    result = _build_prediction_frame(
+    result = _collect_prediction_frame(
         _iter_prediction_work_frames(
             frames,
             required=required,
@@ -84,7 +84,7 @@ def _build_prediction_bundle_from_frames(
     return result
 
 
-def _write_prediction_bundle_from_frames(
+def _write_prediction_artifacts_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: PredictionSpec,
     coefficients: np.ndarray,
@@ -125,7 +125,7 @@ def _write_prediction_bundle_from_frames(
         spec=spec,
         report_spec=report_spec,
         layout=layout,
-        model_metadata=model_metadata,
+        model_metadata=_prediction_window_model_metadata(model_metadata, spec),
         prediction_metadata_factory=lambda: build_state.prediction_metadata(
             spec=spec,
             input_columns=input_columns,
@@ -195,7 +195,20 @@ class _PredictionBuildState:
         }
 
 
-def _build_prediction_frame(
+def _prediction_window_model_metadata(
+    model_metadata: dict[str, object],
+    spec: PredictionSpec,
+) -> dict[str, object]:
+    return {
+        **model_metadata,
+        "test_start": spec.test_start,
+        "test_end": spec.test_end,
+        "oos_start": spec.test_start,
+        "oos_end": spec.test_end or spec.test_start,
+    }
+
+
+def _collect_prediction_frame(
     frames: Iterable[pd.DataFrame],
     *,
     spec: PredictionSpec,
@@ -248,7 +261,7 @@ def _iter_prediction_output_frames(
         test_frame = usable.loc[test_mask]
         if test_frame.empty:
             continue
-        output = test_frame.loc[:, spec.primary_key].copy()
+        output = test_frame.loc[:, list(spec.primary_key)].copy()
         output[spec.prediction_column] = predictor(test_frame)
         build_state.record_prediction_output(output)
         yield output
@@ -300,19 +313,54 @@ def _iter_prediction_work_frames(
         yield frame.loc[:, selected]
 
 
-def write_prediction_bundle(
+def validate_prediction_artifacts(frame: pd.DataFrame, spec: PredictionSpec) -> None:
+    expected = tuple(dict.fromkeys((*spec.primary_key, spec.prediction_column)))
+    missing = [column for column in expected if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            "missing_prediction_artifact_columns: " + ", ".join(missing)
+        )
+    extra = sorted(set(frame.columns).difference(expected))
+    if extra:
+        raise ValueError(
+            "unregistered_prediction_artifact_columns: " + ", ".join(extra)
+        )
+    if frame.empty:
+        raise ValueError("empty_prediction_window")
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    if bool(timestamps.isna().any()):
+        raise ValueError("invalid_prediction_timestamp_values")
+    if bool((timestamps < pd.Timestamp(spec.test_start)).any()):
+        raise ValueError("prediction_artifact_before_test_start")
+    if spec.test_end is not None and bool(
+        (timestamps > pd.Timestamp(spec.test_end)).any()
+    ):
+        raise ValueError("prediction_artifact_after_test_end")
+
+
+def write_prediction_artifacts(
     frame: pd.DataFrame,
     spec: PredictionSpec,
     *,
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
+    output = frame.copy()
+    if "model_metadata" in output.attrs:
+        output.attrs["model_metadata"] = _prediction_window_model_metadata(
+            output.attrs["model_metadata"],
+            spec,
+        )
     return write_prediction_report_artifacts(
-        frame,
+        output,
         spec=spec,
         report_spec=report_spec,
         layout=layout,
     )
 
 
-__all__ = ["build_prediction_bundle", "write_prediction_bundle"]
+__all__ = [
+    "build_prediction_frame",
+    "validate_prediction_artifacts",
+    "write_prediction_artifacts",
+]

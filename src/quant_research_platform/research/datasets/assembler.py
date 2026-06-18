@@ -14,7 +14,6 @@ from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import (
     SessionWindowPlanner,
@@ -22,6 +21,9 @@ from quant_research_platform.markets.calendars import (
 )
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
+)
+from quant_research_platform.research.features.transforms import (
+    apply_feature_transforms,
 )
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
@@ -476,7 +478,7 @@ def _generated_feature_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, 
     return tuple(
         column
         for transform in dataset_spec.feature_transforms
-        for column in transform.output_feature_columns
+        for column in transform.output_columns
     )
 
 
@@ -486,44 +488,7 @@ def _apply_feature_transforms(
 ) -> pd.DataFrame:
     if not dataset_spec.feature_transforms:
         return frame
-    result = frame.copy()
-    for transform in dataset_spec.feature_transforms:
-        _apply_feature_transform(result, transform)
-    return result
-
-
-def _apply_feature_transform(
-    frame: pd.DataFrame,
-    transform: FeatureTransformSpec,
-) -> None:
-    for source_column, output_column in zip(
-        transform.source_factor_columns,
-        transform.output_feature_columns,
-        strict=True,
-    ):
-        values = pd.to_numeric(frame[source_column], errors="coerce")
-        grouped = values.groupby(frame["timestamp"], sort=False)
-        if transform.transform == "rank":
-            transformed = grouped.rank(method="average")
-        elif transform.transform == "zscore":
-            transformed = _zscore(values, grouped)
-        elif transform.transform == "rank_zscore":
-            ranks = grouped.rank(method="average")
-            transformed = _zscore(ranks, ranks.groupby(frame["timestamp"], sort=False))
-        elif transform.transform in {"standardize", "winsorize"}:
-            transformed = _zscore(values, grouped)
-        else:
-            raise ValueError(f"unsupported_feature_transform: {transform.transform}")
-        frame[output_column] = transformed
-
-
-def _zscore(
-    values: pd.Series,
-    grouped: pd.core.groupby.SeriesGroupBy,
-) -> pd.Series:
-    mean = grouped.transform("mean")
-    std = grouped.transform(lambda item: item.std(ddof=0))
-    return (values - mean) / std.replace(0, pd.NA)
+    return apply_feature_transforms(frame, dataset_spec.feature_transforms)
 
 
 def _input_fingerprints(
