@@ -840,6 +840,8 @@ def _portfolio_spec() -> PortfolioSpec:
         research_dataset_id="research_demo",
         signals=(_signal_spec(),),
         return_source_column="label",
+        frequency="1d",
+        execution_lag_steps=0,
         weight_config=WeightConfig(method="rank_weighted_quantile"),
     )
 

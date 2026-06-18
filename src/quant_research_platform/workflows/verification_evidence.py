@@ -183,7 +183,7 @@ def _run_verification_evidence_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             evaluation_catalog=catalogs.evaluations,
-            run_id="a_share_signal_forward_return_20d_2014",
+            run_id="a_share_signal_forward_return_20d",
             time_window=evaluation_time_window,
         )
     with recorder.record("prediction_generation", logical_layer="evidence"):
@@ -206,7 +206,7 @@ def _run_verification_evidence_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             portfolio_catalog=catalogs.portfolios,
-            portfolio_id="a_share_signal_forward_return_20d_portfolio_2014",
+            portfolio_id="a_share_signal_forward_return_20d_portfolio",
             time_window=evaluation_time_window,
         )
 

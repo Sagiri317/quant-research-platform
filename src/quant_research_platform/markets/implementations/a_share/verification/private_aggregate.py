@@ -359,7 +359,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     prediction_roots = _report_category_roots(
         reports_root,
         category="prediction",
-        preferred_id=default_a_share_prediction_smoke_id(),
+        preferred_id=default_a_share_prediction_smoke_id(test_start="2014-07-01"),
     )
     return (
         AggregateInput(
@@ -396,7 +396,10 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         AggregateInput(
             "evaluation_parity",
             evaluation_roots,
-            default_a_share_evaluation_period(),
+            default_a_share_evaluation_period(
+                evaluation_start="2014-01-29",
+                evaluation_end="2014-12-31",
+            ),
             "evaluation",
             summary_kind="report_artifacts",
         ),
@@ -441,7 +444,11 @@ def _report_category_roots(
 
 
 def _prediction_oos_expected_period() -> str:
-    return default_a_share_prediction_oos_period()
+    return default_a_share_prediction_oos_period(
+        train_end="2014-06-30",
+        test_start="2014-07-01",
+        evaluation_end="2014-12-31",
+    )
 
 
 def _dataset_inventory(

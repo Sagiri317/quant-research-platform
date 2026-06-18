@@ -46,6 +46,8 @@ def construct_portfolio_positions(
 ) -> PortfolioResult:
     """Construct portfolio diagnostics from normalized SignalSpec scores."""
 
+    if spec.frequency != "1d":
+        raise ValueError("unsupported_portfolio_frequency")
     panel = _portfolio_panel(
         frame,
         spec,

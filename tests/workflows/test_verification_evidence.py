@@ -610,9 +610,9 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         "portfolio",
     ]
     assert evidence_years == [(2014,)] * (expected_prediction_count + 2)
-    assert evaluation_run_ids == ["a_share_signal_forward_return_20d_2014"]
+    assert evaluation_run_ids == ["a_share_signal_forward_return_20d"]
     assert prediction_ids == expected_prediction_ids
-    assert portfolio_ids == ["a_share_signal_forward_return_20d_portfolio_2014"]
+    assert portfolio_ids == ["a_share_signal_forward_return_20d_portfolio"]
     assert result.status == "PASS"
     assert result.run_id == "s1"
     assert result.output_root == "s1"
@@ -851,12 +851,12 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
     evaluation_root = (
         reports_root
         / "evaluation"
-        / "a_share_signal_forward_return_20d_2014"
+        / "a_share_signal_forward_return_20d"
     )
     portfolio_root = (
         reports_root
         / "portfolio"
-        / "a_share_signal_forward_return_20d_portfolio_2014"
+        / "a_share_signal_forward_return_20d_portfolio"
     )
     prediction_root = reports_root / "prediction"
     metrics = pd.read_parquet(evaluation_root / "metrics.parquet")

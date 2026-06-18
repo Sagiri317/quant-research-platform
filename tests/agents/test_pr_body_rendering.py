@@ -82,6 +82,42 @@ def test_pr_body_validation_rejects_false_pass_claim() -> None:
     assert result == ["validation_row_mismatch: ruff"]
 
 
+def test_pr_body_validation_rejects_external_evidence_status_mismatch() -> None:
+    module = _load_pr_body_module()
+    validation_evidence = {
+        "checks": [
+            {
+                "name": "handoff_verify",
+                "status": "PASS",
+                "evidence": "handoff_package_verify_status=PASS",
+            },
+            {
+                "name": "pr_body_evidence_match",
+                "status": "PASS",
+                "evidence": "pr_body_validation_status=PASS",
+            },
+        ],
+    }
+    body = module.render_pr_body({}, validation_evidence)
+    external_evidence = {
+        "handoff_verify_status": "PASS",
+        "package_verification_status": "NOT_RUN",
+        "pr_body_evidence_match_status": "PASS",
+        "validation_summary": {"status": "PASS"},
+    }
+
+    result = module.validate_pr_body_against_evidence(
+        body,
+        validation_evidence,
+        external_evidence=external_evidence,
+    )
+
+    assert result == [
+        "external_status_mismatch: package_verification_status=NOT_RUN "
+        "!= handoff_verify=PASS"
+    ]
+
+
 def test_pr_body_reads_actual_checks_evidence_schema() -> None:
     module = _load_pr_body_module()
     task_metadata = {

@@ -113,7 +113,7 @@ def test_portfolio_contract_uses_return_source_and_cost_config() -> None:
             ),
         ),
         return_source_column="forward_return_20d",
-        frequency="daily",
+        frequency="1d",
         execution_lag_steps=1,
         cost_config=CostConfig(buy_cost_bps=1.0, sell_cost_bps=1.0),
     )

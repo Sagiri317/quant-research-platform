@@ -98,8 +98,8 @@ class PortfolioSpec:
     research_dataset_id: str
     signals: tuple[SignalSpec, ...]
     return_source_column: str
-    frequency: str = "daily"
-    execution_lag_steps: int = 0
+    frequency: str
+    execution_lag_steps: int
     weight_config: WeightConfig = field(default_factory=WeightConfig)
     cost_config: CostConfig = field(default_factory=CostConfig)
     tradability_config: TradabilityConfig = field(default_factory=TradabilityConfig)
@@ -129,8 +129,6 @@ class PortfolioSpec:
             raise ValueError("portfolio_return_source_column_required")
         if not isinstance(self.frequency, str) or not self.frequency:
             raise ValueError("portfolio_frequency_required")
-        if self.frequency != "daily":
-            raise ValueError("unsupported_portfolio_frequency")
         if not isinstance(self.execution_lag_steps, int) or isinstance(
             self.execution_lag_steps,
             bool,

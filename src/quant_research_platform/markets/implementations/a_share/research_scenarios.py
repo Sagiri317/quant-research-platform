@@ -21,11 +21,8 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 DEFAULT_RETURN_SOURCE_COLUMN = "forward_return_20d"
 DEFAULT_MODEL_RANDOM_SEED = 7
 DEFAULT_MAX_TRAIN_ROWS = 5000
-DEFAULT_TRAIN_END = "2014-06-30"
-DEFAULT_TEST_START = "2014-07-01"
 DEFAULT_TEST_END: str | None = None
 DEFAULT_PREDICTION_MODEL_ALGORITHM = "linear_regression"
-DEFAULT_EVALUATION_PERIOD_END = "2014-12-31"
 
 
 def build_a_share_signal_specs() -> tuple[SignalSpec, ...]:
@@ -79,10 +76,10 @@ def build_a_share_model_specs(
 
 def build_a_share_prediction_specs(
     *,
+    train_end: str,
+    test_start: str,
     model_algorithms: Iterable[str] = tuple(sorted(MODEL_ALGORITHMS)),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
-    train_end: str = DEFAULT_TRAIN_END,
-    test_start: str = DEFAULT_TEST_START,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> tuple[PredictionSpec, ...]:
     return tuple(
@@ -118,14 +115,14 @@ def build_a_share_evaluation_specs(
 
 def build_a_share_portfolio_specs(
     *,
+    frequency: str,
+    execution_lag_steps: int,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
-    frequency: str = "daily",
-    execution_lag_steps: int = 1,
 ) -> tuple[PortfolioSpec, ...]:
     return (
         PortfolioSpec(
-            portfolio_id=f"a_share_signal_{return_source_column}_portfolio_2014",
+            portfolio_id=f"a_share_signal_{return_source_column}_portfolio",
             market_id=A_SHARE_MARKET_ID,
             research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             signals=signals or build_a_share_signal_specs(),
@@ -158,10 +155,10 @@ def build_a_share_model_catalog(
 
 def build_a_share_prediction_catalog(
     *,
+    train_end: str,
+    test_start: str,
     model_algorithms: Iterable[str] = tuple(sorted(MODEL_ALGORITHMS)),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
-    train_end: str = DEFAULT_TRAIN_END,
-    test_start: str = DEFAULT_TEST_START,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> PredictionCatalog:
     catalog = PredictionCatalog()
@@ -192,10 +189,10 @@ def build_a_share_evaluation_catalog(
 
 def build_a_share_portfolio_catalog(
     *,
+    frequency: str,
+    execution_lag_steps: int,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
-    frequency: str = "daily",
-    execution_lag_steps: int = 1,
 ) -> PortfolioCatalog:
     catalog = PortfolioCatalog()
     for spec in build_a_share_portfolio_specs(
@@ -212,33 +209,40 @@ def default_a_share_evaluation_run_id(
     *,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
 ) -> str:
-    return f"a_share_signal_{return_source_column}_2014"
+    return f"a_share_signal_{return_source_column}"
 
 
 def default_a_share_prediction_smoke_id(
     *,
     model_algorithm: str = DEFAULT_PREDICTION_MODEL_ALGORITHM,
-    test_start: str = DEFAULT_TEST_START,
+    test_start: str,
 ) -> str:
     return _a_share_prediction_id(model_algorithm, test_start)
 
 
 def default_a_share_prediction_oos_period(
     *,
+    test_start: str,
+    evaluation_end: str,
+    train_end: str,
     model_algorithm: str = DEFAULT_PREDICTION_MODEL_ALGORITHM,
-    test_start: str = DEFAULT_TEST_START,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> str:
     spec = build_a_share_prediction_specs(
         model_algorithms=(model_algorithm,),
+        train_end=train_end,
         test_start=test_start,
         test_end=test_end,
     )[0]
-    return f"{spec.test_start} through {spec.test_end or DEFAULT_EVALUATION_PERIOD_END}"
+    return f"{spec.test_start} through {spec.test_end or evaluation_end}"
 
 
-def default_a_share_evaluation_period() -> str:
-    return f"2014-01-29 through {DEFAULT_EVALUATION_PERIOD_END}"
+def default_a_share_evaluation_period(
+    *,
+    evaluation_start: str,
+    evaluation_end: str,
+) -> str:
+    return f"{evaluation_start} through {evaluation_end}"
 
 
 def _a_share_model_id(model_algorithm: str, return_source_column: str) -> str:
@@ -287,8 +291,6 @@ __all__ = [
     "DEFAULT_MODEL_RANDOM_SEED",
     "DEFAULT_RETURN_SOURCE_COLUMN",
     "DEFAULT_TEST_END",
-    "DEFAULT_TEST_START",
-    "DEFAULT_TRAIN_END",
     "build_a_share_evaluation_catalog",
     "build_a_share_evaluation_specs",
     "build_a_share_model_catalog",

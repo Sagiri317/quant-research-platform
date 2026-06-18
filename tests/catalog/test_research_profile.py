@@ -71,9 +71,9 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
 
     profile = research_profile()
     dataset = profile.research_datasets.get("a_share_price_volume_forward_returns")
-    evaluation = profile.evaluations.get("a_share_signal_forward_return_20d_2014")
+    evaluation = profile.evaluations.get("a_share_signal_forward_return_20d")
     portfolio = profile.portfolios.get(
-        "a_share_signal_forward_return_20d_portfolio_2014"
+        "a_share_signal_forward_return_20d_portfolio"
     )
     models = tuple(profile.models.list())
     predictions = tuple(profile.predictions.list())

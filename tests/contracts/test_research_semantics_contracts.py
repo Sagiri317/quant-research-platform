@@ -161,6 +161,8 @@ def test_evaluation_and_portfolio_specs_are_signal_owned() -> None:
         research_dataset_id="a_share_research",
         signals=(signal,),
         return_source_column="forward_return_20d",
+        frequency="1d",
+        execution_lag_steps=0,
     )
 
     assert evaluation.signals == (signal,)
@@ -236,6 +238,8 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
         research_dataset_id="a_share_research",
         signals=(own_name_signal,),
         return_source_column="forward_return_20d",
+        frequency="1d",
+        execution_lag_steps=0,
     )
 
     cross_collision = (
@@ -265,6 +269,8 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
             research_dataset_id="a_share_research",
             signals=cross_collision,
             return_source_column="forward_return_20d",
+            frequency="1d",
+            execution_lag_steps=0,
         )
 
 
@@ -290,6 +296,8 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
                 ),
             ),
             return_source_column="forward_return_20d",
+            frequency="1d",
+            execution_lag_steps=0,
         )
 
     with pytest.raises(ValueError, match="portfolio_signal_return_overlap"):
@@ -305,6 +313,8 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
                 ),
             ),
             return_source_column="forward_return_20d",
+            frequency="1d",
+            execution_lag_steps=0,
         )
 
     with pytest.raises(TypeError):
@@ -320,6 +330,8 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
                 ),
             ),
             return_source_column="forward_return_20d",
+            frequency="1d",
+            execution_lag_steps=0,
             weight_column="prediction_score",
         )
 

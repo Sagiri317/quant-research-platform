@@ -122,12 +122,55 @@ def _mapping_section(title: str, values: object) -> list[str]:
 def validate_pr_body_against_evidence(
     body: str,
     validation_evidence: dict[str, Any],
+    *,
+    external_evidence: dict[str, Any] | None = None,
 ) -> list[str]:
     failures: list[str] = []
-    for row in validation_rows(validation_evidence):
+    rows = validation_rows(validation_evidence)
+    for row in rows:
         expected = f"| `{row['check']}` | `{row['status']}` | {row['details']} |"
         if expected not in body:
             failures.append(f"validation_row_mismatch: {row['check']}")
+    if external_evidence is not None:
+        failures.extend(_external_status_failures(rows, external_evidence))
+    return failures
+
+
+def _external_status_failures(
+    rows: list[dict[str, str]],
+    external_evidence: dict[str, Any],
+) -> list[str]:
+    row_status = {row["check"]: row["status"] for row in rows}
+    failures: list[str] = []
+    status_pairs = (
+        ("handoff_self_test_status", "handoff_self_test"),
+        ("handoff_verify_status", "handoff_verify"),
+        ("package_verification_status", "handoff_verify"),
+        ("handoff_safety_scan_status", "handoff_safety_scan"),
+        ("package_safety_status", "package_safety_check"),
+        ("pr_body_evidence_match_status", "pr_body_evidence_match"),
+        ("github_review_threads_status", "github_review_threads"),
+    )
+    for external_key, check_name in status_pairs:
+        if external_key not in external_evidence or check_name not in row_status:
+            continue
+        external_status = str(external_evidence[external_key]).strip().upper()
+        validation_status = row_status[check_name]
+        if external_status != validation_status:
+            failures.append(
+                "external_status_mismatch: "
+                f"{external_key}={external_status} != "
+                f"{check_name}={validation_status}"
+            )
+    summary = external_evidence.get("validation_summary")
+    if isinstance(summary, dict):
+        top_status = str(external_evidence.get("status") or "").strip().upper()
+        summary_status = str(summary.get("status") or "").strip().upper()
+        if top_status and summary_status and top_status != summary_status:
+            failures.append(
+                "external_status_mismatch: "
+                f"status={top_status} != validation_summary.status={summary_status}"
+            )
     return failures
 
 
