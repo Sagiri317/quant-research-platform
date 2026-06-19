@@ -520,6 +520,7 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
             "package_safety_check.py",
             "self_test.py",
             "verify_handoff_package.py",
+            "verify_governance.py",
         )
     )
     if not scanner_source:

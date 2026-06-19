@@ -109,6 +109,7 @@ def _is_scanner_source(name: str) -> bool:
             "package_safety_check.py",
             "self_test.py",
             "verify_handoff_package.py",
+            "verify_governance.py",
         )
     )
 
