@@ -548,7 +548,7 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
     )
     if any(marker in line for marker in markers):
         return True
-    if name.startswith("run_tools/") and (
+    if scanner_source and (
         "vendor_marker" in line
         or "raw_traceback" in line
         or "private_runtime_payload" in line
