@@ -36,3 +36,26 @@ def test_handoff_builder_requires_final_review_artifacts() -> None:
     assert 'parser.add_argument("--base-commit-before-task", required=True)' in source
     assert 'parser.add_argument("--pr-body", required=True)' in source
     assert 'parser.add_argument("--review-threads", required=True)' in source
+
+
+def test_handoff_builder_external_manifest_keeps_review_thread_table() -> None:
+    source = (HANDOFF_TOOL_ROOT / "build_handoff_package.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"github_review_threads": review_thread_table(review_threads)' in source
+    assert (
+        '"github_review_threads_summary": review_thread_summary(review_threads)'
+        in source
+    )
+    for field in (
+        "thread_id",
+        "path",
+        "comment_id",
+        "classification",
+        "resolution_status",
+        "evidence",
+        "resolved_by_tool",
+        "manual_action_required",
+    ):
+        assert field in source
