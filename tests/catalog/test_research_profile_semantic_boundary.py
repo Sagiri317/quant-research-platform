@@ -1,30 +1,43 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
 def test_catalog_profiles_does_not_own_a_share_scenario_parameters() -> None:
-    source = Path("src/quant_research_platform/catalog/profiles.py").read_text(
-        encoding="utf-8"
-    )
+    path = Path("src/quant_research_platform/catalog/profiles.py")
+    source = path.read_text(encoding="utf-8")
 
-    forbidden = (
-        "mom_20d",
-        "rev_1d",
-        "forward_return_20d",
-        "2014-",
-        "n_estimators",
-        "max_train_rows",
-        "model_algorithm",
-        "prediction_id",
-        "portfolio_id",
-        "SignalSpec(",
-        "direction=\"higher\"",
-        "direction=\"lower\"",
-        "column=\"",
+    forbidden_patterns = (
+        r"_PROFILE_",
+        r"\btrain_end\b",
+        r"\btest_start\b",
+        r"\btest_end\b",
+        r"\bevaluation_end\b",
+        r"\bfrequency\b",
+        r"\bexecution_lag_steps\b",
+        r"20[0-9][0-9]-",
+        r"\bmax_train_rows\b",
+        r"\brandom_seed\b",
+        r"\bxgboost\b",
+        r"\blightgbm\b",
+        r"\bportfolio_id\b",
+        r"\bsignal_id\b",
+        r"\bmodel_id\b",
+        r"\brank_weighted\b",
+        r"\bforward_return\b",
+        r"\bmom_",
+        r"\brev_",
+        r"\bbuild_a_share_prediction_catalog\b",
+        r"\bbuild_a_share_portfolio_catalog\b",
     )
-    for token in forbidden:
-        assert token not in source
+    hits: list[str] = []
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        for pattern in forbidden_patterns:
+            if re.search(pattern, line):
+                hits.append(f"{path}:{line_number}: {line.strip()}")
+
+    assert hits == []
 
 
 def test_a_share_scenarios_own_research_scenario_catalog_builders() -> None:

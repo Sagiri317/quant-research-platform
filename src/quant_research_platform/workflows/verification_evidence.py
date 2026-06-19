@@ -13,6 +13,10 @@ import pandas as pd
 from quant_research_platform.catalog.profiles import ResearchProfile
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share.research_scenarios import (
+    build_a_share_portfolio_catalog,
+    build_a_share_prediction_catalog,
+)
 from quant_research_platform.reports.verification_evidence import (
     VerificationEvidenceLayout,
     build_validation_summary,
@@ -59,10 +63,12 @@ class VerificationEvidenceRunConfig:
     start_date: str
     end_date: str
     profile: ResearchProfile
+    prediction_train_end: str
+    prediction_test_start: str
+    portfolio_frequency: str
+    portfolio_execution_lag_steps: int
     evaluation_start_date: str | None = None
     evaluation_end_date: str | None = None
-    prediction_train_end: str | None = None
-    prediction_test_start: str | None = None
     prediction_test_end: str | None = None
     replace_output: bool = False
     run_id: str | None = None
@@ -146,6 +152,15 @@ def _run_verification_evidence_with_policy(
         effective_windows["evaluation_end_date"],
     )
     catalogs = config.profile
+    prediction_catalog = build_a_share_prediction_catalog(
+        train_end=effective_windows["prediction_train_end"],
+        test_start=effective_windows["prediction_test_start"],
+        test_end=effective_windows["prediction_test_end"],
+    )
+    portfolio_catalog = build_a_share_portfolio_catalog(
+        frequency=config.portfolio_frequency,
+        execution_lag_steps=config.portfolio_execution_lag_steps,
+    )
     source_id = config.profile.source_id
     with recorder.record("interim_generation", logical_layer="interim"):
         interim_result = config.profile.materialize_interim_data(
@@ -192,20 +207,20 @@ def _run_verification_evidence_with_policy(
                 layout=storage_layout,
                 dataset_catalog=catalogs.research_datasets,
                 model_catalog=catalogs.models,
-                prediction_catalog=catalogs.predictions,
+                prediction_catalog=prediction_catalog,
                 prediction_id=prediction_spec.prediction_id,
                 time_window=time_window,
                 prediction_train_end=effective_windows["prediction_train_end"],
                 prediction_test_start=effective_windows["prediction_test_start"],
                 prediction_test_end=effective_windows["prediction_test_end"],
             )
-            for prediction_spec in catalogs.predictions.list()
+            for prediction_spec in prediction_catalog.list()
         )
     with recorder.record("portfolio_generation", logical_layer="evidence"):
         portfolio_root = run_portfolio_from_research_dataset(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
-            portfolio_catalog=catalogs.portfolios,
+            portfolio_catalog=portfolio_catalog,
             portfolio_id="a_share_signal_forward_return_20d_portfolio",
             time_window=evaluation_time_window,
         )
@@ -360,20 +375,9 @@ def _resolve_effective_windows(
     if evaluation_start < evidence_start or evaluation_end > evidence_end:
         raise ValueError("evaluation_window_out_of_evidence_range")
 
-    prediction_defaults = _prediction_catalog_default_windows(config.profile)
-    prediction_train_end = (
-        config.prediction_train_end
-        or prediction_defaults["prediction_train_end"]
-    )
-    prediction_test_start = (
-        config.prediction_test_start
-        or prediction_defaults["prediction_test_start"]
-    )
-    prediction_test_end = (
-        config.prediction_test_end
-        if config.prediction_test_end is not None
-        else prediction_defaults["prediction_test_end"]
-    )
+    prediction_train_end = config.prediction_train_end
+    prediction_test_start = config.prediction_test_start
+    prediction_test_end = config.prediction_test_end
     train_end = pd.Timestamp(prediction_train_end)
     test_start = pd.Timestamp(prediction_test_start)
     test_end = (
@@ -400,31 +404,6 @@ def _resolve_effective_windows(
         "prediction_test_start": prediction_test_start,
         "prediction_test_end": prediction_test_end,
     }
-
-
-def _prediction_catalog_default_windows(
-    profile: ResearchProfile,
-) -> dict[str, str | None]:
-    prediction_specs = tuple(profile.predictions.list())
-    if not prediction_specs:
-        raise ValueError("prediction_catalog_required")
-    windows = {
-        (
-            prediction.train_end,
-            prediction.test_start,
-            prediction.test_end,
-        )
-        for prediction in prediction_specs
-    }
-    if len(windows) != 1:
-        raise ValueError("prediction_catalog_default_windows_must_match")
-    train_end, test_start, test_end = next(iter(windows))
-    return {
-        "prediction_train_end": train_end,
-        "prediction_test_start": test_start,
-        "prediction_test_end": test_end,
-    }
-
 
 def _runtime_execution_plan_payload() -> dict[str, object]:
     return {

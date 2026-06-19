@@ -61,12 +61,6 @@ from quant_research_platform.sources.csmar.interim import (
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
-_PROFILE_PREDICTION_TRAIN_END = "2015-01-02"
-_PROFILE_PREDICTION_TEST_START = "2015-01-05"
-_PROFILE_PORTFOLIO_FREQUENCY = "1d"
-_PROFILE_PORTFOLIO_EXECUTION_LAG_STEPS = 1
-
-
 @dataclass(frozen=True)
 class ResearchProfile:
     fields: FieldCatalog
@@ -107,14 +101,8 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         ),
         evaluations=a_share_research_scenarios.build_a_share_evaluation_catalog(),
         models=a_share_research_scenarios.build_a_share_model_catalog(),
-        predictions=a_share_research_scenarios.build_a_share_prediction_catalog(
-            train_end=_PROFILE_PREDICTION_TRAIN_END,
-            test_start=_PROFILE_PREDICTION_TEST_START,
-        ),
-        portfolios=a_share_research_scenarios.build_a_share_portfolio_catalog(
-            frequency=_PROFILE_PORTFOLIO_FREQUENCY,
-            execution_lag_steps=_PROFILE_PORTFOLIO_EXECUTION_LAG_STEPS,
-        ),
+        predictions=PredictionCatalog(),
+        portfolios=PortfolioCatalog(),
         sources=_a_share_csmar_source_registry(),
         markets=_a_share_market_registry(),
         reports=report_catalog(),

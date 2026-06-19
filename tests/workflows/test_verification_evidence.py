@@ -7,7 +7,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -20,6 +19,9 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share import (
+    research_scenarios,
+)
 from quant_research_platform.reports.verification_evidence import (
     VerificationEvidenceLayout,
 )
@@ -37,12 +39,34 @@ from quant_research_platform.workflows.verification_evidence import (
 LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
 MIB = 1024 * 1024
 GIB = 1024 * 1024 * 1024
+SMOKE_PREDICTION_TRAIN_END = "2014-06-30"
+SMOKE_PREDICTION_TEST_START = "2014-07-01"
+SMOKE_PORTFOLIO_FREQUENCY = "1d"
+SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS = 1
+
+
+def _verification_config(**overrides: object) -> VerificationEvidenceRunConfig:
+    payload = {
+        "prediction_train_end": SMOKE_PREDICTION_TRAIN_END,
+        "prediction_test_start": SMOKE_PREDICTION_TEST_START,
+        "portfolio_frequency": SMOKE_PORTFOLIO_FREQUENCY,
+        "portfolio_execution_lag_steps": SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS,
+    }
+    payload.update(overrides)
+    return VerificationEvidenceRunConfig(**payload)
+
+
+def _smoke_prediction_specs():
+    return research_scenarios.build_a_share_prediction_catalog(
+        train_end=SMOKE_PREDICTION_TRAIN_END,
+        test_start=SMOKE_PREDICTION_TEST_START,
+    ).list()
 
 
 def test_verification_evidence_workflow_rejects_existing_output_root(tmp_path):
     output_root = tmp_path / "verification-output" / "s1"
     output_root.mkdir(parents=True)
-    config = VerificationEvidenceRunConfig(
+    config = _verification_config(
         output_root=output_root,
         start_date="2014-01-01",
         end_date="2016-12-31",
@@ -54,7 +78,7 @@ def test_verification_evidence_workflow_rejects_existing_output_root(tmp_path):
 
 
 def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
-    config = VerificationEvidenceRunConfig(
+    config = _verification_config(
         output_root=tmp_path / "verification-output" / "s1",
         start_date="2016-12-31",
         end_date="2014-01-01",
@@ -68,7 +92,7 @@ def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
 def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_path):
     with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
         run_verification_evidence(
-            VerificationEvidenceRunConfig(
+            _verification_config(
                 output_root=tmp_path / "verification-output" / "bad-evaluation",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
@@ -84,7 +108,7 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
         match="prediction_train_end_must_precede_test_start",
     ):
         run_verification_evidence(
-            VerificationEvidenceRunConfig(
+            _verification_config(
                 output_root=tmp_path / "verification-output" / "bad-prediction",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
@@ -100,7 +124,7 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
         match="prediction_test_end_must_not_precede_test_start",
     ):
         run_verification_evidence(
-            VerificationEvidenceRunConfig(
+            _verification_config(
                 output_root=tmp_path / "verification-output" / "bad-prediction-end",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
@@ -164,7 +188,7 @@ def test_verification_evidence_workflow_rejects_override_windows_outside_evidenc
         output_root = tmp_path / "verification-output" / run_name
         with pytest.raises(ValueError, match=match):
             run_verification_evidence(
-                VerificationEvidenceRunConfig(
+                _verification_config(
                     output_root=output_root,
                     start_date="2014-01-01",
                     end_date="2016-12-31",
@@ -176,7 +200,7 @@ def test_verification_evidence_workflow_rejects_override_windows_outside_evidenc
 
 
 def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_path):
-    config = VerificationEvidenceRunConfig(
+    config = _verification_config(
         output_root=tmp_path / "verification-output" / "s1",
         start_date="2014-01-01",
         end_date="2016-12-31",
@@ -187,49 +211,40 @@ def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_pa
     assert config.run_id == "verification-evidence-smoke-a-share-2014-2016"
 
 
-def test_verification_evidence_default_windows_use_global_and_catalog() -> None:
-    profile = research_profile()
-    prediction_spec = tuple(profile.predictions.list())[0]
-
+def test_verification_evidence_uses_explicit_prediction_windows() -> None:
     windows = module._resolve_effective_windows(
-        VerificationEvidenceRunConfig(
+        _verification_config(
             output_root=Path("unused"),
             start_date="2014-01-01",
             end_date="2016-12-31",
-            profile=profile,
+            profile=research_profile(),
         )
     )
 
     assert windows == {
         "evaluation_start_date": "2014-01-01",
         "evaluation_end_date": "2016-12-31",
-        "prediction_train_end": prediction_spec.train_end,
-        "prediction_test_start": prediction_spec.test_start,
-        "prediction_test_end": prediction_spec.test_end,
+        "prediction_train_end": SMOKE_PREDICTION_TRAIN_END,
+        "prediction_test_start": SMOKE_PREDICTION_TEST_START,
+        "prediction_test_end": None,
     }
 
 
-def test_verification_evidence_rejects_mismatched_prediction_catalog_defaults() -> None:
-    base_profile = research_profile()
-    prediction_catalog = PredictionCatalog()
-    for index, prediction_spec in enumerate(base_profile.predictions.list()):
-        prediction_catalog.register(
-            replace(prediction_spec, test_start="2015-01-02")
-            if index == 1
-            else prediction_spec
-        )
-    profile = replace(base_profile, predictions=prediction_catalog)
-
+def test_verification_evidence_requires_prediction_window_order() -> None:
     with pytest.raises(
         ValueError,
-        match="prediction_catalog_default_windows_must_match",
+        match="prediction_train_end_must_precede_test_start",
     ):
         module._resolve_effective_windows(
             VerificationEvidenceRunConfig(
                 output_root=Path("unused"),
                 start_date="2014-01-01",
                 end_date="2016-12-31",
-                profile=profile,
+                profile=research_profile(),
+                prediction_train_end="2014-07-01",
+                prediction_test_start="2014-07-01",
+                portfolio_frequency=SMOKE_PORTFOLIO_FREQUENCY,
+                portfolio_execution_lag_steps=SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS,
             )
         )
 
@@ -323,10 +338,10 @@ def test_verification_evidence_workflow_resolves_independent_windows(
     )
 
     profile = _profile_with_materializers(import_interim, build_processed)
-    expected_prediction_count = len(tuple(profile.predictions.list()))
+    expected_prediction_count = len(tuple(_smoke_prediction_specs()))
     output_root = tmp_path / "verification-output" / "s-window"
     result = run_verification_evidence(
-        VerificationEvidenceRunConfig(
+        _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2019-12-31",
@@ -447,10 +462,10 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
     )
 
     profile = _profile_with_materializers(import_interim, build_processed)
-    expected_prediction_count = len(tuple(profile.predictions.list()))
+    expected_prediction_count = len(tuple(_smoke_prediction_specs()))
     output_root = tmp_path / "verification-output" / "s-policy"
     result = run_verification_evidence(
-        VerificationEvidenceRunConfig(
+        _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -589,12 +604,12 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
 
     profile = _profile_with_materializers(import_interim, build_processed)
     expected_prediction_ids = [
-        prediction_spec.prediction_id for prediction_spec in profile.predictions.list()
+        prediction_spec.prediction_id for prediction_spec in _smoke_prediction_specs()
     ]
     expected_prediction_count = len(expected_prediction_ids)
     output_root = tmp_path / "verification-output" / "s1"
     result = run_verification_evidence(
-        VerificationEvidenceRunConfig(
+        _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -713,7 +728,7 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
 
     output_root = tmp_path / "verification-output" / "s8"
     result = run_verification_evidence(
-        VerificationEvidenceRunConfig(
+        _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -774,7 +789,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
 
     output_root = tmp_path / "verification-output" / "s9"
     result = run_verification_evidence(
-        VerificationEvidenceRunConfig(
+        _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
@@ -804,10 +819,11 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
     tmp_path,
 ) -> None:
     base_profile = research_profile()
-    prediction_ids = [
-        prediction_spec.prediction_id
-        for prediction_spec in base_profile.predictions.list()
-    ]
+    prediction_specs = {
+        prediction_spec.prediction_id: prediction_spec
+        for prediction_spec in _smoke_prediction_specs()
+    }
+    prediction_ids = sorted(prediction_specs)
 
     def import_interim(layout, raw_root, start_date, end_date):
         del raw_root, start_date, end_date
@@ -835,7 +851,7 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
 
     output_root = tmp_path / "verification-output" / "tiny-real-stack"
     result = run_verification_evidence(
-        VerificationEvidenceRunConfig(
+        _verification_config(
             output_root=output_root,
             start_date="2014-01-02",
             end_date="2015-01-05",
@@ -876,7 +892,7 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
         prediction_ids
     )
     for prediction_id in prediction_ids:
-        prediction_spec = base_profile.predictions.get(prediction_id)
+        prediction_spec = prediction_specs[prediction_id]
         model_spec = base_profile.models.get(prediction_spec.model_id)
         expected_input_columns = [
             *model_spec.input_factor_columns,

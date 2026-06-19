@@ -13,6 +13,7 @@ from quant_research_platform.catalog.fields import FieldCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.catalog.models import ModelCatalog
+from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
@@ -23,6 +24,9 @@ from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share import (
+    research_scenarios,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 PROJECT_SRC = Path("src/quant_research_platform")
@@ -57,6 +61,7 @@ def test_research_profile_contains_active_catalogs() -> None:
     assert isinstance(profile.evaluations, EvaluationCatalog)
     assert isinstance(profile.models, ModelCatalog)
     assert isinstance(profile.predictions, PredictionCatalog)
+    assert isinstance(profile.portfolios, PortfolioCatalog)
     assert isinstance(profile.sources, SourceRegistry)
     assert isinstance(profile.markets, MarketRegistry)
     assert set(profile.source_interim_catalogs) == {"csmar"}
@@ -72,13 +77,23 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     profile = research_profile()
     dataset = profile.research_datasets.get("a_share_price_volume_forward_returns")
     evaluation = profile.evaluations.get("a_share_signal_forward_return_20d")
-    portfolio = profile.portfolios.get(
+    portfolio = research_scenarios.build_a_share_portfolio_catalog(
+        frequency="1d",
+        execution_lag_steps=1,
+    ).get(
         "a_share_signal_forward_return_20d_portfolio"
     )
     models = tuple(profile.models.list())
-    predictions = tuple(profile.predictions.list())
+    predictions = tuple(
+        research_scenarios.build_a_share_prediction_catalog(
+            train_end="2014-06-30",
+            test_start="2014-07-01",
+        ).list()
+    )
     model_ids = {model.model_id for model in models}
 
+    assert profile.predictions.list() == ()
+    assert profile.portfolios.list() == ()
     assert sorted(model.model_algorithm for model in models) == sorted(
         MODEL_ALGORITHMS
     )

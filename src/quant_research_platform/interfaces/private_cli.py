@@ -100,19 +100,19 @@ def evidence_run(
         ),
     ] = None,
     prediction_train_end: Annotated[
-        str | None,
+        str,
         typer.Option(
             "--prediction-train-end",
             help="Prediction training window end date.",
         ),
-    ] = None,
+    ] = ...,
     prediction_test_start: Annotated[
-        str | None,
+        str,
         typer.Option(
             "--prediction-test-start",
             help="Prediction test window start date.",
         ),
-    ] = None,
+    ] = ...,
     prediction_test_end: Annotated[
         str | None,
         typer.Option(
@@ -120,6 +120,20 @@ def evidence_run(
             help="Prediction test window end date.",
         ),
     ] = None,
+    portfolio_frequency: Annotated[
+        str,
+        typer.Option(
+            "--portfolio-frequency",
+            help="Portfolio construction frequency.",
+        ),
+    ] = ...,
+    portfolio_execution_lag_steps: Annotated[
+        int,
+        typer.Option(
+            "--portfolio-execution-lag-steps",
+            help="Portfolio signal execution lag in frequency steps.",
+        ),
+    ] = ...,
     replace_output: Annotated[
         bool,
         typer.Option(
@@ -141,6 +155,8 @@ def evidence_run(
                 prediction_train_end=prediction_train_end,
                 prediction_test_start=prediction_test_start,
                 prediction_test_end=prediction_test_end,
+                portfolio_frequency=portfolio_frequency,
+                portfolio_execution_lag_steps=portfolio_execution_lag_steps,
                 profile=research_profile(),
                 replace_output=replace_output,
             )
