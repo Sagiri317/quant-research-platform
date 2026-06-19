@@ -212,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-metadata", required=True)
     parser.add_argument("--validation-evidence", required=True)
+    parser.add_argument("--external-evidence")
     parser.add_argument("--output", required=True)
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args(argv)
@@ -226,7 +227,16 @@ def main(argv: list[str] | None = None) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(body, encoding="utf-8")
     if args.verify:
-        failures = validate_pr_body_against_evidence(body, validation_evidence)
+        external_evidence = (
+            _load_json_object(Path(args.external_evidence), "external_evidence")
+            if args.external_evidence
+            else None
+        )
+        failures = validate_pr_body_against_evidence(
+            body,
+            validation_evidence,
+            external_evidence=external_evidence,
+        )
         if failures:
             print("pr_body_validation_status=FAIL")
             for failure in failures:

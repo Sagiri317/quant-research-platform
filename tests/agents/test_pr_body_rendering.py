@@ -118,6 +118,54 @@ def test_pr_body_validation_rejects_external_evidence_status_mismatch() -> None:
     ]
 
 
+def test_pr_body_cli_verifies_external_evidence_statuses(tmp_path) -> None:
+    module = _load_pr_body_module()
+    task_metadata = tmp_path / "task_metadata.json"
+    validation_path = tmp_path / "validation_evidence.json"
+    external_path = tmp_path / "external_evidence.json"
+    output = tmp_path / "pr_body.md"
+    task_metadata.write_text("{}", encoding="utf-8")
+    validation_path.write_text(
+        """
+{
+  "checks": [
+    {
+      "name": "handoff_verify",
+      "status": "PASS",
+      "evidence": "handoff_package_verify_status=PASS"
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    external_path.write_text(
+        """
+{
+  "handoff_verify_status": "PASS",
+  "package_verification_status": "NOT_RUN"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = module.main(
+        [
+            "--task-metadata",
+            str(task_metadata),
+            "--validation-evidence",
+            str(validation_path),
+            "--external-evidence",
+            str(external_path),
+            "--output",
+            str(output),
+            "--verify",
+        ]
+    )
+
+    assert result == 1
+
+
 def test_pr_body_reads_actual_checks_evidence_schema() -> None:
     module = _load_pr_body_module()
     task_metadata = {
