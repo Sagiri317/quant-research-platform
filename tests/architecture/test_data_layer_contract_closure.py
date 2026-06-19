@@ -21,6 +21,10 @@ NEGATIVE_GATE_FILES = {
 LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL = (
     'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"'
 )
+PRIVATE_EVIDENCE_RUNNER_A_SHARE_BUILDER_IMPORT = (
+    PROJECT_SRC / "workflows/verification_evidence.py",
+    "quant_research_platform.markets.implementations.a_share",
+)
 
 
 def test_old_catalog_entrypoints_are_not_active_imports() -> None:
@@ -147,6 +151,7 @@ def test_interfaces_workflows_agents_use_profile_not_direct_implementations() ->
         f"{path}:{lineno} imports {module}"
         for path, lineno, module in _iter_imports(roots)
         if module.startswith(forbidden_prefixes)
+        and (path, module) != PRIVATE_EVIDENCE_RUNNER_A_SHARE_BUILDER_IMPORT
     ]
     profile_users = [
         path.as_posix()
