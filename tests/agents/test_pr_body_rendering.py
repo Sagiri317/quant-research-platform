@@ -118,6 +118,43 @@ def test_pr_body_validation_rejects_external_evidence_status_mismatch() -> None:
     ]
 
 
+def test_pr_body_evidence_consistency_uses_external_mismatch_status() -> None:
+    module = _load_pr_body_module()
+    validation_evidence = {
+        "checks": [
+            {
+                "name": "handoff_verify",
+                "status": "PASS",
+                "evidence": "verified",
+            },
+        ],
+    }
+    external_evidence = {
+        "package_verification_status": "FAIL",
+    }
+
+    body = module.render_pr_body(
+        {},
+        validation_evidence,
+        external_evidence=external_evidence,
+    )
+
+    assert "| status cross-check | `FAIL` |" in body
+    assert "| validation evidence | `PASS` |" in body
+    assert "| PR body | `PASS` |" not in body
+    assert "| zip sidecar | `PASS` |" not in body
+
+
+def test_pr_body_missing_validation_evidence_renders_not_run() -> None:
+    module = _load_pr_body_module()
+
+    body = module.render_pr_body({}, {})
+
+    assert "| `validation_evidence` | `NOT_RUN` | missing validation rows |" in body
+    assert "| validation evidence | `NOT_RUN` |" in body
+    assert "| validation evidence | `PASS` |" not in body
+
+
 def test_pr_body_cli_verifies_external_evidence_statuses(tmp_path) -> None:
     module = _load_pr_body_module()
     task_metadata = tmp_path / "task_metadata.json"
@@ -251,17 +288,19 @@ def test_pr_body_renders_optional_handoff_threads_and_closure_sections() -> None
     assert "| `handoff_verify` | `PASS` | 1.2s | `PASS_TARGET` |" in body
     assert "| review threads | `PASS` | total=1 unresolved=0 |" in body
     assert "| `thread-1` | `src/example.py` | `outdated-fixed` |" in body
+    assert "full evidence: review_threads.json" in body
     assert "## A-share Date Default Cleanup" in body
     assert "- research_profile() remains API/CLI static catalog entry." in body
 
 
-def test_pr_body_rejects_missing_or_empty_validation_rows() -> None:
+def test_pr_body_missing_or_empty_validation_rows_become_not_run() -> None:
     module = _load_pr_body_module()
 
     for validation_evidence in ({}, {"validation_table": []}, {"checks": []}):
-        try:
-            module.validation_rows(validation_evidence)
-        except ValueError as exc:
-            assert str(exc) == "validation_rows_required"
-        else:  # pragma: no cover - failure branch for clear assertion message
-            raise AssertionError("validation_rows_required")
+        assert module.validation_rows(validation_evidence) == [
+            {
+                "check": "validation_evidence",
+                "status": "NOT_RUN",
+                "details": "missing validation rows",
+            }
+        ]

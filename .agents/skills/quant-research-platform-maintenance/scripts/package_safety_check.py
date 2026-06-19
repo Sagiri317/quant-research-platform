@@ -45,8 +45,10 @@ TEXT_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}
 MAX_TEXT_SCAN_BYTES = 2_000_000
 
 LOCAL_PATH_PATTERN = re.compile(
-    r"((?<![A-Za-z])[A-Za-z]:\\"
-    r"|/Users/[^\s`]+|/home/[^\s`]+|/mnt/[a-z]/[^\s`]+)"
+    r"((?<![A-Za-z])[A-Za-z]:[\\/]"
+    r"|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+"
+    r"|\\\\Users\\\\|\\\\quant-workspace\\\\|\bquant-workspace\b"
+    r"|\bconda env path\b|\bsite-packages\b)"
 )
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|cookie)"
@@ -168,6 +170,24 @@ def scan_dir(path: Path, allow_nested_packages: bool) -> SafetyResult:
     return result
 
 
+def scan_json(path: Path, allow_nested_packages: bool) -> SafetyResult:
+    del allow_nested_packages
+    result = SafetyResult(entries_scanned=1)
+    check_entry_path(result, path.name, allow_nested_packages=True)
+    check_text(result, path.name, path.read_bytes()[: MAX_TEXT_SCAN_BYTES + 1])
+    return result
+
+
+def scan_target(path: Path, allow_nested_packages: bool) -> SafetyResult:
+    if path.is_dir():
+        return scan_dir(path, allow_nested_packages)
+    if path.suffix.lower() == ".json":
+        return scan_json(path, allow_nested_packages)
+    if zipfile.is_zipfile(path):
+        return scan_zip(path, allow_nested_packages)
+    raise ValueError("target_is_neither_directory_zip_nor_json")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Scan a QRP handoff/review package for public-safe rules."
@@ -181,26 +201,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     args = parser.parse_args(argv)
 
-    target = Path(args.target).resolve()
+    target = Path(args.target)
     if not target.exists():
         print(f"ERROR: target not found: {target}")
         return 2
 
     try:
-        if target.is_dir():
-            result = scan_dir(target, args.allow_nested_packages)
-        elif zipfile.is_zipfile(target):
-            result = scan_zip(target, args.allow_nested_packages)
-        else:
-            print(f"ERROR: target is neither a directory nor zip file: {target}")
-            return 2
+        result = scan_target(target, args.allow_nested_packages)
     except zipfile.BadZipFile as exc:
         print(f"ERROR: invalid zip file: {exc}")
+        return 2
+    except ValueError:
+        print(
+            "ERROR: target is neither a directory, zip file, nor JSON file: "
+            f"{target}"
+        )
         return 2
 
     summary = {
         "status": "PASS" if result.ok else "FAIL",
-        "target": str(target),
+        "target": target.name,
         "entries_scanned": result.entries_scanned,
         "text_entries_scanned": result.text_entries_scanned,
         "errors": result.errors,

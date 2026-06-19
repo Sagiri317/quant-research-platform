@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ def render_pr_body(
     *,
     review_threads: dict[str, Any] | None = None,
     handoff_results: dict[str, Any] | None = None,
+    external_evidence: dict[str, Any] | None = None,
 ) -> str:
     rows = validation_rows(validation_evidence)
     lines = [
@@ -50,7 +52,13 @@ def render_pr_body(
         _mapping_section("Smoke And Compare", task_metadata.get("smoke_compare"))
     )
     lines.extend(_handoff_results_section(handoff_results))
-    lines.extend(_evidence_consistency_section(review_threads))
+    lines.extend(
+        _evidence_consistency_section(
+            rows,
+            review_threads,
+            external_evidence=external_evidence,
+        )
+    )
     lines.extend(_review_threads_section(review_threads))
     lines.extend(_closure_sections(task_metadata.get("closure_sections")))
     non_pass_rows = [row for row in rows if row["status"] != "PASS"]
@@ -150,31 +158,60 @@ def _handoff_results_section(payload: dict[str, Any] | None) -> list[str]:
 
 
 def _evidence_consistency_section(
+    rows: list[dict[str, str]],
     review_threads: dict[str, Any] | None,
+    *,
+    external_evidence: dict[str, Any] | None,
 ) -> list[str]:
+    status_failures = (
+        _external_status_failures(rows, external_evidence)
+        if isinstance(external_evidence, dict)
+        else []
+    )
+    validation_status = _aggregate_status(row["status"] for row in rows)
+    pr_body_status = _row_status(rows, "pr_body_evidence_match") or validation_status
+    if status_failures:
+        pr_body_status = "FAIL"
+    sidecar_status = _sidecar_status(external_evidence)
+    if status_failures:
+        sidecar_status = "FAIL"
     lines = [
         "",
         "## Evidence Consistency",
         "",
         "| Evidence | Status | Detail |",
         "| --- | --- | --- |",
-        "| validation evidence | `PASS` | statuses match external sidecar |",
-        (
-            "| PR body | `PASS` | rendered from validation evidence and "
-            "verified against external sidecar |"
+        "| validation evidence | `{}` | {} |".format(
+            validation_status,
+            _status_detail(validation_status, "validation rows loaded"),
+        ),
+        "| PR body | `{}` | {} |".format(
+            pr_body_status,
+            "external status mismatch"
+            if status_failures
+            else _status_detail(pr_body_status, "rendered from validation evidence"),
         ),
     ]
+    if status_failures:
+        lines.append(
+            "| status cross-check | `FAIL` | {} |".format(
+                _clean_cell("; ".join(status_failures))
+            )
+        )
     if isinstance(review_threads, dict):
+        review_status = _clean_status(review_threads.get("status")) or "NOT_RUN"
         lines.append(
             "| review threads | `{}` | total={} unresolved={} |".format(
-                _clean_cell(str(review_threads.get("status") or "")),
+                review_status,
                 _clean_cell(_cell_value(review_threads.get("total_count"))),
                 _clean_cell(_cell_value(review_threads.get("unresolved_count"))),
             )
         )
     lines.append(
-        "| zip sidecar | `PASS` | final hashes are recorded only in the "
-        "external JSON sidecar |"
+        "| zip sidecar | `{}` | {} |".format(
+            sidecar_status,
+            _status_detail(sidecar_status, "final hashes recorded in sidecar"),
+        )
     )
     return lines
 
@@ -202,7 +239,7 @@ def _review_threads_section(review_threads: dict[str, Any] | None) -> list[str]:
                 _clean_cell(str(raw.get("classification") or "")),
                 _clean_cell(str(raw.get("resolution_status") or "")),
                 _clean_cell(_cell_value(raw.get("manual_action_required"))),
-                _clean_cell(str(raw.get("evidence") or ""))[:140],
+                _review_thread_evidence_summary(raw.get("evidence")),
             )
         )
     return lines
@@ -277,6 +314,24 @@ def _external_status_failures(
                 "external_status_mismatch: "
                 f"status={top_status} != validation_summary.status={summary_status}"
             )
+    status_summary = external_evidence.get("status_summary")
+    if isinstance(status_summary, dict):
+        status_pairs = (
+            ("validation", "validation"),
+            ("handoff_verify", "handoff_verify"),
+            ("handoff_safety", "handoff_safety_scan"),
+        )
+        for external_key, check_name in status_pairs:
+            if external_key not in status_summary or check_name not in row_status:
+                continue
+            external_status = str(status_summary[external_key]).strip().upper()
+            validation_status = row_status[check_name]
+            if external_status != validation_status:
+                failures.append(
+                    "external_status_mismatch: "
+                    f"status_summary.{external_key}={external_status} != "
+                    f"{check_name}={validation_status}"
+                )
     return failures
 
 
@@ -288,11 +343,11 @@ def validation_rows(validation_evidence: dict[str, Any]) -> list[dict[str, str]]
         raw_rows = validation_evidence["checks"]
         row_kind = "checks"
     else:
-        raise ValueError("validation_rows_required")
+        return _missing_validation_rows()
     if not isinstance(raw_rows, list):
         raise ValueError(f"{row_kind}_must_be_list")
     if not raw_rows:
-        raise ValueError("validation_rows_required")
+        return _missing_validation_rows()
     rows: list[dict[str, str]] = []
     for raw in raw_rows:
         if not isinstance(raw, dict):
@@ -308,6 +363,71 @@ def validation_rows(validation_evidence: dict[str, Any]) -> list[dict[str, str]]
             raise ValueError(f"invalid_validation_status: {check}")
         rows.append({"check": check, "status": status, "details": details})
     return rows
+
+
+def _missing_validation_rows() -> list[dict[str, str]]:
+    return [
+        {
+            "check": "validation_evidence",
+            "status": "NOT_RUN",
+            "details": "missing validation rows",
+        }
+    ]
+
+
+def _clean_status(value: object) -> str:
+    status = str(value or "").strip().upper()
+    return status if status in VALID_STATUSES else ""
+
+
+def _aggregate_status(statuses: Iterable[str]) -> str:
+    values = tuple(statuses)
+    if not values:
+        return "NOT_RUN"
+    for status in ("FAIL", "BLOCKED", "NOT_RUN"):
+        if status in values:
+            return status
+    return "PASS"
+
+
+def _row_status(rows: list[dict[str, str]], check_name: str) -> str:
+    for row in rows:
+        if row["check"] == check_name:
+            return row["status"]
+    return ""
+
+
+def _sidecar_status(external_evidence: dict[str, Any] | None) -> str:
+    if not isinstance(external_evidence, dict):
+        return "NOT_RUN"
+    summary = external_evidence.get("status_summary")
+    if isinstance(summary, dict):
+        return _aggregate_status(
+            status
+            for status in (_clean_status(value) for value in summary.values())
+            if status
+        )
+    return _clean_status(external_evidence.get("status")) or "NOT_RUN"
+
+
+def _status_detail(status: str, pass_detail: str) -> str:
+    if status == "PASS":
+        return pass_detail
+    if status == "FAIL":
+        return "inconsistent or failed evidence"
+    if status == "BLOCKED":
+        return "blocked by environment, dependency, permission, or input"
+    return "not run"
+
+
+def _review_thread_evidence_summary(value: object) -> str:
+    text = _clean_cell(str(value or "")).replace("`", "'")
+    marker = "full evidence: review_threads.json"
+    if not text:
+        return marker
+    if len(text) > 120:
+        return f"{text[:117].rstrip()}... (truncated; {marker})"
+    return f"{text} ({marker})"
 
 
 def _clean_cell(value: str) -> str:
@@ -344,21 +464,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.handoff_results
         else None
     )
+    external_evidence = (
+        _load_json_object(Path(args.external_evidence), "external_evidence")
+        if args.external_evidence
+        else None
+    )
     body = render_pr_body(
         task_metadata,
         validation_evidence,
         review_threads=review_threads,
         handoff_results=handoff_results,
+        external_evidence=external_evidence,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(body, encoding="utf-8")
     if args.verify:
-        external_evidence = (
-            _load_json_object(Path(args.external_evidence), "external_evidence")
-            if args.external_evidence
-            else None
-        )
         failures = validate_pr_body_against_evidence(
             body,
             validation_evidence,

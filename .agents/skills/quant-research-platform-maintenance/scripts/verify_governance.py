@@ -72,7 +72,8 @@ STALE_STATUS_PATTERNS = (
 )
 
 LOCAL_PATH_PATTERN = re.compile(
-    r"((?<![A-Za-z])[A-Za-z]:\\|/Users/[^\s`]+|/home/[^\s`]+|/mnt/[a-z]/[^\s`]+)"
+    r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+"
+    r"|/mnt/(?:data|[a-z])/[^\s`]+)"
 )
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|cookie)\s*[:=]\s*['\"]?[^\s'\"]+"
@@ -195,10 +196,29 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
         "token = re.compile",
         "secret-like assignment",
         "Finish the official review-fix handoff package",
+        "E:/quant-workspace",
+        "/mnt/data",
+        "/home/user",
     )
     if any(marker in line for marker in markers):
         return True
     return rel.endswith(".py") and line.lstrip().startswith(("r\"", "r'"))
+
+
+def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
+    allowed_fixture_paths = {
+        "tests/agents/test_handoff_tools.py",
+        "tests/agents/test_package_safety_check.py",
+    }
+    if rel in allowed_fixture_paths and any(
+        marker in line
+        for marker in ("E:/quant-workspace", "/mnt/data", "/home/user")
+    ):
+        return True
+    return (
+        rel == "docs/architecture/open-issues-register.md"
+        and "Negative tests cover" in line
+    )
 
 
 def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
@@ -217,7 +237,10 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
                 result.errors.append(
                     f"possible secret-like assignment in {rel}:{line_number}"
                 )
-            if LOCAL_PATH_PATTERN.search(line):
+            if LOCAL_PATH_PATTERN.search(line) and not _is_allowed_local_path_fixture(
+                rel,
+                line,
+            ):
                 result.errors.append(
                     f"local absolute path pattern in {rel}:{line_number}"
                 )

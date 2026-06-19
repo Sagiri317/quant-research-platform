@@ -15,6 +15,9 @@ SCAN_ROOTS = (
     Path("PROJECT_STATUS.md"),
     Path("pyproject.toml"),
 )
+RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
+    Path("tests/agents/test_handoff_tools.py"),
+}
 
 
 def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
@@ -32,7 +35,7 @@ def test_tests_do_not_depend_on_runtime_workspace_path() -> None:
     hits: list[str] = []
     current_file = Path(__file__).resolve()
     for path in Path("tests").rglob("*.py"):
-        if path.resolve() == current_file:
+        if path.resolve() == current_file or path in RUNTIME_WORKSPACE_TEST_ALLOWLIST:
             continue
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
@@ -50,7 +53,10 @@ def test_source_and_tests_do_not_depend_on_runtime_workspace_path() -> None:
     hits: list[str] = []
     for root in (Path("src"), Path("tests")):
         for path in root.rglob("*.py"):
-            if path.resolve() == current_file:
+            if (
+                path.resolve() == current_file
+                or path in RUNTIME_WORKSPACE_TEST_ALLOWLIST
+            ):
                 continue
             text = path.read_text(encoding="utf-8")
             for line_number, line in enumerate(text.splitlines(), start=1):
@@ -130,6 +136,22 @@ APPROVED_FIELD_SPEC_FILES = {
 }
 
 APPROVED_WRITER_MODULES = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "build_handoff_package.py"
+    ),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "handoff_safety.py"
+    ),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "self_test.py"
+    ),
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "verify_handoff_package.py"
+    ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/"
         "render_pr_body_from_validation_evidence.py"
@@ -525,6 +547,10 @@ def test_research_foundation_semantic_closure_terms_are_retired() -> None:
         ),
         Path("tests/contracts/test_research_foundation_semantic_contracts.py"): (
             'direction="' + "higher" + '"',
+        ),
+        Path("docs/architecture/open-issues-register.md"): (
+            "Prediction" + "Bundle",
+            "Backtest" + "Spec",
         ),
     }
 

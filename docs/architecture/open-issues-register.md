@@ -123,6 +123,27 @@ near-term evaluation/model/prediction roadmap.
 | ID | Priority | Owner layer | Issue | Status |
 |---|---|---|---|---|
 | GOV-001 | P1 | `.agents` | 在用户 Win11 + Python 3.13.14 环境验证治理脚本；Linux/macOS/WSL 结果不能替代用户本机。 | done |
-| GOV-002 | P2 | `.agents` / `.run` | 将稳定的 package safety / governance checks 与 `.run` 官方 handoff 工具进一步对齐，但不让 `.run` 反向定义架构。 | open |
+| GOV-002 | P2 | `.agents` / `.run` | 将稳定的 package safety / governance checks 与 `.run` 官方 handoff 工具进一步对齐，但不让 `.run` 反向定义架构。 | done |
 | GOV-003 | P2 | optional adapters | 评估 hooks、MCP、plugins、custom subagents、`codex exec`、GitHub Action 是否需要从 draft-only 进入启用阶段。 | draft-only |
 | GOV-004 | P2 | `.agents` | 周期性检查短提示词示例是否仍能精准命中 task mode，并记录高返工案例。 | open |
+
+## QRFSC Final Review Closure Register
+
+本节是 QRFSC final review closure handoff/evidence hotfix 的当前事实源。
+它不改变 public API/CLI，不定义业务 runtime 架构，也不把 handoff 产物目录反向
+写成长期架构规则。
+
+| Issue id | Severity | Owner layer | Status | Evidence | Next action | Blocked/deferred reason | Last reviewed date |
+|---|---|---|---|---|---|---|---|
+| QRFSC-HANDOFF-001 | P0 | `.agents` handoff tooling | resolved | Sidecar schema is `handoff-sidecar/v1`; builder writes `zip_filename` and `zip_logical_path`, not `zip_path`, `repo_path`, or `worktree_path`. Negative tests cover `E:/`, `/mnt/data`, and `/home` sidecar leaks. | None. | Resolved in this hotfix. | 2026-06-19 |
+| QRFSC-HANDOFF-002 | P1 | `.agents` handoff tooling | resolved | `verify_handoff_package.py --zip ... --json ...` calls handoff safety with the external JSON sidecar; `handoff_safety.py` scans zip member names, zip text members, final bundle Git objects through batch `git cat-file`, and sidecar JSON text. | None. | Resolved in this hotfix. | 2026-06-19 |
+| QRFSC-HANDOFF-003 | P1 | `.agents` package safety | resolved | `package_safety_check.py` supports zip, directory, and `.json` targets using the same local-path and sensitive-text patterns. | None. | Resolved in this hotfix. | 2026-06-19 |
+| QRFSC-HANDOFF-004 | P1 | `.agents` PR body renderer | resolved | Evidence Consistency rows derive from validation rows and external sidecar cross-checks; missing evidence renders `NOT_RUN`; sidecar/validation mismatch renders `FAIL`. | None. | Resolved in this hotfix. | 2026-06-19 |
+| QRFSC-HANDOFF-005 | P2 | `.agents` PR body renderer | resolved | Review thread table emits concise summaries with `full evidence: review_threads.json`; full thread evidence remains in zip `review_threads.json`. | None. | Resolved in this hotfix. | 2026-06-19 |
+| QRFSC-HANDOFF-006 | P2 | `.agents` handoff tooling | resolved | Handoff source of truth is tracked under `.agents/skills/quant-research-platform-maintenance/scripts/handoff/`; `.run` is output/evidence only. `factor_chunk_diagnostic.py`, `n2_artifact_validation.py`, and `smoke_compare.py` are not handoff contract requirements. | None. | Resolved in this hotfix. | 2026-06-19 |
+| QRFSC-HANDOFF-007 | P2 | catalog/model boundary | deferred | `research_profile().models` remains closer to runnable `ModelSpec` than a static model capability catalog. | Evaluate a future `ModelCapability` versus `ModelSpec` split. | Architecture change is outside this handoff/evidence hotfix; do not implement now. | 2026-06-19 |
+| QRFSC-HANDOFF-008 | P2 | workflows / markets/a_share verification | deferred | Generic verification workflow may still expose A-share dataset/run/portfolio IDs in private evidence harness context. | Decide whether to move the private A-share evidence runner to the A-share owner layer or explicitly name it as a private A-share evidence harness. | Owner-layer relocation is outside this handoff/evidence hotfix; do not implement now. | 2026-06-19 |
+| QRFSC-HANDOFF-009 | P2 | research/portfolio capability | deferred | Portfolio engine support for `"1d"` is an explicit capability limit, not a silent default. | Design future multi-frequency support through engine capability or dispatch. | Portfolio architecture change is outside this handoff/evidence hotfix; do not implement now. | 2026-06-19 |
+| QRFSC-HANDOFF-010 | P3 | `.run` handoff outputs | deferred | Builder supports `--out-dir`; default output remains `.run/reviews/`. | Decide separately whether to rename default output to `.run/handoffs/` or another directory. | Directory contract migration is outside this hotfix; do not implement now. | 2026-06-19 |
+| QRFSC-HANDOFF-011 | P2 | research architecture | deferred | Forbidden broad abstractions remain explicitly out of scope: `research_profile_for_scenario`, `ScenarioResolver`, `ResearchRecipe`, `FeatureStore`, `ModelSuiteSpec`, `PredictionBundleSpec`, and `BacktestSpec`. | Revisit only in a dedicated architecture task with explicit approval. | Broad abstraction work is forbidden in this hotfix; do not implement now. | 2026-06-19 |
+| QRFSC-HANDOFF-012 | P2 | validation evidence | updated | Full pytest and smoke status must be recorded as `PASS`, `FAIL`, `NOT_RUN`, or `BLOCKED`; GitHub live PR body/review-thread access limits must be `BLOCKED`, not converted to `PASS`. | Keep validation limitations in `validation_evidence.json` and final summary. | This is a validation limitation classification, not a code defect. | 2026-06-19 |

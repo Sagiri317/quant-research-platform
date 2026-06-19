@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -47,3 +48,24 @@ def test_package_safety_still_rejects_other_nested_packages_by_default(tmp_path)
     assert result.errors == [
         "nested package/bundle not allowed by default: review_evidence/old.bundle"
     ]
+
+
+def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
+    module = _load_package_safety_module()
+    sidecar = tmp_path / "handoff.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": "handoff-sidecar/v1",
+                "zip_filename": "handoff.zip",
+                "zip_path": "E:/quant-workspace/private/handoff.zip",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    result = module.scan_target(sidecar, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("local absolute path" in error for error in result.errors)
