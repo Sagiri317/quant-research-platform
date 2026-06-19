@@ -196,6 +196,65 @@ def test_pr_body_reads_actual_checks_evidence_schema() -> None:
     assert module.validate_pr_body_against_evidence(body, validation_evidence) == []
 
 
+def test_pr_body_renders_optional_handoff_threads_and_closure_sections() -> None:
+    module = _load_pr_body_module()
+    task_metadata = {
+        "closure_sections": [
+            {
+                "title": "A-share Date Default Cleanup",
+                "items": [
+                    "research_profile() remains API/CLI static catalog entry.",
+                    "No public API/CLI was added.",
+                ],
+            }
+        ],
+    }
+    validation_evidence = {
+        "checks": [
+            {"name": "handoff_verify", "status": "PASS", "evidence": "ok"},
+        ],
+    }
+    review_threads = {
+        "status": "PASS",
+        "total_count": 1,
+        "unresolved_count": 0,
+        "threads": [
+            {
+                "thread_id": "thread-1",
+                "path": "src/example.py",
+                "classification": "outdated-fixed",
+                "resolution_status": "resolved",
+                "manual_action_required": False,
+                "evidence": "fixed in abc123",
+            }
+        ],
+    }
+    handoff_results = {
+        "results": [
+            {
+                "name": "handoff_verify",
+                "status": "PASS",
+                "duration_seconds": 1.2,
+                "performance_status": "PASS_TARGET",
+            }
+        ],
+    }
+
+    body = module.render_pr_body(
+        task_metadata,
+        validation_evidence,
+        review_threads=review_threads,
+        handoff_results=handoff_results,
+    )
+
+    assert "## Handoff Fresh-Temp Verification" in body
+    assert "| `handoff_verify` | `PASS` | 1.2s | `PASS_TARGET` |" in body
+    assert "| review threads | `PASS` | total=1 unresolved=0 |" in body
+    assert "| `thread-1` | `src/example.py` | `outdated-fixed` |" in body
+    assert "## A-share Date Default Cleanup" in body
+    assert "- research_profile() remains API/CLI static catalog entry." in body
+
+
 def test_pr_body_rejects_missing_or_empty_validation_rows() -> None:
     module = _load_pr_body_module()
 
