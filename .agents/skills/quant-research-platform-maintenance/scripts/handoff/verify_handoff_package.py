@@ -34,6 +34,7 @@ REQUIRED_RUN_TOOLS = {
     "run_tools/build_handoff_package.py",
     "run_tools/verify_handoff_package.py",
     "run_tools/handoff_safety.py",
+    "run_tools/render_pr_body_from_validation_evidence.py",
     "run_tools/self_test.py",
 }
 

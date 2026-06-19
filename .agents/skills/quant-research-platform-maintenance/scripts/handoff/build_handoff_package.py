@@ -32,6 +32,7 @@ TOOL_NAMES = {
     "README.md",
     "build_handoff_package.py",
     "handoff_safety.py",
+    "render_pr_body_from_validation_evidence.py",
     "self_test.py",
     "verify_handoff_package.py",
 }
@@ -297,7 +298,10 @@ def stage_tools(stage_root: Path) -> None:
     target_root = stage_root / "run_tools"
     target_root.mkdir(parents=True, exist_ok=True)
     for name in sorted(TOOL_NAMES):
-        shutil.copyfile(SCRIPT_DIR / name, target_root / name)
+        source = SCRIPT_DIR / name
+        if not source.exists():
+            source = SCRIPT_PARENT / name
+        shutil.copyfile(source, target_root / name)
 
 
 def sidecar_payload(
