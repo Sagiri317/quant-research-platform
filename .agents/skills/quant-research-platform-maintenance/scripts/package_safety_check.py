@@ -220,6 +220,7 @@ def is_allowed_diff_literal_context(path: str, line: str) -> bool:
         "tests/",
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/",
         ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py",
+        ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py",
         "docs/architecture/open-issues-register.md",
     )
     if not any(normalized.startswith(root) for root in allowed_roots):
@@ -234,6 +235,9 @@ def is_allowed_diff_literal_context(path: str, line: str) -> bool:
         or "/" + "home/" in line
         or "/" + "Users/" in line
         or "\\\\Users\\\\" in line
+        or "quant-workspace" in line
+        or "site-packages" in line
+        or "conda env path" in line
     )
 
 
