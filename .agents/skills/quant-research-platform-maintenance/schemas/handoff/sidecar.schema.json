@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QRP handoff external sidecar",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "zip_filename",
+    "zip_logical_path",
+    "zip_sha256",
+    "artifact_manifest_sha256",
+    "branch",
+    "base",
+    "final_head",
+    "generated_at_utc",
+    "status_summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "handoff-sidecar/v1"
+    },
+    "zip_filename": {
+      "type": "string"
+    },
+    "zip_logical_path": {
+      "type": "string"
+    },
+    "zip_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "base": {
+      "type": "string"
+    },
+    "final_head": {
+      "type": "string"
+    },
+    "generated_at_utc": {
+      "type": "string"
+    },
+    "status_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "validation",
+        "handoff_verify",
+        "handoff_safety",
+        "blocked_count",
+        "fail_count"
+      ],
+      "properties": {
+        "validation": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "handoff_verify": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "handoff_safety": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "blocked_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fail_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

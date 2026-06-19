@@ -407,6 +407,8 @@ def contains_local_absolute_path(text: str) -> bool:
 
 
 def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
+    if name == "diff.patch":
+        return unsafe_diff_text_reason(text)
     scan_text = "\n".join(
         line
         for line in text.splitlines()
@@ -431,6 +433,75 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
     if stale_marker(scan_text) is not None:
         return "stale_marker"
     return None
+
+
+def unsafe_diff_text_reason(text: str) -> str | None:
+    current_path = ""
+    risky_lines: list[str] = []
+    for line in text.splitlines():
+        path = diff_line_path(line)
+        if path:
+            current_path = path
+        if contains_local_absolute_path(line):
+            if is_allowed_diff_literal_context(current_path, line):
+                continue
+            risky_lines.append(line)
+    scan_text = "\n".join(risky_lines)
+    if scan_text:
+        return "local_absolute_path"
+    return unsafe_text_reason(
+        "\n".join(
+            line
+            for line in text.splitlines()
+            if not contains_local_absolute_path(line)
+        ),
+        name="diff.patch.filtered",
+    )
+
+
+def diff_line_path(line: str) -> str:
+    if line.startswith("diff --git "):
+        parts = line.split()
+        if len(parts) >= 4:
+            return normalize_diff_path(parts[3])
+    if line.startswith("+++ ") or line.startswith("--- "):
+        return normalize_diff_path(line[4:].strip())
+    return ""
+
+
+def normalize_diff_path(path: str) -> str:
+    path = path.strip().strip('"').replace("\\", "/")
+    if path in {"/dev/null", "dev/null"}:
+        return ""
+    if path.startswith("a/") or path.startswith("b/"):
+        return path[2:]
+    return path
+
+
+def is_allowed_diff_literal_context(path: str, line: str) -> bool:
+    normalized = path.replace("\\", "/")
+    allowed_roots = (
+        "tests/",
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/",
+        ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py",
+        "docs/architecture/open-issues-register.md",
+    )
+    if not any(normalized.startswith(root) for root in allowed_roots):
+        return False
+    return (
+        "negative" in normalized.lower()
+        or "fixture" in normalized.lower()
+        or "test" in normalized.lower()
+        or "LOCAL_PATH" in line
+        or "DRIVE_ABSOLUTE_RE" in line
+        or "POSIX_USER_ABSOLUTE_RE" in line
+        or "WINDOWS_USER_ABSOLUTE_RE" in line
+        or "ENVIRONMENT_PATH_RE" in line
+        or "E:" + "/" in line
+        or "/" + "mnt/data" in line
+        or "/" + "home/" in line
+        or "/" + "Users/" in line
+    )
 
 
 def stale_marker(text: str) -> str | None:

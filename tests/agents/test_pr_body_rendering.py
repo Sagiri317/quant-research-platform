@@ -304,3 +304,111 @@ def test_pr_body_missing_or_empty_validation_rows_become_not_run() -> None:
                 "details": "missing validation rows",
             }
         ]
+
+
+def test_pr_body_uses_final_sidecar_summary_and_logical_paths() -> None:
+    module = _load_pr_body_module()
+    run_reviews = "." + "run/reviews"
+    task_metadata = {
+        "branch": "feature/qrp-clean-rewrite",
+        "base": "b1d846",
+        "final_sha": "abc123",
+    }
+    validation_evidence = {
+        "review_zip_path": f"{run_reviews}/qrfsc-final-review-closure-hotfix.zip",
+        "external_evidence_json_path": (
+            f"{run_reviews}/qrfsc-final-review-closure-hotfix.json"
+        ),
+        "checks": [
+            {"name": "handoff_verify", "status": "PASS", "evidence": "verified"},
+            {"name": "handoff_safety_scan", "status": "PASS", "evidence": "safe"},
+            {
+                "name": "github_review_threads",
+                "status": "BLOCKED",
+                "evidence": "live GitHub access unavailable",
+            },
+        ],
+    }
+    review_threads = {
+        "schema_version": "handoff-review-threads/v1",
+        "status": "BLOCKED",
+        "counts_available": False,
+        "total_count": None,
+        "unresolved_count": None,
+        "threads": [],
+        "evidence": "Live GitHub access unavailable; counts unknown.",
+    }
+    sidecar = {
+        "status_summary": {
+            "validation": "BLOCKED",
+            "handoff_verify": "PASS",
+            "handoff_safety": "PASS",
+            "blocked_count": 1,
+            "fail_count": 0,
+        }
+    }
+
+    body = module.render_pr_body(
+        task_metadata,
+        validation_evidence,
+        review_threads=review_threads,
+        external_evidence=sidecar,
+    )
+
+    assert "- base head: `b1d846`" in body
+    assert "- start head: ``" not in body
+    assert (
+        f"- review zip: `{run_reviews}/qrfsc-final-review-closure-hotfix.zip`"
+        in body
+    )
+    assert "- external evidence JSON: `" in body
+    assert f"{run_reviews}/qrfsc-final-review-closure-hotfix.json`" in body
+    assert (
+        "| zip sidecar | `BLOCKED` | validation=BLOCKED; "
+        "handoff_verify=PASS; handoff_safety=PASS; blocked_count=1; "
+        "fail_count=0 |"
+        in body
+    )
+    assert "| zip sidecar | `NOT_RUN` |" not in body
+    blocked_threads_row = (
+        "| review threads | `BLOCKED` | live GitHub access unavailable; "
+        "counts unknown |"
+    )
+    assert blocked_threads_row in body
+    assert "total=0 unresolved=0" not in body
+    assert "E:" + "/" not in body
+    assert "/" + "mnt/data" not in body
+
+
+def test_pr_body_missing_sidecar_is_the_only_sidecar_not_run_case() -> None:
+    module = _load_pr_body_module()
+    validation_evidence = {
+        "checks": [
+            {"name": "handoff_verify", "status": "PASS", "evidence": "verified"},
+        ],
+    }
+
+    body = module.render_pr_body({}, validation_evidence)
+
+    assert "| zip sidecar | `NOT_RUN` | not run |" in body
+
+
+def test_blocked_review_threads_counts_are_unknown_not_zero() -> None:
+    module = _load_pr_body_module()
+    review_threads = {
+        "status": "BLOCKED",
+        "counts_available": False,
+        "total_count": None,
+        "unresolved_count": None,
+        "threads": [],
+        "evidence": "Live GitHub access unavailable; counts unknown.",
+    }
+
+    body = module.render_pr_body({}, {}, review_threads=review_threads)
+
+    blocked_threads_row = (
+        "| review threads | `BLOCKED` | live GitHub access unavailable; "
+        "counts unknown |"
+    )
+    assert blocked_threads_row in body
+    assert "total=0 unresolved=0" not in body

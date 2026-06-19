@@ -1,8 +1,9 @@
 # QRP Handoff Tools
 
 Tracked source for building and checking public-safe QRP handoff packages.
-Generated packages copy these files into `run_tools/`; the copied files are not
-the source of truth.
+Generated packages do not copy these tracked files into the zip. The final zip
+contains the branch bundle plus task-specific evidence; reviewers can clone the
+bundle and run the tracked tools from that clone.
 
 ## Task Input
 
@@ -38,16 +39,23 @@ generation timestamp, and minimal status summary.
 
 ## Verification
 
+From an existing checkout:
+
 ```powershell
 <PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py
 <PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py --zip .run/reviews/<slug>.zip --json .run/reviews/<slug>.json
 <PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py .run/reviews/<slug>.zip --json .run/reviews/<slug>.json
 ```
 
-To inspect the bundle in a fresh directory:
+In a fresh directory with only the zip/json, first extract or copy
+`final-branch.bundle` from the zip, then clone the bundle and run the tracked
+tools from the cloned repository:
 
 ```bash
 git clone --branch feature/qrp-clean-rewrite final-branch.bundle repo
+python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py
+python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py --zip <slug>.zip --json <slug>.json
+python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py <slug>.zip --json <slug>.json
 ```
 
 The legacy `factor_chunk_diagnostic.py`, `n2_artifact_validation.py`, and

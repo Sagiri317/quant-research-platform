@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,16 +26,8 @@ from render_pr_body_from_validation_evidence import render_pr_body  # noqa: E402
 
 PACKAGE_SCHEMA_VERSION = "handoff-sidecar/v1"
 VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
-TEXT_SUFFIXES = {".json", ".log", ".md", ".patch", ".txt", ".yaml", ".yml"}
-TOOL_NAMES = {
-    "README.md",
-    "build_handoff_package.py",
-    "handoff_safety.py",
-    "render_pr_body_from_validation_evidence.py",
-    "self_test.py",
-    "verify_handoff_package.py",
-}
 REQUIRED_REVIEW_EVIDENCE = "review_evidence/handoff_generation.json"
+VERIFICATION_MATRIX_EVIDENCE = "review_evidence/verification-matrix.json"
 TASK_CONTROL_KEYS = {
     "validation_evidence",
     "review_threads",
@@ -93,9 +84,17 @@ def build_handoff_package(
     last_failures: list[str] = []
     max_attempts = 3 if verify else 1
     for _attempt in range(max_attempts):
-        validation_evidence = validation_with_status_overrides(
+        validation_evidence = enrich_validation_evidence(
+            validation_with_status_overrides(
             task_validation_evidence(task),
             status_overrides,
+            ),
+            zip_logical_path=str(
+                task.get("zip_logical_path") or f".run/reviews/{zip_path.name}"
+            ).replace("\\", "/"),
+            json_logical_path=str(
+                task.get("sidecar_logical_path") or f".run/reviews/{json_path.name}"
+            ).replace("\\", "/"),
         )
         build_once(
             repo_root=repo_root,
@@ -126,6 +125,12 @@ def build_handoff_package(
         desired = {
             "handoff_verify": verify_status,
             "handoff_safety_scan": safety_status,
+            "raw_diff_exactness": (
+                "FAIL" if "diff_patch_mismatch" in last_failures else "PASS"
+            ),
+            "git_apply_check": (
+                "FAIL" if "diff_patch_apply_check_failed" in last_failures else "PASS"
+            ),
         }
         if status_overrides == desired:
             return {
@@ -174,15 +179,34 @@ def build_once(
             sanitize_handoff_text(git_status_text(repo_root)),
         )
         diff = git_text(repo_root, "diff", "--binary", f"{base}..{final_head}")
-        write_text(stage_root / "diff.patch", sanitize_handoff_text(diff))
+        write_text(stage_root / "diff.patch", normalize_lf(diff))
         review_threads = task_review_threads(task)
         write_text(stage_root / "review_threads.json", stable_json(review_threads))
-        pr_body = task_pr_body(task, validation_evidence, review_threads)
+        pr_body = task_pr_body(
+            task,
+            validation_evidence,
+            review_threads,
+            external_evidence=sidecar_preview(
+                zip_path=zip_path,
+                json_path=json_path,
+                task=task,
+                validation_evidence=validation_evidence,
+            ),
+        )
         write_text(stage_root / "pr_body.md", sanitize_handoff_text(pr_body))
         stage_review_evidence(stage_root, task, validation_evidence)
-        stage_tools(stage_root)
         manifest = {
             "schema_version": "handoff-artifact-manifest/v1",
+            "tool_source_final_head": final_head,
+            "tool_source_repo_paths": [
+                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
+                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
+                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py",
+                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
+                ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
+                ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
+                ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
+            ],
             "entries": artifact_entries(stage_root, staged_paths(stage_root)),
         }
         write_text(stage_root / "artifact_manifest.json", stable_json(manifest))
@@ -211,6 +235,7 @@ def task_metadata(task: dict[str, object]) -> dict[str, object]:
         for key, value in task.items()
         if key not in TASK_CONTROL_KEYS and not key.endswith("_path")
     }
+    payload.pop("goal_status", None)
     payload.setdefault("schema_version", "handoff-task-metadata/v1")
     return json_sanitize(payload)
 
@@ -236,15 +261,34 @@ def task_review_threads(task: dict[str, object]) -> dict[str, object]:
     if isinstance(payload, dict):
         result = json_sanitize(payload)
         result.setdefault("status", "NOT_RUN")
-        result.setdefault("total_count", 0)
-        result.setdefault("unresolved_count", 0)
+        status = str(result.get("status") or "").strip().upper()
+        if status == "BLOCKED":
+            result["counts_available"] = False
+            result["total_count"] = None
+            result["unresolved_count"] = None
+            result.setdefault(
+                "evidence",
+                (
+                    "Live GitHub review-thread access was unavailable; counts are "
+                    "unknown. No PASS is claimed for live thread state."
+                ),
+            )
+        else:
+            result.setdefault("counts_available", status == "PASS")
+            if result.get("counts_available"):
+                result.setdefault("total_count", 0)
+                result.setdefault("unresolved_count", 0)
+            else:
+                result.setdefault("total_count", None)
+                result.setdefault("unresolved_count", None)
         result.setdefault("threads", [])
         return result
     return {
         "schema_version": "handoff-review-threads/v1",
         "status": "NOT_RUN",
-        "total_count": 0,
-        "unresolved_count": 0,
+        "counts_available": False,
+        "total_count": None,
+        "unresolved_count": None,
         "threads": [],
     }
 
@@ -253,6 +297,8 @@ def task_pr_body(
     task: dict[str, object],
     validation_evidence: dict[str, object],
     review_threads: dict[str, object],
+    *,
+    external_evidence: dict[str, object] | None = None,
 ) -> str:
     raw = task.get("pr_body_markdown", task.get("pr_body"))
     if isinstance(raw, str) and raw.strip():
@@ -261,6 +307,7 @@ def task_pr_body(
         task_metadata(task),
         validation_evidence,
         review_threads=review_threads,
+        external_evidence=external_evidence,
     )
 
 
@@ -280,6 +327,11 @@ def stage_review_evidence(
                 name += ".json"
             write_text(stage_root / name, stable_json(json_sanitize(payload)))
             wrote = True
+    if not (stage_root / VERIFICATION_MATRIX_EVIDENCE).exists():
+        write_text(
+            stage_root / VERIFICATION_MATRIX_EVIDENCE,
+            stable_json(verification_matrix_payload(validation_evidence)),
+        )
     if not wrote:
         payload = {
             "schema_version": "handoff-review-evidence/v1",
@@ -294,14 +346,27 @@ def stage_review_evidence(
         write_text(stage_root / REQUIRED_REVIEW_EVIDENCE, stable_json(payload))
 
 
-def stage_tools(stage_root: Path) -> None:
-    target_root = stage_root / "run_tools"
-    target_root.mkdir(parents=True, exist_ok=True)
-    for name in sorted(TOOL_NAMES):
-        source = SCRIPT_DIR / name
-        if not source.exists():
-            source = SCRIPT_PARENT / name
-        shutil.copyfile(source, target_root / name)
+def sidecar_preview(
+    *,
+    zip_path: Path,
+    json_path: Path,
+    task: dict[str, object],
+    validation_evidence: dict[str, object],
+) -> dict[str, object]:
+    status_map = validation_status_map(validation_evidence)
+    return {
+        "zip_filename": zip_path.name,
+        "zip_logical_path": str(
+            task.get("zip_logical_path") or f".run/reviews/{zip_path.name}"
+        ).replace("\\", "/"),
+        "sidecar_logical_path": str(
+            task.get("sidecar_logical_path") or f".run/reviews/{json_path.name}"
+        ).replace("\\", "/"),
+        "status_summary": status_summary_from_validation(
+            status_map,
+            safety_status=status_map.get("handoff_safety_scan", "NOT_RUN"),
+        ),
+    }
 
 
 def sidecar_payload(
@@ -333,15 +398,26 @@ def sidecar_payload(
         "base": base,
         "final_head": final_head,
         "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
-        "status_summary": {
-            "validation": aggregate_status(status_map.values()),
-            "handoff_verify": status_map.get("handoff_verify", "NOT_RUN"),
-            "handoff_safety": "PASS" if safety.ok else "FAIL",
-            "blocked_count": sum(
-                1 for status in status_map.values() if status == "BLOCKED"
-            ),
-            "fail_count": sum(1 for status in status_map.values() if status == "FAIL"),
-        },
+        "status_summary": status_summary_from_validation(
+            status_map,
+            safety_status="PASS" if safety.ok else "FAIL",
+        ),
+    }
+
+
+def status_summary_from_validation(
+    status_map: dict[str, str],
+    *,
+    safety_status: str,
+) -> dict[str, object]:
+    statuses = dict(status_map)
+    statuses["handoff_safety_scan"] = safety_status
+    return {
+        "validation": aggregate_status(statuses.values()),
+        "handoff_verify": statuses.get("handoff_verify", "NOT_RUN"),
+        "handoff_safety": safety_status,
+        "blocked_count": sum(1 for status in statuses.values() if status == "BLOCKED"),
+        "fail_count": sum(1 for status in statuses.values() if status == "FAIL"),
     }
 
 
@@ -361,6 +437,25 @@ def validation_with_status_overrides(
     return payload
 
 
+def enrich_validation_evidence(
+    validation_evidence: dict[str, object],
+    *,
+    zip_logical_path: str,
+    json_logical_path: str,
+) -> dict[str, object]:
+    payload = json.loads(stable_json(validation_evidence))
+    payload["review_zip_path"] = zip_logical_path
+    payload["external_evidence_json_path"] = json_logical_path
+    rows = payload.get("checks")
+    if not isinstance(rows, list):
+        rows = []
+        payload["checks"] = rows
+    for name in ("raw_diff_exactness", "git_apply_check"):
+        if name not in validation_status_map(payload):
+            set_check_status(rows, name, "NOT_RUN")
+    return payload
+
+
 def set_check_status(rows: list[object], check_name: str, status: str) -> None:
     details_key = "evidence"
     for row in rows:
@@ -369,15 +464,51 @@ def set_check_status(rows: list[object], check_name: str, status: str) -> None:
         name = row.get("name", row.get("check"))
         if name == check_name:
             row["status"] = status
-            row.setdefault(details_key, f"{check_name}={status}")
+            row[details_key] = validation_status_evidence(check_name, status)
             return
     rows.append(
         {
             "name": check_name,
             "status": status,
-            details_key: f"{check_name}={status}",
+            details_key: validation_status_evidence(check_name, status),
         }
     )
+
+
+def validation_status_evidence(check_name: str, status: str) -> str:
+    if check_name == "raw_diff_exactness":
+        return f"raw git diff --binary base..HEAD exactness check {status}"
+    if check_name == "git_apply_check":
+        return f"git apply --check diff.patch on base checkout {status}"
+    if check_name == "handoff_verify":
+        return f"verify_handoff_package.py --zip <zip> --json <json> {status}"
+    if check_name == "handoff_safety_scan":
+        return f"handoff_safety.py <zip> --json <json> {status}"
+    return f"{check_name}={status}"
+
+
+def verification_matrix_payload(
+    validation_evidence: dict[str, object],
+) -> dict[str, object]:
+    status_map = validation_status_map(validation_evidence)
+    checks = []
+    for name in ("raw_diff_exactness", "git_apply_check"):
+        checks.append(
+            {
+                "name": name,
+                "required": True,
+                "deterministic": True,
+                "status": status_map.get(name, "NOT_RUN"),
+                "evidence": validation_status_evidence(
+                    name,
+                    status_map.get(name, "NOT_RUN"),
+                ),
+            }
+        )
+    return {
+        "schema_version": "handoff-verification-matrix/v1",
+        "checks": checks,
+    }
 
 
 def validation_status_map(payload: dict[str, object]) -> dict[str, str]:

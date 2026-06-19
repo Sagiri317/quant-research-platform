@@ -21,12 +21,25 @@ def render_pr_body(
     external_evidence: dict[str, Any] | None = None,
 ) -> str:
     rows = validation_rows(validation_evidence)
+    review_zip_path = _evidence_path(
+        validation_evidence,
+        external_evidence,
+        "review_zip_path",
+        "zip_logical_path",
+    )
+    external_json_path = _evidence_path(
+        validation_evidence,
+        external_evidence,
+        "external_evidence_json_path",
+        "sidecar_logical_path",
+    )
     lines = [
         "# QRP Research Foundation Semantic Closure",
         "",
         f"- branch: `{task_metadata.get('branch', '')}`",
-        f"- start head: `{task_metadata.get('base_commit_before_task', '')}`",
-        f"- final head: `{task_metadata.get('final_sha', '')}`",
+        "- base head: "
+        f"`{_head_value(task_metadata, 'base_commit_before_task', 'base')}`",
+        f"- final head: `{_head_value(task_metadata, 'final_sha', 'final_head')}`",
         f"- PR: `{task_metadata.get('pr_url', '')}`",
         "- PR status: `draft`",
     ]
@@ -90,9 +103,8 @@ def render_pr_body(
             "",
             "## Evidence",
             "",
-            f"- review zip: `{validation_evidence.get('review_zip_path', '')}`",
-            "- external evidence JSON: "
-            f"`{validation_evidence.get('external_evidence_json_path', '')}`",
+            f"- review zip: `{review_zip_path}`",
+            f"- external evidence JSON: `{external_json_path}`",
             "",
             "## Non-goals",
             "",
@@ -200,18 +212,13 @@ def _evidence_consistency_section(
         )
     if isinstance(review_threads, dict):
         review_status = _clean_status(review_threads.get("status")) or "NOT_RUN"
+        review_detail = _review_threads_detail(review_threads)
         lines.append(
-            "| review threads | `{}` | total={} unresolved={} |".format(
-                review_status,
-                _clean_cell(_cell_value(review_threads.get("total_count"))),
-                _clean_cell(_cell_value(review_threads.get("unresolved_count"))),
-            )
+            f"| review threads | `{review_status}` | {review_detail} |"
         )
+    sidecar_detail = _sidecar_detail(external_evidence, sidecar_status)
     lines.append(
-        "| zip sidecar | `{}` | {} |".format(
-            sidecar_status,
-            _status_detail(sidecar_status, "final hashes recorded in sidecar"),
-        )
+        f"| zip sidecar | `{sidecar_status}` | {sidecar_detail} |"
     )
     return lines
 
@@ -276,6 +283,13 @@ def validate_pr_body_against_evidence(
             failures.append(f"validation_row_mismatch: {row['check']}")
     if external_evidence is not None:
         failures.extend(_external_status_failures(rows, external_evidence))
+        sidecar_status = _sidecar_status(external_evidence)
+        sidecar_detail = _sidecar_detail(external_evidence, sidecar_status)
+        expected_sidecar = (
+            f"| zip sidecar | `{sidecar_status}` | {sidecar_detail} |"
+        )
+        if expected_sidecar not in body:
+            failures.append("evidence_consistency_sidecar_row_mismatch")
     return failures
 
 
@@ -316,8 +330,15 @@ def _external_status_failures(
             )
     status_summary = external_evidence.get("status_summary")
     if isinstance(status_summary, dict):
+        validation_status = _aggregate_status(row_status.values())
+        summary_validation = str(status_summary.get("validation") or "").strip().upper()
+        if summary_validation and summary_validation != validation_status:
+            failures.append(
+                "external_status_mismatch: "
+                f"status_summary.validation={summary_validation} != "
+                f"validation={validation_status}"
+            )
         status_pairs = (
-            ("validation", "validation"),
             ("handoff_verify", "handoff_verify"),
             ("handoff_safety", "handoff_safety_scan"),
         )
@@ -332,6 +353,26 @@ def _external_status_failures(
                     f"status_summary.{external_key}={external_status} != "
                     f"{check_name}={validation_status}"
                 )
+        blocked_count = sum(1 for status in row_status.values() if status == "BLOCKED")
+        fail_count = sum(1 for status in row_status.values() if status == "FAIL")
+        if (
+            "blocked_count" in status_summary
+            and status_summary.get("blocked_count") != blocked_count
+        ):
+            failures.append(
+                "external_status_mismatch: "
+                f"status_summary.blocked_count={status_summary.get('blocked_count')} "
+                f"!= blocked_count={blocked_count}"
+            )
+        if (
+            "fail_count" in status_summary
+            and status_summary.get("fail_count") != fail_count
+        ):
+            failures.append(
+                "external_status_mismatch: "
+                f"status_summary.fail_count={status_summary.get('fail_count')} "
+                f"!= fail_count={fail_count}"
+            )
     return failures
 
 
@@ -408,6 +449,80 @@ def _sidecar_status(external_evidence: dict[str, Any] | None) -> str:
             if status
         )
     return _clean_status(external_evidence.get("status")) or "NOT_RUN"
+
+
+def _sidecar_detail(external_evidence: dict[str, Any] | None, status: str) -> str:
+    if not isinstance(external_evidence, dict):
+        return "not run"
+    summary = external_evidence.get("status_summary")
+    if isinstance(summary, dict):
+        parts = []
+        for key in (
+            "validation",
+            "handoff_verify",
+            "handoff_safety",
+            "blocked_count",
+            "fail_count",
+        ):
+            if key in summary:
+                parts.append(f"{key}={_clean_cell(str(summary[key]))}")
+        if parts:
+            return "; ".join(parts)
+    return _status_detail(status, "final hashes recorded in sidecar")
+
+
+def _review_threads_detail(review_threads: dict[str, Any]) -> str:
+    status = _clean_status(review_threads.get("status")) or "NOT_RUN"
+    counts_available = bool(review_threads.get("counts_available")) or (
+        isinstance(review_threads.get("total_count"), int)
+        and isinstance(review_threads.get("unresolved_count"), int)
+    )
+    if status == "BLOCKED" and not counts_available:
+        return "live GitHub access unavailable; counts unknown"
+    if status == "PASS" and counts_available:
+        return "total={} unresolved={}".format(
+            _clean_cell(_cell_value(review_threads.get("total_count"))),
+            _clean_cell(_cell_value(review_threads.get("unresolved_count"))),
+        )
+    if not counts_available:
+        return "counts unavailable"
+    return "total={} unresolved={}".format(
+        _clean_cell(_cell_value(review_threads.get("total_count"))),
+        _clean_cell(_cell_value(review_threads.get("unresolved_count"))),
+    )
+
+
+def _head_value(task_metadata: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(task_metadata.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _evidence_path(
+    validation_evidence: dict[str, Any],
+    external_evidence: dict[str, Any] | None,
+    validation_key: str,
+    external_key: str,
+) -> str:
+    value = str(validation_evidence.get(validation_key) or "").strip()
+    if value:
+        return value
+    if isinstance(external_evidence, dict):
+        value = str(external_evidence.get(external_key) or "").strip()
+        if value:
+            return value
+        if external_key == "sidecar_logical_path":
+            zip_logical = str(external_evidence.get("zip_logical_path") or "").strip()
+            zip_name = str(external_evidence.get("zip_filename") or "").strip()
+            if zip_logical and zip_name and zip_logical.endswith(zip_name):
+                return (
+                    zip_logical[: -len(zip_name)]
+                    + zip_name.rsplit(".", 1)[0]
+                    + ".json"
+                )
+    return ""
 
 
 def _status_detail(status: str, pass_detail: str) -> str:

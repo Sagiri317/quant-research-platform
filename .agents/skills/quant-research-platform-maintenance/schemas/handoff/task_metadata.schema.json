@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QRP handoff task metadata",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "slug",
+    "branch",
+    "base"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "handoff-task-metadata/v1"
+    },
+    "slug": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "base": {
+      "type": "string"
+    },
+    "final_head": {
+      "type": "string"
+    },
+    "final_sha": {
+      "type": "string"
+    },
+    "zip_logical_path": {
+      "type": "string"
+    },
+    "sidecar_logical_path": {
+      "type": "string"
+    },
+    "fixed_blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commit_list": {
+      "type": "array"
+    }
+  },
+  "not": {
+    "required": ["goal_status"]
+  }
+}

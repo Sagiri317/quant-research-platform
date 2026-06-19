@@ -154,6 +154,9 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
         result.warnings.append(f"utf-8 decode skipped: {name}")
         return
     result.text_entries_scanned += 1
+    if normalize_entry(name) == "diff.patch":
+        check_diff_text(result, name, text)
+        return
     for line_number, line in enumerate(text.splitlines(), start=1):
         if _skip_pattern_line(line, name):
             continue
@@ -167,6 +170,71 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
             result.warnings.append(
                 f"possible stock-code sample in {name}:{line_number}"
             )
+
+
+def check_diff_text(result: SafetyResult, name: str, text: str) -> None:
+    current_path = ""
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        path = diff_line_path(line)
+        if path:
+            current_path = path
+        if _skip_pattern_line(line, name):
+            continue
+        if SECRET_PATTERN.search(line):
+            result.errors.append(
+                f"possible secret-like assignment in {name}:{line_number}"
+            )
+        if LOCAL_PATH_PATTERN.search(line) and not is_allowed_diff_literal_context(
+            current_path,
+            line,
+        ):
+            result.errors.append(f"local absolute path in {name}:{line_number}")
+        if STOCK_SAMPLE_PATTERN.search(line):
+            result.warnings.append(
+                f"possible stock-code sample in {name}:{line_number}"
+            )
+
+
+def diff_line_path(line: str) -> str:
+    if line.startswith("diff --git "):
+        parts = line.split()
+        if len(parts) >= 4:
+            return normalize_diff_path(parts[3])
+    if line.startswith("+++ ") or line.startswith("--- "):
+        return normalize_diff_path(line[4:].strip())
+    return ""
+
+
+def normalize_diff_path(path: str) -> str:
+    path = path.strip().strip('"').replace("\\", "/")
+    if path in {"/dev/null", "dev/null"}:
+        return ""
+    if path.startswith("a/") or path.startswith("b/"):
+        return path[2:]
+    return path
+
+
+def is_allowed_diff_literal_context(path: str, line: str) -> bool:
+    normalized = path.replace("\\", "/")
+    allowed_roots = (
+        "tests/",
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/",
+        ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py",
+        "docs/architecture/open-issues-register.md",
+    )
+    if not any(normalized.startswith(root) for root in allowed_roots):
+        return False
+    return (
+        "negative" in normalized.lower()
+        or "fixture" in normalized.lower()
+        or "test" in normalized.lower()
+        or "LOCAL_PATH_PATTERN" in line
+        or "E:" + "/" in line
+        or "/" + "mnt/data" in line
+        or "/" + "home/" in line
+        or "/" + "Users/" in line
+        or "\\\\Users\\\\" in line
+    )
 
 
 def scan_zip(path: Path, allow_nested_packages: bool) -> SafetyResult:

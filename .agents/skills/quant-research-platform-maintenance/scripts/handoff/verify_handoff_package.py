@@ -15,7 +15,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from build_handoff_package import sanitize_handoff_text  # noqa: E402
 from handoff_safety import scan_handoff_zip  # noqa: E402
 
 VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
@@ -29,14 +28,24 @@ REQUIRED_ZIP_ENTRIES = {
     "task_metadata.json",
     "validation_evidence.json",
 }
-REQUIRED_RUN_TOOLS = {
-    "run_tools/README.md",
-    "run_tools/build_handoff_package.py",
-    "run_tools/verify_handoff_package.py",
-    "run_tools/handoff_safety.py",
-    "run_tools/render_pr_body_from_validation_evidence.py",
-    "run_tools/self_test.py",
-}
+FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
+    ".agents/",
+    "docs/",
+    "run_tools/",
+    "schemas/",
+    "src/",
+    "templates/",
+    "tests/",
+)
+TRACKED_HANDOFF_SOURCE_PATHS = (
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
+    ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
+    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
+    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
+)
 
 
 def main() -> int:
@@ -73,6 +82,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
         failures.extend(f"safety_{failure}" for failure in safety.failures)
 
     failures.extend(verify_sidecar_shape(sidecar, zip_path))
+    failures.extend(verify_sidecar_schema(sidecar))
     try:
         with ZipFile(zip_path) as archive:
             names = archive.namelist()
@@ -81,8 +91,17 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 failures.append("zip_paths_not_posix")
             if json_path.name in name_set:
                 failures.append("external_json_in_zip")
-            missing = sorted((REQUIRED_ZIP_ENTRIES | REQUIRED_RUN_TOOLS) - name_set)
+            missing = sorted(REQUIRED_ZIP_ENTRIES - name_set)
             failures.extend(f"missing_required_entry: {name}" for name in missing)
+            duplicate_source = sorted(
+                name
+                for name in names
+                if name.startswith(FORBIDDEN_DUPLICATE_SOURCE_ROOTS)
+            )
+            failures.extend(
+                f"duplicate_tracked_source_in_zip: {name}"
+                for name in duplicate_source
+            )
             if not any(
                 name.startswith("review_evidence/") and name.endswith(".json")
                 for name in names
@@ -91,7 +110,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             failures.extend(verify_artifact_manifest(archive, sidecar))
             failures.extend(verify_metadata_entries(archive, sidecar))
             failures.extend(verify_review_thread_closure(archive, sidecar))
-            failures.extend(verify_pr_body_statuses(archive))
+            failures.extend(verify_pr_body_statuses(archive, sidecar))
             failures.extend(verify_review_evidence_json(archive))
             failures.extend(verify_bundle_and_diff(archive, sidecar))
             failures.extend(verify_git_status(archive))
@@ -152,6 +171,27 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     return failures
 
 
+def verify_sidecar_schema(sidecar: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if sidecar.get("schema_version") != "handoff-sidecar/v1":
+        failures.append("sidecar_schema_invalid")
+    allowed = {
+        "schema_version",
+        "zip_filename",
+        "zip_logical_path",
+        "zip_sha256",
+        "artifact_manifest_sha256",
+        "branch",
+        "base",
+        "final_head",
+        "generated_at_utc",
+        "status_summary",
+    }
+    if set(sidecar) - allowed:
+        failures.append("sidecar_schema_invalid")
+    return failures
+
+
 def verify_artifact_manifest(
     archive: ZipFile,
     sidecar: dict[str, object],
@@ -204,6 +244,7 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
     if not isinstance(validation_payload, dict):
         failures.append("validation_evidence_must_be_object")
     if isinstance(task_payload, dict):
+        failures.extend(verify_task_metadata_schema(task_payload))
         failures.extend(
             metadata_consistency_failures("task_metadata", task_payload, sidecar)
         )
@@ -216,6 +257,18 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
             )
         )
         failures.extend(validation_sidecar_status_failures(validation_payload, sidecar))
+    return failures
+
+
+def verify_task_metadata_schema(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    required = {"schema_version", "slug", "branch", "base"}
+    missing = sorted(key for key in required if not payload.get(key))
+    failures.extend(f"task_metadata_schema_missing: {key}" for key in missing)
+    if payload.get("schema_version") != "handoff-task-metadata/v1":
+        failures.append("task_metadata_schema_version_mismatch")
+    if "goal_status" in payload:
+        failures.append("task_metadata_goal_status_not_allowed")
     return failures
 
 
@@ -311,6 +364,23 @@ def verify_review_thread_closure(
         return ["review_threads_json_decode_failed"]
     if not isinstance(payload, dict):
         return ["review_threads_must_be_object"]
+    status = str(payload.get("status") or "").strip().upper()
+    counts_available = payload.get("counts_available")
+    total_count = payload.get("total_count")
+    unresolved_count = payload.get("unresolved_count")
+    if status == "BLOCKED":
+        if counts_available is not False:
+            failures.append("review_threads_blocked_counts_available_not_false")
+        if total_count is not None or unresolved_count is not None:
+            failures.append("review_threads_blocked_counts_must_be_null")
+        evidence = str(payload.get("evidence") or "").lower()
+        if "counts unknown" not in evidence and "counts are unknown" not in evidence:
+            failures.append("review_threads_blocked_counts_unknown_evidence_missing")
+    elif status == "PASS":
+        if counts_available is not True:
+            failures.append("review_threads_pass_counts_available_required")
+        if not isinstance(total_count, int) or not isinstance(unresolved_count, int):
+            failures.append("review_threads_pass_counts_must_be_int")
     threads = payload.get("threads")
     if not isinstance(threads, list):
         failures.append("review_threads_table_missing")
@@ -340,12 +410,15 @@ def verify_review_thread_closure(
     return failures
 
 
-def verify_pr_body_statuses(archive: ZipFile) -> list[str]:
+def verify_pr_body_statuses(archive: ZipFile, sidecar: dict[str, object]) -> list[str]:
     failures: list[str] = []
     try:
         body = archive.read("pr_body.md").decode("utf-8")
         validation = json.loads(
             archive.read("validation_evidence.json").decode("utf-8")
+        )
+        review_threads = json.loads(
+            archive.read("review_threads.json").decode("utf-8")
         )
     except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
         return ["pr_body_validation_inputs_invalid"]
@@ -355,19 +428,48 @@ def verify_pr_body_statuses(archive: ZipFile) -> list[str]:
         expected = f"| `{name}` | `{status}` |"
         if expected not in body:
             failures.append(f"pr_body_validation_row_missing: {name}")
-    if "review_threads.json" in archive.namelist():
-        try:
-            review_threads = json.loads(
-                archive.read("review_threads.json").decode("utf-8")
-            )
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            review_threads = {}
-        if (
-            isinstance(review_threads, dict)
-            and review_threads.get("threads")
-            and "full evidence: review_threads.json" not in body
-        ):
-            failures.append("pr_body_review_threads_full_evidence_marker_missing")
+    if (
+        isinstance(review_threads, dict)
+        and review_threads.get("threads")
+        and "full evidence: review_threads.json" not in body
+    ):
+        failures.append("pr_body_review_threads_full_evidence_marker_missing")
+    if "- start head: ``" in body or "- base head: ``" in body:
+        failures.append("pr_body_base_head_missing")
+    if "- review zip: ``" in body:
+        failures.append("pr_body_review_zip_missing")
+    if "- external evidence JSON: ``" in body:
+        failures.append("pr_body_external_json_missing")
+    if "zip sidecar | `NOT_RUN`" in body:
+        failures.append("pr_body_sidecar_not_run_with_sidecar_present")
+    if contains_local_absolute_path_text(body):
+        failures.append("pr_body_local_absolute_path")
+    summary = sidecar.get("status_summary")
+    if isinstance(summary, dict):
+        expected = (
+            "| zip sidecar | `{}` | validation={}; handoff_verify={}; "
+            "handoff_safety={}; blocked_count={}; fail_count={} |"
+        ).format(
+            aggregate_status(
+                str(value)
+                for value in summary.values()
+                if str(value) in VALID_STATUSES
+            ),
+            summary.get("validation"),
+            summary.get("handoff_verify"),
+            summary.get("handoff_safety"),
+            summary.get("blocked_count"),
+            summary.get("fail_count"),
+        )
+        if expected not in body:
+            failures.append("pr_body_sidecar_summary_row_mismatch")
+    if isinstance(review_threads, dict) and review_threads.get("status") == "BLOCKED":
+        expected = (
+            "| review threads | `BLOCKED` | live GitHub access unavailable; "
+            "counts unknown |"
+        )
+        if expected not in body:
+            failures.append("pr_body_review_threads_blocked_counts_unknown_missing")
     return failures
 
 
@@ -383,6 +485,31 @@ def verify_review_evidence_json(archive: ZipFile) -> list[str]:
             continue
         if not isinstance(payload, dict):
             failures.append(f"review_evidence_must_be_object: {name}")
+            continue
+        if name.endswith("verification-matrix.json"):
+            failures.extend(verify_verification_matrix(payload))
+    if "review_evidence/verification-matrix.json" not in archive.namelist():
+        failures.append("verification_matrix_missing")
+    return failures
+
+
+def verify_verification_matrix(payload: dict[str, object]) -> list[str]:
+    rows = payload.get("checks")
+    if not isinstance(rows, list):
+        return ["verification_matrix_checks_missing"]
+    by_name = {
+        row.get("name"): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    failures: list[str] = []
+    for name in ("raw_diff_exactness", "git_apply_check"):
+        row = by_name.get(name)
+        if row is None:
+            failures.append(f"verification_matrix_required_missing: {name}")
+            continue
+        if row.get("required") is not True or row.get("deterministic") is not True:
+            failures.append(f"verification_matrix_required_flag_invalid: {name}")
     return failures
 
 
@@ -410,6 +537,7 @@ def verify_bundle_and_diff(
         )
         if clone.returncode != 0:
             return ["bundle_clone_failed"]
+        failures.extend(verify_tracked_handoff_sources(clone_dir))
         head = git_text(clone_dir, "rev-parse", "HEAD").strip()
         if head != final_head:
             failures.append("bundle_clone_head_mismatch")
@@ -418,8 +546,64 @@ def verify_bundle_and_diff(
             failures.append("base_required_for_diff")
             return failures
         diff = git_text(clone_dir, "diff", "--binary", f"{base_commit}..{final_head}")
-        if sanitize_handoff_text(diff).encode("utf-8") != archive.read("diff.patch"):
+        diff_patch = archive.read("diff.patch")
+        if normalize_lf(diff).encode("utf-8") != diff_patch:
             failures.append("diff_patch_mismatch")
+        patch_path = Path(temp) / "diff.patch"
+        patch_path.write_bytes(diff_patch)
+        checkout = subprocess.run(
+            ["git", "checkout", "--detach", str(base_commit)],
+            cwd=clone_dir,
+            capture_output=True,
+            text=True,
+        )
+        if checkout.returncode != 0:
+            failures.append("diff_patch_apply_base_checkout_failed")
+        else:
+            apply_check = subprocess.run(
+                ["git", "apply", "--check", str(patch_path)],
+                cwd=clone_dir,
+                capture_output=True,
+                text=True,
+            )
+            if apply_check.returncode != 0:
+                failures.append("diff_patch_apply_check_failed")
+    return failures
+
+
+def verify_tracked_handoff_sources(repo: Path) -> list[str]:
+    failures: list[str] = []
+    for relative in TRACKED_HANDOFF_SOURCE_PATHS:
+        path = repo / relative
+        if not path.is_file():
+            failures.append(f"tracked_handoff_source_missing: {relative}")
+    schema_expectations = {
+        (
+            ".agents/skills/quant-research-platform-maintenance/schemas/"
+            "handoff/task_metadata.schema.json"
+        ): "handoff-task-metadata/v1",
+        (
+            ".agents/skills/quant-research-platform-maintenance/schemas/"
+            "handoff/sidecar.schema.json"
+        ): "handoff-sidecar/v1",
+    }
+    for relative, schema_version in schema_expectations.items():
+        path = repo / relative
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            failures.append(f"tracked_schema_json_invalid: {relative}")
+            continue
+        properties = payload.get("properties")
+        version = (
+            properties.get("schema_version")
+            if isinstance(properties, dict)
+            else {}
+        )
+        if not isinstance(version, dict) or version.get("const") != schema_version:
+            failures.append(f"tracked_schema_version_invalid: {relative}")
     return failures
 
 
@@ -440,6 +624,24 @@ def git_text(repo: Path, *args: str) -> str:
         text=True,
         encoding="utf-8",
     ).stdout
+
+
+def normalize_lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def contains_local_absolute_path_text(text: str) -> bool:
+    markers = (
+        "E:" + "/",
+        "D:" + "/",
+        "C:" + "/",
+        "/" + "mnt/data",
+        "/" + "home/",
+        "/" + "Users/",
+        "\\Users\\",
+        "\\\\Users\\\\",
+    )
+    return any(marker in text for marker in markers)
 
 
 def sha256_file(path: Path) -> str:

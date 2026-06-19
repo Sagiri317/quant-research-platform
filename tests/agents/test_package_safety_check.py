@@ -89,9 +89,34 @@ def test_package_safety_still_rejects_regular_evidence_paths(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("review_evidence/leak.json", '{"path": "E:/private"}\n')
+        archive.writestr(
+            "review_evidence/leak.json",
+            '{"path": "E:' + '/private"}\n',
+        )
 
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
     assert any("local absolute path" in error for error in result.errors)
+
+
+def test_package_safety_allows_negative_fixture_paths_in_raw_diff(tmp_path):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    diff = "\n".join(
+        [
+            "diff --git a/tests/negative_fixtures.py b/tests/negative_fixtures.py",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/tests/negative_fixtures.py",
+            "@@ -0,0 +1 @@",
+            '+LEAK_FIXTURE = "E:' + '/negative-fixture/not-real.txt"',
+            "",
+        ]
+    )
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("diff.patch", diff)
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert result.ok

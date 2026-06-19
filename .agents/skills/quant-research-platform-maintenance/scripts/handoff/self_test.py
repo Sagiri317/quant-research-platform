@@ -12,6 +12,8 @@ from pathlib import Path
 from zipfile import ZipFile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_PARENT = SCRIPT_DIR.parent
+SKILL_ROOT = SCRIPT_PARENT.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -40,6 +42,44 @@ def main() -> int:
     ]
     if missing:
         return fail("missing=" + ",".join(missing))
+    schema_template_missing = [
+        label
+        for label, path in {
+            "task_metadata_template": support_path(
+                "templates/task_metadata.template.json",
+                "templates/handoff/task_metadata.template.json",
+            ),
+            "task_metadata_schema": support_path(
+                "schemas/task_metadata.schema.json",
+                "schemas/handoff/task_metadata.schema.json",
+            ),
+            "sidecar_schema": support_path(
+                "schemas/sidecar.schema.json",
+                "schemas/handoff/sidecar.schema.json",
+            ),
+        }.items()
+        if path is None
+    ]
+    if schema_template_missing:
+        return fail("missing_schema_template=" + ",".join(schema_template_missing))
+    task_template = json.loads(
+        support_path(
+            "templates/task_metadata.template.json",
+            "templates/handoff/task_metadata.template.json",
+        ).read_text(encoding="utf-8")
+    )
+    if task_template.get("schema_version") != "handoff-task-metadata/v1":
+        return fail("task_metadata_template_schema_version_invalid")
+    if "goal_status" in task_template:
+        return fail("task_metadata_template_goal_status_forbidden")
+    sidecar_schema = json.loads(
+        support_path(
+            "schemas/sidecar.schema.json",
+            "schemas/handoff/sidecar.schema.json",
+        ).read_text(encoding="utf-8")
+    )
+    if "status_summary" not in sidecar_schema.get("required", []):
+        return fail("sidecar_schema_status_summary_not_required")
     forbidden_tools = (
         "factor_chunk_diagnostic.py",
         "n2_artifact_validation.py",
@@ -157,6 +197,14 @@ def fail(message: str) -> int:
     print("self_test_status=FAIL")
     print(message)
     return 1
+
+
+def support_path(run_tools_relative: str, source_relative: str) -> Path | None:
+    candidates = (
+        SCRIPT_DIR / run_tools_relative,
+        SKILL_ROOT / source_relative,
+    )
+    return next((path for path in candidates if path.exists()), None)
 
 
 def _zip_and_sidecar_with_leak() -> tuple[Path, Path]:

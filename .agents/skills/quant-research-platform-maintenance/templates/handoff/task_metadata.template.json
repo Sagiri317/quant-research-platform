@@ -1,0 +1,27 @@
+{
+  "schema_version": "handoff-task-metadata/v1",
+  "slug": "<handoff-slug>",
+  "branch": "<branch-name>",
+  "base": "<base-commit-sha>",
+  "final_head": "<final-head-sha>",
+  "final_sha": "<final-head-sha>",
+  "zip_logical_path": ".run/reviews/<handoff-slug>.zip",
+  "sidecar_logical_path": ".run/reviews/<handoff-slug>.json",
+  "scope_summary": "<public-safe handoff scope>",
+  "fixed_blockers": [],
+  "commit_list": [],
+  "validation_evidence": {
+    "schema_version": "handoff-validation-evidence/v1",
+    "checks": []
+  },
+  "review_threads": {
+    "schema_version": "handoff-review-threads/v1",
+    "status": "BLOCKED",
+    "counts_available": false,
+    "total_count": null,
+    "unresolved_count": null,
+    "threads": [],
+    "evidence": "Live GitHub review-thread access was unavailable; counts are unknown. No PASS is claimed for live thread state."
+  },
+  "review_evidence": {}
+}

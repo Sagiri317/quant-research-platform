@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -26,6 +28,122 @@ def _load_handoff_module(name: str):
     return module
 
 
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout
+
+
+def _init_handoff_repo(repo: Path) -> tuple[str, str]:
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "handoff-test@example.invalid")
+    _git(repo, "config", "user.name", "Handoff Test")
+    _git(repo, "checkout", "-b", "feature/qrp-clean-rewrite")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    fixture = repo / "tests" / "negative_fixtures.py"
+    fixture.parent.mkdir()
+    fixture.write_text(
+        'LEAK_FIXTURE = "E:' + '/negative-fixture/not-real.txt"\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add negative fixture")
+    final_head = _git(repo, "rev-parse", "HEAD").strip()
+    return base, final_head
+
+
+def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
+    builder = _load_handoff_module("build_handoff_package")
+    repo = tmp_path / "repo"
+    base, final_head = _init_handoff_repo(repo)
+    out_dir = tmp_path / "out"
+    task = {
+        "slug": "handoff-test",
+        "branch": "feature/qrp-clean-rewrite",
+        "base": base,
+        "final_head": final_head,
+        "final_sha": final_head,
+        "validation_evidence": {
+            "schema_version": "handoff-validation-evidence/v1",
+            "checks": [
+                {
+                    "name": "github_review_threads",
+                    "status": "BLOCKED",
+                    "evidence": "blocked",
+                }
+            ],
+        },
+        "review_threads": {
+            "schema_version": "handoff-review-threads/v1",
+            "status": "BLOCKED",
+            "counts_available": False,
+            "total_count": None,
+            "unresolved_count": None,
+            "threads": [],
+            "evidence": (
+                "Live GitHub review-thread access was unavailable; "
+                "counts are unknown."
+            ),
+        },
+    }
+    result = builder.build_handoff_package(
+        repo_root=repo,
+        out_dir=out_dir,
+        task=task,
+        verify=False,
+    )
+    assert result["zip_path"]
+    return repo, Path(result["zip_path"]), Path(result["json_path"]), base, final_head
+
+
+def _rewrite_package_member(package: Path, member: str, data: bytes) -> None:
+    temp = package.with_suffix(".rewrite.zip")
+    with zipfile.ZipFile(package, "r") as src, zipfile.ZipFile(temp, "w") as dst:
+        for info in src.infolist():
+            payload = data if info.filename == member else src.read(info.filename)
+            dst.writestr(info, payload)
+    temp.replace(package)
+
+
+def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
+    with zipfile.ZipFile(package, "r") as archive:
+        names = sorted(
+            name
+            for name in archive.namelist()
+            if name != "artifact_manifest.json"
+        )
+        entries = [
+            {
+                "path": name,
+                "size": len(archive.read(name)),
+                "sha256": hashlib.sha256(archive.read(name)).hexdigest(),
+            }
+            for name in names
+        ]
+    manifest = {
+        "schema_version": "handoff-artifact-manifest/v1",
+        "entries": entries,
+    }
+    manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+    _rewrite_package_member(package, "artifact_manifest.json", manifest_bytes)
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    payload["zip_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
+    payload["artifact_manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+    sidecar.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_tracked_handoff_tool_source_of_truth_exists() -> None:
     required = {
         "README.md",
@@ -40,6 +158,88 @@ def test_tracked_handoff_tool_source_of_truth_exists() -> None:
     )
 
     assert missing == []
+
+
+def test_builder_writes_raw_binary_diff_without_sanitizing(tmp_path: Path) -> None:
+    repo, package, _sidecar, base, final_head = _build_test_package(tmp_path)
+    raw_diff = _git(repo, "diff", "--binary", f"{base}..{final_head}").encode()
+
+    with zipfile.ZipFile(package) as archive:
+        packaged_diff = archive.read("diff.patch")
+        manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
+
+    diff_entry = next(
+        item for item in manifest["entries"] if item["path"] == "diff.patch"
+    )
+    assert packaged_diff == raw_diff
+    assert diff_entry["sha256"] == hashlib.sha256(raw_diff).hexdigest()
+
+
+def test_builder_does_not_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None:
+    _repo, package, _sidecar, _base, _final_head = _build_test_package(tmp_path)
+
+    with zipfile.ZipFile(package) as archive:
+        names = archive.namelist()
+
+    assert not any(name.startswith("run_tools/") for name in names)
+
+
+def test_verifier_rejects_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with zipfile.ZipFile(package, "a") as archive:
+        archive.writestr("run_tools/self_test.py", "# duplicate tracked source\n")
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "duplicate_tracked_source_in_zip: run_tools/self_test.py" in failures
+
+
+def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with zipfile.ZipFile(package, "a") as archive:
+        archive.writestr("src/copied.py", "# tracked source copy\n")
+        archive.writestr(".agents/copied.py", "# tracked agent source copy\n")
+        archive.writestr("docs/copied.md", "tracked doc copy\n")
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "duplicate_tracked_source_in_zip: .agents/copied.py" in failures
+    assert "duplicate_tracked_source_in_zip: docs/copied.md" in failures
+    assert "duplicate_tracked_source_in_zip: src/copied.py" in failures
+
+
+def test_verifier_rejects_sanitized_diff_even_when_hashes_are_refreshed(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with zipfile.ZipFile(package) as archive:
+        sanitized_diff = archive.read("diff.patch").replace(
+            b"E:" + b"/negative-fixture/not-real.txt",
+            b"<LOCAL_ABSOLUTE_PATH>",
+        )
+    _rewrite_package_member(package, "diff.patch", sanitized_diff)
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "diff_patch_mismatch" in failures
+
+
+def test_verifier_rejects_non_applicable_diff_patch(tmp_path: Path) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    _rewrite_package_member(package, "diff.patch", b"not a patch\n")
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "diff_patch_mismatch" in failures
+    assert "diff_patch_apply_check_failed" in failures
 
 
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
