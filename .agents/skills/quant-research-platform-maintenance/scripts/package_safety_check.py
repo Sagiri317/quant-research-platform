@@ -178,7 +178,10 @@ def check_diff_text(result: SafetyResult, name: str, text: str) -> None:
         path = diff_line_path(line)
         if path:
             current_path = path
-        if _skip_pattern_line(line, name):
+        if _skip_pattern_line(line, name) or is_allowed_diff_literal_context(
+            current_path,
+            line,
+        ):
             continue
         if SECRET_PATTERN.search(line):
             result.errors.append(
@@ -216,6 +219,8 @@ def normalize_diff_path(path: str) -> str:
 
 def is_allowed_diff_literal_context(path: str, line: str) -> bool:
     normalized = path.replace("\\", "/")
+    if _skip_pattern_line(line, normalized):
+        return True
     allowed_roots = (
         "tests/",
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/",

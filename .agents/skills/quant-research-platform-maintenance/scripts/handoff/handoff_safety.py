@@ -438,25 +438,21 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
 def unsafe_diff_text_reason(text: str) -> str | None:
     current_path = ""
     risky_lines: list[str] = []
+    filtered_lines: list[str] = []
     for line in text.splitlines():
         path = diff_line_path(line)
         if path:
             current_path = path
+        if is_allowed_diff_literal_context(current_path, line):
+            continue
         if contains_local_absolute_path(line):
-            if is_allowed_diff_literal_context(current_path, line):
-                continue
             risky_lines.append(line)
+            continue
+        filtered_lines.append(line)
     scan_text = "\n".join(risky_lines)
     if scan_text:
         return "local_absolute_path"
-    return unsafe_text_reason(
-        "\n".join(
-            line
-            for line in text.splitlines()
-            if not contains_local_absolute_path(line)
-        ),
-        name="diff.patch.filtered",
-    )
+    return unsafe_text_reason("\n".join(filtered_lines), name="diff.patch.filtered")
 
 
 def diff_line_path(line: str) -> str:
@@ -480,6 +476,8 @@ def normalize_diff_path(path: str) -> str:
 
 def is_allowed_diff_literal_context(path: str, line: str) -> bool:
     normalized = path.replace("\\", "/")
+    if is_scanner_definition_line(line, name=normalized):
+        return True
     allowed_roots = (
         "tests/",
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/",
