@@ -10,13 +10,13 @@ from typing import Any
 
 import pandas as pd
 
+from quant_research_platform.catalog.portfolios import PortfolioCatalog
+from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.profiles import ResearchProfile
 from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.implementations.a_share.research_scenarios import (
-    build_a_share_portfolio_catalog,
-    build_a_share_prediction_catalog,
-)
 from quant_research_platform.reports.verification_evidence import (
     VerificationEvidenceLayout,
     build_validation_summary,
@@ -152,12 +152,14 @@ def _run_verification_evidence_with_policy(
         effective_windows["evaluation_end_date"],
     )
     catalogs = config.profile
-    prediction_catalog = build_a_share_prediction_catalog(
+    prediction_catalog = _explicit_prediction_catalog(
+        catalogs,
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
         test_end=effective_windows["prediction_test_end"],
     )
-    portfolio_catalog = build_a_share_portfolio_catalog(
+    portfolio_catalog = _explicit_portfolio_catalog(
+        catalogs,
         frequency=config.portfolio_frequency,
         execution_lag_steps=config.portfolio_execution_lag_steps,
     )
@@ -404,6 +406,54 @@ def _resolve_effective_windows(
         "prediction_test_start": prediction_test_start,
         "prediction_test_end": prediction_test_end,
     }
+
+
+def _explicit_prediction_catalog(
+    profile: ResearchProfile,
+    *,
+    train_end: str,
+    test_start: str,
+    test_end: str | None,
+) -> PredictionCatalog:
+    catalog = PredictionCatalog()
+    for model in profile.models.list():
+        catalog.register(
+            PredictionSpec(
+                prediction_id=(
+                    f"a_share_{model.model_algorithm}_mom_20d_prediction_"
+                    f"{test_start[:4]}"
+                ),
+                model_id=model.model_id,
+                research_dataset_id="a_share_price_volume_forward_returns",
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+            )
+        )
+    return catalog
+
+
+def _explicit_portfolio_catalog(
+    profile: ResearchProfile,
+    *,
+    frequency: str,
+    execution_lag_steps: int,
+) -> PortfolioCatalog:
+    evaluation = profile.evaluations.get("a_share_signal_forward_return_20d")
+    catalog = PortfolioCatalog()
+    catalog.register(
+        PortfolioSpec(
+            portfolio_id="a_share_signal_forward_return_20d_portfolio",
+            market_id=evaluation.market_id,
+            research_dataset_id=evaluation.research_dataset_id,
+            signals=evaluation.signals,
+            return_source_column=evaluation.label_columns[0],
+            frequency=frequency,
+            execution_lag_steps=execution_lag_steps,
+        )
+    )
+    return catalog
+
 
 def _runtime_execution_plan_payload() -> dict[str, object]:
     return {

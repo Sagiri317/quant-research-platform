@@ -61,6 +61,7 @@ from quant_research_platform.sources.csmar.interim import (
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout
 
+
 @dataclass(frozen=True)
 class ResearchProfile:
     fields: FieldCatalog

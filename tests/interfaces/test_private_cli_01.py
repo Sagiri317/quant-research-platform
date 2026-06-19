@@ -250,6 +250,14 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
             "2014-01-01",
             "--end-date",
             "2016-12-31",
+            "--prediction-train-end",
+            "2014-06-30",
+            "--prediction-test-start",
+            "2014-07-01",
+            "--portfolio-frequency",
+            "1d",
+            "--portfolio-execution-lag-steps",
+            "1",
         ],
     )
 
@@ -257,6 +265,10 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
     assert calls[0].output_root == Path("verification-output/s1")
     assert calls[0].start_date == "2014-01-01"
     assert calls[0].end_date == "2016-12-31"
+    assert calls[0].prediction_train_end == "2014-06-30"
+    assert calls[0].prediction_test_start == "2014-07-01"
+    assert calls[0].portfolio_frequency == "1d"
+    assert calls[0].portfolio_execution_lag_steps == 1
     assert calls[0].profile.fields.list_names()
     assert calls[0].run_id is None
     assert "PASS" in result.output
@@ -306,6 +318,10 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
             "2018-01-01",
             "--prediction-test-end",
             "2019-12-31",
+            "--portfolio-frequency",
+            "1d",
+            "--portfolio-execution-lag-steps",
+            "1",
         ],
     )
 
@@ -315,6 +331,8 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
     assert calls[0].prediction_train_end == "2017-12-31"
     assert calls[0].prediction_test_start == "2018-01-01"
     assert calls[0].prediction_test_end == "2019-12-31"
+    assert calls[0].portfolio_frequency == "1d"
+    assert calls[0].portfolio_execution_lag_steps == 1
 
 
 def test_qrp_verification_evidence_run_rejects_missing_required_options() -> None:
@@ -333,6 +351,8 @@ def test_qrp_verification_evidence_run_rejects_missing_required_options() -> Non
     assert "--prediction-train-end" in help_result.output
     assert "--prediction-test-start" in help_result.output
     assert "--prediction-test-end" in help_result.output
+    assert "--portfolio-frequency" in help_result.output
+    assert "Portfolio signal execution" in help_result.output
 
 
 def _write_inventory_fixture(project_root: Path) -> None:
