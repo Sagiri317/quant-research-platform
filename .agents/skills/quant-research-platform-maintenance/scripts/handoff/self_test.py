@@ -88,6 +88,20 @@ def main() -> int:
     unsafe_status = " M C:" + "/" + "Users/DELL/private/file.txt\n"
     if "C:" + "/" + "Users" in sanitize_handoff_text(unsafe_status):
         return fail("git_status_sanitizer_fixture_failed")
+    scanner_fixture = (
+        "\\\\Users\\\\ site-packages conda env path vendor_marker "
+        "Traceback (most recent call last): runtime_payload"
+    )
+    sanitized_scanner_fixture = sanitize_handoff_text(scanner_fixture)
+    if (
+        "\\\\Users\\\\" in sanitized_scanner_fixture
+        or "site-packages" in sanitized_scanner_fixture
+        or "conda env path" in sanitized_scanner_fixture
+        or "vendor_marker" in sanitized_scanner_fixture
+        or "Traceback (most recent call last):" in sanitized_scanner_fixture
+        or "runtime_payload" in sanitized_scanner_fixture
+    ):
+        return fail("scanner_pattern_sanitizer_fixture_failed")
     package, sidecar = _zip_and_sidecar_with_leak()
     sidecar_safety = scan_handoff_zip(package, json_path=sidecar)
     if sidecar_safety.ok:

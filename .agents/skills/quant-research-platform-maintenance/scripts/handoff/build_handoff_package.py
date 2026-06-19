@@ -524,6 +524,25 @@ def sanitize_handoff_text(text: str) -> str:
         result,
     )
     result = re.sub(r"(?i)quant-workspace", "<LOCAL_WORKSPACE>", result)
+    result = re.sub(r"(?i)site-packages", "<ENV_PATH_TEXT>", result)
+    result = re.sub(r"(?i)conda env path", "<ENV_PATH_TEXT>", result)
+    result = re.sub(r"\\\\Users\\\\", "WINDOWS_USER_PATH_MARKER", result)
+    result = re.sub(
+        r"(?i)\b(?:vendor_marker|vendor_payload|raw_vendor|provider_marker)\b",
+        "<VENDOR_MARKER_TEXT>",
+        result,
+    )
+    result = re.sub(
+        r"Traceback \(most recent call last\):",
+        "<TRACEBACK_MARKER_TEXT>",
+        result,
+    )
+    result = re.sub(
+        r"(?i)\b(?:runtime_payload|private_runtime_payload|"
+        r"exact_private_runtime_payload)\b",
+        "<PRIVATE_RUNTIME_PAYLOAD_TEXT>",
+        result,
+    )
     result = re.sub(
         r'"\\\\Users\\\\[^"\n]+',
         '"<LOCAL_ABSOLUTE_PATH>',
