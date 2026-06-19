@@ -234,6 +234,7 @@ def is_allowed_diff_literal_context(path: str, line: str) -> bool:
         or "/" + "mnt/data" in line
         or "/" + "home/" in line
         or "/" + "Users/" in line
+        or "\\Users\\" in line
         or "\\\\Users\\\\" in line
         or "quant-workspace" in line
         or "site-packages" in line
