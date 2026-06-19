@@ -509,7 +509,7 @@ def normalize_lf(text: str) -> str:
 def sanitize_handoff_text(text: str) -> str:
     result = normalize_lf(text)
     result = re.sub(
-        r"(?<![A-Za-z])[A-Za-z]:[\\/][^\s`'\"),\]}]+",
+        r"(?<![A-Za-z])[A-Za-z]:[\\/][^\s`'\"),\]}]*",
         "<LOCAL_ABSOLUTE_PATH>",
         result,
     )
@@ -523,7 +523,7 @@ def sanitize_handoff_text(text: str) -> str:
         "<LOCAL_ABSOLUTE_PATH>",
         result,
     )
-    result = re.sub(r"(?i)\bquant-workspace\b", "<LOCAL_WORKSPACE>", result)
+    result = re.sub(r"(?i)quant-workspace", "<LOCAL_WORKSPACE>", result)
     result = re.sub(
         r'"\\\\Users\\\\[^"\n]+',
         '"<LOCAL_ABSOLUTE_PATH>',
