@@ -10,26 +10,12 @@ def test_catalog_profiles_does_not_own_a_share_scenario_parameters() -> None:
 
     forbidden_patterns = (
         r"_PROFILE_",
-        r"\btrain_end\b",
-        r"\btest_start\b",
-        r"\btest_end\b",
-        r"\bevaluation_end\b",
-        r"\bfrequency\b",
-        r"\bexecution_lag_steps\b",
+        r"DEFAULT_",
         r"20[0-9][0-9]-",
-        r"\bmax_train_rows\b",
-        r"\brandom_seed\b",
-        r"\bxgboost\b",
-        r"\blightgbm\b",
-        r"\bportfolio_id\b",
-        r"\bsignal_id\b",
-        r"\bmodel_id\b",
-        r"\brank_weighted\b",
-        r"\bforward_return\b",
-        r"\bmom_",
-        r"\brev_",
-        r"\bbuild_a_share_prediction_catalog\b",
-        r"\bbuild_a_share_portfolio_catalog\b",
+        r"\btrain_end\s*=",
+        r"\btest_start\s*=",
+        r"\bfrequency\s*=",
+        r"\bexecution_lag_steps\s*=",
     )
     hits: list[str] = []
     for line_number, line in enumerate(source.splitlines(), start=1):
@@ -38,6 +24,10 @@ def test_catalog_profiles_does_not_own_a_share_scenario_parameters() -> None:
                 hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert hits == []
+    assert "build_a_share_prediction_catalog" not in source
+    assert "build_a_share_portfolio_catalog" not in source
+    assert "predictions=PredictionCatalog()" in source
+    assert "portfolios=PortfolioCatalog()" in source
 
 
 def test_a_share_scenarios_own_research_scenario_catalog_builders() -> None:

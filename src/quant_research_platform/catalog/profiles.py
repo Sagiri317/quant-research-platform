@@ -29,9 +29,6 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_profiles as a_share_research_profiles,
 )
-from quant_research_platform.markets.implementations.a_share import (
-    research_scenarios as a_share_research_scenarios,
-)
 from quant_research_platform.markets.implementations.a_share.definition import (
     a_share_market_definition,
 )
@@ -49,6 +46,10 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as a_share_processed_materializer,
+)
+from quant_research_platform.markets.implementations.a_share.research_scenarios import (
+    build_a_share_evaluation_catalog,
+    build_a_share_model_catalog,
 )
 from quant_research_platform.reports.catalog import report_catalog
 from quant_research_platform.sources.csmar.catalog import csmar_source_definition
@@ -100,8 +101,8 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         research_datasets=(
             a_share_research_profiles.build_a_share_research_dataset_catalog()
         ),
-        evaluations=a_share_research_scenarios.build_a_share_evaluation_catalog(),
-        models=a_share_research_scenarios.build_a_share_model_catalog(),
+        evaluations=build_a_share_evaluation_catalog(),
+        models=build_a_share_model_catalog(),
         predictions=PredictionCatalog(),
         portfolios=PortfolioCatalog(),
         sources=_a_share_csmar_source_registry(),

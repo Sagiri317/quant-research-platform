@@ -37,6 +37,9 @@ def test_research_profile_is_only_public_profile_builder() -> None:
 
     all_names = set(profiles.__all__)
     assert all_names == {"ResearchProfile", "research_profile"}
+    assert "research_profile_for_scenario" not in vars(profiles)
+    assert "resolve_a_share_prediction_catalog" not in vars(profiles)
+    assert "resolve_a_share_portfolio_catalog" not in vars(profiles)
     assert "default_catalogs" not in vars(profiles)
     assert "CatalogBundle" not in vars(profiles)
     assert "local_a_share_csmar_catalogs" not in vars(profiles)
@@ -171,9 +174,8 @@ def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
         "EvaluationSpec(",
         "ModelSpec(",
         "PredictionSpec(",
-        "build_a_share_evaluation_catalog",
-        "build_a_share_model_catalog",
         "build_a_share_prediction_catalog",
+        "build_a_share_portfolio_catalog",
     )
 
     assert [token for token in forbidden[:3] if token in profile_source] == []

@@ -20,7 +20,7 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
-    research_scenarios,
+    research_scenarios as a_share_research_scenarios,
 )
 from quant_research_platform.reports.verification_evidence import (
     VerificationEvidenceLayout,
@@ -57,7 +57,7 @@ def _verification_config(**overrides: object) -> VerificationEvidenceRunConfig:
 
 
 def _smoke_prediction_specs():
-    return research_scenarios.build_a_share_prediction_catalog(
+    return a_share_research_scenarios.build_a_share_prediction_catalog(
         train_end=SMOKE_PREDICTION_TRAIN_END,
         test_start=SMOKE_PREDICTION_TEST_START,
     ).list()
