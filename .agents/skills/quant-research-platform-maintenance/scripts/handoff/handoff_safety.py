@@ -550,6 +550,7 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
         return True
     if scanner_source and (
         "vendor_marker" in line
+        or "raw_vendor" in line
         or "raw_traceback" in line
         or "private_runtime_payload" in line
         or "Traceback (most recent call last):" in line
