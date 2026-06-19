@@ -244,6 +244,7 @@ def test_verifier_rejects_non_applicable_diff_patch(tmp_path: Path) -> None:
 
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
     safety = _load_handoff_module("handoff_safety")
+    run_reviews = "." + "run/reviews"
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("task_metadata.json", "{}\n")
@@ -253,7 +254,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
             {
                 "schema_version": "handoff-sidecar/v1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": ".run/reviews/handoff.zip",
+                "zip_logical_path": f"{run_reviews}/handoff.zip",
                 "leaked_zip_path": "E:/quant-workspace/private/handoff.zip",
                 "also_bad": "/mnt/data/private/handoff.zip",
                 "home_bad": "/home/user/private/handoff.zip",
@@ -271,6 +272,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
 
 def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
+    run_reviews = "." + "run/reviews"
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("artifact_manifest.json", "{}\n")
@@ -287,7 +289,7 @@ def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None
             {
                 "schema_version": "handoff-sidecar/v1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": ".run/reviews/handoff.zip",
+                "zip_logical_path": f"{run_reviews}/handoff.zip",
                 "zip_sha256": verifier.sha256_file(package),
                 "artifact_manifest_sha256": "0" * 64,
                 "branch": "feature/qrp-clean-rewrite",

@@ -19,6 +19,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from build_handoff_package import sanitize_handoff_text  # noqa: E402
 from handoff_safety import scan_handoff_zip, unsafe_text_reason  # noqa: E402
+from verify_handoff_package import verify_review_thread_closure  # noqa: E402
 
 
 def main() -> int:
@@ -153,6 +154,8 @@ def main() -> int:
     sidecar_safety = scan_handoff_zip(package, json_path=sidecar)
     if sidecar_safety.ok:
         return fail("sidecar_text_content_not_scanned")
+    if not _blocked_review_thread_zero_counts_rejected():
+        return fail("blocked_review_thread_zero_counts_not_rejected")
     bundle_zip = _bundle_zip_with_text(
         "leak.txt",
         "path=" + "C:" + "/" + "Users/DELL/private.txt\n",
@@ -226,6 +229,25 @@ def _zip_and_sidecar_with_leak() -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return package, sidecar
+
+
+def _blocked_review_thread_zero_counts_rejected() -> bool:
+    temp = Path(tempfile.mkdtemp(prefix="handoff-review-threads-self-test-"))
+    package = temp / "handoff.zip"
+    payload = {
+        "schema_version": "handoff-review-threads/v1",
+        "status": "BLOCKED",
+        "counts_available": False,
+        "total_count": 0,
+        "unresolved_count": 0,
+        "threads": [],
+        "evidence": "Live GitHub access unavailable; counts unknown.",
+    }
+    with ZipFile(package, "w") as archive:
+        archive.writestr("review_threads.json", json.dumps(payload) + "\n")
+    with ZipFile(package) as archive:
+        failures = verify_review_thread_closure(archive, {})
+    return "review_threads_blocked_counts_must_be_null" in failures
 
 
 def _bundle_zip_with_text(relative: str, text: str) -> Path:

@@ -538,6 +538,9 @@ def verify_bundle_and_diff(
         if clone.returncode != 0:
             return ["bundle_clone_failed"]
         failures.extend(verify_tracked_handoff_sources(clone_dir))
+        failures.extend(
+            verify_payloads_against_tracked_schemas(clone_dir, archive, sidecar)
+        )
         head = git_text(clone_dir, "rev-parse", "HEAD").strip()
         if head != final_head:
             failures.append("bundle_clone_head_mismatch")
@@ -604,6 +607,73 @@ def verify_tracked_handoff_sources(repo: Path) -> list[str]:
         )
         if not isinstance(version, dict) or version.get("const") != schema_version:
             failures.append(f"tracked_schema_version_invalid: {relative}")
+    return failures
+
+
+def verify_payloads_against_tracked_schemas(
+    repo: Path,
+    archive: ZipFile,
+    sidecar: dict[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    try:
+        task_payload = json.loads(archive.read("task_metadata.json").decode("utf-8"))
+    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+        failures.append("task_metadata_schema_from_bundle_input_invalid")
+        task_payload = {}
+    schema_checks = (
+        (
+            ".agents/skills/quant-research-platform-maintenance/schemas/"
+            "handoff/sidecar.schema.json",
+            sidecar,
+            "sidecar_schema_from_bundle",
+        ),
+        (
+            ".agents/skills/quant-research-platform-maintenance/schemas/"
+            "handoff/task_metadata.schema.json",
+            task_payload,
+            "task_metadata_schema_from_bundle",
+        ),
+    )
+    for relative, payload, label in schema_checks:
+        schema_path = repo / relative
+        try:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            failures.append(f"{label}_source_invalid")
+            continue
+        failures.extend(validate_payload_with_tracked_schema(payload, schema, label))
+    return failures
+
+
+def validate_payload_with_tracked_schema(
+    payload: dict[str, object],
+    schema: dict[str, object],
+    label: str,
+) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(payload, dict):
+        return [f"{label}_payload_not_object"]
+    required = schema.get("required")
+    if isinstance(required, list):
+        for key in required:
+            if isinstance(key, str) and key not in payload:
+                failures.append(f"{label}_required_missing: {key}")
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for key, raw_rule in properties.items():
+            if key not in payload or not isinstance(raw_rule, dict):
+                continue
+            if "const" in raw_rule and payload[key] != raw_rule["const"]:
+                failures.append(f"{label}_const_mismatch: {key}")
+            enum = raw_rule.get("enum")
+            if isinstance(enum, list) and payload[key] not in enum:
+                failures.append(f"{label}_enum_mismatch: {key}")
+    not_rule = schema.get("not")
+    if isinstance(not_rule, dict):
+        forbidden = not_rule.get("required")
+        if isinstance(forbidden, list) and all(key in payload for key in forbidden):
+            failures.append(f"{label}_forbidden_required_present")
     return failures
 
 

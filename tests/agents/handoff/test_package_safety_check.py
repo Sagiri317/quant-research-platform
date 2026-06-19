@@ -71,12 +71,12 @@ def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
     assert any("local absolute path" in error for error in result.errors)
 
 
-def test_package_safety_allows_run_tool_scanner_pattern_definitions(tmp_path):
+def test_package_safety_allows_scanner_pattern_definitions(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(
-            "run_tools/handoff_safety.py",
+            "package_safety_check.py",
             'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',
         )
 

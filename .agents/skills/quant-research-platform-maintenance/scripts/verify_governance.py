@@ -207,8 +207,8 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
 
 def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
     allowed_fixture_paths = {
-        "tests/agents/test_handoff_tools.py",
-        "tests/agents/test_package_safety_check.py",
+        "tests/agents/handoff/test_handoff_tools.py",
+        "tests/agents/handoff/test_package_safety_check.py",
     }
     if rel in allowed_fixture_paths and any(
         marker in line
