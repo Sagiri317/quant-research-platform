@@ -69,3 +69,29 @@ def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
 
     assert not result.ok
     assert any("local absolute path" in error for error in result.errors)
+
+
+def test_package_safety_allows_run_tool_scanner_pattern_definitions(tmp_path):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "run_tools/handoff_safety.py",
+            'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',
+        )
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert result.ok
+
+
+def test_package_safety_still_rejects_regular_evidence_paths(tmp_path):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("review_evidence/leak.json", '{"path": "E:/private"}\n')
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("local absolute path" in error for error in result.errors)

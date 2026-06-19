@@ -100,16 +100,44 @@ def check_entry_path(
             result.errors.append(f"blocked private/sensitive path: {norm}")
 
 
-def _skip_pattern_line(line: str) -> bool:
+def _is_scanner_source(name: str) -> bool:
+    norm = normalize_entry(name)
+    return norm.startswith("run_tools/") or norm.endswith(
+        (
+            "build_handoff_package.py",
+            "handoff_safety.py",
+            "package_safety_check.py",
+            "self_test.py",
+            "verify_handoff_package.py",
+        )
+    )
+
+
+def _skip_pattern_line(line: str, name: str) -> bool:
+    if not _is_scanner_source(name):
+        return False
     markers = (
         "SECRET_PATTERN",
         "LOCAL_PATH_PATTERN",
         "STOCK_SAMPLE_PATTERN",
         "STALE_STATUS_PATTERNS",
         "STALE_STATUS_MARKERS",
+        "CREDENTIAL_RE",
+        "VENDOR_MARKER_RE",
+        "RAW_TRACEBACK_RE",
+        "PRIVATE_RUNTIME_PAYLOAD_RE",
+        "RAW_EXPORT_FILENAME_RE",
         "re.compile(",
         "token = re.compile",
         "secret-like assignment",
+        "\\\\Users\\\\",
+        "quant-workspace",
+        "site-packages",
+        "conda env path",
+        "vendor_marker",
+        "raw_vendor",
+        "Traceback (most recent call last):",
+        "runtime_payload",
     )
     return any(marker in line for marker in markers) or line.lstrip().startswith(
         ("r\"", "r'")
@@ -127,7 +155,7 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
         return
     result.text_entries_scanned += 1
     for line_number, line in enumerate(text.splitlines(), start=1):
-        if _skip_pattern_line(line):
+        if _skip_pattern_line(line, name):
             continue
         if SECRET_PATTERN.search(line):
             result.errors.append(
