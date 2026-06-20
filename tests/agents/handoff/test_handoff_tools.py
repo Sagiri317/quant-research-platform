@@ -323,6 +323,21 @@ def test_handoff_safety_ignores_removed_diff_lines() -> None:
     assert safety.unsafe_text_reason(diff, name="diff.patch") is None
 
 
+def test_handoff_safety_allows_public_aggregate_evidence_counts() -> None:
+    safety = _load_handoff_module("handoff_safety")
+    diff = "\n".join(
+        [
+            "diff --git a/docs/reports/clean-rewrite-0.1-parity-evidence.md "
+            "b/docs/reports/clean-rewrite-0.1-parity-evidence.md",
+            "--- a/docs/reports/clean-rewrite-0.1-parity-evidence.md",
+            "+++ b/docs/reports/clean-rewrite-0.1-parity-evidence.md",
+            "+| processed panel parity | 660416 | 48 | verified aggregate |",
+        ]
+    )
+
+    assert safety.unsafe_text_reason(diff, name="diff.patch") is None
+
+
 def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     run_reviews = "." + "run/reviews"

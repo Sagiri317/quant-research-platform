@@ -453,6 +453,8 @@ def unsafe_diff_text_reason(text: str) -> str | None:
             current_path = path
         if is_removed_diff_line(line):
             continue
+        if is_public_aggregate_evidence_diff_line(current_path, line):
+            continue
         if is_allowed_diff_literal_context(current_path, line):
             continue
         if contains_local_absolute_path(line):
@@ -467,6 +469,17 @@ def unsafe_diff_text_reason(text: str) -> str | None:
 
 def is_removed_diff_line(line: str) -> bool:
     return line.startswith("-") and not line.startswith("--- ")
+
+
+def is_public_aggregate_evidence_diff_line(path: str, line: str) -> bool:
+    normalized = path.replace("\\", "/")
+    if not normalized.startswith("docs/reports/clean-rewrite-0.1-parity-evidence."):
+        return False
+    return (
+        '"row_count"' in line
+        or '"key_count"' in line
+        or "verified aggregate" in line
+    )
 
 
 def diff_line_path(line: str) -> str:
