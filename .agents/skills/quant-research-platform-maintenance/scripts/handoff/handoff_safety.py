@@ -24,7 +24,6 @@ TEXT_LIKE_SUFFIXES = {
 }
 BUNDLE_CONTENT_SCAN_EXEMPT_ROOTS = (
     ".agents/",
-    ".codex/",
     "code/",
     "docs/",
     "src/",
@@ -52,6 +51,7 @@ FORBIDDEN_PATH_SEGMENTS = (
     "data/processed",
     "data/research",
     "reports/private_real",
+    ".codex",
     "credentials",
     "secrets",
     "vendor raw",

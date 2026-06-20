@@ -257,12 +257,13 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
             )
         )
         failures.extend(validation_sidecar_status_failures(validation_payload, sidecar))
+        failures.extend(validation_command_failures(validation_payload))
     return failures
 
 
 def verify_task_metadata_schema(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    required = {"schema_version", "slug", "branch", "base"}
+    required = {"schema_version", "slug", "branch", "base", "pr_url"}
     missing = sorted(key for key in required if not payload.get(key))
     failures.extend(f"task_metadata_schema_missing: {key}" for key in missing)
     if payload.get("schema_version") != "handoff-task-metadata/0.1":
@@ -407,7 +408,65 @@ def verify_review_thread_closure(
                 + ":"
                 + ",".join(missing)
             )
+        forbidden_body_fields = {
+            "body",
+            "comment_body",
+            "comment_bodies",
+            "comments",
+        }.intersection(row)
+        if forbidden_body_fields:
+            failures.append(
+                "review_thread_row_contains_comment_body: "
+                + str(index)
+                + ":"
+                + ",".join(sorted(forbidden_body_fields))
+            )
+    if (
+        status == "PASS"
+        and isinstance(total_count, int)
+        and len(threads) != total_count
+    ):
+        failures.append("review_threads_total_count_mismatch")
     return failures
+
+
+def validation_command_failures(payload: dict[str, object]) -> list[str]:
+    rows = payload.get("checks", payload.get("validation_table", []))
+    if not isinstance(rows, list):
+        return []
+    failures: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", row.get("check")) or "").strip()
+        status = str(row.get("status") or "").strip().upper()
+        command = str(row.get("command") or "").strip()
+        if status != "PASS":
+            continue
+        if not command:
+            failures.append(f"validation_command_missing: {name}")
+            continue
+        if _validation_command_has_placeholder(command):
+            failures.append(f"validation_command_placeholder: {name}")
+        if contains_local_absolute_path_text(command):
+            failures.append(f"validation_command_local_absolute_path: {name}")
+    return failures
+
+
+def _validation_command_has_placeholder(command: str) -> bool:
+    lowered = command.lower()
+    if "targeted reports/workflows/storage/compute/interfaces suites" in lowered:
+        return True
+    if "<" in command or ">" in command:
+        return True
+    return any(
+        marker in lowered
+        for marker in (
+            "<zip>",
+            "<json>",
+            "<official-rendered-pr-body>",
+        )
+    )
 
 
 def verify_pr_body_statuses(archive: ZipFile, sidecar: dict[str, object]) -> list[str]:
@@ -424,6 +483,10 @@ def verify_pr_body_statuses(archive: ZipFile, sidecar: dict[str, object]) -> lis
         return ["pr_body_validation_inputs_invalid"]
     if not isinstance(validation, dict):
         return ["validation_evidence_must_be_object"]
+    if "- PR: ``" in body or "MISSING_PR_URL" in body:
+        failures.append("pr_body_pr_url_missing")
+    if "{'sha':" in body:
+        failures.append("pr_body_commit_list_dict_repr")
     for name, status in validation_status_map(validation).items():
         expected = f"| `{name}` | `{status}` |"
         if expected not in body:

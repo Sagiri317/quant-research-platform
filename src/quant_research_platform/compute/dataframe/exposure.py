@@ -19,7 +19,7 @@ def summarize_exposure(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """   ?gross/net exposure  ?active position counts ?"""
+    """Summarize gross/net exposure and active position counts."""
 
     validated = _validate_positions(positions, segment_columns=segment_columns)
     output_columns = [*segment_columns, *EXPOSURE_SUMMARY_COLUMNS]

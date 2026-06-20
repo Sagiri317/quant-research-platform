@@ -86,8 +86,20 @@ def build_handoff_package(
     for _attempt in range(max_attempts):
         validation_evidence = enrich_validation_evidence(
             validation_with_status_overrides(
-            task_validation_evidence(task),
-            status_overrides,
+                task_validation_evidence(task),
+                status_overrides,
+                command_context={
+                    "zip_logical_path": str(
+                        task.get("zip_logical_path")
+                        or f".run/reviews/{zip_path.name}"
+                    ).replace("\\", "/"),
+                    "json_logical_path": str(
+                        task.get("sidecar_logical_path")
+                        or f".run/reviews/{json_path.name}"
+                    ).replace("\\", "/"),
+                    "base": base,
+                    "final_head": final_head,
+                },
             ),
             zip_logical_path=str(
                 task.get("zip_logical_path") or f".run/reviews/{zip_path.name}"
@@ -430,6 +442,8 @@ def status_summary_from_validation(
 def validation_with_status_overrides(
     validation_evidence: dict[str, object],
     overrides: dict[str, str],
+    *,
+    command_context: dict[str, str] | None = None,
 ) -> dict[str, object]:
     payload = json.loads(stable_json(validation_evidence))
     rows = payload.get("checks")
@@ -439,7 +453,7 @@ def validation_with_status_overrides(
         rows = []
         payload["checks"] = rows
     for check_name, status in overrides.items():
-        set_check_status(rows, check_name, status)
+        set_check_status(rows, check_name, status, command_context=command_context)
     return payload
 
 
@@ -462,7 +476,13 @@ def enrich_validation_evidence(
     return payload
 
 
-def set_check_status(rows: list[object], check_name: str, status: str) -> None:
+def set_check_status(
+    rows: list[object],
+    check_name: str,
+    status: str,
+    *,
+    command_context: dict[str, str] | None = None,
+) -> None:
     details_key = "evidence"
     for row in rows:
         if not isinstance(row, dict):
@@ -471,14 +491,52 @@ def set_check_status(rows: list[object], check_name: str, status: str) -> None:
         if name == check_name:
             row["status"] = status
             row[details_key] = validation_status_evidence(check_name, status)
+            row.setdefault(
+                "command",
+                validation_status_command(check_name, command_context=command_context),
+            )
             return
     rows.append(
         {
             "name": check_name,
             "status": status,
+            "command": validation_status_command(
+                check_name,
+                command_context=command_context,
+            ),
             details_key: validation_status_evidence(check_name, status),
         }
     )
+
+
+def validation_status_command(
+    check_name: str,
+    *,
+    command_context: dict[str, str] | None = None,
+) -> str:
+    context = command_context or {}
+    zip_path = context.get("zip_logical_path", ".run/reviews/handoff.zip")
+    json_path = context.get("json_logical_path", ".run/reviews/handoff.json")
+    base = context.get("base", "BASE")
+    final_head = context.get("final_head", "HEAD")
+    if check_name == "raw_diff_exactness":
+        return f"git diff --full-index --binary {base}..{final_head}"
+    if check_name == "git_apply_check":
+        return (
+            "python .agents/skills/quant-research-platform-maintenance/scripts/"
+            f"handoff/verify_handoff_package.py --zip {zip_path} --json {json_path}"
+        )
+    if check_name == "handoff_verify":
+        return (
+            "python .agents/skills/quant-research-platform-maintenance/scripts/"
+            f"handoff/verify_handoff_package.py --zip {zip_path} --json {json_path}"
+        )
+    if check_name == "handoff_safety_scan":
+        return (
+            "python .agents/skills/quant-research-platform-maintenance/scripts/"
+            f"handoff/handoff_safety.py {zip_path} --json {json_path}"
+        )
+    return check_name
 
 
 def validation_status_evidence(check_name: str, status: str) -> str:
@@ -487,9 +545,9 @@ def validation_status_evidence(check_name: str, status: str) -> str:
     if check_name == "git_apply_check":
         return f"git apply --check diff.patch on base checkout {status}"
     if check_name == "handoff_verify":
-        return f"verify_handoff_package.py --zip <zip> --json <json> {status}"
+        return f"verify_handoff_package.py completed with {status}"
     if check_name == "handoff_safety_scan":
-        return f"handoff_safety.py <zip> --json <json> {status}"
+        return f"handoff_safety.py completed with {status}"
     return f"{check_name}={status}"
 
 

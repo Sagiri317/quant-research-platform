@@ -15,7 +15,7 @@ def summarize_tensor_exposure_from_path(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """    streamed timestamp exposure path    ?Tensor exposure ?"""
+    """Summarize tensor exposure from a streamed exposure path."""
 
     output_columns = [*segment_columns, *EXPOSURE_SUMMARY_COLUMNS]
     if exposure_path.empty:

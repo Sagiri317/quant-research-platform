@@ -3,6 +3,7 @@
   "slug": "<handoff-slug>",
   "branch": "<branch-name>",
   "base": "<base-commit-sha>",
+  "pr_url": "https://github.com/<owner>/<repo>/pull/<number>",
   "final_head": "<final-head-sha>",
   "final_sha": "<final-head-sha>",
   "zip_logical_path": ".run/reviews/<handoff-slug>.zip",

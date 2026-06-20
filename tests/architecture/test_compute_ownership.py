@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import ast
+import io
+import re
+import tokenize
 from pathlib import Path
 
 PROJECT_SRC = Path("src/quant_research_platform")
@@ -191,18 +194,26 @@ def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:
 
 
 def test_compute_docstrings_do_not_contain_garbled_question_mark_terms() -> None:
-    forbidden = (
-        "?RankIC",
-        "?tradability helpers",
-        "?cost",
-        "?cost components",
-    )
+    garbled_question_pattern = re.compile(r"\?[^?\n]{2,}\?")
     hits: list[str] = []
     for path in _python_files((PROJECT_SRC / "compute",)):
         text = path.read_text(encoding="utf-8")
-        for term in forbidden:
-            if term in text:
-                hits.append(f"{path}: {term}")
+        tree = ast.parse(text, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(
+                node,
+                ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+            ):
+                continue
+            docstring = ast.get_docstring(node, clean=False)
+            if docstring and garbled_question_pattern.search(docstring):
+                hits.append(f"{path}:{getattr(node, 'lineno', 1)}: docstring")
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if (
+                token.type == tokenize.COMMENT
+                and garbled_question_pattern.search(token.string)
+            ):
+                hits.append(f"{path}:{token.start[0]}: comment")
 
     assert not hits, "garbled_compute_docstring_terms: " + "; ".join(hits)
 

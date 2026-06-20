@@ -40,7 +40,7 @@ def render_pr_body(
         "- base head: "
         f"`{_head_value(task_metadata, 'base_commit_before_task', 'base')}`",
         f"- final head: `{_head_value(task_metadata, 'final_sha', 'final_head')}`",
-        f"- PR: `{task_metadata.get('pr_url', '')}`",
+        f"- PR: `{_pr_url(task_metadata, external_evidence)}`",
         "- PR status: `draft`",
     ]
     lines.extend(
@@ -129,8 +129,17 @@ def _list_section(title: str, values: object) -> list[str]:
         return []
     lines = ["", f"## {title}", ""]
     for value in values:
-        lines.append(f"- {_clean_cell(str(value))}")
+        lines.append(f"- {_list_item(value)}")
     return lines
+
+
+def _list_item(value: object) -> str:
+    if isinstance(value, dict):
+        sha = _clean_cell(str(value.get("sha") or "")).strip()
+        summary = _clean_cell(str(value.get("summary") or "")).strip()
+        if sha and summary:
+            return f"{sha} {summary}"
+    return _clean_cell(str(value))
 
 
 def _mapping_section(title: str, values: object) -> list[str]:
@@ -500,6 +509,20 @@ def _head_value(task_metadata: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _pr_url(
+    task_metadata: dict[str, Any],
+    external_evidence: dict[str, Any] | None,
+) -> str:
+    value = str(task_metadata.get("pr_url") or "").strip()
+    if value:
+        return value
+    if isinstance(external_evidence, dict):
+        value = str(external_evidence.get("pr_url") or "").strip()
+        if value:
+            return value
+    return "MISSING_PR_URL"
+
+
 def _evidence_path(
     validation_evidence: dict[str, Any],
     external_evidence: dict[str, Any] | None,
@@ -541,8 +564,18 @@ def _review_thread_evidence_summary(value: object) -> str:
     if not text:
         return marker
     if len(text) > 120:
-        return f"{text[:117].rstrip()}... (truncated; {marker})"
+        return f"{_truncate_words(text, 117)}... (truncated; {marker})"
     return f"{text} ({marker})"
+
+
+def _truncate_words(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit].rstrip()
+    boundary = clipped.rfind(" ")
+    if boundary >= max(40, limit // 2):
+        return clipped[:boundary].rstrip()
+    return clipped
 
 
 def _clean_cell(value: str) -> str:

@@ -232,7 +232,7 @@ def make_synthetic_index_info_dynamic() -> pd.DataFrame:
     return pd.DataFrame(
         [
             _index_info_row("index_a", "2020-01-01", "2019-12-31", "broad"),
-            _index_info_row("index_a", "2022-01-01", "2019-12-31", "broad_v2"),
+            _index_info_row("index_a", "2022-01-01", "2019-12-31", "broad_revision"),
             _index_info_row("index_b", "2021-01-01", "2020-12-31", "style"),
         ]
     )

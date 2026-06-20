@@ -61,6 +61,42 @@ def test_pr_body_is_rendered_from_validation_evidence_statuses() -> None:
     module.validate_pr_body_against_evidence(body, validation_evidence)
 
 
+def test_pr_body_renders_pr_url_and_dict_commit_list_entries() -> None:
+    module = _load_pr_body_module()
+    validation_evidence = {
+        "checks": [
+            {"name": "ruff", "status": "PASS", "evidence": "clean"},
+        ],
+    }
+    task_metadata = {
+        "pr_url": "https://github.com/Sagiri317/quant-research-platform/pull/1",
+        "commit_list": [
+            {
+                "sha": "abc123",
+                "summary": "Fix handoff renderer output",
+            },
+            "def456 Keep string commit rows",
+        ],
+    }
+
+    body = module.render_pr_body(task_metadata, validation_evidence)
+
+    assert "- PR: `https://github.com/Sagiri317/quant-research-platform/pull/1`" in body
+    assert "- abc123 Fix handoff renderer output" in body
+    assert "- def456 Keep string commit rows" in body
+    assert "{'sha':" not in body
+    assert "- PR: ``" not in body
+
+
+def test_pr_body_missing_pr_url_is_not_silent_empty_field() -> None:
+    module = _load_pr_body_module()
+
+    body = module.render_pr_body({}, {})
+
+    assert "- PR: ``" not in body
+    assert "MISSING_PR_URL" in body
+
+
 def test_pr_body_validation_rejects_false_pass_claim() -> None:
     module = _load_pr_body_module()
     validation_evidence = {
@@ -291,6 +327,32 @@ def test_pr_body_renders_optional_handoff_threads_and_closure_sections() -> None
     assert "full evidence: review_threads.json" in body
     assert "## A-share Date Default Cleanup" in body
     assert "- research_profile() remains API/CLI static catalog entry." in body
+
+
+def test_pr_body_review_thread_evidence_uses_word_boundary_truncation() -> None:
+    module = _load_pr_body_module()
+    marker = "full evidence: review_threads.json"
+    text = (
+        "This safe evidence string is deliberately long so the renderer must "
+        "truncate at a readable word boundary instead of producing awkward "
+        "midword fragments in the PR body."
+    )
+
+    summary = module._review_thread_evidence_summary(text)
+
+    assert summary.endswith(f"... (truncated; {marker})")
+    assert "midwor..." not in summary
+    assert "midword" not in summary
+
+
+def test_pr_body_review_thread_short_evidence_is_not_truncated() -> None:
+    module = _load_pr_body_module()
+    text = "Long-only portfolio validation now ignores bottom quantile."
+
+    summary = module._review_thread_evidence_summary(text)
+
+    assert text in summary
+    assert "truncated" not in summary
 
 
 def test_pr_body_missing_or_empty_validation_rows_become_not_run() -> None:

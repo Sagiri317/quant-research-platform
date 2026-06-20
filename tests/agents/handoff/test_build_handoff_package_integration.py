@@ -41,6 +41,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 "base": base,
                 "final_head": final_head,
                 "final_sha": final_head,
+                "pr_url": "https://github.com/Sagiri317/quant-research-platform/pull/1",
                 "zip_logical_path": f"{run_reviews}/{slug}.zip",
                 "sidecar_logical_path": f"{run_reviews}/{slug}.json",
                 "validation_evidence": {
@@ -147,6 +148,10 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         manifest_raw
     ).hexdigest()
     assert task_metadata["final_head"] == final_head
+    assert (
+        task_metadata["pr_url"]
+        == "https://github.com/Sagiri317/quant-research-platform/pull/1"
+    )
     assert task_path.name not in names
 
     raw_diff = _git(

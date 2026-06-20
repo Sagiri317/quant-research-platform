@@ -1,4 +1,4 @@
-"""       tensor evaluation  ?mask helpers ?"""
+"""Mask helpers for tensor evaluation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,6 @@ from quant_research_platform.compute.tensor.layout import PanelTensor
 
 
 def valid_observation_mask(tensor: PanelTensor) -> np.ndarray:
-    """       signal-label observation mask ?"""
+    """Return the signal-label observation mask."""
 
     return np.asarray(tensor.valid_mask, dtype=bool)

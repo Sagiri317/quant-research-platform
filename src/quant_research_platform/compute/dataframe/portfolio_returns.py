@@ -54,7 +54,7 @@ def simulate_weighted_long_short_returns(
     cost_config: CostConfig | None = None,
     return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """    weighted positions     portfolio returns ?"""
+    """Simulate portfolio returns from weighted positions."""
 
     return_source_column = _require_return_source_column(return_source_column)
     panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
@@ -80,7 +80,7 @@ def _simulate_weighted_long_short_returns_from_validated_panel(
     cost_config: CostConfig | None = None,
     return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """                timestamp/asset     ?panel     returns ?"""
+    """Simulate returns from a validated timestamp-asset panel."""
 
     positions, turnover, returns, diagnostics, _cost_breakdown = (
         _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
@@ -107,7 +107,7 @@ def _simulate_weighted_long_short_returns_and_cost_from_validated_panel(
     cost_config: CostConfig | None = None,
     return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """    returns       cost breakdown     ?artifact     ?"""
+    """Simulate returns and cost breakdown artifacts."""
 
     return measure_stage(
         "metric",
@@ -135,7 +135,7 @@ def _stream_weighted_portfolio_from_validated_panel(
     cost_config: CostConfig | None = None,
     return_source_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """            ?positions  urnover  osts  ?portfolio returns ?"""
+    """Stream positions, turnover, costs, and portfolio returns."""
 
     _validate_segment_columns(panel, segment_columns)
     _validate_weight_columns(panel, weight_config)
@@ -252,7 +252,7 @@ def simulate_long_short_returns(
     signal_column: str | None = None,
     return_source_column: str | None = None,
 ) -> pd.DataFrame:
-    """    turnover-based costs     equal-weight long-short returns ?"""
+    """Simulate equal-weight long-short returns with turnover-based costs."""
 
     signal = _select_signal(spec, signal_column)
     _positions, _turnover, returns, _diagnostics = simulate_weighted_long_short_returns(

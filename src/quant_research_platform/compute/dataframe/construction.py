@@ -41,7 +41,7 @@ def build_weighted_positions(
     portfolio_signals: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """          signal signal    ?timestamp-level positions ?"""
+    """Build timestamp-level positions for selected signals."""
 
     panel = validate_compute_panel(frame, spec, segment_columns=segment_columns)
     return _build_weighted_positions_from_validated_panel(
@@ -62,7 +62,7 @@ def _build_weighted_positions_from_validated_panel(
     portfolio_signals: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """                timestamp/asset     ?panel    ?positions ?"""
+    """Build positions from a validated timestamp-asset panel."""
 
     _validate_segment_columns(panel, segment_columns)
     _validate_weight_columns(panel, weight_config)
@@ -122,7 +122,7 @@ def build_long_short_positions(
     bottom_quantile: float | None = None,
     signal_column: str | None = None,
 ) -> pd.DataFrame:
-    """    timestamp-level ranks    ?equal-weight long-short positions ?"""
+    """Build equal-weight long-short positions from timestamp-level ranks."""
 
     signal = _select_signal(spec, signal_column)
     config = WeightConfig(

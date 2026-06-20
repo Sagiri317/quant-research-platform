@@ -54,7 +54,7 @@ def compute_ic_and_grouped_label_values_tensor(
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """    ?tensor timestamp/signal        ?IC  ?grouped label values ?"""
+    """Compute tensor timestamp-signal IC and grouped label values."""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -109,7 +109,7 @@ def compute_grouped_label_values_tensor(
     tensor: PanelTensor,
     n_groups: int = 5,
 ) -> pd.DataFrame:
-    """ ?tensor signal rank group     timestamp-level mean label value ?"""
+    """Compute tensor mean label values by signal rank group."""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -139,7 +139,7 @@ def compute_grouped_label_values_tensor(
 
 
 def summarize_group_spread_tensor(grouped_label_values: pd.DataFrame) -> pd.DataFrame:
-    """    DataFrame policy    ?tensor grouped label-value output ?"""
+    """Summarize tensor grouped label-value output with DataFrame policy."""
 
     summary = summarize_group_spread(grouped_label_values)
     return summary[GROUP_SPREAD_SUMMARY_COLUMNS]

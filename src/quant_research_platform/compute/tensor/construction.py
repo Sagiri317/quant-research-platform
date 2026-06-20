@@ -65,7 +65,7 @@ class _TimestampPositionInput:
 
 @dataclass(frozen=True)
 class TensorPortfolioArtifacts:
-    """   ?chunked pass          tensor portfolio artifacts ?"""
+    """Tensor portfolio artifacts produced by the construction path."""
 
     positions: pd.DataFrame
     diagnostics: pd.DataFrame
@@ -85,9 +85,7 @@ def build_tensor_weighted_positions(
     return_source_column: str | None = None,
     value_dtype: str = "float64",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """ ?tensor signal arrays     timestamp-level positions ?
-        tensor compute backend     public artifact contract
-     ?DataFrame backend                   ?positions  ?diagnostics frames ?    """
+    """Build timestamp-level positions from tensor signal arrays."""
 
     return_source_column = _require_return_source_column(return_source_column)
     artifacts = build_tensor_portfolio_artifacts(
@@ -114,7 +112,7 @@ def build_tensor_portfolio_artifacts(
     return_source_column: str | None = None,
     value_dtype: str = "float64",
 ) -> TensorPortfolioArtifacts:
-    """   ?tensor portfolio artifacts          dense path matrices ?"""
+    """Build tensor portfolio artifacts from dense path matrices."""
 
     return_source_column = _require_return_source_column(return_source_column)
     dtype = _validate_value_dtype(value_dtype)

@@ -1,4 +1,4 @@
-"""       ?DataFrame panels        dense tensors ?"""
+"""Convert DataFrame panels into dense tensors."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def panel_to_tensor(
     *,
     value_dtype: str = "float64",
 ) -> PanelTensor:
-    """ ?long panel     time x asset x signal arrays ?"""
+    """Convert a long panel into time x asset x signal arrays."""
 
     dtype = _validate_value_dtype(value_dtype)
     panel = validate_compute_panel(frame, spec)
@@ -76,7 +76,7 @@ def panel_to_tensor_batch(
     label_columns: tuple[str, ...],
     value_dtype: str = "float64",
 ) -> TensorBatch:
-    """ ?long panel     time x asset x signal x label tensor arrays ?"""
+    """Convert a long panel into time x asset x signal x label arrays."""
 
     dtype = _validate_value_dtype(value_dtype)
     _validate_batch_columns(

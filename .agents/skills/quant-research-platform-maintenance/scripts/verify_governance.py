@@ -215,10 +215,39 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
         for marker in ("E:/quant-workspace", "/mnt/data", "/home/user")
     ):
         return True
+    public_safe_local_path_markers = (
+        '"C' + ':/"',
+        r'"C' + r':\\"',
+        '"/' + 'mnt/"',
+        '"/' + 'home/"',
+        '"/' + 'Users/"',
+    )
+    if rel == "tests/architecture/test_public_safe_evidence.py" and any(
+        marker in line for marker in public_safe_local_path_markers
+    ):
+        return True
+    if rel in {
+        "tests/interfaces/test_api_cli_01_contract.py",
+        "tests/storage/test_storage_01.py",
+    } and any(
+        marker in line for marker in ("C" + r":\Users", "/" + "mnt/data")
+    ):
+        return True
     return (
         rel == "docs/architecture/open-issues-register.md"
         and "Negative tests cover" in line
     )
+
+
+def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
+    if rel == "tests/architecture/test_public_safe_evidence.py" and '"token="' in line:
+        return True
+    if rel in {
+        "tests/interfaces/test_api_cli_01_contract.py",
+        "tests/storage/test_storage_01.py",
+    } and '"token"' in line and "token=" in line:
+        return True
+    return False
 
 
 def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
@@ -233,7 +262,10 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
         for line_number, line in enumerate(text.splitlines(), start=1):
             if _skip_regex_definition_line(rel, line):
                 continue
-            if SECRET_PATTERN.search(line):
+            if SECRET_PATTERN.search(line) and not _is_allowed_secret_fixture(
+                rel,
+                line,
+            ):
                 result.errors.append(
                     f"possible secret-like assignment in {rel}:{line_number}"
                 )

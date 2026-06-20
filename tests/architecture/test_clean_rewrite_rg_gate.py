@@ -402,6 +402,7 @@ def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
         ),
         ("/api/v0.1", re.compile(r"/api/v0\.1\b")),
         ("/api/v1", re.compile(r"/api/v1\b")),
+        ("incidental-v2-label", re.compile(r"\b[a-z][a-z0-9_]*_v[2-9]\b")),
     )
     current_file = Path(__file__).resolve()
     hits: list[str] = []

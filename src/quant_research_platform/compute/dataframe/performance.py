@@ -1,4 +1,4 @@
-"""    portfolio returns  ?cumulative return  ?performance diagnostics ?"""
+"""Portfolio cumulative return and performance diagnostics."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def calculate_cumulative_returns(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """    portfolio returns    ?cumulative return  ?drawdown series ?"""
+    """Calculate cumulative return and drawdown series."""
 
     _validate_returns_frame(
         returns,
@@ -115,7 +115,7 @@ def summarize_performance(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """   ?frequency-neutral portfolio performance diagnostics ?"""
+    """Summarize frequency-neutral portfolio performance diagnostics."""
 
     _validate_returns_frame(
         returns,

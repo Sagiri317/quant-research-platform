@@ -7,7 +7,8 @@
     "schema_version",
     "slug",
     "branch",
-    "base"
+    "base",
+    "pr_url"
   ],
   "properties": {
     "schema_version": {
@@ -21,6 +22,10 @@
     },
     "base": {
       "type": "string"
+    },
+    "pr_url": {
+      "type": "string",
+      "minLength": 1
     },
     "final_head": {
       "type": "string"

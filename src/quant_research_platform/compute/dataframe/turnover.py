@@ -24,7 +24,7 @@ def calculate_turnover(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """    timestamp-by-asset position changes     one-way turnover ?"""
+    """Calculate one-way turnover from timestamp-by-asset position changes."""
 
     validated = _validate_positions(positions, segment_columns=segment_columns)
     output_columns = [*segment_columns, *TURNOVER_COLUMNS]

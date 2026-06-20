@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -290,6 +291,18 @@ def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
     assert any("forbidden_path_segment" in item for item in result.failures)
 
 
+def test_handoff_safety_rejects_repo_local_codex_members(tmp_path: Path) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(".codex/config.json", "{}\n")
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("forbidden_path_segment" in item for item in result.failures)
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -387,3 +400,88 @@ def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None
     failures = verifier.verify_handoff_package(package, sidecar)
 
     assert "sidecar_safety_failed" in failures
+
+
+def test_verify_requires_pr_url_in_task_metadata() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.verify_task_metadata_schema(
+        {
+            "schema_version": "handoff-task-metadata/0.1",
+            "slug": "demo",
+            "branch": "feature/qrp-clean-rewrite",
+            "base": "0" * 40,
+        }
+    )
+
+    assert "task_metadata_schema_missing: pr_url" in failures
+
+
+def test_verify_requires_review_thread_rows_to_represent_total_count() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package = _write_review_threads_package(
+        {
+            "schema_version": "handoff-review-threads/0.1",
+            "status": "PASS",
+            "counts_available": True,
+            "total_count": 2,
+            "unresolved_count": 0,
+            "threads": [
+                _review_thread_row("thread-1"),
+            ],
+        }
+    )
+
+    failures = verifier.verify_review_thread_closure(package, {})
+
+    assert "review_threads_total_count_mismatch" in failures
+
+
+def test_verify_rejects_pass_validation_command_placeholders() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    validation_payload = {
+        "schema_version": "handoff-validation-evidence/0.1",
+        "checks": [
+            {
+                "name": "handoff_verify",
+                "status": "PASS",
+                "command": "python verify.py --zip <zip> --json <json>",
+                "evidence": "PASS",
+            },
+            {
+                "name": "targeted_tests",
+                "status": "PASS",
+                "command": (
+                    "python -m pytest targeted reports/workflows/storage/"
+                    "compute/interfaces suites"
+                ),
+                "evidence": "PASS",
+            },
+        ],
+    }
+
+    failures = verifier.validation_command_failures(validation_payload)
+
+    assert "validation_command_placeholder: handoff_verify" in failures
+    assert "validation_command_placeholder: targeted_tests" in failures
+
+
+def _write_review_threads_package(payload: dict[str, object]) -> zipfile.ZipFile:
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("review_threads.json", json.dumps(payload) + "\n")
+    package.seek(0)
+    return zipfile.ZipFile(package)
+
+
+def _review_thread_row(thread_id: str) -> dict[str, object]:
+    return {
+        "thread_id": thread_id,
+        "path": "src/example.py",
+        "comment_id": "discussion_r1",
+        "classification": "codex_p2_resolved",
+        "resolution_status": "resolved",
+        "evidence": "Metadata-only thread row.",
+        "resolved_by_tool": True,
+        "manual_action_required": False,
+    }

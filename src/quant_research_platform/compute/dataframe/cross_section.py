@@ -84,7 +84,7 @@ def compute_ic_and_grouped_label_values(
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """    ?timestamp/signal        ?IC  ?grouped label values ?"""
+    """Compute timestamp-signal IC and grouped label values."""
 
     panel = validate_compute_panel(frame, spec)
     return compute_ic_and_grouped_label_values_from_validated_panel(
@@ -100,7 +100,7 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
     *,
     n_groups: int = 5,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """             panel     IC  ?grouped label values ?"""
+    """Compute IC and grouped label values from a validated panel."""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -166,7 +166,7 @@ def compute_grouped_label_values(
     spec: ComputePanelSpec,
     n_groups: int = 5,
 ) -> pd.DataFrame:
-    """ ?signal rank group     timestamp-level mean label value ?"""
+    """Compute timestamp-level mean label values by signal rank group."""
 
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
@@ -208,7 +208,7 @@ def summarize_ic(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """ ?signal    ?IC stability  ?sign diagnostics ?"""
+    """Summarize signal IC stability and sign diagnostics."""
 
     required_columns = {*segment_columns, *IC_RESULT_COLUMNS}
     missing_columns = sorted(required_columns.difference(ic.columns))
@@ -252,7 +252,7 @@ def summarize_group_spread(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """ ?signal    ?top-bottom group label-value spread diagnostics ?"""
+    """Summarize top-bottom group label-value spread diagnostics."""
 
     required_columns = {*segment_columns, *GROUPED_LABEL_VALUE_COLUMNS}
     missing_columns = sorted(required_columns.difference(grouped_label_values.columns))

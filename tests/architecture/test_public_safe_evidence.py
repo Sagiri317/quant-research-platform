@@ -65,6 +65,7 @@ FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS = [
     "data/raw",
     "data/interim",
     "data/processed",
+    "data/research",
     "reports/private_real",
     "000001",
     "600000",
@@ -609,6 +610,11 @@ def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> N
 
     for term in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS:
         assert term not in combined
+
+
+def test_public_safe_evidence_forbids_physical_research_root_not_logical_root() -> None:
+    assert "data/research" in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS
+    assert "research/a_share/demo" not in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS
 
 
 def test_verification_evidence_source_fixture_is_not_public_market_contract() -> None:
