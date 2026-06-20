@@ -303,6 +303,51 @@ def test_handoff_safety_rejects_repo_local_codex_members(tmp_path: Path) -> None
     assert any("forbidden_path_segment" in item for item in result.failures)
 
 
+def test_handoff_safety_allows_historical_codex_in_bundle_when_head_is_clean(
+    tmp_path: Path,
+) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    repo = tmp_path / "repo"
+    _init_handoff_repo(repo)
+    codex_config = repo / ".codex" / "config.json"
+    codex_config.parent.mkdir()
+    codex_config.write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", ".codex/config.json")
+    _git(repo, "commit", "-m", "add historical repo-local codex fixture")
+    _git(repo, "rm", ".codex/config.json")
+    _git(repo, "commit", "-m", "remove historical repo-local codex fixture")
+    bundle = tmp_path / "final-branch.bundle"
+    _git(repo, "bundle", "create", str(bundle), "feature/qrp-clean-rewrite")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.write(bundle, "final-branch.bundle")
+
+    result = safety.scan_handoff_zip(package)
+
+    assert result.ok
+
+
+def test_handoff_safety_rejects_codex_in_bundle_head_tree(tmp_path: Path) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    repo = tmp_path / "repo"
+    _init_handoff_repo(repo)
+    codex_config = repo / ".codex" / "config.json"
+    codex_config.parent.mkdir()
+    codex_config.write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", ".codex/config.json")
+    _git(repo, "commit", "-m", "add current repo-local codex fixture")
+    bundle = tmp_path / "final-branch.bundle"
+    _git(repo, "bundle", "create", str(bundle), "feature/qrp-clean-rewrite")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.write(bundle, "final-branch.bundle")
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("bundle_forbidden_path_segment" in item for item in result.failures)
+
+
 @pytest.mark.parametrize(
     "text",
     [

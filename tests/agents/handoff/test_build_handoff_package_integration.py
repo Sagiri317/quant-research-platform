@@ -106,6 +106,9 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         manifest_raw = archive.read("artifact_manifest.json")
         manifest = json.loads(manifest_raw.decode("utf-8"))
         task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
+        validation_evidence = json.loads(
+            archive.read("validation_evidence.json").decode("utf-8")
+        )
         review_threads = json.loads(
             archive.read("review_threads.json").decode("utf-8")
         )
@@ -152,6 +155,36 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         task_metadata["pr_url"]
         == "https://github.com/Sagiri317/quant-research-platform/pull/1"
     )
+    checks = {
+        row["name"]: row
+        for row in validation_evidence["checks"]
+        if isinstance(row, dict) and "name" in row
+    }
+    assert "git_apply_check" not in checks
+    assert checks["handoff_verify_includes_git_apply_check"]["status"] == "PASS"
+    assert checks["handoff_verify_includes_git_apply_check"]["command"] == (
+        "python .agents/skills/quant-research-platform-maintenance/scripts/"
+        f"handoff/verify_handoff_package.py --zip {run_reviews}/{slug}.zip "
+        f"--json {run_reviews}/{slug}.json"
+    )
+    assert checks["package_safety_check_zip"] == {
+        "name": "package_safety_check_zip",
+        "status": "PASS",
+        "command": (
+            "python .agents/skills/quant-research-platform-maintenance/scripts/"
+            f"package_safety_check.py {run_reviews}/{slug}.zip"
+        ),
+        "evidence": "package_safety_check.py completed for final zip with PASS",
+    }
+    assert checks["package_safety_check_sidecar"] == {
+        "name": "package_safety_check_sidecar",
+        "status": "PASS",
+        "command": (
+            "python .agents/skills/quant-research-platform-maintenance/scripts/"
+            f"package_safety_check.py {run_reviews}/{slug}.json"
+        ),
+        "evidence": "package_safety_check.py completed for sidecar JSON with PASS",
+    }
     assert task_path.name not in names
 
     raw_diff = _git(
@@ -189,12 +222,23 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         capture_output=True,
         text=True,
     )
-    assert _git(cloned, "rev-parse", "HEAD").strip() != final_head
+    assert _git(cloned, "rev-parse", "HEAD").strip() == final_head
+    assert _git(cloned, "show", "-s", "--format=%H", "HEAD").strip() == final_head
     assert (
-        _git(cloned, "diff", "--full-index", "--binary", "HEAD~1..HEAD").encode()
+        "synthetic"
+        not in _git(cloned, "show", "-s", "--format=%s", "HEAD").strip().lower()
+    )
+    assert (
+        _git(
+            cloned,
+            "diff",
+            "--full-index",
+            "--binary",
+            f"{base}..{final_head}",
+        ).encode()
         == packaged_diff
     )
-    _git(cloned, "checkout", "--detach", "HEAD~1")
+    _git(cloned, "checkout", "--detach", base)
     subprocess.run(
         ["git", "apply", "--check", str(fresh / "diff.patch")],
         cwd=cloned,

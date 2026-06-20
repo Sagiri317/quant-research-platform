@@ -566,7 +566,7 @@ def verify_verification_matrix(payload: dict[str, object]) -> list[str]:
         if isinstance(row, dict) and isinstance(row.get("name"), str)
     }
     failures: list[str] = []
-    for name in ("raw_diff_exactness", "git_apply_check"):
+    for name in ("raw_diff_exactness", "handoff_verify_includes_git_apply_check"):
         row = by_name.get(name)
         if row is None:
             failures.append(f"verification_matrix_required_missing: {name}")
@@ -605,16 +605,19 @@ def verify_bundle_and_diff(
             verify_payloads_against_tracked_schemas(clone_dir, archive, sidecar)
         )
         head = git_text(clone_dir, "rev-parse", "HEAD").strip()
+        show_head = git_text(clone_dir, "show", "-s", "--format=%H", "HEAD").strip()
+        if head != final_head or show_head != final_head:
+            failures.append("bundle_clone_head_mismatch")
+            return failures
+        subject = git_text(clone_dir, "show", "-s", "--format=%s", "HEAD").strip()
+        if "synthetic" in subject.lower():
+            failures.append("bundle_head_synthetic_marker")
         base_commit = sidecar.get("base")
         if base_commit is None:
             failures.append("base_required_for_diff")
             return failures
-        if head == final_head:
-            diff_range = f"{base_commit}..{final_head}"
-            apply_base = str(base_commit)
-        else:
-            diff_range = "HEAD~1..HEAD"
-            apply_base = "HEAD~1"
+        diff_range = f"{base_commit}..{final_head}"
+        apply_base = str(base_commit)
         diff = git_text(clone_dir, "diff", "--full-index", "--binary", diff_range)
         diff_patch = archive.read("diff.patch")
         if normalize_lf(diff).encode("utf-8") != diff_patch:

@@ -8,7 +8,6 @@ import json
 import re
 import subprocess
 import sys
-import tarfile
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -141,9 +140,11 @@ def build_handoff_package(
             "raw_diff_exactness": (
                 "FAIL" if "diff_patch_mismatch" in last_failures else "PASS"
             ),
-            "git_apply_check": (
+            "handoff_verify_includes_git_apply_check": (
                 "FAIL" if "diff_patch_apply_check_failed" in last_failures else "PASS"
             ),
+            "package_safety_check_zip": package_safety_status(zip_path),
+            "package_safety_check_sidecar": package_safety_status(json_path),
         }
         if status_overrides == desired:
             return {
@@ -185,7 +186,6 @@ def build_once(
             repo_root,
             stage_root / "final-branch.bundle",
             branch,
-            base,
             final_head,
         )
         write_text(stage_root / "task_metadata.json", stable_json(task_metadata(task)))
@@ -477,7 +477,12 @@ def enrich_validation_evidence(
     if not isinstance(rows, list):
         rows = []
         payload["checks"] = rows
-    for name in ("raw_diff_exactness", "git_apply_check"):
+    for name in (
+        "raw_diff_exactness",
+        "handoff_verify_includes_git_apply_check",
+        "package_safety_check_zip",
+        "package_safety_check_sidecar",
+    ):
         if name not in validation_status_map(payload):
             set_check_status(rows, name, "NOT_RUN")
     return payload
@@ -528,10 +533,20 @@ def validation_status_command(
     final_head = context.get("final_head", "HEAD")
     if check_name == "raw_diff_exactness":
         return f"git diff --full-index --binary {base}..{final_head}"
-    if check_name == "git_apply_check":
+    if check_name == "handoff_verify_includes_git_apply_check":
         return (
             "python .agents/skills/quant-research-platform-maintenance/scripts/"
             f"handoff/verify_handoff_package.py --zip {zip_path} --json {json_path}"
+        )
+    if check_name == "package_safety_check_zip":
+        return (
+            "python .agents/skills/quant-research-platform-maintenance/scripts/"
+            f"package_safety_check.py {zip_path}"
+        )
+    if check_name == "package_safety_check_sidecar":
+        return (
+            "python .agents/skills/quant-research-platform-maintenance/scripts/"
+            f"package_safety_check.py {json_path}"
         )
     if check_name == "handoff_verify":
         return (
@@ -549,8 +564,15 @@ def validation_status_command(
 def validation_status_evidence(check_name: str, status: str) -> str:
     if check_name == "raw_diff_exactness":
         return f"raw git diff --full-index --binary base..HEAD exactness check {status}"
-    if check_name == "git_apply_check":
-        return f"git apply --check diff.patch on base checkout {status}"
+    if check_name == "handoff_verify_includes_git_apply_check":
+        return (
+            "verify_handoff_package.py completed its internal "
+            f"git apply --check step with {status}"
+        )
+    if check_name == "package_safety_check_zip":
+        return f"package_safety_check.py completed for final zip with {status}"
+    if check_name == "package_safety_check_sidecar":
+        return f"package_safety_check.py completed for sidecar JSON with {status}"
     if check_name == "handoff_verify":
         return f"verify_handoff_package.py completed with {status}"
     if check_name == "handoff_safety_scan":
@@ -563,7 +585,7 @@ def verification_matrix_payload(
 ) -> dict[str, object]:
     status_map = validation_status_map(validation_evidence)
     checks = []
-    for name in ("raw_diff_exactness", "git_apply_check"):
+    for name in ("raw_diff_exactness", "handoff_verify_includes_git_apply_check"):
         checks.append(
             {
                 "name": name,
@@ -639,39 +661,9 @@ def write_bundle(
     repo_root: Path,
     bundle_path: Path,
     branch: str,
-    base: str,
     final_head: str,
 ) -> None:
-    expected_diff = git_text(
-        repo_root,
-        "diff",
-        "--full-index",
-        "--binary",
-        f"{base}..{final_head}",
-    )
-    with tempfile.TemporaryDirectory(prefix="handoff-snapshot-bundle-") as temp:
-        snapshot_repo = Path(temp) / "snapshot"
-        snapshot_repo.mkdir()
-        run_git(snapshot_repo, "init", "--initial-branch", branch)
-        run_git(snapshot_repo, "config", "user.name", "QRP Handoff")
-        run_git(snapshot_repo, "config", "user.email", "handoff@example.invalid")
-        extract_git_tree(repo_root, base, snapshot_repo)
-        run_git(snapshot_repo, "add", "-A")
-        run_git(snapshot_repo, "commit", "-m", "handoff synthetic base")
-        run_git(snapshot_repo, "rm", "-r", "--quiet", "--ignore-unmatch", ".")
-        extract_git_tree(repo_root, final_head, snapshot_repo)
-        run_git(snapshot_repo, "add", "-A")
-        run_git(snapshot_repo, "commit", "-m", "handoff synthetic final")
-        synthetic_diff = git_text(
-            snapshot_repo,
-            "diff",
-            "--full-index",
-            "--binary",
-            "HEAD~1..HEAD",
-        )
-        if normalize_lf(synthetic_diff) != normalize_lf(expected_diff):
-            raise SystemExit("snapshot_bundle_diff_mismatch")
-        run_git(snapshot_repo, "bundle", "create", str(bundle_path), branch)
+    run_git(repo_root, "bundle", "create", str(bundle_path), branch)
     with tempfile.TemporaryDirectory(prefix="handoff-bundle-check-") as temp:
         clone_dir = Path(temp) / "clone"
         subprocess.run(
@@ -680,29 +672,22 @@ def write_bundle(
             capture_output=True,
             text=True,
         )
-        cloned_diff = git_text(
-            clone_dir,
-            "diff",
-            "--full-index",
-            "--binary",
-            "HEAD~1..HEAD",
-        )
-        if normalize_lf(cloned_diff) != normalize_lf(expected_diff):
-            raise SystemExit("bundle_diff_mismatch")
+        cloned_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
+        if cloned_head != final_head:
+            raise SystemExit(f"bundle_head_mismatch: {cloned_head} != {final_head}")
+        subject = git_text(clone_dir, "show", "-s", "--format=%s", "HEAD").strip()
+        if "synthetic" in subject.lower():
+            raise SystemExit("bundle_head_synthetic_marker")
 
 
-def extract_git_tree(repo_root: Path, ref: str, destination: Path) -> None:
-    archive_path = destination.parent / f"{ref}.tar"
-    run_git(
-        repo_root,
-        "archive",
-        "--format=tar",
-        "--output",
-        str(archive_path),
-        ref,
+def package_safety_status(path: Path) -> str:
+    script = SCRIPT_PARENT / "package_safety_check.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(path)],
+        capture_output=True,
+        text=True,
     )
-    with tarfile.open(archive_path) as archive:
-        archive.extractall(destination, filter="data")
+    return "PASS" if result.returncode == 0 else "FAIL"
 
 
 def assert_branch_head(repo_root: Path, branch: str, final_head: str) -> None:

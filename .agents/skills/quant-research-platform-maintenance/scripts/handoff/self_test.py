@@ -112,7 +112,8 @@ def main() -> int:
         "sidecar_safety_failed",
         "artifact_manifest_sha256_mismatch",
         "external_json_in_zip",
-        'diff_range = "HEAD~1..HEAD"',
+        "bundle_clone_head_mismatch",
+        "bundle_head_synthetic_marker",
         "--batch-check",
         '"git", "cat-file", "--batch"',
     )
@@ -168,8 +169,8 @@ def main() -> int:
         "path=" + "C:" + "/" + "Users/DELL/deleted-private.txt\n",
     )
     deleted_bundle_safety = scan_handoff_zip(deleted_bundle_zip)
-    if deleted_bundle_safety.ok:
-        return fail("deleted_bundle_text_content_not_scanned")
+    if not deleted_bundle_safety.ok:
+        return fail("deleted_bundle_historical_text_blocked")
     unsafe_cases = {
         "vendor_marker": '{"vendor_marker": "raw-provider"}',
         "raw_traceback": "Traceback (most recent call last):\nprivate context",

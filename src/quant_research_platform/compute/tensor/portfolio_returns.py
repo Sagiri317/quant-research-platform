@@ -36,7 +36,7 @@ def calculate_tensor_long_short(
     segment_columns: tuple[str, ...] = (),
     return_source_column: str | None = None,
 ) -> pd.DataFrame:
-    """    tensor-shaped positions     portfolio return path ?"""
+    """Build a portfolio return path from tensor-shaped positions."""
 
     return_source_column = _require_return_source_column(return_source_column)
     if weight_config is None:

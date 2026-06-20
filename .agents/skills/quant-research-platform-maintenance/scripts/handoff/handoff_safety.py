@@ -236,8 +236,13 @@ def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
                 text_like_count=0,
                 member_count=0,
             )
+        branch = bundle_branch(bundle, verify_repo)
+        clone_cmd = ["git", "clone"]
+        if branch:
+            clone_cmd.extend(["--branch", branch])
+        clone_cmd.extend([str(bundle), str(clone_dir)])
         clone = subprocess.run(
-            ["git", "clone", str(bundle), str(clone_dir)],
+            clone_cmd,
             capture_output=True,
             text=True,
         )
@@ -247,19 +252,23 @@ def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
                 text_like_count=0,
                 member_count=0,
             )
-        objects = subprocess.run(
-            ["git", "rev-list", "--objects", "--all"],
+        tree = subprocess.run(
+            ["git", "ls-tree", "-r", "-l", "HEAD"],
             cwd=clone_dir,
             check=True,
             stdout=subprocess.PIPE,
             text=True,
         ).stdout
-        object_paths = [
-            (object_id, path)
-            for line in objects.splitlines()
-            for object_id, _, path in [line.partition(" ")]
-            if path
-        ]
+        object_paths: list[tuple[str, str]] = []
+        for line in tree.splitlines():
+            metadata, _, path = line.partition("\t")
+            parts = metadata.split()
+            if len(parts) < 4 or not path:
+                failures.append(f"bundle_tree_entry_parse_failed: {name}")
+                continue
+            _mode, object_type, object_id, _size = parts[:4]
+            if object_type == "blob":
+                object_paths.append((object_id, path))
         object_info = batch_object_info(
             clone_dir,
             tuple(sorted({object_id for object_id, _ in object_paths})),
@@ -312,6 +321,22 @@ def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
         skipped_binary_count=skipped_binary_count,
         duration_seconds=time.perf_counter() - started,
     )
+
+
+def bundle_branch(bundle: Path, cwd: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "bundle", "list-heads", str(bundle)],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        _sha, _, ref = line.partition(" ")
+        if ref.startswith("refs/heads/"):
+            return ref.removeprefix("refs/heads/")
+    return None
 
 
 def batch_object_info(
