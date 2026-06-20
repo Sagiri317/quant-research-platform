@@ -42,13 +42,13 @@ def test_package_safety_still_rejects_other_nested_packages_by_default(tmp_path)
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("review_evidence/old.bundle", b"opaque package")
+        archive.writestr("handoff_evidence/old.bundle", b"opaque package")
 
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
     assert result.errors == [
-        "nested package/bundle not allowed by default: review_evidence/old.bundle"
+        "nested package/bundle not allowed by default: handoff_evidence/old.bundle"
     ]
 
 
@@ -92,7 +92,7 @@ def test_package_safety_still_rejects_regular_evidence_paths(tmp_path):
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(
-            "review_evidence/leak.json",
+            "handoff_evidence/leak.json",
             '{"path": "E:' + '/private"}\n',
         )
 
@@ -160,20 +160,17 @@ def test_package_safety_rejects_private_run_paths_in_sidecar(
     assert any("private run path" in error for error in result.errors)
 
 
-def test_package_safety_rejects_private_run_paths_in_raw_diff(tmp_path):
+def test_package_safety_rejects_private_run_paths_in_handoff_evidence(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
-    diff = "\n".join(
+    text = "\n".join(
         [
-            "diff --git a/docs/evidence.md b/docs/evidence.md",
-            "--- a/docs/evidence.md",
-            "+++ b/docs/evidence.md",
-            "+private evidence path ." + "run/private/s1",
+            "private evidence path ." + "run/private/s1",
             "",
         ]
     )
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("diff.patch", diff)
+        archive.writestr("handoff_evidence/leak.md", text)
 
     result = module.scan_zip(package, allow_nested_packages=False)
 
@@ -185,7 +182,7 @@ def test_package_safety_rejects_private_run_paths_in_raw_diff(tmp_path):
     "text",
     [
         "/workspace/qrp/data/research/a_share/demo",
-        "/workspaces/qrp/reports/private_real/a_share/run",
+        "/workspaces/qrp/reports/private_research/a_share/run",
         "/home/user/private.txt",
         "/" + "Users/user/private.txt",
         "/mnt/data/private.txt",
@@ -195,7 +192,7 @@ def test_package_safety_rejects_posix_private_and_workspace_paths(tmp_path, text
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("review_evidence/leak.md", text)
+        archive.writestr("handoff_evidence/leak.md", text)
 
     result = module.scan_zip(package, allow_nested_packages=False)
 
@@ -203,22 +200,11 @@ def test_package_safety_rejects_posix_private_and_workspace_paths(tmp_path, text
     assert any("local absolute path" in error for error in result.errors)
 
 
-def test_package_safety_allows_negative_fixture_paths_in_raw_diff(tmp_path):
+def test_package_safety_allows_public_handoff_evidence_text(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
-    diff = "\n".join(
-        [
-            "diff --git a/tests/negative_fixtures.py b/tests/negative_fixtures.py",
-            "new file mode 100644",
-            "--- /dev/null",
-            "+++ b/tests/negative_fixtures.py",
-            "@@ -0,0 +1 @@",
-            '+LEAK_FIXTURE = "E:' + '/negative-fixture/not-real.txt"',
-            "",
-        ]
-    )
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("diff.patch", diff)
+        archive.writestr("handoff_evidence/summary.md", "verified aggregate\n")
 
     result = module.scan_zip(package, allow_nested_packages=False)
 

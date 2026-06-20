@@ -27,16 +27,16 @@ def test_panel_module_has_no_annotation_rule_helpers() -> None:
         "eligible_base",
         "eligible_after_listing_age",
         "eligible_liquidity",
-        "next_day_is_trading",
-        "next_day_limit_status",
+        "next_bar_is_trading",
+        "next_bar_limit_status",
     )
 
     assert [token for token in forbidden if token in source] == []
 
 
-def test_daily_panel_schema_excludes_derived_annotation_masks() -> None:
-    panel = panels.compute_daily_panel(
-        _daily_market_frame(),
+def test_market_panel_1d_schema_excludes_derived_annotation_masks() -> None:
+    panel = panels.compute_market_panel(
+        _market_bars_1d_frame(),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(),
         trading_calendar=_trading_calendar_frame(),
@@ -47,8 +47,8 @@ def test_daily_panel_schema_excludes_derived_annotation_masks() -> None:
         "eligible_after_listing_age",
         "eligible_liquidity",
         "eligible",
-        "next_day_is_trading",
-        "next_day_limit_status",
+        "next_bar_is_trading",
+        "next_bar_limit_status",
         "can_enter",
         "can_exit",
     }.intersection(panel.columns)
@@ -60,8 +60,8 @@ def test_annotations_own_eligibility_and_execution_masks() -> None:
         min_listing_trading_days=120,
     )
 
-    default = outputs["a_share_default"]
-    execution = outputs["a_share_execution"]
+    default = outputs["default"]
+    execution = outputs["execution"]
     expected_default = pd.DataFrame(
         {
             "market_id": ["a_share", "a_share", "a_share"],
@@ -82,8 +82,8 @@ def test_annotations_own_eligibility_and_execution_masks() -> None:
             "timestamp": pd.to_datetime(
                 ["2024-01-02", "2024-01-03", "2024-01-05"]
             ),
-            "next_day_is_trading": [True, True, False],
-            "next_day_limit_status": [-1.0, 0.0, float("nan")],
+            "next_bar_is_trading": [True, True, False],
+            "next_bar_limit_status": [-1.0, 0.0, float("nan")],
             "can_enter": [True, True, False],
             "can_exit": [False, True, False],
         }
@@ -97,14 +97,14 @@ def test_annotation_can_enter_can_exit_chunk_boundary_matches_full_frame() -> No
     panel = _chunk_boundary_panel_frame()
     full_execution = annotations.derive_annotations(
         panel,
-        data_ids=("a_share_execution",),
+        data_ids=("execution",),
         min_listing_trading_days=1,
-    )["a_share_execution"]
+    )["execution"]
     chunk_execution = annotations.derive_annotations(
         panel.iloc[:3],
-        data_ids=("a_share_execution",),
+        data_ids=("execution",),
         min_listing_trading_days=1,
-    )["a_share_execution"]
+    )["execution"]
     chunk_core = chunk_execution.loc[
         chunk_execution["timestamp"].isin(pd.to_datetime(["2024-01-02", "2024-01-03"]))
     ].reset_index(drop=True)
@@ -113,8 +113,8 @@ def test_annotation_can_enter_can_exit_chunk_boundary_matches_full_frame() -> No
             "market_id": ["a_share", "a_share"],
             "asset_id": ["asset_a", "asset_a"],
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "next_day_is_trading": [True, True],
-            "next_day_limit_status": [1.0, -1.0],
+            "next_bar_is_trading": [True, True],
+            "next_bar_limit_status": [1.0, -1.0],
             "can_enter": [False, True],
             "can_exit": [True, False],
         }
@@ -127,10 +127,10 @@ def test_annotation_can_enter_can_exit_chunk_boundary_matches_full_frame() -> No
     )
 
 
-def test_daily_context_and_execution_projection_are_separate() -> None:
+def test_market_context_1d_and_execution_projection_are_separate() -> None:
     outputs = annotations.derive_annotations(_annotation_panel_frame())
 
-    assert outputs["daily_context"].columns.tolist() == [
+    assert outputs["market_context_1d"].columns.tolist() == [
         "market_id",
         "asset_id",
         "timestamp",
@@ -146,12 +146,12 @@ def test_daily_context_and_execution_projection_are_separate() -> None:
         "amount",
         "turnover",
     ]
-    assert outputs["a_share_execution"].columns.tolist() == [
+    assert outputs["execution"].columns.tolist() == [
         "market_id",
         "asset_id",
         "timestamp",
-        "next_day_is_trading",
-        "next_day_limit_status",
+        "next_bar_is_trading",
+        "next_bar_limit_status",
         "can_enter",
         "can_exit",
     ]
@@ -159,7 +159,7 @@ def test_daily_context_and_execution_projection_are_separate() -> None:
 
 def test_annotation_outputs_are_joinable_by_primary_key() -> None:
     outputs = annotations.derive_annotations(_annotation_panel_frame())
-    base_keys = outputs["a_share_default"].loc[
+    base_keys = outputs["default"].loc[
         :,
         ["market_id", "asset_id", "timestamp"],
     ]
@@ -175,9 +175,9 @@ def test_annotations_fail_closed_on_missing_required_projection_column() -> None
 
     with pytest.raises(
         ValueError,
-        match="missing_annotation_input_columns: daily_context: market_type",
+        match="missing_annotation_input_columns: market_context_1d: market_type",
     ):
-        annotations.derive_annotations(panel, data_ids=("daily_context",))
+        annotations.derive_annotations(panel, data_ids=("market_context_1d",))
 
 
 def test_annotations_accept_explicit_one_word_limit_columns() -> None:
@@ -188,8 +188,8 @@ def test_annotations_accept_explicit_one_word_limit_columns() -> None:
 
     execution = annotations.derive_annotations(
         panel,
-        data_ids=("a_share_execution",),
-    )["a_share_execution"]
+        data_ids=("execution",),
+    )["execution"]
 
     assert execution["can_enter"].tolist() == [False, True, False]
     assert execution["can_exit"].tolist() == [True, False, False]
@@ -273,7 +273,7 @@ def test_annotations_treat_null_limit_status_as_no_one_word_limit_signal() -> No
             low=[10.0, 9.0, 11.0],
             close=[10.0, 9.0, 11.0],
         )
-    )["a_share_execution"]
+    )["execution"]
 
     assert result["can_enter"].tolist() == [True, True, False]
     assert result["can_exit"].tolist() == [True, True, False]
@@ -359,7 +359,7 @@ def _chunk_boundary_panel_frame() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _daily_market_frame() -> pd.DataFrame:
+def _market_bars_1d_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "source_asset_id": ["asset_a", "asset_a"],
@@ -377,7 +377,7 @@ def _daily_market_frame() -> pd.DataFrame:
             "prev_close": [9.9, 10.2],
             "volume": [100.0, 100.0],
             "amount": [1000.0, 1000.0],
-            "return_1d": [0.01, 0.02],
+            "period_return": [0.01, 0.02],
             "limit_status": [0, 0],
         }
     )

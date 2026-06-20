@@ -52,7 +52,7 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
 def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
     definitions = price_volume_factor_definitions(
         market_id=MarketId("a_share"),
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
     )
     columns = price_volume_factor_columns()
     by_id = {definition.factor_id: definition for definition in definitions}
@@ -65,7 +65,7 @@ def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
             definition.factor_id
         )
         assert definition.base_input_columns == definition.input_columns
-        assert definition.required_input_data_id == "daily_panel"
+        assert definition.required_input_data_id == "market_panel_1d"
         assert definition.family == "price_volume"
         if definition.factor_id in SMOKE_PRICE_VOLUME_FACTORS:
             assert definition.factor_set is FactorSet.SMOKE
@@ -75,9 +75,9 @@ def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
             assert definition.factor_set is FactorSet.STANDARD
             assert definition.to_manifest()["factor_set"] == "standard"
 
-    assert by_id["rev_1d"].input_columns == ("return_1d",)
+    assert by_id["rev_1d"].input_columns == ("period_return",)
     assert by_id["mom_20d"].input_columns == ("adj_close",)
-    assert by_id["amihud_20d"].input_columns == ("return_1d", "amount")
+    assert by_id["amihud_20d"].input_columns == ("period_return", "amount")
     assert by_id["amplitude_20d"].input_columns == (
         "high",
         "low",
@@ -224,7 +224,7 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
     panel.loc[panel["timestamp"].eq(denominator_date), "amount"] = np.inf
     panel.loc[panel["timestamp"].eq(denominator_date), "prev_close"] = np.inf
     panel.loc[panel["timestamp"].eq(denominator_date), "turnover"] = np.inf
-    panel.loc[panel["timestamp"].eq(rolling_window_end), "return_1d"] = np.inf
+    panel.loc[panel["timestamp"].eq(rolling_window_end), "period_return"] = np.inf
     panel.loc[panel["timestamp"].eq(rolling_window_end), "high"] = np.inf
 
     factor_columns = (
@@ -305,7 +305,7 @@ def test_price_volume_standard_formula_matches_reference() -> None:
     ] = 0.0
     panel.loc[
         panel["asset_id"].eq("asset_a") & panel["timestamp"].eq(asset_a_dates[10]),
-        "return_1d",
+        "period_return",
     ] = np.nan
     panel.loc[
         panel["asset_id"].eq("asset_b") & panel["timestamp"].eq(asset_b_dates[19]),
@@ -422,7 +422,7 @@ def _reference_calculate_price_volume_factors(
     grouped = result.groupby("asset_id", sort=False)
     group_keys = result["asset_id"]
     price = pd.to_numeric(result["adj_close"], errors="coerce")
-    returns = pd.to_numeric(result["return_1d"], errors="coerce")
+    returns = pd.to_numeric(result["period_return"], errors="coerce")
     amount = pd.to_numeric(result["amount"], errors="coerce")
     turnover = pd.to_numeric(result["turnover"], errors="coerce")
 
@@ -463,11 +463,11 @@ def _reference_calculate_price_volume_factors(
                 window,
             )
         if f"max_return_{window}d" in requested_set:
-            result[f"max_return_{window}d"] = grouped["return_1d"].transform(
+            result[f"max_return_{window}d"] = grouped["period_return"].transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).max()
             )
         if f"min_return_{window}d" in requested_set:
-            result[f"min_return_{window}d"] = grouped["return_1d"].transform(
+            result[f"min_return_{window}d"] = grouped["period_return"].transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).min()
             )
         if f"drawdown_{window}d" in requested_set:
@@ -676,7 +676,7 @@ def _factor_panel_for_dates(dates) -> pd.DataFrame:
                 "asset_id": "asset_a",
                 "timestamp": pd.Timestamp(date),
                 "adj_close": float(100 + offset),
-                "return_1d": 0.001 * offset,
+                "period_return": 0.001 * offset,
                 "amount": 10000.0 + offset,
                 "turnover": 0.01 + offset / 100000.0,
                 "high": float(101 + offset),

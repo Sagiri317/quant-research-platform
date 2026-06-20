@@ -2,30 +2,14 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import fields, is_dataclass
 from typing import Any
+
+from quant_research_platform.runtime.privacy import public_text_unsafe_reason
 
 
 class ProposalSafetyError(ValueError):
     """Raised when a proposal contains public-unsafe content."""
-
-
-_UNSAFE_TEXT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "private_path",
-        re.compile(
-            r"(?i)(?:[a-z]:\\|/(?:mnt/data|home|Users|workspace|workspaces|tmp)/|"
-            r"data[/\\](?:raw|interim|processed|research)|reports[/\\]private_real)"
-        ),
-    ),
-    ("row_sample", re.compile(r"(?i)\brow\s+sample\b|market_id\s*=.*asset_id\s*=")),
-    ("stock_code", re.compile(r"(?i)\bstock\s+code\b|\b(?:00|30|60|68)\d{4}\b")),
-    (
-        "source_marker",
-        re.compile(r"(?i)\bsource\s+marker\b|\bvendor\s+marker\b"),
-    ),
-)
 
 
 def require_human_approval(proposal_or_approved: Any) -> None:
@@ -44,9 +28,9 @@ def assert_proposal_starts_unapproved(proposal: Any) -> None:
 
 
 def assert_public_safe_text(text: str) -> None:
-    for marker, pattern in _UNSAFE_TEXT_PATTERNS:
-        if pattern.search(text):
-            raise ProposalSafetyError(f"proposal_contains_public_unsafe_text:{marker}")
+    reason = public_text_unsafe_reason(text)
+    if reason is not None:
+        raise ProposalSafetyError(f"proposal_contains_public_unsafe_text:{reason}")
 
 
 def assert_proposal_is_public_safe(proposal: Any) -> None:

@@ -1,4 +1,4 @@
-# Data Layout
+﻿# Data Layout
 
 This file records public-safe data layout rules for QRP Clean Rewrite `0.1.0`.
 It does not contain vendor field samples or private row-level examples.
@@ -10,10 +10,10 @@ data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
 data/research/a_share/
-reports/private_real/
+reports/private_research/
 ```
 
-`data/` and `reports/private_real/` are private by default. Privacy is enforced
+`data/` and `reports/private_research/` are private by default. Privacy is enforced
 by approved roots and sanitizer policy, not by a suffix naming convention.
 
 ## Processed Layout
@@ -53,7 +53,7 @@ Prediction, evaluation, diagnostics, factor-generation, and model-output run
 artifacts belong under:
 
 ```text
-reports/private_real/<market>/<run_type>/<run_id>/
+reports/private_research/<market>/<run_type>/<run_id>/
 ```
 
 They must not be written to `data/processed/`.

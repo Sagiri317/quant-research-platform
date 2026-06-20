@@ -16,7 +16,7 @@ def propose_factor(
     base_input_columns: tuple[str, ...] | None = None,
     derived_input_columns: tuple[str, ...] = (),
     derived_input_producers: dict[str, str] | None = None,
-    required_input_data_id: str = "daily_panel",
+    required_input_data_id: str = "market_panel_1d",
 ) -> FactorProposal:
     _validate_input_columns(tuple(input_columns), profile=profile)
     proposal = FactorProposal(

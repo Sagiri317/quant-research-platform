@@ -26,7 +26,7 @@ _POSIX_PRIVATE_PATH_RE = re.compile(
 _ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
     r"(?:data[/\\](?:raw|interim|processed|research)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_real"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_research"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _RAW_EXPORT_FILENAME_RE = re.compile(

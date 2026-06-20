@@ -17,7 +17,7 @@ from quant_research_platform.contracts.time import TimeWindow
 def add_forward_return_labels(
     frame: pd.DataFrame,
     *,
-    horizons: tuple[int, ...] = (1, 5, 10, 20, 60, 120),
+    horizons: tuple[int, ...],
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",

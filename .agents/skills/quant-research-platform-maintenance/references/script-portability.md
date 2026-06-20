@@ -1,4 +1,4 @@
-# 脚本兼容性（Script portability）
+﻿# 脚本兼容性（Script portability）
 
 治理脚本必须优先兼容用户 Win11 + Python 3.13.14，同时尽量兼容 macOS、Linux、WSL。
 
@@ -26,5 +26,5 @@ PowerShell 不展开 `*.py` 的场景要给出 Python one-liner 替代。路径�
 
 - `.ps1` 作为唯一实现。
 - `.sh` / bash 作为唯一实现。
-- 默认读取 `data/raw`、`data/interim`、`data/processed`、`data/research`、`reports/private_real`。
+- 默认读取 `data/raw`、`data/interim`、`data/processed`、`data/research`、`reports/private_research`。
 - 把未运行检查写成 `PASS`。

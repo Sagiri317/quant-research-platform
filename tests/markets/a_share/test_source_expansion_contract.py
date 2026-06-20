@@ -25,7 +25,7 @@ from quant_research_platform.storage.layout import StorageLayout
 def test_materializer_uses_source_id_parameter_not_csmar_constant() -> None:
     source = inspect.getsource(materializer)
 
-    assert "CSMAR_SOURCE_ID" not in source
+    assert "SOURCE_ID" not in source
     assert "SourceId(\"csmar\")" not in source
 
 
@@ -33,7 +33,7 @@ def test_materializer_uses_source_id_parameter_not_csmar_constant() -> None:
     "source_id",
     [SourceId("synthetic_vendor_a"), SourceId("synthetic_vendor_b")],
 )
-def test_synthetic_normalized_interim_can_generate_daily_panel(
+def test_synthetic_normalized_interim_can_generate_market_panel_1d(
     tmp_path: Path,
     source_id: SourceId,
 ) -> None:
@@ -44,11 +44,11 @@ def test_synthetic_normalized_interim_can_generate_daily_panel(
         layout=layout,
         source_id=source_id,
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
     panel = read_dataset(
-        tmp_path / "data/processed/a_share/panel/daily_panel",
+        tmp_path / "data/processed/a_share/panel/market_panel_1d",
     )
     assert panel["asset_id"].tolist() == ["asset_a", "asset_a"]
     assert "source_asset_id" not in panel.columns
@@ -64,10 +64,10 @@ def test_two_synthetic_sources_generate_same_processed_schema(tmp_path: Path) ->
             layout=layout,
             source_id=source_id,
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
-            data_ids=("daily_panel",),
+            data_ids=("market_panel_1d",),
         )
         frame = read_dataset(
-            layout.project_root / "data/processed/a_share/panel/daily_panel",
+            layout.project_root / "data/processed/a_share/panel/market_panel_1d",
         )
         schemas.append(tuple(frame.columns))
 
@@ -83,10 +83,10 @@ def test_extra_source_columns_do_not_leak_into_processed_schema(tmp_path: Path) 
         layout=layout,
         source_id=source_id,
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
-    panel = read_dataset(tmp_path / "data/processed/a_share/panel/daily_panel")
+    panel = read_dataset(tmp_path / "data/processed/a_share/panel/market_panel_1d")
     assert "vendor_extra_metric" not in panel.columns
 
 
@@ -97,16 +97,16 @@ def test_missing_required_source_column_fails_closed_with_data_id_and_column(
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout, source_id, drop_daily_column="open")
 
-    with pytest.raises(ValueError, match=r"daily_market.*open"):
+    with pytest.raises(ValueError, match=r"market_bars_1d.*open"):
         materializer.materialize_processed_data(
             layout=layout,
             source_id=source_id,
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
-            data_ids=("daily_panel",),
+            data_ids=("market_panel_1d",),
         )
 
 
-def test_normalized_daily_market_contract_excludes_annotation_masks() -> None:
+def test_normalized_market_bars_1d_contract_excludes_annotation_masks() -> None:
     from quant_research_platform.markets.implementations.a_share.validation import (
         internal_tables,
     )
@@ -116,8 +116,8 @@ def test_normalized_daily_market_contract_excludes_annotation_masks() -> None:
         "eligible",
         "can_enter",
         "can_exit",
-        "next_day_is_trading",
-        "next_day_limit_status",
+        "next_bar_is_trading",
+        "next_bar_limit_status",
     }
 
     assert forbidden.isdisjoint(internal_tables.DAILY_MARKET_REQUIRED_COLUMNS)
@@ -136,15 +136,15 @@ def _write_interim_inputs(
         drop_daily_column=drop_daily_column,
     )
     frames = {
-        "daily_market": _daily_market_frame(),
+        "market_bars_1d": _market_bars_1d_frame(),
         "stock_master": _stock_master_frame(),
         "market_cap": _market_cap_frame(),
         "trading_calendar": _trading_calendar_frame(),
     }
     if include_extra_daily_column:
-        frames["daily_market"]["vendor_extra_metric"] = [1.0, 2.0]
+        frames["market_bars_1d"]["vendor_extra_metric"] = [1.0, 2.0]
     if drop_daily_column is not None:
-        frames["daily_market"] = frames["daily_market"].drop(
+        frames["market_bars_1d"] = frames["market_bars_1d"].drop(
             columns=[drop_daily_column]
         )
     for data_id, frame in frames.items():
@@ -162,7 +162,7 @@ def _interim_catalog(
     drop_daily_column: str | None,
 ) -> InterimDataCatalog:
     specs = {
-        "daily_market": (
+        "market_bars_1d": (
             "source_asset_id",
             "timestamp",
             "trade_date",
@@ -177,7 +177,7 @@ def _interim_catalog(
             "amount",
             "prev_close",
             "limit_status",
-            "return_1d",
+            "period_return",
             "adj_close",
             "adj_open",
             "float_market_cap",
@@ -213,8 +213,8 @@ def _interim_catalog(
         ),
     }
     if drop_daily_column is not None:
-        specs["daily_market"] = tuple(
-            column for column in specs["daily_market"] if column != drop_daily_column
+        specs["market_bars_1d"] = tuple(
+            column for column in specs["market_bars_1d"] if column != drop_daily_column
         )
     catalog = InterimDataCatalog()
     for data_id, columns in specs.items():
@@ -247,7 +247,7 @@ def _interim_catalog(
     return catalog
 
 
-def _daily_market_frame() -> pd.DataFrame:
+def _market_bars_1d_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "source_asset_id": ["asset_a", "asset_a"],
@@ -264,7 +264,7 @@ def _daily_market_frame() -> pd.DataFrame:
             "amount": [1000.0, 1000.0],
             "prev_close": [9.9, 10.2],
             "limit_status": [0, 0],
-            "return_1d": [0.01, 0.02],
+            "period_return": [0.01, 0.02],
             "adj_close": [10.2, 11.2],
             "adj_open": [10.0, 11.0],
             "float_market_cap": [100.0, 101.0],

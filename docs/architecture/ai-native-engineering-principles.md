@@ -1,4 +1,4 @@
-# AI-Native Engineering Principles
+﻿# AI-Native Engineering Principles
 
 This project uses AI agents for local implementation work, but QRP Clean Rewrite
 `0.1.0` keeps contracts, source topology, and private boundaries explicit.
@@ -11,7 +11,7 @@ This project uses AI agents for local implementation work, but QRP Clean Rewrite
 - Research assembly, evaluation, prediction, and portfolio work stays under `research`.
 - Agent proposal modules may create proposals or specs only; they do not write parquet or run private data directly.
 - Public API and CLI entry points are spec-first and use `0.1`.
-- Private-derived row-level outputs stay under `data/` or `reports/private_real`.
+- Private-derived row-level outputs stay under `data/` or `reports/private_research`.
 
 ## Guardrails
 

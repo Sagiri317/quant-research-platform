@@ -69,7 +69,7 @@ def test_portfolio_engine_produces_required_signal_artifacts() -> None:
             ),
         ),
         return_source_column="forward_return",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=0,
         weight_config=WeightConfig(
             method="rank_weighted_quantile",
@@ -132,7 +132,7 @@ def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
             ),
         ),
         return_source_column="forward_return",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=0,
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
@@ -167,7 +167,7 @@ def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None
             ),
         ),
         return_source_column="forward_return",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=1,
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
@@ -182,53 +182,23 @@ def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None
     )
 
 
-def test_portfolio_spec_accepts_non_empty_frequency_without_engine_claim() -> None:
-    spec = PortfolioSpec(
-        portfolio_id="weekly_portfolio",
-        market_id=MarketId("a_share"),
-        research_dataset_id="demo",
-        signals=(
-            SignalSpec(
-                signal_id="ranked_signal",
-                source_column="raw_signal",
-                source_kind="factor",
+def test_portfolio_spec_rejects_unsupported_rebalance_frequency() -> None:
+    with pytest.raises(ValueError, match="unsupported_portfolio_rebalance_frequency"):
+        PortfolioSpec(
+            portfolio_id="weekly_portfolio",
+            market_id=MarketId("a_share"),
+            research_dataset_id="demo",
+            signals=(
+                SignalSpec(
+                    signal_id="ranked_signal",
+                    source_column="raw_signal",
+                    source_kind="factor",
+                ),
             ),
-        ),
-        return_source_column="forward_return",
-        frequency="weekly",
-        execution_lag_steps=0,
-    )
-
-    assert spec.frequency == "weekly"
-
-
-def test_portfolio_engine_rejects_unsupported_frequency_at_runtime() -> None:
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["a", "b", "c", "d"],
-            "timestamp": [pd.Timestamp("2024-01-02")] * 4,
-            "raw_signal": [1.0, 2.0, 3.0, 4.0],
-            "forward_return": [0.00, 0.01, 0.02, 0.04],
-        }
-    )
-    spec = PortfolioSpec(
-        portfolio_id="weekly_portfolio",
-        market_id=MarketId("a_share"),
-        research_dataset_id="demo",
-        signals=(
-            SignalSpec(
-                signal_id="ranked_signal",
-                source_column="raw_signal",
-                source_kind="factor",
-            ),
-        ),
-        return_source_column="forward_return",
-        frequency="weekly",
-        execution_lag_steps=0,
-    )
-
-    with pytest.raises(ValueError, match="unsupported_portfolio_frequency"):
-        construct_portfolio_positions(frame, spec)
+            return_source_column="forward_return",
+            rebalance_frequency="weekly",
+            execution_lag_steps=0,
+        )
 
 
 def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
@@ -249,7 +219,7 @@ def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
     )
 
     assert run_root.as_posix().endswith(
-        "reports/private_real/a_share/portfolio/risk_signal_portfolio"
+        "reports/private_research/a_share/portfolio/risk_signal_portfolio"
     )
     for filename in (
         "positions.parquet",
@@ -266,7 +236,7 @@ def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
     ):
         assert (run_root / filename).is_file()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["frequency"] == "1d"
+    assert manifest["rebalance_frequency"] == "1d"
     assert manifest["execution_lag_steps"] == 0
     returns = pd.read_parquet(run_root / "portfolio_returns.parquet")
     assert "return_source_column" in returns.columns
@@ -295,7 +265,7 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     run_root = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "portfolio"
         / "risk_signal_portfolio"
@@ -358,7 +328,7 @@ def _portfolio_spec() -> PortfolioSpec:
             ),
         ),
         return_source_column="forward_return",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=0,
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )

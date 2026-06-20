@@ -16,7 +16,7 @@ from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
-    research_scenarios as a_share_research_scenarios,
+    research_scenarios as scenarios,
 )
 from quant_research_platform.reports.verification_evidence import (
     VerificationEvidenceLayout,
@@ -157,12 +157,12 @@ def _run_verification_evidence_with_policy(
         effective_windows["evaluation_end_date"],
     )
     catalogs = config.profile
-    prediction_catalog = a_share_research_scenarios.build_a_share_prediction_catalog(
+    prediction_catalog = scenarios.build_a_share_prediction_catalog(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
     )
-    portfolio_catalog = a_share_research_scenarios.build_a_share_portfolio_catalog(
-        frequency=config.portfolio_frequency,
+    portfolio_catalog = scenarios.build_portfolio_catalog(
+        rebalance_frequency=config.portfolio_frequency,
         execution_lag_steps=config.portfolio_execution_lag_steps,
     )
     source_id = config.profile.source_id
@@ -193,7 +193,7 @@ def _run_verification_evidence_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             processed_catalog=catalogs.processed,
-            dataset_id="a_share_price_volume_forward_returns",
+            dataset_id="price_volume_forward_returns",
             time_window=time_window,
             resource_policy=resource_policy,
         )
@@ -202,7 +202,7 @@ def _run_verification_evidence_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             evaluation_catalog=catalogs.evaluations,
-            run_id="a_share_signal_forward_return_20d",
+            run_id="signal_forward_return_20d",
             time_window=evaluation_time_window,
         )
     with recorder.record("prediction_generation", logical_layer="evidence"):
@@ -225,7 +225,7 @@ def _run_verification_evidence_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             portfolio_catalog=portfolio_catalog,
-            portfolio_id="a_share_signal_forward_return_20d_portfolio",
+            portfolio_id="signal_forward_return_20d_portfolio",
             time_window=evaluation_time_window,
         )
 
@@ -374,7 +374,7 @@ def validate_private_output_root(output_root: Path, repo_root: Path) -> None:
     except ValueError:
         raise ValueError("unignored_private_output_root") from None
     parts = relative.parts
-    if len(parts) >= 3 and parts[0] == "reports" and parts[1] == "private_real":
+    if len(parts) >= 3 and parts[0] == "reports" and parts[1] == "private_research":
         return
     if len(parts) >= 2 and parts[0] == _RUN_WORKSPACE_DIR:
         run_root = parts[1]

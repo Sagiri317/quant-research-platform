@@ -37,7 +37,12 @@ class StorageLayout:
         return self.project_root / "data/research" / str(market_id) / data_id
 
     def private_research_report_root(self, market_id: MarketId, run_type: str) -> Path:
-        return self.project_root / "reports/private_real" / str(market_id) / run_type
+        return (
+            self.project_root
+            / "reports/private_research"
+            / str(market_id)
+            / run_type
+        )
 
 
 def layout_from_processed_market_root(processed_root: Path) -> StorageLayout:

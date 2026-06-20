@@ -61,8 +61,8 @@ RAW_TABLE_CONTRACTS: dict[str, RawTableContract] = {
             "Statdt",
         ),
     ),
-    "daily_market": RawTableContract(
-        dataset="daily_market",
+    "market_bars_1d": RawTableContract(
+        dataset="market_bars_1d",
         table_code="TRDNEW_Dalyr",
         table_name_zh="日个股回报率文件",
         required_columns=(
@@ -151,7 +151,7 @@ FILENAME_RE = re.compile(
 
 NATIVE_TABLE_DATASETS: dict[str, str] = {
     "TRDNEW_Co": "stock_master",
-    "TRDNEW_Dalyr": "daily_market",
+    "TRDNEW_Dalyr": "market_bars_1d",
     "TRDNEW_Capchg": "market_cap",
     "TRD_AdjustFactor": "adjustment",
     "IDX_Idxinfo": "index_info",

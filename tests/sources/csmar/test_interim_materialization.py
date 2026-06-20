@@ -29,7 +29,7 @@ def test_csmar_interim_catalog_registers_source_owned_specs() -> None:
     specs = interim.interim_catalog().list()
 
     assert {spec.data_id for spec in specs} == {
-        "daily_market",
+        "market_bars_1d",
         "stock_master",
         "market_cap",
         "adjustment",
@@ -52,11 +52,11 @@ def test_csmar_trading_calendar_interim_spec_uses_source_calendar_grain() -> Non
     assert "source_id" not in spec.required_columns
     assert "asset_id" not in spec.required_columns
 
-    daily_market = catalog.get("daily_market")
-    assert daily_market.grain is DataGrain.ASSET_TIMESTAMP
-    assert daily_market.primary_key == ("source_asset_id", "timestamp")
-    assert "source_asset_id" in daily_market.required_columns
-    assert "asset_id" not in daily_market.required_columns
+    market_bars_1d = catalog.get("market_bars_1d")
+    assert market_bars_1d.grain is DataGrain.ASSET_TIMESTAMP
+    assert market_bars_1d.primary_key == ("source_asset_id", "timestamp")
+    assert "source_asset_id" in market_bars_1d.required_columns
+    assert "asset_id" not in market_bars_1d.required_columns
 
     index_info = catalog.get("index_info")
     assert index_info.grain is DataGrain.ASSET_REFERENCE_TIMESTAMP
@@ -240,7 +240,7 @@ def test_csmar_raw_reader_preserves_code_strings_and_index_formula_commas(
         }
     ).to_csv(daily_path, index=False)
 
-    daily = raw_exports.read_private_export_file(daily_path, "daily_market")
+    daily = raw_exports.read_private_export_file(daily_path, "market_bars_1d")
     assert daily.loc[0, "Stkcd"] == "000001"
 
     index_path = tmp_path / "index_info.csv"
@@ -426,10 +426,13 @@ def test_csmar_index_info_dirty_csv_and_bad_dates_fail_closed(
 
 
 def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
-    normalized = interim.normalize_raw_frame(_daily_market_raw_frame(), "daily_market")
+    normalized = interim.normalize_raw_frame(
+        _market_bars_1d_raw_frame(),
+        "market_bars_1d",
+    )
     pruned, report = interim.apply_output_column_rules(
         normalized,
-        "daily_market",
+        "market_bars_1d",
     )
 
     assert pruned["source_asset_id"].tolist() == ["000001", "000002"]
@@ -447,7 +450,7 @@ def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
         "available_at",
         "source_exchange",
     }.intersection(pruned.columns)
-    assert report["data_id"] == "daily_market"
+    assert report["data_id"] == "market_bars_1d"
 
 
 def test_csmar_trading_calendar_normalizer_outputs_source_contract() -> None:
@@ -643,7 +646,7 @@ def test_csmar_full_interim_frame_materialization_entrypoint_is_deleted() -> Non
     assert not hasattr(interim, "build_interim_frame")
 
 
-def test_csmar_daily_market_materializer_streams_chunks_to_storage(
+def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -666,7 +669,7 @@ def test_csmar_daily_market_materializer_streams_chunks_to_storage(
                 "amount": [10200.0],
                 "prev_close": [9.9],
                 "limit_status": [0],
-                "return_1d": [0.03],
+                "period_return": [0.03],
                 "adj_close": [10.2],
                 "adj_open": [10.0],
                 "float_market_cap": [100.0],
@@ -692,39 +695,39 @@ def test_csmar_daily_market_materializer_streams_chunks_to_storage(
 
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
-        data_ids=("daily_market",),
+        data_ids=("market_bars_1d",),
         start_date="2024-01-01",
         end_date="2024-12-31",
         chunksize=1,
     )
 
-    assert captured["data_id"] == "daily_market"
+    assert captured["data_id"] == "market_bars_1d"
     assert len(captured["chunks"]) == 1
-    assert result.artifact_roots["daily_market"] == captured["root"]
+    assert result.artifact_roots["market_bars_1d"] == captured["root"]
 
 
 def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "data" / "raw" / "csmar" / "daily_market"
+    raw_dir = tmp_path / "data" / "raw" / "csmar" / "market_bars_1d"
     raw_dir.mkdir(parents=True, exist_ok=True)
     export = raw_dir / (
-        "csmar__daily_market__all_a_ex_bjse__20240101_20241231__"
+        "csmar__market_bars_1d__all_a_ex_bjse__20240101_20241231__"
         "part-00__export-20260515.csv"
     )
-    _daily_market_raw_frame().to_csv(export, index=False)
+    _market_bars_1d_raw_frame().to_csv(export, index=False)
 
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
-        data_ids=("daily_market",),
+        data_ids=("market_bars_1d",),
         start_date="2024-01-01",
         end_date="2024-12-31",
         chunksize=1,
     )
 
-    artifact_root = result.artifact_roots["daily_market"]
+    artifact_root = result.artifact_roots["market_bars_1d"]
     read_back = read_dataset(artifact_root)
     inspection = inspect_dataset(artifact_root)
 
-    assert artifact_root == tmp_path / "data" / "interim" / "csmar" / "daily_market"
+    assert artifact_root == tmp_path / "data" / "interim" / "csmar" / "market_bars_1d"
     assert inspection.file_count >= 1
     assert inspection.row_count == 2
     assert len(read_back) == 2
@@ -732,7 +735,7 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     assert "market_id" not in read_back.columns
 
 
-def _daily_market_raw_frame() -> pd.DataFrame:
+def _market_bars_1d_raw_frame() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {

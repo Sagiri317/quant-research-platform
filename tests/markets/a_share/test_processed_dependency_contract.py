@@ -24,14 +24,14 @@ from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import SessionWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_AS_OF_MASK_ID,
-    A_SHARE_DEFAULT_UNIVERSE_ID,
-    A_SHARE_EVALUATION_MASK_ID,
-    A_SHARE_EXECUTION_MASK_ID,
-    DAILY_CONTEXT_PROCESSED_DATA_ID,
-    DAILY_PANEL_PROCESSED_DATA_ID,
+    AS_OF_MASK_ID,
+    DEFAULT_UNIVERSE_ID,
+    EVALUATION_MASK_ID,
+    EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
+    market_context_data_id,
+    market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
@@ -56,31 +56,31 @@ def test_a_share_processed_specs_declare_exact_direct_dependencies() -> None:
     }
 
     assert dependencies == {
-        DAILY_PANEL_PROCESSED_DATA_ID: (
-            ("daily_market", "stock_master", "market_cap", "trading_calendar"),
+        market_panel_data_id(): (
+            ("market_bars_1d", "stock_master", "market_cap", "trading_calendar"),
             (),
         ),
-        DAILY_CONTEXT_PROCESSED_DATA_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
-        A_SHARE_DEFAULT_UNIVERSE_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
-        A_SHARE_AS_OF_MASK_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
-        A_SHARE_EXECUTION_MASK_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
-        A_SHARE_EVALUATION_MASK_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
-        PRICE_VOLUME_PROCESSED_DATA_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
-        FORWARD_RETURNS_PROCESSED_DATA_ID: ((), (DAILY_PANEL_PROCESSED_DATA_ID,)),
+        market_context_data_id(): ((), (market_panel_data_id(),)),
+        DEFAULT_UNIVERSE_ID: ((), (market_panel_data_id(),)),
+        AS_OF_MASK_ID: ((), (market_panel_data_id(),)),
+        EXECUTION_MASK_ID: ((), (market_panel_data_id(),)),
+        EVALUATION_MASK_ID: ((), (market_panel_data_id(),)),
+        PRICE_VOLUME_PROCESSED_DATA_ID: ((), (market_panel_data_id(),)),
+        FORWARD_RETURNS_PROCESSED_DATA_ID: ((), (market_panel_data_id(),)),
     }
 
 
-def test_panel_materializer_skips_daily_market_source_preload(
+def test_panel_materializer_skips_market_bars_1d_source_preload(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     source_id = SourceId("synthetic_vendor_a")
     spec = _processed_spec(
-        "daily_panel",
+        "market_panel_1d",
         kind=ProcessedDataKind.PANEL,
-        source_input_data_ids=("daily_market", "trading_calendar"),
+        source_input_data_ids=("market_bars_1d", "trading_calendar"),
     )
-    _write_interim_frame(layout, source_id, "daily_market")
+    _write_interim_frame(layout, source_id, "market_bars_1d")
     _write_interim_frame(layout, source_id, "trading_calendar")
 
     inputs = materializer._read_source_inputs_for_spec(
@@ -97,11 +97,11 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    panel_spec = _processed_spec("daily_panel", kind=ProcessedDataKind.PANEL)
+    panel_spec = _processed_spec("market_panel_1d", kind=ProcessedDataKind.PANEL)
     target = _processed_spec(
         "price_volume",
         kind=ProcessedDataKind.FACTOR,
-        processed_input_data_ids=("daily_panel",),
+        processed_input_data_ids=("market_panel_1d",),
     )
     write_dataset(
         layout.processed_data_root(
@@ -119,8 +119,8 @@ def test_materializer_reads_processed_inputs_from_spec_processed_input_data_ids(
         processed_catalog=_catalog(panel_spec, target),
     )
 
-    assert set(inputs) == {"daily_panel"}
-    assert inputs["daily_panel"]["asset_id"].tolist() == ["asset_a"]
+    assert set(inputs) == {"market_panel_1d"}
+    assert inputs["market_panel_1d"]["asset_id"].tolist() == ["asset_a"]
 
 
 def test_materializer_validates_unknown_processed_dependency() -> None:
@@ -203,10 +203,10 @@ def test_future_tradable_forward_return_spec_depends_on_execution_mask() -> None
         "tradable_forward_return",
         kind=ProcessedDataKind.LABEL,
         columns=(*platform_entity_time_key(), "tradable_forward_return_1d"),
-        processed_input_data_ids=("daily_panel", "a_share_execution"),
+        processed_input_data_ids=("market_panel_1d", "execution"),
     )
 
-    assert spec.processed_input_data_ids == ("daily_panel", "a_share_execution")
+    assert spec.processed_input_data_ids == ("market_panel_1d", "execution")
 
 
 def test_write_paths_read_processed_inputs_via_helper(
@@ -255,7 +255,7 @@ def test_write_paths_read_processed_inputs_via_helper(
             calls["factor"] += 1
         elif spec.kind is ProcessedDataKind.LABEL:
             calls["label"] += 1
-        return {"daily_panel": _panel_frame_for_write_path()}
+        return {"market_panel_1d": _panel_frame_for_write_path()}
 
     def fake_derive_annotations(
         panel: pd.DataFrame,
@@ -264,8 +264,8 @@ def test_write_paths_read_processed_inputs_via_helper(
         **kwargs: object,
     ) -> dict[str, pd.DataFrame]:
         output = _key_frame().assign(
-            next_day_is_trading=[True],
-            next_day_limit_status=[0],
+            next_bar_is_trading=[True],
+            next_bar_limit_status=[0],
             can_enter=[True],
             can_exit=[True],
         )
@@ -370,16 +370,16 @@ def test_write_paths_read_processed_inputs_via_helper(
 
     materializer._write_annotation(
         _processed_spec(
-            "a_share_execution",
+            "execution",
             kind=ProcessedDataKind.ANNOTATION,
             columns=(
                 *platform_entity_time_key(),
-                "next_day_is_trading",
-                "next_day_limit_status",
+                "next_bar_is_trading",
+                "next_bar_limit_status",
                 "can_enter",
                 "can_exit",
             ),
-            processed_input_data_ids=("daily_panel",),
+            processed_input_data_ids=("market_panel_1d",),
         ),
         layout=layout,
         time_window=window,
@@ -392,7 +392,7 @@ def test_write_paths_read_processed_inputs_via_helper(
             "price_volume",
             kind=ProcessedDataKind.FACTOR,
             columns=(*platform_entity_time_key(), "mom_20d"),
-            processed_input_data_ids=("daily_panel",),
+            processed_input_data_ids=("market_panel_1d",),
         ),
         layout=layout,
         time_window=window,
@@ -405,7 +405,7 @@ def test_write_paths_read_processed_inputs_via_helper(
             "forward_returns",
             kind=ProcessedDataKind.LABEL,
             columns=(*platform_entity_time_key(), "forward_return_20d"),
-            processed_input_data_ids=("daily_panel",),
+            processed_input_data_ids=("market_panel_1d",),
         ),
         layout=layout,
         time_window=window,
@@ -427,16 +427,16 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    panel_spec = _processed_spec("daily_panel", kind=ProcessedDataKind.PANEL)
+    panel_spec = _processed_spec("market_panel_1d", kind=ProcessedDataKind.PANEL)
     execution_spec = _processed_spec(
-        "a_share_execution",
+        "execution",
         kind=ProcessedDataKind.ANNOTATION,
     )
     target = _processed_spec(
         "tradable_forward_return",
         kind=ProcessedDataKind.LABEL,
         columns=(*platform_entity_time_key(), "tradable_forward_return_1d"),
-        processed_input_data_ids=("daily_panel", "a_share_execution"),
+        processed_input_data_ids=("market_panel_1d", "execution"),
     )
     for spec in (panel_spec, execution_spec):
         write_dataset(
@@ -451,13 +451,13 @@ def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(
         processed_catalog=_catalog(panel_spec, execution_spec, target),
     )
 
-    assert set(inputs) == {"daily_panel", "a_share_execution"}
+    assert set(inputs) == {"market_panel_1d", "execution"}
     with pytest.raises(
         ValueError,
         match="unsupported_a_share_label_family: tradable_forward_return",
     ):
         label_calculations.calculate_labels_for_panel(
-            inputs["daily_panel"],
+            inputs["market_panel_1d"],
             definitions=(
                 LabelDefinition(
                     label_id="tradable_forward_return_1d",
@@ -571,7 +571,7 @@ def _factor_definition(output_column: str, *, lookback_window: int) -> FactorDef
         input_columns=("adj_close",),
         output_column=output_column,
         family="price_volume",
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
         lookback_window=lookback_window,
         window=lookback_window,
     )

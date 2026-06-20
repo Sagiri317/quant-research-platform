@@ -5,7 +5,7 @@ from __future__ import annotations
 from quant_research_platform.catalog.fields import FieldCatalog, platform_field_catalog
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
 
-A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
+FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="stock_name", role=ColumnRole.CONTEXT, dtype="string"),
     FieldSpec(name="market_type", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="trading_status_code", role=ColumnRole.CONTEXT, dtype="float64"),
@@ -20,7 +20,7 @@ A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="volume", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="amount", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="turnover", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="return_1d", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="period_return", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="limit_status", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="is_limit_up", role=ColumnRole.MASK, dtype="bool"),
     FieldSpec(name="is_limit_down", role=ColumnRole.MASK, dtype="bool"),
@@ -65,9 +65,9 @@ A_SHARE_FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="a_float_shares", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="total_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="float_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="next_day_is_trading", role=ColumnRole.MASK, dtype="bool"),
+    FieldSpec(name="next_bar_is_trading", role=ColumnRole.MASK, dtype="bool"),
     FieldSpec(
-        name="next_day_limit_status",
+        name="next_bar_limit_status",
         role=ColumnRole.CONTEXT,
         dtype="float64",
     ),
@@ -78,9 +78,9 @@ def a_share_field_catalog() -> FieldCatalog:
     """Return platform canonical fields plus A-share-only processed fields."""
 
     catalog = platform_field_catalog()
-    for spec in A_SHARE_FIELD_SPECS:
+    for spec in FIELD_SPECS:
         catalog.register(spec)
     return catalog
 
 
-__all__ = ["A_SHARE_FIELD_SPECS", "a_share_field_catalog"]
+__all__ = ["FIELD_SPECS", "a_share_field_catalog"]

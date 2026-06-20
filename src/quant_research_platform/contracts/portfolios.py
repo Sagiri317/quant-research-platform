@@ -18,6 +18,7 @@ WEIGHT_METHODS = {
 PORTFOLIO_MODES = {"long_short", "long_only"}
 BLOCKED_ENTRY_POLICIES = {"skip", "hold_cash", "redistribute"}
 BLOCKED_EXIT_POLICIES = {"carry_forward", "force_exit", "error"}
+SUPPORTED_REBALANCE_FREQUENCIES = {"1d"}
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,7 @@ class PortfolioSpec:
     research_dataset_id: str
     signals: tuple[SignalSpec, ...]
     return_source_column: str
-    frequency: str
+    rebalance_frequency: str
     execution_lag_steps: int
     weight_config: WeightConfig = field(default_factory=WeightConfig)
     cost_config: CostConfig = field(default_factory=CostConfig)
@@ -136,8 +137,11 @@ class PortfolioSpec:
             or not self.return_source_column
         ):
             raise ValueError("portfolio_return_source_column_required")
-        if not isinstance(self.frequency, str) or not self.frequency:
-            raise ValueError("portfolio_frequency_required")
+        object.__setattr__(
+            self,
+            "rebalance_frequency",
+            normalize_rebalance_frequency(self.rebalance_frequency),
+        )
         if not isinstance(self.execution_lag_steps, int) or isinstance(
             self.execution_lag_steps,
             bool,
@@ -186,13 +190,24 @@ def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[st
     return sorted(overlaps)
 
 
+def normalize_rebalance_frequency(value: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("portfolio_rebalance_frequency_required")
+    normalized = value.strip().lower()
+    if normalized not in SUPPORTED_REBALANCE_FREQUENCIES:
+        raise ValueError("unsupported_portfolio_rebalance_frequency")
+    return normalized
+
+
 __all__ = [
     "BLOCKED_ENTRY_POLICIES",
     "BLOCKED_EXIT_POLICIES",
     "CostConfig",
     "PORTFOLIO_MODES",
     "PortfolioSpec",
+    "SUPPORTED_REBALANCE_FREQUENCIES",
     "TradabilityConfig",
     "WEIGHT_METHODS",
     "WeightConfig",
+    "normalize_rebalance_frequency",
 ]

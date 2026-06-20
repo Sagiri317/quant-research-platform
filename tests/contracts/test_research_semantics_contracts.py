@@ -149,19 +149,19 @@ def test_evaluation_and_portfolio_specs_are_signal_owned() -> None:
         direction="higher_is_better",
     )
     evaluation = EvaluationSpec(
-        run_id="a_share_signal_eval",
+        run_id="signal_eval",
         market_id=MarketId("a_share"),
         research_dataset_id="a_share_research",
         signals=(signal,),
         label_columns=("forward_return_20d",),
     )
     portfolio = PortfolioSpec(
-        portfolio_id="a_share_signal_portfolio",
+        portfolio_id="signal_portfolio",
         market_id=MarketId("a_share"),
         research_dataset_id="a_share_research",
         signals=(signal,),
         return_source_column="forward_return_20d",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=0,
     )
 
@@ -238,7 +238,7 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
         research_dataset_id="a_share_research",
         signals=(own_name_signal,),
         return_source_column="forward_return_20d",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=0,
     )
 
@@ -269,7 +269,7 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
             research_dataset_id="a_share_research",
             signals=cross_collision,
             return_source_column="forward_return_20d",
-            frequency="1d",
+            rebalance_frequency="1d",
             execution_lag_steps=0,
         )
 
@@ -296,7 +296,7 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
                 ),
             ),
             return_source_column="forward_return_20d",
-            frequency="1d",
+            rebalance_frequency="1d",
             execution_lag_steps=0,
         )
 
@@ -313,7 +313,7 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
                 ),
             ),
             return_source_column="forward_return_20d",
-            frequency="1d",
+            rebalance_frequency="1d",
             execution_lag_steps=0,
         )
 
@@ -330,7 +330,7 @@ def test_portfolio_signal_contract_rejects_duplicate_and_reserved_names() -> Non
                 ),
             ),
             return_source_column="forward_return_20d",
-            frequency="1d",
+            rebalance_frequency="1d",
             execution_lag_steps=0,
             weight_column="prediction_score",
         )

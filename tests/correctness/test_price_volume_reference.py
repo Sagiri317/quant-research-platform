@@ -164,14 +164,14 @@ def test_rolling_aggregate_requires_finite_values_for_entire_window() -> None:
 
 def test_price_volume_calculates_requested_factor_without_unneeded_inputs() -> None:
     panel = synthetic_price_volume_panel(sessions=6, assets=("asset_a",))
-    minimal = panel.loc[:, ["market_id", "asset_id", "timestamp", "return_1d"]]
+    minimal = panel.loc[:, ["market_id", "asset_id", "timestamp", "period_return"]]
 
     result = calculate_price_volume_factors(
         minimal,
         factor_columns=("rev_1d",),
     )
 
-    expected = -minimal["return_1d"]
+    expected = -minimal["period_return"]
     pd.testing.assert_series_equal(result["rev_1d"], expected, check_names=False)
 
 
@@ -192,11 +192,14 @@ def test_price_volume_qrp_moment_contract_edge_windows() -> None:
     panel = synthetic_price_volume_panel(sessions=80, assets=("asset_a", "asset_b"))
     asset_a = panel["asset_id"].eq("asset_a")
     asset_b = panel["asset_id"].eq("asset_b")
-    panel.loc[asset_a & panel.index.to_series().between(0, 24), "return_1d"] = 0.0
-    panel.loc[asset_a & panel.index.to_series().between(25, 49), "return_1d"] = [
+    panel.loc[asset_a & panel.index.to_series().between(0, 24), "period_return"] = 0.0
+    panel.loc[asset_a & panel.index.to_series().between(25, 49), "period_return"] = [
         1e-12 + index * 1e-15 for index in range(25)
     ]
-    panel.loc[asset_a & panel.index.to_series().between(50, 54), "return_1d"] = pd.NA
+    panel.loc[
+        asset_a & panel.index.to_series().between(50, 54),
+        "period_return",
+    ] = pd.NA
     panel.loc[asset_b & panel.index.to_series().between(80, 84), "turnover"] = pd.NA
     factor_columns = (
         "vol_20d",
@@ -228,7 +231,7 @@ def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
     panel = synthetic_price_volume_panel(sessions=12, assets=("asset_a", "asset_b"))
     asset_a = panel["asset_id"].eq("asset_a")
     asset_b = panel["asset_id"].eq("asset_b")
-    panel.loc[asset_a, "return_1d"] = [
+    panel.loc[asset_a, "period_return"] = [
         1_000_000.0,
         1_000_000.0000000001,
         1_000_000.0,
@@ -236,8 +239,8 @@ def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
         1_000_000.0000000001,
         *[1_000_000.0] * 7,
     ]
-    panel.loc[asset_a, "turnover"] = panel.loc[asset_a, "return_1d"]
-    panel.loc[asset_b, "return_1d"] = [
+    panel.loc[asset_a, "turnover"] = panel.loc[asset_a, "period_return"]
+    panel.loc[asset_b, "period_return"] = [
         0.9999999379513019,
         0.999999985798791,
         0.9999997798638084,
@@ -245,7 +248,7 @@ def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
         1.0000001128020557,
         *[1.0] * 7,
     ]
-    panel.loc[asset_b, "turnover"] = panel.loc[asset_b, "return_1d"]
+    panel.loc[asset_b, "turnover"] = panel.loc[asset_b, "period_return"]
     factor_columns = ("vol_5d", "skew_5d", "kurt_5d", "turnover_vol_5d")
 
     result = calculate_price_volume_factors(
@@ -270,7 +273,7 @@ def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
 def test_price_volume_moments_use_qrp_formula_above_near_zero_threshold() -> None:
     panel = synthetic_price_volume_panel(sessions=12, assets=("asset_a",))
     first_window = [-3e-6, -1e-6, 0.0, 1e-6, 5e-6]
-    panel.loc[:4, "return_1d"] = first_window
+    panel.loc[:4, "period_return"] = first_window
     panel.loc[:4, "turnover"] = [0.01 + value for value in first_window]
     factor_columns = ("vol_5d", "skew_5d", "kurt_5d", "turnover_vol_5d")
 
@@ -294,7 +297,7 @@ def test_price_volume_moments_use_qrp_formula_above_near_zero_threshold() -> Non
 def test_price_volume_well_conditioned_moments_cross_check_pandas() -> None:
     rng = pd.Series(range(80), dtype="float64")
     panel = synthetic_price_volume_panel(sessions=80, assets=("asset_a",))
-    panel["return_1d"] = 0.02 * ((rng % 9) - 4) + 0.001 * (rng % 5)
+    panel["period_return"] = 0.02 * ((rng % 9) - 4) + 0.001 * (rng % 5)
     panel["turnover"] = 0.05 + 0.01 * ((rng % 7) - 3)
     factor_columns = ("vol_20d", "skew_20d", "kurt_20d", "turnover_vol_20d")
 
@@ -305,7 +308,7 @@ def test_price_volume_well_conditioned_moments_cross_check_pandas() -> None:
     reference = _reference_price_volume_factors(panel, factor_columns=factor_columns)
     group_keys = panel.sort_values(["asset_id", "timestamp"])["asset_id"]
     returns = pd.to_numeric(
-        panel.sort_values(["asset_id", "timestamp"])["return_1d"],
+        panel.sort_values(["asset_id", "timestamp"])["period_return"],
         errors="coerce",
     )
     turnover = pd.to_numeric(
@@ -370,7 +373,7 @@ def test_price_volume_uses_past_rows_only_for_past_timestamps() -> None:
     split_date = pd.Timestamp("2020-03-02")
     changed_future.loc[
         pd.to_datetime(changed_future["timestamp"]).gt(split_date),
-        ["return_1d", "turnover"],
+        ["period_return", "turnover"],
     ] = [0.50, 0.75]
     factor_columns = ("vol_20d", "skew_20d", "kurt_20d", "turnover_vol_20d")
 

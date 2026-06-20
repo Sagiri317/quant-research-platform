@@ -46,7 +46,7 @@ def _file_sha256(path: Path) -> str:
 def _metadata_frequency(dataset: str) -> str:
     if dataset == "trading_calendar":
         return "reference_calendar"
-    if dataset in {"daily_market", "adjustment", "index_market"}:
+    if dataset in {"market_bars_1d", "adjustment", "index_market"}:
         return "daily"
     return "event_or_static"
 

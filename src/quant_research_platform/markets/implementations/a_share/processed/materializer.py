@@ -32,7 +32,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    DAILY_PANEL_PROCESSED_DATA_ID,
+    market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
@@ -71,15 +71,15 @@ class _ProcessedInputContract:
     primary_input_data_id: str
 
 
-_DAILY_PANEL_INPUT_CONTRACT = _ProcessedInputContract(
-    required_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
-    primary_input_data_id=DAILY_PANEL_PROCESSED_DATA_ID,
+_MARKET_PANEL_INPUT_CONTRACT = _ProcessedInputContract(
+    required_input_data_ids=(market_panel_data_id(),),
+    primary_input_data_id=market_panel_data_id(),
 )
 _FACTOR_FAMILY_INPUT_CONTRACTS = {
-    "price_volume": _DAILY_PANEL_INPUT_CONTRACT,
+    "price_volume": _MARKET_PANEL_INPUT_CONTRACT,
 }
 _LABEL_FAMILY_INPUT_CONTRACTS = {
-    "forward_return": _DAILY_PANEL_INPUT_CONTRACT,
+    "forward_return": _MARKET_PANEL_INPUT_CONTRACT,
 }
 
 
@@ -232,18 +232,18 @@ def _write_panel(
     stock_master = source_inputs["stock_master"]
     market_cap = source_inputs["market_cap"]
     trading_calendar = source_inputs["trading_calendar"]
-    daily_market_root = layout.interim_data_root(source_id, "daily_market")
-    daily_market_inspection = inspect_dataset(daily_market_root)
+    market_bars_1d_root = layout.interim_data_root(source_id, "market_bars_1d")
+    market_bars_1d_inspection = inspect_dataset(market_bars_1d_root)
     _require_source_input_columns_from_schema(
-        "daily_market",
-        daily_market_inspection.columns,
+        "market_bars_1d",
+        market_bars_1d_inspection.columns,
         columns=("open", "high", "low", "close", "volume", "amount"),
     )
     estimated = _estimate_panel_bytes_per_session(
         sessions,
         time_window=time_window,
-        daily_market_root=daily_market_root,
-        inspection=daily_market_inspection,
+        market_bars_1d_root=market_bars_1d_root,
+        inspection=market_bars_1d_inspection,
         stock_master=stock_master,
         market_cap=market_cap,
         trading_calendar=trading_calendar,
@@ -253,7 +253,7 @@ def _write_panel(
         sessions,
         time_window=time_window,
         policy=policy,
-        inspection=daily_market_inspection,
+        inspection=market_bars_1d_inspection,
         estimated_bytes_per_session=estimated,
         lookahead_sessions=1,
         reason="panel_next_session",
@@ -261,14 +261,14 @@ def _write_panel(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            daily_market = read_dataset(daily_market_root, time_window=window.read)
+            market_bars_1d = read_dataset(market_bars_1d_root, time_window=window.read)
             _require_source_input_columns(
-                "daily_market",
-                daily_market,
+                "market_bars_1d",
+                market_bars_1d,
                 columns=("open", "high", "low", "close", "volume", "amount"),
             )
-            panel = panels.compute_daily_panel(
-                daily_market,
+            panel = panels.compute_market_panel(
+                market_bars_1d,
                 stock_master=stock_master,
                 market_cap=market_cap,
                 trading_calendar=trading_calendar,
@@ -726,7 +726,7 @@ def _estimate_panel_bytes_per_session(
     sessions: tuple[pd.Timestamp, ...],
     *,
     time_window: TimeWindow,
-    daily_market_root: Path,
+    market_bars_1d_root: Path,
     inspection: DatasetInspection,
     stock_master: pd.DataFrame,
     market_cap: pd.DataFrame,
@@ -739,9 +739,9 @@ def _estimate_panel_bytes_per_session(
         lookahead_sessions=1,
         reason="panel_sizing",
     )
-    daily_market = read_dataset(daily_market_root, time_window=sample.read)
-    panel = panels.compute_daily_panel(
-        daily_market,
+    market_bars_1d = read_dataset(market_bars_1d_root, time_window=sample.read)
+    panel = panels.compute_market_panel(
+        market_bars_1d,
         stock_master=stock_master,
         market_cap=market_cap,
         trading_calendar=trading_calendar,
@@ -749,7 +749,7 @@ def _estimate_panel_bytes_per_session(
     output = _filter_output_sessions(panel, sample.core_sessions)
     selected = output.loc[:, list(required_columns)]
     return _measured_peak_bytes_per_session(
-        frames=(daily_market, panel, selected),
+        frames=(market_bars_1d, panel, selected),
         row_count=len(selected),
         sessions=sample.core_sessions,
         inspection=inspection,
@@ -910,7 +910,7 @@ def _select_label_definitions_for_spec(
 def _annotation_input_contract(spec: ProcessedDataSpec) -> _ProcessedInputContract:
     if spec.kind is not ProcessedDataKind.ANNOTATION:
         raise ValueError(f"invalid_annotation_spec_kind: {spec.data_id}")
-    return _DAILY_PANEL_INPUT_CONTRACT
+    return _MARKET_PANEL_INPUT_CONTRACT
 
 
 def _factor_input_contract(
@@ -918,7 +918,7 @@ def _factor_input_contract(
 ) -> _ProcessedInputContract:
     families = tuple(dict.fromkeys(definition.family for definition in definitions))
     if not families:
-        return _DAILY_PANEL_INPUT_CONTRACT
+        return _MARKET_PANEL_INPUT_CONTRACT
     if len(families) > 1:
         raise ValueError("mixed_factor_families: " + ", ".join(families))
     try:
@@ -932,7 +932,7 @@ def _label_input_contract(
 ) -> _ProcessedInputContract:
     families = tuple(dict.fromkeys(definition.family for definition in definitions))
     if not families:
-        return _DAILY_PANEL_INPUT_CONTRACT
+        return _MARKET_PANEL_INPUT_CONTRACT
     if len(families) > 1:
         raise ValueError("mixed_label_families: " + ", ".join(families))
     try:
@@ -978,7 +978,7 @@ def _read_source_inputs_for_spec(
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
     for data_id in spec.source_input_data_ids:
-        if spec.kind is ProcessedDataKind.PANEL and data_id == "daily_market":
+        if spec.kind is ProcessedDataKind.PANEL and data_id == "market_bars_1d":
             continue
         root = layout.interim_data_root(source_id, data_id)
         inputs[data_id] = read_dataset(root)

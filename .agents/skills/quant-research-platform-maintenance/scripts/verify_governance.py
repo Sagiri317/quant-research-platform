@@ -34,7 +34,7 @@ BUSINESS_PREFIXES = (
     "pyproject.toml",
     "environment.yml",
     "data/",
-    "reports/private_real/",
+    "reports/private_research/",
 )
 
 PRIVATE_ROOTS = (
@@ -42,7 +42,7 @@ PRIVATE_ROOTS = (
     "data/interim/",
     "data/processed/",
     "data/research/",
-    "reports/private_real/",
+    "reports/private_research/",
 )
 
 BLOCKED_EXTENSIONS = {

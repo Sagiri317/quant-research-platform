@@ -13,8 +13,8 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_MARKET_ID,
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+    MARKET_ID,
+    PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
@@ -59,10 +59,10 @@ def test_local_profile_market_catalogs_delegate_to_a_share_owner_factories() -> 
 def test_local_profile_research_dataset_catalog_delegates_to_a_share_owner() -> None:
     catalogs = research_profile()
     profile_spec = catalogs.research_datasets.get(
-        A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
+        PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
     owner_spec = build_a_share_research_dataset_catalog().get(
-        A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
+        PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 
     assert profile_spec.data_id == owner_spec.data_id
@@ -74,8 +74,8 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
     specs = catalogs.processed.list()
     kinds_by_id = {spec.data_id: spec.kind for spec in specs}
 
-    assert kinds_by_id["daily_panel"] is ProcessedDataKind.PANEL
-    assert kinds_by_id["daily_context"] is ProcessedDataKind.ANNOTATION
+    assert kinds_by_id["market_panel_1d"] is ProcessedDataKind.PANEL
+    assert kinds_by_id["market_context_1d"] is ProcessedDataKind.ANNOTATION
     assert kinds_by_id["price_volume"] is ProcessedDataKind.FACTOR
     assert kinds_by_id["forward_returns"] is ProcessedDataKind.LABEL
     assert all(not hasattr(spec, "category") for spec in specs)
@@ -83,7 +83,7 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
 
 def test_local_profile_internal_registries_are_platform_composed() -> None:
     catalogs = research_profile()
-    market = catalogs.markets.get(A_SHARE_MARKET_ID)
+    market = catalogs.markets.get(MARKET_ID)
     owner_market = a_share_market_definition()
     source = catalogs.sources.get("csmar")
 
@@ -105,7 +105,7 @@ def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
     assert {
         spec.data_id for spec in source_catalogs["csmar"].list()
     } == {
-        "daily_market",
+        "market_bars_1d",
         "stock_master",
         "market_cap",
         "adjustment",

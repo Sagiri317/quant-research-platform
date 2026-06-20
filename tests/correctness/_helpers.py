@@ -54,7 +54,7 @@ def synthetic_price_volume_panel(
                     "market_id": "a_share",
                     "asset_id": asset_id,
                     "timestamp": timestamp,
-                    "return_1d": 0.001 * asset_index + wave,
+                    "period_return": 0.001 * asset_index + wave,
                     "adj_close": close,
                     "adj_open": close * 0.997,
                     "open": close * 0.997,
@@ -85,7 +85,7 @@ def _reference_price_volume_factors(
     group_keys = result["asset_id"]
     grouped = result.groupby("asset_id", sort=False)
     price = pd.to_numeric(result["adj_close"], errors="coerce")
-    returns = pd.to_numeric(result["return_1d"], errors="coerce")
+    returns = pd.to_numeric(result["period_return"], errors="coerce")
     amount = pd.to_numeric(result["amount"], errors="coerce")
     turnover = pd.to_numeric(result["turnover"], errors="coerce")
     requested = tuple(dict.fromkeys(factor_columns))
@@ -129,11 +129,11 @@ def _reference_price_volume_factors(
                 window,
             )
         if f"max_return_{window}d" in requested_set:
-            result[f"max_return_{window}d"] = grouped["return_1d"].transform(
+            result[f"max_return_{window}d"] = grouped["period_return"].transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).max()
             )
         if f"min_return_{window}d" in requested_set:
-            result[f"min_return_{window}d"] = grouped["return_1d"].transform(
+            result[f"min_return_{window}d"] = grouped["period_return"].transform(
                 lambda series, w=window: series.rolling(w, min_periods=w).min()
             )
         if f"drawdown_{window}d" in requested_set:
@@ -652,7 +652,7 @@ def write_minimal_interim_inputs(
     catalog = interim_catalog()
     source_id = SourceId("csmar")
     frames = {
-        "daily_market": minimal_daily_market_frame(
+        "market_bars_1d": minimal_market_bars_1d_frame(
             start_date=start_date,
             end_date=end_date,
         ),
@@ -672,7 +672,7 @@ def write_minimal_interim_inputs(
         )
 
 
-def minimal_daily_market_frame(
+def minimal_market_bars_1d_frame(
     *,
     start_date: str = "2014-01-02",
     end_date: str = "2014-01-03",
@@ -698,7 +698,7 @@ def minimal_daily_market_frame(
                 "amount": 10200.0 + offset,
                 "prev_close": 9.9 + offset,
                 "limit_status": 0,
-                "return_1d": 0.01,
+                "period_return": 0.01,
                 "adj_close": 10.2 + offset,
                 "adj_open": 10.0 + offset,
                 "float_market_cap": 100000.0 + offset,

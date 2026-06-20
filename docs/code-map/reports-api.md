@@ -1,4 +1,4 @@
-# Reports And API Code Map
+﻿# Reports And API Code Map
 
 QRP Clean Rewrite `0.1.0` treats evaluation and prediction evidence as private
 report outputs behind 0.1 contracts. This file records current implementation
@@ -9,7 +9,7 @@ ownership only.
 ```text
 research/evaluations
 -> reports/report_artifacts.py
--> reports/private_real/<market>/<run_type>/<run_id>
+-> reports/private_research/<market>/<run_type>/<run_id>
 ```
 
 ## Contract Boundaries

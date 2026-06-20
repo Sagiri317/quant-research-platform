@@ -1,20 +1,20 @@
-"""Execution mode contract for public API and CLI entry points."""
+"""Workflow run mode contract for validation and artifact-writing paths."""
 
 from __future__ import annotations
 
 from enum import StrEnum
 
 
-class ExecutionMode(StrEnum):
-    EXECUTE = "execute"
-    DRY_RUN = "dry_run"
+class WorkflowRunMode(StrEnum):
+    VALIDATE_ONLY = "validate_only"
+    WRITE_ARTIFACTS = "write_artifacts"
 
     @classmethod
-    def default(cls) -> ExecutionMode:
-        return cls.EXECUTE
+    def default(cls) -> WorkflowRunMode:
+        return cls.VALIDATE_ONLY
 
     @classmethod
-    def normalize(cls, value: ExecutionMode | str | None) -> ExecutionMode:
+    def normalize(cls, value: WorkflowRunMode | str | None) -> WorkflowRunMode:
         if value is None:
             return cls.default()
         if isinstance(value, cls):
@@ -22,7 +22,7 @@ class ExecutionMode(StrEnum):
         try:
             return cls(str(value))
         except ValueError as exc:
-            raise ValueError(f"invalid_execution_mode: {value}") from exc
+            raise ValueError(f"invalid_workflow_run_mode: {value}") from exc
 
 
-__all__ = ["ExecutionMode"]
+__all__ = ["WorkflowRunMode"]

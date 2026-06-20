@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
 
@@ -21,6 +21,129 @@ class ModelFitResult:
     coefficients: np.ndarray
     metadata: dict[str, object]
     prediction_model: object | None = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class _AlgorithmFacts:
+    algorithm: str
+    dependency_package: str | None = None
+    default_hyperparameters: Mapping[str, object] = field(default_factory=dict)
+    smoke_hyperparameters: Mapping[str, object] = field(default_factory=dict)
+
+
+_MODEL_ALGORITHM_FACTS = {
+    "linear_regression": _AlgorithmFacts("linear_regression", "sklearn"),
+    "ridge_regression": _AlgorithmFacts(
+        "ridge_regression",
+        "sklearn",
+        default_hyperparameters={"alpha": 1.0},
+    ),
+    "lasso_regression": _AlgorithmFacts(
+        "lasso_regression",
+        "sklearn",
+        default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},
+    ),
+    "elastic_net": _AlgorithmFacts(
+        "elastic_net",
+        "sklearn",
+        default_hyperparameters={
+            "alpha": 0.001,
+            "l1_ratio": 0.5,
+            "max_iter": 10_000,
+        },
+    ),
+    "huber_regression": _AlgorithmFacts(
+        "huber_regression",
+        "sklearn",
+        default_hyperparameters={"max_iter": 1_000},
+    ),
+    "decision_tree_regressor": _AlgorithmFacts(
+        "decision_tree_regressor",
+        "sklearn",
+    ),
+    "random_forest_regressor": _AlgorithmFacts(
+        "random_forest_regressor",
+        "sklearn",
+        default_hyperparameters={"n_estimators": 20, "n_jobs": 1},
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": 1},
+    ),
+    "extra_trees_regressor": _AlgorithmFacts(
+        "extra_trees_regressor",
+        "sklearn",
+        default_hyperparameters={"n_estimators": 20, "n_jobs": 1},
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": 1},
+    ),
+    "gradient_boosting_regressor": _AlgorithmFacts(
+        "gradient_boosting_regressor",
+        "sklearn",
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2},
+    ),
+    "hist_gradient_boosting_regressor": _AlgorithmFacts(
+        "hist_gradient_boosting_regressor",
+        "sklearn",
+        smoke_hyperparameters={"max_iter": 5, "max_leaf_nodes": 7},
+    ),
+    "xgboost_regressor": _AlgorithmFacts(
+        "xgboost_regressor",
+        "xgboost",
+        default_hyperparameters={
+            "n_estimators": 20,
+            "max_depth": 3,
+            "learning_rate": 0.1,
+            "objective": "reg:squarederror",
+            "device": "cpu",
+            "n_jobs": 1,
+        },
+        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2, "n_jobs": 1},
+    ),
+    "lightgbm_regressor": _AlgorithmFacts(
+        "lightgbm_regressor",
+        "lightgbm",
+        default_hyperparameters={
+            "n_estimators": 20,
+            "learning_rate": 0.1,
+            "verbosity": -1,
+            "n_jobs": 1,
+        },
+        smoke_hyperparameters={
+            "n_estimators": 5,
+            "num_leaves": 7,
+            "n_jobs": 1,
+            "verbosity": -1,
+        },
+    ),
+    "single_factor_baseline": _AlgorithmFacts("single_factor_baseline"),
+    "equal_weight_rank_ensemble": _AlgorithmFacts("equal_weight_rank_ensemble"),
+    "ic_weighted_rank_ensemble": _AlgorithmFacts("ic_weighted_rank_ensemble"),
+}
+
+
+def model_algorithm_names() -> tuple[str, ...]:
+    return tuple(sorted(_MODEL_ALGORITHM_FACTS))
+
+
+def model_algorithm_definition(algorithm: str) -> _AlgorithmFacts:
+    return _algorithm_facts(algorithm)
+
+
+def model_default_hyperparameters(algorithm: str) -> dict[str, object]:
+    return dict(_algorithm_facts(algorithm).default_hyperparameters)
+
+
+def model_smoke_hyperparameters(algorithm: str) -> dict[str, object]:
+    return dict(_algorithm_facts(algorithm).smoke_hyperparameters)
+
+
+def model_dependency_status(algorithm: str) -> dict[str, str]:
+    facts = _algorithm_facts(algorithm)
+    package = facts.dependency_package
+    if package is None:
+        return {"status": "available", "package": "internal"}
+    try:
+        import_module(package)
+    except ImportError:
+        return {"status": "missing", "package": package}
+    return {"status": "available", "package": package}
 
 
 def build_estimator_from_model_spec(spec: ModelSpec) -> object:
@@ -158,28 +281,17 @@ def _model_metadata(
 
 
 def _dependency_status(algorithm: str) -> dict[str, str]:
-    dependency_by_algorithm = {
-        "linear_regression": "sklearn",
-        "ridge_regression": "sklearn",
-        "lasso_regression": "sklearn",
-        "elastic_net": "sklearn",
-        "huber_regression": "sklearn",
-        "decision_tree_regressor": "sklearn",
-        "random_forest_regressor": "sklearn",
-        "extra_trees_regressor": "sklearn",
-        "gradient_boosting_regressor": "sklearn",
-        "hist_gradient_boosting_regressor": "sklearn",
-        "xgboost_regressor": "xgboost",
-        "lightgbm_regressor": "lightgbm",
-    }
-    package = dependency_by_algorithm.get(algorithm)
-    if package is None:
-        return {"status": "available", "package": "internal"}
+    status = model_dependency_status(algorithm)
+    if status["status"] == "missing":
+        raise ImportError(f"model_dependency_unavailable: {status['package']}")
+    return status
+
+
+def _algorithm_facts(algorithm: str) -> _AlgorithmFacts:
     try:
-        import_module(package)
-    except ImportError as exc:
-        raise ImportError(f"model_dependency_unavailable: {package}") from exc
-    return {"status": "available", "package": package}
+        return _MODEL_ALGORITHM_FACTS[algorithm]
+    except KeyError as exc:
+        raise ValueError("unsupported_model_algorithm") from exc
 
 
 def _linear_feature_importance(
@@ -522,33 +634,27 @@ def _fit_predictor(
 
 def _build_regression_estimator(spec: ModelSpec) -> object:
     _dependency_status(spec.model_algorithm)
-    params = dict(spec.hyperparameters)
+    params = model_default_hyperparameters(spec.model_algorithm)
+    params.update(spec.hyperparameters)
     if spec.model_algorithm == "ridge_regression":
         from sklearn.linear_model import Ridge
 
-        params.setdefault("alpha", 1.0)
         return Ridge(**params)
     if spec.model_algorithm == "lasso_regression":
         from sklearn.linear_model import Lasso
 
-        params.setdefault("alpha", 0.001)
-        params.setdefault("max_iter", 10_000)
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return Lasso(**params)
     if spec.model_algorithm == "elastic_net":
         from sklearn.linear_model import ElasticNet
 
-        params.setdefault("alpha", 0.001)
-        params.setdefault("l1_ratio", 0.5)
-        params.setdefault("max_iter", 10_000)
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return ElasticNet(**params)
     if spec.model_algorithm == "huber_regression":
         from sklearn.linear_model import HuberRegressor
 
-        params.setdefault("max_iter", 1_000)
         return HuberRegressor(**params)
     if spec.model_algorithm == "decision_tree_regressor":
         from sklearn.tree import DecisionTreeRegressor
@@ -559,16 +665,12 @@ def _build_regression_estimator(spec: ModelSpec) -> object:
     if spec.model_algorithm == "random_forest_regressor":
         from sklearn.ensemble import RandomForestRegressor
 
-        params.setdefault("n_estimators", 20)
-        params.setdefault("n_jobs", 1)
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return RandomForestRegressor(**params)
     if spec.model_algorithm == "extra_trees_regressor":
         from sklearn.ensemble import ExtraTreesRegressor
 
-        params.setdefault("n_estimators", 20)
-        params.setdefault("n_jobs", 1)
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return ExtraTreesRegressor(**params)
@@ -587,22 +689,12 @@ def _build_regression_estimator(spec: ModelSpec) -> object:
     if spec.model_algorithm == "xgboost_regressor":
         from xgboost import XGBRegressor
 
-        params.setdefault("n_estimators", 20)
-        params.setdefault("max_depth", 3)
-        params.setdefault("learning_rate", 0.1)
-        params.setdefault("objective", "reg:squarederror")
-        params.setdefault("device", "cpu")
-        params.setdefault("n_jobs", 1)
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return XGBRegressor(**params)
     if spec.model_algorithm == "lightgbm_regressor":
         from lightgbm import LGBMRegressor
 
-        params.setdefault("n_estimators", 20)
-        params.setdefault("learning_rate", 0.1)
-        params.setdefault("verbosity", -1)
-        params.setdefault("n_jobs", 1)
         if spec.random_seed is not None:
             params.setdefault("random_state", spec.random_seed)
         return LGBMRegressor(**params)

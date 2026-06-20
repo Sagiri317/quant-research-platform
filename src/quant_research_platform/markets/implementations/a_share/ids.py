@@ -2,34 +2,60 @@
 
 from __future__ import annotations
 
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    data_frequency_slug,
+    require_supported_data_frequency,
+)
 from quant_research_platform.contracts.ids import MarketId
 
-A_SHARE_MARKET_ID = MarketId("a_share")
+MARKET_ID = MarketId("a_share")
+SUPPORTED_MARKET_PANEL_FREQUENCIES = (DataFrequency.DAILY,)
 
-DAILY_PANEL_PROCESSED_DATA_ID = "daily_panel"
-DAILY_CONTEXT_PROCESSED_DATA_ID = "daily_context"
-
-A_SHARE_DEFAULT_UNIVERSE_ID = "a_share_default"
-A_SHARE_AS_OF_MASK_ID = "a_share_as_of"
-A_SHARE_EXECUTION_MASK_ID = "a_share_execution"
-A_SHARE_EVALUATION_MASK_ID = "a_share_evaluation"
+DEFAULT_UNIVERSE_ID = "default"
+AS_OF_MASK_ID = "as_of"
+EXECUTION_MASK_ID = "execution"
+EVALUATION_MASK_ID = "evaluation"
 
 PRICE_VOLUME_PROCESSED_DATA_ID = "price_volume"
 FORWARD_RETURNS_PROCESSED_DATA_ID = "forward_returns"
 
-A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID = (
-    "a_share_price_volume_forward_returns"
-)
+PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID = "price_volume_forward_returns"
+
+
+def market_panel_data_id(frequency: DataFrequency | str = DataFrequency.DAILY) -> str:
+    normalized = _require_supported_panel_frequency(frequency, context="market panel")
+    return f"market_panel_{data_frequency_slug(normalized)}"
+
+
+def market_context_data_id(
+    frequency: DataFrequency | str = DataFrequency.DAILY,
+) -> str:
+    normalized = _require_supported_panel_frequency(frequency, context="market context")
+    return f"market_context_{data_frequency_slug(normalized)}"
+
+
+def _require_supported_panel_frequency(
+    frequency: DataFrequency | str,
+    *,
+    context: str,
+) -> DataFrequency:
+    return require_supported_data_frequency(
+        frequency,
+        supported=SUPPORTED_MARKET_PANEL_FREQUENCIES,
+        context=f"a_share {context}",
+    )
 
 __all__ = [
-    "A_SHARE_AS_OF_MASK_ID",
-    "A_SHARE_DEFAULT_UNIVERSE_ID",
-    "A_SHARE_EVALUATION_MASK_ID",
-    "A_SHARE_EXECUTION_MASK_ID",
-    "A_SHARE_MARKET_ID",
-    "A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID",
-    "DAILY_CONTEXT_PROCESSED_DATA_ID",
-    "DAILY_PANEL_PROCESSED_DATA_ID",
+    "AS_OF_MASK_ID",
+    "DEFAULT_UNIVERSE_ID",
+    "EVALUATION_MASK_ID",
+    "EXECUTION_MASK_ID",
     "FORWARD_RETURNS_PROCESSED_DATA_ID",
+    "MARKET_ID",
     "PRICE_VOLUME_PROCESSED_DATA_ID",
+    "PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID",
+    "SUPPORTED_MARKET_PANEL_FREQUENCIES",
+    "market_context_data_id",
+    "market_panel_data_id",
 ]

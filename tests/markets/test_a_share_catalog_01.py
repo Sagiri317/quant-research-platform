@@ -17,15 +17,15 @@ from quant_research_platform.markets.implementations.a_share.fields import (
     a_share_field_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_AS_OF_MASK_ID,
-    A_SHARE_DEFAULT_UNIVERSE_ID,
-    A_SHARE_EVALUATION_MASK_ID,
-    A_SHARE_EXECUTION_MASK_ID,
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-    DAILY_CONTEXT_PROCESSED_DATA_ID,
-    DAILY_PANEL_PROCESSED_DATA_ID,
+    AS_OF_MASK_ID,
+    DEFAULT_UNIVERSE_ID,
+    EVALUATION_MASK_ID,
+    EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
+    market_context_data_id,
+    market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     a_share_processed_catalog,
@@ -84,7 +84,7 @@ def test_a_share_source_code_fields_are_numeric_null_preserving() -> None:
         "trading_status_code",
         "filling_flag",
         "limit_status",
-        "next_day_limit_status",
+        "next_bar_limit_status",
     ):
         assert catalog.get(field_name).dtype == "float64"
 
@@ -249,16 +249,16 @@ def test_a_share_factor_and_label_validators_reject_infinite_outputs() -> None:
 def test_a_share_processed_annotation_contracts_are_role_based() -> None:
     catalog = a_share_processed_catalog()
 
-    daily_panel = catalog.get(DAILY_PANEL_PROCESSED_DATA_ID)
-    context = catalog.get(DAILY_CONTEXT_PROCESSED_DATA_ID)
+    market_panel_1d = catalog.get(market_panel_data_id())
+    context = catalog.get(market_context_data_id())
     labels = catalog.get(FORWARD_RETURNS_PROCESSED_DATA_ID)
-    universe = catalog.get(A_SHARE_DEFAULT_UNIVERSE_ID)
-    as_of_mask = catalog.get(A_SHARE_AS_OF_MASK_ID)
-    execution_mask = catalog.get(A_SHARE_EXECUTION_MASK_ID)
-    evaluation_mask = catalog.get(A_SHARE_EVALUATION_MASK_ID)
+    universe = catalog.get(DEFAULT_UNIVERSE_ID)
+    as_of_mask = catalog.get(AS_OF_MASK_ID)
+    execution_mask = catalog.get(EXECUTION_MASK_ID)
+    evaluation_mask = catalog.get(EVALUATION_MASK_ID)
 
-    assert daily_panel.kind is ProcessedDataKind.PANEL
-    assert {"session_date", "available_at"}.issubset(daily_panel.required_columns)
+    assert market_panel_1d.kind is ProcessedDataKind.PANEL
+    assert {"session_date", "available_at"}.issubset(market_panel_1d.required_columns)
     assert context.kind is ProcessedDataKind.ANNOTATION
     assert context.column_roles["market_type"] is ColumnRole.CONTEXT
     assert labels.kind is ProcessedDataKind.LABEL
@@ -277,15 +277,15 @@ def test_a_share_processed_annotation_contracts_are_role_based() -> None:
 
 def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() -> None:
     dataset = build_a_share_research_dataset_catalog().get(
-        A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
+        PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 
     assert dataset.input_data_ids == (
         PRICE_VOLUME_PROCESSED_DATA_ID,
         FORWARD_RETURNS_PROCESSED_DATA_ID,
-        DAILY_CONTEXT_PROCESSED_DATA_ID,
-        A_SHARE_DEFAULT_UNIVERSE_ID,
-        A_SHARE_EXECUTION_MASK_ID,
+        market_context_data_id(),
+        DEFAULT_UNIVERSE_ID,
+        EXECUTION_MASK_ID,
     )
     assert dataset.required_columns == (
         *platform_entity_time_key(),

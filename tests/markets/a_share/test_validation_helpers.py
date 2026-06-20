@@ -11,14 +11,14 @@ from quant_research_platform.markets.implementations.a_share.validation import (
 def test_quality_report_helpers_cover_common_issue_paths() -> None:
     issues = [
         quality_report.QualityIssue(
-            dataset="daily_market",
+            dataset="market_bars_1d",
             check="duplicate",
             severity="blocking",
             count=1,
             message="duplicate",
         ),
         quality_report.QualityIssue(
-            dataset="daily_market",
+            dataset="market_bars_1d",
             check="warning",
             severity="warning",
             count=99,
@@ -44,19 +44,19 @@ def test_quality_report_helpers_cover_common_issue_paths() -> None:
 
     duplicate = quality_report.duplicate_issue(
         frame,
-        "daily_market",
+        "market_bars_1d",
         ["market_id", "asset_id", "timestamp"],
     )
-    missing = quality_report.duplicate_issue(frame, "daily_market", ["missing"])
+    missing = quality_report.duplicate_issue(frame, "market_bars_1d", ["missing"])
     year = quality_report.expected_year_issue(
         frame["timestamp"],
-        "daily_market",
+        "market_bars_1d",
         2025,
     )
-    ohlc = quality_report.ohlc_issue(frame, "daily_market")
+    ohlc = quality_report.ohlc_issue(frame, "market_bars_1d")
     negative = quality_report.negative_value_issue(
         frame,
-        "daily_market",
+        "market_bars_1d",
         ["volume"],
         "negative_liquidity",
     )
@@ -70,29 +70,29 @@ def test_quality_report_helpers_cover_common_issue_paths() -> None:
     assert quality_report.value_counts(frame, "missing") == {}
 
 
-def test_internal_daily_market_validation_excludes_annotation_fields() -> None:
+def test_internal_market_bars_1d_validation_excludes_annotation_fields() -> None:
     forbidden = {
         "eligible_base",
         "eligible",
         "can_enter",
         "can_exit",
-        "next_day_is_trading",
-        "next_day_limit_status",
+        "next_bar_is_trading",
+        "next_bar_limit_status",
     }
     assert forbidden.isdisjoint(internal_tables.DAILY_MARKET_REQUIRED_COLUMNS)
 
-    frame = _daily_market_validation_frame().assign(
+    frame = _market_bars_1d_validation_frame().assign(
         is_a_share_scope=[True, False],
         volume=[1.0, -1.0],
     )
-    report = internal_tables.check_daily_market(
+    report = internal_tables.check_market_bars_1d(
         frame,
         expected_year=2024,
         file="synthetic.parquet",
     )
     checks = {issue.check for issue in report.issues}
 
-    assert report.dataset == "daily_market"
+    assert report.dataset == "market_bars_1d"
     assert report.min_date == "2024-01-02"
     assert report.max_date == "2024-01-03"
     assert "outside_a_share_scope" in checks
@@ -109,7 +109,7 @@ def test_internal_benchmark_validation_uses_flag_or_ohlc_checks() -> None:
             "high": [11.0],
             "low": [9.0],
             "close": [10.5],
-            "return_1d": [0.01],
+            "period_return": [0.01],
             "volume_10k_shares": [-1.0],
             "amount_10k_cny": [1.0],
             "ohlc_valid": [False],
@@ -127,7 +127,7 @@ def test_internal_benchmark_validation_uses_flag_or_ohlc_checks() -> None:
     assert "negative_liquidity" in checks
 
 
-def _daily_market_validation_frame() -> pd.DataFrame:
+def _market_bars_1d_validation_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "market_id": ["a_share", "a_share"],
@@ -139,7 +139,7 @@ def _daily_market_validation_frame() -> pd.DataFrame:
             "close": [10.5, 10.5],
             "volume": [1.0, 1.0],
             "amount": [100.0, 100.0],
-            "return_1d": [0.01, 0.01],
+            "period_return": [0.01, 0.01],
             "adj_close": [10.5, 10.5],
             "adj_open": [10.0, 10.0],
             "float_market_cap": [1000.0, 1000.0],

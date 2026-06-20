@@ -1,4 +1,4 @@
-# Platform Flow Code Map
+﻿# Platform Flow Code Map
 
 This map records the QRP Clean Rewrite `0.1.0` implementation flow. It is a
 current code-reading map, not a roadmap or historical closeout.
@@ -12,7 +12,7 @@ internal source adapters -> source-normalized interim artifacts
 -> research/datasets session-chunked assembly
 -> data/research/a_share
 -> research/evaluations, research/models, and research/predictions
--> reports/private_real
+-> reports/private_research
 -> interfaces/api and interfaces/cli read research/catalog surfaces
 ```
 

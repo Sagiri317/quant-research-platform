@@ -25,7 +25,7 @@ def test_catalog_profiles_does_not_own_a_share_scenario_parameters() -> None:
 
     assert hits == []
     assert "build_a_share_prediction_catalog" not in source
-    assert "build_a_share_portfolio_catalog" not in source
+    assert "build_portfolio_catalog" not in source
     assert "predictions=PredictionCatalog()" in source
     assert "portfolios=PortfolioCatalog()" in source
 
@@ -36,16 +36,16 @@ def test_a_share_scenarios_own_research_scenario_catalog_builders() -> None:
     )
 
     for name in (
-        "build_a_share_signal_specs",
+        "build_signal_specs",
         "build_a_share_model_specs",
         "build_a_share_prediction_specs",
-        "build_a_share_evaluation_specs",
-        "build_a_share_portfolio_specs",
+        "build_evaluation_specs",
+        "build_portfolio_specs",
         "build_a_share_model_catalog",
         "build_a_share_prediction_catalog",
-        "build_a_share_evaluation_catalog",
-        "build_a_share_portfolio_catalog",
-        "default_a_share_evaluation_run_id",
+        "build_evaluation_catalog",
+        "build_portfolio_catalog",
+        "default_evaluation_run_id",
         "default_a_share_prediction_smoke_id",
         "default_a_share_prediction_oos_period",
     ):
@@ -64,12 +64,8 @@ def test_a_share_scenario_builders_require_smoke_windows_and_frequency() -> None
     else:  # pragma: no cover - failure branch for clear assertion message
         raise AssertionError("prediction specs must require explicit smoke dates")
 
-    try:
-        research_scenarios.build_a_share_portfolio_specs()
-    except TypeError as exc:
-        assert "frequency" in str(exc)
-    else:  # pragma: no cover - failure branch for clear assertion message
-        raise AssertionError("portfolio specs must require explicit frequency")
+    portfolio_specs = research_scenarios.build_portfolio_specs()
+    assert portfolio_specs[0].rebalance_frequency == "1d"
 
     source = Path(
         "src/quant_research_platform/markets/implementations/a_share/"

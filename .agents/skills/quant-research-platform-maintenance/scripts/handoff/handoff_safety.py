@@ -1,15 +1,25 @@
 """Safety scan for QRP handoff packages."""
 
+# ruff: noqa: E402, I001
+
 from __future__ import annotations
 
 import argparse
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+SRC_ROOT = REPO_ROOT / "src"
+if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from quant_research_platform.runtime.privacy import public_text_unsafe_reason
 
 TEXT_LIKE_SUFFIXES = {
     ".json",
@@ -50,28 +60,11 @@ FORBIDDEN_PATH_SEGMENTS = (
     "data/interim",
     "data/processed",
     "data/research",
-    "reports/private_real",
+    "reports/private_research",
     ".codex",
     "credentials",
     "secrets",
     "vendor raw",
-)
-DRIVE_ABSOLUTE_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]")
-POSIX_USER_ABSOLUTE_RE = re.compile(
-    "(?i)(?:/"
-    + "Users"
-    + r"/[^/\s]+|/"
-    + "home"
-    + r"/[^/\s]+|/mnt/data(?:/|\b)|/workspace(?:/|\b)|/workspaces(?:/|\b))"
-)
-ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
-    r"(?i)(?:[a-z]:[\\/]|/)(?:[^\s`'\"),\]}<>|]+[/\\])*"
-    r"(?:data[/\\](?:raw|interim|processed|research)"
-    r"(?:[/\\][^\s`'\"),\]}<>|]+)?|reports[/\\]private_real"
-    r"(?:[/\\][^\s`'\"),\]}<>|]+)?)"
-)
-WINDOWS_USER_ABSOLUTE_RE = re.compile(
-    r"(?i)(?:^|[\s`'\"])[\\/]+" + "Users" + r"[\\/]"
 )
 ENVIRONMENT_PATH_RE = re.compile(
     r"(?i)(?:\bquant-workspace\b|\\\\quant-workspace\\\\|"
@@ -81,21 +74,9 @@ ENVIRONMENT_PATH_RE = re.compile(
 RAW_EXPORT_FILENAME_RE = re.compile(
     r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
 )
-STOCK_CODE_RE = re.compile(
-    r"(?<![A-Za-z0-9.])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?![A-Za-z0-9])",
-    re.I,
-)
-CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
-    r"[A-Za-z0-9._~+/=-]{8,}"
-)
 ROW_SAMPLE_KEY_RE = re.compile(
     r"(?i)(?:[\"']?row_samples?[\"']?\s*[:=]|row_samples?\s*=)"
 )
-VENDOR_MARKER_RE = re.compile(
-    r"(?i)\b(?:vendor_marker|vendor_payload|raw_vendor|provider_marker)\b"
-)
-RAW_TRACEBACK_RE = re.compile(r"Traceback \(most recent call last\):")
 PRIVATE_RUNTIME_PAYLOAD_RE = re.compile(
     r"(?i)\b(?:runtime_payload|private_runtime_payload|"
     r"exact_private_runtime_payload)\b"
@@ -435,143 +416,38 @@ def contains_path_segment(path: str, segment: str) -> bool:
     )
 
 
-def contains_local_absolute_path(text: str) -> bool:
-    return any(
-        regex.search(text)
-        for regex in (
-            ABSOLUTE_REPO_PRIVATE_PATH_RE,
-            DRIVE_ABSOLUTE_RE,
-            POSIX_USER_ABSOLUTE_RE,
-            WINDOWS_USER_ABSOLUTE_RE,
-            ENVIRONMENT_PATH_RE,
-        )
-    )
-
-
 def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
-    if name == "diff.patch":
-        return unsafe_diff_text_reason(text)
     scan_text = "\n".join(
         line
         for line in text.splitlines()
         if not is_scanner_definition_line(line, name=name)
     )
-    if contains_local_absolute_path(scan_text):
-        return "local_absolute_path"
     if PRIVATE_RUN_PATH_RE.search(scan_text):
         return "private_run_path"
+    shared_reason = public_text_unsafe_reason(scan_text)
+    if shared_reason in {"private_path", "local_path"}:
+        return "local_absolute_path"
+    if ENVIRONMENT_PATH_RE.search(scan_text):
+        return "local_absolute_path"
+    if shared_reason == "credential":
+        return "credential"
+    if shared_reason == "private_marker":
+        return "vendor_marker"
+    if shared_reason == "stock_code_sample":
+        return "stock_sample"
+    if shared_reason == "traceback":
+        return "raw_traceback"
+    if shared_reason == "row_sample":
+        return "row_sample"
     if RAW_EXPORT_FILENAME_RE.search(scan_text):
         return "vendor_filename"
     if ROW_SAMPLE_KEY_RE.search(scan_text):
         return "row_sample"
-    if STOCK_CODE_RE.search(scan_text):
-        return "stock_sample"
-    if CREDENTIAL_RE.search(scan_text):
-        return "credential"
-    if VENDOR_MARKER_RE.search(scan_text):
-        return "vendor_marker"
-    if RAW_TRACEBACK_RE.search(scan_text):
-        return "raw_traceback"
     if PRIVATE_RUNTIME_PAYLOAD_RE.search(scan_text):
         return "private_runtime_payload"
     if stale_marker(scan_text) is not None:
         return "stale_marker"
     return None
-
-
-def unsafe_diff_text_reason(text: str) -> str | None:
-    current_path = ""
-    risky_lines: list[str] = []
-    filtered_lines: list[str] = []
-    for line in text.splitlines():
-        path = diff_line_path(line)
-        if path:
-            current_path = path
-        if is_removed_diff_line(line):
-            continue
-        if is_public_aggregate_evidence_diff_line(current_path, line):
-            continue
-        if is_allowed_diff_literal_context(current_path, line):
-            continue
-        if contains_local_absolute_path(line):
-            risky_lines.append(line)
-            continue
-        filtered_lines.append(line)
-    scan_text = "\n".join(risky_lines)
-    if scan_text:
-        return "local_absolute_path"
-    return unsafe_text_reason("\n".join(filtered_lines), name="diff.patch.filtered")
-
-
-def is_removed_diff_line(line: str) -> bool:
-    return line.startswith("-") and not line.startswith("--- ")
-
-
-def is_public_aggregate_evidence_diff_line(path: str, line: str) -> bool:
-    normalized = path.replace("\\", "/")
-    if not normalized.startswith("docs/reports/clean-rewrite-0.1-parity-evidence."):
-        return False
-    return (
-        '"row_count"' in line
-        or '"key_count"' in line
-        or "verified aggregate" in line
-    )
-
-
-def diff_line_path(line: str) -> str:
-    if line.startswith("diff --git "):
-        parts = line.split()
-        if len(parts) >= 4:
-            return normalize_diff_path(parts[3])
-    if line.startswith("+++ ") or line.startswith("--- "):
-        return normalize_diff_path(line[4:].strip())
-    return ""
-
-
-def normalize_diff_path(path: str) -> str:
-    path = path.strip().strip('"').replace("\\", "/")
-    if path in {"/dev/null", "dev/null"}:
-        return ""
-    if path.startswith("a/") or path.startswith("b/"):
-        return path[2:]
-    return path
-
-
-def is_allowed_diff_literal_context(path: str, line: str) -> bool:
-    normalized = path.replace("\\", "/")
-    if is_scanner_definition_line(line, name=normalized):
-        return True
-    allowed_roots = (
-        "tests/",
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/",
-        ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py",
-        ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py",
-        "docs/architecture/open-issues-register.md",
-    )
-    if not any(normalized.startswith(root) for root in allowed_roots):
-        return False
-    return (
-        "negative" in normalized.lower()
-        or "fixture" in normalized.lower()
-        or "test" in normalized.lower()
-        or "LOCAL_PATH" in line
-        or "DRIVE_ABSOLUTE_RE" in line
-        or "POSIX_USER_ABSOLUTE_RE" in line
-        or "WINDOWS_USER_ABSOLUTE_RE" in line
-        or "ENVIRONMENT_PATH_RE" in line
-        or "ABSOLUTE_REPO_PRIVATE_PATH_RE" in line
-        or "E:" + "/" in line
-        or "/" + "mnt/data" in line
-        or "/" + "workspace" in line
-        or "/" + "workspaces" in line
-        or "/" + "home/" in line
-        or "/" + "Users/" in line
-        or "\\Users\\" in line
-        or "\\\\Users\\\\" in line
-        or "quant-workspace" in line
-        or "site-packages" in line
-        or "conda env path" in line
-    )
 
 
 def stale_marker(text: str) -> str | None:
@@ -592,9 +468,6 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
     if not scanner_source:
         return False
     markers = (
-        "CREDENTIAL_RE",
-        "VENDOR_MARKER_RE",
-        "RAW_TRACEBACK_RE",
         "PRIVATE_RUNTIME_PAYLOAD_RE",
         "SECRET_PATTERN",
         "LOCAL_PATH_PATTERN",

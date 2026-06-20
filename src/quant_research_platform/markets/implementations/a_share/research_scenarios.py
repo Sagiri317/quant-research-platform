@@ -3,29 +3,56 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
+from quant_research_platform.contracts.data import DataFrequency, horizon_unit_suffix
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.models import MODEL_ALGORITHMS, ModelSpec
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_MARKET_ID,
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+    MARKET_ID,
+    PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+)
+from quant_research_platform.research.models.supervised import (
+    model_algorithm_names,
+    model_smoke_hyperparameters,
 )
 
-DEFAULT_RETURN_SOURCE_COLUMN = "forward_return_20d"
-DEFAULT_MODEL_RANDOM_SEED = 7
-DEFAULT_MAX_TRAIN_ROWS = 5000
-DEFAULT_TEST_END: str | None = None
-DEFAULT_PREDICTION_MODEL_ALGORITHM = "linear_regression"
+
+@dataclass(frozen=True)
+class _ScenarioDefaults:
+    frequency: DataFrequency = DataFrequency.DAILY
+    return_horizon: int = 20
+    random_seed: int = 7
+    max_train_rows: int = 5000
+    rebalance_frequency: str = "1d"
+    execution_lag_steps: int = 1
+    test_end: str | None = None
+    prediction_model_algorithm: str = "linear_regression"
+    signal_columns: tuple[str, ...] = ("mom_20d", "rev_1d", "mom_20d_zscore")
+    model_factor_inputs: tuple[str, ...] = ("mom_20d", "rev_1d")
+    model_feature_inputs: tuple[str, ...] = ("mom_20d_zscore",)
+    baseline_factor_inputs: tuple[str, ...] = ("mom_20d",)
 
 
-def build_a_share_signal_specs() -> tuple[SignalSpec, ...]:
+SCENARIO_DEFAULTS = _ScenarioDefaults()
+DEFAULT_RETURN_SOURCE_COLUMN = (
+    f"forward_return_{SCENARIO_DEFAULTS.return_horizon}"
+    f"{horizon_unit_suffix(SCENARIO_DEFAULTS.frequency)}"
+)
+DEFAULT_MODEL_RANDOM_SEED = SCENARIO_DEFAULTS.random_seed
+DEFAULT_MAX_TRAIN_ROWS = SCENARIO_DEFAULTS.max_train_rows
+DEFAULT_TEST_END: str | None = SCENARIO_DEFAULTS.test_end
+DEFAULT_PREDICTION_MODEL_ALGORITHM = SCENARIO_DEFAULTS.prediction_model_algorithm
+
+
+def build_signal_specs() -> tuple[SignalSpec, ...]:
     return (
         SignalSpec(
             signal_id="mom_20d",
@@ -50,7 +77,7 @@ def build_a_share_signal_specs() -> tuple[SignalSpec, ...]:
 
 def build_a_share_model_specs(
     *,
-    model_algorithms: Iterable[str] = tuple(sorted(MODEL_ALGORITHMS)),
+    model_algorithms: Iterable[str] = model_algorithm_names(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
@@ -78,7 +105,7 @@ def build_a_share_prediction_specs(
     *,
     train_end: str,
     test_start: str,
-    model_algorithms: Iterable[str] = tuple(sorted(MODEL_ALGORITHMS)),
+    model_algorithms: Iterable[str] = model_algorithm_names(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> tuple[PredictionSpec, ...]:
@@ -86,7 +113,7 @@ def build_a_share_prediction_specs(
         PredictionSpec(
             prediction_id=_a_share_prediction_id(model_algorithm, test_start),
             model_id=_a_share_model_id(model_algorithm, return_source_column),
-            research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+            research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             train_end=train_end,
             test_start=test_start,
             test_end=test_end,
@@ -95,39 +122,39 @@ def build_a_share_prediction_specs(
     )
 
 
-def build_a_share_evaluation_specs(
+def build_evaluation_specs(
     *,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
 ) -> tuple[EvaluationSpec, ...]:
     return (
         EvaluationSpec(
-            run_id=default_a_share_evaluation_run_id(
+            run_id=default_evaluation_run_id(
                 return_source_column=return_source_column,
             ),
-            market_id=A_SHARE_MARKET_ID,
-            research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            signals=signals or build_a_share_signal_specs(),
+            market_id=MARKET_ID,
+            research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+            signals=signals or build_signal_specs(),
             label_columns=(return_source_column,),
         ),
     )
 
 
-def build_a_share_portfolio_specs(
+def build_portfolio_specs(
     *,
-    frequency: str,
-    execution_lag_steps: int,
+    rebalance_frequency: str = SCENARIO_DEFAULTS.rebalance_frequency,
+    execution_lag_steps: int = SCENARIO_DEFAULTS.execution_lag_steps,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
 ) -> tuple[PortfolioSpec, ...]:
     return (
         PortfolioSpec(
-            portfolio_id=f"a_share_signal_{return_source_column}_portfolio",
-            market_id=A_SHARE_MARKET_ID,
-            research_dataset_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            signals=signals or build_a_share_signal_specs(),
+            portfolio_id=f"signal_{return_source_column}_portfolio",
+            market_id=MARKET_ID,
+            research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+            signals=signals or build_signal_specs(),
             return_source_column=return_source_column,
-            frequency=frequency,
+            rebalance_frequency=rebalance_frequency,
             execution_lag_steps=execution_lag_steps,
         ),
     )
@@ -135,7 +162,7 @@ def build_a_share_portfolio_specs(
 
 def build_a_share_model_catalog(
     *,
-    model_algorithms: Iterable[str] = tuple(sorted(MODEL_ALGORITHMS)),
+    model_algorithms: Iterable[str] = model_algorithm_names(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
@@ -157,7 +184,7 @@ def build_a_share_prediction_catalog(
     *,
     train_end: str,
     test_start: str,
-    model_algorithms: Iterable[str] = tuple(sorted(MODEL_ALGORITHMS)),
+    model_algorithms: Iterable[str] = model_algorithm_names(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> PredictionCatalog:
@@ -173,13 +200,13 @@ def build_a_share_prediction_catalog(
     return catalog
 
 
-def build_a_share_evaluation_catalog(
+def build_evaluation_catalog(
     *,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
 ) -> EvaluationCatalog:
     catalog = EvaluationCatalog()
-    for spec in build_a_share_evaluation_specs(
+    for spec in build_evaluation_specs(
         signals=signals,
         return_source_column=return_source_column,
     ):
@@ -187,29 +214,29 @@ def build_a_share_evaluation_catalog(
     return catalog
 
 
-def build_a_share_portfolio_catalog(
+def build_portfolio_catalog(
     *,
-    frequency: str,
-    execution_lag_steps: int,
+    rebalance_frequency: str = SCENARIO_DEFAULTS.rebalance_frequency,
+    execution_lag_steps: int = SCENARIO_DEFAULTS.execution_lag_steps,
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
 ) -> PortfolioCatalog:
     catalog = PortfolioCatalog()
-    for spec in build_a_share_portfolio_specs(
+    for spec in build_portfolio_specs(
         signals=signals,
         return_source_column=return_source_column,
-        frequency=frequency,
+        rebalance_frequency=rebalance_frequency,
         execution_lag_steps=execution_lag_steps,
     ):
         catalog.register(spec)
     return catalog
 
 
-def default_a_share_evaluation_run_id(
+def default_evaluation_run_id(
     *,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
 ) -> str:
-    return f"a_share_signal_{return_source_column}"
+    return f"signal_{return_source_column}"
 
 
 def default_a_share_prediction_smoke_id(
@@ -237,7 +264,7 @@ def default_a_share_prediction_oos_period(
     return f"{spec.test_start} through {spec.test_end or evaluation_end}"
 
 
-def default_a_share_evaluation_period(
+def default_evaluation_period(
     *,
     evaluation_start: str,
     evaluation_end: str,
@@ -246,24 +273,24 @@ def default_a_share_evaluation_period(
 
 
 def _a_share_model_id(model_algorithm: str, return_source_column: str) -> str:
-    return f"a_share_{model_algorithm}_mom_20d_{return_source_column}"
+    return f"{model_algorithm}_mom_20d_{return_source_column}"
 
 
 def _a_share_prediction_id(model_algorithm: str, test_start: str) -> str:
     year = test_start[:4]
-    return f"a_share_{model_algorithm}_mom_20d_prediction_{year}"
+    return f"{model_algorithm}_mom_20d_prediction_{year}"
 
 
 def _a_share_model_factor_inputs(model_algorithm: str) -> tuple[str, ...]:
     if model_algorithm == "single_factor_baseline":
-        return ("mom_20d",)
-    return ("mom_20d", "rev_1d")
+        return SCENARIO_DEFAULTS.baseline_factor_inputs
+    return SCENARIO_DEFAULTS.model_factor_inputs
 
 
 def _a_share_model_feature_inputs(model_algorithm: str) -> tuple[str, ...]:
     if model_algorithm == "single_factor_baseline":
         return ()
-    return ("mom_20d_zscore",)
+    return SCENARIO_DEFAULTS.model_feature_inputs
 
 
 def _a_share_model_hyperparameters(
@@ -272,18 +299,8 @@ def _a_share_model_hyperparameters(
     hyperparameter_preset: str,
 ) -> dict[str, object]:
     if hyperparameter_preset != "smoke":
-        raise ValueError("unsupported_a_share_hyperparameter_preset")
-    if model_algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
-        return {"n_estimators": 5, "max_depth": 3, "n_jobs": 1}
-    if model_algorithm == "gradient_boosting_regressor":
-        return {"n_estimators": 5, "max_depth": 2}
-    if model_algorithm == "hist_gradient_boosting_regressor":
-        return {"max_iter": 5, "max_leaf_nodes": 7}
-    if model_algorithm == "xgboost_regressor":
-        return {"n_estimators": 5, "max_depth": 2, "n_jobs": 1}
-    if model_algorithm == "lightgbm_regressor":
-        return {"n_estimators": 5, "num_leaves": 7, "n_jobs": 1, "verbosity": -1}
-    return {}
+        raise ValueError("unsupported_hyperparameter_preset")
+    return model_smoke_hyperparameters(model_algorithm)
 
 
 __all__ = [
@@ -291,13 +308,13 @@ __all__ = [
     "DEFAULT_MODEL_RANDOM_SEED",
     "DEFAULT_RETURN_SOURCE_COLUMN",
     "DEFAULT_TEST_END",
-    "build_a_share_evaluation_catalog",
-    "build_a_share_evaluation_specs",
+    "build_evaluation_catalog",
+    "build_evaluation_specs",
     "build_a_share_model_catalog",
     "build_a_share_model_specs",
-    "build_a_share_portfolio_catalog",
-    "build_a_share_portfolio_specs",
+    "build_portfolio_catalog",
+    "build_portfolio_specs",
     "build_a_share_prediction_catalog",
     "build_a_share_prediction_specs",
-    "build_a_share_signal_specs",
+    "build_signal_specs",
 ]

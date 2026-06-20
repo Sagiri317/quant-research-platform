@@ -57,14 +57,14 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     combined = json.dumps(inventory, ensure_ascii=False)
 
     assert roots == {
-        "data/interim/csmar/daily_market",
+        "data/interim/csmar/market_bars_1d",
         "data/interim/csmar/stock_master",
         "data/processed/a_share/factor/price_volume",
-        "data/processed/a_share/annotation/a_share_default",
+        "data/processed/a_share/annotation/default",
         "data/research/a_share/demo_research_dataset",
     }
     assert all(set(item) == ALLOWED_INVENTORY_FIELDS for item in inventory)
-    daily_market = _inventory_item(inventory, "data/interim/csmar/daily_market")
+    market_bars_1d = _inventory_item(inventory, "data/interim/csmar/market_bars_1d")
     stock_master = _inventory_item(inventory, "data/interim/csmar/stock_master")
     price_volume = _inventory_item(
         inventory,
@@ -72,20 +72,20 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     )
     annotation = _inventory_item(
         inventory,
-        "data/processed/a_share/annotation/a_share_default",
+        "data/processed/a_share/annotation/default",
     )
     research = _inventory_item(
         inventory,
         "data/research/a_share/demo_research_dataset",
     )
 
-    assert daily_market["kind"] == "interim"
+    assert market_bars_1d["kind"] == "interim"
     assert price_volume["kind"] == "factor"
     assert annotation["kind"] == "annotation"
     assert research["kind"] == "research_dataset"
-    assert daily_market["row_count_by_year"] == {"2023": 1, "2024": 1, "2025": 2}
-    assert daily_market["min_timestamp"] == "2023-12-29"
-    assert daily_market["max_timestamp"] == "2025-01-06"
+    assert market_bars_1d["row_count_by_year"] == {"2023": 1, "2024": 1, "2025": 2}
+    assert market_bars_1d["min_timestamp"] == "2023-12-29"
+    assert market_bars_1d["max_timestamp"] == "2025-01-06"
     assert stock_master["row_count_by_year"] == {"2020": 1, "2021": 1}
     assert stock_master["min_timestamp"] == "2020-01-01"
     assert stock_master["max_timestamp"] == "2021-06-01"
@@ -95,7 +95,7 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     assert annotation["selected_important_column_null_counts"] == {"eligible": 1}
     assert research["row_count_by_year"] == {"2024": 2}
     assert "data/raw" not in combined
-    assert "reports/private_real" not in combined
+    assert "reports/private_research" not in combined
     assert str(tmp_path) not in combined
     assert "asset_a" not in combined
     assert "source_asset_a" not in combined
@@ -396,7 +396,7 @@ def test_qrp_verification_evidence_run_rejects_missing_required_options() -> Non
 
 
 def _write_inventory_fixture(project_root: Path) -> None:
-    interim_root = project_root / "data" / "interim" / "csmar" / "daily_market"
+    interim_root = project_root / "data" / "interim" / "csmar" / "market_bars_1d"
     processed_root = (
         project_root
         / "data"
@@ -412,14 +412,14 @@ def _write_inventory_fixture(project_root: Path) -> None:
         / "processed"
         / "a_share"
         / "annotation"
-        / "a_share_default"
+        / "default"
     )
     research_root = (
         project_root / "data" / "research" / "a_share" / "demo_research_dataset"
     )
     raw_root = project_root / "data" / "raw" / "vendor" / "ignored"
     report_root = (
-        project_root / "reports" / "private_real" / "a_share" / "evaluation" / "run"
+        project_root / "reports" / "private_research" / "a_share" / "evaluation" / "run"
     )
 
     write_low_level_parquet_artifact(

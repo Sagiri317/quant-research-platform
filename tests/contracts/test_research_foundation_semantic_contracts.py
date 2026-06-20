@@ -4,13 +4,13 @@ import pytest
 
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.models import MODEL_ALGORITHMS
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
     PortfolioSpec,
     WeightConfig,
 )
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.research.models.supervised import model_algorithm_names
 
 
 def test_signal_spec_uses_source_column_and_closed_direction_names() -> None:
@@ -78,7 +78,8 @@ def test_feature_transform_spec_uses_source_and_output_columns_only() -> None:
 
 
 def test_model_algorithm_names_are_final_public_contract() -> None:
-    assert MODEL_ALGORITHMS == {
+    algorithms = set(model_algorithm_names())
+    assert algorithms == {
         "linear_regression",
         "ridge_regression",
         "lasso_regression",
@@ -95,9 +96,9 @@ def test_model_algorithm_names_are_final_public_contract() -> None:
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",
     }
-    assert "linear" not in MODEL_ALGORITHMS
-    assert "xgboost" not in MODEL_ALGORITHMS
-    assert "lightgbm" not in MODEL_ALGORITHMS
+    assert "linear" not in algorithms
+    assert "xgboost" not in algorithms
+    assert "lightgbm" not in algorithms
 
 
 def test_portfolio_contract_uses_return_source_and_cost_config() -> None:
@@ -113,12 +114,14 @@ def test_portfolio_contract_uses_return_source_and_cost_config() -> None:
             ),
         ),
         return_source_column="forward_return_20d",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=1,
         cost_config=CostConfig(buy_cost_bps=1.0, sell_cost_bps=1.0),
     )
 
     assert spec.return_source_column == "forward_return_20d"
+    assert spec.rebalance_frequency == "1d"
+    assert "frequency" not in PortfolioSpec.__dataclass_fields__
     assert "label_column" not in PortfolioSpec.__dataclass_fields__
     assert "cost_bps" not in WeightConfig.__dataclass_fields__
 

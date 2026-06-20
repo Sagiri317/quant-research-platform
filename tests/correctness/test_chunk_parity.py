@@ -24,9 +24,14 @@ from ._helpers import (
 @pytest.mark.parametrize(
     ("data_id", "kind", "end_date", "time_window"),
     [
-        ("daily_panel", "panel", "2014-01-08", TimeWindow("2014-01-02", "2014-01-07")),
         (
-            "a_share_execution",
+            "market_panel_1d",
+            "panel",
+            "2014-01-08",
+            TimeWindow("2014-01-02", "2014-01-07"),
+        ),
+        (
+            "execution",
             "annotation",
             "2014-01-08",
             TimeWindow("2014-01-02", "2014-01-07"),

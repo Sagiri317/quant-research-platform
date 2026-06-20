@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import quant_research_platform.workflows.executor as executor_module
-from quant_research_platform.contracts.execution import ExecutionMode
+from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
@@ -30,9 +30,9 @@ from quant_research_platform.workflows.registry import (
 from quant_research_platform.workflows.services import execute_registered_workflow
 
 
-def test_workflow_node_registry_factory_supports_dry_run_modes() -> None:
-    for execution_mode in (None, "dry_run", ExecutionMode.DRY_RUN):
-        registry = workflow_node_registry(execution_mode=execution_mode)
+def test_workflow_node_registry_factory_supports_validate_only_modes() -> None:
+    for run_mode in (None, "validate_only", WorkflowRunMode.VALIDATE_ONLY):
+        registry = workflow_node_registry(run_mode=run_mode)
 
         assert isinstance(registry, WorkflowNodeRegistry)
         assert (
@@ -41,16 +41,16 @@ def test_workflow_node_registry_factory_supports_dry_run_modes() -> None:
         )
 
 
-def test_workflow_node_registry_factory_execute_fails_closed() -> None:
-    for execution_mode in ("execute", ExecutionMode.EXECUTE):
+def test_workflow_node_registry_factory_write_artifacts_fails_closed() -> None:
+    for run_mode in ("write_artifacts", WorkflowRunMode.WRITE_ARTIFACTS):
         with pytest.raises(
             NotImplementedError,
-            match="workflow_execute_not_implemented",
+            match="workflow_write_artifacts_not_implemented",
         ):
-            workflow_node_registry(execution_mode=execution_mode)
+            workflow_node_registry(run_mode=run_mode)
 
 
-def test_workflow_executor_default_dry_run_validates_only() -> None:
+def test_workflow_executor_default_run_mode_validates_only() -> None:
     spec = WorkflowSpec(
         workflow_id="executor_smoke",
         nodes=(
@@ -82,7 +82,7 @@ def test_workflow_executor_default_dry_run_validates_only() -> None:
 
     assert calls == []
     assert isinstance(summary, WorkflowRunSummary)
-    assert summary.execution_mode is ExecutionMode.DRY_RUN
+    assert summary.run_mode is WorkflowRunMode.VALIDATE_ONLY
     assert summary.status == "validated"
     assert summary.completed_nodes == ()
 
@@ -108,15 +108,15 @@ def test_workflow_executor_records_memory_checkpoints_only() -> None:
         spec,
         registry=registry,
         checkpoints=checkpoints,
-        execution_mode="dry_run",
+        run_mode="validate_only",
     )
 
     assert checkpoints.list() == ()
 
 
-def test_workflow_dry_run_does_not_call_handlers_or_write_checkpoints() -> None:
+def test_workflow_validate_only_does_not_call_handlers_or_write_checkpoints() -> None:
     spec = WorkflowSpec(
-        workflow_id="dry_run_no_side_effects",
+        workflow_id="validate_only_no_side_effects",
         nodes=(WorkflowNode(node_id="panel"),),
     )
     calls: list[str] = []
@@ -129,31 +129,31 @@ def test_workflow_dry_run_does_not_call_handlers_or_write_checkpoints() -> None:
         )
     )
 
-    dry_run_summary = execute_workflow(
+    validate_only_summary = execute_workflow(
         spec,
         registry=registry,
         checkpoints=checkpoints,
-        execution_mode="dry_run",
+        run_mode="validate_only",
     )
     with pytest.raises(
         NotImplementedError,
-        match="workflow_execute_not_implemented",
+        match="workflow_write_artifacts_not_implemented",
     ):
         execute_workflow(
             spec,
             registry=registry,
-            execution_mode="execute",
+            run_mode="write_artifacts",
         )
 
     assert calls == []
     assert checkpoints.list() == ()
-    assert dry_run_summary.status == "validated"
-    assert dry_run_summary.completed_nodes == ()
+    assert validate_only_summary.status == "validated"
+    assert validate_only_summary.completed_nodes == ()
 
 
-def test_workflow_dry_run_rejects_unknown_registered_node() -> None:
+def test_workflow_validate_only_rejects_unknown_registered_node() -> None:
     spec = WorkflowSpec(
-        workflow_id="dry_run_missing_node",
+        workflow_id="validate_only_missing_node",
         nodes=(WorkflowNode(node_id="missing"),),
     )
 
@@ -161,7 +161,7 @@ def test_workflow_dry_run_rejects_unknown_registered_node() -> None:
         execute_workflow(
             spec,
             registry=WorkflowNodeRegistry(),
-            execution_mode="dry_run",
+            run_mode="validate_only",
         )
 
 
@@ -217,7 +217,7 @@ def test_workflow_summary_is_sanitized() -> None:
     spec = WorkflowSpec(
         workflow_id="vendor-source-marker-workflow",
         market_id=MarketId("a_share"),
-        output_spec_ids=("daily_panel",),
+        output_spec_ids=("market_panel_1d",),
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="node"),),
     )
@@ -225,7 +225,7 @@ def test_workflow_summary_is_sanitized() -> None:
     summary = workflow_run_summary(
         spec,
         completed_nodes=("node",),
-        execution_mode="execute",
+        run_mode="write_artifacts",
         run_id="workflow-dry-run",
     )
 
@@ -238,7 +238,7 @@ def test_workflow_summary_is_sanitized() -> None:
 def test_registered_workflow_rejects_unknown_node() -> None:
     spec = WorkflowSpec(
         workflow_id="unknown_node",
-        output_spec_ids=("daily_panel",),
+        output_spec_ids=("market_panel_1d",),
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="missing"),),
     )
@@ -247,7 +247,7 @@ def test_registered_workflow_rejects_unknown_node() -> None:
         execute_registered_workflow(
             spec,
             registry=WorkflowNodeRegistry(),
-            allowed_spec_ids={"daily_panel"},
+            allowed_spec_ids={"market_panel_1d"},
         )
 
 
@@ -262,7 +262,7 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
     spec = WorkflowSpec(
         workflow_id="registered",
         market_id=MarketId("a_share"),
-        output_spec_ids=("daily_panel",),
+        output_spec_ids=("market_panel_1d",),
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="validate"),),
     )
@@ -270,11 +270,11 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
     summary = execute_registered_workflow(
         spec,
         registry=registry,
-        allowed_spec_ids={"daily_panel"},
+        allowed_spec_ids={"market_panel_1d"},
     )
 
     assert summary["status"] == "validated"
-    assert summary["execution_mode"] == "dry_run"
+    assert summary["run_mode"] == "validate_only"
     assert "results" not in summary
     assert "C:" not in str(summary)
     assert "/mnt/" not in str(summary)

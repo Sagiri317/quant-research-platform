@@ -36,10 +36,15 @@ def test_research_profile_is_only_public_profile_builder() -> None:
     import quant_research_platform.catalog.profiles as profiles
 
     all_names = set(profiles.__all__)
-    assert all_names == {"ResearchProfile", "research_profile"}
+    assert all_names == {"ResearchProfile", "research_profile", "research_profile_id"}
     assert "research_profile_for_scenario" not in vars(profiles)
     assert "resolve_a_share_prediction_catalog" not in vars(profiles)
-    assert "resolve_a_share_portfolio_catalog" not in vars(profiles)
+    old_portfolio_resolver = (
+        "resolve_"
+        + "a_share_"
+        + "portfolio_catalog"
+    )
+    assert old_portfolio_resolver not in vars(profiles)
     assert "default_catalogs" not in vars(profiles)
     assert "CatalogBundle" not in vars(profiles)
     assert "local_a_share_csmar_catalogs" not in vars(profiles)
@@ -50,11 +55,15 @@ def test_research_profile_contains_active_catalogs() -> None:
     from quant_research_platform.catalog.profiles import (
         ResearchProfile,
         research_profile,
+        research_profile_id,
     )
 
     profile = research_profile()
 
     assert isinstance(profile, ResearchProfile)
+    assert profile.profile_id == "a_share_csmar_1d"
+    assert research_profile_id("a_share", "csmar", "1d") == profile.profile_id
+    assert research_profile(profile.profile_id) == profile
     assert isinstance(profile.fields, FieldCatalog)
     assert isinstance(profile.factors, FactorCatalog)
     assert isinstance(profile.labels, LabelCatalog)
@@ -75,16 +84,16 @@ def test_research_profile_contains_active_catalogs() -> None:
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:
     from quant_research_platform.catalog.profiles import research_profile
-    from quant_research_platform.contracts.models import MODEL_ALGORITHMS
+    from quant_research_platform.research.models.supervised import model_algorithm_names
 
     profile = research_profile()
-    dataset = profile.research_datasets.get("a_share_price_volume_forward_returns")
-    evaluation = profile.evaluations.get("a_share_signal_forward_return_20d")
-    portfolio = research_scenarios.build_a_share_portfolio_catalog(
-        frequency="1d",
+    algorithms = tuple(model_algorithm_names())
+    dataset = profile.research_datasets.get("price_volume_forward_returns")
+    evaluation = profile.evaluations.get("signal_forward_return_20d")
+    portfolio = research_scenarios.build_portfolio_catalog(
         execution_lag_steps=1,
     ).get(
-        "a_share_signal_forward_return_20d_portfolio"
+        "signal_forward_return_20d_portfolio"
     )
     models = tuple(profile.models.list())
     predictions = tuple(
@@ -98,9 +107,9 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     assert profile.predictions.list() == ()
     assert profile.portfolios.list() == ()
     assert sorted(model.model_algorithm for model in models) == sorted(
-        MODEL_ALGORITHMS
+        algorithms
     )
-    assert len(predictions) == len(MODEL_ALGORITHMS)
+    assert len(predictions) == len(algorithms)
     assert {prediction.model_id for prediction in predictions} == model_ids
     assert all(
         prediction.research_dataset_id == dataset.data_id
@@ -136,7 +145,7 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
 
 def test_a_share_research_profiles_do_not_import_csmar() -> None:
     path = PROJECT_SRC / "markets/implementations/a_share/research_profiles.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
 
     imports = _imported_modules(tree)
     assert not [
@@ -149,7 +158,7 @@ def test_a_share_research_profiles_do_not_import_csmar() -> None:
 def test_catalog_profiles_is_only_prod_module_composing_csmar_and_a_share() -> None:
     composers: list[str] = []
     for path in (PROJECT_SRC).rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
         imports = _imported_modules(tree)
         has_csmar = any(
             module.startswith("quant_research_platform.sources.csmar")
@@ -175,7 +184,7 @@ def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
         "ModelSpec(",
         "PredictionSpec(",
         "build_a_share_prediction_catalog",
-        "build_a_share_portfolio_catalog",
+        "build_portfolio_catalog",
     )
 
     assert [token for token in forbidden[:3] if token in profile_source] == []

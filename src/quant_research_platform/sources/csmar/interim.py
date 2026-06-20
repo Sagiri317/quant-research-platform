@@ -22,7 +22,7 @@ from quant_research_platform.sources.csmar.field_mappings import (
     normalize_stock_code,
 )
 from quant_research_platform.sources.csmar.fields import csmar_field_role
-from quant_research_platform.sources.csmar.ids import CSMAR_SOURCE_ID
+from quant_research_platform.sources.csmar.ids import SOURCE_ID
 from quant_research_platform.sources.csmar.raw_exports import (
     find_dataset_files,
     iter_private_export_chunks,
@@ -31,14 +31,14 @@ from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
-    "daily_market",
+    "market_bars_1d",
     "stock_master",
     "adjustment",
     "market_cap",
     "index_info",
     "trading_calendar",
 )
-TIME_RANGE_FILTER_DATA_IDS = {"daily_market"}
+TIME_RANGE_FILTER_DATA_IDS = {"market_bars_1d"}
 END_ONLY_FILTER_DATA_IDS = {"market_cap"}
 START_END_FILTER_DATA_IDS = {"adjustment"}
 SOURCE_REFERENCE_DATA_IDS = {"stock_master", "index_info"}
@@ -61,7 +61,7 @@ DAILY_MARKET_INTERIM_COLUMNS: tuple[str, ...] = (
     "amount",
     "prev_close",
     "limit_status",
-    "return_1d",
+    "period_return",
     "adj_close",
     "adj_open",
     "float_market_cap",
@@ -117,7 +117,7 @@ TRADING_CALENDAR_INTERIM_COLUMNS: tuple[str, ...] = (
     "source_state",
 )
 INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
-    "daily_market": DAILY_MARKET_INTERIM_COLUMNS,
+    "market_bars_1d": DAILY_MARKET_INTERIM_COLUMNS,
     "stock_master": STOCK_MASTER_INTERIM_COLUMNS,
     "market_cap": MARKET_CAP_INTERIM_COLUMNS,
     "adjustment": ADJUSTMENT_INTERIM_COLUMNS,
@@ -125,20 +125,20 @@ INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "trading_calendar": TRADING_CALENDAR_INTERIM_COLUMNS,
 }
 AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
-    "daily_market": {
-        "return_with_dividend": "derived as return_1d",
+    "market_bars_1d": {
+        "return_with_dividend": "derived as period_return",
         "comparable_close_with_dividend": "derived as adj_close",
         "float_market_cap_thousand": "converted to float_market_cap",
         "total_market_cap_thousand": "converted to total_market_cap",
     }
 }
 OPTIONAL_COLUMNS: dict[str, dict[str, str]] = {
-    "daily_market": {
+    "market_bars_1d": {
         "return_without_dividend": "not retained in the source interim contract",
         "comparable_close_without_dividend": (
             "not retained in the source interim contract"
         ),
-        "change_ratio": "return_1d and price fields are used instead",
+        "change_ratio": "period_return and price fields are used instead",
         "limit_down": "limit_status is used instead",
         "limit_up": "limit_status is used instead",
     },
@@ -295,12 +295,12 @@ def normalize_raw_frame(
 
     if data_id == "trading_calendar":
         return _normalize_trading_calendar_frame(mapped)
-    if data_id == "daily_market":
+    if data_id == "market_bars_1d":
         result = mapped.copy()
         result["trade_date"] = pd.to_datetime(result["trade_date"])
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
-        result["return_1d"] = result["return_with_dividend"]
+        result["period_return"] = result["return_with_dividend"]
         result["adj_close"] = result["comparable_close_with_dividend"]
         result["adj_open"] = result["open"] * result["adj_close"] / result["close"]
         result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
@@ -433,7 +433,7 @@ def materialize_interim_data(
     chunksize: int = 500_000,
 ) -> CSMARInterimImportResult:
     catalog = interim_catalog()
-    source_raw_root = raw_root or layout.raw_source_root(SourceId(CSMAR_SOURCE_ID))
+    source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
     overrides = load_column_overrides(override_path) if override_path else None
     written: dict[str, Path] = {}
     skipped: list[str] = []
@@ -574,7 +574,7 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
         primary_key = ("timestamp", "source_market_type")
         return InterimDataSpec(
             data_id=data_id,
-            source_id=SourceId(CSMAR_SOURCE_ID),
+            source_id=SourceId(SOURCE_ID),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.SOURCE_MARKET_CALENDAR_DATE,
             column_roles=_column_roles(columns, primary_key=primary_key),
@@ -585,7 +585,7 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
         primary_key = ("source_asset_id", "timestamp")
         return InterimDataSpec(
             data_id=data_id,
-            source_id=SourceId(CSMAR_SOURCE_ID),
+            source_id=SourceId(SOURCE_ID),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
             column_roles=_column_roles(columns, primary_key=primary_key),
@@ -596,7 +596,7 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
         primary_key = ("source_asset_id", "timestamp")
         return InterimDataSpec(
             data_id=data_id,
-            source_id=SourceId(CSMAR_SOURCE_ID),
+            source_id=SourceId(SOURCE_ID),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
             column_roles=_column_roles(columns, primary_key=primary_key),
@@ -606,7 +606,7 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
     primary_key = ("source_asset_id", "timestamp")
     return InterimDataSpec(
         data_id=data_id,
-        source_id=SourceId(CSMAR_SOURCE_ID),
+        source_id=SourceId(SOURCE_ID),
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles=_column_roles(columns, primary_key=primary_key),
@@ -665,7 +665,7 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _date_column(data_id: str) -> str:
     if data_id in {
-        "daily_market",
+        "market_bars_1d",
         "adjustment",
         "market_cap",
         "stock_master",

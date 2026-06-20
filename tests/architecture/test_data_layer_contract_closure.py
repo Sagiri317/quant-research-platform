@@ -19,7 +19,7 @@ NEGATIVE_GATE_FILES = {
 }
 # Only local/verification evidence fixture residue may name the source here.
 LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL = (
-    'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"'
+    'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE = "csmar"'
 )
 PRIVATE_EVIDENCE_RUNNER_A_SHARE_BUILDER_IMPORT = (
     PROJECT_SRC / "workflows/verification_evidence.py",
@@ -254,7 +254,7 @@ def test_materializer_has_no_old_family_specific_or_source_imports() -> None:
     path = PROJECT_SRC / "markets/implementations/a_share/processed/materializer.py"
     source = path.read_text(encoding="utf-8")
     forbidden = (
-        "CSMAR_SOURCE_ID",
+        "SOURCE_ID",
         "calculate_price_volume_factors_for_panel",
         "calculate_forward_return_labels_for_panel",
         "a_share_forward_return_label_definitions",
@@ -278,8 +278,8 @@ def test_panel_layer_has_no_annotation_rule_terms() -> None:
         "eligible_base",
         "eligible_after_listing_age",
         "eligible_liquidity",
-        "next_day_is_trading",
-        "next_day_limit_status",
+        "next_bar_is_trading",
+        "next_bar_limit_status",
     )
 
     assert [token for token in forbidden if token in source] == []
@@ -312,8 +312,8 @@ def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> 
     csmar_hits: list[tuple[Path, str]] = []
     for path in sorted(a_share_root.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
-        if "CSMAR_SOURCE_ID" in source:
-            hits.append(f"{path}:CSMAR_SOURCE_ID")
+        if "SOURCE_ID" in source:
+            hits.append(f"{path}:SOURCE_ID")
         if "from quant_research_platform.sources.csmar" in source:
             hits.append(f"{path}:sources.csmar import")
         if re.search(r"(?i)\bcsmar\b", source):

@@ -95,7 +95,7 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
         factor_set=FactorSet.CORE,
         input_columns=("adj_close",),
         output_column="mom_20d",
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
         window=20,
     )
     label = LabelDefinition(
@@ -124,9 +124,9 @@ def test_factor_set_rejects_retired_aliases_without_catalog_resolver() -> None:
         factor_id="rev_1d",
         market_id=MarketId("a_share"),
         factor_set=FactorSet.STANDARD,
-        input_columns=("return_1d",),
+        input_columns=("period_return",),
         output_column="rev_1d",
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
     )
 
     assert definition.factor_set == FactorSet.STANDARD
@@ -145,8 +145,8 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     layout = StorageLayout(project_root=Path("/repo"))
 
     assert layout.raw_source_root(SourceId("csmar")) == Path("/repo/data/raw/csmar")
-    assert layout.interim_data_root(SourceId("csmar"), "daily_market") == Path(
-        "/repo/data/interim/csmar/daily_market"
+    assert layout.interim_data_root(SourceId("csmar"), "market_bars_1d") == Path(
+        "/repo/data/interim/csmar/market_bars_1d"
     )
     assert layout.processed_data_root(
         MarketId("a_share"),
@@ -160,17 +160,17 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
         MarketId("a_share"),
         "evaluation",
     ) == Path(
-        "/repo/reports/private_real/a_share/evaluation"
+        "/repo/reports/private_research/a_share/evaluation"
     )
     assert PRIVATE_BOUNDARY_ROOTS == (
         "data/raw",
         "data/interim",
         "data/processed",
         "data/research",
-        "reports/private_real",
+        "reports/private_research",
     )
     assert is_private_boundary_path(Path("/repo/data/raw/csmar/export.csv"))
-    assert is_private_boundary_path(Path("/repo/reports/private_real/a_share/run"))
+    assert is_private_boundary_path(Path("/repo/reports/private_research/a_share/run"))
     assert not is_private_boundary_path(Path("/repo/docs/data/README.md"))
 
 
@@ -190,7 +190,7 @@ def test_sanitizer_removes_local_paths_private_markers_and_stock_codes() -> None
     assert "CSMAR" not in sanitized
 
 
-def test_csmar_daily_market_normalization_stays_source_local() -> None:
+def test_csmar_market_bars_1d_normalization_stays_source_local() -> None:
     raw = pd.DataFrame(
         {
             "Stkcd": ["1"],
@@ -218,10 +218,10 @@ def test_csmar_daily_market_normalization_stays_source_local() -> None:
         }
     )
 
-    normalized = csmar_interim.normalize_raw_frame(raw, "daily_market")
+    normalized = csmar_interim.normalize_raw_frame(raw, "market_bars_1d")
     pruned, _ = csmar_interim.apply_output_column_rules(
         normalized,
-        "daily_market",
+        "market_bars_1d",
     )
 
     assert pruned.loc[0, "source_asset_id"] == "000001"

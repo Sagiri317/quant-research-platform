@@ -12,7 +12,7 @@ PRIVATE_BOUNDARY_ROOTS: tuple[str, ...] = (
     "data/interim",
     "data/processed",
     "data/research",
-    "reports/private_real",
+    "reports/private_research",
 )
 PRIVATE_DATA_LAYERS: tuple[str, ...] = (
     "raw",
@@ -30,21 +30,28 @@ _POSIX_PRIVATE_PATH_RE = re.compile(
 _ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?<!\w)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
     r"(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_real"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_research"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_real"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_research"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(
     r"(?<![.\d])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?!\d)",
     re.IGNORECASE,
 )
+_ROW_SAMPLE_RE = re.compile(
+    r"(?i)\brow[-_ ]?samples?\b|"
+    r"\bmarket_id\s*=\s*[^\s,;]+.*\basset_id\s*=\s*[^\s,;]+|"
+    r"\basset_id\s*=\s*[^\s,;]+.*\btimestamp\s*="
+)
 _PRIVATE_MARKER_RE = re.compile(
     r"(?i)\b(?:csmar|source_id|provider_id|implementation_package|"
-    r"vendor(?:[-_ ]?source)?|raw[-_ ]?source[-_ ]?marker)\b"
+    r"provider[-_ ]?marker|source[-_ ]?marker|vendor[-_ ]?marker|"
+    r"vendor[-_ ]?payload|raw[-_ ]?vendor|vendor(?:[-_ ]?source)?|"
+    r"raw[-_ ]?source[-_ ]?marker)\b"
 )
 _CREDENTIAL_RE = re.compile(
     r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
@@ -70,9 +77,35 @@ def is_private_boundary_path(path: Path) -> bool:
         if part == "data" and parts[index + 1] in PRIVATE_DATA_LAYERS:
             return True
     return any(
-        parts[index : index + 2] == ("reports", "private_real")
+        parts[index : index + 2] == ("reports", "private_research")
         for index in range(max(len(parts) - 1, 0))
     )
+
+
+def public_text_unsafe_reason(text: object) -> str | None:
+    value = str(text)
+    if _TRACEBACK_RE.search(value):
+        return "traceback"
+    if _CREDENTIAL_RE.search(value):
+        return "credential"
+    if (
+        _ABSOLUTE_REPO_PRIVATE_PATH_RE.search(value)
+        or _REPO_PRIVATE_PATH_RE.search(value)
+    ):
+        return "private_path"
+    if (
+        _WINDOWS_DRIVE_PATH_RE.search(value)
+        or _UNC_PATH_RE.search(value)
+        or _POSIX_PRIVATE_PATH_RE.search(value)
+    ):
+        return "local_path"
+    if _ROW_SAMPLE_RE.search(value):
+        return "row_sample"
+    if _PRIVATE_MARKER_RE.search(value):
+        return "private_marker"
+    if _STOCK_CODE_RE.search(value):
+        return "stock_code_sample"
+    return None
 
 
 def sanitize_public_text(text: object) -> str:
@@ -86,6 +119,7 @@ def sanitize_public_text(text: object) -> str:
     result = _UNC_PATH_RE.sub("[local-path]", result)
     result = _POSIX_PRIVATE_PATH_RE.sub("[local-path]", result)
     result = _REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
+    result = _ROW_SAMPLE_RE.sub("[row-sample]", result)
     result = _PRIVATE_MARKER_RE.sub("[private]", result)
     result = _STOCK_CODE_RE.sub("[asset-id]", result)
     return result
@@ -113,6 +147,7 @@ __all__ = [
     "PRIVATE_DATA_LAYERS",
     "PRIVATE_BOUNDARY_ROOTS",
     "is_private_boundary_path",
+    "public_text_unsafe_reason",
     "sanitize_public_object",
     "sanitize_public_text",
 ]

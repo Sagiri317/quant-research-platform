@@ -23,8 +23,13 @@ from quant_research_platform.catalog.processed import (
 )
 from quant_research_platform.catalog.reports import ReportCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
-from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    ProcessedDataKind,
+    data_frequency_slug,
+    normalize_data_frequency,
+)
+from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_profiles as a_share_research_profiles,
@@ -64,6 +69,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 @dataclass(frozen=True)
 class ResearchProfile:
+    profile_id: str
     fields: FieldCatalog
     factors: FactorCatalog
     labels: LabelCatalog
@@ -85,14 +91,43 @@ class ResearchProfile:
     ]
 
 
-def research_profile() -> ResearchProfile:
+def research_profile_id(
+    market_id: MarketId | str,
+    source_id: SourceId | str,
+    frequency: DataFrequency | str,
+) -> str:
+    normalized_frequency = normalize_data_frequency(frequency)
+    return (
+        f"{MarketId(market_id)}_{SourceId(source_id)}_"
+        f"{data_frequency_slug(normalized_frequency)}"
+    )
+
+
+def research_profile(profile_id: str | None = None) -> ResearchProfile:
     """Return the active research profile."""
 
-    return _a_share_csmar_research_profile()
+    active_profile_id = research_profile_id(
+        MarketId("a_share"),
+        SourceId("csmar"),
+        DataFrequency.DAILY,
+    )
+    builders = {
+        active_profile_id: _a_share_csmar_research_profile,
+    }
+    selected = profile_id or active_profile_id
+    try:
+        return builders[selected]()
+    except KeyError as exc:
+        raise KeyError("unknown_research_profile") from exc
 
 
 def _a_share_csmar_research_profile() -> ResearchProfile:
     return ResearchProfile(
+        profile_id=research_profile_id(
+            MarketId("a_share"),
+            SourceId("csmar"),
+            DataFrequency.DAILY,
+        ),
         fields=a_share_field_catalog(),
         factors=a_share_factor_definitions.a_share_factor_catalog(),
         labels=a_share_label_definitions.a_share_label_catalog(),
@@ -100,7 +135,7 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         research_datasets=(
             a_share_research_profiles.build_a_share_research_dataset_catalog()
         ),
-        evaluations=a_share_research_scenarios.build_a_share_evaluation_catalog(),
+        evaluations=a_share_research_scenarios.build_evaluation_catalog(),
         models=a_share_research_scenarios.build_a_share_model_catalog(),
         predictions=PredictionCatalog(),
         portfolios=PortfolioCatalog(),
@@ -166,4 +201,4 @@ def _materialize_a_share_processed_data(
     )
 
 
-__all__ = ["ResearchProfile", "research_profile"]
+__all__ = ["ResearchProfile", "research_profile", "research_profile_id"]

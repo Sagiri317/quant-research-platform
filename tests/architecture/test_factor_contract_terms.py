@@ -18,7 +18,7 @@ EXCLUDED_PARTS = {
     ("__pycache__",),
     ("docs", "architecture", "open-issues-register.md"),
     ("docs", "archive"),
-    ("reports", "private_real"),
+    ("reports", "private_research"),
 }
 FORBIDDEN_PATTERNS = {
     "price_volume_56": re.compile(r"price_volume_56"),

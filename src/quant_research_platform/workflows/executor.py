@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quant_research_platform.contracts.execution import ExecutionMode
+from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowRunSummary,
@@ -30,31 +30,31 @@ def execute_workflow(
     checkpoints: InMemoryCheckpointStore | None = None,
     *,
     allowed_spec_ids: set[str] | None = None,
-    execution_mode: ExecutionMode | str | None = None,
+    run_mode: WorkflowRunMode | str | None = None,
     run_id: str = "workflow-dry-run",
 ) -> WorkflowRunSummary:
-    mode = _normalize_workflow_execution_mode(execution_mode)
-    if mode is ExecutionMode.EXECUTE:
-        raise NotImplementedError("workflow_execute_not_implemented")
-    node_registry = registry or workflow_node_registry(execution_mode=mode)
-    _validate_workflow_execution(
+    mode = _normalize_workflow_run_mode(run_mode)
+    if mode is WorkflowRunMode.WRITE_ARTIFACTS:
+        raise NotImplementedError("workflow_write_artifacts_not_implemented")
+    node_registry = registry or workflow_node_registry(run_mode=mode)
+    _validate_workflow_run(
         spec,
         allowed_spec_ids=allowed_spec_ids,
     )
     step_ids = plan_topological_steps(spec)
-    if mode is ExecutionMode.DRY_RUN:
+    if mode is WorkflowRunMode.VALIDATE_ONLY:
         _validate_registered_steps(step_ids, node_registry)
         return workflow_run_summary(
             spec,
             completed_nodes=(),
-            execution_mode=mode,
+            run_mode=mode,
             run_id=run_id,
             status="validated",
         )
-    raise NotImplementedError("workflow_execute_not_implemented")
+    raise NotImplementedError("workflow_write_artifacts_not_implemented")
 
 
-def _validate_workflow_execution(
+def _validate_workflow_run(
     spec: WorkflowSpec,
     *,
     allowed_spec_ids: set[str] | None,
@@ -74,14 +74,14 @@ def workflow_run_summary(
     spec: WorkflowSpec,
     *,
     completed_nodes: tuple[str, ...],
-    execution_mode: ExecutionMode | str | None = None,
+    run_mode: WorkflowRunMode | str | None = None,
     run_id: str = "workflow-dry-run",
-    status: str = "executed",
+    status: str = "validated",
 ) -> WorkflowRunSummary:
     return WorkflowRunSummary(
         workflow_id=spec.workflow_id,
         workflow_version=spec.workflow_version,
-        execution_mode=ExecutionMode.normalize(execution_mode),
+        run_mode=WorkflowRunMode.normalize(run_mode),
         run_id=run_id,
         status=status,
         market_id=str(spec.market_id) if spec.market_id else None,
@@ -95,12 +95,12 @@ def workflow_run_summary(
     )
 
 
-def _normalize_workflow_execution_mode(
-    execution_mode: ExecutionMode | str | None,
-) -> ExecutionMode:
-    if execution_mode is None:
-        return ExecutionMode.DRY_RUN
-    return ExecutionMode.normalize(execution_mode)
+def _normalize_workflow_run_mode(
+    run_mode: WorkflowRunMode | str | None,
+) -> WorkflowRunMode:
+    if run_mode is None:
+        return WorkflowRunMode.VALIDATE_ONLY
+    return WorkflowRunMode.normalize(run_mode)
 
 
 __all__ = [

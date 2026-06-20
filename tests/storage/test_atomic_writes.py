@@ -14,7 +14,7 @@ from quant_research_platform.storage.atomic import (
 
 
 def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -> None:
-    final_root = tmp_path / "reports" / "private_real" / "a_share" / "run"
+    final_root = tmp_path / "reports" / "private_research" / "a_share" / "run"
 
     def failing_writer(temp_root: Path) -> None:
         (temp_root / "partial.txt").write_text("partial\n", encoding="utf-8")
@@ -31,7 +31,7 @@ def test_atomic_write_directory_retries_transient_permission_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    final_root = tmp_path / "reports" / "private_real" / "a_share" / "run"
+    final_root = tmp_path / "reports" / "private_research" / "a_share" / "run"
     original_rename = Path.rename
     calls = 0
 

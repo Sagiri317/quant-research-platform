@@ -15,7 +15,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets import compare_datasets, write_dataset
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import (
     write_internal_artifact_manifest,
@@ -81,9 +81,25 @@ def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) 
     assert (root / "data" / "year=2014" / "part-000.parquet").is_file()
 
 
+def test_projected_dataset_fingerprint_includes_primary_key_columns(
+    tmp_path: Path,
+) -> None:
+    left = tmp_path / "data" / "processed" / "a_share" / "factor" / "left"
+    right = tmp_path / "data" / "processed" / "a_share" / "factor" / "right"
+    right_frame = _frame().assign(asset_id="asset_002")
+
+    write_dataset(left, _frame(), spec=_processed_spec("left"))
+    write_dataset(right, right_frame, spec=_processed_spec("right"))
+
+    comparison = compare_datasets(left, right, columns=["value"])
+
+    assert comparison.status == "CONTENT_MISMATCH"
+    assert comparison.matches is False
+
+
 def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> None:
     manifest = write_manifest(
-        tmp_path / "reports" / "private_real" / "a_share" / "run" / "manifest.json",
+        tmp_path / "reports" / "private_research" / "a_share" / "run" / "manifest.json",
         {
             "path": r"C:\Users\DELL\data\raw\csmar\000001.SZ",
             "traceback": "Traceback (most recent call last): /mnt/data/raw",
@@ -102,7 +118,7 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     manifest = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "run"
         / "manifest.json"

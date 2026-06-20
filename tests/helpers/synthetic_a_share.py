@@ -33,7 +33,7 @@ def make_synthetic_trading_calendar() -> pd.DataFrame:
     )
 
 
-def make_synthetic_daily_market() -> pd.DataFrame:
+def make_synthetic_market_bars_1d() -> pd.DataFrame:
     dates = pd.to_datetime(
         ["2023-12-29", "2024-01-02", "2024-01-03", "2024-01-05", "2024-01-08"]
     )
@@ -73,7 +73,7 @@ def make_synthetic_daily_market() -> pd.DataFrame:
                     "prev_close": base_price + offset - 0.1,
                     "volume": 0.0 if zero_liquidity else 1000.0 + offset,
                     "amount": 0.0 if zero_liquidity else 10_000.0 + offset,
-                    "return_1d": 0.01 * (offset + 1),
+                    "period_return": 0.01 * (offset + 1),
                     "limit_status": limit_status,
                     "is_limit_up": limit_status == 1,
                     "is_limit_down": limit_status == -1,
@@ -164,7 +164,7 @@ def make_synthetic_market_cap() -> pd.DataFrame:
     )
 
 
-def make_synthetic_daily_panel(
+def make_synthetic_market_panel_1d(
     *,
     sessions: int = 130,
     assets: tuple[str, ...] = ("asset_a", "asset_b"),
@@ -206,7 +206,7 @@ def make_synthetic_factor_panel(
                     "session_date": pd.Timestamp(date),
                     "available_at": pd.Timestamp(date),
                     "adj_close": close,
-                    "return_1d": close / previous_close - 1.0,
+                    "period_return": close / previous_close - 1.0,
                     "amount": 10_000.0 + offset,
                     "turnover": 0.01 + offset / 100_000.0,
                     "high": close + 1.0,

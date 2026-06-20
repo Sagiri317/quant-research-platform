@@ -1,4 +1,4 @@
-# QRP 项目状态
+﻿# QRP 项目状态
 
 本文件记录当前开发状态，不替代代码、tests、contracts 或 `AGENTS.md`。AI agents 执行任务前仍必须用 `git status --short --branch` 和当前分支 diff 校验事实。
 
@@ -71,7 +71,7 @@ public evaluate、predict 或 report command；不是 simulated or real-money or
 
 | 日期 | 类型 | 变化 | 需要根目录同步 | 状态 |
 |---|---|---|---|---|
-| 2026-06-03 | status | QRP clean rewrite started on `feature/qrp-clean-rewrite`：源码拓扑迁移到 `0.1.0`，API/CLI 公共接口变为 `/api/0.1/...`，私有数据边界变为 `data/raw`、`data/interim`、`data/processed`、`reports/private_real`；旧 endpoint/command compatibility 不再是目标合同事实。 | WORKSPACE_STATUS, PLAN_INDEX | open |
+| 2026-06-03 | status | QRP clean rewrite started on `feature/qrp-clean-rewrite`：源码拓扑迁移到 `0.1.0`，API/CLI 公共接口变为 `/api/0.1/...`，私有数据边界变为 `data/raw`、`data/interim`、`data/processed`、`reports/private_research`；旧 endpoint/command compatibility 不再是目标合同事实。 | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-04 | status | QRP clean rewrite 完成结构性本地阶段；private generated artifacts 仍为本地证据。 | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-15 | governance | Agent governance redesign 规定 `.agents/` 为项目治理根，global `.codex/` 为只读证据源，repo-local `.codex`/hooks/MCP/plugins 默认为 draft-only。 | WORKSPACE_STATUS, PLAN_INDEX | open |
 | 2026-06-15 | governance | 第二轮治理修补要求人读文件中文化、内存预算以代码 `0.80` 为事实源、短提示词精准路由、token economy 和外部工具共存规则。 | WORKSPACE_STATUS, PLAN_INDEX | open |

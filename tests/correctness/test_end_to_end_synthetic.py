@@ -29,13 +29,13 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
     _write_synthetic_raw_exports(layout)
     interim_result = materialize_interim_data(
         layout=layout,
-        data_ids=("daily_market", "stock_master", "market_cap", "trading_calendar"),
+        data_ids=("market_bars_1d", "stock_master", "market_cap", "trading_calendar"),
         start_date="2020-01-01",
         end_date="2020-03-31",
         chunksize=17,
     )
     assert set(interim_result.artifact_roots) == {
-        "daily_market",
+        "market_bars_1d",
         "stock_master",
         "market_cap",
         "trading_calendar",
@@ -58,20 +58,20 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
         layout=layout,
         dataset_catalog=catalogs.research_datasets,
         processed_catalog=catalogs.processed,
-        dataset_id="a_share_price_volume_forward_returns",
+        dataset_id="price_volume_forward_returns",
         time_window=time_window,
     )
 
     panel = read_dataset(
-        tmp_path / "data/processed/a_share/panel/daily_panel",
+        tmp_path / "data/processed/a_share/panel/market_panel_1d",
         time_window=time_window,
     )
     execution = read_dataset(
-        tmp_path / "data/processed/a_share/annotation/a_share_execution",
+        tmp_path / "data/processed/a_share/annotation/execution",
         time_window=time_window,
     )
     default_universe = read_dataset(
-        tmp_path / "data/processed/a_share/annotation/a_share_default",
+        tmp_path / "data/processed/a_share/annotation/default",
         time_window=time_window,
     )
     factors = read_dataset(
@@ -85,7 +85,7 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
     research = read_research_dataset(
         layout,
         market_id=MarketId("a_share"),
-        dataset_id="a_share_price_volume_forward_returns",
+        dataset_id="price_volume_forward_returns",
         time_window=time_window,
     )
 
@@ -160,7 +160,7 @@ def test_synthetic_interim_to_research_subset_remains_available(
 def _write_synthetic_raw_exports(layout: StorageLayout) -> None:
     root = layout.raw_source_root(SourceId("csmar"))
     frames = {
-        "daily_market": _daily_market_raw(),
+        "market_bars_1d": _market_bars_1d_raw(),
         "stock_master": _stock_master_raw(),
         "market_cap": _market_cap_raw(),
         "trading_calendar": _trading_calendar_raw(),
@@ -182,7 +182,7 @@ def _write_synthetic_interim_world(layout: StorageLayout) -> None:
     catalog = interim_catalog()
     source_id = SourceId("csmar")
     frames = {
-        "daily_market": _daily_market(),
+        "market_bars_1d": _market_bars_1d(),
         "stock_master": _stock_master(),
         "market_cap": _market_cap(),
         "trading_calendar": _trading_calendar(),
@@ -196,7 +196,7 @@ def _write_synthetic_interim_world(layout: StorageLayout) -> None:
         )
 
 
-def _daily_market() -> pd.DataFrame:
+def _market_bars_1d() -> pd.DataFrame:
     dates = pd.bdate_range("2020-01-02", periods=80)
     rows: list[dict[str, object]] = []
     for asset_id, market_type in (("000001", 4), ("000002", 32), ("000003", 64)):
@@ -231,7 +231,7 @@ def _daily_market() -> pd.DataFrame:
                     "amount": close * (10_000.0 + index),
                     "prev_close": close - 0.05,
                     "limit_status": limit_status,
-                    "return_1d": 0.004 + (index % 7) * 0.0003,
+                    "period_return": 0.004 + (index % 7) * 0.0003,
                     "adj_close": close,
                     "adj_open": open_price * close / close if close else pd.NA,
                     "float_market_cap": close * 500.0,
@@ -242,8 +242,8 @@ def _daily_market() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _daily_market_raw() -> pd.DataFrame:
-    raw = _daily_market()
+def _market_bars_1d_raw() -> pd.DataFrame:
+    raw = _market_bars_1d()
     return raw.rename(
         columns={
             "source_asset_id": "Stkcd",
@@ -259,15 +259,15 @@ def _daily_market_raw() -> pd.DataFrame:
             "amount": "Dnvaltrd",
             "float_market_cap": "Dsmvosd",
             "total_market_cap": "Dsmvtll",
-            "return_1d": "Dretwd",
+            "period_return": "Dretwd",
             "adj_close": "Adjprcwd",
             "prev_close": "PreClosePrice",
             "limit_status": "LimitStatus",
         }
     ).assign(
-        Dretnd=raw["return_1d"],
+        Dretnd=raw["period_return"],
         Adjprcnd=raw["adj_close"],
-        ChangeRatio=raw["return_1d"],
+        ChangeRatio=raw["period_return"],
         LimitDown=raw["prev_close"] * 0.9,
         LimitUp=raw["prev_close"] * 1.1,
     )[

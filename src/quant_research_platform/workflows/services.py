@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quant_research_platform.contracts.execution import ExecutionMode
+from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.workflows import WorkflowSpec
 from quant_research_platform.runtime.workflow_records import (
     workflow_run_summary_to_public_record,
@@ -19,31 +19,35 @@ def execute_registered_workflow(
     *,
     registry: WorkflowNodeRegistry | None = None,
     allowed_spec_ids: set[str] | None = None,
-    execution_mode: ExecutionMode | str | None = None,
+    run_mode: WorkflowRunMode | str | None = None,
     run_id: str = "workflow-dry-run",
 ) -> dict[str, object]:
-    mode = _normalize_workflow_execution_mode(execution_mode)
-    node_registry = registry or workflow_node_registry(execution_mode=mode)
+    mode = _normalize_workflow_run_mode(run_mode)
+    node_registry = registry or workflow_node_registry(run_mode=mode)
     summary = execute_workflow(
         spec,
         registry=node_registry,
         allowed_spec_ids=allowed_spec_ids,
-        execution_mode=mode,
+        run_mode=mode,
         run_id=run_id,
     )
     public_record = workflow_run_summary_to_public_record(summary)
     return {
         **public_record,
-        "status": "executed" if mode is ExecutionMode.EXECUTE else "validated",
+        "status": (
+            "artifact_writing_not_implemented"
+            if mode is WorkflowRunMode.WRITE_ARTIFACTS
+            else "validated"
+        ),
     }
 
 
 __all__ = ["execute_registered_workflow"]
 
 
-def _normalize_workflow_execution_mode(
-    execution_mode: ExecutionMode | str | None,
-) -> ExecutionMode:
-    if execution_mode is None:
-        return ExecutionMode.DRY_RUN
-    return ExecutionMode.normalize(execution_mode)
+def _normalize_workflow_run_mode(
+    run_mode: WorkflowRunMode | str | None,
+) -> WorkflowRunMode:
+    if run_mode is None:
+        return WorkflowRunMode.VALIDATE_ONLY
+    return WorkflowRunMode.normalize(run_mode)

@@ -131,7 +131,7 @@ MATERIALIZED_SCAN_ALLOWLIST = {
             "src/quant_research_platform/markets/implementations/a_share/"
             "processed/panels.py"
         ),
-        "compute_daily_panel",
+        "compute_market_panel",
     ): (
         "per-window panel computation groups one bounded window already selected "
         "upstream"

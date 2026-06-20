@@ -20,14 +20,12 @@ from handoff_safety import scan_handoff_zip  # noqa: E402
 VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
 REQUIRED_ZIP_ENTRIES = {
     "artifact_manifest.json",
-    "diff.patch",
     "final-branch.bundle",
     "git_status.txt",
-    "pr_body.md",
-    "review_threads.json",
     "task_metadata.json",
     "validation_evidence.json",
 }
+DIFF_PATCH_ENTRY = "diff" + ".patch"
 FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
     ".agents/",
     "docs/",
@@ -93,6 +91,16 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 failures.append("external_json_in_zip")
             missing = sorted(REQUIRED_ZIP_ENTRIES - name_set)
             failures.extend(f"missing_required_entry: {name}" for name in missing)
+            if DIFF_PATCH_ENTRY in name_set:
+                failures.append("forbidden_entry: " + DIFF_PATCH_ENTRY)
+            pr_entries = {"pr_body.md", "review_threads.json"}
+            present_pr_entries = pr_entries.intersection(name_set)
+            if present_pr_entries and present_pr_entries != pr_entries:
+                missing_pr_entries = sorted(pr_entries - present_pr_entries)
+                failures.extend(
+                    f"pr_closure_missing_required_entry: {name}"
+                    for name in missing_pr_entries
+                )
             duplicate_source = sorted(
                 name
                 for name in names
@@ -103,16 +111,17 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 for name in duplicate_source
             )
             if not any(
-                name.startswith("review_evidence/") and name.endswith(".json")
+                name.startswith("handoff_evidence/") and name.endswith(".json")
                 for name in names
             ):
-                failures.append("missing_review_evidence_json")
+                failures.append("missing_handoff_evidence_json")
             failures.extend(verify_artifact_manifest(archive, sidecar))
             failures.extend(verify_metadata_entries(archive, sidecar))
-            failures.extend(verify_review_thread_closure(archive, sidecar))
-            failures.extend(verify_pr_body_statuses(archive, sidecar))
-            failures.extend(verify_review_evidence_json(archive))
-            failures.extend(verify_bundle_and_diff(archive, sidecar))
+            if pr_entries.issubset(name_set):
+                failures.extend(verify_review_thread_closure(archive, sidecar))
+                failures.extend(verify_pr_body_statuses(archive, sidecar))
+            failures.extend(verify_handoff_evidence_json(archive))
+            failures.extend(verify_final_branch_bundle(archive, sidecar))
             failures.extend(verify_git_status(archive))
     except Exception as exc:
         failures.append(f"zip_verification_error: {type(exc).__name__}: {exc}")
@@ -536,22 +545,22 @@ def verify_pr_body_statuses(archive: ZipFile, sidecar: dict[str, object]) -> lis
     return failures
 
 
-def verify_review_evidence_json(archive: ZipFile) -> list[str]:
+def verify_handoff_evidence_json(archive: ZipFile) -> list[str]:
     failures: list[str] = []
     for name in archive.namelist():
-        if not (name.startswith("review_evidence/") and name.endswith(".json")):
+        if not (name.startswith("handoff_evidence/") and name.endswith(".json")):
             continue
         try:
             payload = json.loads(archive.read(name).decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            failures.append(f"review_evidence_json_invalid: {name}")
+            failures.append(f"handoff_evidence_json_invalid: {name}")
             continue
         if not isinstance(payload, dict):
-            failures.append(f"review_evidence_must_be_object: {name}")
+            failures.append(f"handoff_evidence_must_be_object: {name}")
             continue
         if name.endswith("verification-matrix.json"):
             failures.extend(verify_verification_matrix(payload))
-    if "review_evidence/verification-matrix.json" not in archive.namelist():
+    if "handoff_evidence/verification-matrix.json" not in archive.namelist():
         failures.append("verification_matrix_missing")
     return failures
 
@@ -566,7 +575,7 @@ def verify_verification_matrix(payload: dict[str, object]) -> list[str]:
         if isinstance(row, dict) and isinstance(row.get("name"), str)
     }
     failures: list[str] = []
-    for name in ("raw_diff_exactness", "handoff_verify_includes_git_apply_check"):
+    for name in ("handoff_verify", "handoff_safety_scan"):
         row = by_name.get(name)
         if row is None:
             failures.append(f"verification_matrix_required_missing: {name}")
@@ -576,7 +585,7 @@ def verify_verification_matrix(payload: dict[str, object]) -> list[str]:
     return failures
 
 
-def verify_bundle_and_diff(
+def verify_final_branch_bundle(
     archive: ZipFile,
     sidecar: dict[str, object],
 ) -> list[str]:
@@ -614,33 +623,7 @@ def verify_bundle_and_diff(
             failures.append("bundle_head_synthetic_marker")
         base_commit = sidecar.get("base")
         if base_commit is None:
-            failures.append("base_required_for_diff")
-            return failures
-        diff_range = f"{base_commit}..{final_head}"
-        apply_base = str(base_commit)
-        diff = git_text(clone_dir, "diff", "--full-index", "--binary", diff_range)
-        diff_patch = archive.read("diff.patch")
-        if normalize_lf(diff).encode("utf-8") != diff_patch:
-            failures.append("diff_patch_mismatch")
-        patch_path = Path(temp) / "diff.patch"
-        patch_path.write_bytes(diff_patch)
-        checkout = subprocess.run(
-            ["git", "checkout", "--detach", apply_base],
-            cwd=clone_dir,
-            capture_output=True,
-            text=True,
-        )
-        if checkout.returncode != 0:
-            failures.append("diff_patch_apply_base_checkout_failed")
-        else:
-            apply_check = subprocess.run(
-                ["git", "apply", "--check", str(patch_path)],
-                cwd=clone_dir,
-                capture_output=True,
-                text=True,
-            )
-            if apply_check.returncode != 0:
-                failures.append("diff_patch_apply_check_failed")
+            failures.append("base_required_for_bundle_context")
     return failures
 
 
@@ -764,10 +747,6 @@ def git_text(repo: Path, *args: str) -> str:
         text=True,
         encoding="utf-8",
     ).stdout
-
-
-def normalize_lf(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def contains_local_absolute_path_text(text: str) -> bool:

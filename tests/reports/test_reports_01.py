@@ -43,7 +43,7 @@ def test_stage_profile_report_artifacts_write_only_inside_private_report_boundar
     assert (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "diagnostics"
         / "run"
@@ -139,7 +139,7 @@ def test_stage_profile_report_artifacts_sanitize_outputs(tmp_path):
     output_dir = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "diagnostics"
         / "run"
@@ -214,7 +214,7 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> Non
     assert not (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "prediction"
         / "pred-run"
@@ -244,7 +244,7 @@ def test_stage_profile_report_artifacts_reject_existing_run_root_without_writes(
     run_root = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "diagnostics"
         / "run"
@@ -279,7 +279,7 @@ def test_prediction_report_artifacts_reject_existing_run_root_without_writes(
     run_root = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "prediction"
         / "pred-run"
@@ -307,7 +307,7 @@ def test_evaluation_report_artifacts_reject_existing_run_root_without_writes(
     run_root = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "evaluation"
         / "eval-run"
@@ -343,7 +343,7 @@ def test_stage_profile_report_artifacts_clean_temp_root_after_mid_write_failure(
     run_root = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "diagnostics"
         / "run"
@@ -375,7 +375,7 @@ def test_prediction_report_artifacts_clean_temp_root_after_mid_write_failure(
     run_root = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "prediction"
         / "pred-run"
@@ -411,7 +411,7 @@ def test_evaluation_report_artifacts_clean_temp_root_after_mid_write_failure(
     run_root = (
         tmp_path
         / "reports"
-        / "private_real"
+        / "private_research"
         / "a_share"
         / "evaluation"
         / "eval-run"

@@ -6,6 +6,14 @@ from pathlib import Path
 SOURCE_ROOT = Path("src/quant_research_platform")
 
 
+def _read_source(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
+def _parse_source(path: Path) -> ast.Module:
+    return ast.parse(_read_source(path), filename=str(path))
+
+
 def test_clean_rewrite_topology_has_required_packages() -> None:
     required = {
         "contracts",
@@ -187,7 +195,7 @@ def test_active_source_has_no_broad_artifact_report_diagnostics_abstractions() -
     }
     hits: list[str] = []
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         defined = _top_level_defined_names(tree)
         for name in sorted(forbidden_names & defined):
             hits.append(f"{path}: {name}")
@@ -211,7 +219,7 @@ def test_compute_split_modules_own_implementations() -> None:
     missing: list[str] = []
     reverse_imports: list[str] = []
     for path in split_modules:
-        text = path.read_text(encoding="utf-8")
+        text = _read_source(path)
         tree = ast.parse(text, filename=str(path))
         has_impl = any(
             isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
@@ -245,7 +253,7 @@ def test_compute_constraint_helpers_are_not_owned_by_portfolio_helpers() -> None
     }
     hits: list[str] = []
     for path, names in forbidden.items():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         hits.extend(
             f"{path}:{node.lineno}: {node.name}"
             for node in tree.body
@@ -333,7 +341,7 @@ def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
     for path, names in retired_functions.items():
         if not path.exists():
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         hits.extend(
             f"{path}:{node.lineno}: {node.name}"
             for node in tree.body
@@ -345,7 +353,7 @@ def test_a_share_source_to_dataset_old_helpers_are_absent() -> None:
 
 def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
     path = SOURCE_ROOT / "sources/csmar/__init__.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = _parse_source(path)
     exported_names = set()
     imported_names = set()
     for node in tree.body:
@@ -372,7 +380,7 @@ def test_package_inits_do_not_forward_storage_or_cli_owner_symbols() -> None:
         SOURCE_ROOT / "storage/__init__.py",
         SOURCE_ROOT / "interfaces/cli/__init__.py",
     ):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         for node in tree.body:
             if isinstance(node, ast.ImportFrom | ast.Import):
                 hits.append(f"{path}:{node.lineno}: import")
@@ -392,7 +400,7 @@ def test_reviewed_package_inits_do_not_reexport_convenience_symbols() -> None:
         SOURCE_ROOT / "research/evaluations/__init__.py",
         SOURCE_ROOT / "compute/tensor/__init__.py",
     ):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         for node in tree.body:
             if isinstance(node, ast.ImportFrom | ast.Import):
                 hits.append(f"{path}:{node.lineno}: import")
@@ -409,7 +417,7 @@ def test_non_interface_source_modules_do_not_define_hidden_cli_entrypoints() -> 
     allowed_private_cli = SOURCE_ROOT / "interfaces/private_cli.py"
     hits: list[str] = []
     for path in _python_files((SOURCE_ROOT,)):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         if path == allowed_private_cli or _is_relative_to(path, allowed_cli_root):
             continue
         for node in ast.walk(tree):
@@ -450,7 +458,7 @@ def test_csmar_source_package_does_not_own_market_interim_contracts() -> None:
     }
     hits: list[str] = []
     for path in source_root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         defined = _top_level_defined_names(tree)
         overlap = sorted(forbidden_raw_names & defined)
         hits.extend(f"{path}: {name}" for name in overlap)
@@ -482,11 +490,11 @@ def test_a_share_csmar_binding_does_not_export_unprefixed_behavior() -> None:
     path = SOURCE_ROOT / "markets/implementations/a_share/source_bindings/csmar.py"
     assert not path.exists()
     return
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = _parse_source(path)
     forbidden = {
         "filter_by_date_range",
         "normalize_asset_time_frame",
-        "normalize_daily_market_frame",
+        "normalize_market_bars_1d_frame",
         "normalize_index_metadata_frame",
         "normalize_index_time_frame",
         "normalize_private_export_frame",
@@ -515,15 +523,15 @@ def test_a_share_csmar_binding_does_not_export_unprefixed_behavior() -> None:
 
 def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
     raw_path = SOURCE_ROOT / "sources/csmar/raw_schemas.py"
-    raw_text = raw_path.read_text(encoding="utf-8")
-    raw_tree = ast.parse(raw_path.read_text(encoding="utf-8"), filename=str(raw_path))
+    raw_text = _read_source(raw_path)
+    raw_tree = _parse_source(raw_path)
     forbidden_raw_owners = {
         "map_csmar_columns",
         "missing_raw_columns",
         "missing_raw_column_names",
         "normalize_stock_code",
         "normalize_trdnew_capchg",
-        "normalize_trdnew_daily_market",
+        "normalize_trdnew_market_bars_1d",
         "_count_csv_rows",
         "_file_sha256",
         "build_raw_export_metadata",
@@ -559,7 +567,7 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
     missing: list[str] = []
     reverse_imports: list[str] = []
     for path, names in expected.items():
-        text = path.read_text(encoding="utf-8")
+        text = _read_source(path)
         tree = ast.parse(text, filename=str(path))
         defined = {
             node.name for node in tree.body if isinstance(node, ast.FunctionDef)
@@ -582,7 +590,7 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
 
 def test_csmar_source_raw_exports_do_not_write_metadata_manifests() -> None:
     path = SOURCE_ROOT / "sources/csmar/raw_exports.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = _parse_source(path)
     text = path.read_text(encoding="utf-8")
     hits: list[str] = []
     forbidden_functions = {"write_raw_export_metadata"}
@@ -606,7 +614,7 @@ def test_csmar_source_raw_exports_do_not_write_metadata_manifests() -> None:
 
 def test_csmar_field_mappings_does_not_own_validators_checksums_or_mappers() -> None:
     path = SOURCE_ROOT / "sources/csmar/field_mappings.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = _parse_source(path)
     forbidden = {
         "DatasetContract",
         "DATASET_CONTRACTS",
@@ -616,7 +624,7 @@ def test_csmar_field_mappings_does_not_own_validators_checksums_or_mappers() -> 
         "missing_required_columns",
         "negative_liquidity_rows",
         "normalize_trdnew_capchg",
-        "normalize_trdnew_daily_market",
+        "normalize_trdnew_market_bars_1d",
         "ohlc_violations",
         "raw_export_sha256",
     }
@@ -628,13 +636,9 @@ def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
     raw_path = SOURCE_ROOT / "sources/csmar/raw_schemas.py"
     mapping_path = SOURCE_ROOT / "sources/csmar/field_mappings.py"
     checksum_path = SOURCE_ROOT / "sources/csmar/checksums.py"
-    raw_tree = ast.parse(raw_path.read_text(encoding="utf-8"), filename=str(raw_path))
-    mapping_tree = ast.parse(
-        mapping_path.read_text(encoding="utf-8"), filename=str(mapping_path)
-    )
-    checksum_tree = ast.parse(
-        checksum_path.read_text(encoding="utf-8"), filename=str(checksum_path)
-    )
+    raw_tree = _parse_source(raw_path)
+    mapping_tree = _parse_source(mapping_path)
+    checksum_tree = _parse_source(checksum_path)
 
     raw_dataclass_fields = {
         node.target.id
@@ -664,9 +668,9 @@ def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
         "required_columns",
     }
     assert {
-        "CSMAR_COLUMN_MAPPINGS",
-        "CSMAR_COLUMN_ALIASES",
-        "CSMAR_FIELD_DESCRIPTIONS",
+        "COLUMN_MAPPINGS",
+        "COLUMN_ALIASES",
+        "FIELD_DESCRIPTIONS",
     }.issubset(mapping_assignments)
     assert {"_file_sha256", "raw_export_sha256", "build_raw_export_metadata"}.issubset(
         checksum_functions
@@ -691,7 +695,7 @@ def test_platform_core_does_not_import_csmar_source_modules() -> None:
     for path in _python_files(checked_roots):
         if path in allowed_composition_roots:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = _parse_source(path)
         for node in ast.walk(tree):
             module = None
             if isinstance(node, ast.ImportFrom):

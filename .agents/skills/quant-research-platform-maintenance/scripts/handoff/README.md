@@ -1,4 +1,4 @@
-# QRP Handoff Tools
+﻿# QRP Handoff Tools
 
 Tracked source for building and checking public-safe QRP handoff packages.
 Generated packages do not copy these tracked files into the zip. The final zip
@@ -15,13 +15,13 @@ The builder takes one public-safe task JSON:
 
 The task JSON must provide `slug`, `branch`, `base`, and `final_head` plus
 public-safe `validation_evidence`, `review_threads`, and optional
-`review_evidence`. The zip normalizes this input into:
+`handoff_evidence`. The zip normalizes this input into:
 
 - `task_metadata.json`
 - `validation_evidence.json`
 - `review_threads.json`
 - `pr_body.md`
-- `review_evidence/*.json`
+- `handoff_evidence/*.json`
 
 Do not include private row-level data, local absolute paths, raw tracebacks,
 vendor filenames, credentials, tokens, or exact private runtime payloads.

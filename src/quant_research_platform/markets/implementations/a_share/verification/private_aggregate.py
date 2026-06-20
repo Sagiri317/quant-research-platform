@@ -20,14 +20,14 @@ from quant_research_platform.markets.calendars import (
     session_dates,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+    PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 from quant_research_platform.markets.implementations.a_share.research_scenarios import (
-    default_a_share_evaluation_period,
-    default_a_share_evaluation_run_id,
     default_a_share_prediction_oos_period,
     default_a_share_prediction_smoke_id,
+    default_evaluation_period,
+    default_evaluation_run_id,
 )
 from quant_research_platform.reports.verification_evidence import (
     render_private_verification_summary_markdown,
@@ -68,23 +68,23 @@ FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 # Local verification evidence runner source fixture; not an A-share market contract.
-LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"
+LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE = "csmar"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
-    "processed/a_share/panel/daily_panel": "full_historical_daily_panel_status",
+    "processed/a_share/panel/market_panel_1d": "full_historical_market_panel_1d_status",
     f"processed/a_share/factor/{PRICE_VOLUME_PROCESSED_DATA_ID}": (
         "factor_value_parity"
     ),
     "processed/a_share/label/forward_returns": "label_value_parity",
-    "processed/a_share/annotation/a_share_default": "masks_universes_parity",
-    "processed/a_share/annotation/a_share_as_of": "masks_universes_parity",
-    "processed/a_share/annotation/a_share_execution": "masks_universes_parity",
-    "processed/a_share/annotation/a_share_evaluation": "masks_universes_parity",
-    "processed/a_share/annotation/daily_context": (
+    "processed/a_share/annotation/default": "masks_universes_parity",
+    "processed/a_share/annotation/as_of": "masks_universes_parity",
+    "processed/a_share/annotation/execution": "masks_universes_parity",
+    "processed/a_share/annotation/evaluation": "masks_universes_parity",
+    "processed/a_share/annotation/market_context_1d": (
         "supporting_layers_coverage_2014_2025"
     ),
     "research/a_share/"
-    "a_share_price_volume_forward_returns": "research_dataset_parity",
+    "price_volume_forward_returns": "research_dataset_parity",
 }
 
 _SummaryCache = dict[tuple[str, tuple[int, ...] | None], "AggregateSummary"]
@@ -206,7 +206,7 @@ def generate_private_verification_summary(
     return {
         "contract_version": CONTRACT_VERSION,
         "project_version": PROJECT_VERSION,
-        "verification_kind": "private_real_data_aggregate_inventory",
+        "verification_kind": "private_research_data_aggregate_inventory",
         "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
             "+00:00",
             "Z",
@@ -278,9 +278,9 @@ def _generate_public_safe_aggregate_evidence_with_cache(
             "+00:00",
             "Z",
         ),
-        "verification_kind": "private_real_data_aggregate",
+        "verification_kind": "private_research_data_aggregate",
         "verification_scope": "aggregate_public_safe_parity",
-        "evidence_generation_mode": "local_private_data_public_safe_aggregate",
+        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
         "source_data_visibility": "private_local_only",
         "row_level_output_committed": False,
         "verification_periods": sorted({area["period"] for area in areas}),
@@ -315,7 +315,7 @@ def _generate_private_verification_summary_with_cache(
     return {
         "contract_version": CONTRACT_VERSION,
         "project_version": PROJECT_VERSION,
-        "verification_kind": "private_real_data_aggregate_inventory",
+        "verification_kind": "private_research_data_aggregate_inventory",
         "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
             "+00:00",
             "Z",
@@ -333,28 +333,28 @@ def _generate_private_verification_summary_with_cache(
 
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
-    reports_root = root / "reports" / "private_real" / MARKET_ID
-    daily_panel = processed / "panel" / "daily_panel"
+    reports_root = root / "reports" / "private_research" / MARKET_ID
+    market_panel_1d = processed / "panel" / "market_panel_1d"
     factor = processed / "factor" / PRICE_VOLUME_PROCESSED_DATA_ID
     label = processed / "label" / "forward_returns"
-    universe = processed / "annotation" / "a_share_default"
+    universe = processed / "annotation" / "default"
     masks = (
-        processed / "annotation" / "a_share_as_of",
-        processed / "annotation" / "a_share_execution",
-        processed / "annotation" / "a_share_evaluation",
+        processed / "annotation" / "as_of",
+        processed / "annotation" / "execution",
+        processed / "annotation" / "evaluation",
     )
-    context = processed / "annotation" / "daily_context"
+    context = processed / "annotation" / "market_context_1d"
     research = (
         root
         / "data"
         / "research"
         / MARKET_ID
-        / A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
+        / PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
     evaluation_roots = _report_category_roots(
         reports_root,
         category="evaluation",
-        preferred_id=default_a_share_evaluation_run_id(),
+        preferred_id=default_evaluation_run_id(),
     )
     prediction_roots = _report_category_roots(
         reports_root,
@@ -364,7 +364,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     return (
         AggregateInput(
             "processed_panel_parity",
-            (daily_panel,),
+            (market_panel_1d,),
             "2014-01-01 through 2014-12-31",
             "processed panel",
             years=(2014,),
@@ -396,7 +396,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         AggregateInput(
             "evaluation_parity",
             evaluation_roots,
-            default_a_share_evaluation_period(
+            default_evaluation_period(
                 evaluation_start="2014-01-29",
                 evaluation_end="2014-12-31",
             ),
@@ -417,8 +417,8 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             "supporting layers coverage",
         ),
         AggregateInput(
-            "full_historical_daily_panel_status",
-            (daily_panel,),
+            "full_historical_market_panel_1d_status",
+            (market_panel_1d,),
             FULL_HISTORY_PERIOD,
             "full historical daily panel",
         ),
@@ -494,7 +494,7 @@ def _official_dataset_artifact_roots(root: Path) -> tuple[Path, ...]:
     processed_root = Path(root) / "data" / "processed" / MARKET_ID
     research_root = Path(root) / "data" / "research" / MARKET_ID
     if not processed_root.exists() and not research_root.exists():
-        raise FileNotFoundError("private_dataset_roots_missing")
+        raise FileNotFoundError("private_roots_missing")
     roots = [
         path
         for layer_root in (processed_root, research_root)
@@ -583,9 +583,9 @@ def _area_record(
                 "not_required" if not human_approval_required else "required"
             ),
         },
-        "verification_kind": "private_real_data_aggregate",
+        "verification_kind": "private_research_data_aggregate",
         "verification_scope": "aggregate_public_safe_parity",
-        "evidence_generation_mode": "local_private_data_public_safe_aggregate",
+        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
         "tolerance_owner": "project_contract_0.1",
         "downstream_impact": (
             "no downstream parity impact detected from aggregate fields"
@@ -604,10 +604,10 @@ def _summarize_area_input(
     *,
     summary_cache: _SummaryCache | None = None,
 ) -> AggregateSummary:
-    if area_input.summary_kind == "generated_daily_panel_from_interim":
+    if area_input.summary_kind == "generated_market_panel_1d_from_interim":
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
-        return _summarize_generated_full_daily_panel(area_input.roots[0])
+        return _summarize_generated_full_market_panel_1d(area_input.roots[0])
     if area_input.summary_kind == "report_artifacts":
         return _summarize_report_roots(area_input.roots)
     return _summarize_roots(
@@ -617,31 +617,31 @@ def _summarize_area_input(
     )
 
 
-def _summarize_generated_full_daily_panel(
+def _summarize_generated_full_market_panel_1d(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> AggregateSummary:
     return _summarize_frames(
-        _iter_generated_full_daily_panel_chunks(
+        _iter_generated_full_market_panel_1d_chunks(
             project_root,
             resource_policy=resource_policy,
         )
     )
 
 
-def _iter_generated_full_daily_panel_chunks(
+def _iter_generated_full_market_panel_1d_chunks(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
-    yield from _iter_generated_full_daily_panel_session_chunks(
+    yield from _iter_generated_full_market_panel_1d_session_chunks(
         project_root,
         resource_policy=resource_policy,
     )
 
 
-def _iter_generated_full_daily_panel_session_chunks(
+def _iter_generated_full_market_panel_1d_session_chunks(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
@@ -657,8 +657,8 @@ def _iter_generated_full_daily_panel_session_chunks(
     stock_master = read_dataset(interim_root / "stock_master")
     market_cap = read_dataset(interim_root / "market_cap")
     trading_calendar = read_dataset(interim_root / "trading_calendar")
-    spec = processed_catalog.a_share_processed_catalog().get("daily_panel")
-    daily_market_root = interim_root / "daily_market"
+    spec = processed_catalog.a_share_processed_catalog().get("market_panel_1d")
+    market_bars_1d_root = interim_root / "market_bars_1d"
     time_window = TimeWindow(FULL_HISTORY_START_DATE, FULL_HISTORY_END_DATE)
     sessions = _trading_sessions_from_calendar(trading_calendar)
     target_sessions = tuple(
@@ -690,16 +690,16 @@ def _iter_generated_full_daily_panel_session_chunks(
         time_window,
         reason="verification_evidence_generated_panel",
     )
-    daily_market_columns = tuple(inspect_dataset(daily_market_root).columns)
+    market_bars_1d_columns = tuple(inspect_dataset(market_bars_1d_root).columns)
     for window in windows:
         daily = read_dataset(
-            daily_market_root,
+            market_bars_1d_root,
             time_window=window.read,
-            columns=daily_market_columns,
+            columns=market_bars_1d_columns,
         )
         if daily.empty:
             continue
-        panel = panels.compute_daily_panel(
+        panel = panels.compute_market_panel(
             daily,
             stock_master=stock_master,
             market_cap=market_cap,
@@ -718,7 +718,7 @@ def _private_interim_root(
         Path(project_root)
         / "data"
         / "interim"
-        / LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID
+        / LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE
     )
 
 
@@ -728,7 +728,7 @@ def _estimate_generated_full_panel_memory_bytes(
     session_count: int,
 ) -> int:
     compressed_bytes = int(
-        inspect_dataset(interim_root / "daily_market").manifest.get(
+        inspect_dataset(interim_root / "market_bars_1d").manifest.get(
             "file_size_bytes",
             0,
         )

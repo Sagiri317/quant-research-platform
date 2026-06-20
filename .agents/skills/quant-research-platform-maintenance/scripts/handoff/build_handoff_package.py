@@ -26,12 +26,12 @@ from render_pr_body_from_validation_evidence import render_pr_body  # noqa: E402
 
 PACKAGE_SCHEMA_VERSION = "handoff-sidecar/0.1"
 VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
-REQUIRED_REVIEW_EVIDENCE = "review_evidence/handoff_generation.json"
-VERIFICATION_MATRIX_EVIDENCE = "review_evidence/verification-matrix.json"
+REQUIRED_REVIEW_EVIDENCE = "handoff_evidence/handoff_generation.json"
+VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 TASK_CONTROL_KEYS = {
     "validation_evidence",
     "review_threads",
-    "review_evidence",
+    "handoff_evidence",
     "pr_body",
     "pr_body_markdown",
 }
@@ -39,11 +39,12 @@ TASK_CONTROL_KEYS = {
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Build a public-safe QRP review package from one task JSON."
+        description="Build a public-safe QRP handoff package from one task JSON."
     )
     parser.add_argument("--task", required=True, help="Public-safe task input JSON.")
-    parser.add_argument("--out-dir", default=".run/reviews")
+    parser.add_argument("--out-dir", default=".run/handoffs")
     parser.add_argument("--repo-root", default=".")
+    parser.add_argument("--mode", choices=("evidence", "pr_closure"))
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args(argv)
 
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=repo_root,
         out_dir=out_dir,
         task=task,
+        mode=args.mode,
         verify=args.verify,
     )
     print(f"zip={result['zip_path']}")
@@ -70,11 +72,13 @@ def build_handoff_package(
     repo_root: Path,
     out_dir: Path,
     task: dict[str, object],
+    mode: str | None = None,
     verify: bool,
 ) -> dict[str, object]:
     slug = required_string(task, "slug")
     branch = required_string(task, "branch")
     base = required_string(task, "base")
+    package_mode = handoff_mode(task, mode)
     final_head = str(task.get("final_head") or task.get("final_sha") or "").strip()
     if not final_head:
         raise SystemExit("task_final_head_required")
@@ -91,21 +95,21 @@ def build_handoff_package(
                 command_context={
                     "zip_logical_path": str(
                         task.get("zip_logical_path")
-                        or f".run/reviews/{zip_path.name}"
+                        or f".run/handoffs/{zip_path.name}"
                     ).replace("\\", "/"),
                     "json_logical_path": str(
                         task.get("sidecar_logical_path")
-                        or f".run/reviews/{json_path.name}"
+                        or f".run/handoffs/{json_path.name}"
                     ).replace("\\", "/"),
                     "base": base,
                     "final_head": final_head,
                 },
             ),
             zip_logical_path=str(
-                task.get("zip_logical_path") or f".run/reviews/{zip_path.name}"
+                task.get("zip_logical_path") or f".run/handoffs/{zip_path.name}"
             ).replace("\\", "/"),
             json_logical_path=str(
-                task.get("sidecar_logical_path") or f".run/reviews/{json_path.name}"
+                task.get("sidecar_logical_path") or f".run/handoffs/{json_path.name}"
             ).replace("\\", "/"),
         )
         build_once(
@@ -117,6 +121,7 @@ def build_handoff_package(
             branch=branch,
             base=base,
             final_head=final_head,
+            mode=package_mode,
         )
         safety_status = (
             "PASS" if scan_handoff_zip(zip_path, json_path=json_path).ok else "FAIL"
@@ -137,12 +142,6 @@ def build_handoff_package(
         desired = {
             "handoff_verify": verify_status,
             "handoff_safety_scan": safety_status,
-            "raw_diff_exactness": (
-                "FAIL" if "diff_patch_mismatch" in last_failures else "PASS"
-            ),
-            "handoff_verify_includes_git_apply_check": (
-                "FAIL" if "diff_patch_apply_check_failed" in last_failures else "PASS"
-            ),
             "package_safety_check_zip": package_safety_status(zip_path),
             "package_safety_check_sidecar": package_safety_status(json_path),
         }
@@ -178,6 +177,7 @@ def build_once(
     branch: str,
     base: str,
     final_head: str,
+    mode: str,
 ) -> None:
     assert_branch_head(repo_root, branch, final_head)
     with tempfile.TemporaryDirectory(prefix="qrp-handoff-stage-") as temp:
@@ -188,7 +188,10 @@ def build_once(
             branch,
             final_head,
         )
-        write_text(stage_root / "task_metadata.json", stable_json(task_metadata(task)))
+        write_text(
+            stage_root / "task_metadata.json",
+            stable_json(task_metadata({**task, "mode": mode})),
+        )
         write_text(
             stage_root / "validation_evidence.json",
             stable_json(validation_evidence),
@@ -197,29 +200,22 @@ def build_once(
             stage_root / "git_status.txt",
             sanitize_handoff_text(git_status_text(repo_root)),
         )
-        diff = git_text(
-            repo_root,
-            "diff",
-            "--full-index",
-            "--binary",
-            f"{base}..{final_head}",
-        )
-        write_text(stage_root / "diff.patch", normalize_lf(diff))
-        review_threads = task_review_threads(task)
-        write_text(stage_root / "review_threads.json", stable_json(review_threads))
-        pr_body = task_pr_body(
-            task,
-            validation_evidence,
-            review_threads,
-            external_evidence=sidecar_preview(
-                zip_path=zip_path,
-                json_path=json_path,
-                task=task,
-                validation_evidence=validation_evidence,
-            ),
-        )
-        write_text(stage_root / "pr_body.md", sanitize_handoff_text(pr_body))
-        stage_review_evidence(stage_root, task, validation_evidence)
+        if mode == "pr_closure":
+            review_threads = task_review_threads(task)
+            write_text(stage_root / "review_threads.json", stable_json(review_threads))
+            pr_body = task_pr_body(
+                task,
+                validation_evidence,
+                review_threads,
+                external_evidence=sidecar_preview(
+                    zip_path=zip_path,
+                    json_path=json_path,
+                    task=task,
+                    validation_evidence=validation_evidence,
+                ),
+            )
+            write_text(stage_root / "pr_body.md", sanitize_handoff_text(pr_body))
+        stage_handoff_evidence(stage_root, task, validation_evidence)
         manifest = {
             "schema_version": "handoff-artifact-manifest/0.1",
             "tool_source_final_head": final_head,
@@ -263,6 +259,14 @@ def task_metadata(task: dict[str, object]) -> dict[str, object]:
     payload.pop("goal_status", None)
     payload.setdefault("schema_version", "handoff-task-metadata/0.1")
     return json_sanitize(payload)
+
+
+def handoff_mode(task: dict[str, object], explicit_mode: str | None = None) -> str:
+    raw = explicit_mode or task.get("mode") or "evidence"
+    mode = str(raw).strip()
+    if mode not in {"evidence", "pr_closure"}:
+        raise SystemExit(f"unsupported_handoff_mode: {mode}")
+    return mode
 
 
 def task_validation_evidence(task: dict[str, object]) -> dict[str, object]:
@@ -336,18 +340,18 @@ def task_pr_body(
     )
 
 
-def stage_review_evidence(
+def stage_handoff_evidence(
     stage_root: Path,
     task: dict[str, object],
     validation_evidence: dict[str, object],
 ) -> None:
-    review_evidence = task.get("review_evidence")
+    handoff_evidence = task.get("handoff_evidence")
     wrote = False
-    if isinstance(review_evidence, dict):
-        for raw_name, payload in sorted(review_evidence.items()):
+    if isinstance(handoff_evidence, dict):
+        for raw_name, payload in sorted(handoff_evidence.items()):
             name = normalize_zip_path(str(raw_name))
-            if not name.startswith("review_evidence/"):
-                name = "review_evidence/" + name
+            if not name.startswith("handoff_evidence/"):
+                name = "handoff_evidence/" + name
             if not name.endswith(".json"):
                 name += ".json"
             write_text(stage_root / name, stable_json(json_sanitize(payload)))
@@ -382,10 +386,10 @@ def sidecar_preview(
     return {
         "zip_filename": zip_path.name,
         "zip_logical_path": str(
-            task.get("zip_logical_path") or f".run/reviews/{zip_path.name}"
+            task.get("zip_logical_path") or f".run/handoffs/{zip_path.name}"
         ).replace("\\", "/"),
         "sidecar_logical_path": str(
-            task.get("sidecar_logical_path") or f".run/reviews/{json_path.name}"
+            task.get("sidecar_logical_path") or f".run/handoffs/{json_path.name}"
         ).replace("\\", "/"),
         "status_summary": status_summary_from_validation(
             status_map,
@@ -408,7 +412,7 @@ def sidecar_payload(
     zip_filename = zip_path.name
     logical = str(
         task.get("zip_logical_path")
-        or f".run/reviews/{zip_filename}"
+        or f".run/handoffs/{zip_filename}"
     ).replace("\\", "/")
     return {
         "schema_version": PACKAGE_SCHEMA_VERSION,
@@ -478,8 +482,6 @@ def enrich_validation_evidence(
         rows = []
         payload["checks"] = rows
     for name in (
-        "raw_diff_exactness",
-        "handoff_verify_includes_git_apply_check",
         "package_safety_check_zip",
         "package_safety_check_sidecar",
     ):
@@ -527,17 +529,8 @@ def validation_status_command(
     command_context: dict[str, str] | None = None,
 ) -> str:
     context = command_context or {}
-    zip_path = context.get("zip_logical_path", ".run/reviews/handoff.zip")
-    json_path = context.get("json_logical_path", ".run/reviews/handoff.json")
-    base = context.get("base", "BASE")
-    final_head = context.get("final_head", "HEAD")
-    if check_name == "raw_diff_exactness":
-        return f"git diff --full-index --binary {base}..{final_head}"
-    if check_name == "handoff_verify_includes_git_apply_check":
-        return (
-            "python .agents/skills/quant-research-platform-maintenance/scripts/"
-            f"handoff/verify_handoff_package.py --zip {zip_path} --json {json_path}"
-        )
+    zip_path = context.get("zip_logical_path", ".run/handoffs/handoff.zip")
+    json_path = context.get("json_logical_path", ".run/handoffs/handoff.json")
     if check_name == "package_safety_check_zip":
         return (
             "python .agents/skills/quant-research-platform-maintenance/scripts/"
@@ -562,13 +555,6 @@ def validation_status_command(
 
 
 def validation_status_evidence(check_name: str, status: str) -> str:
-    if check_name == "raw_diff_exactness":
-        return f"raw git diff --full-index --binary base..HEAD exactness check {status}"
-    if check_name == "handoff_verify_includes_git_apply_check":
-        return (
-            "verify_handoff_package.py completed its internal "
-            f"git apply --check step with {status}"
-        )
     if check_name == "package_safety_check_zip":
         return f"package_safety_check.py completed for final zip with {status}"
     if check_name == "package_safety_check_sidecar":
@@ -585,7 +571,7 @@ def verification_matrix_payload(
 ) -> dict[str, object]:
     status_map = validation_status_map(validation_evidence)
     checks = []
-    for name in ("raw_diff_exactness", "handoff_verify_includes_git_apply_check"):
+    for name in ("handoff_verify", "handoff_safety_scan"):
         checks.append(
             {
                 "name": name,

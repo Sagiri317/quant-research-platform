@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.contracts.execution import ExecutionMode
+from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.workflows import WorkflowRunSummary
 from quant_research_platform.runtime.workflow_records import (
     workflow_run_summary_to_public_record,
@@ -13,7 +13,7 @@ def _summary(*, workflow_id: str = "workflow") -> WorkflowRunSummary:
     return WorkflowRunSummary(
         workflow_id=workflow_id,
         workflow_version="0.1",
-        execution_mode=ExecutionMode.DRY_RUN,
+        run_mode=WorkflowRunMode.VALIDATE_ONLY,
         run_id="workflow-record-test",
         status="validated",
         market_id="a_share",
@@ -33,7 +33,7 @@ def test_workflow_run_summary_to_record_returns_plain_mapping() -> None:
     assert record == {
         "workflow_id": "workflow",
         "workflow_version": "0.1",
-        "execution_mode": "dry_run",
+            "run_mode": "validate_only",
         "run_id": "workflow-record-test",
         "status": "validated",
         "market_id": "a_share",

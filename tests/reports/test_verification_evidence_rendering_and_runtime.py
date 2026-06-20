@@ -21,9 +21,9 @@ def test_public_safe_evidence_markdown_renders_status_rows() -> None:
     payload = {
         "privacy_level": "public_safe_aggregate",
         "contract_version": "0.1",
-        "verification_kind": "private_real_data_aggregate",
+        "verification_kind": "private_research_data_aggregate",
         "verification_scope": "aggregate_public_safe_parity",
-        "evidence_generation_mode": "local_private_data_public_safe_aggregate",
+        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
         "source_data_visibility": "private_local_only",
         "merge_ready": False,
         "areas": [
@@ -55,11 +55,11 @@ def test_private_verification_summary_markdown_renders_inventory() -> None:
     payload = {
         "privacy_level": "public_safe_aggregate",
         "contract_version": "0.1",
-        "verification_kind": "private_real_data_aggregate_inventory",
+        "verification_kind": "private_research_data_aggregate_inventory",
         "source_data_visibility": "private_local_only",
         "dataset_inventory": [
             {
-                "logical_root": "processed/a_share/panel/daily_panel",
+                "logical_root": "processed/a_share/panel/market_panel_1d",
                 "covered_by_evidence_area": "panel",
                 "row_count": 10,
                 "column_count": 3,
@@ -73,7 +73,7 @@ def test_private_verification_summary_markdown_renders_inventory() -> None:
                 "period": "not_applicable",
             },
         ],
-        "covered_roots": ["processed/a_share/panel/daily_panel"],
+        "covered_roots": ["processed/a_share/panel/market_panel_1d"],
         "uncovered_roots": ["processed/a_share/other/demo"],
         "allowed_unverified_roots": [],
         "merge_ready": False,

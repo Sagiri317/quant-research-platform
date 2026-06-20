@@ -163,25 +163,21 @@ def test_tracked_handoff_tool_source_of_truth_exists() -> None:
     assert missing == []
 
 
-def test_builder_writes_raw_binary_diff_without_sanitizing(tmp_path: Path) -> None:
-    repo, package, _sidecar, base, final_head = _build_test_package(tmp_path)
-    raw_diff = _git(
-        repo,
-        "diff",
-        "--full-index",
-        "--binary",
-        f"{base}..{final_head}",
-    ).encode()
-
+def test_builder_writes_final_branch_bundle_without_patch_member(
+    tmp_path: Path,
+) -> None:
+    _repo, package, _sidecar, _base, _final_head = _build_test_package(tmp_path)
     with zipfile.ZipFile(package) as archive:
-        packaged_diff = archive.read("diff.patch")
+        names = set(archive.namelist())
+        bundle = archive.read("final-branch.bundle")
         manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
 
-    diff_entry = next(
-        item for item in manifest["entries"] if item["path"] == "diff.patch"
+    bundle_entry = next(
+        item for item in manifest["entries"] if item["path"] == "final-branch.bundle"
     )
-    assert packaged_diff == raw_diff
-    assert diff_entry["sha256"] == hashlib.sha256(raw_diff).hexdigest()
+    assert "diff" + ".patch" not in names
+    assert bundle
+    assert bundle_entry["sha256"] == hashlib.sha256(bundle).hexdigest()
 
 
 def test_builder_does_not_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None:
@@ -221,39 +217,22 @@ def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> Non
     assert "duplicate_tracked_source_in_zip: src/copied.py" in failures
 
 
-def test_verifier_rejects_sanitized_diff_even_when_hashes_are_refreshed(
-    tmp_path: Path,
-) -> None:
+def test_verifier_rejects_forbidden_patch_member(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
-    with zipfile.ZipFile(package) as archive:
-        sanitized_diff = archive.read("diff.patch").replace(
-            b"E:" + b"/negative-fixture/not-real.txt",
-            b"<LOCAL_ABSOLUTE_PATH>",
-        )
-    _rewrite_package_member(package, "diff.patch", sanitized_diff)
+    forbidden_entry = "diff" + ".patch"
+    with zipfile.ZipFile(package, "a") as archive:
+        archive.writestr(forbidden_entry, b"not expected\n")
     _refresh_manifest_and_sidecar(package, sidecar)
 
     failures = verifier.verify_handoff_package(package, sidecar)
 
-    assert "diff_patch_mismatch" in failures
-
-
-def test_verifier_rejects_non_applicable_diff_patch(tmp_path: Path) -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
-    _rewrite_package_member(package, "diff.patch", b"not a patch\n")
-    _refresh_manifest_and_sidecar(package, sidecar)
-
-    failures = verifier.verify_handoff_package(package, sidecar)
-
-    assert "diff_patch_mismatch" in failures
-    assert "diff_patch_apply_check_failed" in failures
+    assert "forbidden_entry: " + forbidden_entry in failures
 
 
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
     safety = _load_handoff_module("handoff_safety")
-    run_reviews = "." + "run/reviews"
+    run_handoffs = "." + "run/handoffs"
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("task_metadata.json", "{}\n")
@@ -263,7 +242,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
             {
                 "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": f"{run_reviews}/handoff.zip",
+                "zip_logical_path": f"{run_handoffs}/handoff.zip",
                 "leaked_zip_path": "E:/quant-workspace/private/handoff.zip",
                 "also_bad": "/mnt/data/private/handoff.zip",
                 "home_bad": "/home/user/private/handoff.zip",
@@ -399,7 +378,7 @@ def test_handoff_safety_rejects_codex_in_bundle_head_tree(tmp_path: Path) -> Non
     "text",
     [
         "/workspace/qrp/data/research/a_share/demo",
-        "/workspaces/qrp/reports/private_real/a_share/run",
+        "/workspaces/qrp/reports/private_research/a_share/run",
         "/opt/qrp/data/processed/a_share/factor/demo",
     ],
 )
@@ -410,7 +389,7 @@ def test_handoff_safety_rejects_absolute_paths_with_private_segments(
     safety = _load_handoff_module("handoff_safety")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("review_evidence/leak.md", text)
+        archive.writestr("handoff_evidence/leak.md", text)
 
     result = safety.scan_handoff_zip(package)
 
@@ -418,48 +397,37 @@ def test_handoff_safety_rejects_absolute_paths_with_private_segments(
     assert any("local_absolute_path_text" in item for item in result.failures)
 
 
-def test_handoff_safety_ignores_removed_diff_lines() -> None:
+def test_handoff_safety_rejects_local_paths_in_plain_text() -> None:
     safety = _load_handoff_module("handoff_safety")
-    diff = "\n".join(
+    text = "\n".join(
         [
-            "diff --git a/docs/old.md b/docs/old.md",
-            "--- a/docs/old.md",
-            "+++ b/docs/old.md",
-            "-old local example C" + ":/" + "Users/name/private.txt",
-            "-old workspace example /workspace/qrp/data/research/a_share/demo",
-            "+replacement public summary",
+            "old local example C" + ":/" + "Users/name/private.txt",
+            "old workspace example /workspace/qrp/data/research/a_share/demo",
         ]
     )
 
-    assert safety.unsafe_text_reason(diff, name="diff.patch") is None
+    assert safety.unsafe_text_reason(text, name="handoff.txt") == "local_absolute_path"
 
 
 def test_handoff_safety_allows_public_aggregate_evidence_counts() -> None:
     safety = _load_handoff_module("handoff_safety")
-    diff = "\n".join(
+    text = "\n".join(
         [
-            "diff --git a/docs/reports/clean-rewrite-0.1-parity-evidence.md "
-            "b/docs/reports/clean-rewrite-0.1-parity-evidence.md",
-            "--- a/docs/reports/clean-rewrite-0.1-parity-evidence.md",
-            "+++ b/docs/reports/clean-rewrite-0.1-parity-evidence.md",
-            "+| processed panel parity | 660416 | 48 | verified aggregate |",
+            "| processed panel parity | row_count_bucket=large | verified aggregate |",
         ]
     )
 
-    assert safety.unsafe_text_reason(diff, name="diff.patch") is None
+    assert safety.unsafe_text_reason(text, name="handoff_evidence/summary.md") is None
 
 
 def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    run_reviews = "." + "run/reviews"
+    run_handoffs = "." + "run/handoffs"
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("artifact_manifest.json", "{}\n")
-        archive.writestr("diff.patch", "")
         archive.writestr("final-branch.bundle", b"not-a-real-bundle")
         archive.writestr("git_status.txt", "clean\n")
-        archive.writestr("pr_body.md", "")
-        archive.writestr("review_threads.json", "{}\n")
         archive.writestr("task_metadata.json", "{}\n")
         archive.writestr("validation_evidence.json", "{}\n")
     sidecar = tmp_path / "handoff.json"
@@ -468,7 +436,7 @@ def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None
             {
                 "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": f"{run_reviews}/handoff.zip",
+                "zip_logical_path": f"{run_handoffs}/handoff.zip",
                 "zip_sha256": verifier.sha256_file(package),
                 "artifact_manifest_sha256": "0" * 64,
                 "branch": "feature/qrp-clean-rewrite",

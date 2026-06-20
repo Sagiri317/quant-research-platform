@@ -7,6 +7,7 @@ from quant_research_platform.agents.safety import (
     assert_public_safe_text,
 )
 from quant_research_platform.runtime.privacy import (
+    public_text_unsafe_reason,
     sanitize_public_object,
     sanitize_public_text,
 )
@@ -42,10 +43,10 @@ def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:
     "text",
     [
         "/workspace/qrp/data/research/a_share/demo",
-        "/workspaces/qrp/reports/private_real/a_share/run",
+        "/workspaces/qrp/reports/private_research/a_share/run",
         "/opt/qrp/data/processed/a_share/factor/demo",
         r"C:\repo\data\research\a_share\demo",
-        r"D:\repo\reports\private_real\a_share\run",
+        r"D:\repo\reports\private_research\a_share\run",
     ],
 )
 def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
@@ -53,7 +54,7 @@ def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
 
     assert "data/research" not in sanitized
     assert "data/processed" not in sanitized
-    assert "reports/private_real" not in sanitized
+    assert "reports/private_research" not in sanitized
     assert "workspace" not in sanitized.lower()
     assert "C:" not in sanitized
     assert "D:" not in sanitized
@@ -99,3 +100,18 @@ def test_private_marker_input_is_rejected_before_row_level_read() -> None:
         guarded_public_output(r"data\processed\a_share row sample: market_id=asset")
 
     assert row_reader_called is False
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("row sample: market_id=a_share asset_id=000001", "row_sample"),
+        ("source marker from CSMAR export table", "private_marker"),
+        ("vendor_marker=raw-provider", "private_marker"),
+    ],
+)
+def test_public_text_unsafe_reason_covers_public_safety_markers(
+    text: str,
+    reason: str,
+) -> None:
+    assert public_text_unsafe_reason(text) == reason

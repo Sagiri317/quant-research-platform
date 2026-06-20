@@ -1,7 +1,7 @@
 {
   "contract_version": "0.1",
   "project_version": "0.1.0",
-  "verification_kind": "private_real_data_aggregate_inventory",
+  "verification_kind": "private_research_data_aggregate_inventory",
   "status": "superseded_by_factor_catalog_refactor",
   "evidence_status": "evidence_pending_regeneration",
   "generated_at": "2026-06-04T21:21:22Z",
@@ -11,8 +11,8 @@
   "dataset_inventory": [
     {
       "kind": "annotation",
-      "artifact_id": "daily_context",
-      "logical_root": "processed/a_share/annotation/daily_context",
+      "artifact_id": "market_context_1d",
+      "logical_root": "processed/a_share/annotation/market_context_1d",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 14,
@@ -58,8 +58,8 @@
     },
     {
       "kind": "annotation",
-      "artifact_id": "a_share_as_of",
-      "logical_root": "processed/a_share/annotation/a_share_as_of",
+      "artifact_id": "as_of",
+      "logical_root": "processed/a_share/annotation/as_of",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 6,
@@ -73,8 +73,8 @@
     },
     {
       "kind": "annotation",
-      "artifact_id": "a_share_evaluation",
-      "logical_root": "processed/a_share/annotation/a_share_evaluation",
+      "artifact_id": "evaluation",
+      "logical_root": "processed/a_share/annotation/evaluation",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 7,
@@ -88,8 +88,8 @@
     },
     {
       "kind": "annotation",
-      "artifact_id": "a_share_execution",
-      "logical_root": "processed/a_share/annotation/a_share_execution",
+      "artifact_id": "execution",
+      "logical_root": "processed/a_share/annotation/execution",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 7,
@@ -103,8 +103,8 @@
     },
     {
       "kind": "panel",
-      "artifact_id": "daily_panel",
-      "logical_root": "processed/a_share/panel/daily_panel",
+      "artifact_id": "market_panel_1d",
+      "logical_root": "processed/a_share/panel/market_panel_1d",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 48,
@@ -114,12 +114,12 @@
       "dtype_summary_hash": "c2b6af7b8e2ba0591810c7182e160493509ad13c89305f395e7b61ee7ad50dff",
       "null_summary_hash": "f7dbfde846067e8cbde7b9ff3b161b3a0222c8973fa6b80c5bb4082c649fee19",
       "aggregate_checksum": "cf5d5c2ebee7f3f252f8440eea865c5d5f1360c712a1a0789d8df1efc1d4c774",
-      "covered_by_evidence_area": "full_historical_daily_panel_status"
+      "covered_by_evidence_area": "full_historical_market_panel_1d_status"
     },
     {
       "kind": "research_dataset",
-      "artifact_id": "a_share_price_volume_forward_returns",
-      "logical_root": "research/a_share/a_share_price_volume_forward_returns",
+      "artifact_id": "price_volume_forward_returns",
+      "logical_root": "research/a_share/price_volume_forward_returns",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 75,
@@ -133,8 +133,8 @@
     },
     {
       "kind": "annotation",
-      "artifact_id": "a_share_default",
-      "logical_root": "processed/a_share/annotation/a_share_default",
+      "artifact_id": "default",
+      "logical_root": "processed/a_share/annotation/default",
       "period": "2014-01-01 through 2025-12-31",
       "row_count": 12231140,
       "column_count": 6,
@@ -148,15 +148,15 @@
     }
   ],
   "covered_roots": [
-    "processed/a_share/annotation/daily_context",
+    "processed/a_share/annotation/market_context_1d",
     "processed/a_share/factor/price_volume",
     "processed/a_share/label/forward_returns",
-    "processed/a_share/annotation/a_share_as_of",
-    "processed/a_share/annotation/a_share_evaluation",
-    "processed/a_share/annotation/a_share_execution",
-    "processed/a_share/panel/daily_panel",
-    "research/a_share/a_share_price_volume_forward_returns",
-    "processed/a_share/annotation/a_share_default"
+    "processed/a_share/annotation/as_of",
+    "processed/a_share/annotation/evaluation",
+    "processed/a_share/annotation/execution",
+    "processed/a_share/panel/market_panel_1d",
+    "research/a_share/price_volume_forward_returns",
+    "processed/a_share/annotation/default"
   ],
   "uncovered_roots": [],
   "allowed_unverified_roots": [],

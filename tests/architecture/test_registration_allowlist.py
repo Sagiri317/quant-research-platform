@@ -27,12 +27,12 @@ def test_generic_catalogs_do_not_define_bootstrap_defaults() -> None:
     )
 
 
-def test_workflow_registry_uses_execution_mode_factory() -> None:
-    """dry_run is official; execute fails closed until real execute lands.
+def test_workflow_registry_uses_run_mode_factory() -> None:
+    """validate_only is official; write_artifacts fails closed until it lands.
 
-    Future execute support must use workflow_node_registry(execution_mode=...)
-    as the same public entrypoint. Do not introduce separate fixture or
-    long-term dry-run-only public factories.
+    Future artifact writing support must use workflow_node_registry(run_mode=...)
+    as the same entrypoint. Do not introduce separate fixture or long-term
+    validate-only factories.
     """
 
     tree = ast.parse(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
@@ -40,21 +40,21 @@ def test_workflow_registry_uses_execution_mode_factory() -> None:
         node.name for node in tree.body if isinstance(node, ast.FunctionDef)
     }
     fixture_factory = "_".join(("fixture", "workflow", "node", "registry"))
-    dry_run_only_factory = "_".join(
-        ("dry", "run", "workflow", "node", "registry")
+    validate_only_factory = "_".join(
+        ("validate", "only", "workflow", "node", "registry")
     )
 
     assert "workflow_node_registry" in top_level_functions
     assert fixture_factory not in top_level_functions
-    assert dry_run_only_factory not in top_level_functions
+    assert validate_only_factory not in top_level_functions
 
 
 def test_active_workflow_code_avoids_public_fixture_factory_names() -> None:
     forbidden_terms = (
-        "_".join(("fixture", "backed", "execution")),
+        "_".join(("fixture", "backed", "run")),
         "-".join(("workflow", "fixture", "run")),
         "_".join(("fixture", "workflow", "node", "registry")),
-        "_".join(("dry", "run", "workflow", "node", "registry")),
+        "_".join(("validate", "only", "workflow", "node", "registry")),
     )
     hits: list[str] = []
     for path in sorted((PROJECT_SRC / "workflows").rglob("*.py")):

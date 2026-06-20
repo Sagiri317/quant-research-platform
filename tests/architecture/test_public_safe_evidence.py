@@ -22,7 +22,7 @@ REQUIRED_AREAS = {
     "evaluation_parity",
     "prediction_oos_smoke_parity",
     "supporting_layers_coverage_2014_2025",
-    "full_historical_daily_panel_status",
+    "full_historical_market_panel_1d_status",
 }
 
 REQUIRED_FIELDS = {
@@ -66,7 +66,7 @@ FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS = [
     "data/interim",
     "data/processed",
     "data/research",
-    "reports/private_real",
+    "reports/private_research",
     "000001",
     "600000",
     "raw row",
@@ -125,7 +125,7 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
     assert payload["privacy_level"] == "public_safe_aggregate"
     assert payload["artifact_id"] == "a_share_private_aggregate_evidence"
     assert payload["market_id"] == "a_share"
-    assert payload["verification_kind"] == "private_real_data_aggregate"
+    assert payload["verification_kind"] == "private_research_data_aggregate"
     assert payload["verification_scope"] == "aggregate_public_safe_parity"
     assert payload["source_data_visibility"] == "private_local_only"
     assert payload["row_level_output_committed"] is False
@@ -148,11 +148,11 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
             else:
                 assert item["max_abs_delta"] == 0
                 assert item["mean_abs_delta"] == 0
-        assert item["verification_kind"] == "private_real_data_aggregate"
+        assert item["verification_kind"] == "private_research_data_aggregate"
         assert item["verification_scope"] == "aggregate_public_safe_parity"
         assert (
             item["evidence_generation_mode"]
-            == "local_private_data_public_safe_aggregate"
+            == "local_private_research_public_safe_aggregate"
         )
         assert item["source_data_visibility"] == "private_local_only"
         assert item["row_level_output_committed"] is False
@@ -232,9 +232,9 @@ def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:
     text = json.dumps(payload, ensure_ascii=False).lower()
 
     assert "metadata verification" not in text
-    assert payload["verification_kind"] == "private_real_data_aggregate"
+    assert payload["verification_kind"] == "private_research_data_aggregate"
     assert payload["evidence_generation_mode"] == (
-        "local_private_data_public_safe_aggregate"
+        "local_private_research_public_safe_aggregate"
     )
     assert payload["row_level_output_committed"] is False
     assert payload["status"] == "superseded_by_factor_catalog_refactor"
@@ -242,13 +242,13 @@ def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:
     assert payload["merge_ready"] is False
 
 
-def test_full_historical_daily_panel_covers_full_2014_2025_period() -> None:
+def test_full_historical_market_panel_1d_covers_full_2014_2025_period() -> None:
     path = Path("docs/reports/clean-rewrite-0.1-parity-evidence.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
     area = next(
         item
         for item in payload["areas"]
-        if item["area"] == "full_historical_daily_panel_status"
+        if item["area"] == "full_historical_market_panel_1d_status"
     )
 
     assert area["period"] == "2014-01-01 through 2025-12-31"
@@ -258,7 +258,7 @@ def test_full_historical_daily_panel_covers_full_2014_2025_period() -> None:
     assert payload["evidence_status"] == "evidence_pending_regeneration"
 
 
-def test_full_historical_daily_panel_summary_streams_generated_chunks(
+def test_full_historical_market_panel_1d_summary_streams_generated_chunks(
     monkeypatch,
 ) -> None:
     from quant_research_platform.markets.implementations.a_share.verification import (
@@ -288,11 +288,11 @@ def test_full_historical_daily_panel_summary_streams_generated_chunks(
 
     monkeypatch.setattr(
         private_aggregate,
-        "_iter_generated_full_daily_panel_chunks",
+        "_iter_generated_full_market_panel_1d_chunks",
         iter_chunks,
     )
 
-    summary = private_aggregate._summarize_generated_full_daily_panel(
+    summary = private_aggregate._summarize_generated_full_market_panel_1d(
         Path(".")
     )
 
@@ -301,7 +301,7 @@ def test_full_historical_daily_panel_summary_streams_generated_chunks(
     assert summary.period == "2014-01-01 through 2025-12-31"
 
 
-def test_full_historical_daily_panel_generation_always_uses_chunks(
+def test_full_historical_market_panel_1d_generation_always_uses_chunks(
     monkeypatch,
 ) -> None:
     from quant_research_platform.markets.implementations.a_share.verification import (
@@ -322,12 +322,12 @@ def test_full_historical_daily_panel_generation_always_uses_chunks(
 
     monkeypatch.setattr(
         private_aggregate,
-        "_iter_generated_full_daily_panel_session_chunks",
+        "_iter_generated_full_market_panel_1d_session_chunks",
         iter_session_chunks,
     )
 
     frames = list(
-        private_aggregate._iter_generated_full_daily_panel_chunks(
+        private_aggregate._iter_generated_full_market_panel_1d_chunks(
             Path(".")
         )
     )
@@ -371,7 +371,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
             )
         if root.name in {"stock_master", "market_cap"}:
             return pd.DataFrame({"asset_id": ["asset-a"]})
-        assert root.name == "daily_market"
+        assert root.name == "market_bars_1d"
         time_window = kwargs["time_window"]
         timestamps = [
             session
@@ -388,10 +388,10 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         )
 
     required_columns = (
-        catalog.a_share_processed_catalog().get("daily_panel").required_columns
+        catalog.a_share_processed_catalog().get("market_panel_1d").required_columns
     )
 
-    def fake_compute_daily_panel(
+    def fake_compute_market_panel(
         daily: pd.DataFrame,
         *,
         stock_master: pd.DataFrame,
@@ -424,7 +424,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         lambda _root: Inspection(),
     )
     monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
-    monkeypatch.setattr(panels, "compute_daily_panel", fake_compute_daily_panel)
+    monkeypatch.setattr(panels, "compute_market_panel", fake_compute_market_panel)
     monkeypatch.setattr(
         private_aggregate.RuntimeResourcePolicy,
         "from_environment",
@@ -432,7 +432,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
     )
 
     chunks = list(
-        private_aggregate._iter_generated_full_daily_panel_session_chunks(Path("."))
+        private_aggregate._iter_generated_full_market_panel_1d_session_chunks(Path("."))
     )
 
     assert len(chunks) > 1
@@ -449,7 +449,7 @@ def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers() -> No
         "chunked_" + "values",
         "read_dataset_" + "asset_chunk",
         "_available_" + "memory_bytes",
-        "_iter_generated_full_daily_panel_" + "asset_chunks",
+        "_iter_generated_full_market_panel_1d_" + "asset_chunks",
         "_dataset_" + "asset_ids",
         "_read_dataset_for_" + "assets",
         "_filter_" + "asset_frame",
@@ -633,9 +633,9 @@ def test_verification_evidence_source_fixture_is_not_public_market_contract() ->
         )
     )
 
-    assert private_aggregate.LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID == "csmar"
+    assert private_aggregate.LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE == "csmar"
     assert 'PRIVATE_INTERIM_SOURCE_ID = "csmar"' not in source
-    assert 'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE_ID = "csmar"' in source
+    assert 'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE = "csmar"' in source
     assert "not an A-share market contract" in source
     assert "csmar" not in public_payloads
     assert "CSMAR" not in public_payloads
@@ -660,7 +660,7 @@ def test_private_verification_summary_json_schema_and_coverage() -> None:
     assert SUMMARY_TOP_LEVEL_FIELDS.issubset(payload)
     assert payload["contract_version"] == "0.1"
     assert payload["project_version"] == "0.1.0"
-    assert payload["verification_kind"] == "private_real_data_aggregate_inventory"
+    assert payload["verification_kind"] == "private_research_data_aggregate_inventory"
     assert payload["privacy_level"] == "public_safe_aggregate"
     assert payload["source_data_visibility"] == "private_local_only"
     assert payload["row_level_output_committed"] is False
@@ -692,16 +692,16 @@ def test_private_verification_summary_json_schema_and_coverage() -> None:
 def test_private_verification_summary_covers_full_historical_panel() -> None:
     path = Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    daily_panel = next(
+    market_panel_1d = next(
         item
         for item in payload["dataset_inventory"]
-        if item["logical_root"] == "processed/a_share/panel/daily_panel"
+        if item["logical_root"] == "processed/a_share/panel/market_panel_1d"
     )
 
-    assert daily_panel["period"] == "2014-01-01 through 2025-12-31"
+    assert market_panel_1d["period"] == "2014-01-01 through 2025-12-31"
     assert (
-        daily_panel["covered_by_evidence_area"]
-        == "full_historical_daily_panel_status"
+        market_panel_1d["covered_by_evidence_area"]
+        == "full_historical_market_panel_1d_status"
     )
 
 

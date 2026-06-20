@@ -405,6 +405,15 @@ def fingerprint_dataset(
         time_window=time_window,
     )
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
+    hash_columns = tuple(
+        dict.fromkeys((*key_columns, *context.logical_columns))
+    )
+    hash_physical_columns = _read_columns_for_time_window(
+        hash_columns,
+        spec=context.spec,
+        time_window=context.time_window,
+    )
+    output_columns = tuple(context.logical_columns)
     row_count = 0
     row_hash_sum = 0
     row_hash_xor = 0
@@ -416,7 +425,7 @@ def fingerprint_dataset(
     for path in context.read_paths:
         chunk = pd.read_parquet(
             path,
-            columns=list(context.physical_columns),
+            columns=list(hash_physical_columns),
             engine="pyarrow",
             filters=context.parquet_filters,
         )
@@ -425,12 +434,12 @@ def fingerprint_dataset(
             spec=context.spec,
             time_window=context.time_window,
         )
-        chunk = chunk.loc[:, list(context.logical_columns)]
+        chunk = chunk.loc[:, list(hash_columns)]
         if chunk.empty:
             continue
         file_count += 1
         hashes = pd.util.hash_pandas_object(
-            chunk.loc[:, list(context.logical_columns)],
+            chunk.loc[:, list(hash_columns)],
             index=False,
         ).to_numpy("uint64")
         chunk_sum = int(hashes.sum(dtype=np.uint64))
@@ -450,7 +459,8 @@ def fingerprint_dataset(
             "row_hash_sum": row_hash_sum,
             "row_hash_xor": row_hash_xor,
             "row_count": row_count,
-            "columns": list(context.logical_columns),
+            "columns": list(output_columns),
+            "hash_columns": list(hash_columns),
         }
     )
     partition_fingerprints = tuple(
@@ -462,6 +472,7 @@ def fingerprint_dataset(
                     "row_hash_sum": int(partition_hash_sum[partition]),
                     "row_hash_xor": int(partition_hash_xor[partition]),
                     "row_count": int(partition_rows[partition]),
+                    "hash_columns": list(hash_columns),
                 }
             ),
         }
@@ -475,7 +486,7 @@ def fingerprint_dataset(
         content_hash=content_hash,
         partition_fingerprints=partition_fingerprints,
         file_count=file_count,
-        column_names=tuple(context.logical_columns),
+        column_names=output_columns,
     )
 
 

@@ -24,8 +24,8 @@ _FORBIDDEN_FRAGMENTS = (
     "data\\processed",
     "data/research",
     "data\\research",
-    "reports/private_real",
-    "reports\\private_real",
+    "reports/private_research",
+    "reports\\private_research",
 )
 _FORBIDDEN_TOKENS = ("provider", "source")
 

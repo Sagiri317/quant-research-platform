@@ -16,8 +16,8 @@ import quant_research_platform.interfaces.services as services_module
 from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 from quant_research_platform.research.factors.price_volume import (
@@ -46,8 +46,8 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "data\\interim",
     "data/processed",
     "data\\processed",
-    "reports/private_real",
-    "reports\\private_real",
+    "reports/private_research",
+    "reports\\private_research",
     "000001",
     "600000",
     "row sample",
@@ -113,7 +113,7 @@ def test_api_01_endpoints_execute_without_private_markers() -> None:
         client.get("/api/0.1/catalog/labels"),
         client.get(
             "/api/0.1/research-datasets/"
-            "a_share_price_volume_forward_returns/requirements"
+            "price_volume_forward_returns/requirements"
         ),
     ]
 
@@ -128,7 +128,7 @@ def test_api_01_endpoints_execute_without_private_markers() -> None:
     assert len(responses[0].json()["items"]) == len(price_volume_factor_columns())
     assert responses[1].json()["items"][0]["definition_version"] == "0.1"
     requirements = responses[2].json()
-    assert requirements["dataset_id"] == A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
+    assert requirements["dataset_id"] == PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     assert requirements["input_data_ids"][:2] == [
         PRICE_VOLUME_PROCESSED_DATA_ID,
         FORWARD_RETURNS_PROCESSED_DATA_ID,
@@ -156,7 +156,7 @@ def test_cli_exposes_only_clean_rewrite_public_commands() -> None:
         [
             "research-datasets",
             "requirements",
-            "a_share_price_volume_forward_returns",
+            "price_volume_forward_returns",
         ],
     ]
 
@@ -235,7 +235,7 @@ def test_api_and_cli_naming_conventions_are_contractual() -> None:
             assert resource_segment_re.fullmatch(segment)
 
     requirements = services_module.describe_research_dataset_requirements(
-        "a_share_price_volume_forward_returns",
+        "price_volume_forward_returns",
         profile=research_profile(),
     )
     assert snake_case_re.fullmatch(requirements["dataset_id"])
@@ -357,14 +357,14 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
             "describe_research_dataset_requirements",
             lambda: client.get(
                 "/api/0.1/research-datasets/"
-                "a_share_price_volume_forward_returns/requirements"
+                "price_volume_forward_returns/requirements"
             ),
             lambda: runner.invoke(
                 app,
                 [
                     "research-datasets",
                     "requirements",
-                    "a_share_price_volume_forward_returns",
+                    "price_volume_forward_returns",
                 ],
             ),
         ),

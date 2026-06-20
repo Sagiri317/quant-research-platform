@@ -33,6 +33,46 @@ class ProcessedDataKind(StrEnum):
     LABEL = "label"
 
 
+def normalize_data_frequency(value: DataFrequency | str) -> DataFrequency:
+    """Return the platform frequency vocabulary item for a raw value."""
+
+    if isinstance(value, DataFrequency):
+        return value
+    try:
+        return DataFrequency(str(value))
+    except ValueError as exc:
+        raise ValueError(f"invalid_data_frequency: {value}") from exc
+
+
+def data_frequency_slug(value: DataFrequency | str) -> str:
+    return normalize_data_frequency(value).value
+
+
+def horizon_unit_suffix(value: DataFrequency | str) -> str:
+    frequency = normalize_data_frequency(value)
+    if frequency is DataFrequency.DAILY:
+        return "d"
+    if frequency is DataFrequency.MINUTE:
+        return "m"
+    if frequency is DataFrequency.TICK:
+        return "tick"
+    raise ValueError(f"unsupported_data_frequency: {frequency}")
+
+
+def require_supported_data_frequency(
+    value: DataFrequency | str,
+    *,
+    supported: tuple[DataFrequency, ...],
+    context: str,
+) -> DataFrequency:
+    frequency = normalize_data_frequency(value)
+    if frequency not in supported:
+        raise ValueError(
+            f"unsupported_data_frequency: {context}: {frequency.value}"
+        )
+    return frequency
+
+
 @dataclass(frozen=True, kw_only=True)
 class DataSpec:
     data_id: str
@@ -75,4 +115,8 @@ __all__ = [
     "InterimDataSpec",
     "ProcessedDataKind",
     "ProcessedDataSpec",
+    "data_frequency_slug",
+    "horizon_unit_suffix",
+    "normalize_data_frequency",
+    "require_supported_data_frequency",
 ]

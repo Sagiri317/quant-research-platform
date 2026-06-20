@@ -145,7 +145,7 @@ def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() 
         rationale="Candidate for catalog review only.",
         input_columns=("close",),
         output_columns=("candidate_factor",),
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
     )
 
     assert not hasattr(proposal, "execute")
@@ -161,7 +161,7 @@ def test_factor_catalog_registers_valid_factor_proposal() -> None:
         rationale="Candidate based on registered close field.",
         input_columns=("close",),
         output_columns=("candidate_factor",),
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
     )
     catalog = FactorCatalog()
 
@@ -185,7 +185,7 @@ def test_factor_proposal_registration_rejects_duplicate_output_columns() -> None
         rationale="Invalid duplicate output candidate.",
         input_columns=("close",),
         output_columns=("candidate_factor", "candidate_factor"),
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
     )
 
     with pytest.raises(ValueError, match="duplicate_factor_output_column"):
@@ -205,7 +205,7 @@ def test_factor_proposal_registration_rejects_unresolved_derived_input() -> None
         base_input_columns=("close",),
         derived_input_columns=("candidate_derived",),
         output_columns=("candidate_factor",),
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
     )
 
     with pytest.raises(ValueError, match="unresolved_factor_derived_input"):

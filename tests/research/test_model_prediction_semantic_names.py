@@ -4,11 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.models import MODEL_ALGORITHMS, ModelSpec
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
     fit_model_result,
+    model_algorithm_names,
+    model_smoke_hyperparameters,
     predict_model_frame,
 )
 from quant_research_platform.research.predictions import artifacts
@@ -42,21 +44,7 @@ def _model_frame() -> pd.DataFrame:
     )
 
 
-def _hyperparameters(algorithm: str) -> dict[str, object]:
-    if algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
-        return {"n_estimators": 2, "max_depth": 2, "n_jobs": 1}
-    if algorithm == "gradient_boosting_regressor":
-        return {"n_estimators": 2, "max_depth": 2}
-    if algorithm == "hist_gradient_boosting_regressor":
-        return {"max_iter": 2, "max_leaf_nodes": 3}
-    if algorithm == "xgboost_regressor":
-        return {"n_estimators": 2, "max_depth": 2, "n_jobs": 1}
-    if algorithm == "lightgbm_regressor":
-        return {"n_estimators": 2, "num_leaves": 3, "n_jobs": 1, "verbosity": -1}
-    return {}
-
-
-@pytest.mark.parametrize("algorithm", sorted(MODEL_ALGORITHMS))
+@pytest.mark.parametrize("algorithm", sorted(model_algorithm_names()))
 def test_all_model_algorithms_fit_and_predict_synthetic_data(algorithm: str) -> None:
     frame = _model_frame()
     spec = ModelSpec(
@@ -65,7 +53,7 @@ def test_all_model_algorithms_fit_and_predict_synthetic_data(algorithm: str) -> 
         input_factor_columns=("factor",),
         input_feature_columns=("feature",),
         label_column="label",
-        hyperparameters=_hyperparameters(algorithm),
+        hyperparameters=model_smoke_hyperparameters(algorithm),
         random_seed=7,
         max_train_rows=len(frame),
     )

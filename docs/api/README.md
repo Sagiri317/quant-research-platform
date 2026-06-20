@@ -1,4 +1,4 @@
-# QRP API 0.1
+﻿# QRP API 0.1
 
 This document records the clean rewrite API and CLI contract. It is local-only
 and does not describe deployment, external access, external execution-venue connectivity,
@@ -50,14 +50,14 @@ Retired legacy command names are not public clean-rewrite contracts.
   `/research-datasets`.
 - API path parameter: snake_case, for example `{dataset_id}`.
 - ID value: snake_case, for example `a_share` and
-  `a_share_price_volume_forward_returns`.
+  `price_volume_forward_returns`.
 - JSON field: snake_case, for example `dataset_id` and `input_data_ids`.
 - CLI group / command / option: kebab-case, for example `catalog`,
   `research-datasets`, and `requirements`.
 - Python module/function: snake_case, for example
   `describe_research_dataset_requirements`.
 - Do not convert business ID values such as
-  `a_share_price_volume_forward_returns` to kebab-case.
+  `price_volume_forward_returns` to kebab-case.
 
 ## Future-Only Items
 
@@ -75,7 +75,7 @@ qrp-private evidence run
 ```
 
 `qrp-private schema-inventory` writes sanitized aggregate schema metadata for
-sealed dataset roots. It does not scan `data/raw` or `reports/private_real`, and
+sealed dataset roots. It does not scan `data/raw` or `reports/private_research`, and
 it does not run private import or private rebuild.
 
 `qrp-private evidence run` is a private local verification harness for local

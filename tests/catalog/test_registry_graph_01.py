@@ -7,8 +7,8 @@ from quant_research_platform.catalog.profiles import research_profile
 
 EXPECTED_CSMAR_INTERIM_DATA_IDS = (
     "adjustment",
-    "daily_market",
     "index_info",
+    "market_bars_1d",
     "market_cap",
     "stock_master",
     "trading_calendar",

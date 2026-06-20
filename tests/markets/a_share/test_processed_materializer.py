@@ -48,30 +48,33 @@ def test_materialize_processed_data_writes_requested_panel_and_dependencies(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
-    assert set(written) == {"daily_panel"}
-    root = tmp_path / "data" / "processed" / "a_share" / "panel" / "daily_panel"
+    assert set(written) == {"market_panel_1d"}
+    root = tmp_path / "data" / "processed" / "a_share" / "panel" / "market_panel_1d"
     panel = read_dataset(root)
     assert len(panel) == 2
     assert panel["asset_id"].unique().tolist() == ["000001"]
     assert "source_asset_id" not in panel.columns
 
 
-def test_panel_materializer_reuses_daily_market_inspection(
+def test_panel_materializer_reuses_market_bars_1d_inspection(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
-    daily_market_root = layout.interim_data_root(SYNTHETIC_SOURCE_ID, "daily_market")
+    market_bars_1d_root = layout.interim_data_root(
+        SYNTHETIC_SOURCE_ID,
+        "market_bars_1d",
+    )
     calls = 0
     original = materializer.inspect_dataset
 
     def spy_inspect_dataset(*args, **kwargs):
         nonlocal calls
-        if Path(args[0]) == daily_market_root and "time_window" not in kwargs:
+        if Path(args[0]) == market_bars_1d_root and "time_window" not in kwargs:
             calls += 1
         return original(*args, **kwargs)
 
@@ -81,30 +84,33 @@ def test_panel_materializer_reuses_daily_market_inspection(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
     assert calls == 1
 
 
-def test_panel_materializer_does_not_preload_full_daily_market(
+def test_panel_materializer_does_not_preload_full_market_bars_1d(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout, end_date="2014-01-10")
-    daily_market_root = layout.interim_data_root(SYNTHETIC_SOURCE_ID, "daily_market")
+    market_bars_1d_root = layout.interim_data_root(
+        SYNTHETIC_SOURCE_ID,
+        "market_bars_1d",
+    )
     original = materializer.read_dataset
-    full_daily_market_reads = 0
-    windowed_daily_market_reads = 0
+    full_market_bars_1d_reads = 0
+    windowed_market_bars_1d_reads = 0
 
     def spy_read_dataset(root, **kwargs):
-        nonlocal full_daily_market_reads, windowed_daily_market_reads
-        if Path(root) == daily_market_root:
+        nonlocal full_market_bars_1d_reads, windowed_market_bars_1d_reads
+        if Path(root) == market_bars_1d_root:
             if kwargs.get("time_window") is None:
-                full_daily_market_reads += 1
+                full_market_bars_1d_reads += 1
             else:
-                windowed_daily_market_reads += 1
+                windowed_market_bars_1d_reads += 1
         return original(root, **kwargs)
 
     monkeypatch.setattr(materializer, "read_dataset", spy_read_dataset)
@@ -113,7 +119,7 @@ def test_panel_materializer_does_not_preload_full_daily_market(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
         resource_policy=RuntimeResourcePolicy(
             available_memory_bytes=1_000,
             memory_budget_fraction=1.0,
@@ -122,8 +128,8 @@ def test_panel_materializer_does_not_preload_full_daily_market(
         ),
     )
 
-    assert full_daily_market_reads == 0
-    assert windowed_daily_market_reads > 0
+    assert full_market_bars_1d_reads == 0
+    assert windowed_market_bars_1d_reads > 0
 
 
 def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) -> None:
@@ -133,7 +139,7 @@ def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) ->
         "layout": layout,
         "source_id": SYNTHETIC_SOURCE_ID,
         "time_window": TimeWindow("2014-01-02", "2014-01-03"),
-        "data_ids": ("daily_panel",),
+        "data_ids": ("market_panel_1d",),
     }
 
     materializer.materialize_processed_data(**kwargs)
@@ -154,7 +160,7 @@ def test_materialize_processed_data_requires_exactly_one_selector(tmp_path) -> N
     with pytest.raises(ValueError, match="data_ids_xor_kinds_required"):
         materializer.materialize_processed_data(
             **common,
-            data_ids=("daily_panel",),
+            data_ids=("market_panel_1d",),
             kinds=frozenset({ProcessedDataKind.PANEL}),
         )
 
@@ -172,9 +178,9 @@ def test_materialize_processed_data_by_kind_writes_dependency_and_target(
         kinds=frozenset({ProcessedDataKind.FACTOR}),
     )
 
-    assert set(written) == {"daily_panel", "price_volume"}
+    assert set(written) == {"market_panel_1d", "price_volume"}
     assert (
-        tmp_path / "data" / "processed" / "a_share" / "panel" / "daily_panel"
+        tmp_path / "data" / "processed" / "a_share" / "panel" / "market_panel_1d"
     ).exists()
     assert (
         tmp_path / "data" / "processed" / "a_share" / "factor" / "price_volume"
@@ -204,7 +210,7 @@ def test_label_materializer_expands_same_run_panel_dependency_for_future_halo(
         data_ids=("forward_returns",),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
     labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
     jan3_label = labels.loc[
@@ -234,10 +240,10 @@ def test_label_materializer_expands_requested_panel_dependency_for_future_halo(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("daily_panel", "forward_returns"),
+        data_ids=("market_panel_1d", "forward_returns"),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
     labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
     jan3_label = labels.loc[
@@ -270,7 +276,7 @@ def test_factor_materializer_expands_same_run_panel_dependency_for_history_halo(
         data_ids=("price_volume",),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
     factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
     assert pd.notna(factors["mom_20d"].iloc[0])
@@ -296,10 +302,10 @@ def test_factor_materializer_expands_requested_panel_dependency_for_history_halo
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-31", "2014-01-31"),
-        data_ids=("daily_panel", "price_volume"),
+        data_ids=("market_panel_1d", "price_volume"),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
     factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
     assert pd.notna(factors["mom_20d"].iloc[0])
@@ -314,7 +320,7 @@ def test_materializer_empty_target_window_still_fails_closed(tmp_path) -> None:
             layout=layout,
             source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2009-01-01", "2009-01-31"),
-            data_ids=("daily_panel",),
+            data_ids=("market_panel_1d",),
         )
 
 
@@ -326,13 +332,13 @@ def test_factor_materializer_rejects_unexpected_declared_processed_input(
     _write_interim_inputs(layout)
     catalog = _catalog_with_processed_inputs(
         "price_volume",
-        ("daily_panel", "daily_context"),
+        ("market_panel_1d", "market_context_1d"),
     )
     monkeypatch.setattr(materializer, "a_share_processed_catalog", lambda: catalog)
 
     with pytest.raises(
         ValueError,
-        match="unexpected_processed_input_for_factor: price_volume: daily_context",
+        match="unexpected_processed_input_for_factor: price_volume: market_context_1d",
     ):
         materializer.materialize_processed_data(
             layout=layout,
@@ -353,7 +359,7 @@ def test_factor_materializer_requires_family_contract_input_declared_by_spec(
 
     with pytest.raises(
         ValueError,
-        match="missing_processed_input_for_factor: price_volume: daily_panel",
+        match="missing_processed_input_for_factor: price_volume: market_panel_1d",
     ):
         materializer.materialize_processed_data(
             layout=layout,
@@ -473,12 +479,12 @@ def test_materializer_reuses_same_run_dependency_for_empty_window_tail(
     )
 
     assert {
-        "daily_panel",
-        "daily_context",
-        "a_share_default",
-        "a_share_as_of",
-        "a_share_execution",
-        "a_share_evaluation",
+        "market_panel_1d",
+        "market_context_1d",
+        "default",
+        "as_of",
+        "execution",
+        "evaluation",
     }.issubset(written)
 
 
@@ -491,17 +497,17 @@ def test_materialize_processed_data_existing_dependency_accepts_non_trading_end(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
     written = materializer.materialize_processed_data(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-04"),
-        data_ids=("a_share_execution",),
+        data_ids=("execution",),
     )
 
-    assert "a_share_execution" in written
+    assert "execution" in written
 
 
 def test_materialize_processed_data_writes_only_core_trading_sessions(
@@ -522,7 +528,7 @@ def test_materialize_processed_data_writes_only_core_trading_sessions(
         data_ids=("price_volume",),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "daily_panel"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
     factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
 
     assert panel["timestamp"].dt.date.astype(str).tolist() == [
@@ -546,7 +552,7 @@ def test_materialize_processed_data_existing_dependency_must_cover_trading_sessi
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
     with pytest.raises(ValueError, match="insufficient_dataset_coverage"):
@@ -554,7 +560,7 @@ def test_materialize_processed_data_existing_dependency_must_cover_trading_sessi
             layout=layout,
             source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2014-01-02", "2014-01-06"),
-            data_ids=("a_share_execution",),
+            data_ids=("execution",),
         )
 
 
@@ -571,9 +577,9 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
         layout=source_layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2016-01-04"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
-    source_panel_root = _processed_root(tmp_path / "source", "panel", "daily_panel")
+    source_panel_root = _processed_root(tmp_path / "source", "panel", "market_panel_1d")
     panel = read_dataset(source_panel_root)
     panel_without_2015 = panel.loc[
         pd.to_datetime(panel["timestamp"]).dt.year.ne(2015)
@@ -585,11 +591,11 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
         start_date="2014-01-02",
         end_date="2016-01-04",
     )
-    panel_root = _processed_root(tmp_path / "coverage", "panel", "daily_panel")
+    panel_root = _processed_root(tmp_path / "coverage", "panel", "market_panel_1d")
     write_dataset(
         panel_root,
         panel_without_2015,
-        spec=a_share_processed_catalog().get("daily_panel"),
+        spec=a_share_processed_catalog().get("market_panel_1d"),
     )
 
     with pytest.raises(
@@ -600,7 +606,7 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
             layout=layout,
             source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2014-01-02", "2016-01-04"),
-            data_ids=("a_share_execution",),
+            data_ids=("execution",),
         )
 
 
@@ -617,17 +623,17 @@ def test_existing_dependency_coverage_accepts_non_trading_end_date(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2016-12-29", "2016-12-30"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
     materializer.materialize_processed_data(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2016-12-29", "2016-12-31"),
-        data_ids=("a_share_execution",),
+        data_ids=("execution",),
     )
 
-    annotation_root = _processed_root(tmp_path, "annotation", "a_share_execution")
+    annotation_root = _processed_root(tmp_path, "annotation", "execution")
     annotation = read_dataset(annotation_root)
     assert annotation["timestamp"].dt.date.astype(str).tolist() == [
         "2016-12-29",
@@ -653,21 +659,21 @@ def test_annotation_materializer_uses_dependency_lookahead_session(tmp_path) -> 
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-30", "2014-02-07"),
-        data_ids=("daily_panel",),
+        data_ids=("market_panel_1d",),
     )
 
     materializer.materialize_processed_data(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-30", "2014-01-30"),
-        data_ids=("a_share_execution",),
+        data_ids=("execution",),
     )
 
     execution = read_dataset(
-        _processed_root(tmp_path, "annotation", "a_share_execution")
+        _processed_root(tmp_path, "annotation", "execution")
     )
     assert execution["timestamp"].dt.date.astype(str).tolist() == ["2014-01-30"]
-    assert execution["next_day_is_trading"].tolist() == [True]
+    assert execution["next_bar_is_trading"].tolist() == [True]
     assert execution["can_enter"].tolist() == [True]
     assert execution["can_exit"].tolist() == [True]
 
@@ -677,7 +683,7 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
 ) -> None:
     _assert_forced_tiny_chunks_match_default(
         tmp_path,
-        data_id="daily_panel",
+        data_id="market_panel_1d",
         kind="panel",
         end_date="2014-01-08",
         time_window=TimeWindow("2014-01-02", "2014-01-07"),
@@ -688,7 +694,7 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
     ("data_id", "kind", "end_date", "time_window"),
     [
         (
-            "a_share_execution",
+            "execution",
             "annotation",
             "2014-01-08",
             TimeWindow("2014-01-02", "2014-01-07"),
@@ -843,7 +849,7 @@ def _label_catalog_with_families(families: tuple[str, ...]) -> LabelCatalog:
 
 def _interim_catalog() -> InterimDataCatalog:
     specs = {
-        "daily_market": (
+        "market_bars_1d": (
             "source_asset_id",
             "timestamp",
             "trade_date",
@@ -858,7 +864,7 @@ def _interim_catalog() -> InterimDataCatalog:
             "amount",
             "prev_close",
             "limit_status",
-            "return_1d",
+            "period_return",
             "adj_close",
             "adj_open",
             "float_market_cap",
@@ -932,7 +938,7 @@ def _write_interim_inputs(
     catalog = _interim_catalog()
     source_id = SYNTHETIC_SOURCE_ID
     frames = {
-        "daily_market": _daily_market_frame(
+        "market_bars_1d": _market_bars_1d_frame(
             start_date=start_date,
             end_date=end_date,
         ),
@@ -952,7 +958,7 @@ def _write_interim_inputs(
         )
 
 
-def _daily_market_frame(
+def _market_bars_1d_frame(
     *,
     start_date: str = "2014-01-02",
     end_date: str = "2014-01-03",
@@ -978,7 +984,7 @@ def _daily_market_frame(
                 "amount": 10200.0 + offset,
                 "prev_close": 9.9 + offset,
                 "limit_status": 0,
-                "return_1d": 0.01,
+                "period_return": 0.01,
                 "adj_close": 10.2 + offset,
                 "adj_open": 10.0 + offset,
                 "float_market_cap": 100000.0 + offset,

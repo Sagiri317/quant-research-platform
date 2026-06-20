@@ -585,7 +585,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
     assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
     assert run_root.as_posix().endswith(
-        "reports/private_real/a_share/prediction/pred_demo"
+        "reports/private_research/a_share/prediction/pred_demo"
     )
     assert (
         "output_root"
@@ -637,7 +637,7 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     )
 
     assert run_root.as_posix().endswith(
-        "reports/private_real/a_share/prediction/pred_demo"
+        "reports/private_research/a_share/prediction/pred_demo"
     )
     assert (run_root / "prediction.parquet").is_file()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
@@ -851,7 +851,7 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     )
 
     assert run_root.as_posix().endswith(
-        "reports/private_real/a_share/evaluation/eval_demo"
+        "reports/private_research/a_share/evaluation/eval_demo"
     )
     assert (run_root / "metrics.parquet").is_file()
     assert (run_root / "grouped_label_values.parquet").is_file()

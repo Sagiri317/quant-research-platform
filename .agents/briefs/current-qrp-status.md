@@ -1,4 +1,4 @@
-# QRP 当前状态简报
+﻿# QRP 当前状态简报
 
 本文件是日常任务的短上下文，不是 Git 日志、handoff 记录或完整架构文档。任务开始后仍以用户本轮指令、`git status --short --branch`、代码、tests、contracts 为事实源。
 
@@ -65,10 +65,10 @@ runtime/     privacy, sanitization, logging, profiling, errors, resources
 ## 当前 A-share / research 事实
 
 - A-share 是第一个启用市场；其他市场是未来设计，不新增空实现包。
-- `daily_panel` 是 A-share fact layer（事实层），不拥有派生 eligibility/execution masks。
+- `market_panel_1d` 是 A-share fact layer（事实层），不拥有派生 eligibility/execution masks。
 - A-share trading semantics（交易语义）归 `markets/implementations/a_share/processed/annotations.py`；下游 labels/evaluation/model/prediction 应消费 annotation outputs，不重新计算 ST、停牌、涨跌停、eligibility 或 execution 规则。
 - `ResearchDatasetSpec.base_input_data_id` 必填；assembler market-agnostic，先读 explicit base，再按 `market_id, asset_id, timestamp` left join 其他输入。
-- 当前 `price_volume` factors 和 `forward_return` labels 按合同使用 `daily_panel` 作为 primary processed input。
+- 当前 `price_volume` factors 和 `forward_return` labels 按合同使用 `market_panel_1d` 作为 primary processed input。
 - Evaluation / prediction evidence 当前应视为 smoke-scoped（烟雾范围）证据，不是 2014-2025 全历史模型/绩效证明。
 
 ## 当前资源事实
@@ -82,7 +82,7 @@ data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
 data/research/a_share/
-reports/private_real/
+reports/private_research/
 ```
 
 禁止暴露 raw/interim/processed 私有行、私有 reports、vendor markers、stock-code samples、本地绝对路径、credentials、tokens、raw tracebacks with local/private context。

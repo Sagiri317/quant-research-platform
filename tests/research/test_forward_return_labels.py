@@ -10,11 +10,11 @@ from quant_research_platform.markets.implementations.a_share.labels.definitions 
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
-from tests.helpers.synthetic_a_share import make_synthetic_daily_panel
+from tests.helpers.synthetic_a_share import make_synthetic_market_panel_1d
 
 
 def test_forward_return_labels_group_sort_horizons_and_invalid_entry_price() -> None:
-    panel = make_synthetic_daily_panel(sessions=130)
+    panel = make_synthetic_market_panel_1d(sessions=130)
     ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
     asset_a_dates = ordered.loc[ordered["asset_id"].eq("asset_a"), "timestamp"].tolist()
     asset_b_dates = ordered.loc[ordered["asset_id"].eq("asset_b"), "timestamp"].tolist()
@@ -59,7 +59,7 @@ def test_forward_return_labels_group_sort_horizons_and_invalid_entry_price() -> 
 
 
 def test_forward_return_short_history_long_horizon_is_all_nan() -> None:
-    panel = make_synthetic_daily_panel(sessions=3, assets=("asset_a",))
+    panel = make_synthetic_market_panel_1d(sessions=3, assets=("asset_a",))
 
     result = add_forward_return_labels(panel, horizons=(5,))
 
@@ -67,7 +67,7 @@ def test_forward_return_short_history_long_horizon_is_all_nan() -> None:
 
 
 def test_forward_return_labels_treat_non_finite_prices_as_invalid() -> None:
-    panel = make_synthetic_daily_panel(sessions=6, assets=("asset_a",))
+    panel = make_synthetic_market_panel_1d(sessions=6, assets=("asset_a",))
     ordered_dates = panel.sort_values("timestamp")["timestamp"].tolist()
     panel.loc[panel["timestamp"].eq(ordered_dates[1]), "adj_open"] = np.inf
     panel.loc[panel["timestamp"].eq(ordered_dates[3]), "adj_open"] = np.inf
@@ -83,7 +83,7 @@ def test_forward_return_labels_treat_non_finite_prices_as_invalid() -> None:
 
 
 def test_a_share_label_catalog_horizons_mask_invalid_entry() -> None:
-    panel = make_synthetic_daily_panel(sessions=130, assets=("asset_a",))
+    panel = make_synthetic_market_panel_1d(sessions=130, assets=("asset_a",))
     ordered_dates = panel.sort_values("timestamp")["timestamp"].tolist()
     panel.loc[panel["timestamp"].eq(ordered_dates[1]), "adj_open"] = 0.0
 

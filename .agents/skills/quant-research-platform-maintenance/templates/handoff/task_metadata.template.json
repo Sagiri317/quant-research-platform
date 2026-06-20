@@ -1,4 +1,4 @@
-{
+﻿{
   "schema_version": "handoff-task-metadata/0.1",
   "slug": "<handoff-slug>",
   "branch": "<branch-name>",
@@ -24,5 +24,5 @@
     "threads": [],
     "evidence": "Live GitHub review-thread access was unavailable; counts are unknown. No PASS is claimed for live thread state."
   },
-  "review_evidence": {}
+  "handoff_evidence": {}
 }

@@ -67,7 +67,7 @@ def main() -> int:
         support_path(
             "templates/task_metadata.template.json",
             "templates/handoff/task_metadata.template.json",
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8-sig")
     )
     if task_template.get("schema_version") != "handoff-task-metadata/0.1":
         return fail("task_metadata_template_schema_version_invalid")
@@ -77,7 +77,7 @@ def main() -> int:
         support_path(
             "schemas/sidecar.schema.json",
             "schemas/handoff/sidecar.schema.json",
-        ).read_text(encoding="utf-8")
+        ).read_text(encoding="utf-8-sig")
     )
     if "status_summary" not in sidecar_schema.get("required", []):
         return fail("sidecar_schema_status_summary_not_required")
@@ -92,12 +92,12 @@ def main() -> int:
     if forbidden_present:
         return fail("forbidden_legacy_tools=" + ",".join(forbidden_present))
     for path in sorted(root.glob("*.py")):
-        ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
 
-    builder = (root / "build_handoff_package.py").read_text(encoding="utf-8")
-    verifier = (root / "verify_handoff_package.py").read_text(encoding="utf-8")
-    safety = (root / "handoff_safety.py").read_text(encoding="utf-8")
-    readme = (root / "README.md").read_text(encoding="utf-8")
+    builder = (root / "build_handoff_package.py").read_text(encoding="utf-8-sig")
+    verifier = (root / "verify_handoff_package.py").read_text(encoding="utf-8-sig")
+    safety = (root / "handoff_safety.py").read_text(encoding="utf-8-sig")
+    readme = (root / "README.md").read_text(encoding="utf-8-sig")
 
     required_terms = (
         'parser.add_argument("--task", required=True',

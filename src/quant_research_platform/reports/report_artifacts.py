@@ -325,7 +325,7 @@ def write_prediction_report_artifacts(
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write private prediction report artifacts under reports/private_real."""
+    """Write private prediction report artifacts under reports/private_research."""
 
     run_root = _derive_report_run_root(
         report_spec=report_spec,
@@ -472,7 +472,7 @@ def write_evaluation_report_artifacts(
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write private evaluation report artifacts under reports/private_real."""
+    """Write private evaluation report artifacts under reports/private_research."""
 
     run_root = _derive_report_run_root(
         report_spec=report_spec,
@@ -703,7 +703,7 @@ def _portfolio_report_manifest_payload(
         "run_type": spec.run_type,
         "signals": [asdict(signal) for signal in spec.signals],
         "return_source_column": spec.return_source_column,
-        "frequency": spec.frequency,
+        "rebalance_frequency": spec.rebalance_frequency,
         "execution_lag_steps": spec.execution_lag_steps,
         "weight_config": asdict(spec.weight_config),
         "tradability_config": asdict(spec.tradability_config),

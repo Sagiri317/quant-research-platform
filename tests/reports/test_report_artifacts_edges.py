@@ -707,7 +707,7 @@ def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
 
     assert run_root.as_posix().endswith(
-        "reports/private_real/a_share/portfolio/portfolio_demo"
+        "reports/private_research/a_share/portfolio/portfolio_demo"
     )
     assert manifest["portfolio_id"] == "portfolio_demo"
     assert manifest["research_dataset_id"] == "research_demo"
@@ -853,7 +853,7 @@ def test_portfolio_report_artifacts_clean_temp_run_directory_on_failure(
         "portfolio",
     )
     run_parent = (
-        tmp_path / "reports" / "private_real" / "a_share" / "portfolio"
+        tmp_path / "reports" / "private_research" / "a_share" / "portfolio"
     )
 
     def fail_write(frame, path, **kwargs):  # noqa: ANN001
@@ -911,7 +911,7 @@ def _portfolio_spec() -> PortfolioSpec:
         research_dataset_id="research_demo",
         signals=(_signal_spec(),),
         return_source_column="label",
-        frequency="1d",
+        rebalance_frequency="1d",
         execution_lag_steps=0,
         weight_config=WeightConfig(method="rank_weighted_quantile"),
     )

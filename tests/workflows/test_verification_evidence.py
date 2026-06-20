@@ -262,7 +262,7 @@ def test_verification_evidence_output_root_respects_repo_private_boundary(
         )
 
     module.validate_private_output_root(
-        repo_root / "reports" / "private_real" / "s1",
+        repo_root / "reports" / "private_research" / "s1",
         repo_root,
     )
     module.validate_private_output_root(
@@ -389,10 +389,14 @@ def test_verification_evidence_workflow_resolves_independent_windows(
             / "data"
             / "interim"
             / "csmar"
-            / "daily_market"
+            / "market_bars_1d"
         )
-        _persist_fake_artifact(artifact_root, "daily_market", "interim")
-        return type("Result", (), {"artifact_roots": {"daily_market": artifact_root}})()
+        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        return type(
+            "Result",
+            (),
+            {"artifact_roots": {"market_bars_1d": artifact_root}},
+        )()
 
     def build_processed(layout, source_id, time_window, kinds):
         del source_id, time_window, kinds
@@ -546,10 +550,14 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
             / "data"
             / "interim"
             / "csmar"
-            / "daily_market"
+            / "market_bars_1d"
         )
-        _persist_fake_artifact(artifact_root, "daily_market", "interim")
-        return type("Result", (), {"artifact_roots": {"daily_market": artifact_root}})()
+        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        return type(
+            "Result",
+            (),
+            {"artifact_roots": {"market_bars_1d": artifact_root}},
+        )()
 
     def build_processed(layout, source_id, time_window, kinds):
         del source_id, time_window, kinds
@@ -668,13 +676,13 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
             / "data"
             / "interim"
             / "csmar"
-            / "daily_market"
+            / "market_bars_1d"
         )
-        _persist_fake_artifact(artifact_root, "daily_market", "interim")
+        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
         return type(
             "Result",
             (),
-            {"artifact_roots": {"daily_market": artifact_root}},
+            {"artifact_roots": {"market_bars_1d": artifact_root}},
         )()
 
     def build_processed(
@@ -704,11 +712,11 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
             / "data"
             / "research"
             / "a_share"
-            / "a_share_price_volume_forward_returns"
+            / "price_volume_forward_returns"
         )
         _persist_fake_artifact(
             artifact_root,
-            "a_share_price_volume_forward_returns",
+            "price_volume_forward_returns",
             "research",
         )
         return artifact_root
@@ -769,9 +777,9 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         "portfolio",
     ]
     assert evidence_years == [(2014,)] * (expected_prediction_count + 2)
-    assert evaluation_run_ids == ["a_share_signal_forward_return_20d"]
+    assert evaluation_run_ids == ["signal_forward_return_20d"]
     assert prediction_ids == expected_prediction_ids
-    assert portfolio_ids == ["a_share_signal_forward_return_20d_portfolio"]
+    assert portfolio_ids == ["signal_forward_return_20d_portfolio"]
     assert result.status == "PASS"
     assert result.run_id == "s1"
     assert result.output_root == "s1"
@@ -837,15 +845,15 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
             / "data"
             / "interim"
             / "csmar"
-            / "daily_market"
+            / "market_bars_1d"
         )
-        _persist_fake_artifact(artifact_root, "daily_market", "interim")
+        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
         captured_roots.append(artifact_root)
         captured_manifests.append(inspect_dataset(artifact_root).manifest)
         return type(
             "Result",
             (),
-            {"artifact_roots": {"daily_market": artifact_root}},
+            {"artifact_roots": {"market_bars_1d": artifact_root}},
         )()
 
     monkeypatch.setattr(
@@ -900,13 +908,13 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
             / "data"
             / "interim"
             / "csmar"
-            / "daily_market"
+            / "market_bars_1d"
         )
         (artifact_root / "data").mkdir(parents=True)
         return type(
             "Result",
             (),
-            {"artifact_roots": {"daily_market": artifact_root}},
+            {"artifact_roots": {"market_bars_1d": artifact_root}},
         )()
 
     monkeypatch.setattr(
@@ -949,7 +957,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
     assert result.status == "FAIL"
     assert "dataset_manifest_missing" in validation["failure_codes"]
     assert validation["dataset_manifest_completeness"]["missing"] == [
-        "data/interim/csmar/daily_market"
+        "data/interim/csmar/market_bars_1d"
     ]
     assert summary["status"] == validation["status"] == "FAIL"
     summary_md = (output_root / "summary.md").read_text(encoding="utf-8")
@@ -976,10 +984,14 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
             / "data"
             / "interim"
             / "csmar"
-            / "daily_market"
+            / "market_bars_1d"
         )
-        _persist_fake_artifact(artifact_root, "daily_market", "interim")
-        return type("Result", (), {"artifact_roots": {"daily_market": artifact_root}})()
+        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        return type(
+            "Result",
+            (),
+            {"artifact_roots": {"market_bars_1d": artifact_root}},
+        )()
 
     def build_processed(layout, source_id, time_window, kinds):
         del source_id, time_window
@@ -1014,23 +1026,23 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
     )
 
     summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
-    reports_root = output_root / "reports" / "private_real" / "a_share"
+    reports_root = output_root / "reports" / "private_research" / "a_share"
     evaluation_root = (
         reports_root
         / "evaluation"
-        / "a_share_signal_forward_return_20d"
+        / "signal_forward_return_20d"
     )
     portfolio_root = (
         reports_root
         / "portfolio"
-        / "a_share_signal_forward_return_20d_portfolio"
+        / "signal_forward_return_20d_portfolio"
     )
     prediction_root = reports_root / "prediction"
     metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
     research = read_research_dataset(
         StorageLayout(project_root=output_root),
         market_id=MarketId("a_share"),
-        dataset_id="a_share_price_volume_forward_returns",
+        dataset_id="price_volume_forward_returns",
         time_window=TimeWindow("2014-01-02", "2015-01-05"),
     )
 
@@ -1139,11 +1151,11 @@ def _persist_fake_research_root(**kwargs) -> Path:
         / "data"
         / "research"
         / "a_share"
-        / "a_share_price_volume_forward_returns"
+        / "price_volume_forward_returns"
     )
     _persist_fake_artifact(
         artifact_root,
-        "a_share_price_volume_forward_returns",
+        "price_volume_forward_returns",
         "research",
     )
     return artifact_root
@@ -1172,7 +1184,7 @@ def _persist_tiny_a_share_processed_inputs(
     profile,
 ) -> dict[str, object]:
     dataset_spec = profile.research_datasets.get(
-        "a_share_price_volume_forward_returns"
+        "price_volume_forward_returns"
     )
     inspections: dict[str, object] = {}
     for data_id in dataset_spec.input_data_ids:
@@ -1224,7 +1236,7 @@ def _tiny_processed_value(
         "eligible_liquidity",
         "can_enter",
         "can_exit",
-        "next_day_is_trading",
+        "next_bar_is_trading",
     }:
         return True
     if column in {"is_st", "is_pt"}:
@@ -1233,7 +1245,7 @@ def _tiny_processed_value(
         return "I"
     if column == "csrc_2012_industry_name":
         return "industry"
-    if column in {"limit_status", "next_day_limit_status"}:
+    if column in {"limit_status", "next_bar_limit_status"}:
         return 0
     if column == "market_type":
         return 1

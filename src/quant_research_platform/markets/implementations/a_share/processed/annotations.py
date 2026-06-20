@@ -101,16 +101,16 @@ def _with_annotation_masks(
     )
     result = _add_one_word_limit_masks(result)
     grouped = result.groupby("asset_id", sort=False)
-    result["next_day_is_trading"] = _shifted_bool_mask(grouped["is_trading"])
-    result["next_day_limit_status"] = grouped["limit_status"].shift(-1)
+    result["next_bar_is_trading"] = _shifted_bool_mask(grouped["is_trading"])
+    result["next_bar_limit_status"] = grouped["limit_status"].shift(-1)
     next_one_word_limit_up = _shifted_bool_mask(grouped["one_word_limit_up"])
     next_one_word_limit_down = _shifted_bool_mask(grouped["one_word_limit_down"])
     result["can_enter"] = (
         result["eligible"]
-        & result["next_day_is_trading"].astype(bool)
+        & result["next_bar_is_trading"].astype(bool)
         & ~next_one_word_limit_up
     )
-    result["can_exit"] = result["next_day_is_trading"].astype(bool) & (
+    result["can_exit"] = result["next_bar_is_trading"].astype(bool) & (
         ~next_one_word_limit_down
     )
     return result

@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_EXECUTION_MASK_ID,
-    DAILY_CONTEXT_PROCESSED_DATA_ID,
+    EXECUTION_MASK_ID,
+    market_context_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     annotations,
@@ -14,18 +14,18 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 def test_derive_annotations_projects_registered_annotation_roles() -> None:
     outputs = annotations.derive_annotations(_panel_frame())
 
-    context = outputs[DAILY_CONTEXT_PROCESSED_DATA_ID]
-    execution = outputs[A_SHARE_EXECUTION_MASK_ID]
+    context = outputs[market_context_data_id()]
+    execution = outputs[EXECUTION_MASK_ID]
 
-    assert set(outputs) >= {DAILY_CONTEXT_PROCESSED_DATA_ID, A_SHARE_EXECUTION_MASK_ID}
+    assert set(outputs) >= {market_context_data_id(), EXECUTION_MASK_ID}
     assert "market_type" in context.columns
     assert "eligible" not in context.columns
     assert execution.columns.tolist() == [
         "market_id",
         "asset_id",
         "timestamp",
-        "next_day_is_trading",
-        "next_day_limit_status",
+        "next_bar_is_trading",
+        "next_bar_limit_status",
         "can_enter",
         "can_exit",
     ]

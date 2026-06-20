@@ -12,24 +12,6 @@ from quant_research_platform.contracts.filtering import (
     validate_sample_filter_mode,
 )
 
-MODEL_ALGORITHMS = {
-    "linear_regression",
-    "ridge_regression",
-    "lasso_regression",
-    "elastic_net",
-    "huber_regression",
-    "decision_tree_regressor",
-    "random_forest_regressor",
-    "extra_trees_regressor",
-    "gradient_boosting_regressor",
-    "hist_gradient_boosting_regressor",
-    "xgboost_regressor",
-    "lightgbm_regressor",
-    "single_factor_baseline",
-    "equal_weight_rank_ensemble",
-    "ic_weighted_rank_ensemble",
-}
-
 
 @dataclass(frozen=True, kw_only=True)
 class ModelSpec:
@@ -48,8 +30,8 @@ class ModelSpec:
     def __post_init__(self) -> None:
         if self.contract_version != "0.1":
             raise ValueError("unsupported_model_contract_version")
-        if self.model_algorithm not in MODEL_ALGORITHMS:
-            raise ValueError("unsupported_model_algorithm")
+        if not isinstance(self.model_algorithm, str) or not self.model_algorithm:
+            raise ValueError("model_algorithm_required")
         validate_sample_filter_mode(self.sample_filter_mode, owner="model")
         _validate_column_tuple(
             self.input_factor_columns,
@@ -114,4 +96,4 @@ def _validate_column_tuple(
         raise ValueError(f"{field_name}_must_not_contain_duplicates")
 
 
-__all__ = ["MODEL_ALGORITHMS", "ModelSpec"]
+__all__ = ["ModelSpec"]

@@ -106,7 +106,7 @@ def _factor_label_panel(dates) -> pd.DataFrame:
                 "timestamp": pd.Timestamp(date),
                 "adj_open": float(100 + offset),
                 "adj_close": float(100 + offset),
-                "return_1d": 0.001 * offset,
+                "period_return": 0.001 * offset,
                 "amount": 10000.0 + offset,
                 "turnover": 0.01 + offset / 100000.0,
                 "high": float(101 + offset),

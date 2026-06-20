@@ -14,7 +14,7 @@ REQUIRED_TERMS = (
     "/api/0.1",
     "research-datasets",
     "workflows/",
-    "reports/private_real",
+    "reports/private_research",
 )
 FORBIDDEN_TERMS = (
     "raw" + "_private",

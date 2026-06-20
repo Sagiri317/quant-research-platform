@@ -48,7 +48,7 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
         assert set(definition.derived_input_columns).issubset(registered_fields)
         assert definition.output_column == definition.factor_id
         assert definition.family == "price_volume"
-        assert definition.required_input_data_id == "daily_panel"
+        assert definition.required_input_data_id == "market_panel_1d"
 
     shared_input_superset = {
         "open",
@@ -60,16 +60,16 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
         "volume",
         "amount",
         "turnover",
-        "return_1d",
+        "period_return",
         "total_market_cap",
         "float_market_cap",
     }
     assert not any(
         set(item.input_columns) == shared_input_superset for item in definitions
     )
-    assert catalog.get("rev_1d").base_input_columns == ("return_1d",)
+    assert catalog.get("rev_1d").base_input_columns == ("period_return",)
     assert catalog.get("mom_20d").base_input_columns == ("adj_close",)
-    assert catalog.get("amihud_20d").base_input_columns == ("return_1d", "amount")
+    assert catalog.get("amihud_20d").base_input_columns == ("period_return", "amount")
     assert catalog.get("amplitude_20d").base_input_columns == (
         "high",
         "low",

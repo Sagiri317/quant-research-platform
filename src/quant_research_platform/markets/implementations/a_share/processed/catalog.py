@@ -18,15 +18,15 @@ from quant_research_platform.markets.implementations.a_share.fields import (
     a_share_field_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_AS_OF_MASK_ID,
-    A_SHARE_DEFAULT_UNIVERSE_ID,
-    A_SHARE_EVALUATION_MASK_ID,
-    A_SHARE_EXECUTION_MASK_ID,
-    A_SHARE_MARKET_ID,
-    DAILY_CONTEXT_PROCESSED_DATA_ID,
-    DAILY_PANEL_PROCESSED_DATA_ID,
+    AS_OF_MASK_ID,
+    DEFAULT_UNIVERSE_ID,
+    EVALUATION_MASK_ID,
+    EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    MARKET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
+    market_context_data_id,
+    market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
@@ -52,7 +52,7 @@ PANEL_COLUMNS: tuple[str, ...] = (
     "volume",
     "amount",
     "turnover",
-    "return_1d",
+    "period_return",
     "limit_status",
     "is_limit_up",
     "is_limit_down",
@@ -113,8 +113,8 @@ EXECUTION_COLUMNS: tuple[str, ...] = (
     "market_id",
     "asset_id",
     "timestamp",
-    "next_day_is_trading",
-    "next_day_limit_status",
+    "next_bar_is_trading",
+    "next_bar_limit_status",
     "can_enter",
     "can_exit",
 )
@@ -142,10 +142,10 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
     return (
         _processed_spec(
             kind=ProcessedDataKind.PANEL,
-            data_id=DAILY_PANEL_PROCESSED_DATA_ID,
+            data_id=market_panel_data_id(),
             columns=PANEL_COLUMNS,
             source_input_data_ids=(
-                "daily_market",
+                "market_bars_1d",
                 "stock_master",
                 "market_cap",
                 "trading_calendar",
@@ -153,13 +153,13 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
         ),
         _processed_spec(
             kind=ProcessedDataKind.ANNOTATION,
-            data_id=DAILY_CONTEXT_PROCESSED_DATA_ID,
+            data_id=market_context_data_id(),
             columns=CONTEXT_COLUMNS,
-            processed_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+            processed_input_data_ids=(market_panel_data_id(),),
         ),
         _processed_spec(
             kind=ProcessedDataKind.ANNOTATION,
-            data_id=A_SHARE_DEFAULT_UNIVERSE_ID,
+            data_id=DEFAULT_UNIVERSE_ID,
             columns=DEFAULT_UNIVERSE_COLUMNS,
             role_overrides={
                 "eligible_base": ColumnRole.UNIVERSE,
@@ -167,49 +167,49 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
                 "eligible_liquidity": ColumnRole.UNIVERSE,
                 "eligible": ColumnRole.UNIVERSE,
             },
-            processed_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+            processed_input_data_ids=(market_panel_data_id(),),
         ),
         _processed_spec(
             kind=ProcessedDataKind.ANNOTATION,
-            data_id=A_SHARE_AS_OF_MASK_ID,
+            data_id=AS_OF_MASK_ID,
             columns=AS_OF_COLUMNS,
             role_overrides={"eligible": ColumnRole.MASK},
-            processed_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+            processed_input_data_ids=(market_panel_data_id(),),
         ),
         _processed_spec(
             kind=ProcessedDataKind.ANNOTATION,
-            data_id=A_SHARE_EXECUTION_MASK_ID,
+            data_id=EXECUTION_MASK_ID,
             columns=EXECUTION_COLUMNS,
             role_overrides={
-                "next_day_is_trading": ColumnRole.MASK,
+                "next_bar_is_trading": ColumnRole.MASK,
                 "can_enter": ColumnRole.MASK,
                 "can_exit": ColumnRole.MASK,
             },
-            processed_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+            processed_input_data_ids=(market_panel_data_id(),),
         ),
         _processed_spec(
             kind=ProcessedDataKind.ANNOTATION,
-            data_id=A_SHARE_EVALUATION_MASK_ID,
+            data_id=EVALUATION_MASK_ID,
             columns=EVALUATION_COLUMNS,
             role_overrides={
                 "eligible": ColumnRole.MASK,
                 "can_exit": ColumnRole.MASK,
             },
-            processed_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+            processed_input_data_ids=(market_panel_data_id(),),
         ),
         _processed_spec(
             kind=ProcessedDataKind.FACTOR,
             data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
             columns=(*platform_entity_time_key(), *factor_columns),
             role_overrides={column: ColumnRole.FACTOR for column in factor_columns},
-            processed_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+            processed_input_data_ids=(market_panel_data_id(),),
         ),
         _processed_spec(
             kind=ProcessedDataKind.LABEL,
             data_id=FORWARD_RETURNS_PROCESSED_DATA_ID,
             columns=(*platform_entity_time_key(), *label_columns),
             role_overrides={column: ColumnRole.LABEL for column in label_columns},
-            processed_input_data_ids=(DAILY_PANEL_PROCESSED_DATA_ID,),
+            processed_input_data_ids=(market_panel_data_id(),),
         ),
     )
 
@@ -225,7 +225,7 @@ def _processed_spec(
 ) -> ProcessedDataSpec:
     return ProcessedDataSpec(
         data_id=data_id,
-        market_id=A_SHARE_MARKET_ID,
+        market_id=MARKET_ID,
         kind=kind,
         source_input_data_ids=source_input_data_ids,
         processed_input_data_ids=processed_input_data_ids,

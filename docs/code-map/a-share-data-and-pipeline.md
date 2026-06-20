@@ -1,4 +1,4 @@
-# A-share Data And Workflow Code Map
+﻿# A-share Data And Workflow Code Map
 
 This map records the current A-share clean-rewrite direction. It does not
 authorize private data exposure, website UI work, deployment, workers, schedulers,
@@ -12,7 +12,7 @@ data/raw/<internal-provider>/
 -> markets/implementations/a_share/
 -> data/processed/a_share/
 -> data/research/a_share/
--> reports/private_real/a_share/
+-> reports/private_research/a_share/
 ```
 
 Raw files are user-provided local exports. The project does not log in to
@@ -72,7 +72,7 @@ profile.
   to interim, A-share fact panel, A-share annotations/masks/context, factor
   data, label data, and research dataset assembly are closed under explicit
   catalog/profile ownership.
-- `daily_panel` is a fact layer. It excludes derived `eligible*`,
+- `market_panel_1d` is a fact layer. It excludes derived `eligible*`,
   `next_day*`, `can_enter`, and `can_exit` masks.
 - A-share trading semantics are owned by processed annotations. Label,
   evaluation, model, and prediction paths consume annotation outputs instead of
@@ -120,9 +120,9 @@ profile.
 - 2014 ResearchDataset, evaluation, and prediction smoke parity completed.
 - 2014-2025 factor/label-supporting processed layers were verified through
   spec-driven writers.
-- 2014-2025 `a_share_price_volume_forward_returns` ResearchDataset materialized
+- 2014-2025 `price_volume_forward_returns` ResearchDataset materialized
   through the ResearchDataset assembler.
-- Full historical `daily_panel` aggregate coverage is verified for
+- Full historical `market_panel_1d` aggregate coverage is verified for
   `2014-01-01` through `2025-12-31` by local private aggregate verification
   without committing row-level output artifacts.
 - Evaluation and prediction remain 2014 smoke evidence; they have not been

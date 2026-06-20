@@ -15,13 +15,13 @@ from quant_research_platform.markets.implementations.a_share.fields import (
     a_share_field_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_DEFAULT_UNIVERSE_ID,
-    A_SHARE_EXECUTION_MASK_ID,
-    A_SHARE_MARKET_ID,
-    A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-    DAILY_CONTEXT_PROCESSED_DATA_ID,
+    DEFAULT_UNIVERSE_ID,
+    EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    MARKET_ID,
+    PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
+    market_context_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
@@ -65,16 +65,16 @@ def build_a_share_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
     )
     return (
         ResearchDatasetSpec(
-            data_id=A_SHARE_PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            market_id=A_SHARE_MARKET_ID,
+            data_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+            market_id=MARKET_ID,
             input_data_ids=(
                 PRICE_VOLUME_PROCESSED_DATA_ID,
                 FORWARD_RETURNS_PROCESSED_DATA_ID,
-                DAILY_CONTEXT_PROCESSED_DATA_ID,
-                A_SHARE_DEFAULT_UNIVERSE_ID,
-                A_SHARE_EXECUTION_MASK_ID,
+                market_context_data_id(),
+                DEFAULT_UNIVERSE_ID,
+                EXECUTION_MASK_ID,
             ),
-            base_input_data_id=A_SHARE_DEFAULT_UNIVERSE_ID,
+            base_input_data_id=DEFAULT_UNIVERSE_ID,
             factor_columns=factor_columns,
             feature_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
             feature_transforms=RESEARCH_DATASET_FEATURE_TRANSFORMS,

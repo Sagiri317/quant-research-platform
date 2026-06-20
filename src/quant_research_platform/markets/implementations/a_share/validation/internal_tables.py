@@ -27,7 +27,7 @@ DAILY_MARKET_REQUIRED_COLUMNS = (
     "close",
     "volume",
     "amount",
-    "return_1d",
+    "period_return",
     "adj_close",
     "adj_open",
     "float_market_cap",
@@ -43,11 +43,11 @@ BENCHMARK_INDEX_REQUIRED_COLUMNS = (
     "high",
     "low",
     "close",
-    "return_1d",
+    "period_return",
 )
 
 
-def check_daily_market(
+def check_market_bars_1d(
     frame: pd.DataFrame, *, expected_year: int | None = None, file: str = ""
 ) -> QualityReport:
     """检查单个标准化 daily market interim frame。"""
@@ -59,19 +59,19 @@ def check_daily_market(
         for issue in (
             missing_columns_issue(
                 result,
-                "daily_market",
+                "market_bars_1d",
                 DAILY_MARKET_REQUIRED_COLUMNS,
             ),
             duplicate_issue(
                 result,
-                "daily_market",
+                "market_bars_1d",
                 ["market_id", "asset_id", "timestamp"],
             ),
-            expected_year_issue(result["timestamp"], "daily_market", expected_year),
-            ohlc_issue(result, "daily_market"),
+            expected_year_issue(result["timestamp"], "market_bars_1d", expected_year),
+            ohlc_issue(result, "market_bars_1d"),
             negative_value_issue(
                 result,
-                "daily_market",
+                "market_bars_1d",
                 ["volume", "amount", "float_market_cap", "total_market_cap"],
                 "negative_liquidity_or_market_cap",
             ),
@@ -83,7 +83,7 @@ def check_daily_market(
         if outside_scope:
             issues.append(
                 QualityIssue(
-                    dataset="daily_market",
+                    dataset="market_bars_1d",
                     check="outside_a_share_scope",
                     severity="blocking",
                     count=outside_scope,
@@ -93,7 +93,7 @@ def check_daily_market(
 
     min_date, max_date = date_bounds(result["timestamp"])
     return QualityReport(
-        dataset="daily_market",
+        dataset="market_bars_1d",
         file=file,
         row_count=len(result),
         column_count=len(result.columns),

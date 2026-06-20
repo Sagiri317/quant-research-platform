@@ -4,7 +4,7 @@ import pytest
 
 import quant_research_platform.contracts.evaluations as evaluations_contracts
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.execution import ExecutionMode
+from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
@@ -58,7 +58,7 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
         "data/processed/run",
         "data/research/run",
         r"data\research\run",
-        "reports/private_real/run",
+        "reports/private_research/run",
         "600000.sh",
         "000001.sz",
         "000001",
@@ -110,7 +110,7 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
         WorkflowRunSummary(
             workflow_id="workflow",
             workflow_version="0.1",
-            execution_mode=ExecutionMode.DRY_RUN,
+            run_mode=WorkflowRunMode.VALIDATE_ONLY,
             run_id="000001.sz",
             status="failed",
             market_id="a_share",

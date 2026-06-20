@@ -1,4 +1,4 @@
-# QRP 智能体执行规则
+﻿# QRP 智能体执行规则
 
 本文件给 Codex、GPT、Claude 和其他 AI agents 使用。它只放硬边界、任务路由和停止条件，故意保持短小稳定。详细流程只在任务需要时从 `.agents/` 按需加载。
 
@@ -120,7 +120,7 @@ data/raw/<internal-provider>/
 data/interim/<internal-provider>/
 data/processed/a_share/
 data/research/a_share/
-reports/private_real/
+reports/private_research/
 ```
 
 review bundle、handoff package、public-safe artifacts 禁止包含 parquet、csv、pkl、pickle、feather、arrow、raw vendor exports、row-level private data、credentials、tokens、旧 handoff zip/json，除非 package rule 明确允许脱敏摘要。

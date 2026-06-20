@@ -146,7 +146,7 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
     assert {item.area for item in area_inputs} >= {
         "processed_panel_parity",
         "factor_value_parity",
-        "full_historical_daily_panel_status",
+        "full_historical_market_panel_1d_status",
     }
     report_artifact_area_inputs = {
         item.area: item.summary_kind
@@ -178,7 +178,7 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         / "processed"
         / "a_share"
         / "panel"
-        / "daily_panel"
+        / "market_panel_1d"
     )
     artifact_root.mkdir(parents=True)
     monkeypatch.setattr(
@@ -205,12 +205,12 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
     inventory = private_aggregate._dataset_inventory(tmp_path)
 
     assert inventory[0]["kind"] == "panel"
-    assert inventory[0]["artifact_id"] == "daily_panel"
+    assert inventory[0]["artifact_id"] == "market_panel_1d"
     assert inventory[0]["covered_by_evidence_area"] == (
-        "full_historical_daily_panel_status"
+        "full_historical_market_panel_1d_status"
     )
     assert private_aggregate._logical_dataset_root(tmp_path, artifact_root) == (
-        "processed/a_share/panel/daily_panel"
+        "processed/a_share/panel/market_panel_1d"
     )
     assert private_aggregate._dataset_kind_and_artifact_id(
         "research/a_share/demo_dataset"
@@ -227,7 +227,7 @@ def test_private_aggregate_official_roots_use_inspection(
         / "processed"
         / "a_share"
         / "panel"
-        / "daily_panel"
+        / "market_panel_1d"
     )
     artifact_root.mkdir(parents=True)
     (artifact_root / "_manifest").mkdir()
@@ -263,7 +263,7 @@ def test_private_aggregate_helpers_validate_paths_and_periods(tmp_path: Path) ->
         "not_applicable"
     )
 
-    with pytest.raises(FileNotFoundError, match="private_dataset_roots_missing"):
+    with pytest.raises(FileNotFoundError, match="private_roots_missing"):
         private_aggregate._official_dataset_artifact_roots(tmp_path)
     with pytest.raises(ValueError, match="invalid_dataset_logical_root"):
         private_aggregate._dataset_kind_and_artifact_id("bad")
@@ -307,7 +307,7 @@ def test_private_verification_summary_uses_inventory(
         "_dataset_inventory",
         lambda *args, **kwargs: [
             {
-                "logical_root": "processed/a_share/panel/daily_panel",
+                "logical_root": "processed/a_share/panel/market_panel_1d",
                 "covered_by_evidence_area": "panel",
             },
             {
@@ -323,5 +323,5 @@ def test_private_verification_summary_uses_inventory(
     )
 
     assert summary["merge_ready"] is False
-    assert summary["covered_roots"] == ["processed/a_share/panel/daily_panel"]
+    assert summary["covered_roots"] == ["processed/a_share/panel/market_panel_1d"]
     assert summary["uncovered_roots"] == ["processed/a_share/other/demo"]

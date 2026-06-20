@@ -31,7 +31,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     out_dir = tmp_path / "out"
     task_path = tmp_path / "task-input.json"
     slug = "synthetic-handoff"
-    run_reviews = "." + "run/reviews"
+    run_handoffs = "." + "run/handoffs"
     task_path.write_text(
         json.dumps(
             {
@@ -42,8 +42,8 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 "final_head": final_head,
                 "final_sha": final_head,
                 "pr_url": "https://github.com/Sagiri317/quant-research-platform/pull/1",
-                "zip_logical_path": f"{run_reviews}/{slug}.zip",
-                "sidecar_logical_path": f"{run_reviews}/{slug}.json",
+                "zip_logical_path": f"{run_handoffs}/{slug}.zip",
+                "sidecar_logical_path": f"{run_handoffs}/{slug}.json",
                 "validation_evidence": {
                     "schema_version": "handoff-validation-evidence/0.1",
                     "checks": [
@@ -109,24 +109,19 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         validation_evidence = json.loads(
             archive.read("validation_evidence.json").decode("utf-8")
         )
-        review_threads = json.loads(
-            archive.read("review_threads.json").decode("utf-8")
-        )
-        pr_body = archive.read("pr_body.md").decode("utf-8")
-        packaged_diff = archive.read("diff.patch")
 
     required = {
         "final-branch.bundle",
-        "diff.patch",
         "git_status.txt",
-        "pr_body.md",
         "task_metadata.json",
         "validation_evidence.json",
-        "review_threads.json",
         "artifact_manifest.json",
     }
     assert required.issubset(names)
-    assert any(name.startswith("review_evidence/") for name in names)
+    assert "pr_body.md" not in names
+    assert "review_threads.json" not in names
+    assert "diff" + ".patch" not in names
+    assert any(name.startswith("handoff_evidence/") for name in names)
     assert f"{slug}.json" not in names
     forbidden_prefixes = (
         "run_tools/",
@@ -160,19 +155,18 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         for row in validation_evidence["checks"]
         if isinstance(row, dict) and "name" in row
     }
-    assert "git_apply_check" not in checks
-    assert checks["handoff_verify_includes_git_apply_check"]["status"] == "PASS"
-    assert checks["handoff_verify_includes_git_apply_check"]["command"] == (
+    assert checks["handoff_verify"]["status"] == "PASS"
+    assert checks["handoff_verify"]["command"] == (
         "python .agents/skills/quant-research-platform-maintenance/scripts/"
-        f"handoff/verify_handoff_package.py --zip {run_reviews}/{slug}.zip "
-        f"--json {run_reviews}/{slug}.json"
+        f"handoff/verify_handoff_package.py --zip {run_handoffs}/{slug}.zip "
+        f"--json {run_handoffs}/{slug}.json"
     )
     assert checks["package_safety_check_zip"] == {
         "name": "package_safety_check_zip",
         "status": "PASS",
         "command": (
             "python .agents/skills/quant-research-platform-maintenance/scripts/"
-            f"package_safety_check.py {run_reviews}/{slug}.zip"
+            f"package_safety_check.py {run_handoffs}/{slug}.zip"
         ),
         "evidence": "package_safety_check.py completed for final zip with PASS",
     }
@@ -181,33 +175,16 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         "status": "PASS",
         "command": (
             "python .agents/skills/quant-research-platform-maintenance/scripts/"
-            f"package_safety_check.py {run_reviews}/{slug}.json"
+            f"package_safety_check.py {run_handoffs}/{slug}.json"
         ),
         "evidence": "package_safety_check.py completed for sidecar JSON with PASS",
     }
     assert task_path.name not in names
 
-    raw_diff = _git(
-        repo,
-        "diff",
-        "--full-index",
-        "--binary",
-        f"{base}..{final_head}",
-    ).encode()
-    assert packaged_diff == raw_diff
-    assert review_threads["status"] == "BLOCKED"
-    assert review_threads["counts_available"] is False
-    assert review_threads["total_count"] is None
-    assert review_threads["unresolved_count"] is None
-    assert "zip sidecar | `NOT_RUN`" not in pr_body
-    assert f"{run_reviews}/{slug}.zip" in pr_body
-    assert f"{run_reviews}/{slug}.json" in pr_body
-
     fresh = tmp_path / "fresh"
     fresh.mkdir()
     with zipfile.ZipFile(package) as archive:
         archive.extract("final-branch.bundle", fresh)
-        (fresh / "diff.patch").write_bytes(archive.read("diff.patch"))
     cloned = fresh / "repo"
     subprocess.run(
         [
@@ -228,25 +205,6 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         "synthetic"
         not in _git(cloned, "show", "-s", "--format=%s", "HEAD").strip().lower()
     )
-    assert (
-        _git(
-            cloned,
-            "diff",
-            "--full-index",
-            "--binary",
-            f"{base}..{final_head}",
-        ).encode()
-        == packaged_diff
-    )
-    _git(cloned, "checkout", "--detach", base)
-    subprocess.run(
-        ["git", "apply", "--check", str(fresh / "diff.patch")],
-        cwd=cloned,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
     cloned_handoff = (
         cloned
         / ".agents"
@@ -306,6 +264,12 @@ def _init_synthetic_repo(repo: Path) -> None:
     shutil.copytree(
         HANDOFF_ROOT / "schemas" / "handoff",
         support_root / "schemas" / "handoff",
+    )
+    runtime_root = repo / "src" / "quant_research_platform" / "runtime"
+    runtime_root.mkdir(parents=True)
+    shutil.copyfile(
+        REPO_ROOT / "src" / "quant_research_platform" / "runtime" / "privacy.py",
+        runtime_root / "privacy.py",
     )
     (repo / "evidence.txt").write_text("base\n", encoding="utf-8")
     _git(repo, "init")

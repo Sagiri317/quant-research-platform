@@ -6,7 +6,7 @@ import pandas as pd
 
 from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
 
-CSMAR_COLUMN_MAPPINGS = {
+COLUMN_MAPPINGS = {
     "stock_master": {
         "Stkcd": "stock_code",
         "Stknme": "stock_name",
@@ -18,7 +18,7 @@ CSMAR_COLUMN_MAPPINGS = {
         "Statco": "company_status",
         "Statdt": "status_change_date",
     },
-    "daily_market": {
+    "market_bars_1d": {
         "Stkcd": "stock_code",
         "Trddt": "trade_date",
         "Markettype": "market_type",
@@ -94,14 +94,14 @@ CSMAR_COLUMN_MAPPINGS = {
     },
 }
 
-CSMAR_COLUMN_ALIASES = {
+COLUMN_ALIASES = {
     "adjustment": {
         "Symbol": ("Stkcd",),
         "TradingDate": ("Trddt",),
     },
 }
 
-CSMAR_FIELD_DESCRIPTIONS = {
+FIELD_DESCRIPTIONS = {
     "stock_master": {
         "Stkcd": "证券代码",
         "Stknme": "证券简称",
@@ -113,7 +113,7 @@ CSMAR_FIELD_DESCRIPTIONS = {
         "Statco": "公司活动情况",
         "Statdt": "情况变动日",
     },
-    "daily_market": {
+    "market_bars_1d": {
         "Stkcd": "证券代码",
         "Trddt": "交易日期",
         "Markettype": "市场类型",
@@ -200,7 +200,7 @@ def missing_raw_column_names(columns: tuple[str, ...], dataset: str) -> list[str
 
     contract = RAW_TABLE_CONTRACTS[dataset]
     available = set(columns)
-    aliases = CSMAR_COLUMN_ALIASES.get(dataset, {})
+    aliases = COLUMN_ALIASES.get(dataset, {})
     missing = []
     for column in contract.required_columns:
         candidates = (column, *aliases.get(column, ()))
@@ -212,13 +212,13 @@ def missing_raw_column_names(columns: tuple[str, ...], dataset: str) -> list[str
 def csmar_column_mapping(dataset: str) -> dict[str, str]:
     """Return raw-provider to source-local normalized column mappings."""
 
-    return CSMAR_COLUMN_MAPPINGS[dataset]
+    return COLUMN_MAPPINGS[dataset]
 
 
 def csmar_field_descriptions(dataset: str) -> dict[str, str]:
     """Return provider field descriptions for private metadata sidecars."""
 
-    return CSMAR_FIELD_DESCRIPTIONS.get(dataset, {})
+    return FIELD_DESCRIPTIONS.get(dataset, {})
 
 
 def map_csmar_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
@@ -228,7 +228,7 @@ def map_csmar_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
     missing = missing_raw_columns(frame, dataset)
     if missing:
         raise ValueError(f"{dataset} raw export is missing CSMAR columns: {missing}")
-    aliases = CSMAR_COLUMN_ALIASES.get(dataset, {})
+    aliases = COLUMN_ALIASES.get(dataset, {})
     alias_mapping = {
         alias: mapping[column]
         for column, alias_columns in aliases.items()
@@ -246,9 +246,9 @@ def normalize_stock_code(series: pd.Series) -> pd.Series:
 
 
 __all__ = [
-    "CSMAR_COLUMN_ALIASES",
-    "CSMAR_COLUMN_MAPPINGS",
-    "CSMAR_FIELD_DESCRIPTIONS",
+    "COLUMN_ALIASES",
+    "COLUMN_MAPPINGS",
+    "FIELD_DESCRIPTIONS",
     "csmar_column_mapping",
     "csmar_field_descriptions",
     "map_csmar_columns",

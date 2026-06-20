@@ -72,12 +72,12 @@ def test_storage_datasets_exposes_single_artifact_root_api() -> None:
     }.issubset(public_functions)
 
 
-def test_workflow_and_interface_public_names_use_dry_run_wording() -> None:
+def test_workflow_and_interface_public_names_use_validate_only_wording() -> None:
     forbidden_terms = (
         "workflow" + "-fixture",
         "fixture" + "_backed",
         "fixture" + "_workflow_node_registry",
-        "dry" + "_run_workflow_node_registry",
+        "validate" + "_only_workflow_node_registry",
     )
     hits: list[str] = []
     for root in WORKFLOW_INTERFACE_ROOTS:

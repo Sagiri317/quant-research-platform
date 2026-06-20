@@ -20,11 +20,11 @@ from quant_research_platform.contracts.labels import LabelDefinition
 
 def test_processed_data_spec_declares_direct_input_dependencies() -> None:
     spec = ProcessedDataSpec(
-        data_id="daily_panel",
+        data_id="market_panel_1d",
         market_id=MarketId("a_share"),
         kind=ProcessedDataKind.PANEL,
         source_input_data_ids=(
-            "daily_market",
+            "market_bars_1d",
             "stock_master",
             "market_cap",
             "trading_calendar",
@@ -45,7 +45,7 @@ def test_processed_data_spec_declares_direct_input_dependencies() -> None:
     assert "source_input_data_ids" in field_names
     assert "processed_input_data_ids" in field_names
     assert spec.source_input_data_ids == (
-        "daily_market",
+        "market_bars_1d",
         "stock_master",
         "market_cap",
         "trading_calendar",

@@ -12,22 +12,22 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
     compute_listing_age_trading_days,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    A_SHARE_MARKET_ID,
+    MARKET_ID,
 )
 
 _CANONICAL_NAMES = canonical_field_names()
-CANONICAL_DAILY_COLUMNS: tuple[str, ...] = (
+MARKET_PANEL_KEY_COLUMNS: tuple[str, ...] = (
     _CANONICAL_NAMES.market_id,
     _CANONICAL_NAMES.asset_id,
     _CANONICAL_NAMES.timestamp,
     _CANONICAL_NAMES.session_date,
     _CANONICAL_NAMES.available_at,
 )
-DAILY_ST_STATUS_CODES = {2, 3, 5, 6, 8, 9, 11, 12, 14, 15}
+ST_STATUS_CODES = {2, 3, 5, 6, 8, 9, 11, 12, 14, 15}
 
 
-def compute_daily_panel(
-    daily_market: pd.DataFrame,
+def compute_market_panel(
+    market_bars_1d: pd.DataFrame,
     *,
     stock_master: pd.DataFrame,
     market_cap: pd.DataFrame,
@@ -36,17 +36,17 @@ def compute_daily_panel(
     """Compute the A-share processed daily panel from source interim frames."""
 
     daily = _ensure_datetime(
-        _with_a_share_time_fields(_with_a_share_asset_keys(daily_market)),
+        _with_a_share_time_fields(_with_a_share_asset_keys(market_bars_1d)),
         ["timestamp", "session_date", "available_at"],
     ).copy()
     daily = _with_a_share_market_semantics(daily)
     daily = daily.loc[daily["is_a_share_scope"].astype(bool)].copy()
     missing_canonical = [
-        column for column in CANONICAL_DAILY_COLUMNS if column not in daily.columns
+        column for column in MARKET_PANEL_KEY_COLUMNS if column not in daily.columns
     ]
     if missing_canonical:
         raise ValueError(
-            "daily_market_interim_missing_canonical_columns: "
+            "market_bars_1d_interim_missing_canonical_columns: "
             + ", ".join(missing_canonical)
         )
     stocks = _ensure_datetime(
@@ -162,7 +162,7 @@ def _with_a_share_asset_keys(frame: pd.DataFrame) -> pd.DataFrame:
         if "source_asset_id" not in result.columns:
             raise ValueError("missing_source_asset_id")
         result["asset_id"] = result["source_asset_id"].astype(str)
-    result["market_id"] = A_SHARE_MARKET_ID
+    result["market_id"] = MARKET_ID
     return result
 
 
@@ -197,7 +197,7 @@ def _with_a_share_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
     result["is_limit_up"] = filled_limit_status.eq(1)
     result["is_limit_down"] = filled_limit_status.eq(-1)
     result["is_trading"] = result["filling_flag"].eq(0)
-    result["is_st"] = result["trading_status_code"].isin(DAILY_ST_STATUS_CODES)
+    result["is_st"] = result["trading_status_code"].isin(ST_STATUS_CODES)
     result["is_pt"] = result["trading_status_code"].eq(16)
     result["is_a_share_scope"] = result["market_type"].isin(
         CURRENT_A_SHARE_MARKET_TYPES
@@ -325,4 +325,4 @@ def _first_static_stock_value(
     return values.to_dict()
 
 
-__all__ = ["CANONICAL_DAILY_COLUMNS", "compute_daily_panel"]
+__all__ = ["MARKET_PANEL_KEY_COLUMNS", "compute_market_panel"]

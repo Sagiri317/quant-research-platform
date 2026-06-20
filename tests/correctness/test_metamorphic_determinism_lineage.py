@@ -95,7 +95,7 @@ def test_future_perturbation_does_not_change_past_factors() -> None:
     panel = synthetic_price_volume_panel(sessions=90, assets=("asset_a",))
     changed = panel.copy()
     split = pd.Timestamp("2020-03-02")
-    changed.loc[pd.to_datetime(changed["timestamp"]).gt(split), "return_1d"] = 0.25
+    changed.loc[pd.to_datetime(changed["timestamp"]).gt(split), "period_return"] = 0.25
 
     expected = calculate_price_volume_factors(panel, factor_columns=("vol_20d",))
     result = calculate_price_volume_factors(changed, factor_columns=("vol_20d",))
@@ -137,10 +137,10 @@ def test_column_lineage_and_roles_stay_in_data_layer_boundaries() -> None:
     catalogs = research_profile()
     processed = catalogs.processed
     research_spec = catalogs.research_datasets.get(
-        "a_share_price_volume_forward_returns"
+        "price_volume_forward_returns"
     )
-    panel = processed.get("daily_panel")
-    execution = processed.get("a_share_execution")
+    panel = processed.get("market_panel_1d")
+    execution = processed.get("execution")
     factors = processed.get("price_volume")
     labels = processed.get("forward_returns")
 

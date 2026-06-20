@@ -38,7 +38,7 @@ def test_price_volume_factor_dispatch_is_definition_driven() -> None:
     definitions = (
         _factor_definition(
             "rev_1d",
-            input_columns=("return_1d",),
+            input_columns=("period_return",),
             lookback_window=1,
         ),
     )
@@ -91,7 +91,7 @@ def test_price_volume_input_column_query_fails_closed_for_unknown_family() -> No
                 _factor_definition(
                     "custom_factor",
                     family="custom",
-                    input_columns=("return_1d",),
+                    input_columns=("period_return",),
                 ),
             )
         )
@@ -105,7 +105,7 @@ def test_unknown_factor_family_fails_closed() -> None:
                 _factor_definition(
                     "custom_factor",
                     family="custom",
-                    input_columns=("return_1d",),
+                    input_columns=("period_return",),
                 ),
             ),
         )
@@ -121,7 +121,7 @@ def test_factor_input_columns_are_validated_before_dispatch() -> None:
             definitions=(
                 _factor_definition(
                     "rev_1d",
-                    input_columns=("return_1d", "missing_fact"),
+                    input_columns=("period_return", "missing_fact"),
                 ),
             ),
         )
@@ -136,6 +136,7 @@ def test_a_share_label_definitions_expose_unified_catalog_only() -> None:
     assert set(module.__all__) == {
         "LABEL_BASE_COLUMNS",
         "LABEL_PANEL_INPUT_COLUMNS",
+        "FORWARD_RETURN_HORIZONS",
         "a_share_label_definitions",
         "a_share_label_catalog",
     }
@@ -154,10 +155,10 @@ def test_a_share_label_definitions_expose_unified_catalog_only() -> None:
     definition = module.a_share_label_definitions()[0]
     assert (
         definition.label_timing
-        == "next_valid_daily_bar_open_to_horizon_valid_daily_bar_open"
+        == "next_valid_bar_open_to_horizon_valid_bar_open"
     )
-    assert definition.entry_rule == "next_asset_valid_daily_bar_open"
-    assert definition.exit_rule == "horizon_asset_valid_daily_bar_open"
+    assert definition.entry_rule == "next_asset_valid_bar_open"
+    assert definition.exit_rule == "horizon_asset_valid_bar_open"
 
 
 def test_forward_return_label_dispatch_is_definition_driven() -> None:
@@ -264,7 +265,7 @@ def _factor_definition(
         input_columns=input_columns,
         output_column=output_column,
         family=family,
-        required_input_data_id="daily_panel",
+        required_input_data_id="market_panel_1d",
         lookback_window=lookback_window,
         window=lookback_window,
     )
@@ -298,7 +299,7 @@ def _factor_panel() -> pd.DataFrame:
             "market_id": ["a_share", "a_share"],
             "asset_id": ["asset_a", "asset_a"],
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "return_1d": [0.01, 0.02],
+            "period_return": [0.01, 0.02],
             "adj_close": [10.0, 11.0],
             "amount": [1000.0, 1001.0],
             "turnover": [0.1, 0.1],
