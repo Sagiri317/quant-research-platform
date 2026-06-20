@@ -35,7 +35,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     task_path.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-task-metadata/v1",
+                "schema_version": "handoff-task-metadata/0.1",
                 "slug": slug,
                 "branch": "feature/qrp-clean-rewrite",
                 "base": base,
@@ -44,7 +44,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 "zip_logical_path": f"{run_reviews}/{slug}.zip",
                 "sidecar_logical_path": f"{run_reviews}/{slug}.json",
                 "validation_evidence": {
-                    "schema_version": "handoff-validation-evidence/v1",
+                    "schema_version": "handoff-validation-evidence/0.1",
                     "checks": [
                         {
                             "name": "github_review_threads",
@@ -54,7 +54,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                     ],
                 },
                 "review_threads": {
-                    "schema_version": "handoff-review-threads/v1",
+                    "schema_version": "handoff-review-threads/0.1",
                     "status": "BLOCKED",
                     "counts_available": False,
                     "total_count": None,

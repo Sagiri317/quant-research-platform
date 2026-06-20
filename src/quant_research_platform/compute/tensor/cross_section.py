@@ -16,7 +16,7 @@ from quant_research_platform.compute.tensor.masks import valid_observation_mask
 
 
 def compute_ic_by_timestamp_tensor(tensor: PanelTensor) -> pd.DataFrame:
-    """    PanelTensor     IC  ?RankIC ?"""
+    """Compute IC and RankIC from a PanelTensor."""
 
     records: list[dict[str, object]] = []
     mask = valid_observation_mask(tensor)

@@ -162,7 +162,13 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     ) == Path(
         "/repo/reports/private_real/a_share/evaluation"
     )
-    assert PRIVATE_BOUNDARY_ROOTS == ("data", "reports/private_real")
+    assert PRIVATE_BOUNDARY_ROOTS == (
+        "data/raw",
+        "data/interim",
+        "data/processed",
+        "data/research",
+        "reports/private_real",
+    )
     assert is_private_boundary_path(Path("/repo/data/raw/csmar/export.csv"))
     assert is_private_boundary_path(Path("/repo/reports/private_real/a_share/run"))
     assert not is_private_boundary_path(Path("/repo/docs/data/README.md"))

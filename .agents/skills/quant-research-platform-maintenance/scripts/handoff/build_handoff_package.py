@@ -24,7 +24,7 @@ if str(SCRIPT_PARENT) not in sys.path:
 from handoff_safety import scan_handoff_zip  # noqa: E402
 from render_pr_body_from_validation_evidence import render_pr_body  # noqa: E402
 
-PACKAGE_SCHEMA_VERSION = "handoff-sidecar/v1"
+PACKAGE_SCHEMA_VERSION = "handoff-sidecar/0.1"
 VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
 REQUIRED_REVIEW_EVIDENCE = "review_evidence/handoff_generation.json"
 VERIFICATION_MATRIX_EVIDENCE = "review_evidence/verification-matrix.json"
@@ -196,7 +196,7 @@ def build_once(
         write_text(stage_root / "pr_body.md", sanitize_handoff_text(pr_body))
         stage_review_evidence(stage_root, task, validation_evidence)
         manifest = {
-            "schema_version": "handoff-artifact-manifest/v1",
+            "schema_version": "handoff-artifact-manifest/0.1",
             "tool_source_final_head": final_head,
             "tool_source_repo_paths": [
                 ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
@@ -236,7 +236,7 @@ def task_metadata(task: dict[str, object]) -> dict[str, object]:
         if key not in TASK_CONTROL_KEYS and not key.endswith("_path")
     }
     payload.pop("goal_status", None)
-    payload.setdefault("schema_version", "handoff-task-metadata/v1")
+    payload.setdefault("schema_version", "handoff-task-metadata/0.1")
     return json_sanitize(payload)
 
 
@@ -245,7 +245,7 @@ def task_validation_evidence(task: dict[str, object]) -> dict[str, object]:
     if isinstance(payload, dict):
         return json_sanitize(payload)
     return {
-        "schema_version": "handoff-validation-evidence/v1",
+        "schema_version": "handoff-validation-evidence/0.1",
         "checks": [
             {
                 "name": "validation_evidence",
@@ -284,7 +284,7 @@ def task_review_threads(task: dict[str, object]) -> dict[str, object]:
         result.setdefault("threads", [])
         return result
     return {
-        "schema_version": "handoff-review-threads/v1",
+        "schema_version": "handoff-review-threads/0.1",
         "status": "NOT_RUN",
         "counts_available": False,
         "total_count": None,
@@ -334,7 +334,7 @@ def stage_review_evidence(
         )
     if not wrote:
         payload = {
-            "schema_version": "handoff-review-evidence/v1",
+            "schema_version": "handoff-review-evidence/0.1",
             "status": aggregate_status(
                 validation_status_map(validation_evidence).values()
             ),
@@ -506,7 +506,7 @@ def verification_matrix_payload(
             }
         )
     return {
-        "schema_version": "handoff-verification-matrix/v1",
+        "schema_version": "handoff-verification-matrix/0.1",
         "checks": checks,
     }
 

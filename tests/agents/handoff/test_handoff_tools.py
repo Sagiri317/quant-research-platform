@@ -8,6 +8,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 HANDOFF_TOOL_ROOT = (
     Path(".agents")
     / "skills"
@@ -73,7 +75,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
         "final_head": final_head,
         "final_sha": final_head,
         "validation_evidence": {
-            "schema_version": "handoff-validation-evidence/v1",
+            "schema_version": "handoff-validation-evidence/0.1",
             "checks": [
                 {
                     "name": "github_review_threads",
@@ -83,7 +85,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
             ],
         },
         "review_threads": {
-            "schema_version": "handoff-review-threads/v1",
+            "schema_version": "handoff-review-threads/0.1",
             "status": "BLOCKED",
             "counts_available": False,
             "total_count": None,
@@ -130,7 +132,7 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
             for name in names
         ]
     manifest = {
-        "schema_version": "handoff-artifact-manifest/v1",
+        "schema_version": "handoff-artifact-manifest/0.1",
         "entries": entries,
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
@@ -252,7 +254,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-sidecar/v1",
+                "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
                 "zip_logical_path": f"{run_reviews}/handoff.zip",
                 "leaked_zip_path": "E:/quant-workspace/private/handoff.zip",
@@ -268,6 +270,41 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
 
     assert not result.ok
     assert any("sidecar_local_absolute_path_text" in item for item in result.failures)
+
+
+def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("data/research/a_share/demo/manifest.json", "{}\n")
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("forbidden_path_segment" in item for item in result.failures)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/workspace/qrp/data/research/a_share/demo",
+        "/workspaces/qrp/reports/private_real/a_share/run",
+        "/opt/qrp/data/processed/a_share/factor/demo",
+    ],
+)
+def test_handoff_safety_rejects_absolute_paths_with_private_segments(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("review_evidence/leak.md", text)
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("local_absolute_path_text" in item for item in result.failures)
 
 
 def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None:
@@ -287,7 +324,7 @@ def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-sidecar/v1",
+                "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
                 "zip_logical_path": f"{run_reviews}/handoff.zip",
                 "zip_sha256": verifier.sha256_file(package),

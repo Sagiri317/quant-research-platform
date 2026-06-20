@@ -1,5 +1,5 @@
 {
-  "schema_version": "handoff-task-metadata/v1",
+  "schema_version": "handoff-task-metadata/0.1",
   "slug": "<handoff-slug>",
   "branch": "<branch-name>",
   "base": "<base-commit-sha>",
@@ -11,11 +11,11 @@
   "fixed_blockers": [],
   "commit_list": [],
   "validation_evidence": {
-    "schema_version": "handoff-validation-evidence/v1",
+    "schema_version": "handoff-validation-evidence/0.1",
     "checks": []
   },
   "review_threads": {
-    "schema_version": "handoff-review-threads/v1",
+    "schema_version": "handoff-review-threads/0.1",
     "status": "BLOCKED",
     "counts_available": false,
     "total_count": null,

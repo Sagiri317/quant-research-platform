@@ -390,6 +390,35 @@ def test_active_tree_has_no_retired_terms() -> None:
     assert hits == []
 
 
+def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
+    forbidden_patterns = (
+        (
+            "handoff-v1",
+            re.compile(
+                r"handoff-(?:sidecar|task-metadata|artifact-manifest|"
+                r"validation-evidence|review-threads|review-evidence|"
+                r"verification-matrix)/v1"
+            ),
+        ),
+        ("/api/v0.1", re.compile(r"/api/v0\.1\b")),
+        ("/api/v1", re.compile(r"/api/v1\b")),
+    )
+    current_file = Path(__file__).resolve()
+    hits: list[str] = []
+    for path in _iter_text_files():
+        if path.resolve() == current_file:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for name, pattern in forbidden_patterns:
+            if pattern.search(text):
+                hits.append(f"{path}: {name}")
+
+    assert hits == []
+
+
 def test_active_tree_has_no_data_product_id_vocabulary() -> None:
     current_file = Path(__file__).resolve()
     forbidden_patterns = (

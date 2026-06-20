@@ -49,6 +49,8 @@ PRIVATE_DEPENDENCY_TOKENS = (
     "data\\interim",
     "data/processed",
     "data\\processed",
+    "data/research",
+    "data\\research",
 )
 LOCAL_ABSOLUTE_PATH_PATTERNS = (
     re.compile(r"[A-Za-z]:[\\/](?!path[\\/])"),

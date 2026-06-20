@@ -15,8 +15,8 @@ _UNSAFE_TEXT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "private_path",
         re.compile(
-            r"(?i)(?:[a-z]:\\|/(?:mnt|home|Users|tmp)/|"
-            r"data[/\\](?:raw|interim|processed)|reports[/\\]private_real)"
+            r"(?i)(?:[a-z]:\\|/(?:mnt/data|home|Users|workspace|workspaces|tmp)/|"
+            r"data[/\\](?:raw|interim|processed|research)|reports[/\\]private_real)"
         ),
     ),
     ("row_sample", re.compile(r"(?i)\brow\s+sample\b|market_id\s*=.*asset_id\s*=")),

@@ -9,6 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.runtime.logical_paths import (
+    dataset_layer_from_path,
+    logical_path,
+)
 from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_manifest
@@ -16,7 +20,14 @@ from quant_research_platform.storage.manifests import read_manifest
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
 _POSIX_PRIVATE_PATH_RE = re.compile(
-    r"(?i)(?<!\w)/(?:mnt|home|Users|tmp|var/tmp|private/tmp)/[^\r\n\t\"'<>|]+"
+    r"(?i)(?<!\w)/(?:mnt/data|home|Users|workspace|workspaces|tmp|var/tmp|private/tmp)"
+    r"/[^\r\n\t\"'<>|]+"
+)
+_ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
+    r"(?:data[/\\](?:raw|interim|processed|research)"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_real"
+    r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _RAW_EXPORT_FILENAME_RE = re.compile(
     r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
@@ -30,7 +41,9 @@ _CREDENTIAL_RE = re.compile(
     r"[A-Za-z0-9._~+/=-]{8,}"
 )
 _ROW_SAMPLE_RE = re.compile(r"(?i)\b(?:row_sample|row samples?|samples?)\b")
-_SOURCE_ASSET_RE = re.compile(r"\bsource_asset_id\b")
+_SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
+_SOURCE_LOCAL_RE = re.compile(r"\b(?:source_asset_id|source_market_id)\b")
+_LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
 _SMOKE_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
 _COMPARE_STATUSES = frozenset({"NOT_APPLICABLE", "PASS", "FAIL"})
 _FULL_HORIZON_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
@@ -116,13 +129,20 @@ def build_validation_summary(
         try:
             inspection = inspect_dataset(root)
         except ValueError:
-            missing_dataset_manifests.append(_logical_path(root))
+            missing_dataset_manifests.append(
+                logical_path(root, markers=_LOGICAL_PATH_MARKERS)
+            )
             continue
         manifest = inspection.manifest
         if not manifest:
-            missing_dataset_manifests.append(_logical_path(root))
+            missing_dataset_manifests.append(
+                logical_path(root, markers=_LOGICAL_PATH_MARKERS)
+            )
             continue
-        data_id = str(manifest.get("data_id") or _logical_path(root))
+        data_id = str(
+            manifest.get("data_id")
+            or logical_path(root, markers=_LOGICAL_PATH_MARKERS)
+        )
         validation_status = manifest.get("validation_status")
         if validation_status is not None and str(validation_status).lower() not in {
             "pass",
@@ -138,9 +158,10 @@ def build_validation_summary(
         non_finite = _int_mapping(manifest.get("non_finite_count_summary"))
         if any(count > 0 for count in non_finite.values()):
             non_finite_failures.append(data_id)
-        if str(manifest).find("source_asset_id") >= 0 and str(
-            manifest.get("logical_layer", "")
-        ) in {"processed", "research"}:
+        if dataset_layer_from_path(root) in {
+            "processed",
+            "research",
+        } and _contains_source_local_key(manifest):
             source_local_leaks.append(data_id)
         date_ranges.append(
             {
@@ -155,7 +176,9 @@ def build_validation_summary(
 
     layer_failures: list[str] = []
     missing_layer_manifests = [
-        _logical_path(path) for path in layer_manifest_paths if not path.is_file()
+        logical_path(path, markers=_LOGICAL_PATH_MARKERS)
+        for path in layer_manifest_paths
+        if not path.is_file()
     ]
     for path in layer_manifest_paths:
         if not path.is_file():
@@ -186,7 +209,10 @@ def build_validation_summary(
         failure_codes.append("private_safety_scan_failed")
     return {
         "run_id": run_id,
-        "output_root": _logical_path(output_root),
+        "output_root": logical_path(
+            output_root,
+            markers=_LOGICAL_PATH_MARKERS,
+        ),
         "status": "PASS" if not failure_codes else "FAIL",
         "failure_codes": failure_codes,
         "required_columns_status": "summarized_by_dataset_manifests",
@@ -247,7 +273,10 @@ def build_verification_evidence_summary(
             statuses,
         ),
         "date_range": date_range,
-        "output_root": _logical_path(output_root),
+        "output_root": logical_path(
+            output_root,
+            markers=_LOGICAL_PATH_MARKERS,
+        ),
         **statuses,
         "manifest_status": manifests,
         "runtime_resource_policy": runtime_resource_policy or {},
@@ -440,7 +469,15 @@ def _private_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
         if reason is None and path.suffix != ".json":
             reason = _unsafe_text_reason(text)
         if reason is not None:
-            failures.append({"path": _logical_path(path), "reason": reason})
+            failures.append(
+                {
+                    "path": logical_path(
+                        path,
+                        markers=_LOGICAL_PATH_MARKERS,
+                    ),
+                    "reason": reason,
+                }
+            )
     return {
         "status": "PASS" if not failures else "FAIL",
         "failures": failures,
@@ -537,6 +574,8 @@ def _require_evidence_fields(
 def _unsafe_text_reason(text: str) -> str | None:
     if _WINDOWS_DRIVE_PATH_RE.search(text) or _UNC_PATH_RE.search(text):
         return "absolute_path"
+    if _ABSOLUTE_REPO_PRIVATE_PATH_RE.search(text):
+        return "absolute_path"
     if _POSIX_PRIVATE_PATH_RE.search(text):
         return "absolute_path"
     if _RAW_EXPORT_FILENAME_RE.search(text):
@@ -545,11 +584,22 @@ def _unsafe_text_reason(text: str) -> str | None:
         return "row_sample"
     if _STOCK_CODE_RE.search(text):
         return "stock_sample"
-    if _SOURCE_ASSET_RE.search(text):
-        return "source_asset_id"
+    if _SOURCE_LOCAL_RE.search(text):
+        return "source_local_key"
     if _CREDENTIAL_RE.search(text):
         return "credential"
     return None
+
+
+def _contains_source_local_key(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            str(key) in _SOURCE_LOCAL_KEYS or _contains_source_local_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(_contains_source_local_key(item) for item in value)
+    return isinstance(value, str) and value in _SOURCE_LOCAL_KEYS
 
 
 def _unsafe_json_reason(text: str) -> str | None:
@@ -591,17 +641,6 @@ def _int_mapping(value: object) -> dict[str, int]:
 def _merge_profile(target: dict[str, int], value: object) -> None:
     for key, item in _int_mapping(value).items():
         target[key] = target.get(key, 0) + item
-
-
-def _logical_path(path: Path) -> str:
-    item = Path(path)
-    parts = item.parts
-    for marker in ("data", "manifests", "validations", "timings"):
-        if marker in parts:
-            return Path(*parts[parts.index(marker) :]).as_posix()
-    if item.is_absolute():
-        return item.name
-    return item.as_posix()
 
 
 def _utc_now() -> str:

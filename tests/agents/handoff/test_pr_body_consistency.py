@@ -330,7 +330,7 @@ def test_pr_body_uses_final_sidecar_summary_and_logical_paths() -> None:
         ],
     }
     review_threads = {
-        "schema_version": "handoff-review-threads/v1",
+        "schema_version": "handoff-review-threads/0.1",
         "status": "BLOCKED",
         "counts_available": False,
         "total_count": None,

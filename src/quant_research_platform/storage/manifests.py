@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.runtime.privacy import sanitize_public_object
 from quant_research_platform.storage.atomic import atomic_write_text
 
@@ -27,6 +28,7 @@ _CREDENTIAL_RE = re.compile(
     r"[A-Za-z0-9._~+/=-]{8,}"
 )
 _ROW_SAMPLE_KEYS = {"row", "rows", "sample", "samples", "row_sample", "row_samples"}
+_LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
 
 
 def read_manifest(path: Path) -> dict[str, Any]:
@@ -92,7 +94,7 @@ def write_layer_manifest(
     for dataset_root in dataset_roots:
         path = Path(dataset_root) / "_manifest" / "manifest.json"
         if not path.is_file():
-            missing.append(_logical_path(path))
+            missing.append(logical_path(path, markers=_LOGICAL_PATH_MARKERS))
             continue
         payload = read_manifest(path)
         summary = {
@@ -107,7 +109,7 @@ def write_layer_manifest(
         datasets.append(
             {
                 "data_id": _data_id_from_manifest(payload, dataset_root),
-                "manifest_path": _logical_path(path),
+                "manifest_path": logical_path(path, markers=_LOGICAL_PATH_MARKERS),
                 "manifest_summary": summary,
             }
         )
@@ -157,7 +159,7 @@ def write_run_manifest(
     ]
     payload = {
         "run_id": run_id,
-        "output_root": _logical_path(output_root),
+        "output_root": logical_path(output_root, markers=_LOGICAL_PATH_MARKERS),
         "layer_count": len(layers),
         "layers": layers,
         "run_validation_status": "pass" if not failed else "fail",
@@ -218,19 +220,7 @@ def _data_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
     value = payload.get("data_id")
     if value:
         return str(value)
-    return _logical_path(Path(dataset_root))
-
-
-def _logical_path(path: Path) -> str:
-    item = Path(path)
-    parts = item.parts
-    for marker in ("data", "manifests", "validations", "timings"):
-        if marker in parts:
-            index = parts.index(marker)
-            return Path(*parts[index:]).as_posix()
-    if item.is_absolute():
-        return item.name
-    return item.as_posix()
+    return logical_path(Path(dataset_root), markers=_LOGICAL_PATH_MARKERS)
 
 
 def _utc_now() -> str:

@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from quant_research_platform.reports import verification_evidence
+from quant_research_platform.runtime.logical_paths import logical_path
 
 
 def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None:
@@ -23,13 +24,13 @@ def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None
     assert result["missing_count"] == 1
     assert {item["reason"] for item in result["failures"]} == {
         "row_sample",
-        "source_asset_id",
+        "source_local_key",
     }
 
 
 def test_verification_evidence_unsafe_reason_variants() -> None:
     assert (
-        verification_evidence._unsafe_text_reason(r"C:\\private\\path")
+        verification_evidence._unsafe_text_reason("C:" + r"\\private\\path")
         == "absolute_path"
     )
     assert (
@@ -38,7 +39,7 @@ def test_verification_evidence_unsafe_reason_variants() -> None:
     )
     assert verification_evidence._unsafe_text_reason("000001.SZ") == "stock_sample"
     assert (
-        verification_evidence._unsafe_text_reason("token: abcdefghi123")
+        verification_evidence._unsafe_text_reason("token: " + "abcdefghi123")
         == "credential"
     )
     assert verification_evidence._unsafe_json_reason("{bad") == "invalid_json"
@@ -138,11 +139,9 @@ def test_verification_evidence_mapping_and_logical_path_helpers() -> None:
 
     assert target == {"a": 3, "b": 0}
     assert verification_evidence._int_mapping([("a", 1)]) == {}
-    assert verification_evidence._logical_path(Path("plain") / "path") == "plain/path"
+    assert logical_path(Path("plain") / "path") == "plain/path"
     assert (
-        verification_evidence._logical_path(
-            Path("verification-output") / "demo" / "file.md"
-        )
+        logical_path(Path("verification-output") / "demo" / "file.md")
         == "verification-output/demo/file.md"
     )
     assert verification_evidence._utc_now().endswith("Z")

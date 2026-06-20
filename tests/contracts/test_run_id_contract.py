@@ -40,6 +40,8 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
         "data/raw/run",
         "data/interim/run",
         "data/processed/run",
+        "data/research/run",
+        r"data\research\run",
         "reports/private_real/run",
         "600000.sh",
         "000001.sz",

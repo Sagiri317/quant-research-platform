@@ -1316,7 +1316,10 @@ def _derive_report_run_root(
     )
     if report_spec.private_boundary_required and not is_private_boundary_path(run_root):
         raise ValueError("outside_private_boundary")
-    if "data/processed" in run_root.as_posix():
+    if any(
+        f"data/{layer}" in run_root.as_posix()
+        for layer in ("raw", "interim", "processed", "research")
+    ):
         raise ValueError("report_output_must_be_report_root")
     return run_root
 

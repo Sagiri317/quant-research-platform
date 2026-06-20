@@ -50,6 +50,7 @@ FORBIDDEN_PATH_SEGMENTS = (
     "data/raw",
     "data/interim",
     "data/processed",
+    "data/research",
     "reports/private_real",
     "credentials",
     "secrets",
@@ -61,7 +62,13 @@ POSIX_USER_ABSOLUTE_RE = re.compile(
     + "Users"
     + r"/[^/\s]+|/"
     + "home"
-    + r"/[^/\s]+|/mnt/data(?:/|\b))"
+    + r"/[^/\s]+|/mnt/data(?:/|\b)|/workspace(?:/|\b)|/workspaces(?:/|\b))"
+)
+ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
+    r"(?i)(?:[a-z]:[\\/]|/)(?:[^\s`'\"),\]}<>|]+[/\\])*"
+    r"(?:data[/\\](?:raw|interim|processed|research)"
+    r"(?:[/\\][^\s`'\"),\]}<>|]+)?|reports[/\\]private_real"
+    r"(?:[/\\][^\s`'\"),\]}<>|]+)?)"
 )
 WINDOWS_USER_ABSOLUTE_RE = re.compile(
     r"(?i)(?:^|[\s`'\"])[\\/]+" + "Users" + r"[\\/]"
@@ -398,6 +405,7 @@ def contains_local_absolute_path(text: str) -> bool:
     return any(
         regex.search(text)
         for regex in (
+            ABSOLUTE_REPO_PRIVATE_PATH_RE,
             DRIVE_ABSOLUTE_RE,
             POSIX_USER_ABSOLUTE_RE,
             WINDOWS_USER_ABSOLUTE_RE,
@@ -496,8 +504,11 @@ def is_allowed_diff_literal_context(path: str, line: str) -> bool:
         or "POSIX_USER_ABSOLUTE_RE" in line
         or "WINDOWS_USER_ABSOLUTE_RE" in line
         or "ENVIRONMENT_PATH_RE" in line
+        or "ABSOLUTE_REPO_PRIVATE_PATH_RE" in line
         or "E:" + "/" in line
         or "/" + "mnt/data" in line
+        or "/" + "workspace" in line
+        or "/" + "workspaces" in line
         or "/" + "home/" in line
         or "/" + "Users/" in line
         or "\\Users\\" in line
@@ -542,6 +553,8 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
         "/" + "home" + "/[^\\s`]+",
         "/" + "mnt" + "/[a-z]/[^\\s`]+",
         "/" + "mnt" + "/data",
+        "/" + "workspace",
+        "/" + "workspaces",
         "quant-workspace",
         "site-packages",
         "conda env path",

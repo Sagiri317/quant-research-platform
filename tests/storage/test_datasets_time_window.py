@@ -16,6 +16,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import (
+    DatasetReadMode,
     compare_datasets,
     fingerprint_dataset,
     inspect_dataset,
@@ -123,6 +124,26 @@ def test_fingerprint_and_inspect_time_window_file_count_match_contributing_files
     assert fingerprint.row_count == 0
     assert inspection.file_count == 0
     assert fingerprint.file_count == inspection.file_count
+
+
+def test_chunked_read_time_window_without_matching_partitions_yields_empty_schema(
+    tmp_path: Path,
+) -> None:
+    root = _artifact_root(tmp_path, "empty_chunked")
+    write_dataset(root, _frame(), spec=_factor_spec("empty_chunked"))
+
+    chunks = list(
+        read_dataset(
+            root,
+            columns=["asset_id", "value"],
+            time_window=TimeWindow("2017-01-01", "2017-01-02"),
+            mode=DatasetReadMode.CHUNKED,
+        )
+    )
+
+    assert len(chunks) == 1
+    assert list(chunks[0].columns) == ["asset_id", "value"]
+    assert chunks[0].empty
 
 
 def test_fingerprint_dataset_time_window_prunes_year_partitions(

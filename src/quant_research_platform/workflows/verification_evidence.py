@@ -43,6 +43,7 @@ from quant_research_platform.runtime.execution_metrics import (
     write_execution_metrics_csv,
     write_execution_metrics_json,
 )
+from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
@@ -54,6 +55,8 @@ from quant_research_platform.storage.manifests import (
     write_layer_manifest,
     write_run_manifest,
 )
+
+_LOGICAL_PATH_MARKERS = ("data", "reports", "manifests", "validations", "timings")
 
 
 @dataclass(frozen=True)
@@ -114,7 +117,7 @@ def run_verification_evidence(
                 "prediction_test_end": config.prediction_test_end,
             },
             "effective_windows": effective_windows,
-            "output_root": _logical_path(output_root),
+            "output_root": logical_path(output_root, markers=_LOGICAL_PATH_MARKERS),
             "replace_output": config.replace_output,
             "runtime_resource_policy": resource_policy.to_payload(),
             "workflow_id": _OWNERSHIP_MARKER,
@@ -333,17 +336,21 @@ def _run_verification_evidence_with_policy(
     )
     summary = {
         **evidence_summary,
-        "validation_summary_path": _logical_path(
-            layout.validations_root / "validation_summary.json"
+        "validation_summary_path": logical_path(
+            layout.validations_root / "validation_summary.json",
+            markers=_LOGICAL_PATH_MARKERS,
         ),
-        "run_manifest_path": _logical_path(run_manifest_path),
+        "run_manifest_path": logical_path(
+            run_manifest_path,
+            markers=_LOGICAL_PATH_MARKERS,
+        ),
     }
     write_run_summary_json(layout.summary_json_path, summary)
     write_run_summary_md(layout.summary_md_path, summary)
     return VerificationEvidenceRunResult(
         status=str(validation_summary["status"]),
         run_id=run_id,
-        output_root=_logical_path(output_root),
+        output_root=logical_path(output_root, markers=_LOGICAL_PATH_MARKERS),
         summary=summary,
     )
 
@@ -489,7 +496,7 @@ def _dataset_roots(
 
 
 def _logical_layer(dataset_root: Path, output_root: Path) -> str:
-    relative = dataset_root.relative_to(output_root).as_posix()
+    relative = logical_path(dataset_root, output_root=output_root)
     if relative.startswith("data/interim/"):
         return "interim"
     if relative.startswith("data/research/"):
@@ -505,17 +512,6 @@ def _layer_for_root(dataset_root: Path, layout: VerificationEvidenceLayout) -> s
 
 def _dataset_id(dataset_root: Path) -> str:
     return dataset_root.name
-
-
-def _logical_path(path: Path) -> str:
-    item = Path(path)
-    parts = item.parts
-    for marker in ("data", "reports", "manifests", "validations", "timings"):
-        if marker in parts:
-            return Path(*parts[parts.index(marker) :]).as_posix()
-    if item.is_absolute():
-        return item.name
-    return item.as_posix()
 
 
 def _utc_now() -> str:

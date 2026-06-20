@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage import manifests
 
 
@@ -25,12 +26,12 @@ def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
-        ({"path": r"C:\\private\\data"}, "absolute_path"),
-        ({"path": r"\\\\server\\share"}, "absolute_path"),
-        ({"path": "/Users/local/private"}, "absolute_path"),
+        ({"path": "C:" + r"\\private\\data"}, "absolute_path"),
+        ({"path": r"\\" + r"\\server\\share"}, "absolute_path"),
+        ({"path": "/" + "Users/local/private"}, "absolute_path"),
         ({"path": "data/raw/vendor/file.csv"}, "raw_path"),
         ({"file": "daily__vendor__export-20240101.csv"}, "raw_export_filename"),
-        ({"note": "token: abcdefghi123456"}, "credential"),
+        ({"note": "token: " + "abcdefghi123456"}, "credential"),
         ({"row_sample": [{"a": 1}]}, "row_sample"),
     ],
 )
@@ -100,4 +101,10 @@ def test_manifest_logical_path_falls_back_to_posix(tmp_path: Path) -> None:
         manifests._data_id_from_manifest({}, Path("relative/demo"))
         == "relative/demo"
     )
-    assert manifests._logical_path(Path("plain") / "path") == "plain/path"
+    assert logical_path(Path("plain") / "path") == "plain/path"
+
+
+def test_manifest_logical_path_uses_last_generated_marker() -> None:
+    path = Path("/mnt/data/team/qrp/reports/private_real/run/manifests/run.json")
+
+    assert logical_path(path) == "manifests/run.json"

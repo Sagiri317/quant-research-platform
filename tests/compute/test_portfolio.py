@@ -220,6 +220,25 @@ def test_build_weighted_positions_supports_long_only_top_leg() -> None:
     assert diagnostics["short_count"].tolist() == [0, 0]
 
 
+def test_build_weighted_positions_long_only_allows_full_top_quantile() -> None:
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+
+    positions, diagnostics = build_weighted_positions(
+        _ranking_panel(),
+        spec,
+        WeightConfig(
+            portfolio_mode="long_only",
+            top_quantile=1.0,
+            bottom_quantile=1.0,
+        ),
+    )
+
+    first = positions[positions["timestamp"] == pd.Timestamp("2026-01-01")]
+    assert set(first["asset"]) == {"A", "B", "C"}
+    assert (positions["position"] > 0).all()
+    assert diagnostics["short_count"].tolist() == [0, 0]
+
+
 def test_build_weighted_positions_keeps_stable_tie_order() -> None:
     panel = pd.DataFrame(
         {

@@ -1,4 +1,4 @@
-"""    DataFrame portfolio weighting  ?tradability helpers ?"""
+"""DataFrame portfolio weighting and tradability helpers."""
 
 from __future__ import annotations
 

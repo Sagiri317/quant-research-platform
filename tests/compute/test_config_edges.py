@@ -18,6 +18,14 @@ from quant_research_platform.contracts.portfolios import (
         ({"bottom_quantile": 0}, "bottom_quantile must be greater"),
         ({"top_quantile": 0.8, "bottom_quantile": 0.8}, "less than or equal"),
         (
+            {
+                "portfolio_mode": "long_short",
+                "top_quantile": 1.0,
+                "bottom_quantile": 0.2,
+            },
+            "less than or equal",
+        ),
+        (
             {"method": "inverse_vol_scaled_quantile"},
             "risk_column is required",
         ),
@@ -27,6 +35,16 @@ from quant_research_platform.contracts.portfolios import (
 def test_weight_config_validation_errors(kwargs: dict[str, object], error: str) -> None:
     with pytest.raises((TypeError, ValueError), match=error):
         WeightConfig(**kwargs)
+
+
+def test_long_only_weight_config_ignores_bottom_quantile_overlap() -> None:
+    config = WeightConfig(
+        portfolio_mode="long_only",
+        top_quantile=1.0,
+        bottom_quantile=1.0,
+    )
+
+    assert config.top_quantile == 1.0
 
 
 @pytest.mark.parametrize(

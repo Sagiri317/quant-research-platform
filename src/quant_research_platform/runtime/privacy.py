@@ -7,7 +7,13 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-PRIVATE_BOUNDARY_ROOTS: tuple[str, ...] = ("data", "reports/private_real")
+PRIVATE_BOUNDARY_ROOTS: tuple[str, ...] = (
+    "data/raw",
+    "data/interim",
+    "data/processed",
+    "data/research",
+    "reports/private_real",
+)
 PRIVATE_DATA_LAYERS: tuple[str, ...] = (
     "raw",
     "interim",
@@ -18,16 +24,19 @@ PRIVATE_DATA_LAYERS: tuple[str, ...] = (
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
 _POSIX_PRIVATE_PATH_RE = re.compile(
-    r"(?i)(?<!\w)/(?:mnt|home|Users|tmp|var/tmp|private/tmp)/[^\r\n\t\"'<>|]+"
+    r"(?i)(?<!\w)/(?:mnt/data|home|Users|workspace|workspaces|tmp|var/tmp|private/tmp)"
+    r"/[^\r\n\t\"'<>|]+"
 )
 _ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
-    r"(?i)(?<!\w)/(?:[^\s,;\"'<>|]+/)*"
-    r"(?:data/(?:raw|interim|processed|research|reference_docs)"
-    r"(?:/[^\s,;\"'<>|]+)?|reports/private_real(?:/[^\s,;\"'<>|]+)?)"
+    r"(?i)(?<!\w)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
+    r"(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_real"
+    r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _REPO_PRIVATE_PATH_RE = re.compile(
-    r"(?i)\b(?:data/(?:raw|interim|processed|research|reference_docs)"
-    r"(?:/[^\s,;\"'<>|]+)?|reports/private_real(?:/[^\s,;\"'<>|]+)?)"
+    r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_real"
+    r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(
     r"(?<![.\d])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?!\d)",
@@ -72,10 +81,10 @@ def sanitize_public_text(text: object) -> str:
     result = str(text)
     result = _TRACEBACK_RE.sub("[traceback]", result)
     result = _CREDENTIAL_RE.sub("[credential]", result)
+    result = _ABSOLUTE_REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _WINDOWS_DRIVE_PATH_RE.sub("[local-path]", result)
     result = _UNC_PATH_RE.sub("[local-path]", result)
     result = _POSIX_PRIVATE_PATH_RE.sub("[local-path]", result)
-    result = _ABSOLUTE_REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _PRIVATE_MARKER_RE.sub("[private]", result)
     result = _STOCK_CODE_RE.sub("[asset-id]", result)

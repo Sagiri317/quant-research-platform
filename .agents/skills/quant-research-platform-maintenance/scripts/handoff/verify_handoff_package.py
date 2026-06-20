@@ -135,7 +135,7 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     }
     extra = sorted(set(sidecar) - allowed)
     failures.extend(f"sidecar_unapproved_field: {key}" for key in extra)
-    if sidecar.get("schema_version") != "handoff-sidecar/v1":
+    if sidecar.get("schema_version") != "handoff-sidecar/0.1":
         failures.append("sidecar_schema_version_mismatch")
     if sidecar.get("zip_filename") != zip_path.name:
         failures.append("sidecar_zip_filename_mismatch")
@@ -173,7 +173,7 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
 
 def verify_sidecar_schema(sidecar: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    if sidecar.get("schema_version") != "handoff-sidecar/v1":
+    if sidecar.get("schema_version") != "handoff-sidecar/0.1":
         failures.append("sidecar_schema_invalid")
     allowed = {
         "schema_version",
@@ -265,7 +265,7 @@ def verify_task_metadata_schema(payload: dict[str, object]) -> list[str]:
     required = {"schema_version", "slug", "branch", "base"}
     missing = sorted(key for key in required if not payload.get(key))
     failures.extend(f"task_metadata_schema_missing: {key}" for key in missing)
-    if payload.get("schema_version") != "handoff-task-metadata/v1":
+    if payload.get("schema_version") != "handoff-task-metadata/0.1":
         failures.append("task_metadata_schema_version_mismatch")
     if "goal_status" in payload:
         failures.append("task_metadata_goal_status_not_allowed")
@@ -584,11 +584,11 @@ def verify_tracked_handoff_sources(repo: Path) -> list[str]:
         (
             ".agents/skills/quant-research-platform-maintenance/schemas/"
             "handoff/task_metadata.schema.json"
-        ): "handoff-task-metadata/v1",
+        ): "handoff-task-metadata/0.1",
         (
             ".agents/skills/quant-research-platform-maintenance/schemas/"
             "handoff/sidecar.schema.json"
-        ): "handoff-sidecar/v1",
+        ): "handoff-sidecar/0.1",
     }
     for relative, schema_version in schema_expectations.items():
         path = repo / relative

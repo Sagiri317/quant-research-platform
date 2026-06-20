@@ -38,8 +38,17 @@ class WeightConfig:
                 f"portfolio_mode must be one of {sorted(PORTFOLIO_MODES)}."
             )
         _validate_quantile(self.top_quantile, "top_quantile")
-        _validate_quantile(self.bottom_quantile, "bottom_quantile")
-        if self.top_quantile + self.bottom_quantile > 1.0:
+        if self.portfolio_mode == "long_short":
+            _validate_quantile(self.bottom_quantile, "bottom_quantile")
+        elif isinstance(self.bottom_quantile, bool) or not isinstance(
+            self.bottom_quantile,
+            int | float,
+        ):
+            raise TypeError("bottom_quantile must be numeric.")
+        if (
+            self.portfolio_mode == "long_short"
+            and self.top_quantile + self.bottom_quantile > 1.0
+        ):
             raise ValueError(
                 "top_quantile + bottom_quantile must be less than or equal to 1."
             )

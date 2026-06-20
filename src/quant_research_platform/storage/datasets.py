@@ -796,6 +796,9 @@ def _build_dataset_read_context(
 def _read_dataset_chunks(
     context: _DatasetReadContext,
 ) -> Iterator[pd.DataFrame]:
+    if not context.read_paths:
+        yield pd.DataFrame(columns=list(context.logical_columns))
+        return
     for path in context.read_paths:
         frame = pd.read_parquet(
             path,

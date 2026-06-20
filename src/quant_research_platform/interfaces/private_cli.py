@@ -41,7 +41,10 @@ def schema_inventory(
         Path,
         typer.Option(
             "--project-root",
-            help="Project root containing data/interim and data/processed.",
+            help=(
+                "Project root containing sealed dataset roots: data/interim, "
+                "data/processed, and data/research."
+            ),
         ),
     ] = PROJECT_ROOT_DEFAULT,
     output: Annotated[
@@ -59,11 +62,9 @@ def schema_inventory(
         raise typer.Exit(code=2)
     try:
         inventory = build_schema_inventory(project_root)
-    except ValueError as exc:
-        if str(exc) == "schema_inventory_no_datasets_found":
-            typer.echo(str(exc), err=True)
-            raise typer.Exit(code=2) from exc
-        raise
+    except Exception as exc:
+        typer.echo(sanitize_public_text(str(exc)), err=True)
+        raise typer.Exit(code=2) from exc
     atomic_write_text(
         output,
         json.dumps(inventory, ensure_ascii=False, indent=2) + "\n",

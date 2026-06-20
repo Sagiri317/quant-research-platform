@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "handoff-sidecar/v1"
+      "const": "handoff-sidecar/0.1"
     },
     "zip_filename": {
       "type": "string"

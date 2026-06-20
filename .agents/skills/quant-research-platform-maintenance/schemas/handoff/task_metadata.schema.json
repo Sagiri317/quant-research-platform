@@ -11,7 +11,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "handoff-task-metadata/v1"
+      "const": "handoff-task-metadata/0.1"
     },
     "slug": {
       "type": "string"

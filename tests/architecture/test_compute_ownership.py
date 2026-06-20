@@ -190,6 +190,23 @@ def test_tensor_modules_do_not_import_dataframe_private_helpers() -> None:
     assert not hits, "tensor_imports_dataframe_private_helper: " + "; ".join(hits)
 
 
+def test_compute_docstrings_do_not_contain_garbled_question_mark_terms() -> None:
+    forbidden = (
+        "?RankIC",
+        "?tradability helpers",
+        "?cost",
+        "?cost components",
+    )
+    hits: list[str] = []
+    for path in _python_files((PROJECT_SRC / "compute",)):
+        text = path.read_text(encoding="utf-8")
+        for term in forbidden:
+            if term in text:
+                hits.append(f"{path}: {term}")
+
+    assert not hits, "garbled_compute_docstring_terms: " + "; ".join(hits)
+
+
 def _parse(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 

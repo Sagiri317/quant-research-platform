@@ -190,6 +190,42 @@ def test_qrp_private_schema_inventory_empty_roots_fail_without_output_file(
     assert not output.exists()
 
 
+def test_qrp_private_schema_inventory_sanitizes_unexpected_failures(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "inventory.json"
+
+    def fail_with_private_context(project_root):
+        raise RuntimeError(
+            "boom at "
+            + str(project_root / "data" / "research" / "a_share" / "demo")
+        )
+
+    monkeypatch.setattr(
+        "quant_research_platform.interfaces.private_cli.build_schema_inventory",
+        fail_with_private_context,
+    )
+
+    result = CliRunner().invoke(
+        private_app,
+        [
+            "schema-inventory",
+            "--project-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "boom" in result.output
+    assert "data/research" not in result.output
+    assert str(tmp_path) not in result.output
+    assert "Traceback" not in result.output
+    assert not output.exists()
+
+
 def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     runner = CliRunner()
 
@@ -207,6 +243,10 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     assert "private-rebuild" not in root_help.output
     assert schema_inventory_help.exit_code == 0
     assert "private local verification harness" in schema_inventory_help.output
+    assert "sealed dataset" in schema_inventory_help.output
+    assert "data/interim" in schema_inventory_help.output
+    assert "data/processed" in schema_inventory_help.output
+    assert "data/research" in schema_inventory_help.output
     assert "--project-root" in schema_inventory_help.output
     assert "--output" in schema_inventory_help.output
     assert "--overwrite" not in schema_inventory_help.output

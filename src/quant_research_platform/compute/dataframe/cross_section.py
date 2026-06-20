@@ -48,7 +48,7 @@ def compute_ic_by_timestamp(
     frame: pd.DataFrame,
     spec: ComputePanelSpec,
 ) -> pd.DataFrame:
-    """ ?timestamp  ?signal     cross-sectional IC  ?RankIC ?"""
+    """Compute timestamp-signal cross-sectional IC and RankIC."""
 
     panel = validate_compute_panel(frame, spec)
     records: list[dict[str, object]] = []

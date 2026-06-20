@@ -6,6 +6,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 
 def _load_package_safety_module():
     script = (
@@ -56,9 +58,9 @@ def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-sidecar/v1",
+                "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_path": "E:/quant-workspace/private/handoff.zip",
+                "zip_path": "E:" + "/quant-workspace/private/handoff.zip",
             },
             indent=2,
         ),
@@ -93,6 +95,40 @@ def test_package_safety_still_rejects_regular_evidence_paths(tmp_path):
             "review_evidence/leak.json",
             '{"path": "E:' + '/private"}\n',
         )
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("local absolute path" in error for error in result.errors)
+
+
+def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("data/research/a_share/demo/manifest.json", "{}\n")
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("blocked private/sensitive path" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/workspace/qrp/data/research/a_share/demo",
+        "/workspaces/qrp/reports/private_real/a_share/run",
+        "/home/user/private.txt",
+        "/" + "Users/user/private.txt",
+        "/mnt/data/private.txt",
+    ],
+)
+def test_package_safety_rejects_posix_private_and_workspace_paths(tmp_path, text):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("review_evidence/leak.md", text)
 
     result = module.scan_zip(package, allow_nested_packages=False)
 

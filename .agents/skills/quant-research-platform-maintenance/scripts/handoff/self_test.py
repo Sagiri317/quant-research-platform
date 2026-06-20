@@ -69,7 +69,7 @@ def main() -> int:
             "templates/handoff/task_metadata.template.json",
         ).read_text(encoding="utf-8")
     )
-    if task_template.get("schema_version") != "handoff-task-metadata/v1":
+    if task_template.get("schema_version") != "handoff-task-metadata/0.1":
         return fail("task_metadata_template_schema_version_invalid")
     if "goal_status" in task_template:
         return fail("task_metadata_template_goal_status_forbidden")
@@ -219,7 +219,7 @@ def _zip_and_sidecar_with_leak() -> tuple[Path, Path]:
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-sidecar/v1",
+                "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
                 "zip_logical_path": ".run/reviews/handoff.zip",
                 "zip_path": "E:/quant-workspace/private/handoff.zip",
@@ -235,7 +235,7 @@ def _blocked_review_thread_zero_counts_rejected() -> bool:
     temp = Path(tempfile.mkdtemp(prefix="handoff-review-threads-self-test-"))
     package = temp / "handoff.zip"
     payload = {
-        "schema_version": "handoff-review-threads/v1",
+        "schema_version": "handoff-review-threads/0.1",
         "status": "BLOCKED",
         "counts_available": False,
         "total_count": 0,

@@ -47,6 +47,9 @@ MAX_TEXT_SCAN_BYTES = 2_000_000
 LOCAL_PATH_PATTERN = re.compile(
     r"((?<![A-Za-z])[A-Za-z]:[\\/]"
     r"|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+"
+    r"|/workspace/[^\s`]+|/workspaces/[^\s`]+"
+    r"|(?:[A-Za-z]:[\\/]|/)(?:[^\s`]+[\\/])*"
+    r"(?:data[\\/](?:raw|interim|processed|research)|reports[\\/]private_real)"
     r"|\\\\Users\\\\|\\\\quant-workspace\\\\|\bquant-workspace\b"
     r"|\bconda env path\b|\bsite-packages\b)"
 )
@@ -238,6 +241,8 @@ def is_allowed_diff_literal_context(path: str, line: str) -> bool:
         or "LOCAL_PATH_PATTERN" in line
         or "E:" + "/" in line
         or "/" + "mnt/data" in line
+        or "/" + "workspace" in line
+        or "/" + "workspaces" in line
         or "/" + "home/" in line
         or "/" + "Users/" in line
         or "\\Users\\" in line

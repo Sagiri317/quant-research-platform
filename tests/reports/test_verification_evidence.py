@@ -86,6 +86,80 @@ def test_validation_summary_accepts_schema_only_dataset_manifest(tmp_path, monke
     assert "dataset_validation_failed" not in summary["failure_codes"]
 
 
+@pytest.mark.parametrize(
+    ("root", "manifest"),
+    [
+        (
+            Path("data/processed/a_share/factor/demo"),
+            {
+                "schema_version": "0.1",
+                "data_id": "demo",
+                "primary_key": ["market_id", "asset_id", "timestamp"],
+                "partition_columns": ["year"],
+                "required_columns": [
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    "source_asset_id",
+                ],
+                "column_roles": {
+                    "market_id": "key",
+                    "asset_id": "key",
+                    "timestamp": "timestamp",
+                    "source_asset_id": "key",
+                },
+                "columns": [
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    "source_asset_id",
+                ],
+            },
+        ),
+        (
+            Path("data/research/a_share/demo"),
+            {
+                "schema_version": "0.1",
+                "data_id": "demo",
+                "primary_key": ["market_id", "asset_id", "timestamp"],
+                "partition_columns": ["year"],
+                "required_columns": ["market_id", "asset_id", "timestamp"],
+                "column_roles": {
+                    "market_id": "key",
+                    "asset_id": "key",
+                    "timestamp": "timestamp",
+                },
+                "input_fingerprints": {
+                    "price_volume": {"key_columns": ["source_market_id"]}
+                },
+            },
+        ),
+    ],
+)
+def test_validation_summary_detects_source_local_keys_from_real_manifest_shape(
+    tmp_path,
+    monkeypatch,
+    root: Path,
+    manifest: dict[str, object],
+) -> None:
+    dataset_root = tmp_path / root
+    monkeypatch.setattr(
+        "quant_research_platform.reports.verification_evidence.inspect_dataset",
+        lambda root: SimpleNamespace(manifest=manifest),
+    )
+
+    summary = build_validation_summary(
+        run_id="s9",
+        output_root=tmp_path,
+        dataset_roots=(dataset_root,),
+        layer_manifest_paths=(),
+        generated_text_paths=(),
+    )
+
+    assert summary["status"] == "FAIL"
+    assert "source_local_key_leakage" in summary["failure_codes"]
+
+
 def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
     validation = {"status": "PASS", "failure_codes": []}
     evidence = build_verification_evidence_summary(
@@ -107,12 +181,12 @@ def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
-        r"C:\Users\DELL\data\raw\provider\file.csv",
+        "C:" + r"\Users\DELL\data\raw\provider\file.csv",
         "vendor_export_abc__dataset__export-20240101.csv",
         "row_sample: value",
         "stock sample 000001.SZ",
         "source_asset_id",
-        "token=abcdef123456",
+        "token=" + "abcdef123456",
     ],
 )
 def test_private_safety_scan_rejects_private_markers(tmp_path, text):

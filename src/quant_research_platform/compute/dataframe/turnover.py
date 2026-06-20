@@ -60,7 +60,7 @@ def calculate_cost_breakdown(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """    position changes     buy/sell turnover  ?cost components ?"""
+    """Calculate buy/sell turnover and cost components from position changes."""
 
     if cost_config is None:
         cost_config = CostConfig()

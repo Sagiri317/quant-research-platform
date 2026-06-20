@@ -422,6 +422,32 @@ def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "data_layer",
+    ["raw", "interim", "processed", "research"],
+)
+def test_report_run_root_rejects_dataset_roots(
+    tmp_path: Path,
+    data_layer: str,
+) -> None:
+    class DatasetRootLayout(StorageLayout):
+        def private_research_report_root(self, market_id, run_type):  # noqa: ANN001
+            del market_id, run_type
+            return tmp_path / "data" / data_layer / "a_share" / "report"
+
+    with pytest.raises(ValueError, match="report_output_must_be_report_root"):
+        report_artifacts._derive_report_run_root(
+            report_spec=_report_spec(
+                "prediction_artifacts_private",
+                "prediction_demo",
+                "prediction",
+            ),
+            layout=DatasetRootLayout(project_root=tmp_path),
+            expected_definition_id="prediction_artifacts_private",
+            expected_run_id="prediction_demo",
+        )
+
+
 def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None:
     spec = EvaluationSpec(
         run_id="eval_demo",

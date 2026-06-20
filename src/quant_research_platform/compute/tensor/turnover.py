@@ -26,7 +26,7 @@ def calculate_tensor_turnover_and_cost(
     *,
     segment_columns: tuple[str, ...] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """    tensor-shaped position matrices     turnover  ?cost ?"""
+    """Calculate turnover and cost for tensor-shaped position matrices."""
 
     if cost_config is None:
         cost_config = CostConfig()

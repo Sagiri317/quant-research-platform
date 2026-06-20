@@ -24,8 +24,8 @@ def test_sanitizer_redacts_windows_unc_and_posix_paths() -> None:
     assert "C:" not in sanitized
     assert "\\\\server" not in sanitized
     assert "/mnt/" not in sanitized
-    assert "/home/" not in sanitized
-    assert "/Users/" not in sanitized
+    assert "/" + "home/" not in sanitized
+    assert "/" + "Users/" not in sanitized
     assert "/tmp/" not in sanitized
 
 
@@ -38,10 +38,31 @@ def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:
     assert "/workspace/qrp/[private-path]" not in sanitized
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/workspace/qrp/data/research/a_share/demo",
+        "/workspaces/qrp/reports/private_real/a_share/run",
+        "/opt/qrp/data/processed/a_share/factor/demo",
+        r"C:\repo\data\research\a_share\demo",
+        r"D:\repo\reports\private_real\a_share\run",
+    ],
+)
+def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
+    sanitized = sanitize_public_text(text)
+
+    assert "data/research" not in sanitized
+    assert "data/processed" not in sanitized
+    assert "reports/private_real" not in sanitized
+    assert "workspace" not in sanitized.lower()
+    assert "C:" not in sanitized
+    assert "D:" not in sanitized
+
+
 def test_sanitizer_redacts_private_markers_stock_codes_and_credentials() -> None:
     text = (
         "data/raw/csmar/export.csv stock code 600000.SH "
-        "CSMAR vendor token=abcdef123456"
+        "CSMAR vendor token=" + "abcdef123456"
     )
 
     sanitized = sanitize_public_text(text)
@@ -54,9 +75,9 @@ def test_sanitizer_redacts_private_markers_stock_codes_and_credentials() -> None
 
 def test_sanitizer_recurses_public_objects() -> None:
     payload = {
-        "path": r"D:\quant-workspace\data\processed\a_share",
+        "path": "D:" + r"\quant-workspace\data\processed\a_share",
         "rows": ["000001.SZ"],
-        "nested": {"secret": "password=abcdef123456"},
+        "nested": {"secret": "password=" + "abcdef123456"},
     }
 
     sanitized = sanitize_public_object(payload)

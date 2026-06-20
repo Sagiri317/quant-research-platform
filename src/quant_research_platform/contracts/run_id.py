@@ -17,6 +17,8 @@ _FORBIDDEN_FRAGMENTS = (
     "data\\interim",
     "data/processed",
     "data\\processed",
+    "data/research",
+    "data\\research",
     "reports/private_real",
     "reports\\private_real",
 )
