@@ -10,18 +10,19 @@ bundle and run the tracked tools from that clone.
 The builder takes one public-safe task JSON:
 
 ```powershell
-<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --task <task_metadata_input.json> --out-dir .run/reviews --verify
+<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --task <task_metadata_input.json> --out-dir .run/handoffs --verify
 ```
 
 The task JSON must provide `slug`, `branch`, `base`, and `final_head` plus
-public-safe `validation_evidence`, `review_threads`, and optional
-`handoff_evidence`. The zip normalizes this input into:
+public-safe `validation_evidence` and optional `handoff_evidence`. In
+`evidence` mode, the zip normalizes this input into:
 
 - `task_metadata.json`
 - `validation_evidence.json`
-- `review_threads.json`
-- `pr_body.md`
 - `handoff_evidence/*.json`
+
+`pr_closure` mode additionally includes `review_threads.json` and
+`pr_body.md`, and requires public-safe PR closure metadata.
 
 Do not include private row-level data, local absolute paths, raw tracebacks,
 vendor filenames, credentials, tokens, or exact private runtime payloads.
@@ -43,8 +44,8 @@ From an existing checkout:
 
 ```powershell
 <PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py
-<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py --zip .run/reviews/<slug>.zip --json .run/reviews/<slug>.json
-<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py .run/reviews/<slug>.zip --json .run/reviews/<slug>.json
+<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py --zip .run/handoffs/<slug>.zip --json .run/handoffs/<slug>.json
+<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py .run/handoffs/<slug>.zip --json .run/handoffs/<slug>.json
 ```
 
 In a fresh directory with only the zip/json, first extract or copy

@@ -222,7 +222,7 @@ def _zip_and_sidecar_with_leak() -> tuple[Path, Path]:
             {
                 "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": ".run/reviews/handoff.zip",
+                "zip_logical_path": ".run/handoffs/handoff.zip",
                 "zip_path": "E:/quant-workspace/private/handoff.zip",
             },
             indent=2,
