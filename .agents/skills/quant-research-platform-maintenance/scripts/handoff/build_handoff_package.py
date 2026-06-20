@@ -178,7 +178,13 @@ def build_once(
             stage_root / "git_status.txt",
             sanitize_handoff_text(git_status_text(repo_root)),
         )
-        diff = git_text(repo_root, "diff", "--binary", f"{base}..{final_head}")
+        diff = git_text(
+            repo_root,
+            "diff",
+            "--full-index",
+            "--binary",
+            f"{base}..{final_head}",
+        )
         write_text(stage_root / "diff.patch", normalize_lf(diff))
         review_threads = task_review_threads(task)
         write_text(stage_root / "review_threads.json", stable_json(review_threads))
@@ -477,7 +483,7 @@ def set_check_status(rows: list[object], check_name: str, status: str) -> None:
 
 def validation_status_evidence(check_name: str, status: str) -> str:
     if check_name == "raw_diff_exactness":
-        return f"raw git diff --binary base..HEAD exactness check {status}"
+        return f"raw git diff --full-index --binary base..HEAD exactness check {status}"
     if check_name == "git_apply_check":
         return f"git apply --check diff.patch on base checkout {status}"
     if check_name == "handoff_verify":

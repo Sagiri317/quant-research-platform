@@ -548,7 +548,13 @@ def verify_bundle_and_diff(
         if base_commit is None:
             failures.append("base_required_for_diff")
             return failures
-        diff = git_text(clone_dir, "diff", "--binary", f"{base_commit}..{final_head}")
+        diff = git_text(
+            clone_dir,
+            "diff",
+            "--full-index",
+            "--binary",
+            f"{base_commit}..{final_head}",
+        )
         diff_patch = archive.read("diff.patch")
         if normalize_lf(diff).encode("utf-8") != diff_patch:
             failures.append("diff_patch_mismatch")

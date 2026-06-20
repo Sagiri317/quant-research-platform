@@ -164,7 +164,13 @@ def test_tracked_handoff_tool_source_of_truth_exists() -> None:
 
 def test_builder_writes_raw_binary_diff_without_sanitizing(tmp_path: Path) -> None:
     repo, package, _sidecar, base, final_head = _build_test_package(tmp_path)
-    raw_diff = _git(repo, "diff", "--binary", f"{base}..{final_head}").encode()
+    raw_diff = _git(
+        repo,
+        "diff",
+        "--full-index",
+        "--binary",
+        f"{base}..{final_head}",
+    ).encode()
 
     with zipfile.ZipFile(package) as archive:
         packaged_diff = archive.read("diff.patch")

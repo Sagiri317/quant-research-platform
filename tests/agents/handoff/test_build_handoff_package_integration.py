@@ -149,7 +149,13 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert task_metadata["final_head"] == final_head
     assert task_path.name not in names
 
-    raw_diff = _git(repo, "diff", "--binary", f"{base}..{final_head}").encode()
+    raw_diff = _git(
+        repo,
+        "diff",
+        "--full-index",
+        "--binary",
+        f"{base}..{final_head}",
+    ).encode()
     assert packaged_diff == raw_diff
     assert review_threads["status"] == "BLOCKED"
     assert review_threads["counts_available"] is False
