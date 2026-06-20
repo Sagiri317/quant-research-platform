@@ -1364,6 +1364,63 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-03"
 
 
+def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
+    tmp_path: Path,
+) -> None:
+    frame = pd.concat(
+        [
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
+            _filter_frame().assign(timestamp=pd.Timestamp("2024-01-04")),
+        ],
+        ignore_index=True,
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = _dataset_catalog()
+    processed_catalog = _processed_catalog()
+    _write_processed_inputs(layout, processed_catalog, frame)
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        processed_catalog=processed_catalog,
+        dataset_id="demo_filter",
+        time_window=TimeWindow("2024-01-02", "2024-01-04"),
+    )
+    model_catalog = ModelCatalog()
+    model_catalog.register(
+        ModelSpec(
+            model_id="linear_open_ended",
+            model_algorithm="linear_regression",
+            input_factor_columns=("factor",),
+            label_column="label",
+        )
+    )
+    prediction_catalog = PredictionCatalog()
+    prediction_catalog.register(
+        PredictionSpec(
+            prediction_id="pred_open_ended",
+            model_id="linear_open_ended",
+            research_dataset_id="demo_filter",
+            train_end="2024-01-02",
+            test_start="2024-01-03",
+            test_end=None,
+        )
+    )
+
+    run_root = run_prediction_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        model_catalog=model_catalog,
+        prediction_catalog=prediction_catalog,
+        prediction_id="pred_open_ended",
+    )
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["prediction_metadata"]["requested_test_end"] is None
+    assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-04"
+    assert manifest["model_metadata"]["oos_end"] == "2024-01-04"
+
+
 def test_prediction_forced_tiny_resource_chunks_match_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

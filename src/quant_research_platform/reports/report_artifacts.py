@@ -364,6 +364,11 @@ def write_prediction_report_artifacts(
         spec=spec,
         frame=frame,
     )
+    model_metadata = _model_metadata_with_effective_prediction_end(
+        model_metadata,
+        prediction_metadata,
+    )
+    _validate_model_metadata_consistency(model_metadata, spec=spec)
     _validate_model_prediction_metadata_consistency(
         model_metadata,
         prediction_metadata,
@@ -434,15 +439,20 @@ def _write_prediction_report_artifacts_from_chunks(
             row_count=write_summary.row_count,
             effective_test_end=write_summary.effective_test_end,
         )
-        _validate_model_prediction_metadata_consistency(
+        effective_model_metadata = _model_metadata_with_effective_prediction_end(
             model_metadata_payload,
+            prediction_metadata,
+        )
+        _validate_model_metadata_consistency(effective_model_metadata, spec=spec)
+        _validate_model_prediction_metadata_consistency(
+            effective_model_metadata,
             prediction_metadata,
         )
         write_manifest(
             temp_root / "manifest.json",
             _prediction_report_manifest_payload(
                 spec=spec,
-                model_metadata=model_metadata_payload,
+                model_metadata=effective_model_metadata,
                 prediction_metadata=prediction_metadata,
             ),
         )
@@ -995,8 +1005,6 @@ def _validate_model_metadata_consistency(
         or metadata["oos_start"] != spec.test_start
     ):
         raise ValueError("model_metadata_inconsistent")
-    if spec.test_end is not None and metadata["oos_end"] != spec.test_end:
-        raise ValueError("model_metadata_inconsistent")
     if (
         metadata["model_algorithm"] == "linear_regression"
         and int(metadata["coefficient_count"]) != input_count + 1
@@ -1073,6 +1081,18 @@ def _validate_model_prediction_metadata_consistency(
         raise ValueError("prediction_metadata_inconsistent")
     if model_metadata["input_count"] != prediction_metadata["input_count"]:
         raise ValueError("prediction_metadata_inconsistent")
+    if model_metadata["oos_end"] != prediction_metadata["effective_test_end"]:
+        raise ValueError("prediction_metadata_inconsistent")
+
+
+def _model_metadata_with_effective_prediction_end(
+    model_metadata: dict[str, object],
+    prediction_metadata: dict[str, object],
+) -> dict[str, object]:
+    return {
+        **model_metadata,
+        "oos_end": prediction_metadata["effective_test_end"],
+    }
 
 
 def _validate_evaluation_diagnostics_consistency(

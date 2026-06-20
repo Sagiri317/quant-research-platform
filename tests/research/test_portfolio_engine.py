@@ -271,6 +271,27 @@ def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
     assert "label" not in returns.columns
 
 
+def test_portfolio_runner_reports_empty_time_window_without_concat_error(
+    tmp_path,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(_dataset_spec())
+    portfolio_catalog = PortfolioCatalog()
+    portfolio_catalog.register(_portfolio_spec())
+    dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
+    write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
+
+    with pytest.raises(ValueError, match="empty_portfolio_input"):
+        run_portfolio_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            portfolio_catalog=portfolio_catalog,
+            portfolio_id="risk_signal_portfolio",
+            time_window=TimeWindow("2023-01-01", "2023-12-31"),
+        )
+
+
 def _portfolio_spec() -> PortfolioSpec:
     return PortfolioSpec(
         portfolio_id="risk_signal_portfolio",

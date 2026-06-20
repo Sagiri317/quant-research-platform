@@ -690,8 +690,13 @@ def _write_contents(
     timestamp_column = _validate_dataset_spec(spec)
     accumulator = _WriteStats(spec=spec, data_root=root)
     part_indices: dict[str, int] = {}
+    empty_schema_frame: pd.DataFrame | None = None
     for chunk in chunks:
         frame = accumulator.update_frame(chunk)
+        if frame.empty:
+            if empty_schema_frame is None:
+                empty_schema_frame = frame
+            continue
         for partition, partition_frame in _partition_frames(
             frame,
             timestamp_column=timestamp_column,
@@ -703,7 +708,11 @@ def _write_contents(
             _write_parquet_file(partition_frame, output_path)
             accumulator.record_file(output_path, row_count=len(partition_frame))
     if accumulator.row_count == 0:
-        raise ValueError("empty_dataset")
+        if empty_schema_frame is None:
+            raise ValueError("empty_dataset_schema_missing")
+        output_path = _partition_part_path(root, "", 0)
+        _write_parquet_file(empty_schema_frame, output_path)
+        accumulator.record_file(output_path, row_count=0)
     return accumulator
 
 

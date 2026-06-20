@@ -211,6 +211,87 @@ def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_pa
     assert config.run_id == "verification-evidence-smoke-a-share-2014-2016"
 
 
+def test_verification_evidence_run_id_uses_shared_public_safe_contract(
+    tmp_path: Path,
+) -> None:
+    assert module.resolve_verification_run_id(
+        None,
+        tmp_path / "verification-output" / "run_202606",
+    ) == "run_202606"
+    assert module.resolve_verification_run_id(
+        "run_2026_06",
+        tmp_path / "verification-output" / "ignored",
+    ) == "run_2026_06"
+
+    invalid_cases = (
+        (None, tmp_path / "verification-output" / "run_000001"),
+        (None, tmp_path / "verification-output" / "688001"),
+        ("csmar_run", tmp_path / "verification-output" / "safe"),
+        ("source_run", tmp_path / "verification-output" / "safe"),
+    )
+    for run_id, output_root in invalid_cases:
+        with pytest.raises(ValueError, match="invalid_run_id"):
+            module.resolve_verification_run_id(run_id, output_root)
+
+
+def test_verification_evidence_output_root_respects_repo_private_boundary(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    with pytest.raises(ValueError, match="unignored_private_output_root"):
+        module.validate_private_output_root(
+            repo_root / "verification-output" / "s1",
+            repo_root,
+        )
+
+    module.validate_private_output_root(
+        repo_root / "reports" / "private_real" / "s1",
+        repo_root,
+    )
+    module.validate_private_output_root(
+        tmp_path / "outside" / "verification-output" / "s1",
+        repo_root,
+    )
+
+
+def test_prepare_output_root_validates_before_creating_repo_internal_output(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    output_root = repo_root / "verification-output" / "s1"
+
+    with pytest.raises(ValueError, match="unignored_private_output_root"):
+        module._prepare_output_root(
+            output_root,
+            replace_output=False,
+            repo_root=repo_root,
+        )
+
+    assert not output_root.exists()
+
+
+def test_prepare_output_root_detects_repo_boundary_outside_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".git").write_text("gitdir: ../repo.git\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output_root = repo_root / "verification-output" / "s1"
+
+    monkeypatch.chdir(outside)
+
+    with pytest.raises(ValueError, match="unignored_private_output_root"):
+        module._prepare_output_root(output_root, replace_output=False)
+
+    assert not output_root.exists()
+
+
 def test_verification_evidence_uses_explicit_prediction_windows() -> None:
     windows = module._resolve_effective_windows(
         _verification_config(

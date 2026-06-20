@@ -130,7 +130,7 @@ RAW_TABLE_CONTRACTS: dict[str, RawTableContract] = {
         dataset="index_info",
         table_code="IDX_Idxinfo",
         table_name_zh="指数基本信息文件",
-        required_columns=("Indexcd",),
+        required_columns=("Indexcd", "Idxinfo11", "Idxinfo02"),
     ),
     "trading_calendar": RawTableContract(
         dataset="trading_calendar",

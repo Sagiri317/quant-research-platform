@@ -125,7 +125,7 @@ def _write_prediction_artifacts_from_frames(
         spec=spec,
         report_spec=report_spec,
         layout=layout,
-        model_metadata=_prediction_window_model_metadata(model_metadata, spec),
+        model_metadata=_prediction_static_window_model_metadata(model_metadata, spec),
         prediction_metadata_factory=lambda: build_state.prediction_metadata(
             spec=spec,
             input_columns=input_columns,
@@ -195,7 +195,7 @@ class _PredictionBuildState:
         }
 
 
-def _prediction_window_model_metadata(
+def _prediction_static_window_model_metadata(
     model_metadata: dict[str, object],
     spec: PredictionSpec,
 ) -> dict[str, object]:
@@ -204,7 +204,6 @@ def _prediction_window_model_metadata(
         "test_start": spec.test_start,
         "test_end": spec.test_end,
         "oos_start": spec.test_start,
-        "oos_end": spec.test_end or spec.test_start,
     }
 
 
@@ -347,7 +346,7 @@ def write_prediction_artifacts(
 ) -> Path:
     output = frame.copy()
     if "model_metadata" in output.attrs:
-        output.attrs["model_metadata"] = _prediction_window_model_metadata(
+        output.attrs["model_metadata"] = _prediction_static_window_model_metadata(
             output.attrs["model_metadata"],
             spec,
         )

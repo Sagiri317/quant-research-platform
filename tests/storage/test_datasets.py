@@ -237,6 +237,26 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
     ).content_hash
 
 
+def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None:
+    root = _artifact_root(tmp_path, "empty_schema")
+    empty_chunk = _frame().iloc[:0].copy()
+
+    write_dataset(root, iter([empty_chunk]), spec=_spec("empty_schema"))
+
+    manifest = json.loads(
+        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    materialized = read_dataset(root)
+    inspection = inspect_dataset(root)
+    assert manifest["row_count"] == 0
+    assert manifest["columns"] == ["market_id", "asset_id", "timestamp", "value"]
+    assert manifest["file_count"] == 1
+    assert materialized.empty
+    assert materialized.columns.tolist() == manifest["columns"]
+    assert inspection.row_count == 0
+    assert inspection.columns == tuple(manifest["columns"])
+
+
 def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="invalid_dataset_chunk"):
         write_dataset(
@@ -245,11 +265,11 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
             spec=_spec("invalid"),
         )
 
-    with pytest.raises(ValueError, match="empty_dataset"):
+    with pytest.raises(ValueError, match="empty_dataset_schema_missing"):
         write_dataset(
-            _artifact_root(tmp_path, "empty"),
-            iter([_frame().iloc[:0].copy()]),
-            spec=_spec("empty"),
+            _artifact_root(tmp_path, "empty_iterable"),
+            iter(()),
+            spec=_spec("empty_iterable"),
         )
 
     duplicate = pd.concat([_frame().iloc[:1], _frame().iloc[:1]], ignore_index=True)

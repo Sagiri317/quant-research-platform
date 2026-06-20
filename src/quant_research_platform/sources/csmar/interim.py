@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +27,6 @@ from quant_research_platform.sources.csmar.raw_exports import (
     find_dataset_files,
     iter_private_export_chunks,
 )
-from quant_research_platform.sources.csmar.raw_schemas import parse_raw_filename
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -286,8 +286,6 @@ def interim_catalog() -> InterimDataCatalog:
 def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
-    *,
-    export_date: str | None = None,
 ) -> pd.DataFrame:
     mapped = map_csmar_columns(frame, _raw_dataset_for_interim(data_id))
     if "stock_code" in mapped.columns:
@@ -355,9 +353,6 @@ def normalize_raw_frame(
             if column in result.columns:
                 result[column] = _parse_optional_index_info_date(result[column], column)
         result["timestamp"] = result["start_date"].combine_first(result["base_date"])
-        if export_date is not None:
-            export_timestamp = pd.to_datetime(export_date, format="%Y%m%d")
-            result["timestamp"] = result["timestamp"].fillna(export_timestamp)
         if result["timestamp"].isna().any():
             raise ValueError("missing_index_info_effective_timestamp")
         result["source_asset_id"] = result["index_code"]
@@ -406,19 +401,53 @@ def build_interim_frame(
     chunksize: int = 500_000,
     pruning_reports: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
+    """Materialize small reference/test interim data; full imports stream chunks."""
+
+    if data_id not in SOURCE_REFERENCE_DATA_IDS:
+        raise ValueError("interim_frame_materialization_requires_reference_data")
+    frames = list(
+        iter_interim_frames(
+            data_id=data_id,
+            input_files=input_files,
+            start_date=start_date,
+            end_date=end_date,
+            overrides=overrides,
+            chunksize=chunksize,
+            pruning_reports=pruning_reports,
+        )
+    )
+    if not frames:
+        return pd.DataFrame()
+    result = pd.concat(frames, ignore_index=True)
+    if data_id in SOURCE_REFERENCE_DATA_IDS:
+        result = _dedupe_reference_primary_key_rows(result, data_id)
+        if pruning_reports is not None:
+            _append_reference_duplicate_summary(
+                pruning_reports,
+                data_id,
+                int(result.attrs["reference_exact_duplicate_count"]),
+            )
+    return result
+
+
+def iter_interim_frames(
+    *,
+    data_id: str,
+    input_files: list[Path],
+    start_date: str | None,
+    end_date: str | None,
+    overrides: dict[str, dict[str, object]] | None = None,
+    chunksize: int = 500_000,
+    pruning_reports: list[dict[str, object]] | None = None,
+) -> Iterator[pd.DataFrame]:
     raw_dataset = _raw_dataset_for_interim(data_id)
-    frames: list[pd.DataFrame] = []
     for input_file in sorted(input_files):
         for chunk in iter_private_export_chunks(
             input_file,
             dataset=raw_dataset,
             chunksize=chunksize,
         ):
-            normalized = normalize_raw_frame(
-                chunk,
-                data_id,
-                export_date=_raw_export_date(input_file, data_id),
-            )
+            normalized = normalize_raw_frame(chunk, data_id)
             normalized = _filter_normalized_frame(
                 normalized,
                 data_id=data_id,
@@ -434,20 +463,7 @@ def build_interim_frame(
             )
             if pruning_reports is not None:
                 pruning_reports.append(report)
-            frames.append(pruned)
-
-    if not frames:
-        return pd.DataFrame()
-    result = pd.concat(frames, ignore_index=True)
-    if data_id in SOURCE_REFERENCE_DATA_IDS:
-        result = _dedupe_reference_primary_key_rows(result, data_id)
-        if pruning_reports is not None:
-            _append_reference_duplicate_summary(
-                pruning_reports,
-                data_id,
-                int(result.attrs["reference_exact_duplicate_count"]),
-            )
-    return result
+            yield pruned
 
 
 def materialize_interim_data(
@@ -476,7 +492,25 @@ def materialize_interim_data(
         if not input_files:
             skipped.append(data_id)
             continue
-        frame = build_interim_frame(
+        artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
+        if data_id in SOURCE_REFERENCE_DATA_IDS:
+            frame = build_interim_frame(
+                data_id=data_id,
+                input_files=input_files,
+                start_date=start_date,
+                end_date=end_date,
+                overrides=overrides,
+                chunksize=chunksize,
+                pruning_reports=pruning_reports,
+            )
+            if frame.empty:
+                skipped.append(data_id)
+                continue
+            write_dataset(artifact_root, frame, spec=spec)
+            written[data_id] = artifact_root
+            continue
+
+        frames = iter_interim_frames(
             data_id=data_id,
             input_files=input_files,
             start_date=start_date,
@@ -485,11 +519,12 @@ def materialize_interim_data(
             chunksize=chunksize,
             pruning_reports=pruning_reports,
         )
-        if frame.empty:
+        try:
+            first_frame = next(frames)
+        except StopIteration:
             skipped.append(data_id)
             continue
-        artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
-        write_dataset(artifact_root, frame, spec=spec)
+        write_dataset(artifact_root, _iter_with_first(first_frame, frames), spec=spec)
         written[data_id] = artifact_root
 
     return CSMARInterimImportResult(
@@ -664,15 +699,6 @@ def _raw_dataset_for_interim(data_id: str) -> str:
     return data_id
 
 
-def _raw_export_date(input_file: Path, data_id: str) -> str | None:
-    if data_id != "index_info":
-        return None
-    try:
-        return parse_raw_filename(input_file).export_date
-    except ValueError:
-        return None
-
-
 def _filter_normalized_frame(
     frame: pd.DataFrame,
     *,
@@ -704,6 +730,14 @@ def _filter_normalized_frame(
     return frame
 
 
+def _iter_with_first(
+    first_frame: pd.DataFrame,
+    frames: Iterator[pd.DataFrame],
+) -> Iterator[pd.DataFrame]:
+    yield first_frame
+    yield from frames
+
+
 __all__ = [
     "CSMARInterimImportResult",
     "DEFAULT_INTERIM_DATA_IDS",
@@ -713,6 +747,7 @@ __all__ = [
     "filter_by_source_date_range",
     "interim_catalog",
     "interim_specs",
+    "iter_interim_frames",
     "load_column_overrides",
     "materialize_interim_data",
     "normalize_raw_frame",

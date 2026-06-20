@@ -12,6 +12,7 @@ import pandas as pd
 
 from quant_research_platform.catalog.profiles import ResearchProfile
 from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
@@ -98,8 +99,8 @@ def run_verification_evidence(
         raise ValueError("start_date_after_end_date")
     effective_windows = _resolve_effective_windows(config)
     output_root = Path(config.output_root)
+    run_id = resolve_verification_run_id(config.run_id, output_root)
     _prepare_output_root(output_root, replace_output=config.replace_output)
-    run_id = config.run_id or output_root.name
     layout = VerificationEvidenceLayout.from_output_root(output_root)
     _create_layout_directories(layout)
     resource_policy = RuntimeResourcePolicy.from_environment()
@@ -355,8 +356,62 @@ def _run_verification_evidence_with_policy(
     )
 
 
-def _prepare_output_root(path: Path, *, replace_output: bool) -> None:
+def resolve_verification_run_id(
+    config_run_id: str | None,
+    output_root: Path,
+) -> str:
+    run_id = config_run_id if config_run_id is not None else Path(output_root).name
+    return validate_run_id(run_id)
+
+
+def validate_private_output_root(output_root: Path, repo_root: Path) -> None:
+    root = Path(repo_root).resolve(strict=False)
+    target = Path(output_root).resolve(strict=False)
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        return
+    parts = relative.parts
+    if len(parts) >= 3 and parts[0] == "reports" and parts[1] == "private_real":
+        return
+    raise ValueError("unignored_private_output_root")
+
+
+def _resolve_private_boundary_repo_root(
+    output_root: Path,
+    explicit_repo_root: Path | None,
+) -> Path:
+    if explicit_repo_root is not None:
+        return Path(explicit_repo_root)
+    for candidate in (
+        _find_git_root(Path(output_root).resolve(strict=False)),
+        _find_git_root(Path.cwd().resolve(strict=False)),
+        _find_git_root(Path(__file__).resolve(strict=False)),
+    ):
+        if candidate is not None:
+            return candidate
+    return Path.cwd()
+
+
+def _find_git_root(path: Path) -> Path | None:
+    start = path if path.is_dir() else path.parent
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _prepare_output_root(
+    path: Path,
+    *,
+    replace_output: bool,
+    repo_root: Path | None = None,
+) -> None:
     output_root = Path(path)
+    validate_private_output_root(
+        output_root,
+        _resolve_private_boundary_repo_root(output_root, repo_root),
+    )
     if output_root.exists() and not replace_output:
         raise ValueError("output_root_already_exists")
     if output_root.exists() and replace_output:

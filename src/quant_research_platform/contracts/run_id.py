@@ -27,6 +27,7 @@ _FORBIDDEN_FRAGMENTS = (
     "reports/private_real",
     "reports\\private_real",
 )
+_FORBIDDEN_TOKENS = ("provider", "source")
 
 
 class RunIdValidationError(ValueError):
@@ -42,6 +43,9 @@ def validate_run_id(value: str) -> str:
         raise RunIdValidationError("invalid_run_id")
     lowered = value.lower()
     if any(fragment in lowered for fragment in _FORBIDDEN_FRAGMENTS):
+        raise RunIdValidationError("invalid_run_id")
+    tokens = tuple(token for token in re.split(r"[._-]+", lowered) if token)
+    if any(token in _FORBIDDEN_TOKENS for token in tokens):
         raise RunIdValidationError("invalid_run_id")
     if _STOCK_CODE_RE.search(lowered):
         raise RunIdValidationError("invalid_run_id")

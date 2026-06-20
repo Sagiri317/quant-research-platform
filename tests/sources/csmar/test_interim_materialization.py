@@ -125,6 +125,22 @@ def test_csmar_raw_schema_sidecar_and_missing_columns_are_reported(
     assert broken_inspection.missing_required_columns == ["Clddt", "State"]
 
 
+def test_csmar_index_info_requires_timestamp_source_columns_at_header_stage(
+    tmp_path: Path,
+) -> None:
+    broken = tmp_path / "IDX_Idxinfo.csv"
+    pd.DataFrame({"Indexcd": ["000985"]}).to_csv(broken, index=False)
+
+    inspection = raw_schemas.inspect_raw_export_file(broken)
+
+    assert inspection.dataset == "index_info"
+    assert inspection.missing_required_columns == ["Idxinfo11", "Idxinfo02"]
+    assert field_mappings.missing_raw_column_names(
+        ("Indexcd",),
+        "index_info",
+    ) == ["Idxinfo11", "Idxinfo02"]
+
+
 def test_csmar_txt_field_description_is_not_raw_export_table(
     tmp_path: Path,
 ) -> None:
@@ -399,7 +415,6 @@ def test_csmar_index_info_dirty_csv_and_bad_dates_fail_closed(
         interim.normalize_raw_frame(
             bad_date,
             "index_info",
-            export_date="20260515",
         )
 
 
@@ -600,7 +615,7 @@ def test_csmar_index_info_reference_interim_dedupes_and_rejects_conflicts(
         )
 
 
-def test_csmar_index_info_effective_timestamp_falls_back_to_export_date(
+def test_csmar_index_info_missing_start_and_base_dates_fails_closed(
     tmp_path: Path,
 ) -> None:
     export = tmp_path / (
@@ -608,16 +623,97 @@ def test_csmar_index_info_effective_timestamp_falls_back_to_export_date(
     )
     pd.DataFrame([_index_info_raw_row("", "", "1")]).to_csv(export, index=False)
 
-    frame = interim.build_interim_frame(
-        data_id="index_info",
-        input_files=[export],
-        start_date=None,
-        end_date=None,
-        chunksize=10,
+    with pytest.raises(ValueError, match="missing_index_info_effective_timestamp"):
+        interim.build_interim_frame(
+            data_id="index_info",
+            input_files=[export],
+            start_date=None,
+            end_date=None,
+            chunksize=10,
+        )
+
+
+def test_csmar_full_interim_frame_materialization_is_reference_only(
+    tmp_path: Path,
+) -> None:
+    export = tmp_path / "daily_market.csv"
+    export.write_text("placeholder\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="interim_frame_materialization_requires_reference_data",
+    ):
+        interim.build_interim_frame(
+            data_id="daily_market",
+            input_files=[export],
+            start_date=None,
+            end_date=None,
+            chunksize=10,
+        )
+
+
+def test_csmar_daily_market_materializer_streams_chunks_to_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fail_full_builder(**_: object) -> pd.DataFrame:
+        raise AssertionError("daily_market full path must not materialize a frame")
+
+    def fake_iter_interim_frames(**_: object):
+        yield pd.DataFrame(
+            {
+                "source_asset_id": ["000001"],
+                "timestamp": [pd.Timestamp("2024-01-02")],
+                "trade_date": [pd.Timestamp("2024-01-02")],
+                "market_type": [4],
+                "trading_status_code": [1],
+                "filling_flag": ["0"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1000],
+                "amount": [10200.0],
+                "prev_close": [9.9],
+                "limit_status": [0],
+                "return_1d": [0.03],
+                "adj_close": [10.2],
+                "adj_open": [10.0],
+                "float_market_cap": [100.0],
+                "total_market_cap": [200.0],
+                "turnover": [0.01],
+            }
+        )
+
+    def fake_write_dataset(root: Path, data, *, spec) -> None:
+        assert not isinstance(data, pd.DataFrame)
+        captured["root"] = root
+        captured["data_id"] = spec.data_id
+        captured["chunks"] = list(data)
+
+    monkeypatch.setattr(interim, "find_dataset_files", lambda *_, **__: [Path("raw")])
+    monkeypatch.setattr(interim, "build_interim_frame", fail_full_builder)
+    monkeypatch.setattr(
+        interim,
+        "iter_interim_frames",
+        fake_iter_interim_frames,
+        raising=False,
+    )
+    monkeypatch.setattr(interim, "write_dataset", fake_write_dataset)
+
+    result = interim.materialize_interim_data(
+        layout=StorageLayout(project_root=tmp_path),
+        data_ids=("daily_market",),
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        chunksize=1,
     )
 
-    assert frame["timestamp"].tolist() == [pd.Timestamp("2026-05-15")]
-    assert "export_date" not in frame.columns
+    assert captured["data_id"] == "daily_market"
+    assert len(captured["chunks"]) == 1
+    assert result.artifact_roots["daily_market"] == captured["root"]
 
 
 def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
@@ -642,7 +738,8 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     inspection = inspect_dataset(artifact_root)
 
     assert artifact_root == tmp_path / "data" / "interim" / "csmar" / "daily_market"
-    assert inspection.file_count == 1
+    assert inspection.file_count >= 1
+    assert inspection.row_count == 2
     assert len(read_back) == 2
     assert "asset_id" not in read_back.columns
     assert "market_id" not in read_back.columns

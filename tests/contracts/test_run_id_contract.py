@@ -51,6 +51,8 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
         "run/01",
         r"run\01",
         "csmar-run",
+        "provider_run",
+        "source_run",
         "data/raw/run",
         "data/interim/run",
         "data/processed/run",

@@ -168,6 +168,25 @@ def test_tensor_weighted_positions_builds_artifacts_from_execution_path() -> Non
     assert diagnostics.equals(artifacts.diagnostics)
 
 
+def test_tensor_weighted_positions_position_only_skips_return_source() -> None:
+    panel = _ranking_panel().assign(
+        timestamp=lambda frame: pd.to_datetime(frame["timestamp"])
+    )
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+
+    positions, diagnostics = tensor_construction.build_tensor_weighted_positions(
+        panel,
+        spec,
+        WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+    )
+
+    assert not positions.empty
+    assert diagnostics["timestamp"].tolist() == [
+        pd.Timestamp("2026-01-01"),
+        pd.Timestamp("2026-01-02"),
+    ]
+
+
 def test_tensor_weighted_positions_accepts_string_timestamps_like_dataframe() -> None:
     panel = _ranking_panel()
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")

@@ -66,6 +66,33 @@ def test_source_and_tests_do_not_depend_on_runtime_workspace_path() -> None:
     assert hits == []
 
 
+def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:
+    hot_paths = (
+        Path("src/quant_research_platform/research/portfolios/runner.py"),
+    )
+    forbidden_patterns = (
+        re.compile(r"pd\.concat\(\s*chunks\b"),
+        re.compile(r"pd\.concat\(\s*frames\b"),
+    )
+
+    hits: list[str] = []
+    for path in hot_paths:
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if any(pattern.search(line) for pattern in forbidden_patterns):
+                hits.append(f"{path}:{line_number}: {line.strip()}")
+
+    assert hits == []
+
+
+def test_prediction_artifact_builder_does_not_prederive_oos_end() -> None:
+    text = Path(
+        "src/quant_research_platform/research/predictions/artifacts.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"oos_end"' not in text
+
+
 def test_verification_evidence_replaces_retired_public_names() -> None:
     expected_files = {
         Path("src/quant_research_platform/workflows/verification_evidence.py"),

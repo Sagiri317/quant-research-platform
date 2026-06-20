@@ -87,8 +87,7 @@ def build_tensor_weighted_positions(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build timestamp-level positions from tensor signal arrays."""
 
-    return_source_column = _require_return_source_column(return_source_column)
-    artifacts = build_tensor_portfolio_artifacts(
+    artifacts = _build_tensor_positions_core(
         panel,
         spec,
         weight_config,
@@ -97,6 +96,7 @@ def build_tensor_weighted_positions(
         tradability_config=tradability_config,
         return_source_column=return_source_column,
         value_dtype=value_dtype,
+        include_path_records=False,
     )
     return artifacts.positions, artifacts.diagnostics
 
@@ -115,7 +115,36 @@ def build_tensor_portfolio_artifacts(
     """Build tensor portfolio artifacts from dense path matrices."""
 
     return_source_column = _require_return_source_column(return_source_column)
+    return _build_tensor_positions_core(
+        panel,
+        spec,
+        weight_config,
+        cost_config=cost_config,
+        segment_columns=segment_columns,
+        portfolio_signals=portfolio_signals,
+        tradability_config=tradability_config,
+        return_source_column=return_source_column,
+        value_dtype=value_dtype,
+        include_path_records=True,
+    )
+
+
+def _build_tensor_positions_core(
+    panel: pd.DataFrame,
+    spec: ComputePanelSpec,
+    weight_config: WeightConfig,
+    cost_config: CostConfig | None = None,
+    *,
+    segment_columns: tuple[str, ...] = (),
+    portfolio_signals: tuple[str, ...] | None = None,
+    tradability_config: TradabilityConfig | None = None,
+    return_source_column: str | None = None,
+    value_dtype: str = "float64",
+    include_path_records: bool,
+) -> TensorPortfolioArtifacts:
     dtype = _validate_value_dtype(value_dtype)
+    if include_path_records:
+        return_source_column = _require_return_source_column(return_source_column)
     panel = validate_compute_panel(panel, spec, segment_columns=segment_columns)
     _validate_segment_columns(panel, segment_columns)
     _validate_weight_columns(panel, weight_config)
@@ -213,18 +242,18 @@ def build_tensor_portfolio_artifacts(
                 cost_record,
                 return_record,
                 exposure_record,
-            ) = measure_stage(
-                "metric",
-                "positions.path_records",
-                lambda signal=signal,
-                previous_map=previous_map,
-                previous_assets_match=previous_assets_match,
-                segment_context=segment_context,
-                timestamp=timestamp,
-                timestamp_input=timestamp_input,
-                position_values=position_values,
-                previous_values=previous_values: (
-                    _build_path_records_from_arrays(
+            ) = (
+                measure_stage(
+                    "metric",
+                    "positions.path_records",
+                    lambda signal=signal,
+                    previous_map=previous_map,
+                    previous_assets_match=previous_assets_match,
+                    segment_context=segment_context,
+                    timestamp=timestamp,
+                    timestamp_input=timestamp_input,
+                    position_values=position_values,
+                    previous_values=previous_values: _build_path_records_from_arrays(
                         context=segment_context,
                         timestamp=timestamp,
                         signal=signal,
@@ -239,12 +268,13 @@ def build_tensor_portfolio_artifacts(
                         cost_config=cost_config,
                         segment_columns=segment_columns,
                         previous_assets_match=previous_assets_match,
-                    )
-                ),
-                sample_memory=False,
+                    ),
+                    sample_memory=False,
+                )
+                if include_path_records
+                else (None, None, None, None, None)
             )
             signal_previous_arrays[signal] = (timestamp_input.assets, position_values)
-            exposure_records.append(exposure_record)
             _append_position_columns(
                 columns=position_columns,
                 context=segment_context,
@@ -255,10 +285,12 @@ def build_tensor_portfolio_artifacts(
                 positions=position_values,
                 nonzero_offsets=nonzero_offsets,
             )
-            turnover_records.append(turnover_record)
-            cost_records.append(cost_record)
-            if return_record is not None:
-                return_records.append(return_record)
+            if include_path_records:
+                exposure_records.append(exposure_record)
+                turnover_records.append(turnover_record)
+                cost_records.append(cost_record)
+                if return_record is not None:
+                    return_records.append(return_record)
             diagnostic_records.append(
                 {
                     **segment_context,
@@ -531,7 +563,6 @@ def _prepare_timestamp_position_input(
     return_source_column: str | None = None,
     value_dtype: np.dtype | str = "float64",
 ) -> _TimestampPositionInput:
-    return_source_column = _require_return_source_column(return_source_column)
     dtype = _validate_value_dtype(str(value_dtype))
     asset_values = timestamp_frame[spec.asset_column].to_numpy(
         dtype=str,
@@ -549,9 +580,13 @@ def _prepare_timestamp_position_input(
             signal: signal_matrix[:, offset]
             for offset, signal in enumerate(signals)
         },
-        label_values=timestamp_frame[return_source_column].to_numpy(
-            dtype=dtype,
-            copy=False,
+        label_values=(
+            timestamp_frame[_require_return_source_column(return_source_column)].to_numpy(
+                dtype=dtype,
+                copy=False,
+            )
+            if return_source_column is not None
+            else np.empty(len(timestamp_frame), dtype=dtype)
         ),
         risk_values=(
             timestamp_frame[str(weight_config.risk_column)].to_numpy(
