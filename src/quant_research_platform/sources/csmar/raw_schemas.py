@@ -198,6 +198,21 @@ def infer_dataset_from_native_export(path: str | Path) -> str:
     raise ValueError(f"Cannot infer CSMAR dataset from native filename: {export_path}")
 
 
+def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
+    from quant_research_platform.sources.csmar.field_mappings import (
+        missing_raw_column_names,
+    )
+
+    matches = [
+        dataset
+        for dataset in RAW_TABLE_CONTRACTS
+        if not missing_raw_column_names(columns, dataset)
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"Cannot infer CSMAR dataset from raw header: {matches}")
+    return matches[0]
+
+
 def read_export_header(path: str | Path) -> tuple[str, ...]:
     """Read the header row from a supported CSV raw export."""
 
@@ -225,8 +240,17 @@ def inspect_raw_export_file(path: str | Path) -> RawExportInspection:
         metadata = parse_raw_filename(export_path)
         dataset = metadata.dataset
     except ValueError:
-        dataset = infer_dataset_from_native_export(export_path)
-    columns = read_export_header(export_path)
+        if export_path.suffix.lower() != ".csv":
+            dataset = infer_dataset_from_native_export(export_path)
+            columns = read_export_header(export_path)
+        else:
+            columns = read_export_header(export_path)
+            try:
+                dataset = infer_dataset_from_native_export(export_path)
+            except ValueError:
+                dataset = _infer_dataset_from_header(columns)
+    else:
+        columns = read_export_header(export_path)
     contract = RAW_TABLE_CONTRACTS[dataset]
     from quant_research_platform.sources.csmar.field_mappings import (
         missing_raw_column_names,

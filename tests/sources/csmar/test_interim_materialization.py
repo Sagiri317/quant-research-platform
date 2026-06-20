@@ -190,6 +190,18 @@ def test_csmar_raw_export_contract_is_csv_only(tmp_path: Path) -> None:
         raw_schemas.parse_raw_filename(xlsx_export)
 
 
+def test_csmar_find_dataset_files_uses_schema_inspection_not_storage_path(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "provider_exports"
+    raw_dir.mkdir()
+    export = raw_dir / "TRDNEW_Dalyr.csv"
+    _market_bars_1d_raw_frame().to_csv(export, index=False)
+
+    assert raw_exports.find_dataset_files(tmp_path, "market_bars_1d") == [export]
+    assert raw_exports.find_dataset_files(tmp_path, "stock_master") == []
+
+
 def test_csmar_field_mappings_describe_source_local_aliases() -> None:
     assert "source-local normalized column mappings" in (
         field_mappings.csmar_column_mapping.__doc__ or ""
@@ -707,12 +719,9 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
 
 
 def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "data" / "raw" / "csmar" / "market_bars_1d"
+    raw_dir = tmp_path / "data" / "raw" / "csmar" / "provider_exports"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    export = raw_dir / (
-        "csmar__market_bars_1d__all_a_ex_bjse__20240101_20241231__"
-        "part-00__export-20260515.csv"
-    )
+    export = raw_dir / "TRDNEW_Dalyr.csv"
     _market_bars_1d_raw_frame().to_csv(export, index=False)
 
     result = interim.materialize_interim_data(

@@ -39,7 +39,8 @@ _REPO_PRIVATE_PATH_RE = re.compile(
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(
-    r"(?<![.\d])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?!\d)",
+    r"(?<![A-Za-z0-9_.-])(?:[036]\d{5}|688\d{3})"
+    r"(?:\.(?:SZ|SH|BJ))?(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _ROW_SAMPLE_RE = re.compile(

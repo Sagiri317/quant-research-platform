@@ -231,18 +231,13 @@ def iter_private_export_chunks(
 def find_dataset_files(raw_root: Path, dataset: str) -> list[Path]:
     """Find raw CSMAR CSV files for one normalized dataset id."""
 
-    if dataset == "index_info":
-        return sorted(
-            path
-            for path in raw_root.rglob("csmar__index_info__*.csv")
-            if path.is_file() and "__description__" not in path.name
-        )
-
-    return sorted(
-        path
-        for path in (raw_root / dataset).rglob(f"csmar__{dataset}__*.csv")
-        if path.is_file() and "__description__" not in path.name
-    )
+    matches: list[Path] = []
+    for result in inspect_raw_export_tree(raw_root):
+        if not result.ok or result.inspection is None:
+            continue
+        if result.inspection.dataset == dataset:
+            matches.append(result.path)
+    return sorted(matches)
 
 
 def inspect_raw_export_tree(root: Path) -> list[RawExportIntakeResult]:

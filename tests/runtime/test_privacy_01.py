@@ -74,6 +74,15 @@ def test_sanitizer_redacts_private_markers_stock_codes_and_credentials() -> None
     assert "abcdef123456" not in sanitized
 
 
+def test_stock_code_detector_does_not_flag_hash_payloads() -> None:
+    text = (
+        '{"sha256": "1ab57ebee6473a9012cb336cc004040e2130408ff5a08bcf"}'
+    )
+
+    assert public_text_unsafe_reason(text) is None
+    assert sanitize_public_text(text) == text
+
+
 def test_sanitizer_recurses_public_objects() -> None:
     payload = {
         "path": "D:" + r"\quant-workspace\data\processed\a_share",
