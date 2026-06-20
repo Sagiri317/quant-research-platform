@@ -18,6 +18,13 @@ from quant_research_platform.storage.datasets import inspect_dataset, read_datas
 from quant_research_platform.storage.layout import StorageLayout
 
 
+def _collect_interim_frames(**kwargs: object) -> pd.DataFrame:
+    frames = list(interim.iter_interim_frames(**kwargs))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def test_csmar_interim_catalog_registers_source_owned_specs() -> None:
     specs = interim.interim_catalog().list()
 
@@ -512,7 +519,7 @@ def test_csmar_reference_interim_dedupes_exact_duplicates_and_rejects_conflicts(
     ).to_csv(conflict, index=False)
 
     pruning_reports: list[dict[str, object]] = []
-    deduped = interim.build_interim_frame(
+    deduped = _collect_interim_frames(
         data_id="stock_master",
         input_files=[exact_a, exact_b],
         start_date=None,
@@ -522,7 +529,6 @@ def test_csmar_reference_interim_dedupes_exact_duplicates_and_rejects_conflicts(
     )
 
     assert len(deduped) == 1
-    assert int(deduped.attrs["reference_exact_duplicate_count"]) == 1
     assert [
         report["reference_exact_duplicate_count"]
         for report in pruning_reports
@@ -535,7 +541,7 @@ def test_csmar_reference_interim_dedupes_exact_duplicates_and_rejects_conflicts(
         ValueError,
         match="conflicting_reference_primary_key_duplicates: stock_master",
     ):
-        interim.build_interim_frame(
+        _collect_interim_frames(
             data_id="stock_master",
             input_files=[conflict],
             start_date=None,
@@ -573,7 +579,7 @@ def test_csmar_index_info_reference_interim_dedupes_and_rejects_conflicts(
     ).to_csv(conflict, index=False)
 
     pruning_reports: list[dict[str, object]] = []
-    deduped = interim.build_interim_frame(
+    deduped = _collect_interim_frames(
         data_id="index_info",
         input_files=[exact_a, exact_b],
         start_date=None,
@@ -590,7 +596,7 @@ def test_csmar_index_info_reference_interim_dedupes_and_rejects_conflicts(
         for report in pruning_reports
         if report.get("report_type") == "reference_duplicate_summary"
     ] == [1]
-    historical = interim.build_interim_frame(
+    historical = _collect_interim_frames(
         data_id="index_info",
         input_files=[history],
         start_date=None,
@@ -606,7 +612,7 @@ def test_csmar_index_info_reference_interim_dedupes_and_rejects_conflicts(
         ValueError,
         match="conflicting_reference_primary_key_duplicates: index_info",
     ):
-        interim.build_interim_frame(
+        _collect_interim_frames(
             data_id="index_info",
             input_files=[conflict],
             start_date=None,
@@ -624,7 +630,7 @@ def test_csmar_index_info_missing_start_and_base_dates_fails_closed(
     pd.DataFrame([_index_info_raw_row("", "", "1")]).to_csv(export, index=False)
 
     with pytest.raises(ValueError, match="missing_index_info_effective_timestamp"):
-        interim.build_interim_frame(
+        _collect_interim_frames(
             data_id="index_info",
             input_files=[export],
             start_date=None,
@@ -633,23 +639,8 @@ def test_csmar_index_info_missing_start_and_base_dates_fails_closed(
         )
 
 
-def test_csmar_full_interim_frame_materialization_is_reference_only(
-    tmp_path: Path,
-) -> None:
-    export = tmp_path / "daily_market.csv"
-    export.write_text("placeholder\n", encoding="utf-8")
-
-    with pytest.raises(
-        ValueError,
-        match="interim_frame_materialization_requires_reference_data",
-    ):
-        interim.build_interim_frame(
-            data_id="daily_market",
-            input_files=[export],
-            start_date=None,
-            end_date=None,
-            chunksize=10,
-        )
+def test_csmar_full_interim_frame_materialization_entrypoint_is_deleted() -> None:
+    assert not hasattr(interim, "build_interim_frame")
 
 
 def test_csmar_daily_market_materializer_streams_chunks_to_storage(
@@ -657,9 +648,6 @@ def test_csmar_daily_market_materializer_streams_chunks_to_storage(
     tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
-
-    def fail_full_builder(**_: object) -> pd.DataFrame:
-        raise AssertionError("daily_market full path must not materialize a frame")
 
     def fake_iter_interim_frames(**_: object):
         yield pd.DataFrame(
@@ -694,7 +682,6 @@ def test_csmar_daily_market_materializer_streams_chunks_to_storage(
         captured["chunks"] = list(data)
 
     monkeypatch.setattr(interim, "find_dataset_files", lambda *_, **__: [Path("raw")])
-    monkeypatch.setattr(interim, "build_interim_frame", fail_full_builder)
     monkeypatch.setattr(
         interim,
         "iter_interim_frames",

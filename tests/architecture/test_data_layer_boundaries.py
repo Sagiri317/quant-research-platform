@@ -43,6 +43,114 @@ DELETED_FUNCTIONS = {
     "write_contexts_from_panel_dataset",
     "write_masks_from_panel_dataset",
     "write_universe_from_panel_dataset",
+    "build_prediction_frame",
+    "_build_prediction_frame_from_frames",
+    "_collect_prediction_frame",
+    "build_interim_frame",
+}
+
+MATERIALIZED_COLLECTION_NAMES = {
+    "artifact_parts",
+    "batches",
+    "buffers",
+    "collected",
+    "combined",
+    "frames",
+    "outputs",
+    "parts",
+    "pieces",
+    "positions_for_summary",
+    "records",
+    "results",
+    "returns_for_summary",
+    "summary_frames",
+    "tables",
+    "materialized",
+}
+
+UNKNOWN_CONCAT_NAMES = {
+    "artifact_parts",
+    "batches",
+    "buffers",
+    "chunks",
+    "collected",
+    "combined",
+    "frames",
+    "outputs",
+    "parts",
+    "pieces",
+    "positions_for_summary",
+    "records",
+    "results",
+    "returns_for_summary",
+    "summary_frames",
+    "tables",
+    "materialized",
+}
+
+OUTPUT_ROOT_AND_RUN_ID_DERIVED_NAMES = {
+    "artifact_root",
+    "output_dir",
+    "report_root",
+    "result_dir",
+    "root_name",
+    "run_name",
+    "verification_dir",
+}
+
+OUTPUT_ROOT_AND_RUN_ID_SCAN_ROOTS = (
+    SOURCE_ROOT / "workflows",
+    SOURCE_ROOT / "reports",
+    SOURCE_ROOT / "interfaces",
+)
+
+MATERIALIZED_SCAN_ALLOWLIST = {
+    (
+        Path("src/quant_research_platform/storage/datasets.py"),
+        "read_dataset",
+    ): (
+        "materialized read mode is the explicit storage materialization boundary, "
+        "not a workflow or private full-run hot path"
+    ),
+    (
+        Path("src/quant_research_platform/research/models/supervised.py"),
+        "_trim_training_buffer",
+    ): (
+        "bounded training buffer combines only max_train_rows plus purge context"
+    ),
+    (
+        Path("src/quant_research_platform/research/models/supervised.py"),
+        "_apply_training_controls",
+    ): "bounded in-memory training controls on an already capped frame",
+    (
+        Path("src/quant_research_platform/research/portfolios/runner.py"),
+        "_combine_context_and_chunk",
+    ): "bounded lag context carries only recent timestamps",
+    (
+        Path(
+            "src/quant_research_platform/markets/implementations/a_share/"
+            "processed/panels.py"
+        ),
+        "compute_daily_panel",
+    ): (
+        "per-window panel computation groups one bounded window already selected "
+        "upstream"
+    ),
+    (
+        Path(
+            "src/quant_research_platform/markets/implementations/a_share/"
+            "processed/panels.py"
+        ),
+        "compute_index_membership_frame",
+    ): "per-window index membership calculation for reference-sized inputs",
+    (
+        Path("src/quant_research_platform/research/_memory.py"),
+        "_merge_time_boundary_chunks",
+    ): "bounded one-boundary merge to keep complete timestamps together",
+    (
+        Path("src/quant_research_platform/research/evaluations/engine.py"),
+        "_combine_metric_frames",
+    ): "evaluation metric summaries are small aggregate frames",
 }
 
 
@@ -215,6 +323,86 @@ def test_deleted_writer_and_chunk_functions_are_absent() -> None:
     assert hits == []
 
 
+def test_production_hot_paths_do_not_reintroduce_materialized_collectors() -> None:
+    hits: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for function in _iter_function_defs(tree):
+            if (path, function.name) in MATERIALIZED_SCAN_ALLOWLIST:
+                continue
+            assigned_lists = _assigned_empty_list_names(function)
+            names_from_list_calls = _names_assigned_from_list_calls(function)
+            names_from_iter_reads = _names_appended_from_dataset_iterators(function)
+            for node in ast.walk(function):
+                if not isinstance(node, ast.Call) or _call_name(node.func) != "concat":
+                    continue
+                if not _is_pandas_concat(node):
+                    continue
+                target_name = _concat_argument_name(node)
+                if target_name is None:
+                    continue
+                if target_name in names_from_list_calls:
+                    hits.append(
+                        f"{path}:{node.lineno}:{function.name}: "
+                        f"list(iterator)->pd.concat({target_name})"
+                    )
+                elif target_name in names_from_iter_reads:
+                    hits.append(
+                        f"{path}:{node.lineno}:{function.name}: "
+                        f"append(read/iter)->pd.concat({target_name})"
+                    )
+                elif target_name in assigned_lists.intersection(
+                    MATERIALIZED_COLLECTION_NAMES
+                ):
+                    hits.append(
+                        f"{path}:{node.lineno}:{function.name}: "
+                        f"append/extend->pd.concat({target_name})"
+                    )
+                elif target_name in UNKNOWN_CONCAT_NAMES:
+                    hits.append(
+                        f"{path}:{node.lineno}:{function.name}: "
+                        f"pd.concat({target_name}) has unbounded collector name"
+                    )
+
+    assert hits == []
+
+
+def test_run_id_and_output_root_derived_names_are_contract_checked() -> None:
+    hits: list[str] = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        if not any(
+            _is_relative_to(path, root)
+            for root in OUTPUT_ROOT_AND_RUN_ID_SCAN_ROOTS
+        ):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for function in _iter_function_defs(tree):
+            derived_assignments = [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Assign | ast.AnnAssign)
+                for target in _assignment_targets(node)
+                if target in OUTPUT_ROOT_AND_RUN_ID_DERIVED_NAMES
+            ]
+            if not derived_assignments:
+                continue
+            called_names = {
+                _call_name(node.func)
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+            }
+            if called_names.isdisjoint(
+                {"validate_run_id", "validate_private_output_root"}
+            ):
+                hits.extend(
+                    f"{path}:{node.lineno}:{function.name}: {target_name}"
+                    for node in derived_assignments
+                    for target_name in _assignment_targets(node)
+                )
+
+    assert hits == []
+
+
 def test_chunk_axis_contract_has_no_year_alias() -> None:
     resources = importlib.import_module("quant_research_platform.runtime.resources")
 
@@ -254,3 +442,102 @@ def _spec_contains_field(spec: object, field_name: str) -> bool:
         if field_name in candidate:
             return True
     return False
+
+
+def _iter_function_defs(tree: ast.Module) -> tuple[ast.FunctionDef, ...]:
+    return tuple(
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    )
+
+
+def _assigned_empty_list_names(function: ast.FunctionDef) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Assign | ast.AnnAssign):
+            if isinstance(node.value, ast.List) and not node.value.elts:
+                names.update(_assignment_targets(node))
+    return names
+
+
+def _names_assigned_from_list_calls(function: ast.FunctionDef) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Assign | ast.AnnAssign):
+            continue
+        if isinstance(node.value, ast.Call) and _call_name(node.value.func) == "list":
+            names.update(_assignment_targets(node))
+    return names
+
+
+def _names_appended_from_dataset_iterators(function: ast.FunctionDef) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in {"append", "extend"}:
+            continue
+        if not isinstance(node.func.value, ast.Name):
+            continue
+        if not node.args or not _call_tree_reads_dataset_or_iterator(node.args[0]):
+            continue
+        names.add(node.func.value.id)
+    return names
+
+
+def _call_tree_reads_dataset_or_iterator(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            call_name = _call_name(child.func)
+            if call_name in {"read_dataset", "read_parquet"}:
+                return True
+            if call_name.startswith("iter_"):
+                return True
+    return False
+
+
+def _assignment_targets(node: ast.Assign | ast.AnnAssign) -> tuple[str, ...]:
+    if isinstance(node, ast.AnnAssign):
+        targets = (node.target,)
+    else:
+        targets = tuple(node.targets)
+    names: list[str] = []
+    for target in targets:
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+    return tuple(names)
+
+
+def _is_pandas_concat(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "concat"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pd"
+    )
+
+
+def _concat_argument_name(node: ast.Call) -> str | None:
+    if not node.args:
+        return None
+    argument = node.args[0]
+    if isinstance(argument, ast.Name):
+        return argument.id
+    return None
+
+
+def _call_name(func: ast.expr) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True

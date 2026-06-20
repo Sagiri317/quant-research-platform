@@ -63,8 +63,23 @@ def _smoke_prediction_specs():
     ).list()
 
 
-def test_verification_evidence_workflow_rejects_existing_output_root(tmp_path):
-    output_root = tmp_path / "verification-output" / "s1"
+def _repo_output_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *parts: str,
+) -> Path:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(exist_ok=True)
+    (repo_root / ".git").write_text("gitdir: ../repo.git\n", encoding="utf-8")
+    monkeypatch.chdir(repo_root)
+    return repo_root.joinpath(*parts)
+
+
+def test_verification_evidence_workflow_rejects_existing_output_root(
+    tmp_path,
+    monkeypatch,
+):
+    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s1")
     output_root.mkdir(parents=True)
     config = _verification_config(
         output_root=output_root,
@@ -251,9 +266,37 @@ def test_verification_evidence_output_root_respects_repo_private_boundary(
         repo_root,
     )
     module.validate_private_output_root(
-        tmp_path / "outside" / "verification-output" / "s1",
+        repo_root / ("." + "run") / "private" / "s1",
         repo_root,
     )
+    module.validate_private_output_root(
+        repo_root / ("." + "run") / "smoke" / "s1",
+        repo_root,
+    )
+    module.validate_private_output_root(
+        repo_root / ("." + "run") / "s86",
+        repo_root,
+    )
+    with pytest.raises(ValueError, match="unignored_private_output_root"):
+        module.validate_private_output_root(
+            repo_root / ("." + "run") / "reviews" / "s1",
+            repo_root,
+        )
+    with pytest.raises(ValueError, match="unignored_private_output_root"):
+        module.validate_private_output_root(
+            repo_root / "output" / "s1",
+            repo_root,
+        )
+    with pytest.raises(ValueError, match="unignored_private_output_root"):
+        module.validate_private_output_root(
+            repo_root / "tmp-output" / "s1",
+            repo_root,
+        )
+    with pytest.raises(ValueError, match="unignored_private_output_root"):
+        module.validate_private_output_root(
+            tmp_path / "outside" / "verification-output" / "s1",
+            repo_root,
+        )
 
 
 def test_prepare_output_root_validates_before_creating_repo_internal_output(
@@ -420,7 +463,13 @@ def test_verification_evidence_workflow_resolves_independent_windows(
 
     profile = _profile_with_materializers(import_interim, build_processed)
     expected_prediction_count = len(tuple(_smoke_prediction_specs()))
-    output_root = tmp_path / "verification-output" / "s-window"
+    output_root = _repo_output_root(
+        tmp_path,
+        monkeypatch,
+        "." + "run",
+        "private",
+        "s-window",
+    )
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -544,7 +593,13 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
 
     profile = _profile_with_materializers(import_interim, build_processed)
     expected_prediction_count = len(tuple(_smoke_prediction_specs()))
-    output_root = tmp_path / "verification-output" / "s-policy"
+    output_root = _repo_output_root(
+        tmp_path,
+        monkeypatch,
+        "." + "run",
+        "private",
+        "s-policy",
+    )
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -579,7 +634,14 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
         "portfolio": "complete_timestamp_sessions",
     }
     assert execution_plan["report_writing"]["prediction_parquet"] == "chunked_internal"
-    assert execution_plan["report_writing"]["portfolio_parquet"] == "materialized"
+    assert (
+        execution_plan["report_writing"]["portfolio_row_artifacts"]
+        == "chunked_internal"
+    )
+    assert (
+        execution_plan["report_writing"]["portfolio_summary_artifacts"]
+        == "aggregate_summary"
+    )
     assert execution_plan["full_horizon_tiling"]["status"] == "NOT_LANDED"
 
 
@@ -688,7 +750,7 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         prediction_spec.prediction_id for prediction_spec in _smoke_prediction_specs()
     ]
     expected_prediction_count = len(expected_prediction_ids)
-    output_root = tmp_path / "verification-output" / "s1"
+    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s1")
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -807,7 +869,7 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
         lambda **kwargs: Path("portfolio"),
     )
 
-    output_root = tmp_path / "verification-output" / "s8"
+    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s8")
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -868,7 +930,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
         lambda **kwargs: Path("portfolio"),
     )
 
-    output_root = tmp_path / "verification-output" / "s9"
+    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s9")
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -898,6 +960,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
 
 def test_verification_evidence_workflow_runs_real_tiny_research_stack(
     tmp_path,
+    monkeypatch,
 ) -> None:
     base_profile = research_profile()
     prediction_specs = {
@@ -930,7 +993,13 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
         )
         return _persist_tiny_a_share_processed_inputs(layout, base_profile)
 
-    output_root = tmp_path / "verification-output" / "tiny-real-stack"
+    output_root = _repo_output_root(
+        tmp_path,
+        monkeypatch,
+        "." + "run",
+        "private",
+        "tiny-real-stack",
+    )
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,

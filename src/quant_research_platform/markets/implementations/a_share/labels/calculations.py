@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import pandas as pd
 
@@ -54,7 +54,7 @@ def label_lookahead_bars(definitions: Sequence[LabelDefinition]) -> int:
 
 
 def label_read_window_for_panel(
-    panel_keys: pd.DataFrame,
+    panel_keys: pd.DataFrame | Mapping[object, Sequence[pd.Timestamp]],
     *,
     definitions: Sequence[LabelDefinition],
     read_window: TimeWindow,

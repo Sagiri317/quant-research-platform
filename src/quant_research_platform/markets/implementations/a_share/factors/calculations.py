@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import pandas as pd
 
@@ -66,7 +66,7 @@ def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
 
 
 def factor_read_window_for_panel(
-    panel_keys: pd.DataFrame,
+    panel_keys: pd.DataFrame | Mapping[object, Sequence[pd.Timestamp]],
     *,
     definitions: Sequence[FactorDefinition],
     read_window: TimeWindow,

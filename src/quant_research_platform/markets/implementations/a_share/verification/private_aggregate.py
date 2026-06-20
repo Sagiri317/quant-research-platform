@@ -779,14 +779,16 @@ def _summarize_roots(
 
 
 def _summarize_report_roots(roots: tuple[Path, ...]) -> AggregateSummary:
-    frames: list[pd.DataFrame] = []
+    return _summarize_frames(_iter_report_artifact_frames(roots))
+
+
+def _iter_report_artifact_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
     for root in roots:
         files = tuple(sorted(Path(root).rglob("*.parquet")))
         if not files:
             raise FileNotFoundError("private_aggregate_input_missing")
         for file in files:
-            frames.append(pd.read_parquet(file, engine="pyarrow"))
-    return _summarize_frames(frames)
+            yield pd.read_parquet(file, engine="pyarrow")
 
 
 def _summarize_dataset_root(

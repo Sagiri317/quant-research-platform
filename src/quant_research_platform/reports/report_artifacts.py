@@ -559,23 +559,15 @@ def write_evaluation_report_artifacts(
     return run_root
 
 
-def write_portfolio_report_artifacts(
+def _write_portfolio_report_artifacts_from_chunks(
+    artifact_chunks: Iterable[Mapping[str, pd.DataFrame]],
     *,
-    positions: pd.DataFrame,
-    turnover: pd.DataFrame,
-    cost_breakdown: pd.DataFrame,
-    portfolio_returns: pd.DataFrame,
-    cumulative_returns: pd.DataFrame,
-    performance_summary: pd.DataFrame,
-    exposure_summary: pd.DataFrame,
-    concentration: pd.DataFrame,
-    period_breakdown: pd.DataFrame,
-    diagnostics: pd.DataFrame,
+    summary_artifacts_factory: Callable[[], Mapping[str, pd.DataFrame]],
     spec: PortfolioSpec,
     report_spec: ReportSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write private portfolio construction artifacts under reports/private_real."""
+    """Write private portfolio row artifacts from bounded chunks."""
 
     run_root = _derive_report_run_root(
         report_spec=report_spec,
@@ -583,52 +575,51 @@ def write_portfolio_report_artifacts(
         expected_definition_id="portfolio_report_private",
         expected_run_id=spec.portfolio_id,
     )
-    artifacts = {
-        "positions": positions,
-        "turnover": turnover,
-        "cost_breakdown": cost_breakdown,
-        "portfolio_returns": portfolio_returns,
-        "cumulative_returns": cumulative_returns,
-        "performance_summary": performance_summary,
-        "exposure_summary": exposure_summary,
-        "concentration": concentration,
-        "period_breakdown": period_breakdown,
-        "diagnostics": diagnostics,
-    }
-    required_columns = {
-        "positions": _PORTFOLIO_POSITION_COLUMNS,
-        "turnover": _PORTFOLIO_TURNOVER_COLUMNS,
-        "cost_breakdown": _PORTFOLIO_COST_BREAKDOWN_COLUMNS,
-        "portfolio_returns": _PORTFOLIO_RETURN_COLUMNS,
-        "cumulative_returns": _PORTFOLIO_CUMULATIVE_RETURN_COLUMNS,
-        "performance_summary": _PORTFOLIO_PERFORMANCE_SUMMARY_COLUMNS,
-        "exposure_summary": _PORTFOLIO_EXPOSURE_SUMMARY_COLUMNS,
-        "concentration": _PORTFOLIO_CONCENTRATION_COLUMNS,
-        "period_breakdown": _PORTFOLIO_PERIOD_BREAKDOWN_COLUMNS,
-        "diagnostics": _PORTFOLIO_DIAGNOSTIC_COLUMNS,
-    }
-    for artifact_name, frame in artifacts.items():
-        _validate_report_frame(
-            frame,
-            required=required_columns[artifact_name],
-            error_name=f"portfolio_{artifact_name}",
-        )
-    _validate_portfolio_artifact_semantics(artifacts, spec)
+    required_columns = _portfolio_required_columns()
+    row_artifacts = (
+        "positions",
+        "turnover",
+        "cost_breakdown",
+        "portfolio_returns",
+        "diagnostics",
+    )
+    summary_names = tuple(
+        name for name in _PORTFOLIO_ARTIFACTS if name not in row_artifacts
+    )
 
     def _write(temp_root: Path) -> None:
-        for artifact_name, filename in _PORTFOLIO_ARTIFACTS.items():
+        row_counts = _write_portfolio_row_artifact_chunks(
+            artifact_chunks,
+            temp_root=temp_root,
+            row_artifacts=row_artifacts,
+            required_columns=required_columns,
+            spec=spec,
+        )
+        summary_artifacts = summary_artifacts_factory()
+        for artifact_name in summary_names:
+            _validate_report_frame(
+                summary_artifacts[artifact_name],
+                required=required_columns[artifact_name],
+                error_name=f"portfolio_{artifact_name}",
+            )
+            _validate_portfolio_signal_column(
+                summary_artifacts[artifact_name],
+                artifact_name=artifact_name,
+                spec=spec,
+            )
             _atomic_write_report_parquet(
-                artifacts[artifact_name],
-                temp_root / filename,
+                summary_artifacts[artifact_name],
+                temp_root / _PORTFOLIO_ARTIFACTS[artifact_name],
                 engine="pyarrow",
                 compression="zstd",
                 index=False,
             )
+            row_counts[artifact_name] = int(len(summary_artifacts[artifact_name]))
         write_manifest(
             temp_root / "manifest.json",
-            _portfolio_report_manifest_payload(
+            _portfolio_report_manifest_payload_from_row_counts(
                 spec=spec,
-                artifacts=artifacts,
+                row_counts=row_counts,
             ),
         )
 
@@ -725,22 +716,50 @@ def _portfolio_report_manifest_payload(
     }
 
 
+def _portfolio_report_manifest_payload_from_row_counts(
+    *,
+    spec: PortfolioSpec,
+    row_counts: Mapping[str, int],
+) -> dict[str, object]:
+    payload = _portfolio_report_manifest_payload(
+        spec=spec,
+        artifacts={
+            artifact_name: pd.DataFrame(index=range(int(row_counts[artifact_name])))
+            for artifact_name in _PORTFOLIO_ARTIFACTS
+        },
+    )
+    payload["row_counts"] = {
+        artifact_name: int(row_counts[artifact_name])
+        for artifact_name in _PORTFOLIO_ARTIFACTS
+    }
+    return payload
+
+
+def _portfolio_required_columns() -> dict[str, tuple[str, ...]]:
+    return {
+        "positions": _PORTFOLIO_POSITION_COLUMNS,
+        "turnover": _PORTFOLIO_TURNOVER_COLUMNS,
+        "cost_breakdown": _PORTFOLIO_COST_BREAKDOWN_COLUMNS,
+        "portfolio_returns": _PORTFOLIO_RETURN_COLUMNS,
+        "cumulative_returns": _PORTFOLIO_CUMULATIVE_RETURN_COLUMNS,
+        "performance_summary": _PORTFOLIO_PERFORMANCE_SUMMARY_COLUMNS,
+        "exposure_summary": _PORTFOLIO_EXPOSURE_SUMMARY_COLUMNS,
+        "concentration": _PORTFOLIO_CONCENTRATION_COLUMNS,
+        "period_breakdown": _PORTFOLIO_PERIOD_BREAKDOWN_COLUMNS,
+        "diagnostics": _PORTFOLIO_DIAGNOSTIC_COLUMNS,
+    }
+
+
 def _validate_portfolio_artifact_semantics(
     artifacts: Mapping[str, pd.DataFrame],
     spec: PortfolioSpec,
 ) -> None:
-    signal_ids = {signal.signal_id for signal in spec.signals}
     for artifact_name, frame in artifacts.items():
-        if "signal" not in frame.columns:
-            continue
-        artifact_signals = {
-            str(value)
-            for value in frame["signal"].dropna().unique().tolist()
-        }
-        if not artifact_signals.issubset(signal_ids):
-            raise ValueError(
-                "portfolio_artifact_signal_mismatch: " + artifact_name
-            )
+        _validate_portfolio_signal_column(
+            frame,
+            artifact_name=artifact_name,
+            spec=spec,
+        )
     portfolio_returns = artifacts["portfolio_returns"]
     return_sources = {
         str(value)
@@ -750,6 +769,108 @@ def _validate_portfolio_artifact_semantics(
     }
     if return_sources and return_sources != {spec.return_source_column}:
         raise ValueError("portfolio_return_source_column_mismatch")
+
+
+def _validate_portfolio_signal_column(
+    frame: pd.DataFrame,
+    *,
+    artifact_name: str,
+    spec: PortfolioSpec,
+) -> None:
+    signal_ids = {signal.signal_id for signal in spec.signals}
+    if "signal" not in frame.columns:
+        return
+    artifact_signals = {
+        str(value)
+        for value in frame["signal"].dropna().unique().tolist()
+    }
+    if not artifact_signals.issubset(signal_ids):
+        raise ValueError("portfolio_artifact_signal_mismatch: " + artifact_name)
+
+
+def _write_portfolio_row_artifact_chunks(
+    artifact_chunks: Iterable[Mapping[str, pd.DataFrame]],
+    *,
+    temp_root: Path,
+    row_artifacts: tuple[str, ...],
+    required_columns: Mapping[str, tuple[str, ...]],
+    spec: PortfolioSpec,
+) -> dict[str, int]:
+    writers: dict[str, pq.ParquetWriter] = {}
+    temp_paths = {
+        artifact_name: temp_root / _PORTFOLIO_ARTIFACTS[artifact_name]
+        for artifact_name in row_artifacts
+    }
+    row_counts = {artifact_name: 0 for artifact_name in _PORTFOLIO_ARTIFACTS}
+    try:
+        for artifact_chunk in artifact_chunks:
+            for artifact_name in row_artifacts:
+                frame = artifact_chunk[artifact_name]
+                selected = _portfolio_report_chunk_frame(
+                    frame,
+                    artifact_name=artifact_name,
+                    required=required_columns[artifact_name],
+                    spec=spec,
+                )
+                if selected.empty:
+                    continue
+                table = pa.Table.from_pandas(selected, preserve_index=False)
+                writer = writers.get(artifact_name)
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        temp_paths[artifact_name],
+                        table.schema,
+                        compression="zstd",
+                    )
+                    writers[artifact_name] = writer
+                writer.write_table(table)
+                row_counts[artifact_name] += int(len(selected))
+        for writer in writers.values():
+            writer.close()
+        writers.clear()
+        for artifact_name in row_artifacts:
+            if row_counts[artifact_name] == 0:
+                _atomic_write_report_parquet(
+                    pd.DataFrame(columns=list(required_columns[artifact_name])),
+                    temp_paths[artifact_name],
+                    engine="pyarrow",
+                    compression="zstd",
+                    index=False,
+                )
+    except Exception:
+        for writer in writers.values():
+            writer.close()
+        raise
+    return row_counts
+
+
+def _portfolio_report_chunk_frame(
+    frame: pd.DataFrame,
+    *,
+    artifact_name: str,
+    required: tuple[str, ...],
+    spec: PortfolioSpec,
+) -> pd.DataFrame:
+    _validate_report_frame(
+        frame,
+        required=required,
+        error_name=f"portfolio_{artifact_name}",
+    )
+    if "signal" in frame.columns:
+        signal_ids = {signal.signal_id for signal in spec.signals}
+        artifact_signals = {
+            str(value) for value in frame["signal"].dropna().unique().tolist()
+        }
+        if not artifact_signals.issubset(signal_ids):
+            raise ValueError("portfolio_artifact_signal_mismatch: " + artifact_name)
+    if artifact_name == "portfolio_returns":
+        return_sources = {
+            str(value)
+            for value in frame["return_source_column"].dropna().unique().tolist()
+        }
+        if return_sources and return_sources != {spec.return_source_column}:
+            raise ValueError("portfolio_return_source_column_mismatch")
+    return frame.loc[:, list(required)]
 
 
 def _required_frame_metadata(
@@ -1472,7 +1593,6 @@ def _rename_with_transient_permission_retry(
 
 __all__ = [
     "write_evaluation_report_artifacts",
-    "write_portfolio_report_artifacts",
     "write_prediction_report_artifacts",
     "write_stage_profile_report_artifacts",
 ]

@@ -36,11 +36,14 @@ from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
 from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
-    build_prediction_frame,
     run_prediction_from_research_dataset,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.research.prediction_artifact_helpers import (
+    prediction_frame_from_artifact,
+    prediction_frame_from_artifact_frames,
+)
 
 
 def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
@@ -472,6 +475,7 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
         model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
+        max_train_rows=len(frame),
     )
     expected = model_supervised._fit_model_result_from_frames((frame,), spec)
     original_filter = model_supervised.apply_filter_mode
@@ -514,7 +518,7 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
         test_end="2024-01-02",
     )
     coefficients = np.asarray([0.0, 0.01])
-    expected = artifacts_module._build_prediction_frame_from_frames(
+    expected = prediction_frame_from_artifact_frames(
         (frame,),
         spec,
         coefficients,
@@ -528,7 +532,7 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
         return original_filter(frame, mode=mode, metadata_key=metadata_key)
 
     monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
-    result = artifacts_module._build_prediction_frame_from_frames(
+    result = prediction_frame_from_artifact_frames(
         (frame.iloc[:3], frame.iloc[3:]),
         spec,
         coefficients,
@@ -778,6 +782,7 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
         model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
+        max_train_rows=len(frame),
     )
     unfiltered_spec = ModelSpec(
         model_id="linear_unfiltered",
@@ -785,6 +790,7 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
         input_factor_columns=("factor",),
         label_column="label",
         sample_filter_mode="unfiltered",
+        max_train_rows=len(frame),
     )
 
     eligible = fit_model_result(frame, eligible_spec)
@@ -842,7 +848,7 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     assert eligible.metadata["dependency_status"]["status"] == "available"
     assert eligible.metadata["hyperparameters"] == {}
     assert eligible.metadata["random_seed"] is None
-    assert eligible.metadata["max_train_rows"] is None
+    assert eligible.metadata["max_train_rows"] == len(frame)
     assert eligible.metadata["purge_gap_steps"] == 0
     assert eligible.metadata["feature_importance"] == pytest.approx({"factor": 0.01})
     assert unfiltered.metadata["rows_after_filter_mode"] == 6
@@ -900,6 +906,7 @@ def test_required_model_algorithms_fit_and_predict(model_algorithm: str) -> None
         label_column="label",
         random_seed=7,
         hyperparameters=_model_hyperparameters(model_algorithm),
+        max_train_rows=len(train),
     )
     prediction_spec = PredictionSpec(
         prediction_id=f"{model_algorithm}_pred",
@@ -911,7 +918,7 @@ def test_required_model_algorithms_fit_and_predict(model_algorithm: str) -> None
     )
 
     result = fit_model_result(frame.loc[frame["timestamp"].lt("2024-01-03")], spec)
-    prediction = build_prediction_frame(
+    prediction = prediction_frame_from_artifact(
         frame,
         prediction_spec,
         result.coefficients,
@@ -954,6 +961,7 @@ def test_model_training_controls_apply_to_linear_and_estimators(
         input_factor_columns=("factor",),
         label_column="label",
         purge_gap_steps=1,
+        max_train_rows=len(frame),
     )
 
     max_rows = fit_model_result(frame, max_rows_spec)
@@ -1018,7 +1026,7 @@ def test_model_max_train_rows_trims_streaming_training_buffer(
     assert max(observed_buffer_inputs) < len(frame)
 
 
-def test_model_training_collection_keeps_uncapped_streaming_semantics() -> None:
+def test_model_training_collection_rejects_unbounded_collection() -> None:
     from quant_research_platform.research.models import supervised as model_supervised
 
     frame = pd.concat(
@@ -1035,21 +1043,18 @@ def test_model_training_collection_keeps_uncapped_streaming_semantics() -> None:
         label_column="label",
         max_train_rows=None,
     )
-    expected, expected_counts, _expected_metadata = (
+
+    with pytest.raises(ValueError, match="unbounded_model_training_collection"):
         model_supervised._collect_training_frame(
             (frame,),
             spec,
         )
-    )
 
-    training, row_counts, _metadata = model_supervised._collect_training_frame(
-        (chunk for _, chunk in frame.groupby("timestamp")),
-        spec,
-    )
-
-    pd.testing.assert_frame_equal(training, expected)
-    assert row_counts == expected_counts
-    assert row_counts["rows_after_input_label_dropna"] == len(expected)
+    with pytest.raises(ValueError, match="unbounded_model_training_collection"):
+        model_supervised._collect_training_frame(
+            (chunk for _, chunk in frame.groupby("timestamp")),
+            spec,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1077,6 +1082,7 @@ def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
         input_factor_columns=("factor",),
         input_feature_columns=("feature",),
         label_column="label",
+        max_train_rows=len(frame),
     )
 
     result = fit_model_result(frame, spec)
@@ -1128,6 +1134,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         model_algorithm="linear_regression",
         input_factor_columns=("factor",),
         label_column="label",
+        max_train_rows=len(frame),
     )
     expected = fit_model_result(frame, spec)
     original_filter = model_supervised.apply_filter_mode
@@ -1218,6 +1225,7 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design(
         model_algorithm="linear_regression",
         input_factor_columns=("factor", "factor_shadow"),
         label_column="label",
+        max_train_rows=len(frame),
     )
     usable = frame.loc[frame["eligible"]].dropna(
         subset=[*spec.input_columns, spec.label_column]
@@ -1282,7 +1290,7 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         test_start="2024-01-03",
         test_end="2024-01-03",
     )
-    prediction = build_prediction_frame(
+    prediction = prediction_frame_from_artifact(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1449,7 +1457,7 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         test_start="2024-01-03",
         test_end="2024-01-05",
     )
-    expected = build_prediction_frame(
+    expected = prediction_frame_from_artifact(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1464,7 +1472,7 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
 
     monkeypatch.setenv("QRP_MEMORY_BUDGET_MB", "0.0001")
     monkeypatch.setattr(artifacts_module, "apply_filter_mode", wrapped_filter)
-    result = build_prediction_frame(
+    result = prediction_frame_from_artifact(
         frame.drop(columns=["label"]),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1640,7 +1648,7 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
         test_start="2024-01-03",
         sample_filter_mode="unfiltered",
     )
-    prediction = build_prediction_frame(
+    prediction = prediction_frame_from_artifact(
         _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
         spec,
         coefficients=np.asarray([0.0, 0.01]),
@@ -1667,7 +1675,7 @@ def test_prediction_artifacts_fail_closed_errors_are_specific() -> None:
         ValueError,
         match="prediction_train_end_must_precede_test_start",
     ):
-        build_prediction_frame(
+        prediction_frame_from_artifact(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             PredictionSpec(
                 prediction_id="pred_bad_order",
@@ -1684,7 +1692,7 @@ def test_prediction_artifacts_fail_closed_errors_are_specific() -> None:
         ValueError,
         match="prediction_test_end_must_not_precede_test_start",
     ):
-        build_prediction_frame(
+        prediction_frame_from_artifact(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             PredictionSpec(
                 prediction_id="pred_bad_test_end",
@@ -1699,7 +1707,7 @@ def test_prediction_artifacts_fail_closed_errors_are_specific() -> None:
         )
 
     with pytest.raises(ValueError, match="empty_prediction_window"):
-        build_prediction_frame(
+        prediction_frame_from_artifact(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
             PredictionSpec(
                 prediction_id="pred_empty_test",
@@ -1771,7 +1779,7 @@ def test_prediction_artifacts_rejects_filter_columns_as_direct_features() -> Non
     )
 
     with pytest.raises(ValueError, match="filter_column_in_input_columns: eligible"):
-        build_prediction_frame(
+        prediction_frame_from_artifact(
             _filter_frame().assign(timestamp=pd.Timestamp("2024-01-03")),
             spec,
             coefficients=np.asarray([0.0, 0.01]),

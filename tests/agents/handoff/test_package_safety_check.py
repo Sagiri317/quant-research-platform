@@ -115,6 +115,73 @@ def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "member",
+    [
+        "." + "run/private/s1/summary.json",
+        "." + "run/smoke/s1/summary.json",
+        "." + "run/s86/summary.json",
+    ],
+)
+def test_package_safety_rejects_private_run_members(tmp_path, member):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, "{}\n")
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("blocked private/sensitive path" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    "logical_path",
+    [
+        "." + "run/private/s1",
+        "." + "run/smoke/s1",
+        "." + "run/s86",
+        "." + "run\\\\private\\\\s1",
+    ],
+)
+def test_package_safety_rejects_private_run_paths_in_sidecar(
+    tmp_path,
+    logical_path,
+):
+    module = _load_package_safety_module()
+    sidecar = tmp_path / "handoff.json"
+    sidecar.write_text(
+        json.dumps({"evidence_root": logical_path}),
+        encoding="utf-8",
+    )
+
+    result = module.scan_target(sidecar, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("private run path" in error for error in result.errors)
+
+
+def test_package_safety_rejects_private_run_paths_in_raw_diff(tmp_path):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    diff = "\n".join(
+        [
+            "diff --git a/docs/evidence.md b/docs/evidence.md",
+            "--- a/docs/evidence.md",
+            "+++ b/docs/evidence.md",
+            "+private evidence path ." + "run/private/s1",
+            "",
+        ]
+    )
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("diff.patch", diff)
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("private run path" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "/workspace/qrp/data/research/a_share/demo",

@@ -387,6 +387,8 @@ def _collect_training_frame(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
 ) -> tuple[pd.DataFrame, dict[str, object], dict[str, object]]:
+    if spec.max_train_rows is None:
+        raise ValueError("unbounded_model_training_collection")
     required = set(spec.input_columns)
     required.add(spec.label_column)
     required.add("timestamp")
@@ -400,7 +402,6 @@ def _collect_training_frame(
             )
         )
     )
-    parts: list[pd.DataFrame] = []
     rows_input = 0
     rows_after_filter = 0
     filter_columns_used: list[str] = []
@@ -428,19 +429,13 @@ def _collect_training_frame(
             :, ["timestamp", *spec.input_columns, spec.label_column]
         ]
         if not usable.empty:
-            if spec.max_train_rows is None:
-                parts.append(usable)
-            else:
-                capped_training = _trim_training_buffer(
-                    usable
-                    if capped_training is None
-                    else pd.concat([capped_training, usable], ignore_index=True),
-                    spec,
-                )
-    if spec.max_train_rows is None:
-        training = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-    else:
-        training = capped_training if capped_training is not None else pd.DataFrame()
+            capped_training = _trim_training_buffer(
+                usable
+                if capped_training is None
+                else pd.concat([capped_training, usable], ignore_index=True),
+                spec,
+            )
+    training = capped_training if capped_training is not None else pd.DataFrame()
     training = _apply_training_controls(training, spec)
     train_start = None
     train_end = None

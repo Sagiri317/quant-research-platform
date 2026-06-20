@@ -391,45 +391,6 @@ def filter_by_source_date_range(
     return result[mask].copy()
 
 
-def build_interim_frame(
-    *,
-    data_id: str,
-    input_files: list[Path],
-    start_date: str | None,
-    end_date: str | None,
-    overrides: dict[str, dict[str, object]] | None = None,
-    chunksize: int = 500_000,
-    pruning_reports: list[dict[str, object]] | None = None,
-) -> pd.DataFrame:
-    """Materialize small reference/test interim data; full imports stream chunks."""
-
-    if data_id not in SOURCE_REFERENCE_DATA_IDS:
-        raise ValueError("interim_frame_materialization_requires_reference_data")
-    frames = list(
-        iter_interim_frames(
-            data_id=data_id,
-            input_files=input_files,
-            start_date=start_date,
-            end_date=end_date,
-            overrides=overrides,
-            chunksize=chunksize,
-            pruning_reports=pruning_reports,
-        )
-    )
-    if not frames:
-        return pd.DataFrame()
-    result = pd.concat(frames, ignore_index=True)
-    if data_id in SOURCE_REFERENCE_DATA_IDS:
-        result = _dedupe_reference_primary_key_rows(result, data_id)
-        if pruning_reports is not None:
-            _append_reference_duplicate_summary(
-                pruning_reports,
-                data_id,
-                int(result.attrs["reference_exact_duplicate_count"]),
-            )
-    return result
-
-
 def iter_interim_frames(
     *,
     data_id: str,
@@ -441,29 +402,24 @@ def iter_interim_frames(
     pruning_reports: list[dict[str, object]] | None = None,
 ) -> Iterator[pd.DataFrame]:
     raw_dataset = _raw_dataset_for_interim(data_id)
-    for input_file in sorted(input_files):
-        for chunk in iter_private_export_chunks(
-            input_file,
-            dataset=raw_dataset,
-            chunksize=chunksize,
-        ):
-            normalized = normalize_raw_frame(chunk, data_id)
-            normalized = _filter_normalized_frame(
-                normalized,
-                data_id=data_id,
-                start_date=start_date,
-                end_date=end_date,
-            )
-            if normalized.empty:
-                continue
-            pruned, report = apply_output_column_rules(
-                normalized,
-                data_id,
-                overrides=overrides,
-            )
-            if pruning_reports is not None:
-                pruning_reports.append(report)
-            yield pruned
+    frames = _iter_pruned_interim_frames(
+        data_id=data_id,
+        raw_dataset=raw_dataset,
+        input_files=input_files,
+        start_date=start_date,
+        end_date=end_date,
+        overrides=overrides,
+        chunksize=chunksize,
+        pruning_reports=pruning_reports,
+    )
+    if data_id in SOURCE_REFERENCE_DATA_IDS:
+        yield from _iter_deduped_reference_frames(
+            frames,
+            data_id=data_id,
+            pruning_reports=pruning_reports,
+        )
+        return
+    yield from frames
 
 
 def materialize_interim_data(
@@ -493,23 +449,6 @@ def materialize_interim_data(
             skipped.append(data_id)
             continue
         artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
-        if data_id in SOURCE_REFERENCE_DATA_IDS:
-            frame = build_interim_frame(
-                data_id=data_id,
-                input_files=input_files,
-                start_date=start_date,
-                end_date=end_date,
-                overrides=overrides,
-                chunksize=chunksize,
-                pruning_reports=pruning_reports,
-            )
-            if frame.empty:
-                skipped.append(data_id)
-                continue
-            write_dataset(artifact_root, frame, spec=spec)
-            written[data_id] = artifact_root
-            continue
-
         frames = iter_interim_frames(
             data_id=data_id,
             input_files=input_files,
@@ -534,45 +473,86 @@ def materialize_interim_data(
     )
 
 
-def _dedupe_reference_primary_key_rows(
-    frame: pd.DataFrame,
+def _iter_pruned_interim_frames(
+    *,
     data_id: str,
-) -> pd.DataFrame:
+    raw_dataset: str,
+    input_files: list[Path],
+    start_date: str | None,
+    end_date: str | None,
+    overrides: dict[str, dict[str, object]] | None,
+    chunksize: int,
+    pruning_reports: list[dict[str, object]] | None,
+) -> Iterator[pd.DataFrame]:
+    for input_file in sorted(input_files):
+        for chunk in iter_private_export_chunks(
+            input_file,
+            dataset=raw_dataset,
+            chunksize=chunksize,
+        ):
+            normalized = normalize_raw_frame(chunk, data_id)
+            normalized = _filter_normalized_frame(
+                normalized,
+                data_id=data_id,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if normalized.empty:
+                continue
+            pruned, report = apply_output_column_rules(
+                normalized,
+                data_id,
+                overrides=overrides,
+            )
+            if pruning_reports is not None:
+                pruning_reports.append(report)
+            yield pruned
+
+
+def _iter_deduped_reference_frames(
+    frames: Iterator[pd.DataFrame],
+    *,
+    data_id: str,
+    pruning_reports: list[dict[str, object]] | None,
+) -> Iterator[pd.DataFrame]:
     spec = interim_catalog().get(data_id)
     primary_key = list(spec.primary_key)
-    missing = [column for column in primary_key if column not in frame.columns]
-    if missing:
-        raise ValueError("missing_reference_primary_key_columns: " + ", ".join(missing))
-    duplicated = frame.duplicated(primary_key, keep=False)
-    if not bool(duplicated.any()):
-        result = frame.copy()
-        result.attrs["reference_exact_duplicate_count"] = 0
-        return result
-
-    ordered = frame.copy()
-    ordered["_reference_row_order"] = range(len(ordered))
+    seen_rows: dict[tuple[object, ...], tuple[object, ...]] = {}
     exact_duplicate_count = 0
-    for _, group in ordered.loc[duplicated].groupby(
-        primary_key,
-        sort=False,
-        dropna=False,
-    ):
-        content = group.drop(columns=["_reference_row_order"])
-        if len(content.drop_duplicates()) > 1:
-            raise ValueError(f"conflicting_reference_primary_key_duplicates: {data_id}")
-        exact_duplicate_count += len(group) - 1
-
-    result = (
-        ordered.sort_values(
-            [*primary_key, "_reference_row_order"],
-            kind="mergesort",
-        )
-        .drop_duplicates(primary_key, keep="last")
-        .drop(columns=["_reference_row_order"])
-        .reset_index(drop=True)
-    )
-    result.attrs["reference_exact_duplicate_count"] = int(exact_duplicate_count)
-    return result
+    try:
+        for frame in frames:
+            missing = [
+                column for column in primary_key if column not in frame.columns
+            ]
+            if missing:
+                raise ValueError(
+                    "missing_reference_primary_key_columns: " + ", ".join(missing)
+                )
+            keep_positions: list[int] = []
+            for position, row in enumerate(frame.itertuples(index=False, name=None)):
+                columns = tuple(str(column) for column in frame.columns)
+                values = dict(zip(columns, row, strict=True))
+                key = tuple(values[column] for column in primary_key)
+                payload = tuple(values[column] for column in columns)
+                previous = seen_rows.get(key)
+                if previous is None:
+                    seen_rows[key] = payload
+                    keep_positions.append(position)
+                    continue
+                if previous != payload:
+                    raise ValueError(
+                        f"conflicting_reference_primary_key_duplicates: {data_id}"
+                    )
+                exact_duplicate_count += 1
+            if keep_positions:
+                yield frame.iloc[keep_positions].reset_index(drop=True)
+    finally:
+        if pruning_reports is not None:
+            _append_reference_duplicate_summary(
+                pruning_reports,
+                data_id,
+                exact_duplicate_count,
+            )
 
 
 def _append_reference_duplicate_summary(
@@ -742,7 +722,6 @@ __all__ = [
     "CSMARInterimImportResult",
     "DEFAULT_INTERIM_DATA_IDS",
     "apply_output_column_rules",
-    "build_interim_frame",
     "default_override_payload",
     "filter_by_source_date_range",
     "interim_catalog",

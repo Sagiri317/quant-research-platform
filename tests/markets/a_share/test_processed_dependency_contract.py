@@ -39,7 +39,7 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets import DatasetReadMode, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -223,15 +223,23 @@ def test_write_paths_read_processed_inputs_via_helper(
         read_sessions=sessions,
         reason="test",
     )
-    calls = {"annotation": 0, "factor": 0, "label": 0}
-    factor_window_calls = {"count": 0}
-    label_window_calls = {"count": 0}
+    calls = {
+        "annotation": 0,
+        "factor": 0,
+        "factor_key_coverage": 0,
+        "label": 0,
+        "label_key_coverage": 0,
+    }
 
     def fake_planned_session_windows(*args: object, **kwargs: object):
         return (session_window,)
 
     def fake_inspect_dataset(*args: object, **kwargs: object):
-        return SimpleNamespace(manifest={"file_size_bytes": 1}, row_count=1)
+        return SimpleNamespace(
+            manifest={"file_size_bytes": 1},
+            row_count=1,
+            columns=("asset_id", "timestamp", "adj_close", "adj_open"),
+        )
 
     def fake_write_and_inspect(spec: ProcessedDataSpec, frame, **kwargs: object):
         list(frame)
@@ -271,13 +279,15 @@ def test_write_paths_read_processed_inputs_via_helper(
         return _key_frame().assign(**{definitions[0].output_column: [1.0]})
 
     def fake_factor_read_window_for_panel(
-        panel_keys: pd.DataFrame,
+        panel_keys: object,
         *,
         definitions: tuple[FactorDefinition, ...],
         read_window: TimeWindow,
         core_sessions: tuple[pd.Timestamp, ...],
     ) -> TimeWindow:
-        factor_window_calls["count"] += 1
+        del definitions, core_sessions
+        assert panel_keys == {"asset_a": (pd.Timestamp("2024-01-02"),)}
+        calls["factor_key_coverage"] += 1
         return read_window
 
     def fake_calculate_labels_for_panel(
@@ -288,14 +298,22 @@ def test_write_paths_read_processed_inputs_via_helper(
         return _key_frame().assign(**{definitions[0].output_column: [0.01]})
 
     def fake_label_read_window_for_panel(
-        panel_keys: pd.DataFrame,
+        panel_keys: object,
         *,
         definitions: tuple[LabelDefinition, ...],
         read_window: TimeWindow,
         core_sessions: tuple[pd.Timestamp, ...],
     ) -> TimeWindow:
-        label_window_calls["count"] += 1
+        del definitions, core_sessions
+        assert panel_keys == {"asset_a": (pd.Timestamp("2024-01-02"),)}
+        calls["label_key_coverage"] += 1
         return read_window
+
+    def fake_read_dataset(*args: object, **kwargs: object):
+        del args
+        if kwargs.get("mode") is DatasetReadMode.CHUNKED:
+            return (_key_frame(),)
+        return _key_frame()
 
     monkeypatch.setattr(
         materializer,
@@ -312,7 +330,7 @@ def test_write_paths_read_processed_inputs_via_helper(
     monkeypatch.setattr(
         materializer,
         "read_dataset",
-        lambda *args, **kwargs: _key_frame(),
+        fake_read_dataset,
     )
     monkeypatch.setattr(
         materializer.annotations,
@@ -396,9 +414,13 @@ def test_write_paths_read_processed_inputs_via_helper(
         written={},
     )
 
-    assert calls == {"annotation": 1, "factor": 1, "label": 1}
-    assert factor_window_calls == {"count": 1}
-    assert label_window_calls == {"count": 1}
+    assert calls == {
+        "annotation": 1,
+        "factor": 1,
+        "factor_key_coverage": 1,
+        "label": 1,
+        "label_key_coverage": 1,
+    }
 
 
 def test_multi_processed_input_mapping_then_unknown_tradable_label_fails_closed(

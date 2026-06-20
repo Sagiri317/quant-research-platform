@@ -13,8 +13,10 @@ from quant_research_platform.research.models.supervised import (
 )
 from quant_research_platform.research.predictions import artifacts
 from quant_research_platform.research.predictions.artifacts import (
-    build_prediction_frame,
     validate_prediction_artifacts,
+)
+from tests.research.prediction_artifact_helpers import (
+    prediction_frame_from_artifact,
 )
 
 
@@ -56,6 +58,7 @@ def _hyperparameters(algorithm: str) -> dict[str, object]:
 
 @pytest.mark.parametrize("algorithm", sorted(MODEL_ALGORITHMS))
 def test_all_model_algorithms_fit_and_predict_synthetic_data(algorithm: str) -> None:
+    frame = _model_frame()
     spec = ModelSpec(
         model_id=f"{algorithm}_demo",
         model_algorithm=algorithm,
@@ -64,8 +67,8 @@ def test_all_model_algorithms_fit_and_predict_synthetic_data(algorithm: str) -> 
         label_column="label",
         hyperparameters=_hyperparameters(algorithm),
         random_seed=7,
+        max_train_rows=len(frame),
     )
-    frame = _model_frame()
 
     estimator = build_estimator_from_model_spec(spec)
     result = fit_model_result(frame, spec)
@@ -101,10 +104,11 @@ def test_prediction_artifact_helpers_do_not_export_bundle_semantics() -> None:
         input_factor_columns=("factor",),
         input_feature_columns=("feature",),
         label_column="label",
+        max_train_rows=len(frame),
     )
     fit = fit_model_result(frame.loc[frame["timestamp"] <= "2024-01-02"], model_spec)
 
-    prediction = build_prediction_frame(
+    prediction = prediction_frame_from_artifact(
         frame,
         spec,
         fit.coefficients,

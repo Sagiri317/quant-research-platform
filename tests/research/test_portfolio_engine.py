@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import quant_research_platform.research.portfolios as portfolios_package
+import quant_research_platform.research.portfolios.runner as portfolio_runner
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -271,7 +273,7 @@ def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
     assert "label" not in returns.columns
 
 
-def test_portfolio_runner_reports_empty_time_window_without_concat_error(
+def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     tmp_path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -289,6 +291,55 @@ def test_portfolio_runner_reports_empty_time_window_without_concat_error(
             portfolio_catalog=portfolio_catalog,
             portfolio_id="risk_signal_portfolio",
             time_window=TimeWindow("2023-01-01", "2023-12-31"),
+        )
+    run_root = (
+        tmp_path
+        / "reports"
+        / "private_real"
+        / "a_share"
+        / "portfolio"
+        / "risk_signal_portfolio"
+    )
+    assert not run_root.exists()
+    assert not list(run_root.parent.glob(".tmp-*"))
+
+
+def test_portfolio_runner_chunked_output_matches_single_chunk_path(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    normal_root = _run_demo_portfolio(tmp_path / "normal")
+    original_input_chunks = portfolio_runner._portfolio_input_chunks
+
+    def timestamp_input_chunks(**kwargs):  # noqa: ANN003
+        for chunk in original_input_chunks(**kwargs):
+            timestamps = pd.to_datetime(chunk["timestamp"], errors="raise")
+            for timestamp in pd.Index(timestamps.unique()).sort_values():
+                yield chunk.loc[timestamps == timestamp].copy()
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "_portfolio_input_chunks",
+        timestamp_input_chunks,
+    )
+    chunked_root = _run_demo_portfolio(tmp_path / "chunked")
+
+    for filename in (
+        "positions.parquet",
+        "turnover.parquet",
+        "cost_breakdown.parquet",
+        "portfolio_returns.parquet",
+        "cumulative_returns.parquet",
+        "performance_summary.parquet",
+        "exposure_summary.parquet",
+        "concentration.parquet",
+        "period_breakdown.parquet",
+        "diagnostics.parquet",
+    ):
+        pd.testing.assert_frame_equal(
+            _sorted_artifact_frame(pd.read_parquet(normal_root / filename)),
+            _sorted_artifact_frame(pd.read_parquet(chunked_root / filename)),
+            check_dtype=False,
         )
 
 
@@ -346,3 +397,27 @@ def _portfolio_frame() -> pd.DataFrame:
             "forward_return": [0.00, 0.01, 0.02, 0.04, -0.01, 0.01, 0.02, 0.05],
         }
     )
+
+
+def _run_demo_portfolio(project_root) -> Path:
+    layout = StorageLayout(project_root=project_root)
+    dataset_catalog = ResearchDatasetCatalog()
+    dataset_catalog.register(_dataset_spec())
+    portfolio_catalog = PortfolioCatalog()
+    portfolio_catalog.register(_portfolio_spec())
+    dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
+    write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
+    return run_portfolio_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        portfolio_catalog=portfolio_catalog,
+        portfolio_id="risk_signal_portfolio",
+        time_window=TimeWindow("2024-01-02", "2024-02-02"),
+    )
+
+
+def _sorted_artifact_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.reset_index(drop=True)
+    sort_columns = [column for column in frame.columns if column != "fallback_reason"]
+    return frame.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)

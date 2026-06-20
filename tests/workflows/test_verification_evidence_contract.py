@@ -13,9 +13,15 @@ def test_verification_evidence_output_root_is_explicit_not_run_workspace(
     tmp_path: Path,
 ) -> None:
     module = _workflow_module()
-    output_root = tmp_path / "verification-output"
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    output_root = repo_root / ("." + "run") / "private" / "verification-output"
 
-    module._prepare_output_root(output_root, replace_output=False)
+    module._prepare_output_root(
+        output_root,
+        replace_output=False,
+        repo_root=repo_root,
+    )
 
     assert output_root.is_dir()
     assert module._ownership_marker_path(output_root).is_file()
@@ -25,15 +31,21 @@ def test_verification_evidence_replace_output_rejects_unowned_directory(
     tmp_path: Path,
 ) -> None:
     module = _workflow_module()
-    output_root = tmp_path / "evidence-output"
-    output_root.mkdir()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    output_root = repo_root / ("." + "run") / "private" / "evidence-output"
+    output_root.mkdir(parents=True)
     (output_root / "unowned.txt").write_text("do not replace\n", encoding="utf-8")
 
     with pytest.raises(
         ValueError,
         match="output_root_not_owned_by_verification_evidence_workflow",
     ):
-        module._prepare_output_root(output_root, replace_output=True)
+        module._prepare_output_root(
+            output_root,
+            replace_output=True,
+            repo_root=repo_root,
+        )
 
     assert (output_root / "unowned.txt").is_file()
 
@@ -42,11 +54,21 @@ def test_verification_evidence_replace_output_allows_owned_directory(
     tmp_path: Path,
 ) -> None:
     module = _workflow_module()
-    output_root = tmp_path / "report-output"
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    output_root = repo_root / ("." + "run") / "private" / "report-output"
 
-    module._prepare_output_root(output_root, replace_output=False)
+    module._prepare_output_root(
+        output_root,
+        replace_output=False,
+        repo_root=repo_root,
+    )
     (output_root / "old-artifact.txt").write_text("old\n", encoding="utf-8")
-    module._prepare_output_root(output_root, replace_output=True)
+    module._prepare_output_root(
+        output_root,
+        replace_output=True,
+        repo_root=repo_root,
+    )
 
     assert output_root.is_dir()
     assert not (output_root / "old-artifact.txt").exists()

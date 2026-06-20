@@ -694,8 +694,8 @@ def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
 ) -> None:
     spec = _portfolio_spec()
     artifacts = _portfolio_artifacts()
-    run_root = report_artifacts.write_portfolio_report_artifacts(
-        **artifacts,
+    run_root = _write_portfolio_chunks_for_test(
+        artifacts,
         spec=spec,
         report_spec=_report_spec(
             "portfolio_report_private",
@@ -738,6 +738,51 @@ def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
     ]
 
 
+def test_portfolio_report_artifacts_write_row_artifacts_from_chunks(
+    tmp_path: Path,
+) -> None:
+    spec = _portfolio_spec()
+    artifacts = _portfolio_artifacts()
+    row_artifacts = (
+        "positions",
+        "turnover",
+        "cost_breakdown",
+        "portfolio_returns",
+        "diagnostics",
+    )
+    chunks = (
+        {
+            artifact_name: artifacts[artifact_name].iloc[:1].copy()
+            for artifact_name in row_artifacts
+        },
+        {
+            artifact_name: artifacts[artifact_name].iloc[1:].copy()
+            for artifact_name in row_artifacts
+        },
+    )
+    run_root = report_artifacts._write_portfolio_report_artifacts_from_chunks(
+        chunks,
+        summary_artifacts_factory=lambda: {
+            artifact_name: artifacts[artifact_name]
+            for artifact_name in artifacts
+            if artifact_name not in row_artifacts
+        },
+        spec=spec,
+        report_spec=_report_spec(
+            "portfolio_report_private",
+            spec.portfolio_id,
+            "portfolio",
+        ),
+        layout=StorageLayout(project_root=tmp_path),
+    )
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["row_counts"]["positions"] == 2
+    assert manifest["row_counts"]["turnover"] == 1
+    assert len(pd.read_parquet(run_root / "positions.parquet")) == 2
+    assert len(pd.read_parquet(run_root / "portfolio_returns.parquet")) == 1
+
+
 def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
     spec = _portfolio_spec()
     report_spec = _report_spec(
@@ -752,8 +797,8 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         columns=["asset"]
     )
     with pytest.raises(ValueError, match="missing_portfolio_positions_columns"):
-        report_artifacts.write_portfolio_report_artifacts(
-            **missing_positions,
+        _write_portfolio_chunks_for_test(
+            missing_positions,
             spec=spec,
             report_spec=report_spec,
             layout=layout,
@@ -764,8 +809,8 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         extra=1
     )
     with pytest.raises(ValueError, match="unregistered_portfolio_portfolio_returns"):
-        report_artifacts.write_portfolio_report_artifacts(
-            **extra_returns,
+        _write_portfolio_chunks_for_test(
+            extra_returns,
             spec=spec,
             report_spec=report_spec,
             layout=layout,
@@ -776,8 +821,8 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         "portfolio_returns"
     ].assign(return_source_column="other_return")
     with pytest.raises(ValueError, match="portfolio_return_source_column_mismatch"):
-        report_artifacts.write_portfolio_report_artifacts(
-            **wrong_return_source,
+        _write_portfolio_chunks_for_test(
+            wrong_return_source,
             spec=spec,
             report_spec=report_spec,
             layout=layout,
@@ -788,8 +833,8 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         signal="other_signal"
     )
     with pytest.raises(ValueError, match="portfolio_artifact_signal_mismatch"):
-        report_artifacts.write_portfolio_report_artifacts(
-            **wrong_signal,
+        _write_portfolio_chunks_for_test(
+            wrong_signal,
             spec=spec,
             report_spec=report_spec,
             layout=layout,
@@ -819,8 +864,8 @@ def test_portfolio_report_artifacts_clean_temp_run_directory_on_failure(
     monkeypatch.setattr(report_artifacts, "_atomic_write_report_parquet", fail_write)
 
     with pytest.raises(RuntimeError, match="portfolio parquet failed"):
-        report_artifacts.write_portfolio_report_artifacts(
-            **_portfolio_artifacts(),
+        _write_portfolio_chunks_for_test(
+            _portfolio_artifacts(),
             spec=spec,
             report_spec=report_spec,
             layout=layout,
@@ -1031,6 +1076,37 @@ def _portfolio_artifacts() -> dict[str, pd.DataFrame]:
             }
         ),
     }
+
+
+def _write_portfolio_chunks_for_test(
+    artifacts: dict[str, pd.DataFrame],
+    *,
+    spec: PortfolioSpec,
+    report_spec: ReportSpec,
+    layout: StorageLayout,
+) -> Path:
+    row_artifacts = _portfolio_row_artifact_names()
+    return report_artifacts._write_portfolio_report_artifacts_from_chunks(
+        ({artifact_name: artifacts[artifact_name] for artifact_name in row_artifacts},),
+        summary_artifacts_factory=lambda: {
+            artifact_name: artifacts[artifact_name]
+            for artifact_name in artifacts
+            if artifact_name not in row_artifacts
+        },
+        spec=spec,
+        report_spec=report_spec,
+        layout=layout,
+    )
+
+
+def _portfolio_row_artifact_names() -> tuple[str, ...]:
+    return (
+        "positions",
+        "turnover",
+        "cost_breakdown",
+        "portfolio_returns",
+        "diagnostics",
+    )
 
 
 def _prediction_frame(*, with_metadata: bool) -> pd.DataFrame:

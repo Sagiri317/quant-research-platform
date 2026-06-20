@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,6 +59,7 @@ from quant_research_platform.storage.manifests import (
 )
 
 _LOGICAL_PATH_MARKERS = ("data", "reports", "manifests", "validations", "timings")
+_RUN_WORKSPACE_DIR = "." + "run"
 
 
 @dataclass(frozen=True)
@@ -370,10 +372,14 @@ def validate_private_output_root(output_root: Path, repo_root: Path) -> None:
     try:
         relative = target.relative_to(root)
     except ValueError:
-        return
+        raise ValueError("unignored_private_output_root") from None
     parts = relative.parts
     if len(parts) >= 3 and parts[0] == "reports" and parts[1] == "private_real":
         return
+    if len(parts) >= 2 and parts[0] == _RUN_WORKSPACE_DIR:
+        run_root = parts[1]
+        if run_root in {"private", "smoke"} or re.fullmatch(r"s[0-9]+", run_root):
+            return
     raise ValueError("unignored_private_output_root")
 
 
@@ -384,7 +390,6 @@ def _resolve_private_boundary_repo_root(
     if explicit_repo_root is not None:
         return Path(explicit_repo_root)
     for candidate in (
-        _find_git_root(Path(output_root).resolve(strict=False)),
         _find_git_root(Path.cwd().resolve(strict=False)),
         _find_git_root(Path(__file__).resolve(strict=False)),
     ):
@@ -483,7 +488,8 @@ def _runtime_execution_plan_payload() -> dict[str, object]:
         "report_writing": {
             "prediction_parquet": "chunked_internal",
             "evaluation_parquet": "materialized",
-            "portfolio_parquet": "materialized",
+            "portfolio_row_artifacts": "chunked_internal",
+            "portfolio_summary_artifacts": "aggregate_summary",
         },
         "full_horizon_tiling": {
             "status": "NOT_LANDED",

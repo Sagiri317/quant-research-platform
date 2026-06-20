@@ -291,6 +291,53 @@ def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
     assert any("forbidden_path_segment" in item for item in result.failures)
 
 
+@pytest.mark.parametrize(
+    "member",
+    [
+        "." + "run/private/s1/summary.json",
+        "." + "run/smoke/s1/summary.json",
+        "." + "run/s86/summary.json",
+    ],
+)
+def test_handoff_safety_rejects_private_run_members(
+    tmp_path: Path,
+    member: str,
+) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, "{}\n")
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("forbidden_path_segment" in item for item in result.failures)
+
+
+@pytest.mark.parametrize(
+    "logical_path",
+    ["." + "run/private/s1", "." + "run\\\\private\\\\s1"],
+)
+def test_handoff_safety_rejects_private_run_path_in_sidecar(
+    tmp_path: Path,
+    logical_path: str,
+) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("task_metadata.json", "{}\n")
+    sidecar = tmp_path / "handoff.json"
+    sidecar.write_text(
+        json.dumps({"evidence_root": logical_path}),
+        encoding="utf-8",
+    )
+
+    result = safety.scan_handoff_zip(package, json_path=sidecar)
+
+    assert not result.ok
+    assert any("private_run_path" in item for item in result.failures)
+
+
 def test_handoff_safety_rejects_repo_local_codex_members(tmp_path: Path) -> None:
     safety = _load_handoff_module("handoff_safety")
     package = tmp_path / "handoff.zip"

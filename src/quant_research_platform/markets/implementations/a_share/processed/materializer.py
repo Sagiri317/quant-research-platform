@@ -116,6 +116,7 @@ def materialize_processed_data(
         sessions=sessions,
     )
     written: dict[str, DatasetInspection] = {}
+    panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] = {}
     for spec in targets:
         target_time_window = _merge_time_windows(
             time_window,
@@ -131,6 +132,7 @@ def materialize_processed_data(
             written=written,
             requested=True,
             dependency_windows=dependency_windows,
+            panel_key_coverages=panel_key_coverages,
         )
     return written
 
@@ -146,6 +148,7 @@ def _materialize_one(
     written: dict[str, DatasetInspection],
     requested: bool,
     dependency_windows: dict[str, TimeWindow],
+    panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]],
 ) -> DatasetInspection:
     root = _processed_root(layout, spec)
     if spec.data_id in written:
@@ -166,6 +169,7 @@ def _materialize_one(
         written=written,
         processed_catalog=catalog,
         dependency_windows=dependency_windows,
+        panel_key_coverages=panel_key_coverages,
     )
     if spec.kind is ProcessedDataKind.PANEL:
         return _write_panel(
@@ -194,6 +198,7 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
+            panel_key_coverages=panel_key_coverages,
         )
     if spec.kind is ProcessedDataKind.LABEL:
         return _write_labels(
@@ -203,6 +208,7 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
+            panel_key_coverages=panel_key_coverages,
         )
     raise ValueError(f"unsupported_processed_kind: {spec.kind}")
 
@@ -341,6 +347,10 @@ def _write_factors(
     policy: RuntimeResourcePolicy,
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
+    panel_key_coverages: dict[
+        Path,
+        dict[object, tuple[pd.Timestamp, ...]],
+    ] | None = None,
 ) -> DatasetInspection:
     processed_catalog = a_share_processed_catalog()
     factor_catalog = factor_definitions.a_share_factor_catalog()
@@ -356,6 +366,10 @@ def _write_factors(
     available = inspect_dataset(panel_root)
     lookback_days = factor_calculations.factor_lookback_bars(definitions)
     panel_input_columns = factor_calculations.factor_panel_input_columns(definitions)
+    panel_key_coverage = _processed_panel_key_coverage(
+        panel_root,
+        cache=panel_key_coverages,
+    )
     estimated = _estimate_factor_bytes_per_session(
         sessions,
         time_window=time_window,
@@ -375,12 +389,10 @@ def _write_factors(
         warmup_sessions=lookback_days,
         reason="factor_warmup",
     )
-    panel_keys = read_dataset(panel_root, columns=["asset_id", "timestamp"])
-
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
             read_window = factor_calculations.factor_read_window_for_panel(
-                panel_keys,
+                panel_key_coverage,
                 definitions=definitions,
                 read_window=window.read,
                 core_sessions=window.core_sessions,
@@ -425,6 +437,10 @@ def _write_labels(
     policy: RuntimeResourcePolicy,
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
+    panel_key_coverages: dict[
+        Path,
+        dict[object, tuple[pd.Timestamp, ...]],
+    ] | None = None,
 ) -> DatasetInspection:
     processed_catalog = a_share_processed_catalog()
     label_catalog = label_definitions.a_share_label_catalog()
@@ -440,6 +456,10 @@ def _write_labels(
     available = inspect_dataset(panel_root)
     lookahead_sessions = label_calculations.label_lookahead_bars(definitions)
     panel_input_columns = label_calculations.label_panel_input_columns(definitions)
+    panel_key_coverage = _processed_panel_key_coverage(
+        panel_root,
+        cache=panel_key_coverages,
+    )
     estimated = _estimate_label_bytes_per_session(
         sessions,
         time_window=time_window,
@@ -459,12 +479,10 @@ def _write_labels(
         lookahead_sessions=lookahead_sessions,
         reason="label_lookahead",
     )
-    panel_keys = read_dataset(panel_root, columns=["asset_id", "timestamp"])
-
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
             read_window = label_calculations.label_read_window_for_panel(
-                panel_keys,
+                panel_key_coverage,
                 definitions=definitions,
                 read_window=window.read,
                 core_sessions=window.core_sessions,
@@ -574,6 +592,45 @@ def _dataset_session_dates(
         timestamp = pd.to_datetime(chunk["timestamp"], errors="coerce")
         dates.update(timestamp.dropna().dt.date)
     return dates
+
+
+def _processed_panel_key_coverage(
+    root: Path,
+    *,
+    cache: dict[Path, dict[object, tuple[pd.Timestamp, ...]]] | None = None,
+) -> dict[object, tuple[pd.Timestamp, ...]]:
+    cache_key = root.resolve()
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    inspection = inspect_dataset(root)
+    missing = {"asset_id", "timestamp"}.difference(inspection.columns)
+    if missing:
+        raise ValueError(
+            "missing_processed_panel_key_columns: " + ", ".join(sorted(missing))
+        )
+    chunks = read_dataset(
+        root,
+        columns=["asset_id", "timestamp"],
+        mode=DatasetReadMode.CHUNKED,
+    )
+    key_chunks = (chunks,) if isinstance(chunks, pd.DataFrame) else chunks
+    coverage: dict[object, set[pd.Timestamp]] = {}
+    for chunk in key_chunks:
+        if chunk.empty:
+            continue
+        keys = chunk.loc[:, ["asset_id", "timestamp"]].copy()
+        keys["timestamp"] = pd.to_datetime(keys["timestamp"], errors="coerce")
+        keys = keys.dropna(subset=["asset_id", "timestamp"])
+        for asset_id, asset_rows in keys.groupby("asset_id", sort=False):
+            asset_dates = coverage.setdefault(asset_id, set())
+            asset_dates.update(asset_rows["timestamp"].dt.normalize())
+    result = {
+        asset_id: tuple(sorted(asset_dates))
+        for asset_id, asset_dates in coverage.items()
+    }
+    if cache is not None:
+        cache[cache_key] = result
+    return result
 
 
 def _iter_sorted_output_chunks(
@@ -977,6 +1034,7 @@ def _ensure_processed_dependencies(
     written: dict[str, DatasetInspection],
     processed_catalog: ProcessedDataCatalog,
     dependency_windows: dict[str, TimeWindow],
+    panel_key_coverages: dict[Path, dict[object, tuple[pd.Timestamp, ...]]],
 ) -> None:
     dependency_window = _processed_dependency_time_window(
         spec,
@@ -993,6 +1051,8 @@ def _ensure_processed_dependencies(
         )
         dependency_root = _processed_root(layout, dependency)
         if dependency_root.exists():
+            if data_id in written:
+                continue
             _require_dataset_coverage(
                 dependency_root,
                 required_window,
@@ -1009,6 +1069,7 @@ def _ensure_processed_dependencies(
             written=written,
             requested=False,
             dependency_windows=dependency_windows,
+            panel_key_coverages=panel_key_coverages,
         )
 
 
@@ -1063,11 +1124,12 @@ def _processed_dependency_time_window(
             contract=_factor_input_contract(definitions),
             purpose="factor",
         )
-        return factor_calculations.factor_read_window_for_panel(
-            _source_daily_market_panel_keys(layout, source_id),
-            definitions=definitions,
-            read_window=time_window,
-            core_sessions=_target_sessions(sessions, time_window),
+        lookback = factor_calculations.factor_lookback_bars(definitions)
+        return _session_offset_time_window(
+            sessions=sessions,
+            time_window=time_window,
+            lookback_sessions=lookback,
+            lookahead_sessions=0,
         )
     if spec.kind is ProcessedDataKind.LABEL:
         definitions = _select_label_definitions_for_spec(
@@ -1079,27 +1141,46 @@ def _processed_dependency_time_window(
             contract=_label_input_contract(definitions),
             purpose="label",
         )
-        return label_calculations.label_read_window_for_panel(
-            _source_daily_market_panel_keys(layout, source_id),
-            definitions=definitions,
-            read_window=time_window,
-            core_sessions=_target_sessions(sessions, time_window),
+        lookahead = label_calculations.label_lookahead_bars(definitions)
+        return _session_offset_time_window(
+            sessions=sessions,
+            time_window=time_window,
+            lookback_sessions=0,
+            lookahead_sessions=lookahead,
         )
     return time_window
 
 
-def _source_daily_market_panel_keys(
-    layout: StorageLayout,
-    source_id: SourceId,
-) -> pd.DataFrame:
-    daily_market = read_dataset(
-        layout.interim_data_root(source_id, "daily_market"),
-        columns=["source_asset_id", "timestamp"],
+def _session_offset_time_window(
+    *,
+    sessions: tuple[pd.Timestamp, ...],
+    time_window: TimeWindow,
+    lookback_sessions: int,
+    lookahead_sessions: int,
+) -> TimeWindow:
+    if not sessions or (lookback_sessions <= 0 and lookahead_sessions <= 0):
+        return time_window
+    normalized_sessions = tuple(
+        pd.Timestamp(session).normalize() for session in sessions
     )
-    return daily_market.rename(columns={"source_asset_id": "asset_id"}).loc[
-        :,
-        ["asset_id", "timestamp"],
+    start = pd.Timestamp(time_window.start).normalize()
+    end = pd.Timestamp(time_window.end).normalize()
+    core_positions = [
+        position
+        for position, session in enumerate(normalized_sessions)
+        if start <= session <= end
     ]
+    if not core_positions:
+        return time_window
+    start_position = max(0, core_positions[0] - max(0, int(lookback_sessions)))
+    end_position = min(
+        len(normalized_sessions) - 1,
+        core_positions[-1] + max(0, int(lookahead_sessions)),
+    )
+    return TimeWindow(
+        normalized_sessions[start_position].date(),
+        normalized_sessions[end_position].date(),
+    )
 
 
 def _validate_processed_dependency_graph(

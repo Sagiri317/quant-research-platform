@@ -6,6 +6,8 @@ calendar/session windows and do not fill missing or suspended rows.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -41,7 +43,7 @@ def add_forward_return_labels(
 
 
 def forward_return_valid_bar_read_window(
-    panel_keys: pd.DataFrame,
+    panel_keys: pd.DataFrame | Mapping[object, Sequence[pd.Timestamp]],
     *,
     read_window: TimeWindow,
     core_sessions: tuple[pd.Timestamp, ...],
@@ -49,41 +51,69 @@ def forward_return_valid_bar_read_window(
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
 ) -> TimeWindow:
-    if lookahead_bars <= 0 or panel_keys.empty:
+    if lookahead_bars <= 0:
         return read_window
-    keys = panel_keys.loc[:, [asset_column, date_column]].copy()
-    keys[date_column] = pd.to_datetime(keys[date_column], errors="coerce")
-    keys = keys.dropna(subset=[asset_column, date_column])
-    if keys.empty:
+    key_groups = tuple(
+        _iter_panel_key_groups(
+            panel_keys,
+            asset_column=asset_column,
+            date_column=date_column,
+        )
+    )
+    if not key_groups:
         return read_window
     read_start = pd.Timestamp(read_window.start)
-    keys = keys.loc[keys[date_column].dt.normalize().ge(read_start)].sort_values(
-        [asset_column, date_column]
-    )
-    if keys.empty:
-        return read_window
     core_dates = {session.date() for session in core_sessions}
-    core_rows = keys.loc[keys[date_column].dt.date.isin(core_dates)]
-    if core_rows.empty:
-        return read_window
     ends = [pd.Timestamp(read_window.end)]
-    for _, asset_rows in keys.groupby(asset_column, sort=False):
+    saw_core = False
+    for asset_dates in key_groups:
+        asset_rows = asset_dates.loc[asset_dates.dt.normalize().ge(read_start)]
+        if asset_rows.empty:
+            continue
         asset_core_positions = [
             position
-            for position, timestamp in enumerate(asset_rows[date_column])
+            for position, timestamp in enumerate(asset_rows)
             if timestamp.date() in core_dates
         ]
         if not asset_core_positions:
             continue
+        saw_core = True
         read_position = min(
             len(asset_rows) - 1,
             asset_core_positions[-1] + lookahead_bars,
         )
-        ends.append(asset_rows.iloc[read_position][date_column].normalize())
+        ends.append(asset_rows.iloc[read_position].normalize())
+    if not saw_core:
+        return read_window
     end = max(ends).date()
     if end <= read_window.end:
         return read_window
     return TimeWindow(read_window.start, end)
+
+
+def _iter_panel_key_groups(
+    panel_keys: pd.DataFrame | Mapping[object, Sequence[pd.Timestamp]],
+    *,
+    asset_column: str,
+    date_column: str,
+) -> Iterable[pd.Series]:
+    if isinstance(panel_keys, pd.DataFrame):
+        if panel_keys.empty:
+            return
+        keys = panel_keys.loc[:, [asset_column, date_column]].copy()
+        keys[date_column] = pd.to_datetime(keys[date_column], errors="coerce")
+        keys = keys.dropna(subset=[asset_column, date_column])
+        if keys.empty:
+            return
+        keys = keys.sort_values([asset_column, date_column])
+        for _, asset_rows in keys.groupby(asset_column, sort=False):
+            yield asset_rows[date_column].reset_index(drop=True)
+        return
+    for timestamps in panel_keys.values():
+        dates = pd.Series(pd.to_datetime(tuple(timestamps), errors="coerce"))
+        dates = dates.dropna().sort_values(kind="mergesort").reset_index(drop=True)
+        if not dates.empty:
+            yield dates
 
 
 __all__ = ["add_forward_return_labels", "forward_return_valid_bar_read_window"]

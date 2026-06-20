@@ -116,7 +116,13 @@ def compute_daily_panel(
             if "asset_id_capchg" in stock_result.columns:
                 stock_result = stock_result.drop(columns=["asset_id_capchg"])
         merged_groups.append(stock_result)
-    panel = pd.concat(merged_groups, ignore_index=True)
+    if merged_groups:
+        panel = pd.concat(merged_groups, ignore_index=True)
+    else:
+        panel = panel.copy()
+        panel["share_change_date"] = pd.Series(dtype="datetime64[ns]")
+        panel["total_shares"] = pd.Series(dtype="float64")
+        panel["a_float_shares"] = pd.Series(dtype="float64")
     volume = pd.to_numeric(panel["volume"], errors="coerce")
     a_float_shares = pd.to_numeric(panel["a_float_shares"], errors="coerce")
     panel["turnover"] = volume.div(a_float_shares.where(a_float_shares.gt(0)))
@@ -259,7 +265,19 @@ def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
                 static_listing_date[asset_id]
             )
         merged_groups.append(stock_result)
+    if not merged_groups:
+        stock_result = daily.copy()
+        for column in stock_output_columns:
+            if column not in stock_result.columns:
+                stock_result[column] = _empty_stock_master_column(column)
+        return stock_result
     return pd.concat(merged_groups, ignore_index=True)
+
+
+def _empty_stock_master_column(column: str) -> pd.Series:
+    if column in {"listing_date", "delisting_date", "status_change_date"}:
+        return pd.Series(dtype="datetime64[ns]")
+    return pd.Series(dtype="object")
 
 
 def _stock_master_effective_date(stocks: pd.DataFrame) -> pd.Series:

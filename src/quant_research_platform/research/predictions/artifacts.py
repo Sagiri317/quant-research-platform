@@ -25,65 +25,6 @@ from quant_research_platform.runtime.resources import ChunkAxis
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def build_prediction_frame(
-    frame: pd.DataFrame,
-    spec: PredictionSpec,
-    coefficients: np.ndarray,
-    input_columns: tuple[str, ...],
-    *,
-    prediction_model: object | None = None,
-) -> pd.DataFrame:
-    return _build_prediction_frame_from_frames(
-        (frame,),
-        spec,
-        coefficients,
-        input_columns,
-        prediction_model=prediction_model,
-    )
-
-
-def _build_prediction_frame_from_frames(
-    frames: Iterable[pd.DataFrame],
-    spec: PredictionSpec,
-    coefficients: np.ndarray,
-    input_columns: tuple[str, ...],
-    *,
-    prediction_model: object | None = None,
-) -> pd.DataFrame:
-    reject_filter_input_columns(input_columns)
-    required = set((*spec.primary_key, *input_columns))
-    _validate_oos_split(spec)
-    work_columns = tuple(
-        dict.fromkeys(
-            (
-                *spec.primary_key,
-                *input_columns,
-                *required_filter_columns(spec.sample_filter_mode),
-            )
-        )
-    )
-    build_state = _PredictionBuildState()
-    result = _collect_prediction_frame(
-        _iter_prediction_work_frames(
-            frames,
-            required=required,
-            work_columns=work_columns,
-        ),
-        spec=spec,
-        coefficients=coefficients,
-        input_columns=input_columns,
-        predictor=_prediction_callable(coefficients, input_columns, prediction_model),
-        build_state=build_state,
-    )
-    if result.empty:
-        raise ValueError("empty_prediction_window")
-    result.attrs["prediction_metadata"] = build_state.prediction_metadata(
-        spec=spec,
-        input_columns=input_columns,
-    )
-    return result
-
-
 def _write_prediction_artifacts_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: PredictionSpec,
@@ -207,28 +148,6 @@ def _prediction_static_window_model_metadata(
     }
 
 
-def _collect_prediction_frame(
-    frames: Iterable[pd.DataFrame],
-    *,
-    spec: PredictionSpec,
-    coefficients: np.ndarray,
-    input_columns: tuple[str, ...],
-    predictor: Callable[[pd.DataFrame], np.ndarray],
-    build_state: _PredictionBuildState,
-) -> pd.DataFrame:
-    parts = list(
-        _iter_prediction_output_frames(
-            frames,
-            spec=spec,
-            coefficients=coefficients,
-            input_columns=input_columns,
-            predictor=predictor,
-            build_state=build_state,
-        )
-    )
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-
-
 def _iter_prediction_output_frames(
     frames: Iterable[pd.DataFrame],
     *,
@@ -350,6 +269,8 @@ def write_prediction_artifacts(
             output.attrs["model_metadata"],
             spec,
         )
+    if "prediction_metadata" in output.attrs:
+        output.attrs["prediction_metadata"] = dict(output.attrs["prediction_metadata"])
     return write_prediction_report_artifacts(
         output,
         spec=spec,
@@ -359,7 +280,6 @@ def write_prediction_artifacts(
 
 
 __all__ = [
-    "build_prediction_frame",
     "validate_prediction_artifacts",
     "write_prediction_artifacts",
 ]

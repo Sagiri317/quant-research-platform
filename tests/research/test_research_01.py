@@ -34,7 +34,6 @@ from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
 )
-from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import (
@@ -49,12 +48,16 @@ from quant_research_platform.research.evaluations.runner import (
 )
 from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
-    build_prediction_frame,
     run_prediction_from_research_dataset,
-    write_prediction_artifacts,
+)
+from quant_research_platform.research.predictions.artifacts import (
+    _write_prediction_artifacts_from_frames,
 )
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.research.prediction_artifact_helpers import (
+    write_prediction_artifact_and_read,
+)
 
 
 def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
@@ -549,6 +552,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         model_algorithm="linear_regression",
         input_factor_columns=("mom_20d",),
         label_column="forward_return_20d",
+        max_train_rows=len(frame),
     )
     prediction_spec = PredictionSpec(
         prediction_id="pred_demo",
@@ -564,26 +568,13 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],
         model_spec,
     )
-    prediction = build_prediction_frame(
-        frame,
+    prediction, run_root, _ = write_prediction_artifact_and_read(
+        tmp_path,
+        (frame,),
         prediction_spec,
         model_result.coefficients,
         model_spec.input_columns,
-    )
-    prediction.attrs["model_metadata"] = model_result.metadata
-    layout = StorageLayout(project_root=tmp_path)
-    report_spec = ReportSpec(
-        report_id="prediction_artifacts",
-        report_definition_id="prediction_artifacts_private",
-        run_id=prediction_spec.prediction_id,
-        market_id=MarketId("a_share"),
-        run_type=prediction_spec.run_type,
-    )
-    run_root = write_prediction_artifacts(
-        prediction,
-        prediction_spec,
-        report_spec=report_spec,
-        layout=layout,
+        model_metadata=model_result.metadata,
     )
 
     assert len(evaluation.metrics) == 2
@@ -596,7 +587,10 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert run_root.as_posix().endswith(
         "reports/private_real/a_share/prediction/pred_demo"
     )
-    assert "output_root" not in inspect.signature(write_prediction_artifacts).parameters
+    assert (
+        "output_root"
+        not in inspect.signature(_write_prediction_artifacts_from_frames).parameters
+    )
 
 
 def test_prediction_handoff_reads_research_dataset_and_writes_report(
@@ -697,16 +691,6 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
             test_start="2014-01-03",
             test_end="2014-01-03",
         )
-    )
-
-    def reject_materialized_builder(*_args, **_kwargs):
-        raise AssertionError("materialized_prediction_artifacts_builder_called")
-
-    monkeypatch.setattr(
-        prediction_runner_module,
-        "_build_prediction_frame_from_frames",
-        reject_materialized_builder,
-        raising=False,
     )
 
     run_root = run_prediction_from_research_dataset(

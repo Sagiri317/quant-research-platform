@@ -41,7 +41,7 @@ BLOCKED_PATH_PARTS = {
 }
 
 PACKAGE_EXTENSIONS = {".zip", ".bundle"}
-TEXT_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}
+TEXT_EXTENSIONS = {".md", ".patch", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}
 MAX_TEXT_SCAN_BYTES = 2_000_000
 
 LOCAL_PATH_PATTERN = re.compile(
@@ -58,6 +58,10 @@ SECRET_PATTERN = re.compile(
     r"\s*[:=]\s*['\"]?[^\s'\"]+"
 )
 STOCK_SAMPLE_PATTERN = re.compile(r"\b(?:00|30|60|68)\d{4}\.(?:SZ|SH)\b")
+PRIVATE_RUN_PATH_PATTERN = re.compile(
+    r"(?i)(?:^|[\s`'\"])\.run[\\/]+(?:private|smoke|s[0-9]+)"
+    r"(?:[\\/]+|[\s`'\"]|$)"
+)
 
 
 @dataclass
@@ -90,6 +94,7 @@ def check_entry_path(
         result.errors.append(f"Windows backslash entry: {name}")
     lower = norm.lower()
     suffix = PurePosixPath(lower).suffix
+    parts = PurePosixPath(lower).parts
     if suffix in BLOCKED_EXTENSIONS:
         result.errors.append(f"blocked extension: {norm}")
     if (
@@ -100,6 +105,10 @@ def check_entry_path(
         result.errors.append(f"nested package/bundle not allowed by default: {norm}")
     for part in BLOCKED_PATH_PARTS:
         if lower == part or lower.startswith(part + "/") or f"/{part}/" in lower:
+            result.errors.append(f"blocked private/sensitive path: {norm}")
+    if len(parts) >= 2 and parts[0] == ".run":
+        run_root = parts[1]
+        if run_root in {"private", "smoke"} or re.fullmatch(r"s[0-9]+", run_root):
             result.errors.append(f"blocked private/sensitive path: {norm}")
 
 
@@ -164,6 +173,8 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
     for line_number, line in enumerate(text.splitlines(), start=1):
         if _skip_pattern_line(line, name):
             continue
+        if PRIVATE_RUN_PATH_PATTERN.search(line):
+            result.errors.append(f"private run path in {name}:{line_number}")
         if SECRET_PATTERN.search(line):
             result.errors.append(
                 f"possible secret-like assignment in {name}:{line_number}"
@@ -191,6 +202,8 @@ def check_diff_text(result: SafetyResult, name: str, text: str) -> None:
             result.errors.append(
                 f"possible secret-like assignment in {name}:{line_number}"
             )
+        if PRIVATE_RUN_PATH_PATTERN.search(line):
+            result.errors.append(f"private run path in {name}:{line_number}")
         if LOCAL_PATH_PATTERN.search(line) and not is_allowed_diff_literal_context(
             current_path,
             line,

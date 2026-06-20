@@ -100,6 +100,10 @@ PRIVATE_RUNTIME_PAYLOAD_RE = re.compile(
     r"(?i)\b(?:runtime_payload|private_runtime_payload|"
     r"exact_private_runtime_payload)\b"
 )
+PRIVATE_RUN_PATH_RE = re.compile(
+    r"(?i)(?:^|[\s`'\"])\.run[\\/]+(?:private|smoke|s[0-9]+)"
+    r"(?:[\\/]+|[\s`'\"]|$)"
+)
 STALE_MARKERS: tuple[str, ...] = ()
 BUNDLE_TEXT_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
@@ -396,12 +400,17 @@ def member_name_failures(name: str) -> list[str]:
         failures.append(f"windows_backslash_zip_path: {name}")
     normalized = name.replace("\\", "/").lower()
     suffix = Path(normalized).suffix.lower()
+    parts = tuple(part for part in normalized.split("/") if part)
     if suffix in FORBIDDEN_SUFFIXES:
         failures.append(f"forbidden_suffix: {name}")
     for segment in FORBIDDEN_PATH_SEGMENTS:
         if contains_path_segment(normalized, segment):
             failures.append(f"forbidden_path_segment: {name}")
             break
+    if len(parts) >= 2 and parts[0] == ".run":
+        run_root = parts[1]
+        if run_root in {"private", "smoke"} or re.fullmatch(r"s[0-9]+", run_root):
+            failures.append(f"forbidden_path_segment: {name}")
     return failures
 
 
@@ -449,6 +458,8 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
     )
     if contains_local_absolute_path(scan_text):
         return "local_absolute_path"
+    if PRIVATE_RUN_PATH_RE.search(scan_text):
+        return "private_run_path"
     if RAW_EXPORT_FILENAME_RE.search(scan_text):
         return "vendor_filename"
     if ROW_SAMPLE_KEY_RE.search(scan_text):

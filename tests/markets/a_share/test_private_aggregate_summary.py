@@ -40,6 +40,31 @@ def test_private_aggregate_summary_is_row_order_and_file_split_insensitive() -> 
     )
 
 
+def test_private_aggregate_report_artifact_frames_are_lazy(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    report_root = tmp_path / "report"
+    report_root.mkdir()
+    (report_root / "first.parquet").write_bytes(b"")
+    (report_root / "second.parquet").write_bytes(b"")
+    read_order: list[str] = []
+
+    def fake_read_parquet(path, **kwargs):  # noqa: ANN001
+        assert kwargs == {"engine": "pyarrow"}
+        read_order.append(path.name)
+        return _base_frame().iloc[:1].copy()
+
+    monkeypatch.setattr(private_aggregate.pd, "read_parquet", fake_read_parquet)
+    frames = private_aggregate._iter_report_artifact_frames((report_root,))
+
+    assert read_order == []
+    next(frames)
+    assert read_order == ["first.parquet"]
+    next(frames)
+    assert read_order == ["first.parquet", "second.parquet"]
+
+
 def test_private_aggregate_summary_detects_single_value_change() -> None:
     baseline = _base_frame()
     candidate = baseline.copy()
