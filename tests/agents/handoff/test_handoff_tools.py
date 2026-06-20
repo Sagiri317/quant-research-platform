@@ -307,6 +307,22 @@ def test_handoff_safety_rejects_absolute_paths_with_private_segments(
     assert any("local_absolute_path_text" in item for item in result.failures)
 
 
+def test_handoff_safety_ignores_removed_diff_lines() -> None:
+    safety = _load_handoff_module("handoff_safety")
+    diff = "\n".join(
+        [
+            "diff --git a/docs/old.md b/docs/old.md",
+            "--- a/docs/old.md",
+            "+++ b/docs/old.md",
+            "-old local example C" + ":/" + "Users/name/private.txt",
+            "-old workspace example /workspace/qrp/data/research/a_share/demo",
+            "+replacement public summary",
+        ]
+    )
+
+    assert safety.unsafe_text_reason(diff, name="diff.patch") is None
+
+
 def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     run_reviews = "." + "run/reviews"

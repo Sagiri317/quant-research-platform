@@ -451,6 +451,8 @@ def unsafe_diff_text_reason(text: str) -> str | None:
         path = diff_line_path(line)
         if path:
             current_path = path
+        if is_removed_diff_line(line):
+            continue
         if is_allowed_diff_literal_context(current_path, line):
             continue
         if contains_local_absolute_path(line):
@@ -461,6 +463,10 @@ def unsafe_diff_text_reason(text: str) -> str | None:
     if scan_text:
         return "local_absolute_path"
     return unsafe_text_reason("\n".join(filtered_lines), name="diff.patch.filtered")
+
+
+def is_removed_diff_line(line: str) -> bool:
+    return line.startswith("-") and not line.startswith("--- ")
 
 
 def diff_line_path(line: str) -> str:
