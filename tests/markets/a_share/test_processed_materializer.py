@@ -87,6 +87,45 @@ def test_panel_materializer_reuses_daily_market_inspection(
     assert calls == 1
 
 
+def test_panel_materializer_does_not_preload_full_daily_market(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = StorageLayout(project_root=tmp_path)
+    _write_interim_inputs(layout, end_date="2014-01-10")
+    daily_market_root = layout.interim_data_root(SYNTHETIC_SOURCE_ID, "daily_market")
+    original = materializer.read_dataset
+    full_daily_market_reads = 0
+    windowed_daily_market_reads = 0
+
+    def spy_read_dataset(root, **kwargs):
+        nonlocal full_daily_market_reads, windowed_daily_market_reads
+        if Path(root) == daily_market_root:
+            if kwargs.get("time_window") is None:
+                full_daily_market_reads += 1
+            else:
+                windowed_daily_market_reads += 1
+        return original(root, **kwargs)
+
+    monkeypatch.setattr(materializer, "read_dataset", spy_read_dataset)
+
+    materializer.materialize_processed_data(
+        layout=layout,
+        source_id=SYNTHETIC_SOURCE_ID,
+        time_window=TimeWindow("2014-01-02", "2014-01-08"),
+        data_ids=("daily_panel",),
+        resource_policy=RuntimeResourcePolicy(
+            available_memory_bytes=1_000,
+            memory_budget_fraction=1.0,
+            chunk_target_bytes=250,
+            memory_safety_factor=1.0,
+        ),
+    )
+
+    assert full_daily_market_reads == 0
+    assert windowed_daily_market_reads > 0
+
+
 def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)

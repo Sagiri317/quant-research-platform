@@ -22,6 +22,20 @@ def test_run_id_accepts_public_safe_lowercase_identifiers() -> None:
     )
 
     assert report.run_id == "run-01.alpha_beta"
+    assert ReportSpec(
+        report_id="date_profile",
+        report_definition_id="stage_profile_private_diagnostic",
+        run_id="run_202606",
+        market_id=MarketId("a_share"),
+        run_type="diagnostics",
+    ).run_id == "run_202606"
+    assert ReportSpec(
+        report_id="date_parts_profile",
+        report_definition_id="stage_profile_private_diagnostic",
+        run_id="run_2026_06",
+        market_id=MarketId("a_share"),
+        run_type="diagnostics",
+    ).run_id == "run_2026_06"
 
 
 def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
@@ -45,6 +59,12 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
         "reports/private_real/run",
         "600000.sh",
         "000001.sz",
+        "000001",
+        "688001",
+        "run_000001",
+        "run-688001",
+        "run_600000_alpha",
+        "300001",
         "a" * 129,
     ],
 )

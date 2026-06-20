@@ -70,7 +70,7 @@ def test_a_share_processed_specs_declare_exact_direct_dependencies() -> None:
     }
 
 
-def test_materializer_reads_source_inputs_from_spec_source_input_data_ids(
+def test_panel_materializer_skips_daily_market_source_preload(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -89,7 +89,7 @@ def test_materializer_reads_source_inputs_from_spec_source_input_data_ids(
         source_id=source_id,
     )
 
-    assert set(inputs) == {"daily_market", "trading_calendar"}
+    assert set(inputs) == {"trading_calendar"}
     assert all(isinstance(frame, pd.DataFrame) for frame in inputs.values())
 
 

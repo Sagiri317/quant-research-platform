@@ -405,6 +405,7 @@ def _collect_training_frame(
     rows_after_filter = 0
     filter_columns_used: list[str] = []
     filter_definition = ""
+    capped_training: pd.DataFrame | None = None
     for chunk in iter_complete_time_sized_frames(
         _iter_model_work_frames(
             frames,
@@ -427,8 +428,19 @@ def _collect_training_frame(
             :, ["timestamp", *spec.input_columns, spec.label_column]
         ]
         if not usable.empty:
-            parts.append(usable)
-    training = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+            if spec.max_train_rows is None:
+                parts.append(usable)
+            else:
+                capped_training = _trim_training_buffer(
+                    usable
+                    if capped_training is None
+                    else pd.concat([capped_training, usable], ignore_index=True),
+                    spec,
+                )
+    if spec.max_train_rows is None:
+        training = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    else:
+        training = capped_training if capped_training is not None else pd.DataFrame()
     training = _apply_training_controls(training, spec)
     train_start = None
     train_end = None
@@ -451,6 +463,26 @@ def _collect_training_frame(
         "rows_after_filter_mode": rows_after_filter,
     }
     return training, row_counts, filter_metadata
+
+
+def _trim_training_buffer(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
+    if spec.max_train_rows is None or frame.empty:
+        return frame
+    result = frame.copy()
+    result["timestamp"] = pd.to_datetime(result["timestamp"], errors="coerce")
+    result = result.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
+    if spec.purge_gap_steps <= 0:
+        return result.tail(spec.max_train_rows).reset_index(drop=True)
+    unique_timestamps = tuple(sorted(result["timestamp"].dropna().unique()))
+    if spec.purge_gap_steps >= len(unique_timestamps):
+        return result
+    purge_start = unique_timestamps[-spec.purge_gap_steps]
+    training_candidates = result.loc[result["timestamp"] < purge_start]
+    purge_gap_rows = result.loc[result["timestamp"] >= purge_start]
+    return pd.concat(
+        [training_candidates.tail(spec.max_train_rows), purge_gap_rows],
+        ignore_index=True,
+    )
 
 
 def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:

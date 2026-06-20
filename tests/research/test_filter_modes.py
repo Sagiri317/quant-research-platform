@@ -967,6 +967,91 @@ def test_model_training_controls_apply_to_linear_and_estimators(
     assert purge.metadata["train_end"] == "2024-01-02"
 
 
+def test_model_max_train_rows_trims_streaming_training_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.models import supervised as model_supervised
+
+    frame = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "timestamp": [pd.Timestamp("2024-01-01") + pd.Timedelta(days=day)],
+                    "asset_id": [f"asset_{day:02d}"],
+                    "factor": [float(day)],
+                    "label": [float(day) * 2.0],
+                    "eligible": [True],
+                }
+            )
+            for day in range(40)
+        ],
+        ignore_index=True,
+    )
+    spec = ModelSpec(
+        model_id="linear_streaming_max_rows",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        max_train_rows=7,
+        purge_gap_steps=2,
+    )
+    expected = model_supervised._apply_training_controls(
+        frame.loc[:, ["timestamp", "factor", "label"]],
+        spec,
+    )
+    original_trim = model_supervised._trim_training_buffer
+    observed_buffer_inputs: list[int] = []
+
+    def wrapped_trim(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
+        observed_buffer_inputs.append(len(frame))
+        return original_trim(frame, spec)
+
+    monkeypatch.setattr(model_supervised, "_trim_training_buffer", wrapped_trim)
+
+    training, row_counts, _metadata = model_supervised._collect_training_frame(
+        (chunk for _, chunk in frame.groupby(frame.index // 5)),
+        spec,
+    )
+
+    pd.testing.assert_frame_equal(training, expected)
+    assert row_counts["rows_after_input_label_dropna"] == len(expected)
+    assert max(observed_buffer_inputs) < len(frame)
+
+
+def test_model_training_collection_keeps_uncapped_streaming_semantics() -> None:
+    from quant_research_platform.research.models import supervised as model_supervised
+
+    frame = pd.concat(
+        [
+            _filter_frame().assign(timestamp=pd.Timestamp(value))
+            for value in ("2024-01-02", "2024-01-03", "2024-01-04")
+        ],
+        ignore_index=True,
+    )
+    spec = ModelSpec(
+        model_id="linear_uncapped_streaming",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        max_train_rows=None,
+    )
+    expected, expected_counts, _expected_metadata = (
+        model_supervised._collect_training_frame(
+            (frame,),
+            spec,
+        )
+    )
+
+    training, row_counts, _metadata = model_supervised._collect_training_frame(
+        (chunk for _, chunk in frame.groupby("timestamp")),
+        spec,
+    )
+
+    pd.testing.assert_frame_equal(training, expected)
+    assert row_counts == expected_counts
+    assert row_counts["rows_after_input_label_dropna"] == len(expected)
+
+
 @pytest.mark.parametrize(
     "model_algorithm",
     ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],

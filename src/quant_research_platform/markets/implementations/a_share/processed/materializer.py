@@ -228,6 +228,11 @@ def _write_panel(
     trading_calendar = source_inputs["trading_calendar"]
     daily_market_root = layout.interim_data_root(source_id, "daily_market")
     daily_market_inspection = inspect_dataset(daily_market_root)
+    _require_source_input_columns_from_schema(
+        "daily_market",
+        daily_market_inspection.columns,
+        columns=("open", "high", "low", "close", "volume", "amount"),
+    )
     estimated = _estimate_panel_bytes_per_session(
         sessions,
         time_window=time_window,
@@ -916,6 +921,8 @@ def _read_source_inputs_for_spec(
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
     for data_id in spec.source_input_data_ids:
+        if spec.kind is ProcessedDataKind.PANEL and data_id == "daily_market":
+            continue
         root = layout.interim_data_root(source_id, data_id)
         inputs[data_id] = read_dataset(root)
     return inputs
@@ -927,11 +934,13 @@ def _require_source_inputs_for_spec(
 ) -> None:
     if spec.kind is not ProcessedDataKind.PANEL:
         return
-    _require_source_input_columns(
-        "daily_market",
-        source_inputs["daily_market"],
-        columns=("open", "high", "low", "close", "volume", "amount"),
-    )
+    missing = [
+        data_id
+        for data_id in ("stock_master", "market_cap", "trading_calendar")
+        if data_id not in source_inputs
+    ]
+    if missing:
+        raise ValueError("missing_source_input_for_panel: " + ", ".join(missing))
 
 
 def _read_processed_inputs_for_spec(
@@ -1127,7 +1136,17 @@ def _require_source_input_columns(
     *,
     columns: tuple[str, ...],
 ) -> None:
-    missing = [column for column in columns if column not in frame.columns]
+    _require_source_input_columns_from_schema(data_id, frame.columns, columns=columns)
+
+
+def _require_source_input_columns_from_schema(
+    data_id: str,
+    available_columns: Iterable[str],
+    *,
+    columns: tuple[str, ...],
+) -> None:
+    available = set(available_columns)
+    missing = [column for column in columns if column not in available]
     if missing:
         raise ValueError(
             f"missing_source_input_columns: {data_id}: " + ", ".join(missing)

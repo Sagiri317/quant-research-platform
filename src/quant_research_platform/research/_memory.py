@@ -70,12 +70,15 @@ def iter_complete_time_sized_frames(
     pending_max: pd.Timestamp | None = None
     emitted_max: pd.Timestamp | None = None
     saw_empty = False
+    first_empty: pd.DataFrame | None = None
 
     for frame in frames:
         if timestamp_column not in frame.columns:
             raise ValueError("missing_time_chunk_timestamp_column")
         if frame.empty:
             saw_empty = True
+            if first_empty is None:
+                first_empty = frame
             continue
         current_timestamps = _validated_time_chunk_timestamps(
             frame,
@@ -115,8 +118,8 @@ def iter_complete_time_sized_frames(
         pending_max = current_max
 
     if pending is None:
-        if saw_empty:
-            yield pd.DataFrame(columns=[timestamp_column])
+        if saw_empty and first_empty is not None:
+            yield first_empty.iloc[0:0].copy()
         return
     yield from iter_time_sized_frames(
         pending,
