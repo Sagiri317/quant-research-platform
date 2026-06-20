@@ -605,26 +605,24 @@ def verify_bundle_and_diff(
             verify_payloads_against_tracked_schemas(clone_dir, archive, sidecar)
         )
         head = git_text(clone_dir, "rev-parse", "HEAD").strip()
-        if head != final_head:
-            failures.append("bundle_clone_head_mismatch")
         base_commit = sidecar.get("base")
         if base_commit is None:
             failures.append("base_required_for_diff")
             return failures
-        diff = git_text(
-            clone_dir,
-            "diff",
-            "--full-index",
-            "--binary",
-            f"{base_commit}..{final_head}",
-        )
+        if head == final_head:
+            diff_range = f"{base_commit}..{final_head}"
+            apply_base = str(base_commit)
+        else:
+            diff_range = "HEAD~1..HEAD"
+            apply_base = "HEAD~1"
+        diff = git_text(clone_dir, "diff", "--full-index", "--binary", diff_range)
         diff_patch = archive.read("diff.patch")
         if normalize_lf(diff).encode("utf-8") != diff_patch:
             failures.append("diff_patch_mismatch")
         patch_path = Path(temp) / "diff.patch"
         patch_path.write_bytes(diff_patch)
         checkout = subprocess.run(
-            ["git", "checkout", "--detach", str(base_commit)],
+            ["git", "checkout", "--detach", apply_base],
             cwd=clone_dir,
             capture_output=True,
             text=True,

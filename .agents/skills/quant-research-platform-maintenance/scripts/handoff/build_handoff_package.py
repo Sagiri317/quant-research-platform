@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -180,7 +181,13 @@ def build_once(
     assert_branch_head(repo_root, branch, final_head)
     with tempfile.TemporaryDirectory(prefix="qrp-handoff-stage-") as temp:
         stage_root = Path(temp)
-        write_bundle(repo_root, stage_root / "final-branch.bundle", branch, final_head)
+        write_bundle(
+            repo_root,
+            stage_root / "final-branch.bundle",
+            branch,
+            base,
+            final_head,
+        )
         write_text(stage_root / "task_metadata.json", stable_json(task_metadata(task)))
         write_text(
             stage_root / "validation_evidence.json",
@@ -632,9 +639,39 @@ def write_bundle(
     repo_root: Path,
     bundle_path: Path,
     branch: str,
+    base: str,
     final_head: str,
 ) -> None:
-    run_git(repo_root, "bundle", "create", str(bundle_path), branch)
+    expected_diff = git_text(
+        repo_root,
+        "diff",
+        "--full-index",
+        "--binary",
+        f"{base}..{final_head}",
+    )
+    with tempfile.TemporaryDirectory(prefix="handoff-snapshot-bundle-") as temp:
+        snapshot_repo = Path(temp) / "snapshot"
+        snapshot_repo.mkdir()
+        run_git(snapshot_repo, "init", "--initial-branch", branch)
+        run_git(snapshot_repo, "config", "user.name", "QRP Handoff")
+        run_git(snapshot_repo, "config", "user.email", "handoff@example.invalid")
+        extract_git_tree(repo_root, base, snapshot_repo)
+        run_git(snapshot_repo, "add", "-A")
+        run_git(snapshot_repo, "commit", "-m", "handoff synthetic base")
+        run_git(snapshot_repo, "rm", "-r", "--quiet", "--ignore-unmatch", ".")
+        extract_git_tree(repo_root, final_head, snapshot_repo)
+        run_git(snapshot_repo, "add", "-A")
+        run_git(snapshot_repo, "commit", "-m", "handoff synthetic final")
+        synthetic_diff = git_text(
+            snapshot_repo,
+            "diff",
+            "--full-index",
+            "--binary",
+            "HEAD~1..HEAD",
+        )
+        if normalize_lf(synthetic_diff) != normalize_lf(expected_diff):
+            raise SystemExit("snapshot_bundle_diff_mismatch")
+        run_git(snapshot_repo, "bundle", "create", str(bundle_path), branch)
     with tempfile.TemporaryDirectory(prefix="handoff-bundle-check-") as temp:
         clone_dir = Path(temp) / "clone"
         subprocess.run(
@@ -643,9 +680,29 @@ def write_bundle(
             capture_output=True,
             text=True,
         )
-        head = git_text(clone_dir, "rev-parse", "HEAD").strip()
-        if head != final_head:
-            raise SystemExit(f"bundle_head_mismatch: {head} != {final_head}")
+        cloned_diff = git_text(
+            clone_dir,
+            "diff",
+            "--full-index",
+            "--binary",
+            "HEAD~1..HEAD",
+        )
+        if normalize_lf(cloned_diff) != normalize_lf(expected_diff):
+            raise SystemExit("bundle_diff_mismatch")
+
+
+def extract_git_tree(repo_root: Path, ref: str, destination: Path) -> None:
+    archive_path = destination.parent / f"{ref}.tar"
+    run_git(
+        repo_root,
+        "archive",
+        "--format=tar",
+        "--output",
+        str(archive_path),
+        ref,
+    )
+    with tarfile.open(archive_path) as archive:
+        archive.extractall(destination, filter="data")
 
 
 def assert_branch_head(repo_root: Path, branch: str, final_head: str) -> None:

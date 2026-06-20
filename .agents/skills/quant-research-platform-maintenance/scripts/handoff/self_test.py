@@ -112,7 +112,7 @@ def main() -> int:
         "sidecar_safety_failed",
         "artifact_manifest_sha256_mismatch",
         "external_json_in_zip",
-        "bundle_clone_head_mismatch",
+        'diff_range = "HEAD~1..HEAD"',
         "--batch-check",
         '"git", "cat-file", "--batch"',
     )

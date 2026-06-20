@@ -189,8 +189,12 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         capture_output=True,
         text=True,
     )
-    assert _git(cloned, "rev-parse", "HEAD").strip() == final_head
-    _git(cloned, "checkout", "--detach", base)
+    assert _git(cloned, "rev-parse", "HEAD").strip() != final_head
+    assert (
+        _git(cloned, "diff", "--full-index", "--binary", "HEAD~1..HEAD").encode()
+        == packaged_diff
+    )
+    _git(cloned, "checkout", "--detach", "HEAD~1")
     subprocess.run(
         ["git", "apply", "--check", str(fresh / "diff.patch")],
         cwd=cloned,
