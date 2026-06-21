@@ -27,9 +27,7 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.markets.implementations.a_share.fields import (
     field_catalog,
 )
-from quant_research_platform.markets.implementations.a_share.ids import (
-    market_panel_data_id,
-)
+from tests.helpers import frequency_ids
 
 
 def test_agent_proposals_start_unapproved() -> None:
@@ -152,7 +150,7 @@ def test_factor_factory_derives_unique_required_input_data_id_from_profile() -> 
         input_columns=("close",),
     )
 
-    assert proposal.required_input_data_id == market_panel_data_id()
+    assert proposal.required_input_data_id == frequency_ids.MARKET_PANEL_DATA_ID
 
 
 def test_factor_factory_requires_explicit_input_for_multiple_inputs() -> None:
@@ -180,6 +178,33 @@ def test_factor_factory_requires_explicit_input_for_multiple_inputs() -> None:
         )
 
 
+def test_factor_factory_explicit_input_resolves_multiple_inputs() -> None:
+    profile = research_profile()
+    factors = profile.factors.list()
+    catalog = FactorCatalog()
+    catalog.register(factors[0])
+    catalog.register(
+        replace(
+            factors[0],
+            factor_id="alternate_input_factor",
+            output_column="alternate_input_factor",
+            required_input_data_id="alternate_processed_input",
+        )
+    )
+    ambiguous_profile = replace(profile, factors=catalog)
+
+    proposal = propose_factor(
+        profile=ambiguous_profile,
+        proposal_id="factor-proposal-explicit-input",
+        factor_id="candidate_factor",
+        rationale="Candidate based on registered close field.",
+        input_columns=("close",),
+        required_input_data_id="alternate_processed_input",
+    )
+
+    assert proposal.required_input_data_id == "alternate_processed_input"
+
+
 def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() -> None:
     proposal = FactorProposal(
         proposal_id="factor-proposal-unregistered",
@@ -187,7 +212,7 @@ def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() 
         rationale="Candidate for catalog review only.",
         input_columns=("close",),
         output_columns=("candidate_factor",),
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
     )
 
     assert not hasattr(proposal, "exec" + "ute")
@@ -203,7 +228,7 @@ def test_factor_catalog_registers_valid_factor_proposal() -> None:
         rationale="Candidate based on registered close field.",
         input_columns=("close",),
         output_columns=("candidate_factor",),
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
     )
     catalog = FactorCatalog()
 
@@ -227,7 +252,7 @@ def test_factor_proposal_registration_rejects_duplicate_output_columns() -> None
         rationale="Invalid duplicate output candidate.",
         input_columns=("close",),
         output_columns=("candidate_factor", "candidate_factor"),
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
     )
 
     with pytest.raises(ValueError, match="duplicate_factor_output_column"):
@@ -247,7 +272,7 @@ def test_factor_proposal_registration_rejects_unresolved_derived_input() -> None
         base_input_columns=("close",),
         derived_input_columns=("candidate_derived",),
         output_columns=("candidate_factor",),
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
     )
 
     with pytest.raises(ValueError, match="unresolved_factor_derived_input"):

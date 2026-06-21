@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.helpers import frequency_ids
+
 SOURCE_ROOT = Path("src/quant_research_platform")
 
 
@@ -488,36 +490,6 @@ def test_csmar_source_package_does_not_own_a_share_interim_pruning() -> None:
 def test_a_share_csmar_binding_does_not_export_unprefixed_behavior() -> None:
     path = SOURCE_ROOT / "markets/implementations/a_share/source_bindings/csmar.py"
     assert not path.exists()
-    return
-    tree = _parse_source(path)
-    forbidden = {
-        "filter_by_date_range",
-        "normalize_asset_time_frame",
-        "normalize_market_bars_1d_frame",
-        "normalize_index_metadata_frame",
-        "normalize_index_time_frame",
-        "normalize_private_export_frame",
-        "with_benchmark_index_fields",
-        "with_ohlc_valid",
-    }
-    defined = {
-        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
-    }
-    exported = set()
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not isinstance(target, ast.Name) or target.id != "__all__":
-                continue
-            exported.update(
-                item.value
-                for item in node.value.elts
-                if isinstance(item, ast.Constant) and isinstance(item.value, str)
-            )
-
-    assert defined.isdisjoint(forbidden)
-    assert exported.isdisjoint(forbidden)
 
 
 def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
@@ -530,7 +502,7 @@ def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
         "missing_raw_column_names",
         "normalize_stock_code",
         "normalize_trdnew_capchg",
-        "normalize_trdnew_market_bars_1d",
+        f"normalize_trdnew_{frequency_ids.MARKET_BARS_DATA_ID}",
         "_count_csv_rows",
         "_file_sha256",
         "build_raw_export_metadata",
@@ -623,7 +595,7 @@ def test_csmar_field_mappings_does_not_own_validators_checksums_or_mappers() -> 
         "missing_required_columns",
         "negative_liquidity_rows",
         "normalize_trdnew_capchg",
-        "normalize_trdnew_market_bars_1d",
+        f"normalize_trdnew_{frequency_ids.MARKET_BARS_DATA_ID}",
         "ohlc_violations",
         "raw_export_sha256",
     }

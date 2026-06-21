@@ -16,15 +16,16 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
+from tests.helpers import frequency_ids
 
 
 def test_processed_data_spec_declares_direct_input_dependencies() -> None:
     spec = ProcessedDataSpec(
-        data_id="market_panel_1d",
+        data_id=frequency_ids.MARKET_PANEL_DATA_ID,
         market_id=MarketId("a_share"),
         kind=ProcessedDataKind.PANEL,
         source_input_data_ids=(
-            "market_bars_1d",
+            frequency_ids.MARKET_BARS_DATA_ID,
             "stock_master",
             "market_cap",
             "trading_calendar",
@@ -45,7 +46,7 @@ def test_processed_data_spec_declares_direct_input_dependencies() -> None:
     assert "source_input_data_ids" in field_names
     assert "processed_input_data_ids" in field_names
     assert spec.source_input_data_ids == (
-        "market_bars_1d",
+        frequency_ids.MARKET_BARS_DATA_ID,
         "stock_master",
         "market_cap",
         "trading_calendar",

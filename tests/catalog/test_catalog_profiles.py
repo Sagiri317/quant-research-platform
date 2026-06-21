@@ -25,6 +25,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.implementations.a_share.research_profiles import (
     build_research_dataset_catalog,
 )
+from tests.helpers import frequency_ids
 
 
 def test_local_profile_returns_boundary_sealed_bundle() -> None:
@@ -74,8 +75,11 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
     specs = catalogs.processed.list()
     kinds_by_id = {spec.data_id: spec.kind for spec in specs}
 
-    assert kinds_by_id["market_panel_1d"] is ProcessedDataKind.PANEL
-    assert kinds_by_id["market_context_1d"] is ProcessedDataKind.ANNOTATION
+    assert kinds_by_id[frequency_ids.MARKET_PANEL_DATA_ID] is ProcessedDataKind.PANEL
+    assert (
+        kinds_by_id[frequency_ids.MARKET_CONTEXT_DATA_ID]
+        is ProcessedDataKind.ANNOTATION
+    )
     assert kinds_by_id["price_volume"] is ProcessedDataKind.FACTOR
     assert kinds_by_id["forward_returns"] is ProcessedDataKind.LABEL
     assert all(not hasattr(spec, "category") for spec in specs)
@@ -105,7 +109,7 @@ def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
     assert {
         spec.data_id for spec in source_catalogs["csmar"].list()
     } == {
-        "market_bars_1d",
+        frequency_ids.MARKET_BARS_DATA_ID,
         "stock_master",
         "market_cap",
         "adjustment",

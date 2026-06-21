@@ -4,6 +4,8 @@ import ast
 import re
 from pathlib import Path
 
+from tests.helpers import frequency_ids
+
 SCAN_ROOTS = (
     Path("src"),
     Path("tests"),
@@ -404,7 +406,9 @@ def test_active_tree_has_no_retired_terms() -> None:
         ("price_volume_factors_full", re.compile(r"price_volume_factors_full")),
         (
             "_".join(("csmar", "daily", "market", "interim")),
-            re.compile(r"csmar_" r"market_bars_1d_interim"),
+            re.compile(
+                re.escape(f"csmar_{frequency_ids.MARKET_BARS_DATA_ID}_interim")
+            ),
         ),
     )
     current_file = Path(__file__).resolve()

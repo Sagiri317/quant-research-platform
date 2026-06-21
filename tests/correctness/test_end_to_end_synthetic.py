@@ -21,6 +21,7 @@ from quant_research_platform.sources.csmar.interim import (
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 
 def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> None:
@@ -29,13 +30,18 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
     _write_synthetic_raw_exports(layout)
     interim_result = materialize_interim_data(
         layout=layout,
-        data_ids=("market_bars_1d", "stock_master", "market_cap", "trading_calendar"),
+        data_ids=(
+            frequency_ids.MARKET_BARS_DATA_ID,
+            "stock_master",
+            "market_cap",
+            "trading_calendar",
+        ),
         start_date="2020-01-01",
         end_date="2020-03-31",
         chunksize=17,
     )
     assert set(interim_result.artifact_roots) == {
-        "market_bars_1d",
+        frequency_ids.MARKET_BARS_DATA_ID,
         "stock_master",
         "market_cap",
         "trading_calendar",
@@ -63,7 +69,7 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
     )
 
     panel = read_dataset(
-        tmp_path / "data/processed/a_share/panel/market_panel_1d",
+        frequency_ids.market_panel_processed_root(tmp_path),
         time_window=time_window,
     )
     execution = read_dataset(
@@ -160,7 +166,7 @@ def test_synthetic_interim_to_research_subset_remains_available(
 def _write_synthetic_raw_exports(layout: StorageLayout) -> None:
     root = layout.raw_source_root(SourceId("csmar"))
     frames = {
-        "market_bars_1d": _market_bars_1d_raw(),
+        frequency_ids.MARKET_BARS_DATA_ID: _market_bars_daily_raw(),
         "stock_master": _stock_master_raw(),
         "market_cap": _market_cap_raw(),
         "trading_calendar": _trading_calendar_raw(),
@@ -182,7 +188,7 @@ def _write_synthetic_interim_world(layout: StorageLayout) -> None:
     catalog = interim_catalog()
     source_id = SourceId("csmar")
     frames = {
-        "market_bars_1d": _market_bars_1d(),
+        frequency_ids.MARKET_BARS_DATA_ID: _market_bars_daily(),
         "stock_master": _stock_master(),
         "market_cap": _market_cap(),
         "trading_calendar": _trading_calendar(),
@@ -196,7 +202,7 @@ def _write_synthetic_interim_world(layout: StorageLayout) -> None:
         )
 
 
-def _market_bars_1d() -> pd.DataFrame:
+def _market_bars_daily() -> pd.DataFrame:
     dates = pd.bdate_range("2020-01-02", periods=80)
     rows: list[dict[str, object]] = []
     for asset_id, market_type in (("000001", 4), ("000002", 32), ("000003", 64)):
@@ -242,8 +248,8 @@ def _market_bars_1d() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _market_bars_1d_raw() -> pd.DataFrame:
-    raw = _market_bars_1d()
+def _market_bars_daily_raw() -> pd.DataFrame:
+    raw = _market_bars_daily()
     return raw.rename(
         columns={
             "source_asset_id": "Stkcd",

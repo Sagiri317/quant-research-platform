@@ -28,6 +28,7 @@ from quant_research_platform.markets.implementations.a_share import (
     research_scenarios,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 PROJECT_SRC = Path("src/quant_research_platform")
 
@@ -62,7 +63,10 @@ def test_research_profile_contains_active_catalogs() -> None:
 
     assert isinstance(profile, ResearchProfile)
     assert profile.profile_id == "a_share_csmar_1d"
-    assert research_profile_id("a_share", "csmar", "1d") == profile.profile_id
+    assert (
+        research_profile_id("a_share", "csmar", frequency_ids.DAILY_FREQUENCY_SLUG)
+        == profile.profile_id
+    )
     assert research_profile(profile.profile_id) == profile
     assert isinstance(profile.fields, FieldCatalog)
     assert isinstance(profile.factors, FactorCatalog)

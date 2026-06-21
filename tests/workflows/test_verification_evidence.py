@@ -35,13 +35,14 @@ from quant_research_platform.workflows.verification_evidence import (
     VerificationEvidenceRunConfig,
     run_verification_evidence,
 )
+from tests.helpers import frequency_ids
 
 LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
 MIB = 1024 * 1024
 GIB = 1024 * 1024 * 1024
 SMOKE_PREDICTION_TRAIN_END = "2014-06-30"
 SMOKE_PREDICTION_TEST_START = "2014-07-01"
-SMOKE_PORTFOLIO_FREQUENCY = "1d"
+SMOKE_PORTFOLIO_FREQUENCY = frequency_ids.DAILY_FREQUENCY_SLUG
 SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS = 1
 
 
@@ -389,13 +390,17 @@ def test_verification_evidence_workflow_resolves_independent_windows(
             / "data"
             / "interim"
             / "csmar"
-            / "market_bars_1d"
+            / frequency_ids.MARKET_BARS_DATA_ID
         )
-        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        _persist_fake_artifact(
+            artifact_root,
+            frequency_ids.MARKET_BARS_DATA_ID,
+            "interim",
+        )
         return type(
             "Result",
             (),
-            {"artifact_roots": {"market_bars_1d": artifact_root}},
+            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
         )()
 
     def build_processed(layout, source_id, time_window, kinds):
@@ -550,13 +555,17 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
             / "data"
             / "interim"
             / "csmar"
-            / "market_bars_1d"
+            / frequency_ids.MARKET_BARS_DATA_ID
         )
-        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        _persist_fake_artifact(
+            artifact_root,
+            frequency_ids.MARKET_BARS_DATA_ID,
+            "interim",
+        )
         return type(
             "Result",
             (),
-            {"artifact_roots": {"market_bars_1d": artifact_root}},
+            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
         )()
 
     def build_processed(layout, source_id, time_window, kinds):
@@ -676,13 +685,17 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
             / "data"
             / "interim"
             / "csmar"
-            / "market_bars_1d"
+            / frequency_ids.MARKET_BARS_DATA_ID
         )
-        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        _persist_fake_artifact(
+            artifact_root,
+            frequency_ids.MARKET_BARS_DATA_ID,
+            "interim",
+        )
         return type(
             "Result",
             (),
-            {"artifact_roots": {"market_bars_1d": artifact_root}},
+            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
         )()
 
     def build_processed(
@@ -845,15 +858,19 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
             / "data"
             / "interim"
             / "csmar"
-            / "market_bars_1d"
+            / frequency_ids.MARKET_BARS_DATA_ID
         )
-        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        _persist_fake_artifact(
+            artifact_root,
+            frequency_ids.MARKET_BARS_DATA_ID,
+            "interim",
+        )
         captured_roots.append(artifact_root)
         captured_manifests.append(inspect_dataset(artifact_root).manifest)
         return type(
             "Result",
             (),
-            {"artifact_roots": {"market_bars_1d": artifact_root}},
+            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
         )()
 
     monkeypatch.setattr(
@@ -908,13 +925,13 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
             / "data"
             / "interim"
             / "csmar"
-            / "market_bars_1d"
+            / frequency_ids.MARKET_BARS_DATA_ID
         )
         (artifact_root / "data").mkdir(parents=True)
         return type(
             "Result",
             (),
-            {"artifact_roots": {"market_bars_1d": artifact_root}},
+            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
         )()
 
     monkeypatch.setattr(
@@ -957,7 +974,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
     assert result.status == "FAIL"
     assert "dataset_manifest_missing" in validation["failure_codes"]
     assert validation["dataset_manifest_completeness"]["missing"] == [
-        "data/interim/csmar/market_bars_1d"
+        f"data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}"
     ]
     assert summary["status"] == validation["status"] == "FAIL"
     summary_md = (output_root / "summary.md").read_text(encoding="utf-8")
@@ -984,13 +1001,17 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
             / "data"
             / "interim"
             / "csmar"
-            / "market_bars_1d"
+            / frequency_ids.MARKET_BARS_DATA_ID
         )
-        _persist_fake_artifact(artifact_root, "market_bars_1d", "interim")
+        _persist_fake_artifact(
+            artifact_root,
+            frequency_ids.MARKET_BARS_DATA_ID,
+            "interim",
+        )
         return type(
             "Result",
             (),
-            {"artifact_roots": {"market_bars_1d": artifact_root}},
+            {"artifact_roots": {frequency_ids.MARKET_BARS_DATA_ID: artifact_root}},
         )()
 
     def build_processed(layout, source_id, time_window, kinds):

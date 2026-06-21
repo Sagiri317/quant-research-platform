@@ -17,6 +17,7 @@ HANDOFF_ROOT = (
 )
 HANDOFF_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "build_handoff_package.py"
 VERIFY_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "verify_handoff_package.py"
+TEST_BRANCH = "feature/synthetic-handoff-review"
 
 
 def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> None:
@@ -37,7 +38,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 {
                     "schema_version": "handoff-task-metadata/0.1",
                     "slug": slug,
-                    "branch": "feature/qrp-clean-rewrite",
+                    "branch": TEST_BRANCH,
                 "base": base,
                 "final_head": final_head,
                 "final_sha": final_head,
@@ -182,10 +183,24 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert generation["zip_filename"] == f"{slug}.zip"
     assert generation["zip_sha256"] == "external_sidecar"
     assert generation["bundle_sha256"] == hashlib.sha256(bundle_raw).hexdigest()
+    assert generation["compare_evidence_path"] is None
+    assert generation["source_tree_scan_path"] == (
+        "handoff_evidence/source-tree-scan.json"
+    )
+    assert generation["validation_status"] == "BLOCKED"
     assert sidecar["zip_sha256"]
     assert source_tree_scan["status"] == "PASS"
     assert source_tree_scan["scanned_head"] == final_head
     assert source_tree_scan["expected_head"] == final_head
+    assert set(source_tree_scan["scan_groups"]) == {
+        "retired_terms",
+        "active_test_literals",
+    }
+    assert source_tree_scan["scan_groups"]["retired_terms"]["finding_count"] == 0
+    assert (
+        source_tree_scan["scan_groups"]["active_test_literals"]["finding_count"]
+        == 0
+    )
     checks = {
         row["name"]: row
         for row in validation_evidence["checks"]
@@ -227,7 +242,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
             "git",
             "clone",
             "--branch",
-            "feature/qrp-clean-rewrite",
+            TEST_BRANCH,
             str(fresh / "final-branch.bundle"),
             str(cloned),
         ],
@@ -306,7 +321,7 @@ def _init_synthetic_repo(repo: Path) -> None:
     _git(repo, "init")
     _git(repo, "config", "user.email", "handoff-integration@example.invalid")
     _git(repo, "config", "user.name", "Handoff Integration Test")
-    _git(repo, "checkout", "-b", "feature/qrp-clean-rewrite")
+    _git(repo, "checkout", "-b", TEST_BRANCH)
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "base")
 

@@ -89,7 +89,7 @@ def test_a_share_calendar_warmup_start_uses_open_sessions() -> None:
 
 def test_compute_market_panel_maps_source_assets_to_a_share_assets() -> None:
     panel = compute_market_panel(
-        _market_bars_1d_frame(["2014-01-02", "2014-01-03"]),
+        _market_bars_daily_frame(["2014-01-02", "2014-01-03"]),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(),
         trading_calendar=_trading_calendar_frame(
@@ -118,10 +118,10 @@ def test_compute_market_panel_filters_non_a_share_market_types() -> None:
     panel = compute_market_panel(
         pd.DataFrame(
             [
-                _market_bars_1d_row("2014-01-02", market_type=4),
-                _market_bars_1d_row("2014-01-03", market_type=32),
-                _market_bars_1d_row("2014-01-06", market_type=64),
-                _market_bars_1d_row("2014-01-07", market_type=2),
+                _market_bars_daily_row("2014-01-02", market_type=4),
+                _market_bars_daily_row("2014-01-03", market_type=32),
+                _market_bars_daily_row("2014-01-06", market_type=64),
+                _market_bars_daily_row("2014-01-07", market_type=2),
             ]
         ),
         stock_master=_stock_master_frame(),
@@ -140,7 +140,7 @@ def test_compute_market_panel_filters_non_a_share_market_types() -> None:
 
 def test_compute_market_panel_preserves_listing_age_closed_boundary() -> None:
     panel = compute_market_panel(
-        _market_bars_1d_frame(["2020-01-01", "2020-01-02"]),
+        _market_bars_daily_frame(["2020-01-01", "2020-01-02"]),
         stock_master=_stock_master_frame(listing_date="2020-01-01"),
         market_cap=_market_cap_frame(share_change_date="2020-01-01"),
         trading_calendar=_trading_calendar_frame(
@@ -159,7 +159,7 @@ def test_compute_market_panel_preserves_listing_age_closed_boundary() -> None:
 
 def test_compute_market_panel_zero_float_shares_make_turnover_missing() -> None:
     panel = compute_market_panel(
-        _market_bars_1d_frame(["2020-01-02"]),
+        _market_bars_daily_frame(["2020-01-02"]),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(a_float_shares=0.0),
         trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -176,7 +176,7 @@ def test_compute_market_panel_zero_float_shares_make_turnover_missing() -> None:
 
 def test_compute_market_panel_preserves_missing_limit_status_context() -> None:
     panel = compute_market_panel(
-        pd.DataFrame([_market_bars_1d_row("2020-01-02", limit_status=pd.NA)]),
+        pd.DataFrame([_market_bars_daily_row("2020-01-02", limit_status=pd.NA)]),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(),
         trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -190,7 +190,7 @@ def test_compute_market_panel_preserves_missing_limit_status_context() -> None:
 def test_compute_market_panel_rejects_invalid_limit_status_context() -> None:
     with pytest.raises(ValueError, match="invalid_limit_status"):
         compute_market_panel(
-            pd.DataFrame([_market_bars_1d_row("2020-01-02", limit_status=2)]),
+            pd.DataFrame([_market_bars_daily_row("2020-01-02", limit_status=2)]),
             stock_master=_stock_master_frame(),
             market_cap=_market_cap_frame(),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -199,8 +199,8 @@ def test_compute_market_panel_rejects_invalid_limit_status_context() -> None:
 
 def test_annotations_mask_only_next_bar_one_word_limits() -> None:
     rows = [
-        _market_bars_1d_row("2020-01-01"),
-        _market_bars_1d_row(
+        _market_bars_daily_row("2020-01-01"),
+        _market_bars_daily_row(
             "2020-01-02",
             limit_status=1,
             open_price=11.0,
@@ -208,7 +208,7 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
             low=11.0,
             close=11.0,
         ),
-        _market_bars_1d_row(
+        _market_bars_daily_row(
             "2020-01-03",
             limit_status=1,
             open_price=10.8,
@@ -216,7 +216,7 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
             low=10.7,
             close=10.9,
         ),
-        _market_bars_1d_row(
+        _market_bars_daily_row(
             "2020-01-06",
             limit_status=-1,
             open_price=9.0,
@@ -224,7 +224,7 @@ def test_annotations_mask_only_next_bar_one_word_limits() -> None:
             low=9.0,
             close=9.0,
         ),
-        _market_bars_1d_row(
+        _market_bars_daily_row(
             "2020-01-07",
             limit_status=-1,
             open_price=9.2,
@@ -272,7 +272,7 @@ def test_compute_market_panel_fails_closed_on_conflicting_reference_duplicates(
         match="conflicting_panel_join_duplicate_keys: stock_master",
     ):
         compute_market_panel(
-            _market_bars_1d_frame(["2020-01-02"]),
+            _market_bars_daily_frame(["2020-01-02"]),
             stock_master=duplicate_stocks,
             market_cap=_market_cap_frame(),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -282,7 +282,7 @@ def test_compute_market_panel_fails_closed_on_conflicting_reference_duplicates(
 def test_compute_market_panel_fails_closed_on_missing_source_keys() -> None:
     with pytest.raises(ValueError, match="missing_source_asset_id"):
         compute_market_panel(
-            _market_bars_1d_frame(["2020-01-02"]).drop(columns=["source_asset_id"]),
+            _market_bars_daily_frame(["2020-01-02"]).drop(columns=["source_asset_id"]),
             stock_master=_stock_master_frame(),
             market_cap=_market_cap_frame(),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -290,7 +290,7 @@ def test_compute_market_panel_fails_closed_on_missing_source_keys() -> None:
 
     with pytest.raises(ValueError, match="missing_source_timestamp"):
         compute_market_panel(
-            _market_bars_1d_frame(["2020-01-02"]).drop(columns=["timestamp"]),
+            _market_bars_daily_frame(["2020-01-02"]).drop(columns=["timestamp"]),
             stock_master=_stock_master_frame(),
             market_cap=_market_cap_frame(),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -300,7 +300,7 @@ def test_compute_market_panel_fails_closed_on_missing_source_keys() -> None:
 def test_compute_market_panel_fails_closed_on_missing_reference_dates() -> None:
     with pytest.raises(ValueError, match="missing_market_cap_panel_timestamp"):
         compute_market_panel(
-            _market_bars_1d_frame(["2020-01-02"]),
+            _market_bars_daily_frame(["2020-01-02"]),
             stock_master=_stock_master_frame(),
             market_cap=_market_cap_frame().assign(timestamp=pd.NaT),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -311,7 +311,7 @@ def test_compute_market_panel_fails_closed_on_missing_reference_dates() -> None:
         match="missing_stock_master_panel_effective_timestamp",
     ):
         compute_market_panel(
-            _market_bars_1d_frame(["2020-01-02"]),
+            _market_bars_daily_frame(["2020-01-02"]),
             stock_master=_stock_master_frame().assign(
                 listing_date=pd.NaT,
                 status_change_date=pd.NaT,
@@ -323,7 +323,7 @@ def test_compute_market_panel_fails_closed_on_missing_reference_dates() -> None:
 
 def test_compute_market_panel_uses_missing_reference_defaults() -> None:
     panel = compute_market_panel(
-        _market_bars_1d_frame(["2020-01-02"]),
+        _market_bars_daily_frame(["2020-01-02"]),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame().iloc[0:0],
         trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -363,7 +363,7 @@ def test_compute_market_panel_fails_closed_on_missing_canonical_after_mapping(
         match="market_bars_interim_missing_canonical_columns: missing_canonical",
     ):
         compute_market_panel(
-            _market_bars_1d_frame(["2020-01-02"]),
+            _market_bars_daily_frame(["2020-01-02"]),
             stock_master=_stock_master_frame(),
             market_cap=_market_cap_frame(),
             trading_calendar=_trading_calendar_frame(pd.to_datetime(["2020-01-02"])),
@@ -393,10 +393,10 @@ def test_panel_asof_stock_master_fills_missing_stock_columns() -> None:
     assert _first_static_stock_value(stocks, "missing_column") == {}
 
 
-def _market_bars_1d_frame(dates: list[str]) -> pd.DataFrame:
+def _market_bars_daily_frame(dates: list[str]) -> pd.DataFrame:
     return pd.DataFrame(
         [
-            _market_bars_1d_row(
+            _market_bars_daily_row(
                 value,
                 open_price=10.0 + offset,
                 high=10.5 + offset,
@@ -410,7 +410,7 @@ def _market_bars_1d_frame(dates: list[str]) -> pd.DataFrame:
     )
 
 
-def _market_bars_1d_row(
+def _market_bars_daily_row(
     value: str,
     *,
     market_type: int = 4,

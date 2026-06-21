@@ -167,6 +167,157 @@ def test_compare_verification_evidence_pairs_file_is_not_window_specific(
     assert runs["full"]["final"] == Path("final-b")
 
 
+def test_compare_verification_evidence_accepts_expected_pair_failures(
+    tmp_path: Path,
+) -> None:
+    module = _load_compare_module()
+    baseline = tmp_path / "baseline"
+    final = tmp_path / "final"
+    _write_run(
+        baseline,
+        prediction_artifact_ids=(
+            "equal_weight_rank_ensemble",
+            "ic_weighted_rank_ensemble",
+        ),
+    )
+    _write_run(
+        final,
+        swap_prediction_assets=True,
+        prediction_artifact_ids=(
+            "equal_weight_rank_ensemble",
+            "ic_weighted_rank_ensemble",
+        ),
+    )
+
+    comparison = module.compare_run("old_baseline_3y", baseline, final)
+    comparison = module.apply_pair_expectation(
+        comparison,
+        {
+            "expected_status": "FAIL_EXPECTED",
+            "expected_failure_reason": "stale_rank_ensemble_prediction_baseline",
+            "expected_failed_artifacts": [
+                "equal_weight_rank_ensemble",
+                "ic_weighted_rank_ensemble",
+            ],
+        },
+    )
+
+    assert comparison["status"] == "FAIL_EXPECTED"
+    assert comparison["actual_status"] == "FAIL"
+    assert comparison["expected_failure_match"] is True
+    assert comparison["reason_code"] == "stale_rank_ensemble_prediction_baseline"
+    assert comparison["failed_artifacts"] == [
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    ]
+
+
+def test_compare_verification_evidence_rejects_self_authorized_expected_failures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_compare_module()
+    baseline = tmp_path / "baseline"
+    final = tmp_path / "final"
+    _write_run(baseline)
+    _write_run(final, swap_prediction_assets=True)
+    goal_root = tmp_path / "goal-output"
+    pairs_file = tmp_path / "pairs.json"
+    pairs_file.write_text(
+        json.dumps(
+            {
+                "pairs": [
+                    {
+                        "label": "old_baseline_tiny",
+                        "baseline": str(baseline),
+                        "final": str(final),
+                        "expected_status": "FAIL_EXPECTED",
+                        "expected_failure_reason": "stale_prediction_baseline",
+                        "expected_failed_artifacts": ["tiny_model"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_verification_evidence.py",
+            "--goal-root",
+            str(goal_root),
+            "--baseline-commit",
+            "base-sha",
+            "--pairs-file",
+            str(pairs_file),
+        ],
+    )
+
+    module.main()
+
+    payload = json.loads(
+        (goal_root / "baseline-final-compare.json").read_text(encoding="utf-8")
+    )
+    comparison = payload["comparisons"]["old_baseline_tiny"]
+    assert payload["overall_status"] == "FAIL"
+    assert payload["validation_decision"] == "FAIL"
+    assert "missing_required_comparison: old_baseline_3y" in payload[
+        "contract_failures"
+    ]
+    assert comparison["status"] == "FAIL"
+    assert "expected_failure_policy_mismatch" in comparison["failures"]
+
+
+def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> None:
+    module = _load_compare_module()
+
+    failures = module.compare_contract_failures(
+        {
+            "old_baseline_3y": {
+                "status": "FAIL_EXPECTED",
+                "reason_code": "stale_rank_ensemble_prediction_baseline",
+                "failed_artifacts": [
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                ],
+            },
+            "old_baseline_6y": {
+                "status": "FAIL_EXPECTED",
+                "reason_code": "stale_rank_ensemble_prediction_baseline",
+                "failed_artifacts": [
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                ],
+            },
+            "refreshed_prediction_baseline_3y": {
+                "status": "PASS",
+                "prediction_summary": {
+                    "artifact_ids": ["equal_weight_rank_ensemble"],
+                    "failed_artifacts": [],
+                },
+            },
+            "refreshed_prediction_baseline_6y": {
+                "status": "PASS",
+                "prediction_summary": {
+                    "artifact_ids": [
+                        "equal_weight_rank_ensemble",
+                        "ic_weighted_rank_ensemble",
+                    ],
+                    "failed_artifacts": [],
+                },
+            },
+        }
+    )
+
+    assert failures == [
+        (
+            "refreshed_baseline_missing_rank_ensemble_artifact: "
+            "refreshed_prediction_baseline_3y:ic_weighted_rank_ensemble"
+        )
+    ]
+
+
 def test_compare_verification_evidence_rejects_malformed_pair_arg() -> None:
     module = _load_compare_module()
     args = type(
@@ -338,6 +489,7 @@ def _write_run(
     root: Path,
     *,
     missing_prediction_score: bool = False,
+    prediction_artifact_ids: tuple[str, ...] = ("tiny_model",),
     split_research_partition: bool = False,
     flip_research_eligibility: bool = False,
     swap_prediction_assets: bool = False,
@@ -354,6 +506,7 @@ def _write_run(
     _write_reports(
         root,
         missing_prediction_score=missing_prediction_score,
+        prediction_artifact_ids=prediction_artifact_ids,
         swap_prediction_assets=swap_prediction_assets,
         tiny_turnover_epsilon=tiny_turnover_epsilon,
     )
@@ -450,21 +603,25 @@ def _write_reports(
     root: Path,
     *,
     missing_prediction_score: bool,
+    prediction_artifact_ids: tuple[str, ...],
     swap_prediction_assets: bool,
     tiny_turnover_epsilon: bool,
 ) -> None:
     reports_root = root / "reports" / "private_research" / "a_share"
-    prediction = reports_root / "prediction" / "tiny_model" / "prediction.parquet"
-    prediction.parent.mkdir(parents=True)
-    prediction_payload = {
-        "timestamp": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")],
-        "asset_id": (
-            ["asset_b", "asset_a"] if swap_prediction_assets else ["asset_a", "asset_b"]
-        ),
-    }
-    if not missing_prediction_score:
-        prediction_payload["prediction_score"] = [0.1, 0.2]
-    pd.DataFrame(prediction_payload).to_parquet(prediction, index=False)
+    for artifact_id in prediction_artifact_ids:
+        prediction = reports_root / "prediction" / artifact_id / "prediction.parquet"
+        prediction.parent.mkdir(parents=True)
+        prediction_payload = {
+            "timestamp": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")],
+            "asset_id": (
+                ["asset_b", "asset_a"]
+                if swap_prediction_assets
+                else ["asset_a", "asset_b"]
+            ),
+        }
+        if not missing_prediction_score:
+            prediction_payload["prediction_score"] = [0.1, 0.2]
+        pd.DataFrame(prediction_payload).to_parquet(prediction, index=False)
 
     evaluation = reports_root / "evaluation" / "tiny_eval"
     evaluation.mkdir(parents=True)

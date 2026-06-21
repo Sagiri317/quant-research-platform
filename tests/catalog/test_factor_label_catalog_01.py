@@ -20,6 +20,7 @@ from quant_research_platform.markets.implementations.a_share.fields import (
 from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_columns,
 )
+from tests.helpers import frequency_ids
 
 
 def test_factor_catalog_is_pure_registry_without_market_bootstrap() -> None:
@@ -48,7 +49,7 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
         assert set(definition.derived_input_columns).issubset(registered_fields)
         assert definition.output_column == definition.factor_id
         assert definition.family == "price_volume"
-        assert definition.required_input_data_id == "market_panel_1d"
+        assert definition.required_input_data_id == frequency_ids.MARKET_PANEL_DATA_ID
 
     shared_input_superset = {
         "open",

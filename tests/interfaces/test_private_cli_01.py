@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.private_cli import app as private_app
 from quant_research_platform.reports.schema_inventory import build_schema_inventory
+from tests.helpers import frequency_ids
 from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
 ALLOWED_INVENTORY_FIELDS = {
@@ -57,14 +58,17 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     combined = json.dumps(inventory, ensure_ascii=False)
 
     assert roots == {
-        "data/interim/csmar/market_bars_1d",
+        f"data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}",
         "data/interim/csmar/stock_master",
         "data/processed/a_share/factor/price_volume",
         "data/processed/a_share/annotation/default",
         "data/research/a_share/demo_research_dataset",
     }
     assert all(set(item) == ALLOWED_INVENTORY_FIELDS for item in inventory)
-    market_bars_1d = _inventory_item(inventory, "data/interim/csmar/market_bars_1d")
+    market_bars_daily = _inventory_item(
+        inventory,
+        f"data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}",
+    )
     stock_master = _inventory_item(inventory, "data/interim/csmar/stock_master")
     price_volume = _inventory_item(
         inventory,
@@ -79,13 +83,17 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
         "data/research/a_share/demo_research_dataset",
     )
 
-    assert market_bars_1d["kind"] == "interim"
+    assert market_bars_daily["kind"] == "interim"
     assert price_volume["kind"] == "factor"
     assert annotation["kind"] == "annotation"
     assert research["kind"] == "research_dataset"
-    assert market_bars_1d["row_count_by_year"] == {"2023": 1, "2024": 1, "2025": 2}
-    assert market_bars_1d["min_timestamp"] == "2023-12-29"
-    assert market_bars_1d["max_timestamp"] == "2025-01-06"
+    assert market_bars_daily["row_count_by_year"] == {
+        "2023": 1,
+        "2024": 1,
+        "2025": 2,
+    }
+    assert market_bars_daily["min_timestamp"] == "2023-12-29"
+    assert market_bars_daily["max_timestamp"] == "2025-01-06"
     assert stock_master["row_count_by_year"] == {"2020": 1, "2021": 1}
     assert stock_master["min_timestamp"] == "2020-01-01"
     assert stock_master["max_timestamp"] == "2021-06-01"
@@ -295,7 +303,7 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
             "--prediction-test-start",
             "2014-07-01",
             "--portfolio-frequency",
-            "1d",
+            frequency_ids.DAILY_FREQUENCY_SLUG,
             "--portfolio-execution-lag-steps",
             "1",
         ],
@@ -307,7 +315,7 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
     assert calls[0].end_date == "2016-12-31"
     assert calls[0].prediction_train_end == "2014-06-30"
     assert calls[0].prediction_test_start == "2014-07-01"
-    assert calls[0].portfolio_frequency == "1d"
+    assert calls[0].portfolio_frequency == frequency_ids.DAILY_FREQUENCY_SLUG
     assert calls[0].portfolio_execution_lag_steps == 1
     assert calls[0].profile.fields.list_names()
     assert calls[0].run_id is None
@@ -359,7 +367,7 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
             "--prediction-test-end",
             "2019-12-31",
             "--portfolio-frequency",
-            "1d",
+            frequency_ids.DAILY_FREQUENCY_SLUG,
             "--portfolio-execution-lag-steps",
             "1",
         ],
@@ -371,7 +379,7 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
     assert calls[0].prediction_train_end == "2017-12-31"
     assert calls[0].prediction_test_start == "2018-01-01"
     assert calls[0].prediction_test_end == "2019-12-31"
-    assert calls[0].portfolio_frequency == "1d"
+    assert calls[0].portfolio_frequency == frequency_ids.DAILY_FREQUENCY_SLUG
     assert calls[0].portfolio_execution_lag_steps == 1
 
 
@@ -396,7 +404,7 @@ def test_qrp_verification_evidence_run_rejects_missing_required_options() -> Non
 
 
 def _write_inventory_fixture(project_root: Path) -> None:
-    interim_root = project_root / "data" / "interim" / "csmar" / "market_bars_1d"
+    interim_root = frequency_ids.csmar_market_bars_interim_root(project_root)
     processed_root = (
         project_root
         / "data"

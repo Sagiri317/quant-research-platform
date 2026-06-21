@@ -18,6 +18,7 @@ from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.reports import report_artifacts
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 
 def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
@@ -911,7 +912,7 @@ def _portfolio_spec() -> PortfolioSpec:
         research_dataset_id="research_demo",
         signals=(_signal_spec(),),
         return_source_column="label",
-        rebalance_frequency="1d",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=0,
         weight_config=WeightConfig(method="rank_weighted_quantile"),
     )

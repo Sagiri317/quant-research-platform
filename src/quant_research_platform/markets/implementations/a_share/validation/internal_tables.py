@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.contracts.data import DataFrequency, data_frequency_slug
+from quant_research_platform.contracts.data import DataFrequency, market_bars_data_id
 
 from .quality_report import (
     QualityIssue,
@@ -19,7 +19,7 @@ from .quality_report import (
     value_counts,
 )
 
-MARKET_BARS_DATA_ID = f"market_bars_{data_frequency_slug(DataFrequency.DAILY)}"
+MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 MARKET_BARS_REQUIRED_COLUMNS = (
     "market_id",
     "asset_id",

@@ -10,6 +10,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     annotations,
     panels,
 )
+from tests.helpers import frequency_ids
 
 
 def test_panel_module_has_no_annotation_rule_helpers() -> None:
@@ -34,9 +35,9 @@ def test_panel_module_has_no_annotation_rule_helpers() -> None:
     assert [token for token in forbidden if token in source] == []
 
 
-def test_market_panel_1d_schema_excludes_derived_annotation_masks() -> None:
+def test_market_panel_daily_schema_excludes_derived_annotation_masks() -> None:
     panel = panels.compute_market_panel(
-        _market_bars_1d_frame(),
+        _market_bars_daily_frame(),
         stock_master=_stock_master_frame(),
         market_cap=_market_cap_frame(),
         trading_calendar=_trading_calendar_frame(),
@@ -127,10 +128,10 @@ def test_annotation_can_enter_can_exit_chunk_boundary_matches_full_frame() -> No
     )
 
 
-def test_market_context_1d_and_execution_projection_are_separate() -> None:
+def test_market_context_daily_and_execution_projection_are_separate() -> None:
     outputs = annotations.derive_annotations(_annotation_panel_frame())
 
-    assert outputs["market_context_1d"].columns.tolist() == [
+    assert outputs[frequency_ids.MARKET_CONTEXT_DATA_ID].columns.tolist() == [
         "market_id",
         "asset_id",
         "timestamp",
@@ -175,9 +176,15 @@ def test_annotations_fail_closed_on_missing_required_projection_column() -> None
 
     with pytest.raises(
         ValueError,
-        match="missing_annotation_input_columns: market_context_1d: market_type",
+        match=(
+            "missing_annotation_input_columns: "
+            f"{frequency_ids.MARKET_CONTEXT_DATA_ID}: market_type"
+        ),
     ):
-        annotations.derive_annotations(panel, data_ids=("market_context_1d",))
+        annotations.derive_annotations(
+            panel,
+            data_ids=(frequency_ids.MARKET_CONTEXT_DATA_ID,),
+        )
 
 
 def test_annotations_accept_explicit_one_word_limit_columns() -> None:
@@ -359,7 +366,7 @@ def _chunk_boundary_panel_frame() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _market_bars_1d_frame() -> pd.DataFrame:
+def _market_bars_daily_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "source_asset_id": ["asset_a", "asset_a"],

@@ -249,7 +249,7 @@ def test_a_share_factor_and_label_validators_reject_infinite_outputs() -> None:
 def test_a_share_processed_annotation_contracts_are_role_based() -> None:
     catalog = processed_catalog()
 
-    market_panel_1d = catalog.get(market_panel_data_id())
+    market_panel_daily = catalog.get(market_panel_data_id())
     context = catalog.get(market_context_data_id())
     labels = catalog.get(FORWARD_RETURNS_PROCESSED_DATA_ID)
     universe = catalog.get(DEFAULT_UNIVERSE_ID)
@@ -257,8 +257,10 @@ def test_a_share_processed_annotation_contracts_are_role_based() -> None:
     execution_mask = catalog.get(EXECUTION_MASK_ID)
     evaluation_mask = catalog.get(EVALUATION_MASK_ID)
 
-    assert market_panel_1d.kind is ProcessedDataKind.PANEL
-    assert {"session_date", "available_at"}.issubset(market_panel_1d.required_columns)
+    assert market_panel_daily.kind is ProcessedDataKind.PANEL
+    assert {"session_date", "available_at"}.issubset(
+        market_panel_daily.required_columns
+    )
     assert context.kind is ProcessedDataKind.ANNOTATION
     assert context.column_roles["market_type"] is ColumnRole.CONTEXT
     assert labels.kind is ProcessedDataKind.LABEL

@@ -27,6 +27,7 @@ from quant_research_platform.research.portfolios import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 
 def test_research_portfolio_package_exports_final_names() -> None:
@@ -69,7 +70,7 @@ def test_portfolio_engine_produces_required_signal_artifacts() -> None:
             ),
         ),
         return_source_column="forward_return",
-        rebalance_frequency="1d",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=0,
         weight_config=WeightConfig(
             method="rank_weighted_quantile",
@@ -132,7 +133,7 @@ def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
             ),
         ),
         return_source_column="forward_return",
-        rebalance_frequency="1d",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=0,
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
@@ -167,7 +168,7 @@ def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None
             ),
         ),
         return_source_column="forward_return",
-        rebalance_frequency="1d",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=1,
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
@@ -236,7 +237,7 @@ def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
     ):
         assert (run_root / filename).is_file()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["rebalance_frequency"] == "1d"
+    assert manifest["rebalance_frequency"] == frequency_ids.DAILY_FREQUENCY_SLUG
     assert manifest["execution_lag_steps"] == 0
     returns = pd.read_parquet(run_root / "portfolio_returns.parquet")
     assert "return_source_column" in returns.columns
@@ -328,7 +329,7 @@ def _portfolio_spec() -> PortfolioSpec:
             ),
         ),
         return_source_column="forward_return",
-        rebalance_frequency="1d",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=0,
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )

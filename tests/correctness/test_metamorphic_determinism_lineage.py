@@ -12,6 +12,7 @@ from quant_research_platform.research.factors.price_volume import (
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
+from tests.helpers import frequency_ids
 
 from ._helpers import KEY_COLUMNS, synthetic_price_volume_panel
 
@@ -139,7 +140,7 @@ def test_column_lineage_and_roles_stay_in_data_layer_boundaries() -> None:
     research_spec = catalogs.research_datasets.get(
         "price_volume_forward_returns"
     )
-    panel = processed.get("market_panel_1d")
+    panel = processed.get(frequency_ids.MARKET_PANEL_DATA_ID)
     execution = processed.get("execution")
     factors = processed.get("price_volume")
     labels = processed.get("forward_returns")

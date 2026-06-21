@@ -7,6 +7,7 @@ import json
 import math
 import subprocess
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,18 @@ KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
 FLOAT_ATOL = 1e-10
 FLOAT_RTOL = 1e-10
 UINT64_MOD = 1 << 64
+EXPECTED_FAILURE_STATUS = "FAIL_EXPECTED"
+EXPECTED_FAILURE_REASON = "stale_rank_ensemble_prediction_baseline"
+RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
+    "equal_weight_rank_ensemble",
+    "ic_weighted_rank_ensemble",
+)
+REQUIRED_COMPARE_LABELS = (
+    "old_baseline_3y",
+    "old_baseline_6y",
+    "refreshed_prediction_baseline_3y",
+    "refreshed_prediction_baseline_6y",
+)
 
 RETIRED_RESEARCH_DATA_ID = "a_share" + "_price_volume_forward_returns"
 RETIRED_CONTEXT_DATA_ID = "daily" + "_context"
@@ -196,26 +209,52 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     _write_json(goal_root / "compare-rename-map.json", _rename_map_payload())
-    comparisons = {}
+    comparisons: dict[str, dict[str, Any]] = {}
     for label, paths in runs.items():
-        comparisons[label] = compare_run_safely(
+        comparison = compare_run_safely(
             label,
             paths["baseline"],
             paths["final"],
         )
+        comparison = add_public_summary_fields(comparison)
+        comparisons[label] = apply_pair_expectation(comparison, paths)
     currentness = _currentness_payload(tuple(path["final"] for path in runs.values()))
     statuses = {label: item["status"] for label, item in comparisons.items()}
-    overall_status = "PASS"
-    if any(status in {"FAIL", "BLOCKED"} for status in statuses.values()):
-        overall_status = "FAIL"
-    elif any(status == "PARTIAL" for status in statuses.values()):
-        overall_status = "PARTIAL"
+    actual_statuses = {
+        label: item.get("actual_status", item["status"])
+        for label, item in comparisons.items()
+    }
+    contract_failures = compare_contract_failures(comparisons)
+    actual_overall_status = _overall_status(actual_statuses.values())
+    overall_status = _overall_status(statuses.values(), contract_failures)
+    old_baseline_compare_status = _group_status(
+        status
+        for label, status in statuses.items()
+        if label.startswith("old_baseline_")
+        or comparisons[label].get("expected_status") == EXPECTED_FAILURE_STATUS
+    )
+    refreshed_prediction_baseline_compare_status = _group_status(
+        status
+        for label, status in statuses.items()
+        if label.startswith("refreshed_prediction_baseline_")
+    )
 
     payload = {
-        "schema_version": "qrp-baseline-final-compare/0.2",
+        "schema_version": "qrp-baseline-final-compare-summary/0.1",
         "baseline_commit": args.baseline_commit,
         "current_git": currentness,
+        "actual_overall_status": actual_overall_status,
+        "contract_failures": contract_failures,
         "overall_status": overall_status,
+        "old_baseline_compare_status": old_baseline_compare_status,
+        "refreshed_prediction_baseline_compare_status": (
+            refreshed_prediction_baseline_compare_status
+        ),
+        "validation_decision": "PASS" if overall_status == "PASS" else overall_status,
+        "status_counts": {
+            status: sum(1 for item in statuses.values() if item == status)
+            for status in sorted(set(statuses.values()))
+        },
         "comparisons": comparisons,
         "rename_map_path": _safe_relative(goal_root / "compare-rename-map.json"),
         "privacy": "public_safe_aggregate_only_no_row_level_values",
@@ -237,15 +276,224 @@ def compare_run_safely(
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "BLOCKED",
+            "label": label,
             "failures": ["compare_input_error"],
             "partials": [],
             "error_type": type(exc).__name__,
-            "error": str(exc),
+            "error": "compare_input_error",
             "baseline_run_label": baseline_root.name,
             "final_run_label": final_root.name,
             "baseline_root": _safe_relative(baseline_root),
             "final_root": _safe_relative(final_root),
         }
+
+
+def apply_pair_expectation(
+    comparison: dict[str, Any],
+    pair: dict[str, Any],
+) -> dict[str, Any]:
+    expected_status = str(pair.get("expected_status") or "PASS").strip().upper()
+    if expected_status == "PASS":
+        comparison["expected_status"] = "PASS"
+        return comparison
+    if expected_status != EXPECTED_FAILURE_STATUS:
+        comparison["expected_status"] = expected_status
+        comparison["status"] = "FAIL"
+        comparison.setdefault("failures", []).append("unsupported_expected_status")
+        return comparison
+
+    reason = str(pair.get("expected_failure_reason") or "").strip()
+    expected_artifacts = sorted(
+        str(item)
+        for item in pair.get("expected_failed_artifacts", ())
+        if str(item).strip()
+    )
+    comparison["expected_status"] = EXPECTED_FAILURE_STATUS
+    comparison["expected_failure"] = True
+    comparison["reason_code"] = reason
+    comparison["expected_failed_artifacts"] = expected_artifacts
+    comparison["failed_artifacts"] = prediction_failed_artifacts(comparison)
+    policy_failures = expected_failure_policy_failures(
+        comparison,
+        expected_artifacts=expected_artifacts,
+        reason=reason,
+    )
+    if not policy_failures and expected_failure_matches(comparison, expected_artifacts):
+        comparison["actual_status"] = "FAIL"
+        comparison["status"] = EXPECTED_FAILURE_STATUS
+        comparison["expected_failure_match"] = True
+        return comparison
+    comparison["expected_failure_match"] = False
+    comparison["expected_failure_policy_failures"] = policy_failures
+    comparison["status"] = "FAIL"
+    comparison.setdefault("failures", []).append("expected_failure_policy_mismatch")
+    return comparison
+
+
+def expected_failure_policy_failures(
+    comparison: dict[str, Any],
+    *,
+    expected_artifacts: list[str],
+    reason: str,
+) -> list[str]:
+    failures: list[str] = []
+    label = str(comparison.get("label") or "")
+    if label not in {"old_baseline_3y", "old_baseline_6y"}:
+        failures.append("expected_failure_label_not_old_baseline")
+    if reason != EXPECTED_FAILURE_REASON:
+        failures.append("expected_failure_reason_mismatch")
+    if expected_artifacts != sorted(RANK_ENSEMBLE_PREDICTION_ARTIFACTS):
+        failures.append("expected_failed_artifacts_mismatch")
+    return failures
+
+
+def expected_failure_matches(
+    comparison: dict[str, Any],
+    expected_artifacts: list[str],
+) -> bool:
+    if comparison.get("status") != "FAIL":
+        return False
+    if comparison.get("failures") != ["prediction_summary"]:
+        return False
+    for key in (
+        "research_dataset",
+        "evaluation_summary",
+        "portfolio_summary",
+        "validation_summary",
+    ):
+        if comparison.get(key, {}).get("status") != "PASS":
+            return False
+    prediction = comparison.get("prediction_summary", {})
+    if prediction.get("missing_prediction_artifacts"):
+        return False
+    if prediction.get("extra_prediction_artifacts"):
+        return False
+    return sorted(comparison.get("failed_artifacts", ())) == expected_artifacts
+
+
+def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[str]:
+    failures: list[str] = []
+    missing = sorted(set(REQUIRED_COMPARE_LABELS) - set(comparisons))
+    failures.extend(f"missing_required_comparison: {label}" for label in missing)
+    for label in ("old_baseline_3y", "old_baseline_6y"):
+        comparison = comparisons.get(label)
+        if comparison is None:
+            continue
+        if comparison.get("status") != EXPECTED_FAILURE_STATUS:
+            failures.append(f"old_baseline_status_not_fail_expected: {label}")
+        if comparison.get("reason_code") != EXPECTED_FAILURE_REASON:
+            failures.append(f"old_baseline_reason_mismatch: {label}")
+        if comparison.get("failed_artifacts") != sorted(
+            RANK_ENSEMBLE_PREDICTION_ARTIFACTS
+        ):
+            failures.append(f"old_baseline_failed_artifacts_mismatch: {label}")
+    for label in (
+        "refreshed_prediction_baseline_3y",
+        "refreshed_prediction_baseline_6y",
+    ):
+        comparison = comparisons.get(label)
+        if comparison is None:
+            continue
+        if comparison.get("status") != "PASS":
+            failures.append(f"refreshed_baseline_status_not_pass: {label}")
+            continue
+        prediction = comparison.get("prediction_summary", {})
+        artifact_ids = set(prediction.get("artifact_ids", ()))
+        missing_artifacts = sorted(
+            set(RANK_ENSEMBLE_PREDICTION_ARTIFACTS) - artifact_ids
+        )
+        failures.extend(
+            f"refreshed_baseline_missing_rank_ensemble_artifact: {label}:{artifact}"
+            for artifact in missing_artifacts
+        )
+        if prediction.get("failed_artifacts"):
+            failures.append(f"refreshed_baseline_failed_artifacts_present: {label}")
+    return failures
+
+
+def prediction_failed_artifacts(comparison: dict[str, Any]) -> list[str]:
+    prediction = comparison.get("prediction_summary", {})
+    artifacts = set(prediction.get("artifact_diffs", {}))
+    artifacts.update(prediction.get("artifact_content_diffs", {}))
+    artifacts.update(prediction.get("missing_prediction_artifacts", ()))
+    artifacts.update(prediction.get("extra_prediction_artifacts", ()))
+    return sorted(str(artifact) for artifact in artifacts)
+
+
+def add_public_summary_fields(comparison: dict[str, Any]) -> dict[str, Any]:
+    if comparison.get("status") == "BLOCKED":
+        return comparison
+    comparison["research_dataset_summary"] = research_dataset_summary(
+        comparison["research_dataset"]
+    )
+    return comparison
+
+
+def research_dataset_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "row_count": {
+            **payload["row_count"],
+            "match": payload["row_count_match"],
+        },
+        "row_count_baseline": payload["row_count"]["baseline"],
+        "row_count_final": payload["row_count"]["final"],
+        "row_count_match": payload["row_count_match"],
+        "asset_count": {
+            **payload["asset_count"],
+            "match": payload["asset_count_match"],
+        },
+        "asset_count_baseline": payload["asset_count"]["baseline"],
+        "asset_count_final": payload["asset_count"]["final"],
+        "asset_count_match": payload["asset_count_match"],
+        "timestamp_count": {
+            **payload["timestamp_count"],
+            "match": payload["timestamp_count_match"],
+        },
+        "timestamp_count_baseline": payload["timestamp_count"]["baseline"],
+        "timestamp_count_final": payload["timestamp_count"]["final"],
+        "timestamp_count_match": payload["timestamp_count_match"],
+        "schema_columns_after_rename_match": payload[
+            "schema_columns_after_rename_match"
+        ],
+        "key_bound_hash_match": payload["key_bound_hash_match"],
+        "numeric_max_abs_diff": payload["max_numeric_abs_diff"],
+        "numeric_max_rel_diff": payload["max_numeric_rel_diff"],
+        "nan_profile_match": payload["nan_profile_match"],
+    }
+
+
+def _overall_status(
+    statuses: Iterable[str],
+    contract_failures: list[str] | None = None,
+) -> str:
+    if contract_failures:
+        return "FAIL"
+    status_set = set(statuses)
+    if status_set & {"FAIL", "BLOCKED"}:
+        return "FAIL"
+    if "PARTIAL" in status_set:
+        return "PARTIAL"
+    return "PASS"
+
+
+def _group_status(statuses: Iterable[str]) -> str:
+    status_list = list(statuses)
+    if not status_list:
+        return "NOT_RUN"
+    status_set = set(status_list)
+    if status_set == {EXPECTED_FAILURE_STATUS}:
+        return EXPECTED_FAILURE_STATUS
+    if status_set <= {"PASS"}:
+        return "PASS"
+    if status_set <= {"PASS", EXPECTED_FAILURE_STATUS}:
+        return "PASS"
+    if "BLOCKED" in status_set:
+        return "BLOCKED"
+    if "FAIL" in status_set:
+        return "FAIL"
+    if "PARTIAL" in status_set:
+        return "PARTIAL"
+    return "FAIL"
 
 
 def compare_run(label: str, baseline_root: Path, final_root: Path) -> dict[str, Any]:
@@ -287,6 +535,7 @@ def compare_run(label: str, baseline_root: Path, final_root: Path) -> dict[str, 
         status = "PARTIAL"
     return {
         "status": status,
+        "label": label,
         "failures": failures,
         "partials": partials,
         "baseline_run_label": baseline_root.name,
@@ -308,14 +557,14 @@ def compare_run(label: str, baseline_root: Path, final_root: Path) -> dict[str, 
     }
 
 
-def run_pairs_from_args(args: argparse.Namespace) -> dict[str, dict[str, Path]]:
+def run_pairs_from_args(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     if args.pair and args.pairs_file:
         raise ValueError("pair_arguments_are_mutually_exclusive")
     if args.pairs_file:
         return run_pairs_from_file(Path(args.pairs_file))
     if not args.pair:
         raise ValueError("missing_pair: provide --pair or --pairs-file")
-    runs: dict[str, dict[str, Path]] = {}
+    runs: dict[str, dict[str, Any]] = {}
     for raw_pair in args.pair:
         if "=" not in raw_pair or "::" not in raw_pair:
             raise ValueError(
@@ -334,12 +583,12 @@ def run_pairs_from_args(args: argparse.Namespace) -> dict[str, dict[str, Path]]:
     return runs
 
 
-def run_pairs_from_file(path: Path) -> dict[str, dict[str, Path]]:
+def run_pairs_from_file(path: Path) -> dict[str, dict[str, Any]]:
     payload = _read_json(path)
     raw_pairs = payload.get("pairs", payload)
     if not isinstance(raw_pairs, list):
         raise ValueError("invalid_pairs_file: expected list or {pairs: list}")
-    runs: dict[str, dict[str, Path]] = {}
+    runs: dict[str, dict[str, Any]] = {}
     for raw_pair in raw_pairs:
         if not isinstance(raw_pair, dict):
             raise ValueError("invalid_pairs_file: pair_must_be_object")
@@ -353,9 +602,15 @@ def run_pairs_from_file(path: Path) -> dict[str, dict[str, Path]]:
             raise ValueError("invalid_pairs_file: missing_label")
         if label in runs:
             raise ValueError(f"duplicate_pair_label: {label}")
+        expected_failed_artifacts = raw_pair.get("expected_failed_artifacts", ())
+        if isinstance(expected_failed_artifacts, str):
+            expected_failed_artifacts = [expected_failed_artifacts]
         runs[label] = {
             "baseline": baseline_root,
             "final": final_root,
+            "expected_status": raw_pair.get("expected_status", "PASS"),
+            "expected_failure_reason": raw_pair.get("expected_failure_reason", ""),
+            "expected_failed_artifacts": list(expected_failed_artifacts),
         }
     if not runs:
         raise ValueError("invalid_pairs_file: empty_pairs")
@@ -553,11 +808,47 @@ def compare_prediction_outputs(baseline_root: Path, final_root: Path) -> dict[st
         artifact_partials or content_compare["status"] == "PARTIAL"
     ):
         status = "PARTIAL"
+    prediction_score_diff = aggregate["required_field_diffs"].get(
+        "prediction_score",
+        {},
+    )
+    failed_artifacts = sorted(
+        {
+            *artifact_failures,
+            *content_compare["artifact_diffs"],
+            *missing_artifacts,
+            *extra_artifacts,
+        }
+    )
     return {
         **aggregate,
         "status": status,
         "failures": failures,
         "partials": artifact_partials,
+        "artifact_ids": sorted(set(baseline_by_id) | set(final_by_id)),
+        "artifact_count": {
+            "baseline": len(baseline_by_id),
+            "final": len(final_by_id),
+            "match": len(baseline_by_id) == len(final_by_id),
+        },
+        "row_count": _count_summary_from_stat_diff(prediction_score_diff),
+        "prediction_mean_abs_diff_max": _abs_stat_diff(
+            prediction_score_diff,
+            "mean_diff",
+        ),
+        "prediction_std_abs_diff_max": _abs_stat_diff(
+            prediction_score_diff,
+            "std_diff",
+        ),
+        "prediction_min_abs_diff_max": _abs_stat_diff(
+            prediction_score_diff,
+            "min_diff",
+        ),
+        "prediction_max_abs_diff_max": _abs_stat_diff(
+            prediction_score_diff,
+            "max_diff",
+        ),
+        "failed_artifacts": failed_artifacts,
         "missing_prediction_artifacts": missing_artifacts,
         "extra_prediction_artifacts": extra_artifacts,
         "artifact_diffs": artifact_diffs,
@@ -585,7 +876,35 @@ def compare_evaluation_outputs(baseline_root: Path, final_root: Path) -> dict[st
             ),
         ),
     }
-    return compare_report_sections(baseline_root, final_root, "evaluation", sections)
+    payload = compare_report_sections(baseline_root, final_root, "evaluation", sections)
+    payload.update(
+        {
+            "artifact_count": _section_artifact_count(payload, "metrics"),
+            "ic_abs_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("metrics", "ic"),
+                ("ic_summary", "mean_ic"),
+            ),
+            "rank_ic_abs_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("metrics", "rankic"),
+                ("ic_summary", "mean_rankic"),
+            ),
+            "count_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("metrics", "n_obs"),
+                ("ic_summary", "valid_ic_count"),
+                ("ic_summary", "valid_rankic_count"),
+            ),
+            "coverage_abs_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("metrics", "n_obs"),
+                ("ic_summary", "valid_ic_count"),
+                ("ic_summary", "valid_rankic_count"),
+            ),
+        }
+    )
+    return payload
 
 
 def compare_portfolio_outputs(baseline_root: Path, final_root: Path) -> dict[str, Any]:
@@ -617,7 +936,34 @@ def compare_portfolio_outputs(baseline_root: Path, final_root: Path) -> dict[str
             ("timestamp", "signal", "total_cost"),
         ),
     }
-    return compare_report_sections(baseline_root, final_root, "portfolio", sections)
+    payload = compare_report_sections(baseline_root, final_root, "portfolio", sections)
+    payload.update(
+        {
+            "artifact_count": _section_artifact_count(
+                payload,
+                "performance_summary",
+            ),
+            "net_return_abs_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("performance_summary", "final_cumulative_net_return"),
+            ),
+            "max_drawdown_abs_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("performance_summary", "max_drawdown"),
+            ),
+            "turnover_abs_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("performance_summary", "mean_turnover"),
+                ("turnover", "turnover"),
+            ),
+            "cost_abs_diff_max": _max_required_field_abs_diff(
+                payload,
+                ("performance_summary", "total_cost"),
+                ("cost_breakdown", "total_cost"),
+            ),
+        }
+    )
+    return payload
 
 
 def compare_report_sections(
@@ -680,6 +1026,52 @@ def compare_report_sections(
     elif partials:
         status = "PARTIAL"
     return {"status": status, "failures": failures, "partials": partials, **payload}
+
+
+def _section_artifact_count(
+    payload: dict[str, Any],
+    section: str,
+) -> dict[str, Any]:
+    file_count = payload.get(section, {}).get("file_count", {})
+    baseline = int(file_count.get("baseline", 0))
+    final = int(file_count.get("final", 0))
+    return {"baseline": baseline, "final": final, "match": baseline == final}
+
+
+def _count_summary_from_stat_diff(diff: dict[str, Any]) -> dict[str, Any]:
+    count = diff.get("count", {})
+    baseline = int(count.get("baseline", 0) or 0)
+    final = int(count.get("final", 0) or 0)
+    return {"baseline": baseline, "final": final, "match": baseline == final}
+
+
+def _max_required_field_abs_diff(
+    payload: dict[str, Any],
+    *fields: tuple[str, str],
+) -> float:
+    values: list[float] = []
+    for section, field in fields:
+        diff = (
+            payload.get(section, {})
+            .get("required_field_diffs", {})
+            .get(field, {})
+        )
+        values.extend(
+            _abs_stat_diff(diff, key)
+            for key in ("count_diff", "mean_diff", "std_diff", "min_diff", "max_diff")
+        )
+    return max(values, default=0.0)
+
+
+def _abs_stat_diff(diff: dict[str, Any], key: str) -> float:
+    value = diff.get(key)
+    if value is None:
+        return 0.0
+    try:
+        result = abs(float(value))
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if math.isnan(result) else result
 
 
 def compare_required_stats(
@@ -1153,7 +1545,7 @@ def _git_output(*command: str) -> str:
 
 def _rename_map_payload() -> dict[str, Any]:
     return {
-        "schema_version": "qrp-compare-rename-map/0.2",
+        "schema_version": "qrp-compare-rename-map/0.1",
         "data_ids": DATA_ID_RENAME_MAP,
         "report_paths": {
             f"reports/{RETIRED_PRIVATE_REPORT_ROOT}": "reports/private_research",
@@ -1249,7 +1641,7 @@ def _safe_relative(path: Path) -> str:
     try:
         return path.relative_to(Path.cwd()).as_posix()
     except ValueError:
-        return path.as_posix()
+        return f"<external-path>/{path.name}"
 
 
 def _parse_args() -> argparse.Namespace:

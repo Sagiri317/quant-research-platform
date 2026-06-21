@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -41,3 +43,29 @@ def test_current_source_and_market_ids_are_frequency_derived() -> None:
     assert market_ids.market_context_data_id(DataFrequency.DAILY) == "market_context_1d"
     assert not hasattr(source_ids, "CSMAR" + "_SOURCE_ID")
     assert not hasattr(market_ids, "A_SHARE" + "_MARKET_ID")
+
+
+def test_regular_tests_do_not_hardcode_active_frequency_literals() -> None:
+    allowed = {
+        Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
+        Path("tests/architecture/test_retired_surface_absent.py"),
+    }
+    forbidden = (
+        "market_bars_1d",
+        "market_panel_1d",
+        "market_context_1d",
+        '"1d"',
+        "'1d'",
+        '"1" + "d"',
+        "'1' + 'd'",
+    )
+    findings: list[str] = []
+    for path in sorted(Path("tests").rglob("*.py")):
+        if path in allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in text:
+                findings.append(f"{path.as_posix()}: {token}")
+
+    assert findings == []

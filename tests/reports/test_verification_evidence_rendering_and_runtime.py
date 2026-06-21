@@ -15,6 +15,7 @@ from quant_research_platform.runtime.profiling import (
     active_stage_profiler,
     measure_stage,
 )
+from tests.helpers import frequency_ids
 
 
 def test_public_safe_evidence_markdown_renders_status_rows() -> None:
@@ -59,7 +60,7 @@ def test_private_verification_summary_markdown_renders_inventory() -> None:
         "source_data_visibility": "private_local_only",
         "dataset_inventory": [
             {
-                "logical_root": "processed/a_share/panel/market_panel_1d",
+                "logical_root": frequency_ids.market_panel_logical_root(),
                 "covered_by_evidence_area": "panel",
                 "row_count": 10,
                 "column_count": 3,
@@ -73,7 +74,7 @@ def test_private_verification_summary_markdown_renders_inventory() -> None:
                 "period": "not_applicable",
             },
         ],
-        "covered_roots": ["processed/a_share/panel/market_panel_1d"],
+        "covered_roots": [frequency_ids.market_panel_logical_root()],
         "uncovered_roots": ["processed/a_share/other/demo"],
         "allowed_unverified_roots": [],
         "merge_ready": False,

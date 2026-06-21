@@ -30,6 +30,7 @@ class _AlgorithmFacts:
     estimator_factory: Callable[[ModelSpec, dict[str, object]], object] | None = None
     default_hyperparameters: Mapping[str, object] = field(default_factory=dict)
     smoke_hyperparameters: Mapping[str, object] = field(default_factory=dict)
+    input_kind: str = "feature_inputs"
 
 
 @dataclass(frozen=True)
@@ -255,14 +256,17 @@ _MODEL_ALGORITHM_FACTS = {
     "single_factor_baseline": _AlgorithmFacts(
         "single_factor_baseline",
         estimator_factory=_single_factor_baseline,
+        input_kind="single_factor_input",
     ),
     "equal_weight_rank_ensemble": _AlgorithmFacts(
         "equal_weight_rank_ensemble",
         estimator_factory=_equal_weight_rank_ensemble,
+        input_kind="rank_ensemble_inputs",
     ),
     "ic_weighted_rank_ensemble": _AlgorithmFacts(
         "ic_weighted_rank_ensemble",
         estimator_factory=_ic_weighted_rank_ensemble,
+        input_kind="rank_ensemble_inputs",
     ),
 }
 

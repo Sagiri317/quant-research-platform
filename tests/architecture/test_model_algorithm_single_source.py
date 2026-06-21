@@ -9,14 +9,25 @@ def test_model_algorithms_live_only_in_supervised_model_facts() -> None:
 
     assert not hasattr(contracts_models, "MODEL" + "_ALGORITHMS")
     names = supervised.model_algorithm_names()
+    required_algorithms = {
+        "linear_regression",
+        "single_factor_baseline",
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    }
     assert names == tuple(sorted(names))
-    assert "linear_regression" in names
+    assert required_algorithms.issubset(names)
     for name in names:
         definition = supervised.model_algorithm_definition(name)
         assert definition.algorithm == name
         assert isinstance(supervised.model_default_hyperparameters(name), dict)
         assert isinstance(supervised.model_smoke_hyperparameters(name), dict)
         assert callable(definition.estimator_factory)
+        assert definition.input_kind in {
+            "feature_inputs",
+            "single_factor_input",
+            "rank_ensemble_inputs",
+        }
         status = supervised.model_dependency_status(name)
         assert status["status"] in {"available", "missing"}
 
@@ -41,4 +52,20 @@ def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     )
     assert "_ICWeightedRankEnsembleFactory" not in inspect.getsource(
         supervised._fit_predictor
+    )
+
+
+def test_a_share_model_scenario_inputs_use_algorithm_facts_only() -> None:
+    from quant_research_platform.markets.implementations.a_share import (
+        research_scenarios as scenarios,
+    )
+
+    assert 'model_algorithm == "single_factor_baseline"' not in inspect.getsource(
+        scenarios
+    )
+    assert "model_algorithm_definition" in inspect.getsource(
+        scenarios._model_factor_inputs
+    )
+    assert "model_algorithm_definition" in inspect.getsource(
+        scenarios._model_feature_inputs
     )

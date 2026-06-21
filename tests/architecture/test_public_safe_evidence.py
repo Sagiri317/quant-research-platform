@@ -12,6 +12,7 @@ from quant_research_platform.markets.implementations.a_share.verification import
     private_aggregate,
 )
 from quant_research_platform.storage.datasets import DatasetReadMode
+from tests.helpers import frequency_ids
 
 REQUIRED_AREAS = {
     "processed_panel_parity",
@@ -22,7 +23,7 @@ REQUIRED_AREAS = {
     "evaluation_parity",
     "prediction_oos_smoke_parity",
     "supporting_layers_coverage_2014_2025",
-    "full_historical_market_panel_1d_status",
+    frequency_ids.full_historical_market_panel_status_area(),
 }
 
 REQUIRED_FIELDS = {
@@ -242,13 +243,13 @@ def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:
     assert payload["merge_ready"] is False
 
 
-def test_full_historical_market_panel_1d_covers_full_2014_2025_period() -> None:
+def test_full_historical_market_panel_daily_covers_full_2014_2025_period() -> None:
     path = Path("docs/reports/clean-rewrite-0.1-parity-evidence.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
     area = next(
         item
         for item in payload["areas"]
-        if item["area"] == "full_historical_market_panel_1d_status"
+        if item["area"] == frequency_ids.full_historical_market_panel_status_area()
     )
 
     assert area["period"] == "2014-01-01 through 2025-12-31"
@@ -258,7 +259,7 @@ def test_full_historical_market_panel_1d_covers_full_2014_2025_period() -> None:
     assert payload["evidence_status"] == "evidence_pending_regeneration"
 
 
-def test_full_historical_market_panel_1d_summary_streams_generated_chunks(
+def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
     monkeypatch,
 ) -> None:
     from quant_research_platform.markets.implementations.a_share.verification import (
@@ -301,7 +302,7 @@ def test_full_historical_market_panel_1d_summary_streams_generated_chunks(
     assert summary.period == "2014-01-01 through 2025-12-31"
 
 
-def test_full_historical_market_panel_1d_generation_always_uses_chunks(
+def test_full_historical_market_panel_daily_generation_always_uses_chunks(
     monkeypatch,
 ) -> None:
     from quant_research_platform.markets.implementations.a_share.verification import (
@@ -371,7 +372,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
             )
         if root.name in {"stock_master", "market_cap"}:
             return pd.DataFrame({"asset_id": ["asset-a"]})
-        assert root.name == "market_bars_1d"
+        assert root.name == frequency_ids.MARKET_BARS_DATA_ID
         time_window = kwargs["time_window"]
         timestamps = [
             session
@@ -388,7 +389,9 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         )
 
     required_columns = (
-        catalog.processed_catalog().get("market_panel_1d").required_columns
+        catalog.processed_catalog()
+        .get(frequency_ids.MARKET_PANEL_DATA_ID)
+        .required_columns
     )
 
     def fake_compute_market_panel(
@@ -692,16 +695,16 @@ def test_private_verification_summary_json_schema_and_coverage() -> None:
 def test_private_verification_summary_covers_full_historical_panel() -> None:
     path = Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    market_panel_1d = next(
+    market_panel_daily = next(
         item
         for item in payload["dataset_inventory"]
-        if item["logical_root"] == "processed/a_share/panel/market_panel_1d"
+        if item["logical_root"] == frequency_ids.market_panel_logical_root()
     )
 
-    assert market_panel_1d["period"] == "2014-01-01 through 2025-12-31"
+    assert market_panel_daily["period"] == "2014-01-01 through 2025-12-31"
     assert (
-        market_panel_1d["covered_by_evidence_area"]
-        == "full_historical_market_panel_1d_status"
+        market_panel_daily["covered_by_evidence_area"]
+        == frequency_ids.full_historical_market_panel_status_area()
     )
 
 

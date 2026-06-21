@@ -18,6 +18,7 @@ HANDOFF_TOOL_ROOT = (
     / "scripts"
     / "handoff"
 )
+TEST_BRANCH = "feature/synthetic-handoff-review"
 
 
 def _load_handoff_module(name: str):
@@ -47,7 +48,7 @@ def _init_handoff_repo(repo: Path) -> tuple[str, str]:
     _git(repo, "init")
     _git(repo, "config", "user.email", "handoff-test@example.invalid")
     _git(repo, "config", "user.name", "Handoff Test")
-    _git(repo, "checkout", "-b", "feature/qrp-clean-rewrite")
+    _git(repo, "checkout", "-b", TEST_BRANCH)
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "base")
@@ -71,7 +72,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     out_dir = tmp_path / "out"
     task = {
         "slug": "handoff-test",
-        "branch": "feature/qrp-clean-rewrite",
+        "branch": TEST_BRANCH,
         "base": base,
         "final_head": final_head,
         "final_sha": final_head,
@@ -291,7 +292,7 @@ def test_verifier_reruns_source_tree_scan_from_bundle(tmp_path: Path) -> None:
         "bundle",
         "create",
         str(forged_bundle),
-        "feature/qrp-clean-rewrite",
+        TEST_BRANCH,
     )
 
     with zipfile.ZipFile(package) as archive:
@@ -386,7 +387,7 @@ def test_verifier_reruns_source_tree_scan_rejects_pr_body_renderer(
         "bundle",
         "create",
         str(forged_bundle),
-        "feature/qrp-clean-rewrite",
+        TEST_BRANCH,
     )
 
     with zipfile.ZipFile(package) as archive:
@@ -652,7 +653,7 @@ def test_handoff_safety_allows_historical_codex_in_bundle_when_head_is_clean(
     _git(repo, "rm", ".codex/config.json")
     _git(repo, "commit", "-m", "remove historical repo-local codex fixture")
     bundle = tmp_path / "final-branch.bundle"
-    _git(repo, "bundle", "create", str(bundle), "feature/qrp-clean-rewrite")
+    _git(repo, "bundle", "create", str(bundle), TEST_BRANCH)
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.write(bundle, "final-branch.bundle")
@@ -672,7 +673,7 @@ def test_handoff_safety_rejects_codex_in_bundle_head_tree(tmp_path: Path) -> Non
     _git(repo, "add", ".codex/config.json")
     _git(repo, "commit", "-m", "add current repo-local codex fixture")
     bundle = tmp_path / "final-branch.bundle"
-    _git(repo, "bundle", "create", str(bundle), "feature/qrp-clean-rewrite")
+    _git(repo, "bundle", "create", str(bundle), TEST_BRANCH)
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.write(bundle, "final-branch.bundle")
@@ -748,7 +749,7 @@ def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None
                 "zip_logical_path": f"{run_handoffs}/handoff.zip",
                 "zip_sha256": verifier.sha256_file(package),
                 "artifact_manifest_sha256": "0" * 64,
-                "branch": "feature/qrp-clean-rewrite",
+                "branch": TEST_BRANCH,
                 "base": "0" * 40,
                 "final_head": "1" * 40,
                 "generated_at_utc": "2026-06-19T00:00:00+00:00",
@@ -778,7 +779,7 @@ def test_verify_requires_pr_url_in_task_metadata() -> None:
         {
             "schema_version": "handoff-task-metadata/0.1",
             "slug": "demo",
-            "branch": "feature/qrp-clean-rewrite",
+            "branch": TEST_BRANCH,
             "base": "0" * 40,
         }
     )

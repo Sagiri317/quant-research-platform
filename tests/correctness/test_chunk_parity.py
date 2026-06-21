@@ -11,6 +11,7 @@ from quant_research_platform.research.datasets import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 from ._helpers import (
     assert_forced_tiny_processed_chunks_match_default,
@@ -25,7 +26,7 @@ from ._helpers import (
     ("data_id", "kind", "end_date", "time_window"),
     [
         (
-            "market_panel_1d",
+            frequency_ids.MARKET_PANEL_DATA_ID,
             "panel",
             "2014-01-08",
             TimeWindow("2014-01-02", "2014-01-07"),

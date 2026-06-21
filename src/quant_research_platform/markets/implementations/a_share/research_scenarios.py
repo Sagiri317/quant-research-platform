@@ -29,6 +29,7 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 from quant_research_platform.research.models.supervised import (
+    model_algorithm_definition,
     model_algorithm_names,
     model_smoke_hyperparameters,
 )
@@ -314,13 +315,15 @@ def _prediction_id(model_algorithm: str, test_start: str) -> str:
 
 
 def _model_factor_inputs(model_algorithm: str) -> tuple[str, ...]:
-    if model_algorithm == "single_factor_baseline":
+    facts = model_algorithm_definition(model_algorithm)
+    if facts.input_kind == "single_factor_input":
         return SCENARIO_DEFAULTS.baseline_factor_inputs
     return SCENARIO_DEFAULTS.model_factor_inputs
 
 
 def _model_feature_inputs(model_algorithm: str) -> tuple[str, ...]:
-    if model_algorithm == "single_factor_baseline":
+    facts = model_algorithm_definition(model_algorithm)
+    if facts.input_kind == "single_factor_input":
         return ()
     return SCENARIO_DEFAULTS.model_feature_inputs
 

@@ -364,6 +364,7 @@ def stage_handoff_evidence(
         stable_json(
             generation_payload(
                 task=task,
+                validation_evidence=validation_evidence,
                 branch=branch,
                 base=base,
                 final_head=final_head,
@@ -388,6 +389,7 @@ def stage_handoff_evidence(
 def generation_payload(
     *,
     task: dict[str, object],
+    validation_evidence: dict[str, object],
     branch: str,
     base: str,
     final_head: str,
@@ -397,9 +399,6 @@ def generation_payload(
 ) -> dict[str, object]:
     return {
         "schema_version": "handoff-generation/0.1",
-        "status": "PASS",
-        "builder_script": HANDOFF_TOOL_SOURCE_PATHS[0],
-        "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "mode": mode,
         "base": base,
         "final_head": final_head,
@@ -407,14 +406,45 @@ def generation_payload(
         "zip_filename": zip_filename,
         "zip_sha256": "external_sidecar",
         "bundle_sha256": sha256_file(bundle_path),
-        "source_tool_paths": HANDOFF_TOOL_SOURCE_PATHS,
-        "task_slug": str(task.get("slug") or ""),
-        "zip_integrity_note": (
-            "The final zip SHA-256 is recorded in the external sidecar because "
-            "a zip member cannot contain the hash of the final archive without "
-            "creating a self-referential digest."
-        ),
+        "compare_evidence_path": compare_evidence_path(task),
+        "source_tree_scan_path": SOURCE_TREE_SCAN_EVIDENCE,
+        "validation_status": validation_status(validation_evidence),
     }
+
+
+def compare_evidence_path(task: dict[str, object]) -> str | None:
+    handoff_evidence = task.get("handoff_evidence")
+    if not isinstance(handoff_evidence, dict):
+        return None
+    for raw_name in handoff_evidence:
+        name = normalize_zip_path(str(raw_name))
+        if not name.startswith("handoff_evidence/"):
+            name = "handoff_evidence/" + name
+        if not name.endswith(".json"):
+            name += ".json"
+        if name == "handoff_evidence/baseline-final-compare.json":
+            return name
+    return None
+
+
+def validation_status(validation_evidence: dict[str, object]) -> str:
+    checks = validation_evidence.get("checks")
+    if not isinstance(checks, list):
+        return "BLOCKED"
+    statuses = {
+        str(row.get("status") or "").upper()
+        for row in checks
+        if isinstance(row, dict)
+    }
+    if statuses & {"FAIL"}:
+        return "FAIL"
+    if statuses & {"BLOCKED"}:
+        return "BLOCKED"
+    if statuses & {"NOT_RUN"}:
+        return "NOT_RUN"
+    if statuses == {"PASS"}:
+        return "PASS"
+    return "NOT_RUN"
 
 
 def source_tree_scan_payload(
@@ -440,7 +470,12 @@ def source_tree_scan_from_clone(
     final_head: str,
 ) -> dict[str, object]:
     scanned_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
-    findings = source_tree_findings(clone_dir)
+    scan_groups = source_tree_scan_groups(clone_dir)
+    findings = [
+        finding
+        for group in scan_groups.values()
+        for finding in group["findings"]
+    ]
     failures = []
     if scanned_head != final_head:
         failures.append("source_tree_scan_head_mismatch")
@@ -455,10 +490,36 @@ def source_tree_scan_from_clone(
         "finding_count": len(findings),
         "findings": findings[:50],
         "failures": failures[:50],
+        "scan_groups": {
+            group: {
+                **payload,
+                "findings": payload["findings"][:50],
+            }
+            for group, payload in scan_groups.items()
+        },
     }
 
 
 def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
+    return source_tree_scan_groups(clone_dir)["retired_terms"]["findings"]
+
+
+def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
+    retired_findings = source_tree_retired_term_findings(clone_dir)
+    active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
+    return {
+        "retired_terms": {
+            "finding_count": len(retired_findings),
+            "findings": retired_findings,
+        },
+        "active_test_literals": {
+            "finding_count": len(active_test_literal_findings),
+            "findings": active_test_literal_findings,
+        },
+    }
+
+
+def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_tracked_text_files(clone_dir):
         if source_tree_path_allowed(relative):
@@ -471,6 +532,50 @@ def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
             if pattern.search(text):
                 findings.append({"path": relative.as_posix(), "rule": rule})
     return findings
+
+
+def source_tree_active_test_literal_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if not relative.parts or relative.parts[0] != "tests":
+            continue
+        if source_tree_active_test_literal_path_allowed(relative):
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for token in source_tree_active_test_literal_tokens():
+            if token in text:
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "rule": "active_test_literal",
+                        "token": token,
+                    }
+                )
+    return findings
+
+
+def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
+    return relative in {
+        Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
+        Path("tests/architecture/test_retired_surface_absent.py"),
+    }
+
+
+def source_tree_active_test_literal_tokens() -> tuple[str, ...]:
+    return (
+        "market_bars_1d",
+        "market_panel_1d",
+        "market_context_1d",
+        '"1d"',
+        "'1d'",
+        '"1" + "d"',
+        "'1' + 'd'",
+    )
 
 
 def source_tree_tracked_text_files(clone_dir: Path) -> tuple[Path, ...]:

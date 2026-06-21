@@ -20,6 +20,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 
 def test_materializer_uses_source_id_parameter_not_csmar_constant() -> None:
@@ -33,7 +34,7 @@ def test_materializer_uses_source_id_parameter_not_csmar_constant() -> None:
     "source_id",
     [SourceId("synthetic_vendor_a"), SourceId("synthetic_vendor_b")],
 )
-def test_synthetic_normalized_interim_can_generate_market_panel_1d(
+def test_synthetic_normalized_interim_can_generate_market_panel_daily(
     tmp_path: Path,
     source_id: SourceId,
 ) -> None:
@@ -44,11 +45,11 @@ def test_synthetic_normalized_interim_can_generate_market_panel_1d(
         layout=layout,
         source_id=source_id,
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
-        data_ids=("market_panel_1d",),
+        data_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
     )
 
     panel = read_dataset(
-        tmp_path / "data/processed/a_share/panel/market_panel_1d",
+        frequency_ids.market_panel_processed_root(tmp_path),
     )
     assert panel["asset_id"].tolist() == ["asset_a", "asset_a"]
     assert "source_asset_id" not in panel.columns
@@ -64,10 +65,10 @@ def test_two_synthetic_sources_generate_same_processed_schema(tmp_path: Path) ->
             layout=layout,
             source_id=source_id,
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
-            data_ids=("market_panel_1d",),
+            data_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
         )
         frame = read_dataset(
-            layout.project_root / "data/processed/a_share/panel/market_panel_1d",
+            frequency_ids.market_panel_processed_root(layout.project_root),
         )
         schemas.append(tuple(frame.columns))
 
@@ -83,10 +84,10 @@ def test_extra_source_columns_do_not_leak_into_processed_schema(tmp_path: Path) 
         layout=layout,
         source_id=source_id,
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
-        data_ids=("market_panel_1d",),
+        data_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
     )
 
-    panel = read_dataset(tmp_path / "data/processed/a_share/panel/market_panel_1d")
+    panel = read_dataset(frequency_ids.market_panel_processed_root(tmp_path))
     assert "vendor_extra_metric" not in panel.columns
 
 
@@ -97,16 +98,19 @@ def test_missing_required_source_column_fails_closed_with_data_id_and_column(
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout, source_id, drop_daily_column="open")
 
-    with pytest.raises(ValueError, match=r"market_bars_1d.*open"):
+    with pytest.raises(
+        ValueError,
+        match=rf"{frequency_ids.MARKET_BARS_DATA_ID}.*open",
+    ):
         materializer.materialize_processed_data(
             layout=layout,
             source_id=source_id,
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
-            data_ids=("market_panel_1d",),
+            data_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
         )
 
 
-def test_normalized_market_bars_1d_contract_excludes_annotation_masks() -> None:
+def test_normalized_market_bars_daily_contract_excludes_annotation_masks() -> None:
     from quant_research_platform.markets.implementations.a_share.validation import (
         internal_tables,
     )
@@ -136,15 +140,17 @@ def _write_interim_inputs(
         drop_daily_column=drop_daily_column,
     )
     frames = {
-        "market_bars_1d": _market_bars_1d_frame(),
+        frequency_ids.MARKET_BARS_DATA_ID: _market_bars_daily_frame(),
         "stock_master": _stock_master_frame(),
         "market_cap": _market_cap_frame(),
         "trading_calendar": _trading_calendar_frame(),
     }
     if include_extra_daily_column:
-        frames["market_bars_1d"]["vendor_extra_metric"] = [1.0, 2.0]
+        frames[frequency_ids.MARKET_BARS_DATA_ID]["vendor_extra_metric"] = [1.0, 2.0]
     if drop_daily_column is not None:
-        frames["market_bars_1d"] = frames["market_bars_1d"].drop(
+        frames[frequency_ids.MARKET_BARS_DATA_ID] = frames[
+            frequency_ids.MARKET_BARS_DATA_ID
+        ].drop(
             columns=[drop_daily_column]
         )
     for data_id, frame in frames.items():
@@ -162,7 +168,7 @@ def _interim_catalog(
     drop_daily_column: str | None,
 ) -> InterimDataCatalog:
     specs = {
-        "market_bars_1d": (
+        frequency_ids.MARKET_BARS_DATA_ID: (
             "source_asset_id",
             "timestamp",
             "trade_date",
@@ -213,8 +219,10 @@ def _interim_catalog(
         ),
     }
     if drop_daily_column is not None:
-        specs["market_bars_1d"] = tuple(
-            column for column in specs["market_bars_1d"] if column != drop_daily_column
+        specs[frequency_ids.MARKET_BARS_DATA_ID] = tuple(
+            column
+            for column in specs[frequency_ids.MARKET_BARS_DATA_ID]
+            if column != drop_daily_column
         )
     catalog = InterimDataCatalog()
     for data_id, columns in specs.items():
@@ -247,7 +255,7 @@ def _interim_catalog(
     return catalog
 
 
-def _market_bars_1d_frame() -> pd.DataFrame:
+def _market_bars_daily_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "source_asset_id": ["asset_a", "asset_a"],

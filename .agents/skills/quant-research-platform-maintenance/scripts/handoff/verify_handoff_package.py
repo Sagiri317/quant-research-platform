@@ -33,6 +33,18 @@ DIFF_PATCH_ENTRY = "diff" + ".patch"
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
+BASELINE_FINAL_COMPARE_EVIDENCE = "handoff_evidence/baseline-final-compare.json"
+EXPECTED_FAILURE_REASON = "stale_rank_ensemble_prediction_baseline"
+RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
+    "equal_weight_rank_ensemble",
+    "ic_weighted_rank_ensemble",
+)
+REQUIRED_COMPARE_LABELS = (
+    "old_baseline_3y",
+    "old_baseline_6y",
+    "refreshed_prediction_baseline_3y",
+    "refreshed_prediction_baseline_6y",
+)
 FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
     ".agents/",
     "docs/",
@@ -519,8 +531,6 @@ def verify_generation_evidence(
     archive: ZipFile,
 ) -> list[str]:
     required = {
-        "builder_script",
-        "generated_at_utc",
         "mode",
         "base",
         "final_head",
@@ -528,7 +538,9 @@ def verify_generation_evidence(
         "zip_filename",
         "zip_sha256",
         "bundle_sha256",
-        "source_tool_paths",
+        "compare_evidence_path",
+        "source_tree_scan_path",
+        "validation_status",
     }
     failures = [
         f"generation_evidence_missing: {key}"
@@ -537,12 +549,24 @@ def verify_generation_evidence(
     ]
     if payload.get("schema_version") != "handoff-generation/0.1":
         failures.append("generation_evidence_schema_version_mismatch")
-    if payload.get("status") not in VALID_STATUSES:
-        failures.append("generation_evidence_status_invalid")
     if payload.get("mode") not in {"evidence", "pr_closure"}:
         failures.append("generation_evidence_mode_invalid")
-    if not isinstance(payload.get("source_tool_paths"), list):
-        failures.append("generation_evidence_source_tool_paths_invalid")
+    if payload.get("validation_status") not in VALID_STATUSES:
+        failures.append("generation_evidence_validation_status_invalid")
+    if payload.get("source_tree_scan_path") != SOURCE_TREE_SCAN_EVIDENCE:
+        failures.append("generation_source_tree_scan_path_mismatch")
+    compare_evidence_path = payload.get("compare_evidence_path")
+    if compare_evidence_path is not None and not isinstance(compare_evidence_path, str):
+        failures.append("generation_compare_evidence_path_invalid")
+    if isinstance(compare_evidence_path, str) and compare_evidence_path:
+        if compare_evidence_path not in archive.namelist():
+            failures.append("generation_compare_evidence_missing")
+        elif compare_evidence_path == BASELINE_FINAL_COMPARE_EVIDENCE:
+            failures.extend(
+                verify_baseline_final_compare(
+                    json_payload_from_archive(archive, compare_evidence_path),
+                )
+            )
     for key in ("base", "branch", "final_head", "zip_filename"):
         if payload.get(key) != sidecar.get(key):
             failures.append(f"generation_evidence_sidecar_mismatch: {key}")
@@ -553,6 +577,81 @@ def verify_generation_evidence(
     else:
         if payload.get("bundle_sha256") != bundle_sha256:
             failures.append("generation_bundle_sha256_mismatch")
+    return failures
+
+
+def json_payload_from_archive(
+    archive: ZipFile,
+    name: str,
+) -> dict[str, object]:
+    try:
+        payload = json.loads(archive.read(name).decode("utf-8"))
+    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def verify_baseline_final_compare(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if payload.get("schema_version") != "qrp-baseline-final-compare-summary/0.1":
+        failures.append("baseline_final_compare_schema_version_mismatch")
+    if payload.get("overall_status") != "PASS":
+        failures.append("baseline_final_compare_overall_status_not_pass")
+    if payload.get("old_baseline_compare_status") != "FAIL_EXPECTED":
+        failures.append("baseline_final_compare_old_status_mismatch")
+    if payload.get("refreshed_prediction_baseline_compare_status") != "PASS":
+        failures.append("baseline_final_compare_refreshed_status_mismatch")
+    if payload.get("validation_decision") != "PASS":
+        failures.append("baseline_final_compare_validation_decision_not_pass")
+    if payload.get("contract_failures"):
+        failures.append("baseline_final_compare_contract_failures_present")
+    comparisons = payload.get("comparisons")
+    if not isinstance(comparisons, dict):
+        return [*failures, "baseline_final_compare_comparisons_missing"]
+    missing = sorted(set(REQUIRED_COMPARE_LABELS) - set(comparisons))
+    failures.extend(
+        f"baseline_final_compare_missing_required_group: {label}"
+        for label in missing
+    )
+    for label in ("old_baseline_3y", "old_baseline_6y"):
+        comparison = comparisons.get(label)
+        if not isinstance(comparison, dict):
+            continue
+        if comparison.get("status") != "FAIL_EXPECTED":
+            failures.append(f"baseline_final_compare_old_status_not_expected: {label}")
+        if comparison.get("reason_code") != EXPECTED_FAILURE_REASON:
+            failures.append(f"baseline_final_compare_old_reason_mismatch: {label}")
+        if comparison.get("failed_artifacts") != sorted(
+            RANK_ENSEMBLE_PREDICTION_ARTIFACTS
+        ):
+            failures.append(f"baseline_final_compare_old_artifacts_mismatch: {label}")
+    for label in (
+        "refreshed_prediction_baseline_3y",
+        "refreshed_prediction_baseline_6y",
+    ):
+        comparison = comparisons.get(label)
+        if not isinstance(comparison, dict):
+            continue
+        if comparison.get("status") != "PASS":
+            failures.append(
+                f"baseline_final_compare_refreshed_status_not_pass: {label}"
+            )
+            continue
+        prediction = comparison.get("prediction_summary", {})
+        if not isinstance(prediction, dict):
+            failures.append(f"baseline_final_compare_prediction_missing: {label}")
+            continue
+        artifacts = set(prediction.get("artifact_ids", ()))
+        for artifact in RANK_ENSEMBLE_PREDICTION_ARTIFACTS:
+            if artifact not in artifacts:
+                failures.append(
+                    "baseline_final_compare_refreshed_missing_artifact: "
+                    f"{label}:{artifact}"
+                )
+        if prediction.get("failed_artifacts"):
+            failures.append(
+                f"baseline_final_compare_refreshed_failed_artifacts: {label}"
+            )
     return failures
 
 
@@ -567,9 +666,26 @@ def verify_source_tree_scan_evidence(
         failures.append("source_tree_scan_status_invalid")
     if payload.get("status") != "PASS":
         failures.append("source_tree_scan_not_pass")
-    for key in ("scanned_head", "expected_head", "finding_count", "findings"):
+    for key in (
+        "scanned_head",
+        "expected_head",
+        "finding_count",
+        "findings",
+        "scan_groups",
+    ):
         if key not in payload:
             failures.append(f"source_tree_scan_missing: {key}")
+    scan_groups = payload.get("scan_groups")
+    if not isinstance(scan_groups, dict):
+        failures.append("source_tree_scan_groups_invalid")
+    else:
+        for group in ("retired_terms", "active_test_literals"):
+            group_payload = scan_groups.get(group)
+            if not isinstance(group_payload, dict):
+                failures.append(f"source_tree_scan_group_missing: {group}")
+                continue
+            if "finding_count" not in group_payload or "findings" not in group_payload:
+                failures.append(f"source_tree_scan_group_shape_invalid: {group}")
     if payload.get("scanned_head") != payload.get("expected_head"):
         failures.append("source_tree_scan_head_mismatch")
     final_head = sidecar.get("final_head")

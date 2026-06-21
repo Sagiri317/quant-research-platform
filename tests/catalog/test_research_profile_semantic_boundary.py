@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.helpers import frequency_ids
+
 
 def test_catalog_profiles_does_not_own_a_share_scenario_parameters() -> None:
     path = Path("src/quant_research_platform/catalog/profiles.py")
@@ -65,7 +67,7 @@ def test_a_share_scenario_builders_require_smoke_windows_and_frequency() -> None
         raise AssertionError("prediction specs must require explicit smoke dates")
 
     portfolio_specs = research_scenarios.build_portfolio_specs()
-    assert portfolio_specs[0].rebalance_frequency == "1d"
+    assert portfolio_specs[0].rebalance_frequency == frequency_ids.DAILY_FREQUENCY_SLUG
 
     source = Path(
         "src/quant_research_platform/markets/implementations/a_share/"

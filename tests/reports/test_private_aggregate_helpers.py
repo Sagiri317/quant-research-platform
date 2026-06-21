@@ -12,6 +12,7 @@ from quant_research_platform.markets.implementations.a_share.research_scenarios 
 from quant_research_platform.markets.implementations.a_share.verification import (
     private_aggregate,
 )
+from tests.helpers import frequency_ids
 
 
 def test_private_aggregate_summarizes_frames_without_row_level_output() -> None:
@@ -146,7 +147,7 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
     assert {item.area for item in area_inputs} >= {
         "processed_panel_parity",
         "factor_value_parity",
-        "full_historical_market_panel_1d_status",
+        frequency_ids.full_historical_market_panel_status_area(),
     }
     report_artifact_area_inputs = {
         item.area: item.summary_kind
@@ -172,14 +173,7 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         f"{prediction_spec.test_start} through 2014-12-31"
     )
 
-    artifact_root = (
-        tmp_path
-        / "data"
-        / "processed"
-        / "a_share"
-        / "panel"
-        / "market_panel_1d"
-    )
+    artifact_root = frequency_ids.market_panel_processed_root(tmp_path)
     artifact_root.mkdir(parents=True)
     monkeypatch.setattr(
         private_aggregate,
@@ -205,12 +199,12 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
     inventory = private_aggregate._dataset_inventory(tmp_path)
 
     assert inventory[0]["kind"] == "panel"
-    assert inventory[0]["artifact_id"] == "market_panel_1d"
+    assert inventory[0]["artifact_id"] == frequency_ids.MARKET_PANEL_DATA_ID
     assert inventory[0]["covered_by_evidence_area"] == (
-        "full_historical_market_panel_1d_status"
+        frequency_ids.full_historical_market_panel_status_area()
     )
     assert private_aggregate._logical_dataset_root(tmp_path, artifact_root) == (
-        "processed/a_share/panel/market_panel_1d"
+        frequency_ids.market_panel_logical_root()
     )
     assert private_aggregate._dataset_kind_and_artifact_id(
         "research/a_share/demo_dataset"
@@ -221,14 +215,7 @@ def test_private_aggregate_official_roots_use_inspection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    artifact_root = (
-        tmp_path
-        / "data"
-        / "processed"
-        / "a_share"
-        / "panel"
-        / "market_panel_1d"
-    )
+    artifact_root = frequency_ids.market_panel_processed_root(tmp_path)
     artifact_root.mkdir(parents=True)
     (artifact_root / "_manifest").mkdir()
     inspected: list[Path] = []
@@ -307,7 +294,7 @@ def test_private_verification_summary_uses_inventory(
         "_dataset_inventory",
         lambda *args, **kwargs: [
             {
-                "logical_root": "processed/a_share/panel/market_panel_1d",
+                "logical_root": frequency_ids.market_panel_logical_root(),
                 "covered_by_evidence_area": "panel",
             },
             {
@@ -323,5 +310,5 @@ def test_private_verification_summary_uses_inventory(
     )
 
     assert summary["merge_ready"] is False
-    assert summary["covered_roots"] == ["processed/a_share/panel/market_panel_1d"]
+    assert summary["covered_roots"] == [frequency_ids.market_panel_logical_root()]
     assert summary["uncovered_roots"] == ["processed/a_share/other/demo"]

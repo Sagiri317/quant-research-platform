@@ -15,6 +15,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
+from tests.helpers import frequency_ids
 
 
 def test_factor_definitions_expose_unified_catalog_only() -> None:
@@ -265,7 +266,7 @@ def _factor_definition(
         input_columns=input_columns,
         output_column=output_column,
         family=family,
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
         lookback_window=lookback_window,
         window=lookback_window,
     )

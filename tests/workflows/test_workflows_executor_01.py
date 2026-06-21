@@ -28,6 +28,7 @@ from quant_research_platform.workflows.registry import (
     workflow_node_registry,
 )
 from quant_research_platform.workflows.services import run_registered_workflow
+from tests.helpers import frequency_ids
 
 
 def test_workflow_node_registry_factory_supports_validate_only_modes() -> None:
@@ -217,7 +218,7 @@ def test_workflow_summary_is_sanitized() -> None:
     spec = WorkflowSpec(
         workflow_id="vendor-source-marker-workflow",
         market_id=MarketId("a_share"),
-        output_spec_ids=("market_panel_1d",),
+        output_spec_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="node"),),
     )
@@ -238,7 +239,7 @@ def test_workflow_summary_is_sanitized() -> None:
 def test_registered_workflow_rejects_unknown_node() -> None:
     spec = WorkflowSpec(
         workflow_id="unknown_node",
-        output_spec_ids=("market_panel_1d",),
+        output_spec_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="missing"),),
     )
@@ -247,7 +248,7 @@ def test_registered_workflow_rejects_unknown_node() -> None:
         run_registered_workflow(
             spec,
             registry=WorkflowNodeRegistry(),
-            allowed_spec_ids={"market_panel_1d"},
+            allowed_spec_ids={frequency_ids.MARKET_PANEL_DATA_ID},
         )
 
 
@@ -262,7 +263,7 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
     spec = WorkflowSpec(
         workflow_id="registered",
         market_id=MarketId("a_share"),
-        output_spec_ids=("market_panel_1d",),
+        output_spec_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
         nodes=(WorkflowNode(node_id="validate"),),
     )
@@ -270,7 +271,7 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
     summary = run_registered_workflow(
         spec,
         registry=registry,
-        allowed_spec_ids={"market_panel_1d"},
+        allowed_spec_ids={frequency_ids.MARKET_PANEL_DATA_ID},
     )
 
     assert summary["status"] == "validated"

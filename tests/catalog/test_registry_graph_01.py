@@ -4,11 +4,12 @@ import pytest
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.catalog.profiles import research_profile
+from tests.helpers import frequency_ids
 
 EXPECTED_CSMAR_INTERIM_DATA_IDS = (
     "adjustment",
     "index_info",
-    "market_bars_1d",
+    frequency_ids.MARKET_BARS_DATA_ID,
     "market_cap",
     "stock_master",
     "trading_calendar",

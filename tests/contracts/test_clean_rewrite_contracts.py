@@ -31,6 +31,7 @@ from quant_research_platform.runtime.privacy import (
 )
 from quant_research_platform.sources.csmar import interim as csmar_interim
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 
 def test_dataspec_hierarchy_uses_data_id_without_retired_id_fields() -> None:
@@ -95,7 +96,7 @@ def test_factor_and_label_definitions_keep_future_flags_out() -> None:
         factor_set=FactorSet.CORE,
         input_columns=("adj_close",),
         output_column="mom_20d",
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
         window=20,
     )
     label = LabelDefinition(
@@ -126,7 +127,7 @@ def test_factor_set_rejects_retired_aliases_without_catalog_resolver() -> None:
         factor_set=FactorSet.STANDARD,
         input_columns=("period_return",),
         output_column="rev_1d",
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=frequency_ids.MARKET_PANEL_DATA_ID,
     )
 
     assert definition.factor_set == FactorSet.STANDARD
@@ -145,8 +146,11 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     layout = StorageLayout(project_root=Path("/repo"))
 
     assert layout.raw_source_root(SourceId("csmar")) == Path("/repo/data/raw/csmar")
-    assert layout.interim_data_root(SourceId("csmar"), "market_bars_1d") == Path(
-        "/repo/data/interim/csmar/market_bars_1d"
+    assert layout.interim_data_root(
+        SourceId("csmar"),
+        frequency_ids.MARKET_BARS_DATA_ID,
+    ) == Path(
+        f"/repo/data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}"
     )
     assert layout.processed_data_root(
         MarketId("a_share"),
@@ -190,7 +194,7 @@ def test_sanitizer_removes_local_paths_private_markers_and_stock_codes() -> None
     assert "CSMAR" not in sanitized
 
 
-def test_csmar_market_bars_1d_normalization_stays_source_local() -> None:
+def test_csmar_market_bars_daily_normalization_stays_source_local() -> None:
     raw = pd.DataFrame(
         {
             "Stkcd": ["1"],
@@ -218,10 +222,13 @@ def test_csmar_market_bars_1d_normalization_stays_source_local() -> None:
         }
     )
 
-    normalized = csmar_interim.normalize_raw_frame(raw, "market_bars_1d")
+    normalized = csmar_interim.normalize_raw_frame(
+        raw,
+        frequency_ids.MARKET_BARS_DATA_ID,
+    )
     pruned, _ = csmar_interim.apply_output_column_rules(
         normalized,
-        "market_bars_1d",
+        frequency_ids.MARKET_BARS_DATA_ID,
     )
 
     assert pruned.loc[0, "source_asset_id"] == "000001"

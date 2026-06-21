@@ -19,6 +19,7 @@ from quant_research_platform.sources.csmar import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers import frequency_ids
 
 
 def _collect_interim_frames(**kwargs: object) -> pd.DataFrame:
@@ -32,7 +33,7 @@ def test_csmar_interim_catalog_registers_source_owned_specs() -> None:
     specs = interim.interim_catalog().list()
 
     assert {spec.data_id for spec in specs} == {
-        "market_bars_1d",
+        frequency_ids.MARKET_BARS_DATA_ID,
         "stock_master",
         "market_cap",
         "adjustment",
@@ -55,11 +56,11 @@ def test_csmar_trading_calendar_interim_spec_uses_source_calendar_grain() -> Non
     assert "source_id" not in spec.required_columns
     assert "asset_id" not in spec.required_columns
 
-    market_bars_1d = catalog.get("market_bars_1d")
-    assert market_bars_1d.grain is DataGrain.ASSET_TIMESTAMP
-    assert market_bars_1d.primary_key == ("source_asset_id", "timestamp")
-    assert "source_asset_id" in market_bars_1d.required_columns
-    assert "asset_id" not in market_bars_1d.required_columns
+    market_bars_daily = catalog.get(frequency_ids.MARKET_BARS_DATA_ID)
+    assert market_bars_daily.grain is DataGrain.ASSET_TIMESTAMP
+    assert market_bars_daily.primary_key == ("source_asset_id", "timestamp")
+    assert "source_asset_id" in market_bars_daily.required_columns
+    assert "asset_id" not in market_bars_daily.required_columns
 
     index_info = catalog.get("index_info")
     assert index_info.grain is DataGrain.ASSET_REFERENCE_TIMESTAMP
@@ -199,9 +200,12 @@ def test_csmar_find_dataset_files_uses_schema_inspection_not_storage_path(
     raw_dir = tmp_path / "provider_exports"
     raw_dir.mkdir()
     export = raw_dir / "TRDNEW_Dalyr.csv"
-    _market_bars_1d_raw_frame().to_csv(export, index=False)
+    _market_bars_daily_raw_frame().to_csv(export, index=False)
 
-    assert raw_exports.find_dataset_files(tmp_path, "market_bars_1d") == [export]
+    assert raw_exports.find_dataset_files(
+        tmp_path,
+        frequency_ids.MARKET_BARS_DATA_ID,
+    ) == [export]
     assert raw_exports.find_dataset_files(tmp_path, "stock_master") == []
 
 
@@ -210,12 +214,12 @@ def test_csmar_dataset_files_by_id_groups_raw_exports_once(tmp_path: Path) -> No
     raw_dir.mkdir()
     market_export = raw_dir / "TRDNEW_Dalyr.csv"
     calendar_export = raw_dir / "TRDNEW_Cale.csv"
-    _market_bars_1d_raw_frame().to_csv(market_export, index=False)
+    _market_bars_daily_raw_frame().to_csv(market_export, index=False)
     _write_trading_calendar_raw_export(calendar_export)
 
     grouped = raw_exports.dataset_files_by_id(tmp_path)
 
-    assert grouped["market_bars_1d"] == (market_export,)
+    assert grouped[frequency_ids.MARKET_BARS_DATA_ID] == (market_export,)
     assert grouped["trading_calendar"] == (calendar_export,)
 
 
@@ -269,7 +273,10 @@ def test_csmar_raw_reader_preserves_code_strings_and_index_formula_commas(
         }
     ).to_csv(daily_path, index=False)
 
-    daily = raw_exports.read_private_export_file(daily_path, "market_bars_1d")
+    daily = raw_exports.read_private_export_file(
+        daily_path,
+        frequency_ids.MARKET_BARS_DATA_ID,
+    )
     assert daily.loc[0, "Stkcd"] == "000001"
 
     index_path = tmp_path / "index_info.csv"
@@ -456,12 +463,12 @@ def test_csmar_index_info_dirty_csv_and_bad_dates_fail_closed(
 
 def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
     normalized = interim.normalize_raw_frame(
-        _market_bars_1d_raw_frame(),
-        "market_bars_1d",
+        _market_bars_daily_raw_frame(),
+        frequency_ids.MARKET_BARS_DATA_ID,
     )
     pruned, report = interim.apply_output_column_rules(
         normalized,
-        "market_bars_1d",
+        frequency_ids.MARKET_BARS_DATA_ID,
     )
 
     assert pruned["source_asset_id"].tolist() == ["000001", "000002"]
@@ -479,7 +486,7 @@ def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
         "available_at",
         "source_exchange",
     }.intersection(pruned.columns)
-    assert report["data_id"] == "market_bars_1d"
+    assert report["data_id"] == frequency_ids.MARKET_BARS_DATA_ID
 
 
 def test_csmar_narrow_market_bars_optional_raw_columns_do_not_block_mapping() -> None:
@@ -491,7 +498,7 @@ def test_csmar_narrow_market_bars_optional_raw_columns_do_not_block_mapping() ->
         "LimitDown",
         "LimitUp",
     )
-    raw = _market_bars_1d_raw_frame().drop(columns=list(optional_columns))
+    raw = _market_bars_daily_raw_frame().drop(columns=list(optional_columns))
 
     inspection = raw_schemas.RawExportInspection(
         path=Path("narrow.csv"),
@@ -532,10 +539,13 @@ def test_csmar_market_cap_optional_share_columns_do_not_block_mapping() -> None:
 
 def test_csmar_missing_required_raw_columns_still_fails() -> None:
     data_id = csmar_ids.market_bars_data_id()
-    raw = _market_bars_1d_raw_frame().drop(columns=["Dretwd"])
+    raw = _market_bars_daily_raw_frame().drop(columns=["Dretwd"])
 
     assert field_mappings.missing_raw_columns(raw, data_id) == ["Dretwd"]
-    with pytest.raises(ValueError, match="market_bars_1d raw export is missing"):
+    with pytest.raises(
+        ValueError,
+        match=f"{frequency_ids.MARKET_BARS_DATA_ID} raw export is missing",
+    ):
         field_mappings.map_columns(raw, data_id)
 
 
@@ -732,7 +742,7 @@ def test_csmar_full_interim_frame_materialization_entrypoint_is_deleted() -> Non
     assert not hasattr(interim, "build_" + "interim_frame")
 
 
-def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
+def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -740,7 +750,7 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
 
     def fake_iter_interim_frames(**kwargs: object):
         data_id = kwargs["data_id"]
-        if data_id == "market_bars_1d":
+        if data_id == frequency_ids.MARKET_BARS_DATA_ID:
             yield pd.DataFrame(
                 {
                     "source_asset_id": ["000001"],
@@ -792,7 +802,7 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
         nonlocal raw_index_calls
         raw_index_calls += 1
         return {
-            "market_bars_1d": (Path("raw-market-bars"),),
+            frequency_ids.MARKET_BARS_DATA_ID: (Path("raw-market-bars"),),
             "market_cap": (Path("raw-market-cap"),),
         }
 
@@ -807,16 +817,19 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
 
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
-        data_ids=("market_bars_1d", "market_cap"),
+        data_ids=(frequency_ids.MARKET_BARS_DATA_ID, "market_cap"),
         start_date="2024-01-01",
         end_date="2024-12-31",
         chunksize=1,
     )
 
-    assert set(captured) == {"market_bars_1d", "market_cap"}
-    assert len(captured["market_bars_1d"]["chunks"]) == 1
+    assert set(captured) == {frequency_ids.MARKET_BARS_DATA_ID, "market_cap"}
+    assert len(captured[frequency_ids.MARKET_BARS_DATA_ID]["chunks"]) == 1
     assert len(captured["market_cap"]["chunks"]) == 1
-    assert result.artifact_roots["market_bars_1d"] == captured["market_bars_1d"]["root"]
+    assert (
+        result.artifact_roots[frequency_ids.MARKET_BARS_DATA_ID]
+        == captured[frequency_ids.MARKET_BARS_DATA_ID]["root"]
+    )
     assert result.artifact_roots["market_cap"] == captured["market_cap"]["root"]
     assert raw_index_calls == 1
 
@@ -825,21 +838,21 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     raw_dir = tmp_path / "data" / "raw" / "csmar" / "provider_exports"
     raw_dir.mkdir(parents=True, exist_ok=True)
     export = raw_dir / "TRDNEW_Dalyr.csv"
-    _market_bars_1d_raw_frame().to_csv(export, index=False)
+    _market_bars_daily_raw_frame().to_csv(export, index=False)
 
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
-        data_ids=("market_bars_1d",),
+        data_ids=(frequency_ids.MARKET_BARS_DATA_ID,),
         start_date="2024-01-01",
         end_date="2024-12-31",
         chunksize=1,
     )
 
-    artifact_root = result.artifact_roots["market_bars_1d"]
+    artifact_root = result.artifact_roots[frequency_ids.MARKET_BARS_DATA_ID]
     read_back = read_dataset(artifact_root)
     inspection = inspect_dataset(artifact_root)
 
-    assert artifact_root == tmp_path / "data" / "interim" / "csmar" / "market_bars_1d"
+    assert artifact_root == frequency_ids.csmar_market_bars_interim_root(tmp_path)
     assert inspection.file_count >= 1
     assert inspection.row_count == 2
     assert len(read_back) == 2
@@ -847,7 +860,7 @@ def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:
     assert "market_id" not in read_back.columns
 
 
-def _market_bars_1d_raw_frame() -> pd.DataFrame:
+def _market_bars_daily_raw_frame() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {

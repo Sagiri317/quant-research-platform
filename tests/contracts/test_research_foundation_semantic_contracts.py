@@ -11,6 +11,7 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.models.supervised import model_algorithm_names
+from tests.helpers import frequency_ids
 
 
 def test_signal_spec_uses_source_column_and_closed_direction_names() -> None:
@@ -114,13 +115,13 @@ def test_portfolio_contract_uses_return_source_and_cost_config() -> None:
             ),
         ),
         return_source_column="forward_return_20d",
-        rebalance_frequency="1d",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
         execution_lag_steps=1,
         cost_config=CostConfig(buy_cost_bps=1.0, sell_cost_bps=1.0),
     )
 
     assert spec.return_source_column == "forward_return_20d"
-    assert spec.rebalance_frequency == "1d"
+    assert spec.rebalance_frequency == frequency_ids.DAILY_FREQUENCY_SLUG
     assert "frequency" not in PortfolioSpec.__dataclass_fields__
     assert "label_column" not in PortfolioSpec.__dataclass_fields__
     assert "cost_bps" not in WeightConfig.__dataclass_fields__
