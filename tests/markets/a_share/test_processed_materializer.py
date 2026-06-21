@@ -18,7 +18,6 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     InterimDataSpec,
     ProcessedDataKind,
-    market_bars_data_id,
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
@@ -39,6 +38,7 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
@@ -47,7 +47,7 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.layout import StorageLayout
 
 SYNTHETIC_SOURCE_ID = SourceId("synthetic_vendor_a")
-MARKET_BARS_DATA_ID = market_bars_data_id()
+MARKET_BARS_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 MARKET_PANEL_DATA_ID = market_panel_data_id()
 MARKET_CONTEXT_DATA_ID = market_context_data_id()
 FORWARD_RETURN_1D_COLUMN = forward_return_label_column(1)

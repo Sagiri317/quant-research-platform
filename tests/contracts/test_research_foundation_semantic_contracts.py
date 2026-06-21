@@ -10,7 +10,6 @@ from quant_research_platform.contracts.portfolios import (
     WeightConfig,
 )
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.models.supervised import model_algorithm_names
 from tests.helpers import frequency_ids
 
 
@@ -78,28 +77,10 @@ def test_feature_transform_spec_uses_source_and_output_columns_only() -> None:
         )
 
 
-def test_model_algorithm_names_are_final_public_contract() -> None:
-    algorithms = set(model_algorithm_names())
-    assert algorithms == {
-        "linear_regression",
-        "ridge_regression",
-        "lasso_regression",
-        "elastic_net",
-        "huber_regression",
-        "decision_tree_regressor",
-        "random_forest_regressor",
-        "extra_trees_regressor",
-        "gradient_boosting_regressor",
-        "hist_gradient_boosting_regressor",
-        "xgboost_regressor",
-        "lightgbm_regressor",
-        "single_factor_baseline",
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    }
-    assert "linear" not in algorithms
-    assert "xgboost" not in algorithms
-    assert "lightgbm" not in algorithms
+def test_contracts_models_do_not_export_algorithm_collection() -> None:
+    import quant_research_platform.contracts.models as models
+
+    assert not hasattr(models, "MODEL_ALGORITHMS")
 
 
 def test_portfolio_contract_uses_return_source_and_cost_config() -> None:

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.sources.csmar.field_mappings import field_descriptions
 from quant_research_platform.sources.csmar.ids import market_bars_data_id
 from quant_research_platform.sources.csmar.raw_schemas import (
@@ -45,7 +46,11 @@ def _file_sha256(path: Path) -> str:
 def _metadata_frequency(dataset: str) -> str:
     if dataset == "trading_calendar":
         return "reference_calendar"
-    if dataset in {market_bars_data_id(), "adjustment", "index_market"}:
+    if dataset in {
+        market_bars_data_id(DataFrequency.DAILY),
+        "adjustment",
+        "index_market",
+    }:
         return "daily"
     return "event_or_static"
 

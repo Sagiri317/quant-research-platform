@@ -133,8 +133,8 @@ def test_factor_set_rejects_retired_aliases_without_catalog_resolver() -> None:
     assert definition.factor_set == FactorSet.STANDARD
     retired_values = (
         "full",
-        "core" + "_long_period",
-        "smoke" + "_minimal",
+        "core_long_period",
+        "smoke_minimal",
         "deprecated",
     )
     for value in retired_values:

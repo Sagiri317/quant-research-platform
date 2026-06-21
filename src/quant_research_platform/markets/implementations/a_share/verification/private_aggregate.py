@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.data import DataFrequency, market_bars_data_id
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import (
     SessionWindowPlanner,
@@ -43,6 +43,7 @@ from quant_research_platform.runtime.resources import (
     active_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     inspect_dataset,
@@ -52,7 +53,7 @@ from quant_research_platform.storage.datasets import (
 CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
 PRIVACY_LEVEL = "public_safe_aggregate"
-ARTIFACT_ID = "a_share_private_aggregate_evidence"
+ARTIFACT_ID = "private_research_aggregate_evidence"
 MARKET_ID = "a_share"
 FULL_HISTORY_PERIOD = "2014-01-01 through 2025-12-31"
 GENERATED_BY = (
@@ -745,7 +746,7 @@ def _estimate_generated_full_panel_memory_bytes(
 
 
 def _private_market_bars_data_id() -> str:
-    return market_bars_data_id(DataFrequency.DAILY)
+    return csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 
 
 def _trading_sessions_from_calendar(

@@ -1,6 +1,6 @@
 ﻿# Clean Rewrite 0.1 Public-Safe Parity Evidence
 
-This evidence records public-safe aggregate validation for QRP Clean Rewrite `0.1.0`. Public identifiers are `artifact_id=a_share_private_aggregate_evidence`, `market_id=a_share`, and contract version `0.1`.
+This evidence records public-safe aggregate validation for QRP Clean Rewrite `0.1.0`. Public identifiers are `artifact_id=private_research_aggregate_evidence`, `market_id=a_share`, and contract version `0.1`.
 
 Machine-readable evidence lives in `docs/reports/clean-rewrite-0.1-parity-evidence.json`.
 

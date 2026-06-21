@@ -32,17 +32,17 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     out_dir = tmp_path / "out"
     task_path = tmp_path / "task-input.json"
     slug = "synthetic-handoff"
-    run_handoffs = "." + "run/handoffs"
+    run_handoffs = ".run/handoffs"
     task_path.write_text(
         json.dumps(
                 {
                     "schema_version": "handoff-task-metadata/0.1",
+                    "mode": "evidence",
                     "slug": slug,
                     "branch": TEST_BRANCH,
                 "base": base,
                 "final_head": final_head,
                 "final_sha": final_head,
-                    "pr_url": "https://github.com/Sagiri317/quant-research-platform/pull/1",
                     "zip_logical_path": f"{run_handoffs}/{slug}.zip",
                     "sidecar_logical_path": f"{run_handoffs}/{slug}.json",
                     "handoff_evidence": {
@@ -51,9 +51,9 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                             "status": "FAIL",
                             "scanned_head": "forged",
                         },
-                        "diff" + ".patch": {"status": "PASS"},
+                        "diff.patch": {"status": "PASS"},
                         "pr_body.md": {"status": "PASS"},
-                        "review" + "_evidence": {"status": "PASS"},
+                        "review_evidence": {"status": "PASS"},
                         "custom-note": {
                             "schema_version": "custom-note/0.1",
                             "status": "PASS",
@@ -68,18 +68,6 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                             "evidence": "live GitHub access unavailable",
                         }
                     ],
-                },
-                "review_threads": {
-                    "schema_version": "handoff-review-threads/0.1",
-                    "status": "BLOCKED",
-                    "counts_available": False,
-                    "total_count": None,
-                    "unresolved_count": None,
-                    "threads": [],
-                    "evidence": (
-                        "Live GitHub review-thread access was unavailable; "
-                        "counts are unknown."
-                    ),
                 },
             },
             indent=2,
@@ -142,10 +130,10 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert required.issubset(names)
     assert "pr_body.md" not in names
     assert "review_threads.json" not in names
-    assert "diff" + ".patch" not in names
-    assert "handoff_evidence/diff" + ".patch.json" not in names
+    assert "diff.patch" not in names
+    assert "handoff_evidence/diff.patch.json" not in names
     assert "handoff_evidence/pr_body.md.json" not in names
-    assert "handoff_evidence/review" + "_evidence.json" not in names
+    assert "handoff_evidence/review_evidence.json" not in names
     assert "handoff_evidence/generation.json" in names
     assert "handoff_evidence/source-tree-scan.json" in names
     assert "handoff_evidence/custom-note.json" in names
@@ -173,15 +161,13 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         manifest_raw
     ).hexdigest()
     assert task_metadata["final_head"] == final_head
-    assert (
-        task_metadata["pr_url"]
-        == "https://github.com/Sagiri317/quant-research-platform/pull/1"
-    )
+    assert "pr_url" not in task_metadata
+    assert task_metadata["mode"] == "evidence"
     assert generation["mode"] == "evidence"
     assert generation["base"] == base
     assert generation["final_head"] == final_head
     assert generation["zip_filename"] == f"{slug}.zip"
-    assert generation["zip_sha256"] == "external_sidecar"
+    assert generation["zip_sha256_source"] == "sidecar"
     assert generation["bundle_sha256"] == hashlib.sha256(bundle_raw).hexdigest()
     assert generation["compare_evidence_path"] is None
     assert generation["source_tree_scan_path"] == (

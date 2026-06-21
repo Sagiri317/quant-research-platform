@@ -340,7 +340,7 @@ def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
         (
             "This evidence records public-safe aggregate validation for QRP "
             "Clean Rewrite `0.1.0`. Public identifiers are "
-            "`artifact_id=a_share_private_aggregate_evidence`, "
+            "`artifact_id=private_research_aggregate_evidence`, "
             "`market_id=a_share`, and contract version `0.1`."
         ),
         "",

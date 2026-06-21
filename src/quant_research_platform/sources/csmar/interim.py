@@ -30,7 +30,7 @@ from quant_research_platform.sources.csmar.raw_exports import (
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
-MARKET_BARS_DATA_ID = market_bars_data_id()
+MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
     MARKET_BARS_DATA_ID,
     "stock_master",

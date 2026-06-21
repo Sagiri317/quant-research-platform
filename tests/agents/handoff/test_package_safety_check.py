@@ -117,9 +117,9 @@ def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
 @pytest.mark.parametrize(
     "member",
     [
-        "reports/" + "private" + "_real/a_share/run/summary.json",
-        "reports/" + "private" + "_data/a_share/run/summary.json",
-        "review" + "_evidence/old.json",
+        "reports/private_real/a_share/run/summary.json",
+        "reports/private_data/a_share/run/summary.json",
+        "review_evidence/old.json",
     ],
 )
 def test_package_safety_rejects_retired_private_and_handoff_paths(
@@ -140,9 +140,9 @@ def test_package_safety_rejects_retired_private_and_handoff_paths(
 @pytest.mark.parametrize(
     "member",
     [
-        "." + "run/private/s1/summary.json",
-        "." + "run/smoke/s1/summary.json",
-        "." + "run/s86/summary.json",
+        ".run/private/s1/summary.json",
+        ".run/smoke/s1/summary.json",
+        ".run/s86/summary.json",
     ],
 )
 def test_package_safety_rejects_private_run_members(tmp_path, member):
@@ -160,10 +160,10 @@ def test_package_safety_rejects_private_run_members(tmp_path, member):
 @pytest.mark.parametrize(
     "logical_path",
     [
-        "." + "run/private/s1",
-        "." + "run/smoke/s1",
-        "." + "run/s86",
-        "." + "run\\\\private\\\\s1",
+        ".run/private/s1",
+        ".run/smoke/s1",
+        ".run/s86",
+        ".run\\\\private\\\\s1",
     ],
 )
 def test_package_safety_rejects_private_run_paths_in_sidecar(
@@ -188,7 +188,7 @@ def test_package_safety_rejects_private_run_paths_in_handoff_evidence(tmp_path):
     package = tmp_path / "handoff.zip"
     text = "\n".join(
         [
-            "private evidence path ." + "run/private/s1",
+            "private evidence path .run/private/s1",
             "",
         ]
     )

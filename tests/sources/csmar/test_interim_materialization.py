@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.data import DataGrain
+from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.sources.csmar import (
     checksums,
     field_mappings,
@@ -490,7 +490,7 @@ def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
 
 
 def test_csmar_narrow_market_bars_optional_raw_columns_do_not_block_mapping() -> None:
-    data_id = csmar_ids.market_bars_data_id()
+    data_id = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
     optional_columns = (
         "Dretnd",
         "Adjprcnd",
@@ -538,7 +538,7 @@ def test_csmar_market_cap_optional_share_columns_do_not_block_mapping() -> None:
 
 
 def test_csmar_missing_required_raw_columns_still_fails() -> None:
-    data_id = csmar_ids.market_bars_data_id()
+    data_id = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
     raw = _market_bars_daily_raw_frame().drop(columns=["Dretwd"])
 
     assert field_mappings.missing_raw_columns(raw, data_id) == ["Dretwd"]

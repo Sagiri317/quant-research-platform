@@ -15,7 +15,7 @@ def test_verification_evidence_output_root_is_explicit_not_run_workspace(
     module = _workflow_module()
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    output_root = repo_root / ("." + "run") / "private" / "verification-output"
+    output_root = repo_root / ".run" / "private" / "verification-output"
 
     module._prepare_output_root(
         output_root,
@@ -33,7 +33,7 @@ def test_verification_evidence_replace_output_rejects_unowned_directory(
     module = _workflow_module()
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    output_root = repo_root / ("." + "run") / "private" / "evidence-output"
+    output_root = repo_root / ".run" / "private" / "evidence-output"
     output_root.mkdir(parents=True)
     (output_root / "unowned.txt").write_text("do not replace\n", encoding="utf-8")
 
@@ -56,7 +56,7 @@ def test_verification_evidence_replace_output_allows_owned_directory(
     module = _workflow_module()
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    output_root = repo_root / ("." + "run") / "private" / "report-output"
+    output_root = repo_root / ".run" / "private" / "report-output"
 
     module._prepare_output_root(
         output_root,

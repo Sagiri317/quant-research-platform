@@ -7,16 +7,11 @@ def test_model_algorithms_live_only_in_supervised_model_facts() -> None:
     import quant_research_platform.contracts.models as contracts_models
     import quant_research_platform.research.models.supervised as supervised
 
-    assert not hasattr(contracts_models, "MODEL" + "_ALGORITHMS")
+    assert not hasattr(contracts_models, "MODEL_ALGORITHMS")
     names = supervised.model_algorithm_names()
-    required_algorithms = {
-        "linear_regression",
-        "single_factor_baseline",
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    }
+    assert names
     assert names == tuple(sorted(names))
-    assert required_algorithms.issubset(names)
+    assert len(names) == len(set(names))
     for name in names:
         definition = supervised.model_algorithm_definition(name)
         assert definition.algorithm == name

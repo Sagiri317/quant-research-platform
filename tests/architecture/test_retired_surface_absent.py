@@ -54,18 +54,9 @@ def test_retired_workflow_run_module_is_absent() -> None:
 
 
 def test_retired_handoff_evidence_names_are_absent() -> None:
-    handoff_root = Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff"
-    )
-    combined = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in handoff_root.glob("*.py")
-        if path.name != "self_test.py"
-    )
+    scan_groups = _load_handoff_builder().source_tree_scan_groups(Path("."))
 
-    assert "handoff_generation.json" not in combined
-    assert "review_evidence/" not in combined
-    assert "diff.patch" not in combined
+    assert scan_groups["retired_terms"]["findings"] == []
 
 
 def test_retired_pr_body_renderer_is_absent() -> None:
@@ -77,6 +68,15 @@ def test_retired_pr_body_renderer_is_absent() -> None:
 
 
 def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
+    module = _load_handoff_builder()
+
+    patterns = module.source_tree_forbidden_patterns()
+
+    assert "forbidden_pr_body" in patterns
+    assert "forbidden_render_pr_body" in patterns
+
+
+def _load_handoff_builder():
     script = (
         Path(".agents")
         / "skills"
@@ -91,8 +91,4 @@ def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-
-    patterns = module.source_tree_forbidden_patterns()
-
-    assert "forbidden_pr_body" in patterns
-    assert "forbidden_render_pr_body" in patterns
+    return module

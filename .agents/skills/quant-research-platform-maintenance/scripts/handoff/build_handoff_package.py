@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -34,9 +35,9 @@ BUILDER_OWNED_HANDOFF_EVIDENCE = {
     VERIFICATION_MATRIX_EVIDENCE,
 }
 RESERVED_HANDOFF_EVIDENCE_STEMS = {
-    "diff" + ".patch",
-    "pr_body" + ".md",
-    "review" + "_evidence",
+    "diff.patch",
+    "pr_body.md",
+    "review_evidence",
 }
 HANDOFF_TOOL_SOURCE_PATHS = [
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
@@ -47,10 +48,339 @@ HANDOFF_TOOL_SOURCE_PATHS = [
     ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
     ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
 ]
+SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "compare_verification_evidence.py"
+    ): {
+        "forbidden_private_real": {
+            '"private_real": "private_research",',
+            '"reports/private_real": "reports/private_research",',
+        },
+    },
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "handoff_safety.py"
+    ): {
+        "forbidden_private_real": {'"reports/private_real",'},
+        "forbidden_private_data": {'"reports/private_data",'},
+        "forbidden_review_evidence": {'"review_evidence",'},
+    },
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "verify_handoff_package.py"
+    ): {
+        "forbidden_diff_patch": {'DIFF_PATCH_ENTRY = "diff.patch"'},
+        "forbidden_pr_body": {
+            'if "pr_body.md" in name_set:',
+            'failures.append("forbidden_entry: pr_body.md")',
+            'for key in ("pr_url", "pr_body", "review_threads"):',
+            'for key in ("pr_url", "pr_body", "review_threads")',
+        },
+    },
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "package_safety_check.py"
+    ): {
+        "forbidden_private_real": {
+            'for path_name in ("private_research", "private_real", "private_data")',
+            '"reports/private_real",',
+        },
+        "forbidden_private_data": {
+            'for path_name in ("private_research", "private_real", "private_data")',
+            '"reports/private_data",',
+        },
+        "forbidden_review_evidence": {'"review_evidence",'},
+    },
+    Path("src/quant_research_platform/runtime/privacy.py"): {
+        "forbidden_private_real": {'"private_real",'},
+        "forbidden_private_data": {'"private_data",'},
+    },
+    Path("tests/architecture/test_retired_surface_absent.py"): {
+        "retired_a_share_market_definition": {
+            '"a_share_market_definition",',
+        },
+        "retired_a_share_field_catalog": {
+            '"a_share_field_catalog",',
+        },
+        "retired_a_share_processed_catalog": {
+            '"a_share_processed_catalog",',
+        },
+        "retired_a_share_factor_catalog": {
+            '"a_share_factor_catalog",',
+        },
+        "retired_a_share_label_catalog": {
+            '"a_share_label_catalog",',
+        },
+        "retired_build_a_share": {
+            '"build_a_share_research_dataset_catalog",',
+            '"build_a_share_research_dataset_specs",',
+            '"build_a_share_model_catalog",',
+            '"build_a_share_model_specs",',
+            '"build_a_share_prediction_catalog",',
+            '"build_a_share_prediction_specs",',
+            '"build_a_share_portfolio_catalog",',
+            '"build_a_share_portfolio_specs",',
+        },
+        "retired_default_a_share": {
+            '"default_a_share_prediction_smoke_id",',
+            '"default_a_share_prediction_oos_period",',
+        },
+        "retired_workflow_module": {
+            'importlib.util.find_spec("quant_research_platform.contracts.workflow_run")',
+        },
+        "forbidden_review_evidence": {
+            'assert "review_evidence/" not in combined',
+        },
+        "forbidden_diff_patch": {
+            'assert "diff.patch" not in combined',
+        },
+        "forbidden_render_pr_body": {
+            '"render_pr_body_from_validation_evidence.py"',
+        },
+    },
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "build_handoff_package.py"
+    ): {
+        "forbidden_diff_patch": {
+            '"diff.patch",',
+            '\'"diff.patch": {"status": "PASS"},\',',
+            '\'assert "diff.patch" not in names\',',
+            '\'assert "handoff_evidence/diff.patch.json" not in names\',',
+            '\'"handoff_evidence/diff.patch.json",\',',
+        },
+        "forbidden_pr_body": {
+            '"pr_body.md",',
+            'payload.pop("pr_body", None)',
+            '\'"pr_body.md": {"status": "PASS"},\',',
+            '\'assert "pr_body.md" not in names\',',
+            '\'assert "handoff_evidence/pr_body.md.json" not in names\',',
+            '\'"handoff_evidence/pr_body.md.json",\',',
+            '\'assert \\\'"pr_body.md"\\\' not in builder\',',
+            '\'assert "pr_body.md" not in required_block\',',
+        },
+        "forbidden_review_evidence": {
+            '"review_evidence",',
+            '\'"review_evidence": {"status": "PASS"},\',',
+            '\'assert "handoff_evidence/review_evidence.json" not in names\',',
+            '\'"handoff_evidence/review_evidence.json",\',',
+            '\'"review_evidence/old.json",\',',
+            '\'"review_evidence": {"old": True},\',',
+            '\'assert "review_evidence" not in payload\',',
+            '\'assert "review_evidence/" not in builder\',',
+            '\'assert "review_evidence/" not in verifier\',',
+        },
+        "forbidden_local_private_path": {
+            '\'"E:/repo/data/processed/a_share/factor/demo",\',',
+            '\'"E:/repo/data/research/a_share/demo",\',',
+            '\'"E:/repo/reports/private_research/a_share/run",\',',
+            '\'"/workspace/qrp/data/processed/a_share/factor/demo",\',',
+            '\'"/workspaces/qrp/data/research/a_share/demo",\',',
+            '\'"/mnt/data/reports/private_research/a_share/run",\',',
+            '\'"/workspace/qrp/data/research/a_share/demo",\',',
+            '\'"/workspaces/qrp/reports/private_research/a_share/run",\',',
+            '\'"old workspace example /workspace/qrp/data/research/a_share/demo",\',',
+            '\'path = Path("/mnt/data/team/qrp/reports/private_research/run/\'',
+            '\'Path("/mnt/data/team/qrp/data/research/a_share/demo")\',',
+            '\'text = "/workspace/qrp/data/research/a_share/demo/_manifest/\'',
+        },
+        "forbidden_private_data": {
+            '\'"reports/private_data/a_share/run/summary.json",\',',
+        },
+        "forbidden_private_real": {
+            '\'"reports/private_real/a_share/run/summary.json",\',',
+            '\'"retired path reports/private_real/a_share/run\\\\n",\',',
+        },
+        "forbidden_render_pr_body": {
+            '\'\\\'LEGACY = "render_pr_body_from_validation_evidence.py"\\\\n\\\',\',',
+        },
+        "retired_workflow_module": {
+            '\'legacy.write_text(\\\'LEGACY = "contracts.workflow_run"\\\\n\\\', \'',
+        },
+        "retired_model_algorithm_collection": {
+            '\'assert not hasattr(contracts_models, "MODEL_ALGORITHMS")\',',
+            '\'assert not hasattr(models, "MODEL_ALGORITHMS")\',',
+        },
+    },
+    Path("tests/agents/handoff/test_build_handoff_package_integration.py"): {
+        "forbidden_diff_patch": {
+            '"diff.patch": {"status": "PASS"},',
+            'assert "diff.patch" not in names',
+            'assert "handoff_evidence/diff.patch.json" not in names',
+        },
+        "forbidden_pr_body": {
+            '"pr_body.md": {"status": "PASS"},',
+            'assert "pr_body.md" not in names',
+            'assert "handoff_evidence/pr_body.md.json" not in names',
+        },
+        "forbidden_review_evidence": {
+            '"review_evidence": {"status": "PASS"},',
+            'assert "handoff_evidence/review_evidence.json" not in names',
+        },
+    },
+    Path("tests/agents/handoff/test_handoff_tools.py"): {
+        "forbidden_diff_patch": {
+            '"handoff_evidence/diff.patch.json",',
+            'assert "diff.patch" not in names',
+            'forbidden_entry = "diff.patch"',
+        },
+        "forbidden_local_private_path": {
+            '"E:/repo/data/processed/a_share/factor/demo",',
+            '"E:/repo/data/research/a_share/demo",',
+            '"E:/repo/reports/private_research/a_share/run",',
+            '"/workspace/qrp/data/processed/a_share/factor/demo",',
+            '"/workspaces/qrp/data/research/a_share/demo",',
+            '"/mnt/data/reports/private_research/a_share/run",',
+            '"/workspace/qrp/data/research/a_share/demo",',
+            '"/workspaces/qrp/reports/private_research/a_share/run",',
+            '"old workspace example /workspace/qrp/data/research/a_share/demo",',
+        },
+        "forbidden_pr_body": {
+            '"handoff_evidence/pr_body.md.json",',
+            '"pr_body": "stale body",',
+            'assert "pr_body" not in payload',
+            '"task_metadata_evidence_forbidden_field: pr_body",',
+            '"handoff_evidence/custom.json: pr_body",',
+        },
+        "forbidden_private_data": {
+            '"reports/private_data/a_share/run/summary.json",',
+        },
+        "forbidden_private_real": {
+            '"reports/private_real/a_share/run/summary.json",',
+            '"retired path reports/private_real/a_share/run\\n",',
+        },
+        "forbidden_render_pr_body": {
+            '\'LEGACY = "render_pr_body_from_validation_evidence.py"\\n\',',
+        },
+        "forbidden_review_evidence": {
+            '"handoff_evidence/review_evidence.json",',
+            '"review_evidence/old.json",',
+            '"review_evidence": {"old": True},',
+            'assert "review_evidence" not in payload',
+        },
+        "retired_workflow_module": {
+            (
+                'legacy.write_text(\'LEGACY = "contracts.workflow_run"\\n\', '
+                'encoding="utf-8")'
+            ),
+        },
+    },
+    Path("tests/agents/handoff/test_package_safety_check.py"): {
+        "forbidden_local_private_path": {
+            '"/workspace/qrp/data/research/a_share/demo",',
+            '"/workspaces/qrp/reports/private_research/a_share/run",',
+        },
+        "forbidden_private_data": {
+            '"reports/private_data/a_share/run/summary.json",',
+        },
+        "forbidden_private_real": {
+            '"reports/private_real/a_share/run/summary.json",',
+        },
+        "forbidden_review_evidence": {
+            '"review_evidence/old.json",',
+        },
+    },
+    Path("tests/agents/test_verify_governance.py"): {
+        "forbidden_local_private_path": {
+            '\'path = "C\' + r\':\\Users\\DELL\\data\\raw\\csmar"\',',
+        },
+    },
+    Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"): {
+        "retired_csmar_source_alias": {
+            'assert not hasattr(source_ids, "CSMAR_SOURCE_ID")',
+        },
+        "retired_a_share_market_alias": {
+            'assert not hasattr(market_ids, "A_SHARE_MARKET_ID")',
+        },
+    },
+    Path("tests/architecture/test_handoff_package_contract.py"): {
+        "forbidden_pr_body": {
+            'assert \'"pr_body.md"\' not in builder',
+            'assert "pr_body.md" not in required_block',
+        },
+        "forbidden_review_evidence": {
+            'assert "review_evidence/" not in builder',
+            'assert "review_evidence/" not in verifier',
+        },
+    },
+    Path("tests/architecture/test_model_algorithm_single_source.py"): {
+        "retired_model_algorithm_collection": {
+            'assert not hasattr(contracts_models, "MODEL_ALGORITHMS")',
+        },
+    },
+    Path("tests/contracts/test_research_foundation_semantic_contracts.py"): {
+        "retired_model_algorithm_collection": {
+            'assert not hasattr(models, "MODEL_ALGORITHMS")',
+        },
+    },
+    Path("tests/interfaces/test_api_cli_01_contract.py"): {
+        "forbidden_local_private_path": {
+            'message=r"failed at C:\\Users\\DELL\\data\\raw\\csmar\\000001.SZ",',
+        },
+    },
+    Path("tests/reports/test_reports_01.py"): {
+        "forbidden_local_private_path": {
+            'r"failed at C:\\Users\\DELL\\data\\raw\\csmar\\000001.SZ"',
+        },
+    },
+    Path("tests/reports/test_verification_evidence.py"): {
+        "forbidden_local_private_path": {
+            '"C:" + r"\\Users\\DELL\\data\\raw\\provider\\file.csv",',
+        },
+    },
+    Path("tests/runtime/test_logical_paths.py"): {
+        "forbidden_local_private_path": {
+            (
+                'path = Path("/mnt/data/team/qrp/reports/private_research/run/'
+                'summary.json")'
+            ),
+            'Path("/mnt/data/team/qrp/data/research/a_share/demo")',
+        },
+    },
+    Path("tests/runtime/test_privacy_01.py"): {
+        "forbidden_local_private_path": {
+            (
+                'text = "/workspace/qrp/data/research/a_share/demo/_manifest/'
+                'manifest.json"'
+            ),
+            '"/workspace/qrp/data/research/a_share/demo",',
+            '"/workspaces/qrp/reports/private_research/a_share/run",',
+            'r"C:\\repo\\data\\research\\a_share\\demo",',
+            'r"D:\\repo\\reports\\private_research\\a_share\\run",',
+            '"path": "D:" + r"\\quant-workspace\\data\\processed\\a_share",',
+        },
+        "forbidden_private_data": {
+            '"reports/private_data/a_share/run",',
+            '"/workspace/qrp/reports/private_data/a_share/run",',
+        },
+        "forbidden_private_real": {
+            '"reports/private_real/a_share/run",',
+            '"/workspace/qrp/reports/private_real/a_share/run",',
+        },
+    },
+    Path("tests/storage/test_manifest_helper_edges.py"): {
+        "forbidden_local_private_path": {
+            (
+                'path = Path("/mnt/data/team/qrp/reports/private_research/run/'
+                'manifests/run.json")'
+            ),
+        },
+    },
+    Path("tests/storage/test_storage_01.py"): {
+        "forbidden_local_private_path": {
+            '"path": r"C:\\Users\\DELL\\data\\raw\\csmar\\000001.SZ",',
+        },
+    },
+}
+SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
+    Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
+    Path("docs/architecture/open-issues-register.md"),
+}
 TASK_CONTROL_KEYS = {
     "validation_evidence",
     "review_threads",
-    "review" + "_evidence",
+    "review_evidence",
     "handoff_evidence",
 }
 
@@ -97,6 +427,8 @@ def build_handoff_package(
     branch = required_string(task, "branch")
     base = required_string(task, "base")
     package_mode = handoff_mode(task, mode)
+    if package_mode == "pr_closure" and not str(task.get("pr_url") or "").strip():
+        raise SystemExit("task_pr_url_required_for_pr_closure")
     final_head = str(task.get("final_head") or task.get("final_sha") or "").strip()
     if not final_head:
         raise SystemExit("task_final_head_required")
@@ -266,6 +598,13 @@ def task_metadata(task: dict[str, object]) -> dict[str, object]:
     }
     payload.pop("goal_status", None)
     payload.setdefault("schema_version", "handoff-task-metadata/0.1")
+    mode = handoff_mode(payload)
+    payload["mode"] = mode
+    if mode == "evidence":
+        payload.pop("pr_url", None)
+        payload.pop("pr_body", None)
+    elif not str(payload.get("pr_url") or "").strip():
+        raise SystemExit("task_pr_url_required_for_pr_closure")
     return json_sanitize(payload)
 
 
@@ -404,7 +743,7 @@ def generation_payload(
         "final_head": final_head,
         "branch": branch,
         "zip_filename": zip_filename,
-        "zip_sha256": "external_sidecar",
+        "zip_sha256_source": "sidecar",
         "bundle_sha256": sha256_file(bundle_path),
         "compare_evidence_path": compare_evidence_path(task),
         "source_tree_scan_path": SOURCE_TREE_SCAN_EVIDENCE,
@@ -522,16 +861,113 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
 def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_tracked_text_files(clone_dir):
-        if source_tree_path_allowed(relative):
-            continue
         path = clone_dir / relative
         if not path.exists():
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
         for rule, pattern in source_tree_forbidden_patterns().items():
-            if pattern.search(text):
-                findings.append({"path": relative.as_posix(), "rule": rule})
+            for line_number, line in enumerate(lines, start=1):
+                if line_number in skip_lines:
+                    continue
+                if not pattern.search(line):
+                    continue
+                if source_tree_path_allowed(
+                    relative,
+                    scan_group="retired_terms",
+                    rule=rule,
+                    line_text=line.strip(),
+                ):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "rule": rule,
+                    }
+                )
+        findings.extend(
+            source_tree_split_string_findings(relative, path, lines, skip_lines)
+        )
     return findings
+
+
+def source_tree_split_string_findings(
+    relative: Path,
+    path: Path,
+    lines: list[str],
+    skip_lines: set[int],
+) -> list[dict[str, object]]:
+    if path.suffix != ".py":
+        return []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except SyntaxError:
+        return []
+    findings: list[dict[str, object]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
+            continue
+        line_number = getattr(node, "lineno", 0)
+        if line_number in skip_lines:
+            continue
+        value = source_tree_static_string_value(node)
+        if value is None:
+            continue
+        for rule, pattern in source_tree_forbidden_patterns().items():
+            if not pattern.search(value):
+                continue
+            line_text = lines[line_number - 1].strip() if line_number else ""
+            if source_tree_path_allowed(
+                relative,
+                scan_group="retired_terms",
+                rule=rule,
+                line_text=line_text,
+            ):
+                continue
+            findings.append(
+                {
+                    "path": relative.as_posix(),
+                    "line": line_number,
+                    "rule": rule,
+                    "split_string_value": value,
+                }
+            )
+    return findings
+
+
+def source_tree_static_string_value(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = source_tree_static_string_value(node.left)
+        right = source_tree_static_string_value(node.right)
+        if left is None or right is None:
+            return None
+        return left + right
+    return None
+
+
+def source_tree_allowlist_definition_lines(
+    relative: Path,
+    lines: list[str],
+) -> set[int]:
+    if relative != Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "build_handoff_package.py"
+    ):
+        return set()
+    skip_lines = set()
+    in_block = False
+    for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST ="):
+            in_block = True
+        if stripped.startswith("SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS"):
+            in_block = False
+        if in_block:
+            skip_lines.add(line_number)
+    return skip_lines
 
 
 def source_tree_active_test_literal_findings(
@@ -560,10 +996,7 @@ def source_tree_active_test_literal_findings(
 
 
 def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
-    return relative in {
-        Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
-        Path("tests/architecture/test_retired_surface_absent.py"),
-    }
+    return source_tree_path_allowed(relative, scan_group="active_test_literals")
 
 
 def source_tree_active_test_literal_tokens() -> tuple[str, ...]:
@@ -590,30 +1023,24 @@ def source_tree_tracked_text_files(clone_dir: Path) -> tuple[Path, ...]:
     return tuple(result)
 
 
-def source_tree_path_allowed(relative: Path) -> bool:
-    allowed = {
-        Path("tests/agents/handoff/test_build_handoff_package_integration.py"),
-        Path("tests/agents/handoff/test_handoff_tools.py"),
-        Path("tests/agents/handoff/test_package_safety_check.py"),
-        Path("tests/architecture/test_handoff_package_contract.py"),
-        Path("tests/architecture/test_retired_surface_absent.py"),
-        Path("tests/interfaces/test_api_cli_01_contract.py"),
-        Path("tests/reports/test_reports_01.py"),
-        Path("tests/runtime/test_logical_paths.py"),
-        Path("tests/runtime/test_privacy_01.py"),
-        Path("tests/storage/test_manifest_helper_edges.py"),
-        Path("tests/storage/test_storage_01.py"),
-        Path("docs/architecture/open-issues-register.md"),
-        *(Path(path) for path in HANDOFF_TOOL_SOURCE_PATHS),
-    }
-    return relative in allowed
+def source_tree_path_allowed(
+    relative: Path,
+    *,
+    scan_group: str,
+    rule: str | None = None,
+    line_text: str | None = None,
+) -> bool:
+    if scan_group == "retired_terms":
+        allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
+        if rule is None or line_text is None:
+            return False
+        return line_text in allowed_by_rule.get(rule, set())
+    if scan_group == "active_test_literals":
+        return relative in SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS
+    raise ValueError(f"unsupported_source_tree_scan_group: {scan_group}")
 
 
 def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
-    review_evidence = "review" + "_evidence"
-    diff_patch = "diff" + r"\.patch"
-    pr_body = "pr_body"
-    render_pr_body = "render" + "_pr_body"
     return {
         "retired_a_share_market_definition": re.compile(
             r"\ba_share_market_definition\b"
@@ -635,13 +1062,11 @@ def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
         "retired_execution_mode": re.compile(r"\bExecutionMode\b"),
         "forbidden_private_real": re.compile(r"\bprivate_real\b", re.IGNORECASE),
         "forbidden_private_data": re.compile(r"\bprivate_data\b", re.IGNORECASE),
-        "forbidden_review_evidence": re.compile(
-            rf"\b{re.escape(review_evidence)}\b"
-        ),
-        "forbidden_diff_patch": re.compile(rf"\b{diff_patch}\b"),
-        "forbidden_pr_body": re.compile(rf"\b{pr_body}(?:\.md)?\b"),
+        "forbidden_review_evidence": re.compile(r"\breview_evidence\b"),
+        "forbidden_diff_patch": re.compile(r"\bdiff\.patch\b"),
+        "forbidden_pr_body": re.compile(r"\bpr_body(?:\.md)?\b"),
         "forbidden_render_pr_body": re.compile(
-            rf"\b{render_pr_body}(?:_from_validation_evidence)?(?:\.py)?\b"
+            r"\brender_pr_body(?:_from_validation_evidence)?(?:\.py)?\b"
         ),
         "forbidden_local_private_path": re.compile(
             r"(?i)(?:[A-Za-z]:[\\/][^\n]*(?:"

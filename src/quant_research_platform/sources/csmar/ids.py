@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from quant_research_platform.contracts.data import (
     DataFrequency,
+    data_frequency_slug,
     require_supported_data_frequency,
-)
-from quant_research_platform.contracts.data import (
-    market_bars_data_id as platform_market_bars_data_id,
 )
 from quant_research_platform.contracts.ids import SourceId
 
@@ -23,7 +21,7 @@ def market_bars_data_id(
         supported=SUPPORTED_MARKET_BAR_FREQUENCIES,
         context="csmar market bars",
     )
-    return platform_market_bars_data_id(normalized)
+    return f"market_bars_{data_frequency_slug(normalized)}"
 
 
 __all__ = [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 HANDOFF_ROOT = Path(
@@ -19,13 +20,8 @@ def test_handoff_package_contract_uses_evidence_mode_without_diff_or_pr_body() -
     assert "handoff_evidence/source-tree-scan.json" in verifier
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier
-    old_evidence_dir = "review_" + "evidence/"
-    assert old_evidence_dir not in builder
-    assert old_evidence_dir not in verifier
-    patch_entry = '"diff' + '.patch"'
-    assert patch_entry not in builder
-    assert patch_entry not in verifier
-    assert '"pr_body.md"' not in builder
+    source_tree_scan = _load_handoff_builder().source_tree_scan_groups(Path("."))
+    assert source_tree_scan["retired_terms"]["findings"] == []
     assert '"' + "." + "run/handoffs" + '"' in builder
     assert '"evidence"' in builder
     assert '"pr_closure"' in builder
@@ -68,3 +64,13 @@ def test_public_safe_text_checks_use_runtime_privacy_single_source() -> None:
     combined = agent_safety + "\n" + handoff_safety + "\n" + report_safety
 
     assert [name for name in forbidden_local_fact_sources if name in combined] == []
+
+
+def _load_handoff_builder():
+    path = HANDOFF_ROOT / "build_handoff_package.py"
+    spec = importlib.util.spec_from_file_location("handoff_builder_contract_test", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

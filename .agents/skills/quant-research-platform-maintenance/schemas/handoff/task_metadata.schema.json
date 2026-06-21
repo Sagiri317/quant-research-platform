@@ -7,8 +7,7 @@
     "schema_version",
     "slug",
     "branch",
-    "base",
-    "pr_url"
+    "base"
   ],
   "properties": {
     "schema_version": {

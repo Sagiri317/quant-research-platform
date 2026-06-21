@@ -54,9 +54,9 @@ BLOCKED_PATH_PARTS = {
     "data/processed",
     "data/research",
     "reports/private_research",
-    "reports/" + "private" + "_real",
-    "reports/" + "private" + "_data",
-    "review" + "_evidence",
+    "reports/private_real",
+    "reports/private_data",
+    "review_evidence",
     "secrets",
     "credentials",
     ".env",
@@ -68,7 +68,7 @@ TEXT_EXTENSIONS = {".md", ".patch", ".txt", ".json", ".yaml", ".yml", ".toml", "
 MAX_TEXT_SCAN_BYTES = 2_000_000
 PRIVATE_REPORT_PATH_PATTERN = "|".join(
     re.escape(path_name)
-    for path_name in ("private_research", "private" + "_real", "private" + "_data")
+    for path_name in ("private_research", "private_real", "private_data")
 )
 
 LOCAL_PATH_PATTERN = re.compile(

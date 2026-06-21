@@ -34,26 +34,18 @@ BASELINE_FINAL_COMPARE_GROUPS = (
     OLD_BASELINE_GROUP,
     REFRESHED_PREDICTION_BASELINE_GROUP,
 )
-
-RETIRED_RESEARCH_DATA_ID = "a_share" + "_price_volume_forward_returns"
-RETIRED_CONTEXT_DATA_ID = "daily" + "_context"
-RETIRED_MARKET_DATA_ID = "daily" + "_market"
-RETIRED_PANEL_DATA_ID = "daily" + "_panel"
-RETIRED_PRIVATE_REPORT_ROOT = "private" + "_real"
-RETIRED_RETURN_COLUMN = "return" + "_1d"
-RETIRED_VALID_BAR_COLUMN = "valid" + "_daily" + "_bar"
-RETIRED_NEXT_BAR_PREFIX = "next" + "_day" + "_*"
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 DATA_ID_RENAME_MAP = {
     "a_share_as_of": "as_of",
     "a_share_default": "default",
     "a_share_evaluation": "evaluation",
     "a_share_execution": "execution",
-    RETIRED_RESEARCH_DATA_ID: "price_volume_forward_returns",
-    RETIRED_CONTEXT_DATA_ID: "market_context_1d",
-    RETIRED_MARKET_DATA_ID: "market_bars_1d",
-    RETIRED_PANEL_DATA_ID: "market_panel_1d",
-    RETIRED_PRIVATE_REPORT_ROOT: "private_research",
+    "a_share_price_volume_forward_returns": "price_volume_forward_returns",
+    "daily_context": "market_context_1d",
+    "daily_market": "market_bars_1d",
+    "daily_panel": "market_panel_1d",
+    "private_real": "private_research",
 }
 
 
@@ -207,6 +199,7 @@ def main() -> None:
     goal_root.mkdir(parents=True, exist_ok=True)
     try:
         runs = run_pairs_from_args(args)
+        run_metadata = run_pair_metadata_from_args(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     _write_json(goal_root / "compare-rename-map.json", _rename_map_payload())
@@ -225,8 +218,19 @@ def main() -> None:
         label: item.get("actual_status", item["status"])
         for label, item in comparisons.items()
     }
+    baseline_commit = str(args.baseline_commit)
+    baseline_commit_full = _resolve_commit_full(baseline_commit)
+    final_head_full = str(currentness["head"])
+    smoke_evidence = final_smoke_evidence_from_metadata(run_metadata)
     contract_failures = compare_contract_failures(comparisons)
-    actual_overall_status = _overall_status(actual_statuses.values())
+    contract_failures.extend(
+        compare_metadata_contract_failures(
+            baseline_commit_full=baseline_commit_full,
+            final_head_full=final_head_full,
+            smoke_evidence=smoke_evidence,
+        )
+    )
+    raw_overall_status = _overall_status(actual_statuses.values())
     overall_status = _overall_status(statuses.values(), contract_failures)
     grouped = comparisons_by_group(comparisons)
     old_baseline_compare_status = _group_status(
@@ -238,11 +242,19 @@ def main() -> None:
 
     payload = {
         "schema_version": "qrp-baseline-final-compare-summary/0.1",
-        "baseline_commit": args.baseline_commit,
+        "baseline_commit": baseline_commit[:8],
+        "baseline_commit_full": baseline_commit_full,
+        "final_head": final_head_full[:8],
+        "final_head_full": final_head_full,
         "current_git": currentness,
-        "actual_overall_status": actual_overall_status,
+        "actual_overall_status": raw_overall_status,
+        "raw_overall_status": raw_overall_status,
+        "policy_adjusted_overall_status": overall_status,
         "contract_failures": contract_failures,
         "overall_status": overall_status,
+        "final_smoke_commit": smoke_evidence["final_smoke_commit"],
+        "git_status_before_smoke": smoke_evidence["git_status_before_smoke"],
+        "git_status_after_smoke": smoke_evidence["git_status_after_smoke"],
         "old_baseline_compare_status": old_baseline_compare_status,
         "refreshed_prediction_baseline_compare_status": (
             refreshed_prediction_baseline_compare_status
@@ -410,6 +422,36 @@ def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[st
         if prediction.get("failed_artifacts"):
             failures.append(f"refreshed_baseline_failed_artifacts_present: {label}")
     return failures
+
+
+def compare_metadata_contract_failures(
+    *,
+    baseline_commit_full: str,
+    final_head_full: str,
+    smoke_evidence: dict[str, str],
+) -> list[str]:
+    failures = []
+    if not is_full_sha(baseline_commit_full):
+        failures.append("baseline_commit_full_not_full_sha")
+    if not is_full_sha(final_head_full):
+        failures.append("final_head_full_not_full_sha")
+    final_smoke_commit = smoke_evidence["final_smoke_commit"]
+    if not is_full_sha(final_smoke_commit):
+        failures.append("final_smoke_commit_not_full_sha")
+    elif is_full_sha(final_head_full) and final_smoke_commit != final_head_full:
+        failures.append("final_smoke_commit_not_current_head")
+    if smoke_evidence["git_status_before_smoke"] != "clean":
+        failures.append("git_status_before_smoke_not_clean")
+    if (
+        smoke_evidence["git_status_after_smoke"]
+        != "clean_or_only_ignored_run_outputs"
+    ):
+        failures.append("git_status_after_smoke_not_clean")
+    return failures
+
+
+def is_full_sha(value: object) -> bool:
+    return isinstance(value, str) and bool(FULL_SHA_RE.fullmatch(value))
 
 
 def pair_comparison_group(pair: dict[str, Any]) -> str:
@@ -634,6 +676,37 @@ def run_pairs_from_args(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
             "final": Path(final_root),
         }
     return runs
+
+
+def run_pair_metadata_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.pairs_file:
+        return {}
+    return run_pair_metadata_from_file(Path(args.pairs_file))
+
+
+def run_pair_metadata_from_file(path: Path) -> dict[str, Any]:
+    payload = _read_json(path)
+    metadata = payload.get("metadata", {})
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, dict):
+        raise ValueError("invalid_pairs_file: metadata_must_be_object")
+    return metadata
+
+
+def final_smoke_evidence_from_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    raw = metadata.get("final_smoke", metadata)
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "final_smoke_commit": str(raw.get("final_smoke_commit") or "NOT_PROVIDED"),
+        "git_status_before_smoke": str(
+            raw.get("git_status_before_smoke") or "NOT_PROVIDED"
+        ),
+        "git_status_after_smoke": str(
+            raw.get("git_status_after_smoke") or "NOT_PROVIDED"
+        ),
+    }
 
 
 def run_pairs_from_file(path: Path) -> dict[str, dict[str, Any]]:
@@ -1595,9 +1668,21 @@ def _currentness_payload(final_roots: tuple[Path, ...]) -> dict[str, Any]:
 
 def _git_output(*command: str) -> str:
     try:
-        return subprocess.check_output(command, text=True, encoding="utf-8").strip()
+        return subprocess.check_output(
+            command,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+        ).strip()
     except Exception:
         return "UNKNOWN"
+
+
+def _resolve_commit_full(commit: str) -> str:
+    resolved = _git_output("git", "rev-parse", commit)
+    if resolved != "UNKNOWN" and len(resolved) == 40:
+        return resolved
+    return "UNKNOWN"
 
 
 def _rename_map_payload() -> dict[str, Any]:
@@ -1605,14 +1690,14 @@ def _rename_map_payload() -> dict[str, Any]:
         "schema_version": "qrp-compare-rename-map/0.1",
         "data_ids": DATA_ID_RENAME_MAP,
         "report_paths": {
-            f"reports/{RETIRED_PRIVATE_REPORT_ROOT}": "reports/private_research",
+            "reports/private_real": "reports/private_research",
             "a_share_<run_id>": "<run_id>",
         },
         "columns": {
             "frequency": "rebalance_frequency",
-            RETIRED_RETURN_COLUMN: "period_return",
-            RETIRED_VALID_BAR_COLUMN: "valid_bar",
-            RETIRED_NEXT_BAR_PREFIX: "next_bar_*",
+            "return_1d": "period_return",
+            "valid_daily_bar": "valid_bar",
+            "next_day_*": "next_bar_*",
         },
         "privacy": "rename metadata only; no row-level data",
     }

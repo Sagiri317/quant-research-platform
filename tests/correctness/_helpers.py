@@ -15,7 +15,6 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     ProcessedDataKind,
     ProcessedDataSpec,
-    market_bars_data_id,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
@@ -31,6 +30,7 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
@@ -47,7 +47,7 @@ MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 MOMENTUM_20D_ZSCORE_COLUMN = f"{MOMENTUM_20D_COLUMN}_zscore"
 REVERSAL_1D_COLUMN = price_volume_window_column("rev", 1)
 FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
-MARKET_BARS_DATA_ID = market_bars_data_id()
+MARKET_BARS_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 
 
 def synthetic_price_volume_panel(

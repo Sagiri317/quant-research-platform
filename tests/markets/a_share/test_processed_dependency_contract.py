@@ -17,7 +17,6 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     ProcessedDataKind,
     ProcessedDataSpec,
-    market_bars_data_id,
 )
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId, SourceId
@@ -46,10 +45,11 @@ from quant_research_platform.research.factors.price_volume import (
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
+from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import DatasetReadMode, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
-MARKET_BARS_DATA_ID = market_bars_data_id()
+MARKET_BARS_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 MARKET_PANEL_DATA_ID = market_panel_data_id()
 MARKET_CONTEXT_DATA_ID = market_context_data_id()
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)

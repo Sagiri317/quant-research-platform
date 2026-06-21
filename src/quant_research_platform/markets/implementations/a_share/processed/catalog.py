@@ -10,7 +10,6 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     ProcessedDataKind,
     ProcessedDataSpec,
-    market_bars_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
@@ -32,6 +31,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
+from quant_research_platform.sources.csmar import ids as csmar_ids
 
 PANEL_COLUMNS: tuple[str, ...] = (
     "market_id",
@@ -128,7 +128,7 @@ EVALUATION_COLUMNS: tuple[str, ...] = (
     "can_exit",
 )
 
-MARKET_BARS_SOURCE_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
+MARKET_BARS_SOURCE_DATA_ID = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 
 
 def processed_catalog() -> ProcessedDataCatalog:

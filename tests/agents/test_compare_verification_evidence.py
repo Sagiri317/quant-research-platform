@@ -52,6 +52,10 @@ def test_compare_verification_evidence_accepts_parameterized_pairs(
     assert payload["contract_failures"] == [
         "missing_required_comparison_group: old_baseline",
         "missing_required_comparison_group: refreshed_prediction_baseline",
+        "baseline_commit_full_not_full_sha",
+        "final_smoke_commit_not_full_sha",
+        "git_status_before_smoke_not_clean",
+        "git_status_after_smoke_not_clean",
     ]
     assert payload["comparisons"]["tiny"]["status"] == "PASS"
     research = payload["comparisons"]["tiny"]["research_dataset"]
@@ -170,6 +174,63 @@ def test_compare_verification_evidence_pairs_file_is_not_window_specific(
     assert tuple(runs) == ("18m", "full")
     assert runs["18m"]["baseline"] == Path("baseline-a")
     assert runs["full"]["final"] == Path("final-b")
+
+
+def test_compare_verification_evidence_reads_final_smoke_metadata(
+    tmp_path: Path,
+) -> None:
+    module = _load_compare_module()
+    pairs_file = tmp_path / "pairs.json"
+    final_head = "1" * 40
+    pairs_file.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "final_smoke": {
+                        "final_smoke_commit": final_head,
+                        "git_status_before_smoke": "clean",
+                        "git_status_after_smoke": (
+                            "clean_or_only_ignored_run_outputs"
+                        ),
+                    }
+                },
+                "pairs": [
+                    {
+                        "label": "window",
+                        "baseline": "baseline-a",
+                        "final": "final-a",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = module.run_pair_metadata_from_file(pairs_file)
+    smoke = module.final_smoke_evidence_from_metadata(metadata)
+    failures = module.compare_metadata_contract_failures(
+        baseline_commit_full="0" * 40,
+        final_head_full=final_head,
+        smoke_evidence=smoke,
+    )
+
+    assert smoke["final_smoke_commit"] == final_head
+    assert failures == []
+
+
+def test_compare_verification_evidence_rejects_missing_final_smoke_metadata() -> None:
+    module = _load_compare_module()
+    smoke = module.final_smoke_evidence_from_metadata({})
+
+    failures = module.compare_metadata_contract_failures(
+        baseline_commit_full="0" * 40,
+        final_head_full="1" * 40,
+        smoke_evidence=smoke,
+    )
+
+    assert "final_smoke_commit_not_full_sha" in failures
+    assert "git_status_before_smoke_not_clean" in failures
+    assert "git_status_after_smoke_not_clean" in failures
 
 
 def test_compare_verification_evidence_accepts_expected_pair_failures(

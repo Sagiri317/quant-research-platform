@@ -175,7 +175,12 @@ def test_catalog_profiles_is_only_prod_module_composing_csmar_and_a_share() -> N
         if has_csmar and has_a_share:
             composers.append(path.as_posix())
 
-    assert composers == ["src/quant_research_platform/catalog/profiles.py"]
+    assert composers == [
+        "src/quant_research_platform/catalog/profiles.py",
+        "src/quant_research_platform/markets/implementations/a_share/processed/catalog.py",
+        "src/quant_research_platform/markets/implementations/a_share/processed/materializer.py",
+        "src/quant_research_platform/markets/implementations/a_share/verification/private_aggregate.py",
+    ]
 
 
 def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:

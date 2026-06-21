@@ -13,9 +13,9 @@ from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.data import (
+    DataFrequency,
     ProcessedDataKind,
     ProcessedDataSpec,
-    market_bars_data_id,
 )
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import SourceId
@@ -57,6 +57,7 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
 )
+from quant_research_platform.sources.csmar import ids as csmar_ids
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
     DatasetReadMode,
@@ -999,7 +1000,7 @@ def _read_source_inputs_for_spec(
 
 
 def _market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
-    expected = market_bars_data_id()
+    expected = csmar_ids.market_bars_data_id(DataFrequency.DAILY)
     candidates = tuple(
         data_id
         for data_id in spec.source_input_data_ids

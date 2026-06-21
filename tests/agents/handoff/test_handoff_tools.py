@@ -176,7 +176,7 @@ def test_builder_writes_final_branch_bundle_without_patch_member(
     bundle_entry = next(
         item for item in manifest["entries"] if item["path"] == "final-branch.bundle"
     )
-    assert "diff" + ".patch" not in names
+    assert "diff.patch" not in names
     assert bundle
     assert bundle_entry["sha256"] == hashlib.sha256(bundle).hexdigest()
 
@@ -221,7 +221,7 @@ def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> Non
 def test_verifier_rejects_forbidden_patch_member(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
-    forbidden_entry = "diff" + ".patch"
+    forbidden_entry = "diff.patch"
     with zipfile.ZipFile(package, "a") as archive:
         archive.writestr(forbidden_entry, b"not expected\n")
     _refresh_manifest_and_sidecar(package, sidecar)
@@ -485,7 +485,7 @@ def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
 
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
     safety = _load_handoff_module("handoff_safety")
-    run_handoffs = "." + "run/handoffs"
+    run_handoffs = ".run/handoffs"
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("task_metadata.json", "{}\n")
@@ -526,9 +526,9 @@ def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "member",
     [
-        "reports/" + "private" + "_real/a_share/run/summary.json",
-        "reports/" + "private" + "_data/a_share/run/summary.json",
-        "review" + "_evidence/old.json",
+        "reports/private_real/a_share/run/summary.json",
+        "reports/private_data/a_share/run/summary.json",
+        "review_evidence/old.json",
     ],
 )
 def test_handoff_safety_rejects_retired_private_and_handoff_paths(
@@ -554,7 +554,7 @@ def test_handoff_safety_rejects_retired_private_report_path_text(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(
             "handoff_evidence/leak.md",
-            "retired path reports/" + "private" + "_real/a_share/run\n",
+            "retired path reports/private_real/a_share/run\n",
         )
 
     result = safety.scan_handoff_zip(package)
@@ -573,19 +573,61 @@ def test_task_metadata_drops_retired_review_payload_input_key() -> None:
             "branch": "feature/demo",
             "base": "0" * 40,
             "pr_url": "https://github.com/example/repo/pull/1",
-            "review" + "_evidence": {"old": True},
+            "review_evidence": {"old": True},
         }
     )
 
-    assert "review" + "_evidence" not in payload
+    assert "review_evidence" not in payload
+
+
+def test_task_metadata_drops_pr_fields_in_evidence_mode() -> None:
+    builder = _load_handoff_module("build_handoff_package")
+
+    payload = builder.task_metadata(
+        {
+            "schema_version": "handoff-task-metadata/0.1",
+            "mode": "evidence",
+            "slug": "demo",
+            "branch": "feature/demo",
+            "base": "0" * 40,
+            "pr_url": "https://github.com/example/repo/pull/1",
+            "pr_body": "stale body",
+        }
+    )
+
+    assert "pr_url" not in payload
+    assert "pr_body" not in payload
+
+
+def test_builder_requires_pr_url_for_pr_closure_even_without_verify(
+    tmp_path: Path,
+) -> None:
+    builder = _load_handoff_module("build_handoff_package")
+    repo = tmp_path / "repo"
+    base, final_head = _init_handoff_repo(repo)
+
+    with pytest.raises(SystemExit, match="task_pr_url_required_for_pr_closure"):
+        builder.build_handoff_package(
+            repo_root=repo,
+            out_dir=tmp_path / "out",
+            task={
+                "schema_version": "handoff-task-metadata/0.1",
+                "mode": "pr_closure",
+                "slug": "demo",
+                "branch": TEST_BRANCH,
+                "base": base,
+                "final_head": final_head,
+            },
+            verify=False,
+        )
 
 
 @pytest.mark.parametrize(
     "member",
     [
-        "." + "run/private/s1/summary.json",
-        "." + "run/smoke/s1/summary.json",
-        "." + "run/s86/summary.json",
+        ".run/private/s1/summary.json",
+        ".run/smoke/s1/summary.json",
+        ".run/s86/summary.json",
     ],
 )
 def test_handoff_safety_rejects_private_run_members(
@@ -605,7 +647,7 @@ def test_handoff_safety_rejects_private_run_members(
 
 @pytest.mark.parametrize(
     "logical_path",
-    ["." + "run/private/s1", "." + "run\\\\private\\\\s1"],
+    [".run/private/s1", ".run\\\\private\\\\s1"],
 )
 def test_handoff_safety_rejects_private_run_path_in_sidecar(
     tmp_path: Path,
@@ -730,9 +772,9 @@ def test_handoff_safety_allows_public_aggregate_evidence_counts() -> None:
     assert safety.unsafe_text_reason(text, name="handoff_evidence/summary.md") is None
 
 
-def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None:
+def test_verify_fails_when_sidecar_safety_fails(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    run_handoffs = "." + "run/handoffs"
+    run_handoffs = ".run/handoffs"
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("artifact_manifest.json", "{}\n")
@@ -772,12 +814,52 @@ def test_verify_fails_when_external_sidecar_safety_fails(tmp_path: Path) -> None
     assert "sidecar_safety_failed" in failures
 
 
-def test_verify_requires_pr_url_in_task_metadata() -> None:
+def test_verify_allows_evidence_task_metadata_without_pr_url() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
     failures = verifier.verify_task_metadata_schema(
         {
             "schema_version": "handoff-task-metadata/0.1",
+            "mode": "evidence",
+            "slug": "demo",
+            "branch": TEST_BRANCH,
+            "base": "0" * 40,
+        }
+    )
+
+    assert "task_metadata_schema_missing: pr_url" not in failures
+
+
+def test_verify_rejects_pr_fields_in_evidence_task_metadata() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.verify_task_metadata_schema(
+        {
+            "schema_version": "handoff-task-metadata/0.1",
+            "mode": "evidence",
+            "slug": "demo",
+            "branch": TEST_BRANCH,
+            "base": "0" * 40,
+            "pr_url": "https://github.com/example/repo/pull/1",
+            "pr_body": "stale body",
+            "review_threads": {},
+        }
+    )
+
+    assert failures == [
+        "task_metadata_evidence_forbidden_field: pr_url",
+        "task_metadata_evidence_forbidden_field: pr_body",
+        "task_metadata_evidence_forbidden_field: review_threads",
+    ]
+
+
+def test_verify_requires_pr_url_in_pr_closure_task_metadata() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.verify_task_metadata_schema(
+        {
+            "schema_version": "handoff-task-metadata/0.1",
+            "mode": "pr_closure",
             "slug": "demo",
             "branch": TEST_BRANCH,
             "base": "0" * 40,
@@ -785,6 +867,38 @@ def test_verify_requires_pr_url_in_task_metadata() -> None:
     )
 
     assert "task_metadata_schema_missing: pr_url" in failures
+
+
+def test_verify_rejects_review_threads_entry_in_evidence_mode() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    package = _write_evidence_review_threads_package()
+
+    failures = verifier.verify_review_threads_entry(package, {})
+
+    assert failures == ["forbidden_evidence_mode_entry: review_threads.json"]
+
+
+def test_verify_rejects_pr_fields_in_handoff_evidence_payload() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+
+    failures = verifier.handoff_evidence_pr_field_failures(
+        "handoff_evidence/custom.json",
+        {
+            "schema_version": "demo/0.1",
+            "pr_url": "https://github.com/example/repo/pull/1",
+            "pr_body": "stale body",
+            "review_threads": [],
+        },
+    )
+
+    assert failures == [
+        "handoff_evidence_forbidden_pr_field: "
+        "handoff_evidence/custom.json: pr_url",
+        "handoff_evidence_forbidden_pr_field: "
+        "handoff_evidence/custom.json: pr_body",
+        "handoff_evidence_forbidden_pr_field: "
+        "handoff_evidence/custom.json: review_threads",
+    ]
 
 
 def test_verify_requires_review_thread_rows_to_represent_total_count() -> None:
@@ -934,7 +1048,17 @@ def _baseline_final_compare_payload(
 ) -> dict[str, object]:
     return {
         "schema_version": "qrp-baseline-final-compare-summary/0.1",
+        "actual_overall_status": "FAIL",
+        "raw_overall_status": "FAIL",
+        "policy_adjusted_overall_status": "PASS",
         "overall_status": "PASS",
+        "baseline_commit": "0" * 8,
+        "baseline_commit_full": "0" * 40,
+        "final_head": "1" * 8,
+        "final_head_full": "1" * 40,
+        "final_smoke_commit": "1" * 40,
+        "git_status_before_smoke": "clean",
+        "git_status_after_smoke": "clean_or_only_ignored_run_outputs",
         "old_baseline_compare_status": "FAIL_EXPECTED",
         "refreshed_prediction_baseline_compare_status": "PASS",
         "validation_decision": "PASS",
@@ -947,6 +1071,40 @@ def _write_review_threads_package(payload: dict[str, object]) -> zipfile.ZipFile
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("review_threads.json", json.dumps(payload) + "\n")
+    package.seek(0)
+    return zipfile.ZipFile(package)
+
+
+def _write_evidence_review_threads_package() -> zipfile.ZipFile:
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "task_metadata.json",
+            json.dumps(
+                {
+                    "schema_version": "handoff-task-metadata/0.1",
+                    "mode": "evidence",
+                    "slug": "demo",
+                    "branch": TEST_BRANCH,
+                    "base": "0" * 40,
+                }
+            )
+            + "\n",
+        )
+        archive.writestr(
+            "review_threads.json",
+            json.dumps(
+                {
+                    "schema_version": "handoff-review-threads/0.1",
+                    "status": "PASS",
+                    "counts_available": True,
+                    "total_count": 0,
+                    "unresolved_count": 0,
+                    "threads": [],
+                }
+            )
+            + "\n",
+        )
     package.seek(0)
     return zipfile.ZipFile(package)
 

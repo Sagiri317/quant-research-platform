@@ -124,7 +124,7 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
     assert payload["contract_version"] == "0.1"
     assert payload["project_version"] == "0.1.0"
     assert payload["privacy_level"] == "public_safe_aggregate"
-    assert payload["artifact_id"] == "a_share_private_aggregate_evidence"
+    assert payload["artifact_id"] == "private_research_aggregate_evidence"
     assert payload["market_id"] == "a_share"
     assert payload["verification_kind"] == "private_research_data_aggregate"
     assert payload["verification_scope"] == "aggregate_public_safe_parity"

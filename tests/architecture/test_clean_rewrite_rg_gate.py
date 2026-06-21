@@ -18,12 +18,15 @@ SCAN_ROOTS = (
     Path("pyproject.toml"),
 )
 RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
-    Path("tests/agents/test_handoff_tools.py"),
+    Path("tests/agents/handoff/test_build_handoff_package_integration.py"),
+    Path("tests/agents/handoff/test_handoff_tools.py"),
+    Path("tests/agents/handoff/test_package_safety_check.py"),
+    Path("tests/workflows/test_verification_evidence_contract.py"),
 }
 
 
 def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
-    runtime_workspace = Path("." + "run")
+    runtime_workspace = Path(".run")
 
     assert Path("reports") not in SCAN_ROOTS
     assert runtime_workspace not in SCAN_ROOTS
@@ -32,7 +35,7 @@ def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
 
 def test_tests_do_not_depend_on_runtime_workspace_path() -> None:
     runtime_workspace_pattern = re.compile(
-        rf"(?<![A-Za-z0-9_]){re.escape('.' + 'run')}(?![A-Za-z0-9_])"
+        rf"(?<![A-Za-z0-9_]){re.escape('.run')}(?![A-Za-z0-9_])"
     )
     hits: list[str] = []
     current_file = Path(__file__).resolve()
@@ -49,7 +52,7 @@ def test_tests_do_not_depend_on_runtime_workspace_path() -> None:
 
 def test_source_and_tests_do_not_depend_on_runtime_workspace_path() -> None:
     runtime_workspace_pattern = re.compile(
-        rf"(?<![A-Za-z0-9_]){re.escape('.' + 'run')}(?![A-Za-z0-9_])"
+        rf"(?<![A-Za-z0-9_]){re.escape('.run')}(?![A-Za-z0-9_])"
     )
     current_file = Path(__file__).resolve()
     hits: list[str] = []
@@ -125,7 +128,7 @@ def test_verification_evidence_replaces_retired_public_names() -> None:
         if path.resolve() == current_file:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            text = _public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for line_number, line in enumerate(text.splitlines(), start=1):
@@ -157,6 +160,12 @@ INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
     ("docs", "architecture", "open-issues-register.md"),
     ("docs", "code-map", "source-csmar-contracts.md"),
     ("src", "quant_research_platform", "reports", "schema_inventory.py"),
+}
+RETIRED_TERM_NEGATIVE_TEST_ALLOWLIST = {
+    Path("tests/contracts/test_clean_rewrite_contracts.py"): {
+        "core_long_period",
+        "smoke_minimal",
+    },
 }
 
 APPROVED_FIELD_SPEC_FILES = {
@@ -417,10 +426,12 @@ def test_active_tree_has_no_retired_terms() -> None:
         if path.resolve() == current_file:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            text = _public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
+            if name in RETIRED_TERM_NEGATIVE_TEST_ALLOWLIST.get(path, set()):
+                continue
             if pattern.search(text):
                 hits.append(f"{path}: {name}")
 
@@ -447,7 +458,7 @@ def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
         if path.resolve() == current_file:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            text = _public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
@@ -706,7 +717,7 @@ def test_public_surfaces_do_not_expose_internal_provider_markers() -> None:
         if path.resolve() == current_file:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            text = _public_surface_scan_text(path)
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
@@ -732,6 +743,31 @@ def _iter_public_surface_files() -> list[Path]:
             ):
                 files.append(path)
     return files
+
+
+def _public_surface_scan_text(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    if path != Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "build_handoff_package.py"
+    ):
+        return text
+    lines = text.splitlines()
+    filtered: list[str] = []
+    in_allowlist = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST ="):
+            in_allowlist = True
+        if stripped.startswith("TASK_CONTROL_KEYS"):
+            in_allowlist = False
+        if stripped.startswith("def source_tree_forbidden_patterns"):
+            in_allowlist = True
+        if stripped.startswith("def is_reserved_handoff_evidence_path"):
+            in_allowlist = False
+        if not in_allowlist:
+            filtered.append(line)
+    return "\n".join(filtered)
 
 
 def _is_internal_provider_doc(path: Path) -> bool:

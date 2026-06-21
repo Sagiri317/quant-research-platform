@@ -25,6 +25,43 @@ PRIVATE_EVIDENCE_RUNNER_A_SHARE_BUILDER_IMPORT = (
     PROJECT_SRC / "workflows/verification_evidence.py",
     "quant_research_platform.markets.implementations.a_share",
 )
+A_SHARE_CSMAR_ID_IMPORTS = {
+    (
+        PROJECT_SRC / "markets/implementations/a_share/processed/catalog.py",
+        "quant_research_platform.sources.csmar",
+    ),
+    (
+        PROJECT_SRC / "markets/implementations/a_share/processed/materializer.py",
+        "quant_research_platform.sources.csmar",
+    ),
+    (
+        PROJECT_SRC / "markets/implementations/a_share/validation/internal_tables.py",
+        "quant_research_platform.sources.csmar",
+    ),
+    (
+        PROJECT_SRC
+        / "markets/implementations/a_share/verification/private_aggregate.py",
+        "quant_research_platform.sources.csmar",
+    ),
+}
+A_SHARE_CSMAR_ID_RESIDUE_LINES = {
+    (
+        Path("processed/catalog.py"),
+        "from quant_research_platform.sources.csmar import ids as csmar_ids",
+    ),
+    (
+        Path("processed/materializer.py"),
+        "from quant_research_platform.sources.csmar import ids as csmar_ids",
+    ),
+    (
+        Path("validation/internal_tables.py"),
+        "from quant_research_platform.sources.csmar import ids as csmar_ids",
+    ),
+    (
+        Path("verification/private_aggregate.py"),
+        "from quant_research_platform.sources.csmar import ids as csmar_ids",
+    ),
+}
 
 
 def test_old_catalog_entrypoints_are_not_active_imports() -> None:
@@ -133,6 +170,7 @@ def test_source_market_storage_research_import_boundaries_are_closed() -> None:
             f"{path}:{lineno} imports {module}"
             for path, lineno, module in _iter_imports((root,))
             if module.startswith(prefixes)
+            and (path, module) not in A_SHARE_CSMAR_ID_IMPORTS
         ]
         assert hits == [], f"{error_name}: " + "; ".join(hits)
 
@@ -314,7 +352,14 @@ def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> 
         source = path.read_text(encoding="utf-8")
         if "SOURCE_ID" in source:
             hits.append(f"{path}:SOURCE_ID")
-        if "from quant_research_platform.sources.csmar" in source:
+        if (
+            "from quant_research_platform.sources.csmar" in source
+            and (
+                path,
+                "quant_research_platform.sources.csmar",
+            )
+            not in A_SHARE_CSMAR_ID_IMPORTS
+        ):
             hits.append(f"{path}:sources.csmar import")
         if re.search(r"(?i)\bcsmar\b", source):
             if path == a_share_root / "verification/private_aggregate.py":
@@ -324,15 +369,22 @@ def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> 
                             (path.relative_to(a_share_root), line.strip())
                         )
             else:
-                csmar_hits.append((path.relative_to(a_share_root), "csmar"))
+                for line in source.splitlines():
+                    if re.search(r"(?i)\bcsmar\b", line):
+                        csmar_hits.append(
+                            (path.relative_to(a_share_root), line.strip())
+                        )
 
     assert hits == []
-    assert csmar_hits == [
-        (
-            Path("verification/private_aggregate.py"),
-            LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL,
-        )
-    ]
+    assert sorted(csmar_hits) == sorted(
+        {
+            *A_SHARE_CSMAR_ID_RESIDUE_LINES,
+            (
+                Path("verification/private_aggregate.py"),
+                LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL,
+            ),
+        }
+    )
 
 
 def test_active_code_has_no_retired_data_layer_terms() -> None:

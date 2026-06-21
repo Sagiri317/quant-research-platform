@@ -8,9 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.sources.csmar.ids import market_bars_data_id
 
-MARKET_BARS_DATA_ID = market_bars_data_id()
+MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 
 
 @dataclass(frozen=True)

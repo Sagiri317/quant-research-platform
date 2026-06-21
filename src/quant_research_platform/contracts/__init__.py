@@ -10,7 +10,6 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
     data_frequency_slug,
     horizon_unit_suffix,
-    market_bars_data_id,
     normalize_data_frequency,
     require_supported_data_frequency,
 )
@@ -83,7 +82,6 @@ __all__ = [
     "WorkflowRunPolicy",
     "data_frequency_slug",
     "horizon_unit_suffix",
-    "market_bars_data_id",
     "normalize_data_frequency",
     "require_supported_data_frequency",
     "validate_run_id",

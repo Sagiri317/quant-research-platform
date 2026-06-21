@@ -16,8 +16,8 @@ PRIVATE_BOUNDARY_ROOTS: tuple[str, ...] = (
 )
 PRIVATE_REPORT_PATH_NAMES: tuple[str, ...] = (
     "private_research",
-    "private" + "_real",
-    "private" + "_data",
+    "private_real",
+    "private_data",
 )
 PRIVATE_DATA_LAYERS: tuple[str, ...] = (
     "raw",

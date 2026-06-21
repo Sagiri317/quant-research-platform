@@ -63,10 +63,10 @@ def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "reports/" + "private" + "_real/a_share/run",
-        "reports/" + "private" + "_data/a_share/run",
-        "/workspace/qrp/reports/" + "private" + "_real/a_share/run",
-        "/workspace/qrp/reports/" + "private" + "_data/a_share/run",
+        "reports/private_real/a_share/run",
+        "reports/private_data/a_share/run",
+        "/workspace/qrp/reports/private_real/a_share/run",
+        "/workspace/qrp/reports/private_data/a_share/run",
     ],
 )
 def test_sanitizer_rejects_retired_private_report_paths(text: str) -> None:

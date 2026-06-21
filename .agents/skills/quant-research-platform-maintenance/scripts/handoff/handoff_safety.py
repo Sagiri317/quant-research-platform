@@ -61,9 +61,9 @@ FORBIDDEN_PATH_SEGMENTS = (
     "data/processed",
     "data/research",
     "reports/private_research",
-    "reports/" + "private" + "_real",
-    "reports/" + "private" + "_data",
-    "review" + "_evidence",
+    "reports/private_real",
+    "reports/private_data",
+    "review_evidence",
     ".codex",
     "credentials",
     "secrets",
@@ -178,7 +178,7 @@ def scan_handoff_zip(
         else:
             if raw.startswith(b"\xef\xbb\xbf") or looks_like_utf16(raw):
                 failures.append(f"sidecar_non_utf8_text_artifact: {sidecar.name}")
-            reason = unsafe_text_reason(text, name="external_sidecar.json")
+            reason = unsafe_text_reason(text, name="sidecar.json")
             if reason is not None:
                 failures.append(f"sidecar_{reason}_text: {sidecar.name}")
     return HandoffSafetyResult(
