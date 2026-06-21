@@ -275,6 +275,18 @@ def test_verification_evidence_output_root_respects_repo_private_boundary(
         repo_root,
     )
     module.validate_private_output_root(
+        repo_root / ("." + "run") / "smoke-final" / "commit-sha" / "3y",
+        repo_root,
+    )
+    module.validate_private_output_root(
+        repo_root
+        / ("." + "run")
+        / "smoke-refreshed-prediction-baseline"
+        / "commit-sha"
+        / "6y",
+        repo_root,
+    )
+    module.validate_private_output_root(
         repo_root / ("." + "run") / "s86",
         repo_root,
     )
