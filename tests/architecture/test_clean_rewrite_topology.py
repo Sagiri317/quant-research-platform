@@ -369,7 +369,7 @@ def test_csmar_package_init_does_not_reexport_convenience_functions() -> None:
         if isinstance(node, ast.ImportFrom):
             imported_names.update(alias.asname or alias.name for alias in node.names)
 
-    forbidden = {"build" + "_interim_frame", "import_interim_data"}
+    forbidden = {"build" + "_interim_frame", "import_" + "interim_data"}
     assert exported_names.isdisjoint(forbidden)
     assert imported_names.isdisjoint(forbidden)
 

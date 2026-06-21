@@ -338,7 +338,7 @@ def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> 
 def test_active_code_has_no_retired_data_layer_terms() -> None:
     forbidden_patterns = (
         r"\basset_batches\b",
-        r"\bdata_product_id\b",
+        r"\b" + "data_product" + r"_id\b",
         r"\bChunkAxis\.YEAR\b",
         r"\bChunkAxis\.ENTITY\b",
         r"\b_PANDAS_MOMENT_FALLBACK_VARIANCE\b",

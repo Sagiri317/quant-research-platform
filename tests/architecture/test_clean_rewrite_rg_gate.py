@@ -216,6 +216,8 @@ APPROVED_CLI_LINES = (
     "qrp research-datasets requirements <dataset_id>",
 )
 
+RETIRED_DATA_PRODUCT_ID = "data_product" + "_id"
+
 RETIRED_PUBLIC_CONTRACT_TEXT = (
     "/api/0.1/data-products/a_share_" + "daily" + "_bar/interim",
     "/api/0.1/markets/{market_id}/processed-data",
@@ -229,20 +231,24 @@ RETIRED_PUBLIC_CONTRACT_TEXT = (
     "qrp report show",
     "GET  /api/0.1/catalog/data-products",
     "GET  /api/0.1/catalog/universes",
-    "POST /api/0.1/data-products/{data_product_id}/interim-runs",
+    "POST /api/0.1/data-products/{"
+    + RETIRED_DATA_PRODUCT_ID
+    + "}/interim-runs",
     "qrp catalog data-products",
     "qrp catalog universes",
-    "qrp data-products run-interim <data_product_id>",
+    "qrp data-products run-interim <" + RETIRED_DATA_PRODUCT_ID + ">",
 )
 
-DATA_PRODUCT_ID_ALLOWED_NEGATIVE_TESTS = {
+RETIRED_DATA_PRODUCT_ALLOWED_NEGATIVE_TESTS = {
     Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
-        "POST /api/0.1/data-products/{data_product_id}/interim-runs",
-        "qrp data-products run-interim <data_product_id>",
-        "data_product_id",
+        "POST /api/0.1/data-products/{"
+        + RETIRED_DATA_PRODUCT_ID
+        + "}/interim-runs",
+        "qrp data-products run-interim <" + RETIRED_DATA_PRODUCT_ID + ">",
+        RETIRED_DATA_PRODUCT_ID,
     ),
     Path("tests/interfaces/test_api_cli_01_contract.py"): (
-        "/api/0.1/data-products/{data_product_id}/interim-runs",
+        "/api/0.1/data-products/{" + RETIRED_DATA_PRODUCT_ID + "}/interim-runs",
     ),
 }
 
@@ -285,7 +291,7 @@ RETIRED_A_SHARE_BAR_SHADOW_ALLOWED_TEXT = {
 }
 
 RETIRED_DATA_LAYER_STRUCTURE_PATTERNS = (
-    ("data_product_id", re.compile(r"\bdata_product_id\b")),
+    (RETIRED_DATA_PRODUCT_ID, re.compile(r"\b" + RETIRED_DATA_PRODUCT_ID + r"\b")),
     ("DATA_PRODUCT_ID", re.compile(r"\bDATA_PRODUCT_ID\b")),
     ("DataProductId", re.compile(r"\bDataProductId\b")),
     ("data product id", re.compile(r"\bdata product id\b", re.IGNORECASE)),
@@ -447,10 +453,10 @@ def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
     assert hits == []
 
 
-def test_active_tree_has_no_data_product_id_vocabulary() -> None:
+def test_active_tree_has_no_retired_data_product_vocabulary() -> None:
     current_file = Path(__file__).resolve()
     forbidden_patterns = (
-        re.compile(r"\bdata_product_id\b"),
+        re.compile(r"\b" + RETIRED_DATA_PRODUCT_ID + r"\b"),
         re.compile(r"\bDataProductId\b"),
         re.compile(r"\bdata product id\b", re.IGNORECASE),
     )
@@ -462,7 +468,7 @@ def test_active_tree_has_no_data_product_id_vocabulary() -> None:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        allowed = DATA_PRODUCT_ID_ALLOWED_NEGATIVE_TESTS.get(path, ())
+        allowed = RETIRED_DATA_PRODUCT_ALLOWED_NEGATIVE_TESTS.get(path, ())
         for line_number, line in enumerate(text.splitlines(), start=1):
             if any(item in line for item in allowed):
                 continue

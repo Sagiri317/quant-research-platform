@@ -46,7 +46,7 @@ DELETED_FUNCTIONS = {
     "build_prediction_frame",
     "_build_prediction_frame_from_frames",
     "_collect_prediction_frame",
-    "build_interim_frame",
+    "build_" + "interim_frame",
 }
 
 MATERIALIZED_COLLECTION_NAMES = {
