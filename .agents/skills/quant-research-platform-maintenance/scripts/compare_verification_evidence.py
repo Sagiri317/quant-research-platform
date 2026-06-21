@@ -1715,16 +1715,16 @@ def _markdown(payload: dict[str, Any]) -> str:
         "",
     ]
     for label, comparison in payload["comparisons"].items():
-        if comparison["status"] == "BLOCKED":
+        if comparison["status"] == "BLOCKED" or "research_dataset" not in comparison:
             lines.extend(
                 [
                     f"## {label}",
                     "",
-                    "- status: BLOCKED",
+                    f"- status: {comparison['status']}",
                     f"- baseline_run_label: {comparison['baseline_run_label']}",
                     f"- final_run_label: {comparison['final_run_label']}",
                     f"- failures: {comparison['failures']}",
-                    f"- error_type: {comparison['error_type']}",
+                    f"- error_type: {comparison.get('error_type', 'NOT_RECORDED')}",
                     "",
                 ]
             )
