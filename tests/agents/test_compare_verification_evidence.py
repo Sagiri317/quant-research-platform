@@ -119,6 +119,63 @@ def test_compare_verification_evidence_detects_keyed_report_content_mismatch(
     assert prediction["artifact_content_diffs"]["tiny_model"]["match"] is False
 
 
+def test_compare_verification_evidence_marks_large_research_partition_partial(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_compare_module()
+    baseline = tmp_path / "baseline"
+    final = tmp_path / "final"
+    _write_run(baseline)
+    _write_run(final)
+    monkeypatch.setattr(module, "MAX_IN_MEMORY_RESEARCH_PARTITION_ROWS", 1)
+
+    comparison = module.compare_run("tiny", baseline, final)
+
+    assert comparison["status"] == "PARTIAL"
+    assert comparison["partials"] == ["research_dataset"]
+    research = comparison["research_dataset"]
+    assert research["status"] == "PARTIAL"
+    assert research["partial_partitions"] == [
+        {
+            "partition": "year=2020",
+            "baseline_rows": 2,
+            "final_rows": 2,
+            "max_in_memory_rows": 1,
+        }
+    ]
+
+
+def test_compare_verification_evidence_streams_parquet_report_reads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_compare_module()
+    path = tmp_path / "prediction.parquet"
+    pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")],
+            "asset_id": ["asset_a", "asset_b"],
+            "prediction_score": [0.1, 0.2],
+        }
+    ).to_parquet(path, index=False)
+
+    def fail_read_parquet(*args, **kwargs):
+        raise AssertionError("pd.read_parquet should not be used for streaming reads")
+
+    monkeypatch.setattr(module.pd, "read_parquet", fail_read_parquet)
+
+    stats = module.aggregate_column_stats([path], ("prediction_score",))
+    fingerprint = module.report_file_content_fingerprint(
+        path,
+        columns=("timestamp", "asset_id", "prediction_score"),
+    )
+
+    assert stats["prediction_score"]["count"] == 2
+    assert fingerprint["row_count"] == 2
+    assert fingerprint["missing_columns"] == []
+
+
 def test_compare_verification_evidence_keyed_content_hash_tolerates_float_noise(
     tmp_path: Path,
 ) -> None:

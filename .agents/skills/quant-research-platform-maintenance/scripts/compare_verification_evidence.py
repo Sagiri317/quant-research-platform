@@ -22,6 +22,8 @@ KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
 FLOAT_ATOL = 1e-10
 FLOAT_RTOL = 1e-10
 UINT64_MOD = 1 << 64
+PARQUET_BATCH_SIZE = 65_536
+MAX_IN_MEMORY_RESEARCH_PARTITION_ROWS = 1_500_000
 EXPECTED_FAILURE_STATUS = "FAIL_EXPECTED"
 EXPECTED_FAILURE_REASON = "stale_rank_ensemble_prediction_baseline"
 RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
@@ -763,7 +765,20 @@ def compare_research_dataset(baseline_root: Path, final_root: Path) -> dict[str,
     numeric_diffs: dict[str, NumericDiff] = defaultdict(NumericDiff)
     typed_value_diffs: dict[str, TypedValueDiff] = defaultdict(TypedValueDiff)
     file_key_mismatches: list[str] = []
+    memory_guard_partitions: list[dict[str, Any]] = []
     for rel_path in common:
+        left_rows = parquet_row_count(baseline_files[rel_path])
+        right_rows = parquet_row_count(final_files[rel_path])
+        if max(left_rows, right_rows) > MAX_IN_MEMORY_RESEARCH_PARTITION_ROWS:
+            memory_guard_partitions.append(
+                {
+                    "partition": rel_path,
+                    "baseline_rows": left_rows,
+                    "final_rows": right_rows,
+                    "max_in_memory_rows": MAX_IN_MEMORY_RESEARCH_PARTITION_ROWS,
+                }
+            )
+            continue
         left_frame = _read_partition_files(baseline_files[rel_path])
         right_frame = _read_partition_files(final_files[rel_path])
         update_dataset_accumulator(left, left_frame)
@@ -820,10 +835,16 @@ def compare_research_dataset(baseline_root: Path, final_root: Path) -> dict[str,
     typed_value_payload = {
         column: diff.payload() for column, diff in sorted(typed_value_diffs.items())
     }
+    status = "PASS"
+    if failures:
+        status = "FAIL"
+    elif memory_guard_partitions:
+        status = "PARTIAL"
 
     return {
-        "status": "PASS" if not failures else "FAIL",
+        "status": status,
         "failures": failures,
+        "partial_partitions": memory_guard_partitions,
         "baseline_dataset": _safe_relative(baseline_dataset),
         "final_dataset": _safe_relative(final_dataset),
         "row_count": {"baseline": left["row_count"], "final": right["row_count"]},
@@ -1333,10 +1354,10 @@ def aggregate_column_stats(
         ]
         if not selected_columns:
             continue
-        frame = pd.read_parquet(path, columns=selected_columns)
-        for column in columns:
-            if column in frame.columns:
-                stats[column].update(frame[column])
+        for frame in parquet_batches(path, columns=tuple(selected_columns)):
+            for column in columns:
+                if column in frame.columns:
+                    stats[column].update(frame[column])
     return {
         column: stat.payload()
         for column, stat in stats.items()
@@ -1389,6 +1410,22 @@ def _read_partition_files(paths: list[Path]) -> pd.DataFrame:
     if len(frames) == 1:
         return frames[0]
     return pd.concat(frames, ignore_index=True)
+
+
+def parquet_batches(
+    path: Path,
+    *,
+    columns: tuple[str, ...],
+) -> Iterable[pd.DataFrame]:
+    for batch in pq.ParquetFile(path).iter_batches(
+        batch_size=PARQUET_BATCH_SIZE,
+        columns=list(columns),
+    ):
+        yield batch.to_pandas()
+
+
+def parquet_row_count(paths: list[Path]) -> int:
+    return sum(int(pq.ParquetFile(path).metadata.num_rows) for path in paths)
 
 
 def empty_dataset_accumulator(dataset_root: Path) -> dict[str, Any]:
@@ -1577,15 +1614,20 @@ def report_file_content_fingerprint(
             "missing_columns": missing_columns,
             "content_hash": _hash_payload(0, 0),
         }
-    frame = pd.read_parquet(path, columns=selected_columns)
-    hash_frame = normalized_report_hash_frame(frame, tuple(selected_columns))
-    hashes = pd.util.hash_pandas_object(hash_frame, index=False).to_numpy(
-        dtype=np.uint64
-    )
-    hash_sum = int(hashes.sum(dtype=np.uint64)) % UINT64_MOD
-    hash_xor = int(np.bitwise_xor.reduce(hashes)) if hashes.size else 0
+    row_count = 0
+    hash_sum = 0
+    hash_xor = 0
+    for frame in parquet_batches(path, columns=tuple(selected_columns)):
+        row_count += int(frame.shape[0])
+        hash_frame = normalized_report_hash_frame(frame, tuple(selected_columns))
+        hashes = pd.util.hash_pandas_object(hash_frame, index=False).to_numpy(
+            dtype=np.uint64
+        )
+        hash_sum = (hash_sum + int(hashes.sum(dtype=np.uint64))) % UINT64_MOD
+        if hashes.size:
+            hash_xor ^= int(np.bitwise_xor.reduce(hashes))
     return {
-        "row_count": int(frame.shape[0]),
+        "row_count": row_count,
         "missing_columns": missing_columns,
         "content_hash": _hash_payload(hash_sum, hash_xor),
     }
