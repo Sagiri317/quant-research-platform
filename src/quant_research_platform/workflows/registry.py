@@ -48,7 +48,7 @@ def workflow_node_registry(
     mode = _normalize_workflow_run_mode(run_mode)
     if mode is WorkflowRunMode.WRITE_ARTIFACTS:
         raise NotImplementedError("workflow_write_artifacts_not_implemented")
-    return _build_workflow_node_registry_for_dry_run()
+    return _build_workflow_node_registry_for_validation()
 
 
 def _normalize_workflow_run_mode(
@@ -59,7 +59,7 @@ def _normalize_workflow_run_mode(
     return WorkflowRunMode.normalize(run_mode)
 
 
-def _build_workflow_node_registry_for_dry_run() -> WorkflowNodeRegistry:
+def _build_workflow_node_registry_for_validation() -> WorkflowNodeRegistry:
     registry = WorkflowNodeRegistry()
     for node_id in (
         "validate_interim_spec",

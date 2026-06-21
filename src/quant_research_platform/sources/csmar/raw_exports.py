@@ -231,13 +231,21 @@ def iter_private_export_chunks(
 def find_dataset_files(raw_root: Path, dataset: str) -> list[Path]:
     """Find raw CSMAR CSV files for one normalized dataset id."""
 
-    matches: list[Path] = []
+    return list(dataset_files_by_id(raw_root).get(dataset, ()))
+
+
+def dataset_files_by_id(raw_root: Path) -> dict[str, tuple[Path, ...]]:
+    """Group raw CSMAR CSV files by inspected normalized dataset id."""
+
+    matches: dict[str, list[Path]] = {}
     for result in inspect_raw_export_tree(raw_root):
         if not result.ok or result.inspection is None:
             continue
-        if result.inspection.dataset == dataset:
-            matches.append(result.path)
-    return sorted(matches)
+        matches.setdefault(result.inspection.dataset, []).append(result.path)
+    return {
+        data_id: tuple(sorted(paths))
+        for data_id, paths in sorted(matches.items())
+    }
 
 
 def inspect_raw_export_tree(root: Path) -> list[RawExportIntakeResult]:
@@ -250,6 +258,7 @@ __all__ = [
     "RawExportIntakeResult",
     "STRING_CODE_DTYPES",
     "SUPPORTED_RAW_EXPORT_SUFFIXES",
+    "dataset_files_by_id",
     "find_dataset_files",
     "inspect_raw_export",
     "inspect_raw_export_tree",

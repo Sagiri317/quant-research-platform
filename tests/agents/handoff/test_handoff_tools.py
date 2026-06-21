@@ -273,6 +273,63 @@ def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "member",
     [
+        "reports/" + "private" + "_real/a_share/run/summary.json",
+        "reports/" + "private" + "_data/a_share/run/summary.json",
+        "review" + "_evidence/old.json",
+    ],
+)
+def test_handoff_safety_rejects_retired_private_and_handoff_paths(
+    tmp_path: Path,
+    member: str,
+) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, "{}\n")
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("forbidden_path_segment" in item for item in result.failures)
+
+
+def test_handoff_safety_rejects_retired_private_report_path_text(
+    tmp_path: Path,
+) -> None:
+    safety = _load_handoff_module("handoff_safety")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "handoff_evidence/leak.md",
+            "retired path reports/" + "private" + "_real/a_share/run\n",
+        )
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("local_absolute_path_text" in item for item in result.failures)
+
+
+def test_task_metadata_drops_retired_review_payload_input_key() -> None:
+    builder = _load_handoff_module("build_handoff_package")
+
+    payload = builder.task_metadata(
+        {
+            "schema_version": "handoff-task-metadata/0.1",
+            "slug": "demo",
+            "branch": "feature/demo",
+            "base": "0" * 40,
+            "pr_url": "https://github.com/example/repo/pull/1",
+            "review" + "_evidence": {"old": True},
+        }
+    )
+
+    assert "review" + "_evidence" not in payload
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
         "." + "run/private/s1/summary.json",
         "." + "run/smoke/s1/summary.json",
         "." + "run/s86/summary.json",

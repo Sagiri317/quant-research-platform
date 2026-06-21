@@ -23,7 +23,7 @@ from quant_research_platform.markets.calendars import (
     session_dates,
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
-    CURRENT_A_SHARE_MARKET_TYPES,
+    CURRENT_MARKET_TYPES,
 )
 from quant_research_platform.markets.implementations.a_share.factors import (
     calculations as factor_calculations,
@@ -656,7 +656,7 @@ def _available_trading_sessions(
     )
     mask = (
         calendar["is_trading_day"].astype(bool)
-        & source_market_type.isin(CURRENT_A_SHARE_MARKET_TYPES)
+        & source_market_type.isin(CURRENT_MARKET_TYPES)
     )
     return session_dates(calendar.loc[mask, "timestamp"])
 

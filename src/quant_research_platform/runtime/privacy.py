@@ -14,6 +14,11 @@ PRIVATE_BOUNDARY_ROOTS: tuple[str, ...] = (
     "data/research",
     "reports/private_research",
 )
+PRIVATE_REPORT_PATH_NAMES: tuple[str, ...] = (
+    "private_research",
+    "private" + "_real",
+    "private" + "_data",
+)
 PRIVATE_DATA_LAYERS: tuple[str, ...] = (
     "raw",
     "interim",
@@ -27,19 +32,26 @@ _POSIX_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?<!\w)/(?:mnt/data|home|Users|workspace|workspaces|tmp|var/tmp|private/tmp)"
     r"/[^\r\n\t\"'<>|]+"
 )
+_PRIVATE_REPORT_PATH_PATTERN = "|".join(
+    re.escape(path_name) for path_name in PRIVATE_REPORT_PATH_NAMES
+)
 _ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?<!\w)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
     r"(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_research"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:"
+    + _PRIVATE_REPORT_PATH_PATTERN
+    + r")"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_research"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:"
+    + _PRIVATE_REPORT_PATH_PATTERN
+    + r")"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:[036]\d{5}|688\d{3})"
+    r"(?<![A-Za-z0-9_.-])(?:[03468]\d{5})"
     r"(?:\.(?:SZ|SH|BJ))?(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
@@ -78,7 +90,7 @@ def is_private_boundary_path(path: Path) -> bool:
         if part == "data" and parts[index + 1] in PRIVATE_DATA_LAYERS:
             return True
     return any(
-        parts[index : index + 2] == ("reports", "private_research")
+        parts[index] == "reports" and parts[index + 1] in PRIVATE_REPORT_PATH_NAMES
         for index in range(max(len(parts) - 1, 0))
     )
 
@@ -147,6 +159,7 @@ def sanitize_public_object(value: Any) -> Any:
 __all__ = [
     "PRIVATE_DATA_LAYERS",
     "PRIVATE_BOUNDARY_ROOTS",
+    "PRIVATE_REPORT_PATH_NAMES",
     "is_private_boundary_path",
     "public_text_unsafe_reason",
     "sanitize_public_object",

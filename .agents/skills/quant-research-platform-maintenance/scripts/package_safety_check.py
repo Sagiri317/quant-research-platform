@@ -34,6 +34,9 @@ BLOCKED_PATH_PARTS = {
     "data/processed",
     "data/research",
     "reports/private_research",
+    "reports/" + "private" + "_real",
+    "reports/" + "private" + "_data",
+    "review" + "_evidence",
     "secrets",
     "credentials",
     ".env",
@@ -43,13 +46,20 @@ BLOCKED_PATH_PARTS = {
 PACKAGE_EXTENSIONS = {".zip", ".bundle"}
 TEXT_EXTENSIONS = {".md", ".patch", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}
 MAX_TEXT_SCAN_BYTES = 2_000_000
+PRIVATE_REPORT_PATH_PATTERN = "|".join(
+    re.escape(path_name)
+    for path_name in ("private_research", "private" + "_real", "private" + "_data")
+)
 
 LOCAL_PATH_PATTERN = re.compile(
     r"((?<![A-Za-z])[A-Za-z]:[\\/]"
     r"|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+"
     r"|/workspace/[^\s`]+|/workspaces/[^\s`]+"
     r"|(?:[A-Za-z]:[\\/]|/)(?:[^\s`]+[\\/])*"
-    r"(?:data[\\/](?:raw|interim|processed|research)|reports[\\/]private_research)"
+    r"(?:data[\\/](?:raw|interim|processed|research)"
+    r"|reports[\\/](?:"
+    + PRIVATE_REPORT_PATH_PATTERN
+    + r"))"
     r"|\\\\Users\\\\|\\\\quant-workspace\\\\|\bquant-workspace\b"
     r"|\bconda env path\b|\bsite-packages\b)"
 )
@@ -57,7 +67,7 @@ SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|cookie)"
     r"\s*[:=]\s*['\"]?[^\s'\"]+"
 )
-STOCK_SAMPLE_PATTERN = re.compile(r"\b(?:00|30|60|68)\d{4}\.(?:SZ|SH)\b")
+STOCK_SAMPLE_PATTERN = re.compile(r"\b[03468]\d{5}\.(?:SZ|SH|BJ)\b")
 PRIVATE_RUN_PATH_PATTERN = re.compile(
     r"(?i)(?:^|[\s`'\"])\.run[\\/]+(?:private|smoke|s[0-9]+)"
     r"(?:[\\/]+|[\s`'\"]|$)"

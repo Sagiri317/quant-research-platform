@@ -202,6 +202,20 @@ def test_csmar_find_dataset_files_uses_schema_inspection_not_storage_path(
     assert raw_exports.find_dataset_files(tmp_path, "stock_master") == []
 
 
+def test_csmar_dataset_files_by_id_groups_raw_exports_once(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "provider_exports"
+    raw_dir.mkdir()
+    market_export = raw_dir / "TRDNEW_Dalyr.csv"
+    calendar_export = raw_dir / "TRDNEW_Cale.csv"
+    _market_bars_1d_raw_frame().to_csv(market_export, index=False)
+    _write_trading_calendar_raw_export(calendar_export)
+
+    grouped = raw_exports.dataset_files_by_id(tmp_path)
+
+    assert grouped["market_bars_1d"] == (market_export,)
+    assert grouped["trading_calendar"] == (calendar_export,)
+
+
 def test_csmar_field_mappings_describe_source_local_aliases() -> None:
     assert "source-local normalized column mappings" in (
         field_mappings.csmar_column_mapping.__doc__ or ""
@@ -696,7 +710,14 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
         captured["data_id"] = spec.data_id
         captured["chunks"] = list(data)
 
-    monkeypatch.setattr(interim, "find_dataset_files", lambda *_, **__: [Path("raw")])
+    raw_index_calls = 0
+
+    def fake_dataset_files_by_id(_: Path) -> dict[str, tuple[Path, ...]]:
+        nonlocal raw_index_calls
+        raw_index_calls += 1
+        return {"market_bars_1d": (Path("raw"),)}
+
+    monkeypatch.setattr(interim, "dataset_files_by_id", fake_dataset_files_by_id)
     monkeypatch.setattr(
         interim,
         "iter_interim_frames",
@@ -716,6 +737,7 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
     assert captured["data_id"] == "market_bars_1d"
     assert len(captured["chunks"]) == 1
     assert result.artifact_roots["market_bars_1d"] == captured["root"]
+    assert raw_index_calls == 1
 
 
 def test_csmar_interim_materializer_writes_source_path(tmp_path: Path) -> None:

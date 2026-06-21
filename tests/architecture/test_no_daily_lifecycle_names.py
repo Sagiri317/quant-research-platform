@@ -28,6 +28,9 @@ def test_daily_lifecycle_names_are_replaced() -> None:
         "Daily" + "Panel": _literal_pattern("Daily" + "Panel"),
         "DAILY" + "_PANEL": _literal_pattern("DAILY" + "_PANEL"),
         "DAILY" + "_CONTEXT": _literal_pattern("DAILY" + "_CONTEXT"),
+        "DAILY" + "_MARKET": re.compile(
+            r"\b" + re.escape("DAILY" + "_MARKET") + r"[A-Z0-9_]*\b"
+        ),
         "CANONICAL" + "_DAILY": re.compile(
             r"\b" + re.escape("CANONICAL" + "_DAILY") + r"[A-Z0-9_]*\b"
         ),

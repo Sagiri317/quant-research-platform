@@ -79,7 +79,7 @@ def test_internal_market_bars_1d_validation_excludes_annotation_fields() -> None
         "next_bar_is_trading",
         "next_bar_limit_status",
     }
-    assert forbidden.isdisjoint(internal_tables.DAILY_MARKET_REQUIRED_COLUMNS)
+    assert forbidden.isdisjoint(internal_tables.MARKET_BARS_REQUIRED_COLUMNS)
 
     frame = _market_bars_1d_validation_frame().assign(
         is_a_share_scope=[True, False],

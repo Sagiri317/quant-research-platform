@@ -17,7 +17,7 @@ from .quality_report import (
     value_counts,
 )
 
-DAILY_MARKET_REQUIRED_COLUMNS = (
+MARKET_BARS_REQUIRED_COLUMNS = (
     "market_id",
     "asset_id",
     "timestamp",
@@ -60,7 +60,7 @@ def check_market_bars_1d(
             missing_columns_issue(
                 result,
                 "market_bars_1d",
-                DAILY_MARKET_REQUIRED_COLUMNS,
+                MARKET_BARS_REQUIRED_COLUMNS,
             ),
             duplicate_issue(
                 result,

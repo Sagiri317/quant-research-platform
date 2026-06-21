@@ -35,6 +35,10 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
 from quant_research_platform.research.models import fit_model_result
+from quant_research_platform.research.models.supervised import (
+    model_algorithm_names,
+    model_smoke_hyperparameters,
+)
 from quant_research_platform.research.predictions import (
     run_prediction_from_research_dataset,
 )
@@ -863,23 +867,7 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
 
 @pytest.mark.parametrize(
     "model_algorithm",
-    [
-        "linear_regression",
-        "ridge_regression",
-        "lasso_regression",
-        "elastic_net",
-        "huber_regression",
-        "decision_tree_regressor",
-        "random_forest_regressor",
-        "extra_trees_regressor",
-        "gradient_boosting_regressor",
-        "hist_gradient_boosting_regressor",
-        "xgboost_regressor",
-        "lightgbm_regressor",
-        "single_factor_baseline",
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    ],
+    model_algorithm_names(),
 )
 def test_required_model_algorithms_fit_and_predict(model_algorithm: str) -> None:
     train = pd.DataFrame(
@@ -1092,21 +1080,7 @@ def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
 
 
 def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:
-    if model_algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
-        return {"n_estimators": 3, "max_depth": 3}
-    if model_algorithm in {
-        "gradient_boosting_regressor",
-        "hist_gradient_boosting_regressor",
-    }:
-        return {"max_iter": 3} if model_algorithm.startswith("hist") else {
-            "n_estimators": 3,
-            "max_depth": 2,
-        }
-    if model_algorithm == "xgboost_regressor":
-        return {"n_estimators": 3, "max_depth": 2, "verbosity": 0}
-    if model_algorithm == "lightgbm_regressor":
-        return {"n_estimators": 3, "min_data_in_leaf": 1}
-    return {}
+    return model_smoke_hyperparameters(model_algorithm)
 
 
 def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(

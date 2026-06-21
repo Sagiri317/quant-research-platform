@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 
 _RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
-_STOCK_CODE_RE = re.compile(r"(?<!\d)\d{6}\.(?:sh|sz|bj)\b")
+_EXCHANGE_QUALIFIED_ASSET_SAMPLE_RE = re.compile(
+    r"(?<!\d)\d{6}\.(?:sh|sz|bj)\b"
+)
 _BARE_A_SHARE_CODE_RE = re.compile(
     r"(?:(?<=^)|(?<=[._-]))"
     r"(?:000|001|002|003|300|301|600|601|603|605|688|689)\d{3}"
@@ -47,7 +49,7 @@ def validate_run_id(value: str) -> str:
     tokens = tuple(token for token in re.split(r"[._-]+", lowered) if token)
     if any(token in _FORBIDDEN_TOKENS for token in tokens):
         raise RunIdValidationError("invalid_run_id")
-    if _STOCK_CODE_RE.search(lowered):
+    if _EXCHANGE_QUALIFIED_ASSET_SAMPLE_RE.search(lowered):
         raise RunIdValidationError("invalid_run_id")
     if _BARE_A_SHARE_CODE_RE.search(lowered):
         raise RunIdValidationError("invalid_run_id")

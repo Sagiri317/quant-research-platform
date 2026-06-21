@@ -120,7 +120,7 @@ def test_normalized_market_bars_1d_contract_excludes_annotation_masks() -> None:
         "next_bar_limit_status",
     }
 
-    assert forbidden.isdisjoint(internal_tables.DAILY_MARKET_REQUIRED_COLUMNS)
+    assert forbidden.isdisjoint(internal_tables.MARKET_BARS_REQUIRED_COLUMNS)
 
 
 def _write_interim_inputs(

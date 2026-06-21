@@ -24,14 +24,14 @@ def _validate_registered_steps(
         registry.get(step_id)
 
 
-def execute_workflow(
+def run_workflow(
     spec: WorkflowSpec,
     registry: WorkflowNodeRegistry | None = None,
     checkpoints: InMemoryCheckpointStore | None = None,
     *,
     allowed_spec_ids: set[str] | None = None,
     run_mode: WorkflowRunMode | str | None = None,
-    run_id: str = "workflow-dry-run",
+    run_id: str = "workflow-validation-run",
 ) -> WorkflowRunSummary:
     mode = _normalize_workflow_run_mode(run_mode)
     if mode is WorkflowRunMode.WRITE_ARTIFACTS:
@@ -75,7 +75,7 @@ def workflow_run_summary(
     *,
     completed_nodes: tuple[str, ...],
     run_mode: WorkflowRunMode | str | None = None,
-    run_id: str = "workflow-dry-run",
+    run_id: str = "workflow-validation-run",
     status: str = "validated",
 ) -> WorkflowRunSummary:
     return WorkflowRunSummary(
@@ -104,6 +104,6 @@ def _normalize_workflow_run_mode(
 
 
 __all__ = [
-    "execute_workflow",
+    "run_workflow",
     "workflow_run_summary",
 ]

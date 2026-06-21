@@ -60,6 +60,19 @@ def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
     assert "D:" not in sanitized
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "reports/" + "private" + "_real/a_share/run",
+        "reports/" + "private" + "_data/a_share/run",
+        "/workspace/qrp/reports/" + "private" + "_real/a_share/run",
+        "/workspace/qrp/reports/" + "private" + "_data/a_share/run",
+    ],
+)
+def test_sanitizer_rejects_retired_private_report_paths(text: str) -> None:
+    assert public_text_unsafe_reason(text) == "private_path"
+
+
 def test_sanitizer_redacts_private_markers_stock_codes_and_credentials() -> None:
     text = (
         "data/raw/csmar/export.csv stock code 600000.SH "
@@ -81,6 +94,12 @@ def test_stock_code_detector_does_not_flag_hash_payloads() -> None:
 
     assert public_text_unsafe_reason(text) is None
     assert sanitize_public_text(text) == text
+
+
+@pytest.mark.parametrize("text", ["830000.BJ", "430047.BJ", "600000.SH"])
+def test_stock_code_detector_covers_a_share_exchange_suffixes(text: str) -> None:
+    assert public_text_unsafe_reason(text) == "stock_code_sample"
+    assert text not in sanitize_public_text(text)
 
 
 def test_sanitizer_recurses_public_objects() -> None:

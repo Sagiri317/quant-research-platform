@@ -9,8 +9,8 @@ CSMAR_ROOT = Path("src/quant_research_platform/sources/csmar")
 
 def test_owner_local_modules_do_not_repeat_owner_prefix_in_exported_names() -> None:
     forbidden_by_root = {
-        A_SHARE_ROOT: re.compile(r"\bA_SHARE_[A-Z0-9_]*\b"),
-        CSMAR_ROOT: re.compile(r"\bCSMAR_[A-Z0-9_]*\b"),
+        A_SHARE_ROOT: re.compile(r"\b[A-Z0-9_]*A_SHARE_[A-Z0-9_]*\b"),
+        CSMAR_ROOT: re.compile(r"\b[A-Z0-9_]*CSMAR_[A-Z0-9_]*\b"),
     }
     hits: list[str] = []
     for root, pattern in forbidden_by_root.items():

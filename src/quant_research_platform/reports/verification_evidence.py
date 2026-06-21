@@ -13,34 +13,18 @@ from quant_research_platform.runtime.logical_paths import (
     dataset_layer_from_path,
     logical_path,
 )
+from quant_research_platform.runtime.privacy import public_text_unsafe_reason
 from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_manifest
 
-_WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
-_UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
-_POSIX_PRIVATE_PATH_RE = re.compile(
-    r"(?i)(?<!\w)/(?:mnt/data|home|Users|workspace|workspaces|tmp|var/tmp|private/tmp)"
-    r"/[^\r\n\t\"'<>|]+"
-)
-_ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
-    r"(?i)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
-    r"(?:data[/\\](?:raw|interim|processed|research)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\]private_research"
-    r"(?:[/\\][^\s,;\"'<>|]+)?)"
-)
 _RAW_EXPORT_FILENAME_RE = re.compile(
     r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
 )
-_STOCK_CODE_RE = re.compile(
-    r"(?<![.\d])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?!\d)",
-    re.I,
+_LOGICAL_PRIVATE_PATH_RE = re.compile(
+    r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
+    r"|reports[/\\]private_research)(?:[/\\][^\s,;\"'<>|]+)?"
 )
-_CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
-    r"[A-Za-z0-9._~+/=-]{8,}"
-)
-_ROW_SAMPLE_RE = re.compile(r"(?i)\b(?:row_sample|row samples?|samples?)\b")
 _SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
 _SOURCE_LOCAL_RE = re.compile(r"\b(?:source_asset_id|source_market_id)\b")
 _LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
@@ -572,22 +556,25 @@ def _require_evidence_fields(
 
 
 def _unsafe_text_reason(text: str) -> str | None:
-    if _WINDOWS_DRIVE_PATH_RE.search(text) or _UNC_PATH_RE.search(text):
-        return "absolute_path"
-    if _ABSOLUTE_REPO_PRIVATE_PATH_RE.search(text):
-        return "absolute_path"
-    if _POSIX_PRIVATE_PATH_RE.search(text):
-        return "absolute_path"
     if _RAW_EXPORT_FILENAME_RE.search(text):
         return "vendor_filename"
-    if _ROW_SAMPLE_RE.search(text):
-        return "row_sample"
-    if _STOCK_CODE_RE.search(text):
-        return "stock_sample"
     if _SOURCE_LOCAL_RE.search(text):
         return "source_local_key"
-    if _CREDENTIAL_RE.search(text):
+    shared_reason = public_text_unsafe_reason(
+        _LOGICAL_PRIVATE_PATH_RE.sub("[logical-private-path]", text)
+    )
+    if shared_reason in {"private_path", "local_path"}:
+        return "absolute_path"
+    if shared_reason == "credential":
         return "credential"
+    if shared_reason == "stock_code_sample":
+        return "stock_sample"
+    if shared_reason == "row_sample":
+        return "row_sample"
+    if shared_reason == "private_marker":
+        return "vendor_marker"
+    if shared_reason == "traceback":
+        return "traceback"
     return None
 
 

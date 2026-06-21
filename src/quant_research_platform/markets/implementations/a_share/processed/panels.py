@@ -8,7 +8,7 @@ import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
 from quant_research_platform.markets.implementations.a_share.calendar import (
-    CURRENT_A_SHARE_MARKET_TYPES,
+    CURRENT_MARKET_TYPES,
     compute_listing_age_trading_days,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
@@ -199,9 +199,7 @@ def _with_a_share_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
     result["is_trading"] = result["filling_flag"].eq(0)
     result["is_st"] = result["trading_status_code"].isin(ST_STATUS_CODES)
     result["is_pt"] = result["trading_status_code"].eq(16)
-    result["is_a_share_scope"] = result["market_type"].isin(
-        CURRENT_A_SHARE_MARKET_TYPES
-    )
+    result["is_a_share_scope"] = result["market_type"].isin(CURRENT_MARKET_TYPES)
     return result
 
 

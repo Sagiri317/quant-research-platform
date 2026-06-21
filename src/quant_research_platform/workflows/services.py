@@ -7,24 +7,24 @@ from quant_research_platform.contracts.workflows import WorkflowSpec
 from quant_research_platform.runtime.workflow_records import (
     workflow_run_summary_to_public_record,
 )
-from quant_research_platform.workflows.executor import execute_workflow
+from quant_research_platform.workflows.executor import run_workflow
 from quant_research_platform.workflows.registry import (
     WorkflowNodeRegistry,
     workflow_node_registry,
 )
 
 
-def execute_registered_workflow(
+def run_registered_workflow(
     spec: WorkflowSpec,
     *,
     registry: WorkflowNodeRegistry | None = None,
     allowed_spec_ids: set[str] | None = None,
     run_mode: WorkflowRunMode | str | None = None,
-    run_id: str = "workflow-dry-run",
+    run_id: str = "workflow-validation-run",
 ) -> dict[str, object]:
     mode = _normalize_workflow_run_mode(run_mode)
     node_registry = registry or workflow_node_registry(run_mode=mode)
-    summary = execute_workflow(
+    summary = run_workflow(
         spec,
         registry=node_registry,
         allowed_spec_ids=allowed_spec_ids,
@@ -42,7 +42,7 @@ def execute_registered_workflow(
     }
 
 
-__all__ = ["execute_registered_workflow"]
+__all__ = ["run_registered_workflow"]
 
 
 def _normalize_workflow_run_mode(

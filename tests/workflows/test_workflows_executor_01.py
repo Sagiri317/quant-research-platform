@@ -19,7 +19,7 @@ from quant_research_platform.runtime.workflow_records import (
 )
 from quant_research_platform.workflows.checkpoints import InMemoryCheckpointStore
 from quant_research_platform.workflows.executor import (
-    execute_workflow,
+    run_workflow,
     workflow_run_summary,
 )
 from quant_research_platform.workflows.registry import (
@@ -27,7 +27,7 @@ from quant_research_platform.workflows.registry import (
     WorkflowNodeRegistry,
     workflow_node_registry,
 )
-from quant_research_platform.workflows.services import execute_registered_workflow
+from quant_research_platform.workflows.services import run_registered_workflow
 
 
 def test_workflow_node_registry_factory_supports_validate_only_modes() -> None:
@@ -50,7 +50,7 @@ def test_workflow_node_registry_factory_write_artifacts_fails_closed() -> None:
             workflow_node_registry(run_mode=run_mode)
 
 
-def test_workflow_executor_default_run_mode_validates_only() -> None:
+def test_workflow_runner_default_run_mode_validates_only() -> None:
     spec = WorkflowSpec(
         workflow_id="executor_smoke",
         nodes=(
@@ -75,7 +75,7 @@ def test_workflow_executor_default_run_mode_validates_only() -> None:
             WorkflowNodeDefinition(node_id=node_id, handler=handler(node_id))
         )
 
-    summary = execute_workflow(
+    summary = run_workflow(
         spec,
         registry=registry,
     )
@@ -87,7 +87,7 @@ def test_workflow_executor_default_run_mode_validates_only() -> None:
     assert summary.completed_nodes == ()
 
 
-def test_workflow_executor_records_memory_checkpoints_only() -> None:
+def test_workflow_runner_records_memory_checkpoints_only() -> None:
     spec = WorkflowSpec(
         workflow_id="checkpoint_smoke",
         nodes=(
@@ -104,7 +104,7 @@ def test_workflow_executor_records_memory_checkpoints_only() -> None:
         WorkflowNodeDefinition(node_id="factors", handler=lambda: "factors:done")
     )
 
-    execute_workflow(
+    run_workflow(
         spec,
         registry=registry,
         checkpoints=checkpoints,
@@ -129,7 +129,7 @@ def test_workflow_validate_only_does_not_call_handlers_or_write_checkpoints() ->
         )
     )
 
-    validate_only_summary = execute_workflow(
+    validate_only_summary = run_workflow(
         spec,
         registry=registry,
         checkpoints=checkpoints,
@@ -139,7 +139,7 @@ def test_workflow_validate_only_does_not_call_handlers_or_write_checkpoints() ->
         NotImplementedError,
         match="workflow_write_artifacts_not_implemented",
     ):
-        execute_workflow(
+        run_workflow(
             spec,
             registry=registry,
             run_mode="write_artifacts",
@@ -158,14 +158,14 @@ def test_workflow_validate_only_rejects_unknown_registered_node() -> None:
     )
 
     with pytest.raises(ValueError, match="unknown_workflow_node"):
-        execute_workflow(
+        run_workflow(
             spec,
             registry=WorkflowNodeRegistry(),
             run_mode="validate_only",
         )
 
 
-def test_workflow_executor_rejects_unknown_spec_id() -> None:
+def test_workflow_runner_rejects_unknown_spec_id() -> None:
     spec = WorkflowSpec(
         workflow_id="unknown_spec",
         input_spec_ids=("missing_spec",),
@@ -173,14 +173,14 @@ def test_workflow_executor_rejects_unknown_spec_id() -> None:
     )
 
     with pytest.raises(ValueError, match="unknown_workflow_spec_id"):
-        execute_workflow(
+        run_workflow(
             spec,
             registry=workflow_node_registry(),
             allowed_spec_ids={"known_spec"},
         )
 
 
-def test_workflow_executor_requires_output_spec_for_spec_driven_writer() -> None:
+def test_workflow_runner_requires_output_spec_for_spec_driven_writer() -> None:
     spec = WorkflowSpec(
         workflow_id="missing_output_spec",
         artifact_writer_policy=WorkflowArtifactWriterPolicy.SPEC_DRIVEN,
@@ -188,29 +188,29 @@ def test_workflow_executor_requires_output_spec_for_spec_driven_writer() -> None
     )
 
     with pytest.raises(ValueError, match="workflow_output_spec_required"):
-        execute_workflow(spec, registry=workflow_node_registry())
+        run_workflow(spec, registry=workflow_node_registry())
 
 
-def test_workflow_executor_does_not_accept_arbitrary_output_root() -> None:
-    assert "output_root" not in inspect.signature(execute_workflow).parameters
-    service_params = inspect.signature(execute_registered_workflow).parameters
+def test_workflow_runner_does_not_accept_arbitrary_output_root() -> None:
+    assert "output_root" not in inspect.signature(run_workflow).parameters
+    service_params = inspect.signature(run_registered_workflow).parameters
     assert "output_root" not in service_params
 
 
-def test_workflow_executor_rejects_arbitrary_handler_injection() -> None:
-    assert "handlers" not in inspect.signature(execute_workflow).parameters
-    assert "include_summary" not in inspect.signature(execute_workflow).parameters
+def test_workflow_runner_rejects_arbitrary_handler_injection() -> None:
+    assert "handlers" not in inspect.signature(run_workflow).parameters
+    assert "include_summary" not in inspect.signature(run_workflow).parameters
     assert not hasattr(WorkflowNodeRegistry, "handlers_for")
     with pytest.raises(TypeError):
-        execute_workflow(  # type: ignore[call-arg]
+        run_workflow(  # type: ignore[call-arg]
             WorkflowSpec(workflow_id="no_handlers"),
             handlers={"anything": lambda: "done"},
         )
 
 
-def test_handler_map_execution_is_not_public_executor_surface() -> None:
-    assert "execute_steps" not in executor_module.__all__
-    assert not hasattr(executor_module, "execute_steps")
+def test_handler_map_runner_is_not_public_workflow_surface() -> None:
+    assert "run_steps" not in executor_module.__all__
+    assert not hasattr(executor_module, "run_steps")
 
 
 def test_workflow_summary_is_sanitized() -> None:
@@ -226,7 +226,7 @@ def test_workflow_summary_is_sanitized() -> None:
         spec,
         completed_nodes=("node",),
         run_mode="write_artifacts",
-        run_id="workflow-dry-run",
+        run_id="workflow-validation-run",
     )
 
     assert isinstance(summary, WorkflowRunSummary)
@@ -244,7 +244,7 @@ def test_registered_workflow_rejects_unknown_node() -> None:
     )
 
     with pytest.raises(ValueError, match="unknown_workflow_node"):
-        execute_registered_workflow(
+        run_registered_workflow(
             spec,
             registry=WorkflowNodeRegistry(),
             allowed_spec_ids={"market_panel_1d"},
@@ -267,7 +267,7 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
         nodes=(WorkflowNode(node_id="validate"),),
     )
 
-    summary = execute_registered_workflow(
+    summary = run_registered_workflow(
         spec,
         registry=registry,
         allowed_spec_ids={"market_panel_1d"},

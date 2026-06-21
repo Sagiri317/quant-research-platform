@@ -38,7 +38,7 @@ data/interim/
 data/processed/
 data/research/
 data/reference_docs/
-reports/private_real/
+reports/private_research/
 secrets.*
 credentials.*
 token.*

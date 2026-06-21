@@ -24,7 +24,7 @@ from quant_research_platform.sources.csmar.field_mappings import (
 from quant_research_platform.sources.csmar.fields import csmar_field_role
 from quant_research_platform.sources.csmar.ids import SOURCE_ID
 from quant_research_platform.sources.csmar.raw_exports import (
-    find_dataset_files,
+    dataset_files_by_id,
     iter_private_export_chunks,
 )
 from quant_research_platform.storage.datasets import write_dataset
@@ -47,7 +47,7 @@ SOURCE_ASSET_TIME_COLUMNS: tuple[str, ...] = (
     "source_asset_id",
     "timestamp",
 )
-DAILY_MARKET_INTERIM_COLUMNS: tuple[str, ...] = (
+MARKET_BARS_INTERIM_COLUMNS: tuple[str, ...] = (
     *SOURCE_ASSET_TIME_COLUMNS,
     "trade_date",
     "market_type",
@@ -117,7 +117,7 @@ TRADING_CALENDAR_INTERIM_COLUMNS: tuple[str, ...] = (
     "source_state",
 )
 INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
-    "market_bars_1d": DAILY_MARKET_INTERIM_COLUMNS,
+    "market_bars_1d": MARKET_BARS_INTERIM_COLUMNS,
     "stock_master": STOCK_MASTER_INTERIM_COLUMNS,
     "market_cap": MARKET_CAP_INTERIM_COLUMNS,
     "adjustment": ADJUSTMENT_INTERIM_COLUMNS,
@@ -438,12 +438,12 @@ def materialize_interim_data(
     written: dict[str, Path] = {}
     skipped: list[str] = []
     pruning_reports: list[dict[str, object]] = []
+    raw_files_by_data_id = dataset_files_by_id(source_raw_root)
 
     for data_id in data_ids:
         spec = catalog.get(data_id)
-        input_files = find_dataset_files(
-            source_raw_root,
-            _raw_dataset_for_interim(data_id),
+        input_files = list(
+            raw_files_by_data_id.get(_raw_dataset_for_interim(data_id), ())
         )
         if not input_files:
             skipped.append(data_id)

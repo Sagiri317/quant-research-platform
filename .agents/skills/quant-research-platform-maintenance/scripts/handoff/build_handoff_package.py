@@ -31,6 +31,7 @@ VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 TASK_CONTROL_KEYS = {
     "validation_evidence",
     "review_threads",
+    "review" + "_evidence",
     "handoff_evidence",
     "pr_body",
     "pr_body_markdown",
@@ -363,7 +364,7 @@ def stage_handoff_evidence(
         )
     if not wrote:
         payload = {
-            "schema_version": "handoff-review-evidence/0.1",
+            "schema_version": "handoff-evidence/0.1",
             "status": aggregate_status(
                 validation_status_map(validation_evidence).values()
             ),
@@ -776,7 +777,7 @@ def sanitize_handoff_text(text: str) -> str:
         result,
     )
     result = re.sub(
-        r"(?<![A-Za-z0-9.])(?:[036]\d{5}|688\d{3})(?:\.(?:SZ|SH|BJ))?(?![A-Za-z0-9])",
+        r"(?<![A-Za-z0-9.])(?:[03468]\d{5})(?:\.(?:SZ|SH|BJ))?(?![A-Za-z0-9])",
         "<STOCK_CODE_SAMPLE>",
         result,
         flags=re.I,

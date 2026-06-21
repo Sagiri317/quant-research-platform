@@ -117,6 +117,29 @@ def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
 @pytest.mark.parametrize(
     "member",
     [
+        "reports/" + "private" + "_real/a_share/run/summary.json",
+        "reports/" + "private" + "_data/a_share/run/summary.json",
+        "review" + "_evidence/old.json",
+    ],
+)
+def test_package_safety_rejects_retired_private_and_handoff_paths(
+    tmp_path,
+    member,
+):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, "{}\n")
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("blocked private/sensitive path" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
         "." + "run/private/s1/summary.json",
         "." + "run/smoke/s1/summary.json",
         "." + "run/s86/summary.json",

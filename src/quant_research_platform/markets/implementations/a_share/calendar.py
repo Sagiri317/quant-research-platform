@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 import pandas as pd
 
-CURRENT_A_SHARE_MARKET_TYPES = frozenset({1, 4, 16, 32})
+CURRENT_MARKET_TYPES = frozenset({1, 4, 16, 32})
 NORMALIZED_CALENDAR_COLUMNS = frozenset(
     {"calendar_date", "source_market_type", "is_trading_day"}
 )
@@ -15,7 +15,7 @@ NORMALIZED_CALENDAR_COLUMNS = frozenset(
 def a_share_unified_trading_sessions(
     calendar: pd.DataFrame,
     *,
-    market_types: Iterable[int] = CURRENT_A_SHARE_MARKET_TYPES,
+    market_types: Iterable[int] = CURRENT_MARKET_TYPES,
 ) -> pd.DatetimeIndex:
     """Return sorted unique current-scope A-share trading sessions."""
 
@@ -176,7 +176,7 @@ def _count_sessions_between(
 
 
 __all__ = [
-    "CURRENT_A_SHARE_MARKET_TYPES",
+    "CURRENT_MARKET_TYPES",
     "a_share_unified_trading_sessions",
     "compute_listing_age_trading_days",
     "market_type_trading_sessions",
