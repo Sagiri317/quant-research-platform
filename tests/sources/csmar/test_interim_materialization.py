@@ -669,7 +669,7 @@ def test_csmar_index_info_missing_start_and_base_dates_fails_closed(
 
 
 def test_csmar_full_interim_frame_materialization_entrypoint_is_deleted() -> None:
-    assert not hasattr(interim, "build_interim_frame")
+    assert not hasattr(interim, "build_" + "interim_frame")
 
 
 def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(

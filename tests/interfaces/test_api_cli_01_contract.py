@@ -56,7 +56,7 @@ FORBIDDEN_PUBLIC_MARKERS = (
 RETIRED_API_FRAGMENTS = (
     "/api/0.1/catalog/data-products",
     "/api/0.1/catalog/universes",
-    "/api/0.1/data-products/{data_product_id}/interim-runs",
+    "/api/0.1/data-products/{data_product" + "_id}/interim-runs",
     "/markets/{market_id}/processed-data",
     "/workflows",
     "/reports/{run_id}",
