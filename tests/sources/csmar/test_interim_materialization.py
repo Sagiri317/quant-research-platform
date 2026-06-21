@@ -14,6 +14,9 @@ from quant_research_platform.sources.csmar import (
     raw_exports,
     raw_schemas,
 )
+from quant_research_platform.sources.csmar import (
+    ids as csmar_ids,
+)
 from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -68,7 +71,7 @@ def test_csmar_trading_calendar_interim_spec_uses_source_calendar_grain() -> Non
 
 def test_csmar_contracts_split_uses_owner_modules_directly() -> None:
     assert raw_schemas.parse_raw_filename.__module__.endswith(".raw_schemas")
-    assert field_mappings.map_csmar_columns.__module__.endswith(".field_mappings")
+    assert field_mappings.map_columns.__module__.endswith(".field_mappings")
     assert checksums.build_raw_export_metadata.__module__.endswith(".checksums")
     assert raw_exports.read_private_export_file.__module__.endswith(".raw_exports")
     assert hasattr(checksums, "raw_export_sha256")
@@ -218,13 +221,13 @@ def test_csmar_dataset_files_by_id_groups_raw_exports_once(tmp_path: Path) -> No
 
 def test_csmar_field_mappings_describe_source_local_aliases() -> None:
     assert "source-local normalized column mappings" in (
-        field_mappings.csmar_column_mapping.__doc__ or ""
+        field_mappings.column_mapping.__doc__ or ""
     )
     assert "source-local normalized aliases" in (
-        field_mappings.map_csmar_columns.__doc__ or ""
+        field_mappings.map_columns.__doc__ or ""
     )
 
-    mapped = field_mappings.map_csmar_columns(
+    mapped = field_mappings.map_columns(
         pd.DataFrame(
             {
                 "Markettype": [1],
@@ -246,7 +249,7 @@ def test_csmar_field_mappings_describe_source_local_aliases() -> None:
         ("Markettype", "Daywk"),
         "trading_calendar",
     ) == ["Clddt", "State"]
-    assert set(field_mappings.csmar_field_descriptions("trading_calendar")) == {
+    assert set(field_mappings.field_descriptions("trading_calendar")) == {
         "Markettype",
         "Clddt",
         "Daywk",
@@ -477,6 +480,63 @@ def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
         "source_exchange",
     }.intersection(pruned.columns)
     assert report["data_id"] == "market_bars_1d"
+
+
+def test_csmar_narrow_market_bars_optional_raw_columns_do_not_block_mapping() -> None:
+    data_id = csmar_ids.market_bars_data_id()
+    optional_columns = (
+        "Dretnd",
+        "Adjprcnd",
+        "ChangeRatio",
+        "LimitDown",
+        "LimitUp",
+    )
+    raw = _market_bars_1d_raw_frame().drop(columns=list(optional_columns))
+
+    inspection = raw_schemas.RawExportInspection(
+        path=Path("narrow.csv"),
+        dataset=data_id,
+        table_code=raw_schemas.RAW_TABLE_CONTRACTS[data_id].table_code,
+        columns=tuple(raw.columns),
+        missing_required_columns=field_mappings.missing_raw_columns(raw, data_id),
+        has_metadata=False,
+    )
+    normalized = interim.normalize_raw_frame(raw, data_id)
+    pruned, report = interim.apply_output_column_rules(normalized, data_id)
+
+    assert inspection.missing_required_columns == []
+    assert "period_return" in pruned.columns
+    assert "adj_close" in pruned.columns
+    assert report["optional_available_columns"] == {}
+
+
+def test_csmar_market_cap_optional_share_columns_do_not_block_mapping() -> None:
+    data_id = "market_cap"
+    raw = pd.DataFrame(
+        {
+            "Stkcd": ["1"],
+            "Shrchgdt": ["2024-01-02"],
+            "Nshrttl": [1000.0],
+            "Nshra": [800.0],
+        }
+    )
+
+    assert field_mappings.missing_raw_columns(raw, data_id) == []
+    normalized = interim.normalize_raw_frame(raw, data_id)
+    pruned, report = interim.apply_output_column_rules(normalized, data_id)
+
+    assert pruned["total_shares"].tolist() == [1000.0]
+    assert pruned["a_float_shares"].tolist() == [800.0]
+    assert report["optional_available_columns"] == {}
+
+
+def test_csmar_missing_required_raw_columns_still_fails() -> None:
+    data_id = csmar_ids.market_bars_data_id()
+    raw = _market_bars_1d_raw_frame().drop(columns=["Dretwd"])
+
+    assert field_mappings.missing_raw_columns(raw, data_id) == ["Dretwd"]
+    with pytest.raises(ValueError, match="market_bars_1d raw export is missing"):
+        field_mappings.map_columns(raw, data_id)
 
 
 def test_csmar_trading_calendar_normalizer_outputs_source_contract() -> None:

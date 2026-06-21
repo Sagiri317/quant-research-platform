@@ -13,12 +13,19 @@ def test_handoff_package_contract_uses_evidence_mode_without_diff_or_pr_body() -
 
     assert "handoff_evidence/" in builder
     assert "handoff_evidence/" in verifier
+    assert "handoff_evidence/generation.json" in builder
+    assert "handoff_evidence/generation.json" in verifier
+    assert "handoff_evidence/source-tree-scan.json" in builder
+    assert "handoff_evidence/source-tree-scan.json" in verifier
+    assert "handoff_generation.json" not in builder
+    assert "handoff_generation.json" not in verifier
     old_evidence_dir = "review_" + "evidence/"
     assert old_evidence_dir not in builder
     assert old_evidence_dir not in verifier
     patch_entry = '"diff' + '.patch"'
     assert patch_entry not in builder
     assert patch_entry not in verifier
+    assert '"pr_body.md"' not in builder
     assert '"' + "." + "run/handoffs" + '"' in builder
     assert '"evidence"' in builder
     assert '"pr_closure"' in builder

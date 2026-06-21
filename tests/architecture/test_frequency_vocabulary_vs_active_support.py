@@ -26,13 +26,16 @@ def test_data_frequency_helpers_define_reserved_vocabulary_and_active_support() 
 
 def test_current_source_and_market_ids_are_frequency_derived() -> None:
     from quant_research_platform.contracts.data import DataFrequency
+    from quant_research_platform.contracts.data import (
+        market_bars_data_id as contract_market_bars_data_id,
+    )
     from quant_research_platform.markets.implementations.a_share import (
         ids as market_ids,
     )
     from quant_research_platform.sources.csmar import ids as source_ids
 
     assert source_ids.SUPPORTED_MARKET_BAR_FREQUENCIES == (DataFrequency.DAILY,)
-    assert source_ids.market_bars_data_id(DataFrequency.DAILY) == "market_bars_1d"
+    assert contract_market_bars_data_id(DataFrequency.DAILY) == "market_bars_1d"
     assert market_ids.SUPPORTED_MARKET_PANEL_FREQUENCIES == (DataFrequency.DAILY,)
     assert market_ids.market_panel_data_id(DataFrequency.DAILY) == "market_panel_1d"
     assert market_ids.market_context_data_id(DataFrequency.DAILY) == "market_context_1d"

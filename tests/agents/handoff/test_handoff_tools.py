@@ -230,6 +230,258 @@ def test_verifier_rejects_forbidden_patch_member(tmp_path: Path) -> None:
     assert "forbidden_entry: " + forbidden_entry in failures
 
 
+@pytest.mark.parametrize(
+    "forbidden_member",
+    [
+        "handoff_evidence/diff.patch.json",
+        "handoff_evidence/pr_body.md.json",
+        "handoff_evidence/review_evidence.json",
+    ],
+)
+def test_verifier_rejects_reserved_handoff_evidence_members(
+    tmp_path: Path,
+    forbidden_member: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with zipfile.ZipFile(package, "a") as archive:
+        archive.writestr(
+            forbidden_member,
+            json.dumps({"schema_version": "legacy/0.1", "status": "PASS"}) + "\n",
+        )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert f"forbidden_handoff_evidence_entry: {forbidden_member}" in failures
+
+
+def test_verifier_rejects_generation_bundle_hash_mismatch(tmp_path: Path) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with zipfile.ZipFile(package) as archive:
+        generation = json.loads(
+            archive.read("handoff_evidence/generation.json").decode("utf-8")
+        )
+    generation["bundle_sha256"] = "0" * 64
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/generation.json",
+        (json.dumps(generation, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "generation_bundle_sha256_mismatch" in failures
+
+
+def test_verifier_reruns_source_tree_scan_from_bundle(tmp_path: Path) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    repo, package, sidecar, base, _final_head = _build_test_package(tmp_path)
+    legacy = repo / "src" / "legacy.py"
+    legacy.parent.mkdir(exist_ok=True)
+    legacy.write_text('LEGACY = "contracts.workflow_run"\n', encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add hidden legacy surface")
+    forged_head = _git(repo, "rev-parse", "HEAD").strip()
+    forged_bundle = tmp_path / "forged-final-branch.bundle"
+    _git(
+        repo,
+        "bundle",
+        "create",
+        str(forged_bundle),
+        "feature/qrp-clean-rewrite",
+    )
+
+    with zipfile.ZipFile(package) as archive:
+        task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
+        validation = json.loads(
+            archive.read("validation_evidence.json").decode("utf-8")
+        )
+        generation = json.loads(
+            archive.read("handoff_evidence/generation.json").decode("utf-8")
+        )
+        source_tree_scan = json.loads(
+            archive.read("handoff_evidence/source-tree-scan.json").decode("utf-8")
+        )
+    task_metadata.update(
+        {"base": base, "final_head": forged_head, "final_sha": forged_head}
+    )
+    validation.update(
+        {"base": base, "final_head": forged_head, "final_sha": forged_head}
+    )
+    generation.update(
+        {
+            "base": base,
+            "final_head": forged_head,
+            "bundle_sha256": hashlib.sha256(forged_bundle.read_bytes()).hexdigest(),
+        }
+    )
+    source_tree_scan.update(
+        {
+            "status": "PASS",
+            "expected_head": forged_head,
+            "scanned_head": forged_head,
+            "finding_count": 0,
+            "findings": [],
+            "failures": [],
+        }
+    )
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_payload.update({"base": base, "final_head": forged_head})
+    sidecar.write_text(
+        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _rewrite_package_member(package, "final-branch.bundle", forged_bundle.read_bytes())
+    _rewrite_package_member(
+        package,
+        "task_metadata.json",
+        (json.dumps(task_metadata, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "validation_evidence.json",
+        (json.dumps(validation, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/generation.json",
+        (json.dumps(generation, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/source-tree-scan.json",
+        (json.dumps(source_tree_scan, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "source_tree_scan_bundle_findings_present" in failures
+    assert any(
+        failure == "source_tree_scan_bundle_rule: retired_workflow_module"
+        for failure in failures
+    )
+
+
+def test_verifier_reruns_source_tree_scan_rejects_pr_body_renderer(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    repo, package, sidecar, base, _final_head = _build_test_package(tmp_path)
+    legacy = repo / "src" / "legacy.py"
+    legacy.parent.mkdir(exist_ok=True)
+    legacy.write_text(
+        'LEGACY = "render_pr_body_from_validation_evidence.py"\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add hidden pr body renderer")
+    forged_head = _git(repo, "rev-parse", "HEAD").strip()
+    forged_bundle = tmp_path / "forged-final-branch.bundle"
+    _git(
+        repo,
+        "bundle",
+        "create",
+        str(forged_bundle),
+        "feature/qrp-clean-rewrite",
+    )
+
+    with zipfile.ZipFile(package) as archive:
+        task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
+        validation = json.loads(
+            archive.read("validation_evidence.json").decode("utf-8")
+        )
+        generation = json.loads(
+            archive.read("handoff_evidence/generation.json").decode("utf-8")
+        )
+        source_tree_scan = json.loads(
+            archive.read("handoff_evidence/source-tree-scan.json").decode("utf-8")
+        )
+    task_metadata.update(
+        {"base": base, "final_head": forged_head, "final_sha": forged_head}
+    )
+    validation.update(
+        {"base": base, "final_head": forged_head, "final_sha": forged_head}
+    )
+    generation.update(
+        {
+            "base": base,
+            "final_head": forged_head,
+            "bundle_sha256": hashlib.sha256(forged_bundle.read_bytes()).hexdigest(),
+        }
+    )
+    source_tree_scan.update(
+        {
+            "status": "PASS",
+            "expected_head": forged_head,
+            "scanned_head": forged_head,
+            "finding_count": 0,
+            "findings": [],
+            "failures": [],
+        }
+    )
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_payload.update({"base": base, "final_head": forged_head})
+    sidecar.write_text(
+        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _rewrite_package_member(package, "final-branch.bundle", forged_bundle.read_bytes())
+    _rewrite_package_member(
+        package,
+        "task_metadata.json",
+        (json.dumps(task_metadata, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "validation_evidence.json",
+        (json.dumps(validation, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/generation.json",
+        (json.dumps(generation, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/source-tree-scan.json",
+        (json.dumps(source_tree_scan, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "source_tree_scan_bundle_findings_present" in failures
+    assert any(
+        failure == "source_tree_scan_bundle_rule: forbidden_render_pr_body"
+        for failure in failures
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "E:/repo/data/processed/a_share/factor/demo",
+        "E:/repo/data/research/a_share/demo",
+        "E:/repo/reports/private_research/a_share/run",
+        "/workspace/qrp/data/processed/a_share/factor/demo",
+        "/workspaces/qrp/data/research/a_share/demo",
+        "/mnt/data/reports/private_research/a_share/run",
+    ],
+)
+def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
+    text: str,
+) -> None:
+    builder = _load_handoff_module("build_handoff_package")
+
+    rules = builder.source_tree_forbidden_patterns()
+
+    assert rules["forbidden_local_private_path"].search(text)
+
+
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
     safety = _load_handoff_module("handoff_safety")
     run_handoffs = "." + "run/handoffs"

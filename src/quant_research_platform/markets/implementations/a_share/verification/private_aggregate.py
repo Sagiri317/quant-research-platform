@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.data import DataFrequency, market_bars_data_id
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.calendars import (
     SessionWindowPlanner,
@@ -22,12 +23,14 @@ from quant_research_platform.markets.calendars import (
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
+    market_context_data_id,
+    market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.research_scenarios import (
-    default_a_share_prediction_oos_period,
-    default_a_share_prediction_smoke_id,
     default_evaluation_period,
     default_evaluation_run_id,
+    default_prediction_oos_period,
+    default_prediction_smoke_id,
 )
 from quant_research_platform.reports.verification_evidence import (
     render_private_verification_summary_markdown,
@@ -71,7 +74,9 @@ GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE = "csmar"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
-    "processed/a_share/panel/market_panel_1d": "full_historical_market_panel_1d_status",
+    f"processed/a_share/panel/{market_panel_data_id()}": (
+        f"full_historical_{market_panel_data_id()}_status"
+    ),
     f"processed/a_share/factor/{PRICE_VOLUME_PROCESSED_DATA_ID}": (
         "factor_value_parity"
     ),
@@ -80,7 +85,7 @@ PROCESSED_ROOT_AREA_COVERAGE = {
     "processed/a_share/annotation/as_of": "masks_universes_parity",
     "processed/a_share/annotation/execution": "masks_universes_parity",
     "processed/a_share/annotation/evaluation": "masks_universes_parity",
-    "processed/a_share/annotation/market_context_1d": (
+    f"processed/a_share/annotation/{market_context_data_id()}": (
         "supporting_layers_coverage_2014_2025"
     ),
     "research/a_share/"
@@ -334,7 +339,7 @@ def _generate_private_verification_summary_with_cache(
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
     reports_root = root / "reports" / "private_research" / MARKET_ID
-    market_panel_1d = processed / "panel" / "market_panel_1d"
+    market_panel_root = processed / "panel" / market_panel_data_id()
     factor = processed / "factor" / PRICE_VOLUME_PROCESSED_DATA_ID
     label = processed / "label" / "forward_returns"
     universe = processed / "annotation" / "default"
@@ -343,7 +348,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         processed / "annotation" / "execution",
         processed / "annotation" / "evaluation",
     )
-    context = processed / "annotation" / "market_context_1d"
+    context = processed / "annotation" / market_context_data_id()
     research = (
         root
         / "data"
@@ -359,12 +364,12 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     prediction_roots = _report_category_roots(
         reports_root,
         category="prediction",
-        preferred_id=default_a_share_prediction_smoke_id(test_start="2014-07-01"),
+        preferred_id=default_prediction_smoke_id(test_start="2014-07-01"),
     )
     return (
         AggregateInput(
             "processed_panel_parity",
-            (market_panel_1d,),
+            (market_panel_root,),
             "2014-01-01 through 2014-12-31",
             "processed panel",
             years=(2014,),
@@ -417,10 +422,10 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             "supporting layers coverage",
         ),
         AggregateInput(
-            "full_historical_market_panel_1d_status",
-            (market_panel_1d,),
+            f"full_historical_{market_panel_data_id()}_status",
+            (market_panel_root,),
             FULL_HISTORY_PERIOD,
-            "full historical market_panel_1d",
+            "full historical market panel",
         ),
     )
 
@@ -444,7 +449,7 @@ def _report_category_roots(
 
 
 def _prediction_oos_expected_period() -> str:
-    return default_a_share_prediction_oos_period(
+    return default_prediction_oos_period(
         train_end="2014-06-30",
         test_start="2014-07-01",
         evaluation_end="2014-12-31",
@@ -604,10 +609,10 @@ def _summarize_area_input(
     *,
     summary_cache: _SummaryCache | None = None,
 ) -> AggregateSummary:
-    if area_input.summary_kind == "generated_market_panel_1d_from_interim":
+    if area_input.summary_kind == "generated_market_panel_from_interim":
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
-        return _summarize_generated_full_market_panel_1d(area_input.roots[0])
+        return _summarize_generated_full_market_panel(area_input.roots[0])
     if area_input.summary_kind == "report_artifacts":
         return _summarize_report_roots(area_input.roots)
     return _summarize_roots(
@@ -617,31 +622,31 @@ def _summarize_area_input(
     )
 
 
-def _summarize_generated_full_market_panel_1d(
+def _summarize_generated_full_market_panel(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> AggregateSummary:
     return _summarize_frames(
-        _iter_generated_full_market_panel_1d_chunks(
+        _iter_generated_full_market_panel_chunks(
             project_root,
             resource_policy=resource_policy,
         )
     )
 
 
-def _iter_generated_full_market_panel_1d_chunks(
+def _iter_generated_full_market_panel_chunks(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
-    yield from _iter_generated_full_market_panel_1d_session_chunks(
+    yield from _iter_generated_full_market_panel_session_chunks(
         project_root,
         resource_policy=resource_policy,
     )
 
 
-def _iter_generated_full_market_panel_1d_session_chunks(
+def _iter_generated_full_market_panel_session_chunks(
     project_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
@@ -657,8 +662,8 @@ def _iter_generated_full_market_panel_1d_session_chunks(
     stock_master = read_dataset(interim_root / "stock_master")
     market_cap = read_dataset(interim_root / "market_cap")
     trading_calendar = read_dataset(interim_root / "trading_calendar")
-    spec = processed_catalog.a_share_processed_catalog().get("market_panel_1d")
-    market_bars_1d_root = interim_root / "market_bars_1d"
+    spec = processed_catalog.processed_catalog().get(market_panel_data_id())
+    market_bars_root = interim_root / _private_market_bars_data_id()
     time_window = TimeWindow(FULL_HISTORY_START_DATE, FULL_HISTORY_END_DATE)
     sessions = _trading_sessions_from_calendar(trading_calendar)
     target_sessions = tuple(
@@ -690,17 +695,17 @@ def _iter_generated_full_market_panel_1d_session_chunks(
         time_window,
         reason="verification_evidence_generated_panel",
     )
-    market_bars_1d_columns = tuple(inspect_dataset(market_bars_1d_root).columns)
+    market_bars_columns = tuple(inspect_dataset(market_bars_root).columns)
     for window in windows:
-        daily = read_dataset(
-            market_bars_1d_root,
+        market_bars = read_dataset(
+            market_bars_root,
             time_window=window.read,
-            columns=market_bars_1d_columns,
+            columns=market_bars_columns,
         )
-        if daily.empty:
+        if market_bars.empty:
             continue
         panel = panels.compute_market_panel(
-            daily,
+            market_bars,
             stock_master=stock_master,
             market_cap=market_cap,
             trading_calendar=trading_calendar,
@@ -728,7 +733,7 @@ def _estimate_generated_full_panel_memory_bytes(
     session_count: int,
 ) -> int:
     compressed_bytes = int(
-        inspect_dataset(interim_root / "market_bars_1d").manifest.get(
+        inspect_dataset(interim_root / _private_market_bars_data_id()).manifest.get(
             "file_size_bytes",
             0,
         )
@@ -737,6 +742,10 @@ def _estimate_generated_full_panel_memory_bytes(
         session_count,
         compressed_bytes * GENERATED_PANEL_MEMORY_EXPANSION_FACTOR,
     )
+
+
+def _private_market_bars_data_id() -> str:
+    return market_bars_data_id(DataFrequency.DAILY)
 
 
 def _trading_sessions_from_calendar(

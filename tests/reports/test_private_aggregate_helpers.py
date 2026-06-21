@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.markets.implementations.a_share.research_scenarios import (
-    build_a_share_prediction_specs,
-    default_a_share_prediction_smoke_id,
+    build_prediction_specs,
+    default_prediction_smoke_id,
 )
 from quant_research_platform.markets.implementations.a_share.verification import (
     private_aggregate,
@@ -157,12 +157,12 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         "evaluation_parity": "report_artifacts",
         "prediction_oos_smoke_parity": "report_artifacts",
     }
-    prediction_spec = build_a_share_prediction_specs(
+    prediction_spec = build_prediction_specs(
         train_end="2014-06-30",
         test_start="2014-07-01",
         model_algorithms=("linear_regression",),
     )[0]
-    assert prediction_spec.prediction_id == default_a_share_prediction_smoke_id(
+    assert prediction_spec.prediction_id == default_prediction_smoke_id(
         test_start="2014-07-01"
     )
     prediction_area = next(

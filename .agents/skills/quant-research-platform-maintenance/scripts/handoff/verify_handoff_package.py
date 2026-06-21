@@ -15,6 +15,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from build_handoff_package import (  # noqa: E402
+    is_reserved_handoff_evidence_path,
+    source_tree_scan_from_clone,
+)
 from handoff_safety import scan_handoff_zip  # noqa: E402
 
 VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
@@ -26,6 +30,9 @@ REQUIRED_ZIP_ENTRIES = {
     "validation_evidence.json",
 }
 DIFF_PATCH_ENTRY = "diff" + ".patch"
+GENERATION_EVIDENCE = "handoff_evidence/generation.json"
+SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
+VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
     ".agents/",
     "docs/",
@@ -93,14 +100,14 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             failures.extend(f"missing_required_entry: {name}" for name in missing)
             if DIFF_PATCH_ENTRY in name_set:
                 failures.append("forbidden_entry: " + DIFF_PATCH_ENTRY)
-            pr_entries = {"pr_body.md", "review_threads.json"}
-            present_pr_entries = pr_entries.intersection(name_set)
-            if present_pr_entries and present_pr_entries != pr_entries:
-                missing_pr_entries = sorted(pr_entries - present_pr_entries)
-                failures.extend(
-                    f"pr_closure_missing_required_entry: {name}"
-                    for name in missing_pr_entries
-                )
+            if "pr_body.md" in name_set:
+                failures.append("forbidden_entry: pr_body.md")
+            failures.extend(
+                f"forbidden_handoff_evidence_entry: {name}"
+                for name in sorted(names)
+                if name.startswith("handoff_evidence/")
+                and is_reserved_handoff_evidence_path(name)
+            )
             duplicate_source = sorted(
                 name
                 for name in names
@@ -110,17 +117,18 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 f"duplicate_tracked_source_in_zip: {name}"
                 for name in duplicate_source
             )
-            if not any(
-                name.startswith("handoff_evidence/") and name.endswith(".json")
-                for name in names
+            for required_evidence in (
+                GENERATION_EVIDENCE,
+                SOURCE_TREE_SCAN_EVIDENCE,
+                VERIFICATION_MATRIX_EVIDENCE,
             ):
-                failures.append("missing_handoff_evidence_json")
+                if required_evidence not in name_set:
+                    failures.append(f"missing_required_entry: {required_evidence}")
             failures.extend(verify_artifact_manifest(archive, sidecar))
             failures.extend(verify_metadata_entries(archive, sidecar))
-            if pr_entries.issubset(name_set):
+            if "review_threads.json" in name_set:
                 failures.extend(verify_review_thread_closure(archive, sidecar))
-                failures.extend(verify_pr_body_statuses(archive, sidecar))
-            failures.extend(verify_handoff_evidence_json(archive))
+            failures.extend(verify_handoff_evidence_json(archive, sidecar))
             failures.extend(verify_final_branch_bundle(archive, sidecar))
             failures.extend(verify_git_status(archive))
     except Exception as exc:
@@ -478,74 +486,10 @@ def _validation_command_has_placeholder(command: str) -> bool:
     )
 
 
-def verify_pr_body_statuses(archive: ZipFile, sidecar: dict[str, object]) -> list[str]:
-    failures: list[str] = []
-    try:
-        body = archive.read("pr_body.md").decode("utf-8")
-        validation = json.loads(
-            archive.read("validation_evidence.json").decode("utf-8")
-        )
-        review_threads = json.loads(
-            archive.read("review_threads.json").decode("utf-8")
-        )
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
-        return ["pr_body_validation_inputs_invalid"]
-    if not isinstance(validation, dict):
-        return ["validation_evidence_must_be_object"]
-    if "- PR: ``" in body or "MISSING_PR_URL" in body:
-        failures.append("pr_body_pr_url_missing")
-    if "{'sha':" in body:
-        failures.append("pr_body_commit_list_dict_repr")
-    for name, status in validation_status_map(validation).items():
-        expected = f"| `{name}` | `{status}` |"
-        if expected not in body:
-            failures.append(f"pr_body_validation_row_missing: {name}")
-    if (
-        isinstance(review_threads, dict)
-        and review_threads.get("threads")
-        and "full evidence: review_threads.json" not in body
-    ):
-        failures.append("pr_body_review_threads_full_evidence_marker_missing")
-    if "- start head: ``" in body or "- base head: ``" in body:
-        failures.append("pr_body_base_head_missing")
-    if "- review zip: ``" in body:
-        failures.append("pr_body_review_zip_missing")
-    if "- external evidence JSON: ``" in body:
-        failures.append("pr_body_external_json_missing")
-    if "zip sidecar | `NOT_RUN`" in body:
-        failures.append("pr_body_sidecar_not_run_with_sidecar_present")
-    if contains_local_absolute_path_text(body):
-        failures.append("pr_body_local_absolute_path")
-    summary = sidecar.get("status_summary")
-    if isinstance(summary, dict):
-        expected = (
-            "| zip sidecar | `{}` | validation={}; handoff_verify={}; "
-            "handoff_safety={}; blocked_count={}; fail_count={} |"
-        ).format(
-            aggregate_status(
-                str(value)
-                for value in summary.values()
-                if str(value) in VALID_STATUSES
-            ),
-            summary.get("validation"),
-            summary.get("handoff_verify"),
-            summary.get("handoff_safety"),
-            summary.get("blocked_count"),
-            summary.get("fail_count"),
-        )
-        if expected not in body:
-            failures.append("pr_body_sidecar_summary_row_mismatch")
-    if isinstance(review_threads, dict) and review_threads.get("status") == "BLOCKED":
-        expected = (
-            "| review threads | `BLOCKED` | live GitHub access unavailable; "
-            "counts unknown |"
-        )
-        if expected not in body:
-            failures.append("pr_body_review_threads_blocked_counts_unknown_missing")
-    return failures
-
-
-def verify_handoff_evidence_json(archive: ZipFile) -> list[str]:
+def verify_handoff_evidence_json(
+    archive: ZipFile,
+    sidecar: dict[str, object],
+) -> list[str]:
     failures: list[str] = []
     for name in archive.namelist():
         if not (name.startswith("handoff_evidence/") and name.endswith(".json")):
@@ -558,10 +502,85 @@ def verify_handoff_evidence_json(archive: ZipFile) -> list[str]:
         if not isinstance(payload, dict):
             failures.append(f"handoff_evidence_must_be_object: {name}")
             continue
+        if name == GENERATION_EVIDENCE:
+            failures.extend(verify_generation_evidence(payload, sidecar, archive))
+        if name == SOURCE_TREE_SCAN_EVIDENCE:
+            failures.extend(verify_source_tree_scan_evidence(payload, sidecar))
         if name.endswith("verification-matrix.json"):
             failures.extend(verify_verification_matrix(payload))
-    if "handoff_evidence/verification-matrix.json" not in archive.namelist():
+    if VERIFICATION_MATRIX_EVIDENCE not in archive.namelist():
         failures.append("verification_matrix_missing")
+    return failures
+
+
+def verify_generation_evidence(
+    payload: dict[str, object],
+    sidecar: dict[str, object],
+    archive: ZipFile,
+) -> list[str]:
+    required = {
+        "builder_script",
+        "generated_at_utc",
+        "mode",
+        "base",
+        "final_head",
+        "branch",
+        "zip_filename",
+        "zip_sha256",
+        "bundle_sha256",
+        "source_tool_paths",
+    }
+    failures = [
+        f"generation_evidence_missing: {key}"
+        for key in sorted(required)
+        if key not in payload
+    ]
+    if payload.get("schema_version") != "handoff-generation/0.1":
+        failures.append("generation_evidence_schema_version_mismatch")
+    if payload.get("status") not in VALID_STATUSES:
+        failures.append("generation_evidence_status_invalid")
+    if payload.get("mode") not in {"evidence", "pr_closure"}:
+        failures.append("generation_evidence_mode_invalid")
+    if not isinstance(payload.get("source_tool_paths"), list):
+        failures.append("generation_evidence_source_tool_paths_invalid")
+    for key in ("base", "branch", "final_head", "zip_filename"):
+        if payload.get(key) != sidecar.get(key):
+            failures.append(f"generation_evidence_sidecar_mismatch: {key}")
+    try:
+        bundle_sha256 = hashlib.sha256(archive.read("final-branch.bundle")).hexdigest()
+    except KeyError:
+        failures.append("generation_bundle_missing")
+    else:
+        if payload.get("bundle_sha256") != bundle_sha256:
+            failures.append("generation_bundle_sha256_mismatch")
+    return failures
+
+
+def verify_source_tree_scan_evidence(
+    payload: dict[str, object],
+    sidecar: dict[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    if payload.get("schema_version") != "handoff-source-tree-scan/0.1":
+        failures.append("source_tree_scan_schema_version_mismatch")
+    if payload.get("status") not in VALID_STATUSES:
+        failures.append("source_tree_scan_status_invalid")
+    if payload.get("status") != "PASS":
+        failures.append("source_tree_scan_not_pass")
+    for key in ("scanned_head", "expected_head", "finding_count", "findings"):
+        if key not in payload:
+            failures.append(f"source_tree_scan_missing: {key}")
+    if payload.get("scanned_head") != payload.get("expected_head"):
+        failures.append("source_tree_scan_head_mismatch")
+    final_head = sidecar.get("final_head")
+    if payload.get("expected_head") != final_head:
+        failures.append("source_tree_scan_sidecar_expected_head_mismatch")
+    if payload.get("scanned_head") != final_head:
+        failures.append("source_tree_scan_sidecar_scanned_head_mismatch")
+    if payload.get("scanned_tree") != "final-branch.bundle clone":
+        failures.append("source_tree_scan_tree_mismatch")
+    if payload.get("finding_count") != 0:
+        failures.append("source_tree_scan_findings_present")
     return failures
 
 
@@ -618,6 +637,18 @@ def verify_final_branch_bundle(
         if head != final_head or show_head != final_head:
             failures.append("bundle_clone_head_mismatch")
             return failures
+        scan = source_tree_scan_from_clone(clone_dir, final_head=final_head)
+        if scan.get("status") != "PASS":
+            failures.append("source_tree_scan_bundle_not_pass")
+        if scan.get("finding_count") != 0:
+            failures.append("source_tree_scan_bundle_findings_present")
+        findings = scan.get("findings")
+        if isinstance(findings, list):
+            for finding in findings:
+                if isinstance(finding, dict) and isinstance(finding.get("rule"), str):
+                    failures.append(f"source_tree_scan_bundle_rule: {finding['rule']}")
+        if scan.get("scanned_head") != final_head:
+            failures.append("source_tree_scan_bundle_head_mismatch")
         subject = git_text(clone_dir, "show", "-s", "--format=%s", "HEAD").strip()
         if "synthetic" in subject.lower():
             failures.append("bundle_head_synthetic_marker")

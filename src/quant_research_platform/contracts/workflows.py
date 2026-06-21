@@ -7,7 +7,26 @@ from enum import StrEnum
 
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
+
+
+class WorkflowRunPolicy(StrEnum):
+    VALIDATE_ONLY = "validate_only"
+    WRITE_ARTIFACTS = "write_artifacts"
+
+    @classmethod
+    def default(cls) -> WorkflowRunPolicy:
+        return cls.VALIDATE_ONLY
+
+    @classmethod
+    def normalize(cls, value: WorkflowRunPolicy | str | None) -> WorkflowRunPolicy:
+        if value is None:
+            return cls.default()
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value))
+        except ValueError as exc:
+            raise ValueError(f"invalid_workflow_run_policy: {value}") from exc
 
 
 class WorkflowCheckpointPolicy(StrEnum):

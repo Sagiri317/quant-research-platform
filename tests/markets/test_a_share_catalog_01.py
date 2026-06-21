@@ -14,7 +14,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.fields import (
-    a_share_field_catalog,
+    field_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     AS_OF_MASK_ID,
@@ -28,10 +28,10 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     market_panel_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
-    a_share_processed_catalog,
+    processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.research_profiles import (
-    build_a_share_research_dataset_catalog,
+    build_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.validation import (
     factor_tables,
@@ -54,8 +54,8 @@ def test_platform_field_catalog_does_not_own_a_share_specific_fields() -> None:
     } & platform_fields
 
 
-def test_a_share_field_catalog_owns_market_specific_fields() -> None:
-    catalog = a_share_field_catalog()
+def test_field_catalog_owns_market_specific_fields() -> None:
+    catalog = field_catalog()
 
     for field_name in (
         "is_st",
@@ -77,7 +77,7 @@ def test_a_share_field_catalog_owns_market_specific_fields() -> None:
 
 
 def test_a_share_source_code_fields_are_numeric_null_preserving() -> None:
-    catalog = a_share_field_catalog()
+    catalog = field_catalog()
 
     for field_name in (
         "market_type",
@@ -90,7 +90,7 @@ def test_a_share_source_code_fields_are_numeric_null_preserving() -> None:
 
 
 def test_a_share_processed_specs_use_kind_and_canonical_entity_time_key() -> None:
-    catalog = a_share_processed_catalog()
+    catalog = processed_catalog()
 
     for spec in catalog.list():
         assert spec.market_id == "a_share"
@@ -104,7 +104,7 @@ def test_a_share_processed_specs_use_kind_and_canonical_entity_time_key() -> Non
 
 
 def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
-    catalog = a_share_processed_catalog()
+    catalog = processed_catalog()
     spec = catalog.get(PRICE_VOLUME_PROCESSED_DATA_ID)
     factor_columns = tuple(
         column
@@ -113,7 +113,7 @@ def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
     )
     registered_columns = tuple(
         definition.output_column
-        for definition in factor_definitions.a_share_factor_catalog().list()
+        for definition in factor_definitions.factor_catalog().list()
     )
 
     with pytest.raises(KeyError, match="unknown_processed_data_spec"):
@@ -247,7 +247,7 @@ def test_a_share_factor_and_label_validators_reject_infinite_outputs() -> None:
 
 
 def test_a_share_processed_annotation_contracts_are_role_based() -> None:
-    catalog = a_share_processed_catalog()
+    catalog = processed_catalog()
 
     market_panel_1d = catalog.get(market_panel_data_id())
     context = catalog.get(market_context_data_id())
@@ -276,7 +276,7 @@ def test_a_share_processed_annotation_contracts_are_role_based() -> None:
 
 
 def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() -> None:
-    dataset = build_a_share_research_dataset_catalog().get(
+    dataset = build_research_dataset_catalog().get(
         PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 
@@ -309,5 +309,5 @@ def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() ->
 def _a_share_factor_columns() -> tuple[str, ...]:
     return tuple(
         definition.output_column
-        for definition in factor_definitions.a_share_factor_definitions()
+        for definition in factor_definitions.factor_definitions()
     )

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    data_frequency_slug,
+    normalize_data_frequency,
+)
 from quant_research_platform.contracts.filtering import reject_filter_input_columns
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.signals import SignalSpec
@@ -18,7 +23,7 @@ WEIGHT_METHODS = {
 PORTFOLIO_MODES = {"long_short", "long_only"}
 BLOCKED_ENTRY_POLICIES = {"skip", "hold_cash", "redistribute"}
 BLOCKED_EXIT_POLICIES = {"carry_forward", "force_exit", "error"}
-SUPPORTED_REBALANCE_FREQUENCIES = {"1d"}
+SUPPORTED_REBALANCE_FREQUENCIES = {data_frequency_slug(DataFrequency.DAILY)}
 
 
 @dataclass(frozen=True)
@@ -190,10 +195,13 @@ def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[st
     return sorted(overlaps)
 
 
-def normalize_rebalance_frequency(value: str) -> str:
-    if not isinstance(value, str) or not value:
+def normalize_rebalance_frequency(value: str | DataFrequency) -> str:
+    if isinstance(value, str) and not value:
         raise ValueError("portfolio_rebalance_frequency_required")
-    normalized = value.strip().lower()
+    try:
+        normalized = data_frequency_slug(normalize_data_frequency(value))
+    except ValueError as exc:
+        raise ValueError("unsupported_portfolio_rebalance_frequency") from exc
     if normalized not in SUPPORTED_REBALANCE_FREQUENCIES:
         raise ValueError("unsupported_portfolio_rebalance_frequency")
     return normalized

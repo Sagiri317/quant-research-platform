@@ -11,7 +11,7 @@ import sys
 import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zipfile import ZIP_DEFLATED, ZipFile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -22,19 +22,36 @@ if str(SCRIPT_PARENT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_PARENT))
 
 from handoff_safety import scan_handoff_zip  # noqa: E402
-from render_pr_body_from_validation_evidence import render_pr_body  # noqa: E402
 
 PACKAGE_SCHEMA_VERSION = "handoff-sidecar/0.1"
 VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
-REQUIRED_REVIEW_EVIDENCE = "handoff_evidence/handoff_generation.json"
+GENERATION_EVIDENCE = "handoff_evidence/generation.json"
+SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
+BUILDER_OWNED_HANDOFF_EVIDENCE = {
+    GENERATION_EVIDENCE,
+    SOURCE_TREE_SCAN_EVIDENCE,
+    VERIFICATION_MATRIX_EVIDENCE,
+}
+RESERVED_HANDOFF_EVIDENCE_STEMS = {
+    "diff" + ".patch",
+    "pr_body" + ".md",
+    "review" + "_evidence",
+}
+HANDOFF_TOOL_SOURCE_PATHS = [
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
+    ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
+    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
+    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
+]
 TASK_CONTROL_KEYS = {
     "validation_evidence",
     "review_threads",
     "review" + "_evidence",
     "handoff_evidence",
-    "pr_body",
-    "pr_body_markdown",
 }
 
 
@@ -204,31 +221,21 @@ def build_once(
         if mode == "pr_closure":
             review_threads = task_review_threads(task)
             write_text(stage_root / "review_threads.json", stable_json(review_threads))
-            pr_body = task_pr_body(
-                task,
-                validation_evidence,
-                review_threads,
-                external_evidence=sidecar_preview(
-                    zip_path=zip_path,
-                    json_path=json_path,
-                    task=task,
-                    validation_evidence=validation_evidence,
-                ),
-            )
-            write_text(stage_root / "pr_body.md", sanitize_handoff_text(pr_body))
-        stage_handoff_evidence(stage_root, task, validation_evidence)
+        stage_handoff_evidence(
+            stage_root,
+            task,
+            validation_evidence,
+            bundle_path=stage_root / "final-branch.bundle",
+            branch=branch,
+            base=base,
+            final_head=final_head,
+            mode=mode,
+            zip_filename=zip_path.name,
+        )
         manifest = {
             "schema_version": "handoff-artifact-manifest/0.1",
             "tool_source_final_head": final_head,
-            "tool_source_repo_paths": [
-                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
-                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
-                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py",
-                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
-                ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
-                ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
-                ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
-            ],
+            "tool_source_repo_paths": HANDOFF_TOOL_SOURCE_PATHS,
             "entries": artifact_entries(stage_root, staged_paths(stage_root)),
         }
         write_text(stage_root / "artifact_manifest.json", stable_json(manifest))
@@ -323,31 +330,19 @@ def task_review_threads(task: dict[str, object]) -> dict[str, object]:
     }
 
 
-def task_pr_body(
-    task: dict[str, object],
-    validation_evidence: dict[str, object],
-    review_threads: dict[str, object],
-    *,
-    external_evidence: dict[str, object] | None = None,
-) -> str:
-    raw = task.get("pr_body_markdown", task.get("pr_body"))
-    if isinstance(raw, str) and raw.strip():
-        return raw
-    return render_pr_body(
-        task_metadata(task),
-        validation_evidence,
-        review_threads=review_threads,
-        external_evidence=external_evidence,
-    )
-
-
 def stage_handoff_evidence(
     stage_root: Path,
     task: dict[str, object],
     validation_evidence: dict[str, object],
+    *,
+    bundle_path: Path,
+    branch: str,
+    base: str,
+    final_head: str,
+    mode: str,
+    zip_filename: str,
 ) -> None:
     handoff_evidence = task.get("handoff_evidence")
-    wrote = False
     if isinstance(handoff_evidence, dict):
         for raw_name, payload in sorted(handoff_evidence.items()):
             name = normalize_zip_path(str(raw_name))
@@ -355,48 +350,215 @@ def stage_handoff_evidence(
                 name = "handoff_evidence/" + name
             if not name.endswith(".json"):
                 name += ".json"
+            if name in BUILDER_OWNED_HANDOFF_EVIDENCE:
+                continue
+            if is_reserved_handoff_evidence_path(name):
+                continue
             write_text(stage_root / name, stable_json(json_sanitize(payload)))
-            wrote = True
-    if not (stage_root / VERIFICATION_MATRIX_EVIDENCE).exists():
-        write_text(
-            stage_root / VERIFICATION_MATRIX_EVIDENCE,
-            stable_json(verification_matrix_payload(validation_evidence)),
-        )
-    if not wrote:
-        payload = {
-            "schema_version": "handoff-evidence/0.1",
-            "status": aggregate_status(
-                validation_status_map(validation_evidence).values()
-            ),
-            "evidence": (
-                "Generated from task validation_evidence; no extra evidence file "
-                "was supplied."
-            ),
-        }
-        write_text(stage_root / REQUIRED_REVIEW_EVIDENCE, stable_json(payload))
+    write_text(
+        stage_root / VERIFICATION_MATRIX_EVIDENCE,
+        stable_json(verification_matrix_payload(validation_evidence)),
+    )
+    write_text(
+        stage_root / GENERATION_EVIDENCE,
+        stable_json(
+            generation_payload(
+                task=task,
+                branch=branch,
+                base=base,
+                final_head=final_head,
+                mode=mode,
+                zip_filename=zip_filename,
+                bundle_path=bundle_path,
+            )
+        ),
+    )
+    write_text(
+        stage_root / SOURCE_TREE_SCAN_EVIDENCE,
+        stable_json(
+            source_tree_scan_payload(
+                bundle_path=bundle_path,
+                branch=branch,
+                final_head=final_head,
+            )
+        ),
+    )
 
 
-def sidecar_preview(
+def generation_payload(
     *,
-    zip_path: Path,
-    json_path: Path,
     task: dict[str, object],
-    validation_evidence: dict[str, object],
+    branch: str,
+    base: str,
+    final_head: str,
+    mode: str,
+    zip_filename: str,
+    bundle_path: Path,
 ) -> dict[str, object]:
-    status_map = validation_status_map(validation_evidence)
     return {
-        "zip_filename": zip_path.name,
-        "zip_logical_path": str(
-            task.get("zip_logical_path") or f".run/handoffs/{zip_path.name}"
-        ).replace("\\", "/"),
-        "sidecar_logical_path": str(
-            task.get("sidecar_logical_path") or f".run/handoffs/{json_path.name}"
-        ).replace("\\", "/"),
-        "status_summary": status_summary_from_validation(
-            status_map,
-            safety_status=status_map.get("handoff_safety_scan", "NOT_RUN"),
+        "schema_version": "handoff-generation/0.1",
+        "status": "PASS",
+        "builder_script": HANDOFF_TOOL_SOURCE_PATHS[0],
+        "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "mode": mode,
+        "base": base,
+        "final_head": final_head,
+        "branch": branch,
+        "zip_filename": zip_filename,
+        "zip_sha256": "external_sidecar",
+        "bundle_sha256": sha256_file(bundle_path),
+        "source_tool_paths": HANDOFF_TOOL_SOURCE_PATHS,
+        "task_slug": str(task.get("slug") or ""),
+        "zip_integrity_note": (
+            "The final zip SHA-256 is recorded in the external sidecar because "
+            "a zip member cannot contain the hash of the final archive without "
+            "creating a self-referential digest."
         ),
     }
+
+
+def source_tree_scan_payload(
+    *,
+    bundle_path: Path,
+    branch: str,
+    final_head: str,
+) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="handoff-source-tree-scan-") as temp:
+        clone_dir = Path(temp) / "repo"
+        subprocess.run(
+            ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return source_tree_scan_from_clone(clone_dir, final_head=final_head)
+
+
+def source_tree_scan_from_clone(
+    clone_dir: Path,
+    *,
+    final_head: str,
+) -> dict[str, object]:
+    scanned_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
+    findings = source_tree_findings(clone_dir)
+    failures = []
+    if scanned_head != final_head:
+        failures.append("source_tree_scan_head_mismatch")
+    failures.extend(finding["rule"] for finding in findings)
+    return {
+        "schema_version": "handoff-source-tree-scan/0.1",
+        "status": "PASS" if not failures else "FAIL",
+        "scanned_head": scanned_head,
+        "expected_head": final_head,
+        "scanned_tree": "final-branch.bundle clone",
+        "forbidden_rule_count": len(source_tree_forbidden_patterns()),
+        "finding_count": len(findings),
+        "findings": findings[:50],
+        "failures": failures[:50],
+    }
+
+
+def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if source_tree_path_allowed(relative):
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for rule, pattern in source_tree_forbidden_patterns().items():
+            if pattern.search(text):
+                findings.append({"path": relative.as_posix(), "rule": rule})
+    return findings
+
+
+def source_tree_tracked_text_files(clone_dir: Path) -> tuple[Path, ...]:
+    raw = git_text(clone_dir, "ls-files")
+    result: list[Path] = []
+    for line in raw.splitlines():
+        relative = Path(line)
+        text_suffixes = {".py", ".md", ".json", ".toml", ".yaml", ".yml"}
+        if relative.suffix.lower() not in text_suffixes:
+            continue
+        result.append(relative)
+    return tuple(result)
+
+
+def source_tree_path_allowed(relative: Path) -> bool:
+    allowed = {
+        Path("tests/agents/handoff/test_build_handoff_package_integration.py"),
+        Path("tests/agents/handoff/test_handoff_tools.py"),
+        Path("tests/agents/handoff/test_package_safety_check.py"),
+        Path("tests/architecture/test_handoff_package_contract.py"),
+        Path("tests/architecture/test_retired_surface_absent.py"),
+        Path("tests/interfaces/test_api_cli_01_contract.py"),
+        Path("tests/reports/test_reports_01.py"),
+        Path("tests/runtime/test_logical_paths.py"),
+        Path("tests/runtime/test_privacy_01.py"),
+        Path("tests/storage/test_manifest_helper_edges.py"),
+        Path("tests/storage/test_storage_01.py"),
+        Path("docs/architecture/open-issues-register.md"),
+        *(Path(path) for path in HANDOFF_TOOL_SOURCE_PATHS),
+    }
+    return relative in allowed
+
+
+def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    review_evidence = "review" + "_evidence"
+    diff_patch = "diff" + r"\.patch"
+    pr_body = "pr_body"
+    render_pr_body = "render" + "_pr_body"
+    return {
+        "retired_a_share_market_definition": re.compile(
+            r"\ba_share_market_definition\b"
+        ),
+        "retired_a_share_field_catalog": re.compile(r"\ba_share_field_catalog\b"),
+        "retired_a_share_processed_catalog": re.compile(
+            r"\ba_share_processed_catalog\b"
+        ),
+        "retired_a_share_factor_catalog": re.compile(r"\ba_share_factor_catalog\b"),
+        "retired_a_share_label_catalog": re.compile(r"\ba_share_label_catalog\b"),
+        "retired_build_a_share": re.compile(r"\bbuild_a_share_[A-Za-z0-9_]+\b"),
+        "retired_default_a_share": re.compile(
+            r"\bdefault_a_share_[A-Za-z0-9_]+\b"
+        ),
+        "retired_csmar_source_alias": re.compile(r"\bCSMAR_SOURCE_ID\b"),
+        "retired_a_share_market_alias": re.compile(r"\bA_SHARE_MARKET_ID\b"),
+        "retired_workflow_module": re.compile(r"\bcontracts\.workflow_run\b"),
+        "retired_model_algorithm_collection": re.compile(r"\bMODEL_ALGORITHMS\b"),
+        "retired_execution_mode": re.compile(r"\bExecutionMode\b"),
+        "forbidden_private_real": re.compile(r"\bprivate_real\b", re.IGNORECASE),
+        "forbidden_private_data": re.compile(r"\bprivate_data\b", re.IGNORECASE),
+        "forbidden_review_evidence": re.compile(
+            rf"\b{re.escape(review_evidence)}\b"
+        ),
+        "forbidden_diff_patch": re.compile(rf"\b{diff_patch}\b"),
+        "forbidden_pr_body": re.compile(rf"\b{pr_body}(?:\.md)?\b"),
+        "forbidden_render_pr_body": re.compile(
+            rf"\b{render_pr_body}(?:_from_validation_evidence)?(?:\.py)?\b"
+        ),
+        "forbidden_local_private_path": re.compile(
+            r"(?i)(?:[A-Za-z]:[\\/][^\n]*(?:"
+            r"data[\\/](?:raw|interim|processed|research)"
+            r"|reports[\\/]private_research"
+            r")"
+            r"|/(?:Users|home|workspace|workspaces|mnt/data)[^\n]*(?:"
+            r"data/(?:raw|interim|processed|research)"
+            r"|reports/private_research"
+            r"))"
+        ),
+    }
+
+
+def is_reserved_handoff_evidence_path(name: str) -> bool:
+    parts = PurePosixPath(name).parts
+    for part in parts:
+        if part in RESERVED_HANDOFF_EVIDENCE_STEMS:
+            return True
+        if part.endswith(".json") and part[:-5] in RESERVED_HANDOFF_EVIDENCE_STEMS:
+            return True
+    return False
 
 
 def sidecar_payload(

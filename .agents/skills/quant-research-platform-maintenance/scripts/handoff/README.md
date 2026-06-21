@@ -21,8 +21,9 @@ public-safe `validation_evidence` and optional `handoff_evidence`. In
 - `validation_evidence.json`
 - `handoff_evidence/*.json`
 
-`pr_closure` mode additionally includes `review_threads.json` and
-`pr_body.md`, and requires public-safe PR closure metadata.
+`pr_closure` mode may additionally include `review_threads.json` with
+public-safe PR closure metadata. Narrative PR text is outside the handoff
+package contract.
 
 Do not include private row-level data, local absolute paths, raw tracebacks,
 vendor filenames, credentials, tokens, or exact private runtime payloads.

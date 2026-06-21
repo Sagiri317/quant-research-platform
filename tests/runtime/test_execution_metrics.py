@@ -59,7 +59,7 @@ def test_execution_metrics_records_sampled_rss_fields(monkeypatch, tmp_path) -> 
     monkeypatch.setenv("QRP_RSS_SAMPLE_INTERVAL_SECONDS", "0.001")
     recorder = ExecutionMetricsRecorder(memory_sampler=sampler)
 
-    with recorder.record("build_market_panel_1d") as record:
+    with recorder.record("build_market_panel") as record:
         record.input_rows = 2
         time.sleep(0.01)
 
@@ -86,7 +86,7 @@ def test_execution_metrics_keeps_start_end_rss_fields() -> None:
     sampler = ProcessMemorySampler.from_callable(lambda: 128.0)
     recorder = ExecutionMetricsRecorder(memory_sampler=sampler)
 
-    with recorder.record("build_market_panel_1d") as record:
+    with recorder.record("build_market_panel") as record:
         record.input_rows = 2
 
     payload = recorder.payload(run_id="s9")

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
-from quant_research_platform.contracts.workflows import WorkflowSpec
+from quant_research_platform.contracts.workflows import WorkflowRunPolicy, WorkflowSpec
 from quant_research_platform.runtime.workflow_records import (
     workflow_run_summary_to_public_record,
 )

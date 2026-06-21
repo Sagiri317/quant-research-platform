@@ -34,10 +34,16 @@ from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import assemble_research_dataset
 from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
-from quant_research_platform.research.models import fit_model_result
+from quant_research_platform.research.models import (
+    fit_model_result,
+    predict_model_frame,
+)
 from quant_research_platform.research.models.supervised import (
     model_algorithm_names,
     model_smoke_hyperparameters,
+)
+from quant_research_platform.research.predictions import (
+    artifacts as prediction_artifacts,
 )
 from quant_research_platform.research.predictions import (
     run_prediction_from_research_dataset,
@@ -1075,8 +1081,98 @@ def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
 
     result = fit_model_result(frame, spec)
     predicted = result.prediction_model.predict(frame)
+    predicted_frame = predict_model_frame(frame, spec, result)
 
     assert predicted.tolist() == pytest.approx([0.5, 1.0, 0.5, 1.0])
+    assert predicted_frame["prediction_score"].tolist() == pytest.approx(
+        [0.5, 1.0, 0.5, 1.0]
+    )
+
+
+@pytest.mark.parametrize(
+    "model_algorithm",
+    ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],
+)
+def test_rank_ensemble_prediction_artifacts_are_chunk_boundary_invariant(
+    model_algorithm: str,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
+            ),
+            "asset_id": ["asset_a", "asset_b", "asset_a", "asset_b"],
+            "factor": [1.0, 2.0, 1.0, 2.0],
+            "feature": [10.0, 20.0, 10.0, 20.0],
+            "label": [0.0, 1.0, 0.0, 1.0],
+            "eligible": [True, True, True, True],
+        }
+    )
+    model_spec = ModelSpec(
+        model_id=f"{model_algorithm}_chunk_boundary",
+        model_algorithm=model_algorithm,
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+        max_train_rows=len(frame),
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id=f"{model_algorithm}_chunk_boundary_prediction",
+        model_id=model_spec.model_id,
+        research_dataset_id="rank_boundary_dataset",
+        train_end="2024-01-01",
+        test_start="2024-01-02",
+    )
+    result = fit_model_result(frame, model_spec)
+
+    one_chunk = _prediction_artifact_scores(
+        [frame],
+        prediction_spec=prediction_spec,
+        model_spec=model_spec,
+        result=result,
+    )
+    split_chunks = _prediction_artifact_scores(
+        [chunk for _, chunk in frame.groupby("timestamp", sort=True)],
+        prediction_spec=prediction_spec,
+        model_spec=model_spec,
+        result=result,
+    )
+
+    assert one_chunk["prediction_score"].tolist() == pytest.approx(
+        [0.5, 1.0, 0.5, 1.0]
+    )
+    assert split_chunks["prediction_score"].tolist() == pytest.approx(
+        one_chunk["prediction_score"].tolist()
+    )
+
+
+def _prediction_artifact_scores(
+    frames: list[pd.DataFrame],
+    *,
+    prediction_spec: PredictionSpec,
+    model_spec: ModelSpec,
+    result,
+) -> pd.DataFrame:
+    build_state = prediction_artifacts._PredictionBuildState()
+    output = list(
+        prediction_artifacts._iter_prediction_output_frames(
+            iter(frames),
+            spec=prediction_spec,
+            coefficients=result.coefficients,
+            input_columns=model_spec.input_columns,
+            predictor=prediction_artifacts._prediction_callable(
+                result.coefficients,
+                model_spec.input_columns,
+                result.prediction_model,
+            ),
+            build_state=build_state,
+        )
+    )
+    return (
+        pd.concat(output, ignore_index=True)
+        .sort_values(["timestamp", "asset_id"], kind="mergesort")
+        .reset_index(drop=True)
+    )
 
 
 def _model_hyperparameters(model_algorithm: str) -> dict[str, object]:

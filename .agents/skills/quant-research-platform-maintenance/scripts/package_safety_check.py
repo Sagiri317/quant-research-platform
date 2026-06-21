@@ -11,9 +11,29 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+SRC_ROOT = REPO_ROOT / "src"
+if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+try:
+    from quant_research_platform.runtime.privacy import public_text_unsafe_reason
+except ImportError:  # pragma: no cover - fallback for copied standalone use
+    _FALLBACK_PRIVATE_MARKER_RE = re.compile(
+        r"(?i)\b(?:source[-_ ]?id|provider[-_ ]?id|implementation[-_ ]?package|"
+        r"provider[-_ ]?name|source[-_ ]?name|data[-_ ]?provider|"
+        r"vendor[-_ ]?name|raw[-_ ]?vendor|vendor[-_ ]?payload)\b"
+    )
+
+    def public_text_unsafe_reason(text: str) -> str | None:
+        if _FALLBACK_PRIVATE_MARKER_RE.search(text):
+            return "private_marker"
+        return None
 
 BLOCKED_EXTENSIONS = {
     ".parquet",
@@ -169,7 +189,7 @@ def _skip_pattern_line(line: str, name: str) -> bool:
 
 def check_text(result: SafetyResult, name: str, data: bytes) -> None:
     if len(data) > MAX_TEXT_SCAN_BYTES:
-        result.warnings.append(f"text scan skipped for large file: {name}")
+        result.errors.append(f"text scan exceeded maximum size: {name}")
         return
     try:
         text = data.decode("utf-8")
@@ -192,6 +212,14 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
             result.warnings.append(
                 f"possible stock-code sample in {name}:{line_number}"
             )
+        if public_text_unsafe_reason is not None:
+            shared_reason = public_text_unsafe_reason(line)
+            if shared_reason == "private_marker":
+                result.errors.append(f"private marker in {name}:{line_number}")
+            if shared_reason == "private_path":
+                result.errors.append(f"private path in {name}:{line_number}")
+            if shared_reason == "row_sample":
+                result.errors.append(f"row sample in {name}:{line_number}")
 
 def scan_zip(path: Path, allow_nested_packages: bool) -> SafetyResult:
     result = SafetyResult()
@@ -203,7 +231,7 @@ def scan_zip(path: Path, allow_nested_packages: bool) -> SafetyResult:
             suffix = PurePosixPath(name.lower()).suffix
             if suffix in TEXT_EXTENSIONS and not name.endswith("/"):
                 if info.file_size > MAX_TEXT_SCAN_BYTES:
-                    result.warnings.append(f"text scan skipped for large file: {name}")
+                    result.errors.append(f"text scan exceeded maximum size: {name}")
                     continue
                 check_text(result, name, zf.read(info))
     return result

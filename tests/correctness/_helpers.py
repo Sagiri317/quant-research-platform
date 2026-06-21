@@ -15,6 +15,7 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     ProcessedDataKind,
     ProcessedDataSpec,
+    market_bars_data_id,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
@@ -22,6 +23,12 @@ from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
+)
+from quant_research_platform.research.factors.price_volume import (
+    price_volume_window_column,
+)
+from quant_research_platform.research.labels.forward_returns import (
+    forward_return_label_column,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.sources.csmar.interim import interim_catalog
@@ -36,6 +43,11 @@ KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
 FLOAT_RTOL = 1e-10
 FLOAT_ATOL = 1e-12
 REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12
+MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
+MOMENTUM_20D_ZSCORE_COLUMN = f"{MOMENTUM_20D_COLUMN}_zscore"
+REVERSAL_1D_COLUMN = price_volume_window_column("rev", 1)
+FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
+MARKET_BARS_DATA_ID = market_bars_data_id()
 
 
 def synthetic_price_volume_panel(
@@ -92,8 +104,8 @@ def _reference_price_volume_factors(
     requested_set = set(requested)
     required_windows = reference_windows_from_requested_factors(requested_set)
 
-    if "rev_1d" in requested_set:
-        result["rev_1d"] = -returns
+    if REVERSAL_1D_COLUMN in requested_set:
+        result[REVERSAL_1D_COLUMN] = -returns
     for window in required_windows:
         if window == 1:
             continue
@@ -390,7 +402,7 @@ def reference_valid_denominator(values: pd.Series) -> pd.Series:
 
 
 def reference_windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
-    values = {1} if "rev_1d" in requested else set()
+    values = {1} if REVERSAL_1D_COLUMN in requested else set()
     for factor in requested:
         for token in factor.split("_"):
             if token.endswith("d") and token[:-1].isdigit():
@@ -652,7 +664,7 @@ def write_minimal_interim_inputs(
     catalog = interim_catalog()
     source_id = SourceId("csmar")
     frames = {
-        "market_bars_1d": minimal_market_bars_1d_frame(
+        MARKET_BARS_DATA_ID: minimal_market_bars_frame(
             start_date=start_date,
             end_date=end_date,
         ),
@@ -672,7 +684,7 @@ def write_minimal_interim_inputs(
         )
 
 
-def minimal_market_bars_1d_frame(
+def minimal_market_bars_frame(
     *,
     start_date: str = "2014-01-02",
     end_date: str = "2014-01-03",
@@ -777,8 +789,8 @@ def research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
                     "market_id": "a_share",
                     "asset_id": asset_id,
                     "timestamp": timestamp,
-                    "mom_20d": float(date_index + asset_index),
-                    "forward_return_20d": 0.01 * (date_index + asset_index),
+                    MOMENTUM_20D_COLUMN: float(date_index + asset_index),
+                    FORWARD_RETURN_20D_COLUMN: 0.01 * (date_index + asset_index),
                     "eligible": True,
                     "can_enter": True,
                     "can_exit": True,
@@ -801,7 +813,7 @@ def correctness_processed_catalog() -> ProcessedDataCatalog:
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FACTOR,
+                MOMENTUM_20D_COLUMN: ColumnRole.FACTOR,
             },
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
@@ -818,7 +830,7 @@ def correctness_processed_catalog() -> ProcessedDataCatalog:
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "forward_return_20d": ColumnRole.LABEL,
+                FORWARD_RETURN_20D_COLUMN: ColumnRole.LABEL,
             },
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
@@ -852,14 +864,14 @@ def correctness_research_dataset_catalog(
     include_feature_transform: bool = False,
 ) -> ResearchDatasetCatalog:
     feature_columns = (
-        ("mom_20d_zscore",) if include_feature_transform else ()
+        (MOMENTUM_20D_ZSCORE_COLUMN,) if include_feature_transform else ()
     )
     feature_transforms = (
         (
                 FeatureTransformSpec(
-                    transform_id="mom_20d_zscore",
-                    source_columns=("mom_20d",),
-                    output_columns=("mom_20d_zscore",),
+                    transform_id=MOMENTUM_20D_ZSCORE_COLUMN,
+                    source_columns=(MOMENTUM_20D_COLUMN,),
+                    output_columns=(MOMENTUM_20D_ZSCORE_COLUMN,),
                     transform="cross_sectional_zscore",
                 ),
         )
@@ -873,10 +885,10 @@ def correctness_research_dataset_catalog(
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
             base_input_data_id="demo_annotations",
-            factor_columns=("mom_20d",),
+            factor_columns=(MOMENTUM_20D_COLUMN,),
             feature_columns=feature_columns,
             feature_transforms=feature_transforms,
-            label_columns=("forward_return_20d",),
+            label_columns=(FORWARD_RETURN_20D_COLUMN,),
             filter_columns=("eligible", "can_enter", "can_exit"),
             context_columns=("market_type",),
             frequency=DataFrequency.DAILY,
@@ -885,13 +897,13 @@ def correctness_research_dataset_catalog(
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FACTOR,
+                MOMENTUM_20D_COLUMN: ColumnRole.FACTOR,
                 **(
-                    {"mom_20d_zscore": ColumnRole.FEATURE}
+                    {MOMENTUM_20D_ZSCORE_COLUMN: ColumnRole.FEATURE}
                     if include_feature_transform
                     else {}
                 ),
-                "forward_return_20d": ColumnRole.LABEL,
+                FORWARD_RETURN_20D_COLUMN: ColumnRole.LABEL,
                 "eligible": ColumnRole.UNIVERSE,
                 "can_enter": ColumnRole.MASK,
                 "can_exit": ColumnRole.MASK,
@@ -911,7 +923,7 @@ def write_correctness_processed_inputs(
     frame: pd.DataFrame,
 ) -> None:
     columns_by_id = {
-        "demo_factors": ["market_id", "asset_id", "timestamp", "mom_20d"],
+        "demo_factors": ["market_id", "asset_id", "timestamp", MOMENTUM_20D_COLUMN],
         "demo_annotations": [
             "market_id",
             "asset_id",
@@ -925,7 +937,7 @@ def write_correctness_processed_inputs(
             "market_id",
             "asset_id",
             "timestamp",
-            "forward_return_20d",
+            FORWARD_RETURN_20D_COLUMN,
         ],
     }
     for data_id, columns in columns_by_id.items():

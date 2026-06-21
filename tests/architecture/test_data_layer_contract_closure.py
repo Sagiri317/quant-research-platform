@@ -170,7 +170,7 @@ def test_deep_layers_do_not_build_default_research_profile() -> None:
         "local_a_share_csmar_catalogs(",
         "_a_share_csmar_source_id",
         "_materialize_a_share_csmar_interim_data",
-        "_materialize_a_share_processed_data",
+        "_materialize_processed_data",
     )
     roots = (
         PROJECT_SRC / "interfaces/services.py",

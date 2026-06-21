@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
+    WorkflowRunPolicy,
     WorkflowRunSummary,
     WorkflowSpec,
 )

@@ -97,7 +97,7 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     )
     models = tuple(profile.models.list())
     predictions = tuple(
-        research_scenarios.build_a_share_prediction_catalog(
+        research_scenarios.build_prediction_catalog(
             train_end="2014-06-30",
             test_start="2014-07-01",
         ).list()
@@ -183,7 +183,7 @@ def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
         "EvaluationSpec(",
         "ModelSpec(",
         "PredictionSpec(",
-        "build_a_share_prediction_catalog",
+        "build_prediction_catalog",
         "build_portfolio_catalog",
     )
 
@@ -227,7 +227,7 @@ def test_catalog_profile_private_processed_helper_forwards_typed_source_id(
         return "ok"
 
     monkeypatch.setattr(
-        profiles.a_share_processed_materializer,
+        profiles.processed_materializer_module,
         "materialize_processed_data",
         fake_materialize,
     )
@@ -237,7 +237,7 @@ def test_catalog_profile_private_processed_helper_forwards_typed_source_id(
     kinds = frozenset({ProcessedDataKind.PANEL})
 
     assert (
-        profiles._materialize_a_share_processed_data(
+        profiles._materialize_processed_data(
             layout,
             SourceId("csmar"),
             time_window,

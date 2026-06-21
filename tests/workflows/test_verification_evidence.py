@@ -57,7 +57,7 @@ def _verification_config(**overrides: object) -> VerificationEvidenceRunConfig:
 
 
 def _smoke_prediction_specs():
-    return a_share_research_scenarios.build_a_share_prediction_catalog(
+    return a_share_research_scenarios.build_prediction_catalog(
         train_end=SMOKE_PREDICTION_TRAIN_END,
         test_start=SMOKE_PREDICTION_TEST_START,
     ).list()

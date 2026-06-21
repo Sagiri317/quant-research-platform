@@ -12,7 +12,11 @@ import pandas as pd
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
-from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
+from quant_research_platform.contracts.data import (
+    ProcessedDataKind,
+    ProcessedDataSpec,
+    market_bars_data_id,
+)
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
@@ -44,8 +48,8 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     annotations,
     panels,
 )
-from quant_research_platform.markets.implementations.a_share.processed.catalog import (
-    a_share_processed_catalog,
+from quant_research_platform.markets.implementations.a_share.processed import (
+    catalog as processed_catalog_module,
 )
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
@@ -63,6 +67,9 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.layout import StorageLayout
 
 SIZING_SAMPLE_SESSION_CAP = 20
+
+
+processed_catalog = processed_catalog_module.processed_catalog
 
 
 @dataclass(frozen=True)
@@ -97,7 +104,7 @@ def materialize_processed_data(
     policy = resource_policy or active_runtime_resource_policy()
     if (data_ids is None) == (kinds is None):
         raise ValueError("data_ids_xor_kinds_required")
-    catalog = a_share_processed_catalog()
+    catalog = processed_catalog()
     if data_ids is not None:
         targets = tuple(catalog.get(data_id) for data_id in data_ids)
     else:
@@ -158,7 +165,7 @@ def _materialize_one(
             raise ValueError("dataset_exists")
         _require_dataset_coverage(root, time_window, sessions=sessions)
         return inspect_dataset(root, time_window=time_window)
-    catalog = a_share_processed_catalog()
+    catalog = processed_catalog()
     _ensure_processed_dependencies(
         spec,
         layout=layout,
@@ -232,18 +239,19 @@ def _write_panel(
     stock_master = source_inputs["stock_master"]
     market_cap = source_inputs["market_cap"]
     trading_calendar = source_inputs["trading_calendar"]
-    market_bars_1d_root = layout.interim_data_root(source_id, "market_bars_1d")
-    market_bars_1d_inspection = inspect_dataset(market_bars_1d_root)
+    market_bars_data_id = _market_bars_source_data_id(spec)
+    market_bars_root = layout.interim_data_root(source_id, market_bars_data_id)
+    market_bars_inspection = inspect_dataset(market_bars_root)
     _require_source_input_columns_from_schema(
-        "market_bars_1d",
-        market_bars_1d_inspection.columns,
+        market_bars_data_id,
+        market_bars_inspection.columns,
         columns=("open", "high", "low", "close", "volume", "amount"),
     )
     estimated = _estimate_panel_bytes_per_session(
         sessions,
         time_window=time_window,
-        market_bars_1d_root=market_bars_1d_root,
-        inspection=market_bars_1d_inspection,
+        market_bars_root=market_bars_root,
+        inspection=market_bars_inspection,
         stock_master=stock_master,
         market_cap=market_cap,
         trading_calendar=trading_calendar,
@@ -253,7 +261,7 @@ def _write_panel(
         sessions,
         time_window=time_window,
         policy=policy,
-        inspection=market_bars_1d_inspection,
+        inspection=market_bars_inspection,
         estimated_bytes_per_session=estimated,
         lookahead_sessions=1,
         reason="panel_next_session",
@@ -261,14 +269,14 @@ def _write_panel(
 
     def chunks() -> Iterable[pd.DataFrame]:
         for window in windows:
-            market_bars_1d = read_dataset(market_bars_1d_root, time_window=window.read)
+            market_bars = read_dataset(market_bars_root, time_window=window.read)
             _require_source_input_columns(
-                "market_bars_1d",
-                market_bars_1d,
+                market_bars_data_id,
+                market_bars,
                 columns=("open", "high", "low", "close", "volume", "amount"),
             )
             panel = panels.compute_market_panel(
-                market_bars_1d,
+                market_bars,
                 stock_master=stock_master,
                 market_cap=market_cap,
                 trading_calendar=trading_calendar,
@@ -294,14 +302,14 @@ def _write_annotation(
     sessions: tuple[pd.Timestamp, ...],
     written: dict[str, DatasetInspection],
 ) -> DatasetInspection:
-    processed_catalog = a_share_processed_catalog()
+    catalog = processed_catalog()
     contract = _annotation_input_contract(spec)
     _validate_processed_input_contract(
         spec,
         contract=contract,
         purpose="annotation",
     )
-    panel_spec = processed_catalog.get(contract.primary_input_data_id)
+    panel_spec = catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     windows = _planned_session_windows(
         sessions,
@@ -317,7 +325,7 @@ def _write_annotation(
             processed_inputs = _read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
-                processed_catalog=processed_catalog,
+                processed_catalog=catalog,
                 time_window=window.read,
             )
             _validate_processed_input_contract(
@@ -352,8 +360,8 @@ def _write_factors(
         dict[object, tuple[pd.Timestamp, ...]],
     ] | None = None,
 ) -> DatasetInspection:
-    processed_catalog = a_share_processed_catalog()
-    factor_catalog = factor_definitions.a_share_factor_catalog()
+    catalog = processed_catalog()
+    factor_catalog = factor_definitions.factor_catalog()
     definitions = _select_factor_definitions_for_spec(spec, factor_catalog)
     contract = _factor_input_contract(definitions)
     _validate_processed_input_contract(
@@ -361,7 +369,7 @@ def _write_factors(
         contract=contract,
         purpose="factor",
     )
-    panel_spec = processed_catalog.get(contract.primary_input_data_id)
+    panel_spec = catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookback_days = factor_calculations.factor_lookback_bars(definitions)
@@ -400,7 +408,7 @@ def _write_factors(
             processed_inputs = _read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
-                processed_catalog=processed_catalog,
+                processed_catalog=catalog,
                 time_window=read_window,
                 columns_by_data_id={
                     contract.primary_input_data_id: panel_input_columns,
@@ -442,8 +450,8 @@ def _write_labels(
         dict[object, tuple[pd.Timestamp, ...]],
     ] | None = None,
 ) -> DatasetInspection:
-    processed_catalog = a_share_processed_catalog()
-    label_catalog = label_definitions.a_share_label_catalog()
+    catalog = processed_catalog()
+    label_catalog = label_definitions.label_catalog()
     definitions = _select_label_definitions_for_spec(spec, label_catalog)
     contract = _label_input_contract(definitions)
     _validate_processed_input_contract(
@@ -451,7 +459,7 @@ def _write_labels(
         contract=contract,
         purpose="label",
     )
-    panel_spec = processed_catalog.get(contract.primary_input_data_id)
+    panel_spec = catalog.get(contract.primary_input_data_id)
     panel_root = _processed_root(layout, panel_spec)
     available = inspect_dataset(panel_root)
     lookahead_sessions = label_calculations.label_lookahead_bars(definitions)
@@ -490,7 +498,7 @@ def _write_labels(
             processed_inputs = _read_processed_inputs_for_spec(
                 spec,
                 layout=layout,
-                processed_catalog=processed_catalog,
+                processed_catalog=catalog,
                 time_window=read_window,
                 columns_by_data_id={
                     contract.primary_input_data_id: panel_input_columns,
@@ -726,7 +734,7 @@ def _estimate_panel_bytes_per_session(
     sessions: tuple[pd.Timestamp, ...],
     *,
     time_window: TimeWindow,
-    market_bars_1d_root: Path,
+    market_bars_root: Path,
     inspection: DatasetInspection,
     stock_master: pd.DataFrame,
     market_cap: pd.DataFrame,
@@ -739,9 +747,9 @@ def _estimate_panel_bytes_per_session(
         lookahead_sessions=1,
         reason="panel_sizing",
     )
-    market_bars_1d = read_dataset(market_bars_1d_root, time_window=sample.read)
+    market_bars = read_dataset(market_bars_root, time_window=sample.read)
     panel = panels.compute_market_panel(
-        market_bars_1d,
+        market_bars,
         stock_master=stock_master,
         market_cap=market_cap,
         trading_calendar=trading_calendar,
@@ -749,7 +757,7 @@ def _estimate_panel_bytes_per_session(
     output = _filter_output_sessions(panel, sample.core_sessions)
     selected = output.loc[:, list(required_columns)]
     return _measured_peak_bytes_per_session(
-        frames=(market_bars_1d, panel, selected),
+        frames=(market_bars, panel, selected),
         row_count=len(selected),
         sessions=sample.core_sessions,
         inspection=inspection,
@@ -977,12 +985,29 @@ def _read_source_inputs_for_spec(
     source_id: SourceId,
 ) -> dict[str, pd.DataFrame]:
     inputs: dict[str, pd.DataFrame] = {}
+    market_bars_data_id = (
+        _market_bars_source_data_id(spec)
+        if spec.kind is ProcessedDataKind.PANEL
+        else None
+    )
     for data_id in spec.source_input_data_ids:
-        if spec.kind is ProcessedDataKind.PANEL and data_id == "market_bars_1d":
+        if spec.kind is ProcessedDataKind.PANEL and data_id == market_bars_data_id:
             continue
         root = layout.interim_data_root(source_id, data_id)
         inputs[data_id] = read_dataset(root)
     return inputs
+
+
+def _market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
+    expected = market_bars_data_id()
+    candidates = tuple(
+        data_id
+        for data_id in spec.source_input_data_ids
+        if data_id == expected
+    )
+    if len(candidates) != 1:
+        raise ValueError("panel_market_bars_source_input_not_unique")
+    return candidates[0]
 
 
 def _require_source_inputs_for_spec(
@@ -1117,7 +1142,7 @@ def _processed_dependency_time_window(
     if spec.kind is ProcessedDataKind.FACTOR:
         definitions = _select_factor_definitions_for_spec(
             spec,
-            factor_definitions.a_share_factor_catalog(),
+            factor_definitions.factor_catalog(),
         )
         _validate_processed_input_contract(
             spec,
@@ -1134,7 +1159,7 @@ def _processed_dependency_time_window(
     if spec.kind is ProcessedDataKind.LABEL:
         definitions = _select_label_definitions_for_spec(
             spec,
-            label_definitions.a_share_label_catalog(),
+            label_definitions.label_catalog(),
         )
         _validate_processed_input_contract(
             spec,

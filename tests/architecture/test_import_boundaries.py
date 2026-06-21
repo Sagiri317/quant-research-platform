@@ -23,10 +23,6 @@ FORBIDDEN_REPORT_IMPORT_PREFIXES = (
     "quant_research_platform.interfaces",
 )
 
-PROFILE_A_SHARE_DEFINITION = (
-    "src/quant_research_platform/catalog/profiles.py",
-    "quant_research_platform.markets.implementations.a_share.definition",
-)
 PROFILE_A_SHARE_ROOT = (
     "src/quant_research_platform/catalog/profiles.py",
     "quant_research_platform.markets.implementations.a_share",
@@ -34,10 +30,6 @@ PROFILE_A_SHARE_ROOT = (
 PROFILE_A_SHARE_FACTORS = (
     "src/quant_research_platform/catalog/profiles.py",
     "quant_research_platform.markets.implementations.a_share.factors",
-)
-PROFILE_A_SHARE_FIELDS = (
-    "src/quant_research_platform/catalog/profiles.py",
-    "quant_research_platform.markets.implementations.a_share.fields",
 )
 PROFILE_A_SHARE_LABELS = (
     "src/quant_research_platform/catalog/profiles.py",
@@ -60,14 +52,10 @@ PROFILE_REPORT_CATALOG = (
     "quant_research_platform.reports.catalog",
 )
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
-    PROFILE_A_SHARE_DEFINITION: (
-        "profiles.py composes the active A-share market definition."
-    ),
     PROFILE_A_SHARE_ROOT: "profiles.py composes A-share research profile owners.",
     PROFILE_A_SHARE_FACTORS: (
         "profiles.py composes the active A-share factor catalog."
     ),
-    PROFILE_A_SHARE_FIELDS: "profiles.py composes the active A-share field catalog.",
     PROFILE_A_SHARE_LABELS: (
         "profiles.py composes the active A-share label catalog."
     ),

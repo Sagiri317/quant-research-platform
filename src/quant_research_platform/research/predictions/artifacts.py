@@ -21,6 +21,9 @@ from quant_research_platform.reports.report_artifacts import (
 )
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.models.supervised import (
+    _prediction_model_input_frame,
+)
 from quant_research_platform.runtime.resources import ChunkAxis
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -192,7 +195,13 @@ def _prediction_callable(
 ) -> Callable[[pd.DataFrame], np.ndarray]:
     if prediction_model is not None:
         def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
-            predicted = prediction_model.predict(frame.loc[:, input_columns])
+            predicted = prediction_model.predict(
+                _prediction_model_input_frame(
+                    frame,
+                    input_columns=input_columns,
+                    prediction_model=prediction_model,
+                )
+            )
             return np.asarray(predicted, dtype="float64")
 
         return predict_from_model

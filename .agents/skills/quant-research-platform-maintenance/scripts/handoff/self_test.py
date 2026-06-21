@@ -30,17 +30,10 @@ def main() -> int:
         "build_handoff_package.py",
         "verify_handoff_package.py",
         "handoff_safety.py",
-        "render_pr_body_from_validation_evidence.py",
         "self_test.py",
         "README.md",
     }
     missing = sorted(name for name in required if not (root / name).exists())
-    missing = [
-        name
-        for name in missing
-        if not (name == "render_pr_body_from_validation_evidence.py"
-                and (root.parent / name).exists())
-    ]
     if missing:
         return fail("missing=" + ",".join(missing))
     schema_template_missing = [

@@ -8,8 +8,10 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
-from quant_research_platform.contracts.workflows import WorkflowRunSummary
+from quant_research_platform.contracts.workflows import (
+    WorkflowRunPolicy,
+    WorkflowRunSummary,
+)
 
 
 def test_run_id_accepts_public_safe_lowercase_identifiers() -> None:

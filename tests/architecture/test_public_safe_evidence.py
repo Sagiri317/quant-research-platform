@@ -288,11 +288,11 @@ def test_full_historical_market_panel_1d_summary_streams_generated_chunks(
 
     monkeypatch.setattr(
         private_aggregate,
-        "_iter_generated_full_market_panel_1d_chunks",
+        "_iter_generated_full_market_panel_chunks",
         iter_chunks,
     )
 
-    summary = private_aggregate._summarize_generated_full_market_panel_1d(
+    summary = private_aggregate._summarize_generated_full_market_panel(
         Path(".")
     )
 
@@ -322,12 +322,12 @@ def test_full_historical_market_panel_1d_generation_always_uses_chunks(
 
     monkeypatch.setattr(
         private_aggregate,
-        "_iter_generated_full_market_panel_1d_session_chunks",
+        "_iter_generated_full_market_panel_session_chunks",
         iter_session_chunks,
     )
 
     frames = list(
-        private_aggregate._iter_generated_full_market_panel_1d_chunks(
+        private_aggregate._iter_generated_full_market_panel_chunks(
             Path(".")
         )
     )
@@ -388,7 +388,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         )
 
     required_columns = (
-        catalog.a_share_processed_catalog().get("market_panel_1d").required_columns
+        catalog.processed_catalog().get("market_panel_1d").required_columns
     )
 
     def fake_compute_market_panel(
@@ -432,7 +432,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
     )
 
     chunks = list(
-        private_aggregate._iter_generated_full_market_panel_1d_session_chunks(Path("."))
+        private_aggregate._iter_generated_full_market_panel_session_chunks(Path("."))
     )
 
     assert len(chunks) > 1
@@ -449,7 +449,7 @@ def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers() -> No
         "chunked_" + "values",
         "read_dataset_" + "asset_chunk",
         "_available_" + "memory_bytes",
-        "_iter_generated_full_market_panel_1d_" + "asset_chunks",
+        "_iter_generated_full_market_panel_" + "asset_chunks",
         "_dataset_" + "asset_ids",
         "_read_dataset_for_" + "assets",
         "_filter_" + "asset_frame",

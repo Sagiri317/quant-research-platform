@@ -157,7 +157,7 @@ def _run_verification_evidence_with_policy(
         effective_windows["evaluation_end_date"],
     )
     catalogs = config.profile
-    prediction_catalog = scenarios.build_a_share_prediction_catalog(
+    prediction_catalog = scenarios.build_prediction_catalog(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
     )

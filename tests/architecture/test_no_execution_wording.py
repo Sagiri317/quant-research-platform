@@ -5,11 +5,12 @@ from pathlib import Path
 
 
 def test_workflow_run_policy_replaces_retired_action_contract() -> None:
-    from quant_research_platform.contracts import WorkflowRunPolicy
+    from quant_research_platform.contracts.workflows import WorkflowRunPolicy
 
     assert WorkflowRunPolicy.VALIDATE_ONLY.value == "validate_only"
     assert WorkflowRunPolicy.WRITE_ARTIFACTS.value == "write_artifacts"
     assert not Path("src/quant_research_platform/contracts/execution.py").exists()
+    assert not Path("src/quant_research_platform/contracts/workflow_run.py").exists()
 
 
 def test_runtime_workflow_outputs_do_not_use_action_wording() -> None:

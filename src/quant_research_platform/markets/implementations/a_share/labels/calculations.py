@@ -26,7 +26,7 @@ def calculate_labels_for_panel(
         return panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
     if families != ("forward_return",):
         unsupported = next(family for family in families if family != "forward_return")
-        raise ValueError(f"unsupported_a_share_label_family: {unsupported}")
+        raise ValueError(f"unsupported_label_family: {unsupported}")
     return add_forward_return_labels(
         panel_frame.loc[:, list(label_panel_input_columns(requested))],
         horizons=tuple(definition.horizon for definition in requested),
@@ -45,7 +45,7 @@ def label_panel_input_columns(
         return ("market_id", "asset_id", "timestamp")
     if families != ("forward_return",):
         unsupported = next(family for family in families if family != "forward_return")
-        raise ValueError(f"unsupported_a_share_label_family: {unsupported}")
+        raise ValueError(f"unsupported_label_family: {unsupported}")
     return _label_panel_columns(requested)
 
 
@@ -66,7 +66,7 @@ def label_read_window_for_panel(
         return read_window
     if families != ("forward_return",):
         unsupported = next(family for family in families if family != "forward_return")
-        raise ValueError(f"unsupported_a_share_label_family: {unsupported}")
+        raise ValueError(f"unsupported_label_family: {unsupported}")
     return forward_return_valid_bar_read_window(
         panel_keys,
         read_window=read_window,
@@ -87,7 +87,7 @@ def _require_label_input_columns(
         ]
         if missing:
             raise ValueError(
-                "missing_a_share_label_input_columns: "
+                "missing_label_input_columns: "
                 f"{definition.family}: {', '.join(missing)}"
             )
 

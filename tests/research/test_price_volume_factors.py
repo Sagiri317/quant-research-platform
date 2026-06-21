@@ -8,6 +8,9 @@ import pytest
 
 from quant_research_platform.contracts.factors import FactorSet
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.markets.implementations.a_share.ids import (
+    market_panel_data_id,
+)
 from quant_research_platform.research.factors import price_volume as price_volume_module
 from quant_research_platform.research.factors.price_volume import (
     CORE_PRICE_VOLUME_FACTORS,
@@ -21,13 +24,22 @@ from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_columns,
     price_volume_factor_definitions,
     price_volume_factor_input_columns,
+    price_volume_window_column,
     select_price_volume_feature_columns_from_schema,
+)
+from quant_research_platform.research.labels.forward_returns import (
+    forward_return_label_column,
 )
 from tests.correctness._helpers import (
     assert_frame_matches_reference,
     reference_qrp_window_moment_by_asset,
 )
 from tests.helpers.synthetic_a_share import make_synthetic_factor_panel
+
+MARKET_PANEL_DATA_ID = market_panel_data_id()
+MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
+REVERSAL_1D_COLUMN = price_volume_window_column("rev", 1)
+FORWARD_RETURN_20D_COLUMN = forward_return_label_column(20)
 
 
 def test_price_volume_standard_preset_defines_catalog_contract() -> None:
@@ -37,7 +49,7 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
     assert "mom_252d" in columns
     assert "rev_252d" in columns
     assert "vol_252d" not in columns
-    assert "forward_return_20d" not in columns
+    assert FORWARD_RETURN_20D_COLUMN not in columns
     assert price_volume_factor_columns() == columns
     assert price_volume_factor_columns(preset=PRICE_VOLUME_CORE_PRESET) == (
         CORE_PRICE_VOLUME_FACTORS
@@ -52,7 +64,7 @@ def test_price_volume_standard_preset_defines_catalog_contract() -> None:
 def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
     definitions = price_volume_factor_definitions(
         market_id=MarketId("a_share"),
-        required_input_data_id="market_panel_1d",
+        required_input_data_id=MARKET_PANEL_DATA_ID,
     )
     columns = price_volume_factor_columns()
     by_id = {definition.factor_id: definition for definition in definitions}
@@ -65,7 +77,7 @@ def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
             definition.factor_id
         )
         assert definition.base_input_columns == definition.input_columns
-        assert definition.required_input_data_id == "market_panel_1d"
+        assert definition.required_input_data_id == MARKET_PANEL_DATA_ID
         assert definition.family == "price_volume"
         if definition.factor_id in SMOKE_PRICE_VOLUME_FACTORS:
             assert definition.factor_set is FactorSet.SMOKE
@@ -75,8 +87,8 @@ def test_price_volume_factor_definitions_are_output_and_input_driven() -> None:
             assert definition.factor_set is FactorSet.STANDARD
             assert definition.to_manifest()["factor_set"] == "standard"
 
-    assert by_id["rev_1d"].input_columns == ("period_return",)
-    assert by_id["mom_20d"].input_columns == ("adj_close",)
+    assert by_id[REVERSAL_1D_COLUMN].input_columns == ("period_return",)
+    assert by_id[MOMENTUM_20D_COLUMN].input_columns == ("adj_close",)
     assert by_id["amihud_20d"].input_columns == ("period_return", "amount")
     assert by_id["amplitude_20d"].input_columns == (
         "high",
@@ -125,24 +137,24 @@ def test_price_volume_feature_exclusion_is_canonical_key_only() -> None:
             "market_id",
             "asset_id",
             "timestamp",
-            "mom_20d",
-            "forward_return_20d",
+            MOMENTUM_20D_COLUMN,
+            FORWARD_RETURN_20D_COLUMN,
         ),
         expected_columns=(
             "market_id",
             "asset_id",
             "timestamp",
-            "mom_20d",
-            "forward_return_20d",
+            MOMENTUM_20D_COLUMN,
+            FORWARD_RETURN_20D_COLUMN,
         ),
     )
 
-    assert selected == ("mom_20d",)
+    assert selected == (MOMENTUM_20D_COLUMN,)
     assert warnings == (
         "excluded leakage/control column: market_id",
         "excluded leakage/control column: asset_id",
         "excluded leakage/control column: timestamp",
-        "excluded leakage/control column: forward_return_20d",
+        f"excluded leakage/control column: {FORWARD_RETURN_20D_COLUMN}",
     )
 
 
@@ -228,7 +240,7 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
     panel.loc[panel["timestamp"].eq(rolling_window_end), "high"] = np.inf
 
     factor_columns = (
-        "mom_20d",
+        MOMENTUM_20D_COLUMN,
         "rev_20d",
         "max_return_20d",
         "amihud_20d",
@@ -245,7 +257,7 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
     assert pd.isna(result.loc[19, "amplitude_20d"])
     assert pd.isna(result.loc[19, "max_return_20d"])
     assert pd.isna(result.loc[19, "intraday_range_20d"])
-    assert pd.isna(result.loc[20, "mom_20d"])
+    assert pd.isna(result.loc[20, MOMENTUM_20D_COLUMN])
     assert pd.isna(result.loc[20, "rev_20d"])
     assert pd.isna(result.loc[20, "turnover_chg_20d"])
     assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
@@ -426,8 +438,8 @@ def _reference_calculate_price_volume_factors(
     amount = pd.to_numeric(result["amount"], errors="coerce")
     turnover = pd.to_numeric(result["turnover"], errors="coerce")
 
-    if "rev_1d" in requested_set:
-        result["rev_1d"] = -returns
+    if REVERSAL_1D_COLUMN in requested_set:
+        result[REVERSAL_1D_COLUMN] = -returns
     for window in required_windows:
         if window == 1:
             continue
@@ -622,7 +634,7 @@ def _reference_valid_denominator(values: pd.Series) -> pd.Series:
 
 
 def _reference_windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
-    values = {1} if "rev_1d" in requested else set()
+    values = {1} if REVERSAL_1D_COLUMN in requested else set()
     for factor in requested:
         for token in factor.split("_"):
             if token.endswith("d") and token[:-1].isdigit():

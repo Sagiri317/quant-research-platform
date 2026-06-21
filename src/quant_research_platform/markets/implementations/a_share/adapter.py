@@ -10,10 +10,10 @@ from quant_research_platform.catalog.fields import (
 )
 
 
-class AShareMarketAdapter:
+class MarketAdapter:
     market_id = "a_share"
 
-    def with_market_bars_1d_canonical_fields(
+    def with_market_bar_canonical_fields(
         self,
         frame: pd.DataFrame,
         *,
@@ -131,4 +131,4 @@ class AShareMarketAdapter:
                 frame.insert(offset, column, values[column])
 
 
-__all__ = ["AShareMarketAdapter"]
+__all__ = ["MarketAdapter"]

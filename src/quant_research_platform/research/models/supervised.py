@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
 
@@ -27,25 +27,157 @@ class ModelFitResult:
 class _AlgorithmFacts:
     algorithm: str
     dependency_package: str | None = None
+    estimator_factory: Callable[[ModelSpec, dict[str, object]], object] | None = None
     default_hyperparameters: Mapping[str, object] = field(default_factory=dict)
     smoke_hyperparameters: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _LinearRegressionEstimator:
+    coefficient_count: int = 0
+
+    def fit_model_result_from_frames(
+        self,
+        frames: Iterable[pd.DataFrame],
+        spec: ModelSpec,
+    ) -> ModelFitResult:
+        del self
+        return _fit_linear_model_result_from_frames(frames, spec)
+
+
+def _linear_regression_estimator(
+    spec: ModelSpec,
+    params: dict[str, object],
+) -> object:
+    del spec, params
+    return _LinearRegressionEstimator()
+
+
+def _ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
+    del spec
+    from sklearn.linear_model import Ridge
+
+    return Ridge(**params)
+
+
+def _lasso_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
+    from sklearn.linear_model import Lasso
+
+    _set_random_state(params, spec)
+    return Lasso(**params)
+
+
+def _elastic_net_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
+    from sklearn.linear_model import ElasticNet
+
+    _set_random_state(params, spec)
+    return ElasticNet(**params)
+
+
+def _huber_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
+    del spec
+    from sklearn.linear_model import HuberRegressor
+
+    return HuberRegressor(**params)
+
+
+def _decision_tree_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
+    from sklearn.tree import DecisionTreeRegressor
+
+    _set_random_state(params, spec)
+    return DecisionTreeRegressor(**params)
+
+
+def _random_forest_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
+    from sklearn.ensemble import RandomForestRegressor
+
+    _set_random_state(params, spec)
+    return RandomForestRegressor(**params)
+
+
+def _extra_trees_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
+    from sklearn.ensemble import ExtraTreesRegressor
+
+    _set_random_state(params, spec)
+    return ExtraTreesRegressor(**params)
+
+
+def _gradient_boosting_regressor(
+    spec: ModelSpec,
+    params: dict[str, object],
+) -> object:
+    from sklearn.ensemble import GradientBoostingRegressor
+
+    _set_random_state(params, spec)
+    return GradientBoostingRegressor(**params)
+
+
+def _hist_gradient_boosting_regressor(
+    spec: ModelSpec,
+    params: dict[str, object],
+) -> object:
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    _set_random_state(params, spec)
+    return HistGradientBoostingRegressor(**params)
+
+
+def _xgboost_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
+    from xgboost import XGBRegressor
+
+    _set_random_state(params, spec)
+    return XGBRegressor(**params)
+
+
+def _lightgbm_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
+    from lightgbm import LGBMRegressor
+
+    _set_random_state(params, spec)
+    return LGBMRegressor(**params)
+
+
+def _single_factor_baseline(spec: ModelSpec, params: dict[str, object]) -> object:
+    del params
+    return _SingleFactorBaseline(spec.input_columns[0])
+
+
+def _equal_weight_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
+    del params
+    return _RankEnsemblePredictor(spec.input_columns)
+
+
+def _ic_weighted_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
+    del params
+    return _ICWeightedRankEnsembleFactory(spec.input_columns, spec.label_column)
+
+
+def _set_random_state(params: dict[str, object], spec: ModelSpec) -> None:
+    if spec.random_seed is not None:
+        params.setdefault("random_state", spec.random_seed)
+
+
 _MODEL_ALGORITHM_FACTS = {
-    "linear_regression": _AlgorithmFacts("linear_regression", "sklearn"),
+    "linear_regression": _AlgorithmFacts(
+        "linear_regression",
+        "sklearn",
+        estimator_factory=_linear_regression_estimator,
+    ),
     "ridge_regression": _AlgorithmFacts(
         "ridge_regression",
         "sklearn",
+        estimator_factory=_ridge_regression_estimator,
         default_hyperparameters={"alpha": 1.0},
     ),
     "lasso_regression": _AlgorithmFacts(
         "lasso_regression",
         "sklearn",
+        estimator_factory=_lasso_regression_estimator,
         default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},
     ),
     "elastic_net": _AlgorithmFacts(
         "elastic_net",
         "sklearn",
+        estimator_factory=_elastic_net_estimator,
         default_hyperparameters={
             "alpha": 0.001,
             "l1_ratio": 0.5,
@@ -55,37 +187,44 @@ _MODEL_ALGORITHM_FACTS = {
     "huber_regression": _AlgorithmFacts(
         "huber_regression",
         "sklearn",
+        estimator_factory=_huber_regression_estimator,
         default_hyperparameters={"max_iter": 1_000},
     ),
     "decision_tree_regressor": _AlgorithmFacts(
         "decision_tree_regressor",
         "sklearn",
+        estimator_factory=_decision_tree_regressor,
     ),
     "random_forest_regressor": _AlgorithmFacts(
         "random_forest_regressor",
         "sklearn",
+        estimator_factory=_random_forest_regressor,
         default_hyperparameters={"n_estimators": 20, "n_jobs": 1},
         smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": 1},
     ),
     "extra_trees_regressor": _AlgorithmFacts(
         "extra_trees_regressor",
         "sklearn",
+        estimator_factory=_extra_trees_regressor,
         default_hyperparameters={"n_estimators": 20, "n_jobs": 1},
         smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": 1},
     ),
     "gradient_boosting_regressor": _AlgorithmFacts(
         "gradient_boosting_regressor",
         "sklearn",
+        estimator_factory=_gradient_boosting_regressor,
         smoke_hyperparameters={"n_estimators": 5, "max_depth": 2},
     ),
     "hist_gradient_boosting_regressor": _AlgorithmFacts(
         "hist_gradient_boosting_regressor",
         "sklearn",
+        estimator_factory=_hist_gradient_boosting_regressor,
         smoke_hyperparameters={"max_iter": 5, "max_leaf_nodes": 7},
     ),
     "xgboost_regressor": _AlgorithmFacts(
         "xgboost_regressor",
         "xgboost",
+        estimator_factory=_xgboost_regressor,
         default_hyperparameters={
             "n_estimators": 20,
             "max_depth": 3,
@@ -99,6 +238,7 @@ _MODEL_ALGORITHM_FACTS = {
     "lightgbm_regressor": _AlgorithmFacts(
         "lightgbm_regressor",
         "lightgbm",
+        estimator_factory=_lightgbm_regressor,
         default_hyperparameters={
             "n_estimators": 20,
             "learning_rate": 0.1,
@@ -112,9 +252,18 @@ _MODEL_ALGORITHM_FACTS = {
             "verbosity": -1,
         },
     ),
-    "single_factor_baseline": _AlgorithmFacts("single_factor_baseline"),
-    "equal_weight_rank_ensemble": _AlgorithmFacts("equal_weight_rank_ensemble"),
-    "ic_weighted_rank_ensemble": _AlgorithmFacts("ic_weighted_rank_ensemble"),
+    "single_factor_baseline": _AlgorithmFacts(
+        "single_factor_baseline",
+        estimator_factory=_single_factor_baseline,
+    ),
+    "equal_weight_rank_ensemble": _AlgorithmFacts(
+        "equal_weight_rank_ensemble",
+        estimator_factory=_equal_weight_rank_ensemble,
+    ),
+    "ic_weighted_rank_ensemble": _AlgorithmFacts(
+        "ic_weighted_rank_ensemble",
+        estimator_factory=_ic_weighted_rank_ensemble,
+    ),
 }
 
 
@@ -147,19 +296,13 @@ def model_dependency_status(algorithm: str) -> dict[str, str]:
 
 
 def build_estimator_from_model_spec(spec: ModelSpec) -> object:
-    _dependency_status(spec.model_algorithm)
-    algorithm = spec.model_algorithm
-    if algorithm == "linear_regression":
-        from sklearn.linear_model import LinearRegression
-
-        return LinearRegression()
-    if algorithm == "single_factor_baseline":
-        return _SingleFactorBaseline(spec.input_columns[0])
-    if algorithm == "equal_weight_rank_ensemble":
-        return _RankEnsemblePredictor(spec.input_columns)
-    if algorithm == "ic_weighted_rank_ensemble":
-        return _ICWeightedRankEnsembleFactory(spec.input_columns, spec.label_column)
-    return _build_regression_estimator(spec)
+    facts = _algorithm_facts(spec.model_algorithm)
+    _dependency_status(facts.algorithm)
+    if facts.estimator_factory is None:
+        raise ValueError("unsupported_model_algorithm")
+    params = dict(facts.default_hyperparameters)
+    params.update(spec.hyperparameters)
+    return facts.estimator_factory(spec, params)
 
 
 def fit_model_result(frame: pd.DataFrame, spec: ModelSpec) -> ModelFitResult:
@@ -189,8 +332,25 @@ def _fit_model_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
 ) -> ModelFitResult:
-    if spec.model_algorithm != "linear_regression":
-        return _fit_estimator_model_result_from_frames(frames, spec)
+    estimator = build_estimator_from_model_spec(spec)
+    fit_model_result_from_frames = getattr(
+        estimator,
+        "fit_model_result_from_frames",
+        None,
+    )
+    if callable(fit_model_result_from_frames):
+        return fit_model_result_from_frames(frames, spec)
+    return _fit_estimator_model_result_from_frames(
+        frames,
+        spec,
+        estimator=estimator,
+    )
+
+
+def _fit_linear_model_result_from_frames(
+    frames: Iterable[pd.DataFrame],
+    spec: ModelSpec,
+) -> ModelFitResult:
     if spec.max_train_rows is not None or spec.purge_gap_steps > 0:
         return _fit_controlled_linear_model_result_from_frames(frames, spec)
     input_columns = spec.input_columns
@@ -342,10 +502,28 @@ def _predict_scores(
     prediction_model: object | None,
 ) -> np.ndarray:
     if prediction_model is not None:
-        predicted = prediction_model.predict(frame.loc[:, input_columns])
+        predicted = prediction_model.predict(
+            _prediction_model_input_frame(
+                frame,
+                input_columns=input_columns,
+                prediction_model=prediction_model,
+            )
+        )
         return np.asarray(predicted, dtype="float64")
     x = frame.loc[:, input_columns].to_numpy(dtype="float64", copy=False)
     return np.asarray(float(coefficients[0]) + x @ coefficients[1:])
+
+
+def _prediction_model_input_frame(
+    frame: pd.DataFrame,
+    *,
+    input_columns: tuple[str, ...],
+    prediction_model: object,
+) -> pd.DataFrame:
+    columns = input_columns
+    if isinstance(prediction_model, (_RankEnsemblePredictor, _ICWeightedRankEnsemble)):
+        columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
+    return frame.loc[:, list(columns)]
 
 
 def _fit_controlled_linear_model_result_from_frames(
@@ -468,12 +646,14 @@ def _fit_linear_coefficients(
 def _fit_estimator_model_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
+    *,
+    estimator: object | None = None,
 ) -> ModelFitResult:
     training, row_counts, filter_metadata = _collect_training_frame(frames, spec)
     if row_counts["rows_after_input_label_dropna"] == 0:
         raise ValueError("model_training_sample_empty")
     y = training.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
-    predictor = _fit_predictor(spec, training=training, y=y)
+    predictor = _fit_predictor(spec, training=training, y=y, estimator=estimator)
     coefficient_count = int(
         getattr(predictor, "coefficient_count", len(spec.input_columns))
     )
@@ -615,90 +795,17 @@ def _fit_predictor(
     *,
     training: pd.DataFrame,
     y: np.ndarray,
+    estimator: object | None = None,
 ) -> object:
-    algorithm = spec.model_algorithm
-    if algorithm == "single_factor_baseline":
-        return _SingleFactorBaseline(spec.input_columns[0])
-    if algorithm == "equal_weight_rank_ensemble":
-        return _RankEnsemblePredictor(spec.input_columns)
-    if algorithm == "ic_weighted_rank_ensemble":
-        return _ICWeightedRankEnsemble.fit(
-            training,
-            input_columns=spec.input_columns,
-            label_column=spec.label_column,
-        )
-    estimator = _build_regression_estimator(spec)
+    if estimator is None:
+        estimator = build_estimator_from_model_spec(spec)
+    fit_training_frame = getattr(estimator, "fit_training_frame", None)
+    if callable(fit_training_frame):
+        return fit_training_frame(training)
+    if not hasattr(estimator, "fit"):
+        return estimator
     estimator.fit(training.loc[:, spec.input_columns], y)
     return estimator
-
-
-def _build_regression_estimator(spec: ModelSpec) -> object:
-    _dependency_status(spec.model_algorithm)
-    params = model_default_hyperparameters(spec.model_algorithm)
-    params.update(spec.hyperparameters)
-    if spec.model_algorithm == "ridge_regression":
-        from sklearn.linear_model import Ridge
-
-        return Ridge(**params)
-    if spec.model_algorithm == "lasso_regression":
-        from sklearn.linear_model import Lasso
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return Lasso(**params)
-    if spec.model_algorithm == "elastic_net":
-        from sklearn.linear_model import ElasticNet
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return ElasticNet(**params)
-    if spec.model_algorithm == "huber_regression":
-        from sklearn.linear_model import HuberRegressor
-
-        return HuberRegressor(**params)
-    if spec.model_algorithm == "decision_tree_regressor":
-        from sklearn.tree import DecisionTreeRegressor
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return DecisionTreeRegressor(**params)
-    if spec.model_algorithm == "random_forest_regressor":
-        from sklearn.ensemble import RandomForestRegressor
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return RandomForestRegressor(**params)
-    if spec.model_algorithm == "extra_trees_regressor":
-        from sklearn.ensemble import ExtraTreesRegressor
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return ExtraTreesRegressor(**params)
-    if spec.model_algorithm == "gradient_boosting_regressor":
-        from sklearn.ensemble import GradientBoostingRegressor
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return GradientBoostingRegressor(**params)
-    if spec.model_algorithm == "hist_gradient_boosting_regressor":
-        from sklearn.ensemble import HistGradientBoostingRegressor
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return HistGradientBoostingRegressor(**params)
-    if spec.model_algorithm == "xgboost_regressor":
-        from xgboost import XGBRegressor
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return XGBRegressor(**params)
-    if spec.model_algorithm == "lightgbm_regressor":
-        from lightgbm import LGBMRegressor
-
-        if spec.random_seed is not None:
-            params.setdefault("random_state", spec.random_seed)
-        return LGBMRegressor(**params)
-    raise ValueError("unsupported_model_algorithm")
 
 
 @dataclass(frozen=True)
@@ -723,6 +830,13 @@ class _RankEnsemblePredictor:
 class _ICWeightedRankEnsembleFactory:
     columns: tuple[str, ...]
     label_column: str
+
+    def fit_training_frame(self, frame: pd.DataFrame) -> _ICWeightedRankEnsemble:
+        return _ICWeightedRankEnsemble.fit(
+            frame,
+            input_columns=self.columns,
+            label_column=self.label_column,
+        )
 
 
 @dataclass(frozen=True)

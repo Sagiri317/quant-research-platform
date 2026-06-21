@@ -13,7 +13,7 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
 from quant_research_platform.markets.implementations.a_share.labels.definitions import (
-    a_share_label_catalog,
+    label_catalog,
 )
 
 
@@ -22,7 +22,7 @@ def test_factor_boundary_nan_is_allowed_without_pre_window_history() -> None:
 
     factors = factor_calculations.calculate_factors_for_panel(
         panel,
-        definitions=factor_definitions.a_share_factor_catalog().list(),
+        definitions=factor_definitions.factor_catalog().list(),
     )
 
     first = factors.sort_values("timestamp").iloc[0]
@@ -36,7 +36,7 @@ def test_factor_middle_window_keeps_values_when_history_exists() -> None:
 
     factors = factor_calculations.calculate_factors_for_panel(
         panel,
-        definitions=factor_definitions.a_share_factor_catalog().list(),
+        definitions=factor_definitions.factor_catalog().list(),
     )
     requested = factors.loc[
         factors["timestamp"].between(
@@ -54,7 +54,7 @@ def test_label_tail_nan_is_allowed_without_post_window_future() -> None:
 
     labels = label_calculations.calculate_labels_for_panel(
         panel,
-        definitions=a_share_label_catalog().list(),
+        definitions=label_catalog().list(),
     )
 
     middle = labels.loc[labels["timestamp"].eq(pd.Timestamp("2014-01-15"))].iloc[0]
@@ -68,7 +68,7 @@ def test_label_middle_window_is_not_artificially_truncated_when_future_exists() 
 
     labels = label_calculations.calculate_labels_for_panel(
         panel,
-        definitions=a_share_label_catalog().list(),
+        definitions=label_catalog().list(),
     )
     requested = labels.loc[
         labels["timestamp"].between(
@@ -88,11 +88,11 @@ def test_factor_calculation_fails_closed_for_missing_required_input_columns() ->
 
     with pytest.raises(
         ValueError,
-        match="missing_a_share_factor_input_columns: price_volume: amount",
+        match="missing_factor_input_columns: price_volume: amount",
     ):
         factor_calculations.calculate_factors_for_panel(
             panel,
-            definitions=factor_definitions.a_share_factor_catalog().list(),
+            definitions=factor_definitions.factor_catalog().list(),
         )
 
 

@@ -10,6 +10,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
     data_frequency_slug,
     horizon_unit_suffix,
+    market_bars_data_id,
     normalize_data_frequency,
     require_supported_data_frequency,
 )
@@ -42,7 +43,7 @@ from quant_research_platform.contracts.run_id import (
     validate_run_id,
 )
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
+from quant_research_platform.contracts.workflows import WorkflowRunPolicy
 
 CONTRACT_VERSION = "0.1"
 
@@ -82,6 +83,7 @@ __all__ = [
     "WorkflowRunPolicy",
     "data_frequency_slug",
     "horizon_unit_suffix",
+    "market_bars_data_id",
     "normalize_data_frequency",
     "require_supported_data_frequency",
     "validate_run_id",

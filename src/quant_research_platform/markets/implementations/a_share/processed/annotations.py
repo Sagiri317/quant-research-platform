@@ -7,7 +7,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
-    a_share_processed_catalog,
+    processed_catalog,
 )
 
 
@@ -17,9 +17,9 @@ def derive_annotations(
     data_ids: tuple[str, ...] | None = None,
     min_listing_trading_days: int = 120,
 ) -> dict[str, pd.DataFrame]:
-    """Derive registered A-share annotation frames from market_panel_1d."""
+    """Derive registered A-share annotation frames from the market panel."""
 
-    catalog = a_share_processed_catalog()
+    catalog = processed_catalog()
     requested = set(data_ids) if data_ids is not None else None
     if requested is not None:
         annotation_ids = {

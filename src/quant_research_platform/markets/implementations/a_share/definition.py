@@ -16,7 +16,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 )
 
 
-def a_share_market_definition() -> MarketDefinition:
+def market_definition() -> MarketDefinition:
     return MarketDefinition(
         market_id=MARKET_ID,
         display_name="A-share market implementation",
@@ -33,4 +33,4 @@ def a_share_market_definition() -> MarketDefinition:
     )
 
 
-__all__ = ["a_share_market_definition"]
+__all__ = ["market_definition"]

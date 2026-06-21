@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -18,6 +19,11 @@ ALLOWED_PATH_PARTS = {
     ("docs", "reports"),
     ("docs", "code-map", "source-csmar-contracts.md"),
 }
+
+SHARED_TEST_HELPER_ROOTS = (
+    Path("tests/helpers"),
+    Path("tests/correctness/_helpers.py"),
+)
 
 
 def test_daily_lifecycle_names_are_replaced() -> None:
@@ -73,6 +79,49 @@ def test_daily_lifecycle_names_are_replaced() -> None:
     assert hits == []
 
 
+def test_shared_test_helpers_do_not_handwrite_active_derived_names() -> None:
+    forbidden = {
+        "market" + "_bars_1d": _literal_pattern("market" + "_bars_1d"),
+        "market" + "_panel_1d": _literal_pattern("market" + "_panel_1d"),
+        "mom" + "_20d": _literal_pattern("mom" + "_20d"),
+        "rev" + "_1d": _literal_pattern("rev" + "_1d"),
+        "forward" + "_return_horizon": re.compile(
+            r"\bforward_return_[0-9]+d\b"
+        ),
+    }
+    hits: list[str] = []
+    for path in _iter_shared_test_helper_files():
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for name, pattern in forbidden.items():
+                if pattern.search(line):
+                    hits.append(f"{path}:{line_number}: {name}: {line.strip()}")
+
+    assert hits == []
+
+
+def test_shared_test_helpers_do_not_import_source_specific_id_builders() -> None:
+    forbidden_modules = {"quant_research_platform.sources.csmar.ids"}
+    forbidden_names = {"market_bars_data_id"}
+    hits: list[str] = []
+    for path in _iter_shared_test_helper_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in forbidden_modules:
+                        hits.append(f"{path}:{node.lineno}: {alias.name}")
+            elif isinstance(node, ast.ImportFrom) and node.module in forbidden_modules:
+                imported_names = {alias.name for alias in node.names}
+                if "*" in imported_names or imported_names & forbidden_names:
+                    hits.append(
+                        f"{path}:{node.lineno}: {node.module}: "
+                        f"{', '.join(sorted(imported_names))}"
+                    )
+
+    assert hits == []
+
+
 def _iter_text_files() -> list[Path]:
     files: list[Path] = []
     for root in SCAN_ROOTS:
@@ -82,6 +131,16 @@ def _iter_text_files() -> list[Path]:
         for path in root.rglob("*"):
             if path.is_file() and path.suffix in {".py", ".md", ".json", ".toml"}:
                 files.append(path)
+    return files
+
+
+def _iter_shared_test_helper_files() -> list[Path]:
+    files: list[Path] = []
+    for root in SHARED_TEST_HELPER_ROOTS:
+        if root.is_file():
+            files.append(root)
+            continue
+        files.extend(path for path in root.rglob("*.py") if path.is_file())
     return files
 
 

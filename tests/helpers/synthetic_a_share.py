@@ -33,7 +33,7 @@ def make_synthetic_trading_calendar() -> pd.DataFrame:
     )
 
 
-def make_synthetic_market_bars_1d() -> pd.DataFrame:
+def make_synthetic_market_bars() -> pd.DataFrame:
     dates = pd.to_datetime(
         ["2023-12-29", "2024-01-02", "2024-01-03", "2024-01-05", "2024-01-08"]
     )
@@ -164,7 +164,7 @@ def make_synthetic_market_cap() -> pd.DataFrame:
     )
 
 
-def make_synthetic_market_panel_1d(
+def make_synthetic_market_panel(
     *,
     sessions: int = 130,
     assets: tuple[str, ...] = ("asset_a", "asset_b"),

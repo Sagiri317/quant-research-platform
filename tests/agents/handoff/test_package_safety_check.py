@@ -204,6 +204,44 @@ def test_package_safety_rejects_private_run_paths_in_handoff_evidence(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
+        "source_id=raw-source",
+        "provider_id=raw-provider",
+        "provider_name=raw-provider",
+        "source_name=raw-source",
+        "data_provider=raw-provider",
+        "vendor_name=raw-provider",
+        "raw_vendor=export",
+        "vendor_payload={}",
+    ],
+)
+def test_package_safety_rejects_private_provider_markers(tmp_path, text):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("handoff_evidence/leak.md", text)
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("private marker" in error for error in result.errors)
+
+
+def test_package_safety_large_text_skip_is_fail_closed(tmp_path):
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    large_text = ("x" * (module.MAX_TEXT_SCAN_BYTES + 1)) + "\nsource_id=raw\n"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("handoff_evidence/large.md", large_text)
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+    assert any("text scan exceeded maximum size" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "/workspace/qrp/data/research/a_share/demo",
         "/workspaces/qrp/reports/private_research/a_share/run",
         "/home/user/private.txt",

@@ -7,7 +7,7 @@ from quant_research_platform.catalog.profiles import (
 )
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.markets.implementations.a_share.definition import (
-    a_share_market_definition,
+    market_definition,
 )
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
@@ -23,7 +23,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
     catalog as processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.research_profiles import (
-    build_a_share_research_dataset_catalog,
+    build_research_dataset_catalog,
 )
 
 
@@ -44,9 +44,9 @@ def test_local_profile_returns_boundary_sealed_bundle() -> None:
 def test_local_profile_market_catalogs_delegate_to_a_share_owner_factories() -> None:
     catalogs = research_profile()
     profile_factors = catalogs.factors.list()
-    owner_factors = factor_definitions.a_share_factor_catalog().list()
+    owner_factors = factor_definitions.factor_catalog().list()
     profile_labels = catalogs.labels.list()
-    owner_labels = label_definitions.a_share_label_catalog().list()
+    owner_labels = label_definitions.label_catalog().list()
 
     assert [(item.factor_id, item.output_column) for item in profile_factors] == [
         (item.factor_id, item.output_column) for item in owner_factors
@@ -61,7 +61,7 @@ def test_local_profile_research_dataset_catalog_delegates_to_a_share_owner() -> 
     profile_spec = catalogs.research_datasets.get(
         PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
-    owner_spec = build_a_share_research_dataset_catalog().get(
+    owner_spec = build_research_dataset_catalog().get(
         PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
 
@@ -84,7 +84,7 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
 def test_local_profile_internal_registries_are_platform_composed() -> None:
     catalogs = research_profile()
     market = catalogs.markets.get(MARKET_ID)
-    owner_market = a_share_market_definition()
+    owner_market = market_definition()
     source = catalogs.sources.get("csmar")
 
     assert market.market_id == owner_market.market_id
@@ -118,12 +118,12 @@ def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
     )
 
 
-def test_a_share_processed_catalog_owner_matches_profile() -> None:
+def test_processed_catalog_owner_matches_profile() -> None:
     profile_ids = {
         spec.data_id for spec in research_profile().processed.list()
     }
     owner_ids = {
-        spec.data_id for spec in processed_catalog.a_share_processed_catalog().list()
+        spec.data_id for spec in processed_catalog.processed_catalog().list()
     }
 
     assert profile_ids == owner_ids

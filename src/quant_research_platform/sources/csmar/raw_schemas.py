@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.sources.csmar.ids import market_bars_data_id
+
+MARKET_BARS_DATA_ID = market_bars_data_id()
+
 
 @dataclass(frozen=True)
 class RawFileMetadata:
@@ -30,6 +34,7 @@ class RawTableContract:
     table_code: str
     table_name_zh: str
     required_columns: tuple[str, ...]
+    optional_columns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,8 +66,8 @@ RAW_TABLE_CONTRACTS: dict[str, RawTableContract] = {
             "Statdt",
         ),
     ),
-    "market_bars_1d": RawTableContract(
-        dataset="market_bars_1d",
+    MARKET_BARS_DATA_ID: RawTableContract(
+        dataset=MARKET_BARS_DATA_ID,
         table_code="TRDNEW_Dalyr",
         table_name_zh="日个股回报率文件",
         required_columns=(
@@ -80,21 +85,24 @@ RAW_TABLE_CONTRACTS: dict[str, RawTableContract] = {
             "Dsmvosd",
             "Dsmvtll",
             "Dretwd",
-            "Dretnd",
             "Adjprcwd",
-            "Adjprcnd",
             "PreClosePrice",
+            "LimitStatus",
+        ),
+        optional_columns=(
+            "Dretnd",
+            "Adjprcnd",
             "ChangeRatio",
             "LimitDown",
             "LimitUp",
-            "LimitStatus",
         ),
     ),
     "market_cap": RawTableContract(
         dataset="market_cap",
         table_code="TRDNEW_Capchg",
         table_name_zh="股本变动文件",
-        required_columns=("Stkcd", "Shrchgdt", "Nshrttl", "Nshra", "Nshrb", "Nshrh"),
+        required_columns=("Stkcd", "Shrchgdt", "Nshrttl", "Nshra"),
+        optional_columns=("Nshrb", "Nshrh"),
     ),
     "adjustment": RawTableContract(
         dataset="adjustment",
@@ -151,7 +159,7 @@ FILENAME_RE = re.compile(
 
 NATIVE_TABLE_DATASETS: dict[str, str] = {
     "TRDNEW_Co": "stock_master",
-    "TRDNEW_Dalyr": "market_bars_1d",
+    "TRDNEW_Dalyr": MARKET_BARS_DATA_ID,
     "TRDNEW_Capchg": "market_cap",
     "TRD_AdjustFactor": "adjustment",
     "IDX_Idxinfo": "index_info",

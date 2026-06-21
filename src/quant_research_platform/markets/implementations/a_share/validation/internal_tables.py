@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.contracts.data import DataFrequency, data_frequency_slug
+
 from .quality_report import (
     QualityIssue,
     QualityReport,
@@ -17,6 +19,7 @@ from .quality_report import (
     value_counts,
 )
 
+MARKET_BARS_DATA_ID = f"market_bars_{data_frequency_slug(DataFrequency.DAILY)}"
 MARKET_BARS_REQUIRED_COLUMNS = (
     "market_id",
     "asset_id",
@@ -47,10 +50,10 @@ BENCHMARK_INDEX_REQUIRED_COLUMNS = (
 )
 
 
-def check_market_bars_1d(
+def check_market_bars(
     frame: pd.DataFrame, *, expected_year: int | None = None, file: str = ""
 ) -> QualityReport:
-    """检查单个标准化 market_bars_1d interim frame。"""
+    """Validate one normalized market-bars interim frame."""
 
     result = frame.copy()
     result["timestamp"] = to_datetime(result["timestamp"])
@@ -59,19 +62,23 @@ def check_market_bars_1d(
         for issue in (
             missing_columns_issue(
                 result,
-                "market_bars_1d",
+                MARKET_BARS_DATA_ID,
                 MARKET_BARS_REQUIRED_COLUMNS,
             ),
             duplicate_issue(
                 result,
-                "market_bars_1d",
+                MARKET_BARS_DATA_ID,
                 ["market_id", "asset_id", "timestamp"],
             ),
-            expected_year_issue(result["timestamp"], "market_bars_1d", expected_year),
-            ohlc_issue(result, "market_bars_1d"),
+            expected_year_issue(
+                result["timestamp"],
+                MARKET_BARS_DATA_ID,
+                expected_year,
+            ),
+            ohlc_issue(result, MARKET_BARS_DATA_ID),
             negative_value_issue(
                 result,
-                "market_bars_1d",
+                MARKET_BARS_DATA_ID,
                 ["volume", "amount", "float_market_cap", "total_market_cap"],
                 "negative_liquidity_or_market_cap",
             ),
@@ -83,7 +90,7 @@ def check_market_bars_1d(
         if outside_scope:
             issues.append(
                 QualityIssue(
-                    dataset="market_bars_1d",
+                    dataset=MARKET_BARS_DATA_ID,
                     check="outside_a_share_scope",
                     severity="blocking",
                     count=outside_scope,
@@ -93,7 +100,7 @@ def check_market_bars_1d(
 
     min_date, max_date = date_bounds(result["timestamp"])
     return QualityReport(
-        dataset="market_bars_1d",
+        dataset=MARKET_BARS_DATA_ID,
         file=file,
         row_count=len(result),
         column_count=len(result.columns),

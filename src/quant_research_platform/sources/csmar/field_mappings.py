@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.sources.csmar.ids import market_bars_data_id
 from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
+
+MARKET_BARS_DATA_ID = market_bars_data_id()
 
 COLUMN_MAPPINGS = {
     "stock_master": {
@@ -18,7 +21,7 @@ COLUMN_MAPPINGS = {
         "Statco": "company_status",
         "Statdt": "status_change_date",
     },
-    "market_bars_1d": {
+    MARKET_BARS_DATA_ID: {
         "Stkcd": "stock_code",
         "Trddt": "trade_date",
         "Markettype": "market_type",
@@ -113,7 +116,7 @@ FIELD_DESCRIPTIONS = {
         "Statco": "公司活动情况",
         "Statdt": "情况变动日",
     },
-    "market_bars_1d": {
+    MARKET_BARS_DATA_ID: {
         "Stkcd": "证券代码",
         "Trddt": "交易日期",
         "Markettype": "市场类型",
@@ -209,22 +212,22 @@ def missing_raw_column_names(columns: tuple[str, ...], dataset: str) -> list[str
     return missing
 
 
-def csmar_column_mapping(dataset: str) -> dict[str, str]:
+def column_mapping(dataset: str) -> dict[str, str]:
     """Return raw-provider to source-local normalized column mappings."""
 
     return COLUMN_MAPPINGS[dataset]
 
 
-def csmar_field_descriptions(dataset: str) -> dict[str, str]:
+def field_descriptions(dataset: str) -> dict[str, str]:
     """Return provider field descriptions for private metadata sidecars."""
 
     return FIELD_DESCRIPTIONS.get(dataset, {})
 
 
-def map_csmar_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
+def map_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
     """Rename raw provider columns to source-local normalized aliases."""
 
-    mapping = csmar_column_mapping(dataset)
+    mapping = column_mapping(dataset)
     missing = missing_raw_columns(frame, dataset)
     if missing:
         raise ValueError(f"{dataset} raw export is missing CSMAR columns: {missing}")
@@ -249,9 +252,9 @@ __all__ = [
     "COLUMN_ALIASES",
     "COLUMN_MAPPINGS",
     "FIELD_DESCRIPTIONS",
-    "csmar_column_mapping",
-    "csmar_field_descriptions",
-    "map_csmar_columns",
+    "column_mapping",
+    "field_descriptions",
+    "map_columns",
     "missing_raw_column_names",
     "missing_raw_columns",
     "normalize_stock_code",

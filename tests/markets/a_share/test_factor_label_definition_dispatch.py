@@ -17,20 +17,20 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 )
 
 
-def test_a_share_factor_definitions_expose_unified_catalog_only() -> None:
+def test_factor_definitions_expose_unified_catalog_only() -> None:
     module = import_module(
         "quant_research_platform.markets.implementations.a_share."
         "factors.definitions"
     )
 
     assert set(module.__all__) == {
-        "a_share_factor_definitions",
-        "a_share_factor_catalog",
+        "factor_definitions",
+        "factor_catalog",
     }
-    assert module.a_share_factor_definitions()
+    assert module.factor_definitions()
     assert (
-        module.a_share_factor_catalog().list()
-        == module.a_share_factor_definitions()
+        module.factor_catalog().list()
+        == module.factor_definitions()
     )
 
 
@@ -85,7 +85,7 @@ def test_price_volume_empty_definition_dispatch_returns_keys_only() -> None:
 
 
 def test_price_volume_input_column_query_fails_closed_for_unknown_family() -> None:
-    with pytest.raises(ValueError, match="unsupported_a_share_factor_family: custom"):
+    with pytest.raises(ValueError, match="unsupported_factor_family: custom"):
         factor_calculations.factor_panel_input_columns(
             (
                 _factor_definition(
@@ -98,7 +98,7 @@ def test_price_volume_input_column_query_fails_closed_for_unknown_family() -> No
 
 
 def test_unknown_factor_family_fails_closed() -> None:
-    with pytest.raises(ValueError, match="unsupported_a_share_factor_family: custom"):
+    with pytest.raises(ValueError, match="unsupported_factor_family: custom"):
         factor_calculations.calculate_factors_for_panel(
             _factor_panel(),
             definitions=(
@@ -114,7 +114,7 @@ def test_unknown_factor_family_fails_closed() -> None:
 def test_factor_input_columns_are_validated_before_dispatch() -> None:
     with pytest.raises(
         ValueError,
-        match=r"missing_a_share_factor_input_columns: price_volume: missing_fact",
+        match=r"missing_factor_input_columns: price_volume: missing_fact",
     ):
         factor_calculations.calculate_factors_for_panel(
             _factor_panel(),
@@ -127,7 +127,7 @@ def test_factor_input_columns_are_validated_before_dispatch() -> None:
         )
 
 
-def test_a_share_label_definitions_expose_unified_catalog_only() -> None:
+def test_label_definitions_expose_unified_catalog_only() -> None:
     module = import_module(
         "quant_research_platform.markets.implementations.a_share."
         "labels.definitions"
@@ -137,8 +137,8 @@ def test_a_share_label_definitions_expose_unified_catalog_only() -> None:
         "LABEL_BASE_COLUMNS",
         "LABEL_PANEL_INPUT_COLUMNS",
         "FORWARD_RETURN_HORIZONS",
-        "a_share_label_definitions",
-        "a_share_label_catalog",
+        "label_definitions",
+        "label_catalog",
     }
     assert module.LABEL_BASE_COLUMNS == ("market_id", "asset_id", "timestamp")
     assert module.LABEL_PANEL_INPUT_COLUMNS == (
@@ -147,12 +147,12 @@ def test_a_share_label_definitions_expose_unified_catalog_only() -> None:
         "timestamp",
         "adj_open",
     )
-    assert module.a_share_label_definitions()
-    assert module.a_share_label_catalog().list() == module.a_share_label_definitions()
+    assert module.label_definitions()
+    assert module.label_catalog().list() == module.label_definitions()
     assert {
-        definition.family for definition in module.a_share_label_definitions()
+        definition.family for definition in module.label_definitions()
     } == {"forward_return"}
-    definition = module.a_share_label_definitions()[0]
+    definition = module.label_definitions()[0]
     assert (
         definition.label_timing
         == "next_valid_bar_open_to_horizon_valid_bar_open"
@@ -191,7 +191,7 @@ def test_forward_return_empty_definition_dispatch_returns_keys_only() -> None:
 
 
 def test_forward_return_input_column_query_fails_closed_for_unknown_family() -> None:
-    with pytest.raises(ValueError, match="unsupported_a_share_label_family: tradable"):
+    with pytest.raises(ValueError, match="unsupported_label_family: tradable"):
         label_calculations.label_panel_input_columns(
             (
                 _label_definition(
@@ -205,7 +205,7 @@ def test_forward_return_input_column_query_fails_closed_for_unknown_family() -> 
 
 
 def test_unknown_label_family_fails_closed() -> None:
-    with pytest.raises(ValueError, match="unsupported_a_share_label_family: tradable"):
+    with pytest.raises(ValueError, match="unsupported_label_family: tradable"):
         label_calculations.calculate_labels_for_panel(
             _label_panel(),
             definitions=(
@@ -222,7 +222,7 @@ def test_unknown_label_family_fails_closed() -> None:
 def test_label_input_columns_are_validated_before_dispatch() -> None:
     with pytest.raises(
         ValueError,
-        match=r"missing_a_share_label_input_columns: forward_return: missing_price",
+        match=r"missing_label_input_columns: forward_return: missing_price",
     ):
         label_calculations.calculate_labels_for_panel(
             _label_panel(),

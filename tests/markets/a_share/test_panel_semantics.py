@@ -38,7 +38,7 @@ def test_a_share_calendar_helpers_use_source_normalized_calendar() -> None:
         }
     )
 
-    assert calendar.a_share_unified_trading_sessions(frame).tolist() == [
+    assert calendar.unified_trading_sessions(frame).tolist() == [
         pd.Timestamp("2024-01-02"),
         pd.Timestamp("2024-01-06"),
     ]
@@ -49,7 +49,7 @@ def test_a_share_calendar_helpers_use_source_normalized_calendar() -> None:
         pd.Timestamp("2024-01-08")
     ]
     with pytest.raises(ValueError, match="calendar_missing_normalized_columns"):
-        calendar.a_share_unified_trading_sessions(
+        calendar.unified_trading_sessions(
             pd.DataFrame({"Markettype": [1], "Clddt": ["2024-01-02"]})
         )
 
@@ -360,7 +360,7 @@ def test_compute_market_panel_fails_closed_on_missing_canonical_after_mapping(
 
     with pytest.raises(
         ValueError,
-        match="market_bars_1d_interim_missing_canonical_columns: missing_canonical",
+        match="market_bars_interim_missing_canonical_columns: missing_canonical",
     ):
         compute_market_panel(
             _market_bars_1d_frame(["2020-01-02"]),

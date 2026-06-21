@@ -181,7 +181,7 @@ APPROVED_WRITER_MODULES = {
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/"
-        "render_pr_body_from_validation_evidence.py"
+        "compare_verification_evidence.py"
     ),
     Path("src/quant_research_platform/storage/atomic.py"),
     Path("src/quant_research_platform/storage/datasets.py"),

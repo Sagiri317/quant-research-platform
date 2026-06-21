@@ -12,7 +12,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.fields import (
-    a_share_field_catalog,
+    field_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     DEFAULT_UNIVERSE_ID,
@@ -26,7 +26,18 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
+from quant_research_platform.research.factors.price_volume import (
+    price_volume_window_column,
+)
 
+RESEARCH_DATASET_MOMENTUM_COLUMN = price_volume_window_column(
+    "mom",
+    20,
+    DataFrequency.DAILY,
+)
+RESEARCH_DATASET_MOMENTUM_FEATURE_COLUMN = (
+    f"{RESEARCH_DATASET_MOMENTUM_COLUMN}_zscore"
+)
 RESEARCH_DATASET_FILTER_COLUMNS: tuple[str, ...] = (
     "eligible",
     "can_enter",
@@ -39,18 +50,20 @@ RESEARCH_DATASET_CONTEXT_COLUMNS: tuple[str, ...] = (
     "total_market_cap",
     "float_market_cap",
 )
-RESEARCH_DATASET_FEATURE_COLUMNS: tuple[str, ...] = ("mom_20d_zscore",)
+RESEARCH_DATASET_FEATURE_COLUMNS: tuple[str, ...] = (
+    RESEARCH_DATASET_MOMENTUM_FEATURE_COLUMN,
+)
 RESEARCH_DATASET_FEATURE_TRANSFORMS: tuple[FeatureTransformSpec, ...] = (
     FeatureTransformSpec(
-        transform_id="mom_20d_zscore",
-        source_columns=("mom_20d",),
+        transform_id=RESEARCH_DATASET_MOMENTUM_FEATURE_COLUMN,
+        source_columns=(RESEARCH_DATASET_MOMENTUM_COLUMN,),
         output_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
         transform="cross_sectional_zscore",
     ),
 )
 
 
-def build_a_share_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
+def build_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
     """Return A-share research dataset specs assembled from processed data."""
 
     factor_columns = _registered_factor_columns()
@@ -95,11 +108,11 @@ def build_a_share_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
     )
 
 
-def build_a_share_research_dataset_catalog() -> ResearchDatasetCatalog:
+def build_research_dataset_catalog() -> ResearchDatasetCatalog:
     """Register A-share research dataset specs assembled from processed data."""
 
     catalog = ResearchDatasetCatalog()
-    for spec in build_a_share_research_dataset_specs():
+    for spec in build_research_dataset_specs():
         catalog.register(spec)
     return catalog
 
@@ -111,7 +124,7 @@ def _research_dataset_column_roles(
     feature_columns: tuple[str, ...],
     label_columns: tuple[str, ...],
 ) -> dict[str, ColumnRole]:
-    fields = a_share_field_catalog()
+    fields = field_catalog()
     factor_set = set(factor_columns)
     feature_set = set(feature_columns)
     label_set = set(label_columns)
@@ -137,7 +150,7 @@ def _research_dataset_column_roles(
 def _registered_factor_columns() -> tuple[str, ...]:
     return tuple(
         definition.output_column
-        for definition in factor_definitions.a_share_factor_catalog().list()
+        for definition in factor_definitions.factor_catalog().list()
     )
 
 
@@ -145,7 +158,7 @@ def _registered_label_columns() -> tuple[str, ...]:
     return tuple(
         definition.output_column
         for definition in sorted(
-            label_definitions.a_share_label_catalog().list(),
+            label_definitions.label_catalog().list(),
             key=lambda item: item.horizon,
         )
     )
@@ -154,6 +167,6 @@ def _registered_label_columns() -> tuple[str, ...]:
 __all__ = [
     "RESEARCH_DATASET_CONTEXT_COLUMNS",
     "RESEARCH_DATASET_FILTER_COLUMNS",
-    "build_a_share_research_dataset_catalog",
-    "build_a_share_research_dataset_specs",
+    "build_research_dataset_catalog",
+    "build_research_dataset_specs",
 ]

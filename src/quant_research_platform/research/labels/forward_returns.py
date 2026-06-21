@@ -11,6 +11,10 @@ from collections.abc import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    horizon_unit_suffix,
+)
 from quant_research_platform.contracts.time import TimeWindow
 
 
@@ -18,6 +22,7 @@ def add_forward_return_labels(
     frame: pd.DataFrame,
     *,
     horizons: tuple[int, ...],
+    frequency: DataFrequency | str = DataFrequency.DAILY,
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
@@ -34,12 +39,19 @@ def add_forward_return_labels(
         exit_price = grouped_price.shift(-(horizon + 1))
         exit_price = exit_price.where(np.isfinite(exit_price))
         label = exit_price / entry_price - 1.0
-        result[f"forward_return_{horizon}d"] = label.replace(
+        result[forward_return_label_column(horizon, frequency)] = label.replace(
             [np.inf, -np.inf],
             np.nan,
         )
 
     return result
+
+
+def forward_return_label_column(
+    horizon: int,
+    frequency: DataFrequency | str = DataFrequency.DAILY,
+) -> str:
+    return f"forward_return_{horizon}{horizon_unit_suffix(frequency)}"
 
 
 def forward_return_valid_bar_read_window(
@@ -116,4 +128,8 @@ def _iter_panel_key_groups(
             yield dates
 
 
-__all__ = ["add_forward_return_labels", "forward_return_valid_bar_read_window"]
+__all__ = [
+    "add_forward_return_labels",
+    "forward_return_label_column",
+    "forward_return_valid_bar_read_window",
+]

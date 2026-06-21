@@ -327,7 +327,7 @@ def _payload(
 
 def _total_duration_seconds(records: list[ExecutionStepMetric]) -> float:
     processed_child_steps = {
-        "build_market_panel_1d",
+        "build_market_panel",
         "build_context",
         "build_universe",
         "build_masks",

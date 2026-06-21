@@ -14,7 +14,7 @@ from quant_research_platform.research.factors.price_volume import (
 )
 
 
-def a_share_factor_definitions() -> tuple[FactorDefinition, ...]:
+def factor_definitions() -> tuple[FactorDefinition, ...]:
     return price_volume_factor_definitions(
         market_id=MARKET_ID,
         required_input_data_id=market_panel_data_id(),
@@ -22,14 +22,14 @@ def a_share_factor_definitions() -> tuple[FactorDefinition, ...]:
     )
 
 
-def a_share_factor_catalog() -> FactorCatalog:
+def factor_catalog() -> FactorCatalog:
     catalog = FactorCatalog()
-    for definition in a_share_factor_definitions():
+    for definition in factor_definitions():
         catalog.register(definition)
     return catalog
 
 
 __all__ = [
-    "a_share_factor_catalog",
-    "a_share_factor_definitions",
+    "factor_catalog",
+    "factor_definitions",
 ]

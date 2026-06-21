@@ -16,7 +16,7 @@ from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
-    a_share_processed_catalog,
+    processed_catalog,
 )
 
 from .quality_report import (
@@ -57,7 +57,7 @@ def factor_columns(frame: pd.DataFrame) -> list[str]:
 
     registered = {
         definition.output_column
-        for definition in factor_definitions.a_share_factor_catalog().list()
+        for definition in factor_definitions.factor_catalog().list()
     }
     return [column for column in frame.columns if column in registered]
 
@@ -67,7 +67,7 @@ def label_columns(frame: pd.DataFrame) -> list[str]:
 
     registered = {
         definition.output_column
-        for definition in label_definitions.a_share_label_catalog().list()
+        for definition in label_definitions.label_catalog().list()
     }
     return [column for column in frame.columns if column in registered]
 
@@ -77,7 +77,7 @@ def check_factor_table(
 ) -> QualityReport:
     """Validate a split price-volume factor table against catalog/spec columns."""
 
-    spec = a_share_processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
+    spec = processed_catalog().get(PRICE_VOLUME_PROCESSED_DATA_ID)
     result = frame.copy()
     timestamps = _timestamp_series(result)
     if "timestamp" in result:
@@ -174,7 +174,7 @@ def check_label_table(
 ) -> QualityReport:
     """Validate a split forward-return label table against catalog/spec columns."""
 
-    spec = a_share_processed_catalog().get(FORWARD_RETURNS_PROCESSED_DATA_ID)
+    spec = processed_catalog().get(FORWARD_RETURNS_PROCESSED_DATA_ID)
     result = frame.copy()
     timestamps = _timestamp_series(result)
     if "timestamp" in result:

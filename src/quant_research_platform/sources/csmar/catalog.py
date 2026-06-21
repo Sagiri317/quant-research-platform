@@ -7,7 +7,7 @@ from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.sources.csmar.ids import SOURCE_ID
 
 
-def csmar_source_definition() -> SourceDefinition:
+def source_definition() -> SourceDefinition:
     return SourceDefinition(
         source_id=SourceId(SOURCE_ID),
         provider_id=SOURCE_ID,
@@ -16,4 +16,4 @@ def csmar_source_definition() -> SourceDefinition:
     )
 
 
-__all__ = ["csmar_source_definition"]
+__all__ = ["source_definition"]

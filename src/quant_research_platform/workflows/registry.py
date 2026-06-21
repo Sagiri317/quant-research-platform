@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
+from quant_research_platform.contracts.workflows import WorkflowRunPolicy
 
 NodeHandler = Callable[[], Any]
 

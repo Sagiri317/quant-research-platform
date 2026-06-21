@@ -59,6 +59,10 @@ def horizon_unit_suffix(value: DataFrequency | str) -> str:
     raise ValueError(f"unsupported_data_frequency: {frequency}")
 
 
+def market_bars_data_id(value: DataFrequency | str = DataFrequency.DAILY) -> str:
+    return f"market_bars_{data_frequency_slug(value)}"
+
+
 def require_supported_data_frequency(
     value: DataFrequency | str,
     *,
@@ -117,6 +121,7 @@ __all__ = [
     "ProcessedDataSpec",
     "data_frequency_slug",
     "horizon_unit_suffix",
+    "market_bars_data_id",
     "normalize_data_frequency",
     "require_supported_data_frequency",
 ]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from quant_research_platform.agents.dataset_planner import plan_research_dataset
@@ -23,7 +25,10 @@ from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.markets.implementations.a_share.fields import (
-    a_share_field_catalog,
+    field_catalog,
+)
+from quant_research_platform.markets.implementations.a_share.ids import (
+    market_panel_data_id,
 )
 
 
@@ -138,6 +143,43 @@ def test_factor_factory_rejects_unknown_input_columns() -> None:
         )
 
 
+def test_factor_factory_derives_unique_required_input_data_id_from_profile() -> None:
+    proposal = propose_factor(
+        profile=research_profile(),
+        proposal_id="factor-proposal-inferred-input",
+        factor_id="candidate_factor",
+        rationale="Candidate based on registered close field.",
+        input_columns=("close",),
+    )
+
+    assert proposal.required_input_data_id == market_panel_data_id()
+
+
+def test_factor_factory_requires_explicit_input_for_multiple_inputs() -> None:
+    profile = research_profile()
+    factors = profile.factors.list()
+    catalog = FactorCatalog()
+    catalog.register(factors[0])
+    catalog.register(
+        replace(
+            factors[0],
+            factor_id="alternate_input_factor",
+            output_column="alternate_input_factor",
+            required_input_data_id="alternate_processed_input",
+        )
+    )
+    ambiguous_profile = replace(profile, factors=catalog)
+
+    with pytest.raises(ValueError, match="factor_required_input_data_id_ambiguous"):
+        propose_factor(
+            profile=ambiguous_profile,
+            proposal_id="factor-proposal-ambiguous-input",
+            factor_id="candidate_factor",
+            rationale="Candidate based on registered close field.",
+            input_columns=("close",),
+        )
+
+
 def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() -> None:
     proposal = FactorProposal(
         proposal_id="factor-proposal-unregistered",
@@ -168,7 +210,7 @@ def test_factor_catalog_registers_valid_factor_proposal() -> None:
     definition = factor_definition_from_proposal(
         proposal,
         market_id=MarketId("a_share"),
-        field_names=set(a_share_field_catalog().list_names()),
+        field_names=set(field_catalog().list_names()),
     )
     catalog.register(definition)
 
@@ -192,7 +234,7 @@ def test_factor_proposal_registration_rejects_duplicate_output_columns() -> None
         factor_definition_from_proposal(
             proposal,
             market_id=MarketId("a_share"),
-            field_names=set(a_share_field_catalog().list_names()),
+            field_names=set(field_catalog().list_names()),
         )
 
 
@@ -212,7 +254,7 @@ def test_factor_proposal_registration_rejects_unresolved_derived_input() -> None
         factor_definition_from_proposal(
             proposal,
             market_id=MarketId("a_share"),
-            field_names=set(a_share_field_catalog().list_names()),
+            field_names=set(field_catalog().list_names()),
         )
 
 

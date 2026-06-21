@@ -32,31 +32,31 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
+    definition as a_share_definition,
+)
+from quant_research_platform.markets.implementations.a_share import (
+    fields as a_share_fields,
+)
+from quant_research_platform.markets.implementations.a_share import (
     research_profiles as a_share_research_profiles,
 )
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
 )
-from quant_research_platform.markets.implementations.a_share.definition import (
-    a_share_market_definition,
-)
 from quant_research_platform.markets.implementations.a_share.factors import (
-    definitions as a_share_factor_definitions,
-)
-from quant_research_platform.markets.implementations.a_share.fields import (
-    a_share_field_catalog,
+    definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
-    definitions as a_share_label_definitions,
+    definitions as label_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    catalog as a_share_processed_catalog_module,
+    catalog as processed_catalog_module,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
-    materializer as a_share_processed_materializer,
+    materializer as processed_materializer_module,
 )
 from quant_research_platform.reports.catalog import report_catalog
-from quant_research_platform.sources.csmar.catalog import csmar_source_definition
+from quant_research_platform.sources.csmar.catalog import source_definition
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_interim_catalog,
 )
@@ -128,15 +128,15 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
             SourceId("csmar"),
             DataFrequency.DAILY,
         ),
-        fields=a_share_field_catalog(),
-        factors=a_share_factor_definitions.a_share_factor_catalog(),
-        labels=a_share_label_definitions.a_share_label_catalog(),
-        processed=a_share_processed_catalog_module.a_share_processed_catalog(),
+        fields=a_share_fields.field_catalog(),
+        factors=factor_definitions.factor_catalog(),
+        labels=label_definitions.label_catalog(),
+        processed=processed_catalog_module.processed_catalog(),
         research_datasets=(
-            a_share_research_profiles.build_a_share_research_dataset_catalog()
+            a_share_research_profiles.build_research_dataset_catalog()
         ),
         evaluations=a_share_research_scenarios.build_evaluation_catalog(),
-        models=a_share_research_scenarios.build_a_share_model_catalog(),
+        models=a_share_research_scenarios.build_model_catalog(),
         predictions=PredictionCatalog(),
         portfolios=PortfolioCatalog(),
         sources=_a_share_csmar_source_registry(),
@@ -145,19 +145,19 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         source_interim_catalogs=_a_share_csmar_source_interim_catalogs(),
         source_id=_a_share_csmar_source_id(),
         materialize_interim_data=_materialize_a_share_csmar_interim_data,
-        materialize_processed_data=_materialize_a_share_processed_data,
+        materialize_processed_data=_materialize_processed_data,
     )
 
 
 def _a_share_csmar_source_registry() -> SourceRegistry:
     registry = SourceRegistry()
-    registry.register(csmar_source_definition())
+    registry.register(source_definition())
     return registry
 
 
 def _a_share_market_registry() -> MarketRegistry:
     registry = MarketRegistry()
-    registry.register(a_share_market_definition())
+    registry.register(a_share_definition.market_definition())
     return registry
 
 
@@ -187,13 +187,13 @@ def _materialize_a_share_csmar_interim_data(
     )
 
 
-def _materialize_a_share_processed_data(
+def _materialize_processed_data(
     layout: StorageLayout,
     source_id: SourceId,
     time_window: TimeWindow,
     kinds: frozenset[ProcessedDataKind],
 ) -> Mapping[str, DatasetInspection]:
-    return a_share_processed_materializer.materialize_processed_data(
+    return processed_materializer_module.materialize_processed_data(
         layout=layout,
         source_id=source_id,
         time_window=time_window,

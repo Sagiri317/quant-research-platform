@@ -9,7 +9,11 @@ from collections.abc import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.data import DataGrain
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    horizon_unit_suffix,
+)
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
@@ -25,37 +29,46 @@ _ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12
 
 _PRICE_VOLUME_STANDARD_WINDOWS: tuple[int, ...] = (1, 5, 10, 20, 60, 120, 252)
 
+
+def price_volume_window_column(
+    prefix: str,
+    window: int,
+    frequency: DataFrequency | str = DataFrequency.DAILY,
+) -> str:
+    return f"{prefix}_{window}{horizon_unit_suffix(frequency)}"
+
+
 CORE_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
-    "rev_1d",
-    "rev_5d",
-    "rev_10d",
-    "rev_20d",
-    "mom_20d",
-    "mom_60d",
-    "mom_120d",
-    "vol_20d",
-    "vol_60d",
-    "downside_vol_20d",
-    "downside_vol_60d",
-    "avg_amount_20d",
-    "avg_amount_60d",
-    "turnover_20d",
-    "turnover_60d",
-    "amihud_20d",
-    "amihud_60d",
-    "amplitude_20d",
-    "amplitude_60d",
+    price_volume_window_column("rev", 1),
+    price_volume_window_column("rev", 5),
+    price_volume_window_column("rev", 10),
+    price_volume_window_column("rev", 20),
+    price_volume_window_column("mom", 20),
+    price_volume_window_column("mom", 60),
+    price_volume_window_column("mom", 120),
+    price_volume_window_column("vol", 20),
+    price_volume_window_column("vol", 60),
+    price_volume_window_column("downside_vol", 20),
+    price_volume_window_column("downside_vol", 60),
+    price_volume_window_column("avg_amount", 20),
+    price_volume_window_column("avg_amount", 60),
+    price_volume_window_column("turnover", 20),
+    price_volume_window_column("turnover", 60),
+    price_volume_window_column("amihud", 20),
+    price_volume_window_column("amihud", 60),
+    price_volume_window_column("amplitude", 20),
+    price_volume_window_column("amplitude", 60),
     "log_float_market_cap",
     "log_total_market_cap",
 )
 SMOKE_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
-    "rev_1d",
-    "mom_20d",
-    "vol_20d",
-    "avg_amount_20d",
-    "turnover_20d",
-    "amihud_20d",
-    "amplitude_20d",
+    price_volume_window_column("rev", 1),
+    price_volume_window_column("mom", 20),
+    price_volume_window_column("vol", 20),
+    price_volume_window_column("avg_amount", 20),
+    price_volume_window_column("turnover", 20),
+    price_volume_window_column("amihud", 20),
+    price_volume_window_column("amplitude", 20),
     "log_float_market_cap",
     "log_total_market_cap",
 )
@@ -95,7 +108,7 @@ PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS: frozenset[str] = frozenset(
     }
 )
 BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
-    "rev_1d": ("period_return",),
+    price_volume_window_column("rev", 1): ("period_return",),
     "mom": ("adj_close",),
     "rev": ("adj_close",),
     "vol": ("period_return",),
@@ -122,36 +135,51 @@ BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 def price_volume_factor_columns_for_windows(
     windows: Iterable[int],
 ) -> tuple[str, ...]:
-    columns: list[str] = ["rev_1d"]
+    columns: list[str] = [price_volume_window_column("rev", 1)]
     for window in windows:
         if window != 1:
-            columns.extend((f"rev_{window}d", f"mom_{window}d"))
+            columns.extend(
+                (
+                    price_volume_window_column("rev", window),
+                    price_volume_window_column("mom", window),
+                )
+            )
     for window in (5, 20, 60, 120):
-        columns.append(f"vol_{window}d")
+        columns.append(price_volume_window_column("vol", window))
     for window in (20, 60):
         columns.extend(
             (
-                f"downside_vol_{window}d",
-                f"upside_vol_{window}d",
-                f"max_return_{window}d",
-                f"min_return_{window}d",
-                f"drawdown_{window}d",
-                f"skew_{window}d",
-                f"kurt_{window}d",
+                price_volume_window_column("downside_vol", window),
+                price_volume_window_column("upside_vol", window),
+                price_volume_window_column("max_return", window),
+                price_volume_window_column("min_return", window),
+                price_volume_window_column("drawdown", window),
+                price_volume_window_column("skew", window),
+                price_volume_window_column("kurt", window),
             )
         )
     for window in (5, 20, 60, 120):
-        columns.extend((f"avg_amount_{window}d", f"turnover_{window}d"))
+        columns.extend(
+            (
+                price_volume_window_column("avg_amount", window),
+                price_volume_window_column("turnover", window),
+            )
+        )
     for window in (20, 60):
-        columns.extend((f"turnover_chg_{window}d", f"turnover_vol_{window}d"))
+        columns.extend(
+            (
+                price_volume_window_column("turnover_chg", window),
+                price_volume_window_column("turnover_vol", window),
+            )
+        )
     for window in (20, 60, 120):
-        columns.append(f"amihud_{window}d")
+        columns.append(price_volume_window_column("amihud", window))
     for window in (20, 60):
-        columns.append(f"zero_volume_ratio_{window}d")
+        columns.append(price_volume_window_column("zero_volume_ratio", window))
     for window in (5, 20, 60, 120):
-        columns.append(f"amplitude_{window}d")
+        columns.append(price_volume_window_column("amplitude", window))
     for window in (20, 60):
-        columns.append(f"intraday_range_{window}d")
+        columns.append(price_volume_window_column("intraday_range", window))
     columns.extend(("log_float_market_cap", "log_total_market_cap"))
     return tuple(dict.fromkeys(columns))
 
@@ -292,22 +320,26 @@ def calculate_price_volume_factors(
     grouped = result.groupby(asset_column, sort=False)
     group_positions = tuple(grouped.indices.values())
     needs_trailing_price = any(
-        f"mom_{window}d" in requested_set or f"rev_{window}d" in requested_set
+        price_volume_window_column("mom", window) in requested_set
+        or price_volume_window_column("rev", window) in requested_set
         for window in required_windows
         if window != 1
     )
     needs_price = (
         needs_trailing_price
-        or any(f"drawdown_{window}d" in requested_set for window in required_windows)
         or any(
-            f"intraday_range_{window}d" in requested_set
+            price_volume_window_column("drawdown", window) in requested_set
+            for window in required_windows
+        )
+        or any(
+            price_volume_window_column("intraday_range", window) in requested_set
             for window in required_windows
         )
     )
     needs_returns = (
-        "rev_1d" in requested_set
+        price_volume_window_column("rev", 1) in requested_set
         or any(
-            f"{prefix}_{window}d" in requested_set
+            price_volume_window_column(prefix, window) in requested_set
             for prefix in (
                 "vol",
                 "downside_vol",
@@ -322,12 +354,12 @@ def calculate_price_volume_factors(
         )
     )
     needs_amount = any(
-        f"{prefix}_{window}d" in requested_set
+        price_volume_window_column(prefix, window) in requested_set
         for prefix in ("avg_amount", "amihud", "zero_volume_ratio")
         for window in required_windows
     )
     needs_turnover = any(
-        f"{prefix}_{window}d" in requested_set
+        price_volume_window_column(prefix, window) in requested_set
         for prefix in ("turnover", "turnover_chg", "turnover_vol")
         for window in required_windows
     )
@@ -359,76 +391,87 @@ def calculate_price_volume_factors(
         turnover.groupby(group_keys, sort=False) if turnover is not None else None
     )
 
-    if "rev_1d" in requested_set:
-        result["rev_1d"] = -returns
+    one_bar_reversal = price_volume_window_column("rev", 1)
+    if one_bar_reversal in requested_set:
+        result[one_bar_reversal] = -returns
     for window in required_windows:
         if window == 1:
             continue
-        needs_momentum = f"mom_{window}d" in requested_set
-        needs_reversal = f"rev_{window}d" in requested_set
+        momentum_column = price_volume_window_column("mom", window)
+        reversal_column = price_volume_window_column("rev", window)
+        needs_momentum = momentum_column in requested_set
+        needs_reversal = reversal_column in requested_set
         if needs_momentum or needs_reversal:
             shifted_price = price_grouped.shift(window)
             denominator = _valid_denominator(shifted_price)
             trailing_return = _finite_or_nan(price / denominator - 1.0)
         if needs_momentum:
-            result[f"mom_{window}d"] = trailing_return
+            result[momentum_column] = trailing_return
         if needs_reversal:
-            result[f"rev_{window}d"] = -trailing_return
+            result[reversal_column] = -trailing_return
 
     for window in required_windows:
-        if f"vol_{window}d" in requested_set:
-            result[f"vol_{window}d"] = _rolling_std(
+        column = price_volume_window_column("vol", window)
+        if column in requested_set:
+            result[column] = _rolling_std(
                 returns,
                 group_keys,
                 group_positions,
                 window,
             )
-        if f"downside_vol_{window}d" in requested_set:
-            result[f"downside_vol_{window}d"] = _rolling_rms(
+        column = price_volume_window_column("downside_vol", window)
+        if column in requested_set:
+            result[column] = _rolling_rms(
                 returns.clip(upper=0.0),
                 group_keys,
                 group_positions,
                 window,
             )
-        if f"upside_vol_{window}d" in requested_set:
-            result[f"upside_vol_{window}d"] = _rolling_rms(
+        column = price_volume_window_column("upside_vol", window)
+        if column in requested_set:
+            result[column] = _rolling_rms(
                 returns.clip(lower=0.0),
                 group_keys,
                 group_positions,
                 window,
             )
-        if f"max_return_{window}d" in requested_set:
-            result[f"max_return_{window}d"] = _rolling_aggregate(
+        column = price_volume_window_column("max_return", window)
+        if column in requested_set:
+            result[column] = _rolling_aggregate(
                 result[return_column],
                 grouped[return_column],
                 group_positions,
                 window,
                 "max",
             )
-        if f"min_return_{window}d" in requested_set:
-            result[f"min_return_{window}d"] = _rolling_aggregate(
+        column = price_volume_window_column("min_return", window)
+        if column in requested_set:
+            result[column] = _rolling_aggregate(
                 result[return_column],
                 grouped[return_column],
                 group_positions,
                 window,
                 "min",
             )
-        if f"drawdown_{window}d" in requested_set:
-            result[f"drawdown_{window}d"] = _rolling_drawdown(
+        column = price_volume_window_column("drawdown", window)
+        if column in requested_set:
+            result[column] = _rolling_drawdown(
                 price,
                 group_keys,
                 group_positions,
                 window,
             )
-        if f"skew_{window}d" in requested_set:
-            result[f"skew_{window}d"] = _rolling_skew(
+        column = price_volume_window_column("skew", window)
+        if column in requested_set:
+            result[column] = _rolling_skew(
                 returns,
                 group_keys,
                 group_positions,
                 window,
             )
-        if f"kurt_{window}d" in requested_set:
-            result[f"kurt_{window}d"] = _rolling_kurt(
+        column = price_volume_window_column("kurt", window)
+        if column in requested_set:
+            result[column] = _rolling_kurt(
                 returns,
                 group_keys,
                 group_positions,
@@ -436,36 +479,41 @@ def calculate_price_volume_factors(
             )
 
     for window in required_windows:
-        if f"avg_amount_{window}d" in requested_set:
-            result[f"avg_amount_{window}d"] = _rolling_aggregate(
+        column = price_volume_window_column("avg_amount", window)
+        if column in requested_set:
+            result[column] = _rolling_aggregate(
                 amount,
                 amount_grouped,
                 group_positions,
                 window,
                 "mean",
             )
-        if f"turnover_{window}d" in requested_set:
-            result[f"turnover_{window}d"] = _rolling_aggregate(
+        column = price_volume_window_column("turnover", window)
+        if column in requested_set:
+            result[column] = _rolling_aggregate(
                 turnover,
                 turnover_grouped,
                 group_positions,
                 window,
                 "mean",
             )
-        if f"turnover_chg_{window}d" in requested_set:
+        column = price_volume_window_column("turnover_chg", window)
+        if column in requested_set:
             shifted_turnover = turnover_grouped.shift(window)
             denominator = _valid_denominator(shifted_turnover)
-            result[f"turnover_chg_{window}d"] = turnover / denominator - 1.0
-        if f"turnover_vol_{window}d" in requested_set:
-            result[f"turnover_vol_{window}d"] = _rolling_std(
+            result[column] = turnover / denominator - 1.0
+        column = price_volume_window_column("turnover_vol", window)
+        if column in requested_set:
+            result[column] = _rolling_std(
                 turnover,
                 group_keys,
                 group_positions,
                 window,
             )
-        if f"zero_volume_ratio_{window}d" in requested_set:
+        column = price_volume_window_column("zero_volume_ratio", window)
+        if column in requested_set:
             zero_volume = (amount <= 0.0).astype(float)
-            result[f"zero_volume_ratio_{window}d"] = _rolling_aggregate(
+            result[column] = _rolling_aggregate(
                 zero_volume,
                 zero_volume.groupby(group_keys, sort=False),
                 group_positions,
@@ -474,11 +522,17 @@ def calculate_price_volume_factors(
             )
 
     illiquidity = None
-    if any(f"amihud_{window}d" in requested_set for window in required_windows):
+    if any(
+        price_volume_window_column("amihud", window) in requested_set
+        for window in required_windows
+    ):
         denominator = _valid_denominator(amount)
         illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
     amplitude = None
-    if any(f"amplitude_{window}d" in requested_set for window in required_windows):
+    if any(
+        price_volume_window_column("amplitude", window) in requested_set
+        for window in required_windows
+    ):
         amplitude = (
             pd.to_numeric(result[high_column], errors="coerce")
             - pd.to_numeric(result[low_column], errors="coerce")
@@ -487,16 +541,18 @@ def calculate_price_volume_factors(
         )
         amplitude = _finite_or_nan(amplitude)
     for window in required_windows:
-        if f"amihud_{window}d" in requested_set:
-            result[f"amihud_{window}d"] = _rolling_aggregate(
+        column = price_volume_window_column("amihud", window)
+        if column in requested_set:
+            result[column] = _rolling_aggregate(
                 illiquidity,
                 illiquidity.groupby(group_keys, sort=False),
                 group_positions,
                 window,
                 "mean",
             )
-        if f"amplitude_{window}d" in requested_set:
-            result[f"amplitude_{window}d"] = _rolling_aggregate(
+        column = price_volume_window_column("amplitude", window)
+        if column in requested_set:
+            result[column] = _rolling_aggregate(
                 amplitude,
                 amplitude.groupby(group_keys, sort=False),
                 group_positions,
@@ -506,7 +562,8 @@ def calculate_price_volume_factors(
 
     intraday_range = None
     if any(
-        f"intraday_range_{window}d" in requested_set for window in required_windows
+        price_volume_window_column("intraday_range", window) in requested_set
+        for window in required_windows
     ):
         intraday_range = (
             pd.to_numeric(result[high_column], errors="coerce")
@@ -514,8 +571,9 @@ def calculate_price_volume_factors(
         ) / _valid_denominator(price)
         intraday_range = _finite_or_nan(intraday_range)
     for window in required_windows:
-        if f"intraday_range_{window}d" in requested_set:
-            result[f"intraday_range_{window}d"] = _rolling_aggregate(
+        column = price_volume_window_column("intraday_range", window)
+        if column in requested_set:
+            result[column] = _rolling_aggregate(
                 intraday_range,
                 intraday_range.groupby(group_keys, sort=False),
                 group_positions,
@@ -669,7 +727,7 @@ def largest_price_volume_lookback_days(
 
     windows = []
     for column in factor_columns:
-        if column == "rev_1d":
+        if column == price_volume_window_column("rev", 1):
             windows.append(1)
         windows.extend(int(value) for value in re.findall(r"_(\d+)d(?:_|$)", column))
     return max(windows, default=0)
@@ -996,7 +1054,7 @@ def _required_fields_for_factor(factor: str) -> tuple[str, ...]:
 
 
 def _windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
-    values = {1} if "rev_1d" in requested else set()
+    values = {1} if price_volume_window_column("rev", 1) in requested else set()
     for factor in requested:
         for token in factor.split("_"):
             if token.endswith("d") and token[:-1].isdigit():
@@ -1023,6 +1081,7 @@ __all__ = [
     "price_volume_factor_columns_for_windows",
     "price_volume_factor_definitions",
     "price_volume_factor_input_columns",
+    "price_volume_window_column",
     "price_volume_valid_bar_read_window",
     "select_price_volume_feature_columns_from_schema",
     "select_price_volume_features",

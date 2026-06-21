@@ -29,7 +29,7 @@ def calculate_factors_for_panel(
         unsupported = next(
             family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
         )
-        raise ValueError(f"unsupported_a_share_factor_family: {unsupported}")
+        raise ValueError(f"unsupported_factor_family: {unsupported}")
     return calculate_price_volume_factors(
         panel_frame.loc[:, list(factor_panel_input_columns(requested))],
         factor_columns=tuple(definition.output_column for definition in requested),
@@ -47,7 +47,7 @@ def factor_panel_input_columns(
         unsupported = next(
             family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
         )
-        raise ValueError(f"unsupported_a_share_factor_family: {unsupported}")
+        raise ValueError(f"unsupported_factor_family: {unsupported}")
     return _factor_panel_columns(requested)
 
 
@@ -80,7 +80,7 @@ def factor_read_window_for_panel(
         unsupported = next(
             family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
         )
-        raise ValueError(f"unsupported_a_share_factor_family: {unsupported}")
+        raise ValueError(f"unsupported_factor_family: {unsupported}")
     return price_volume_valid_bar_read_window(
         panel_keys,
         read_window=read_window,
@@ -101,8 +101,7 @@ def _require_factor_input_columns(
     if missing:
         family = definitions[0].family if definitions else PRICE_VOLUME_FACTOR_FAMILY
         raise ValueError(
-            "missing_a_share_factor_input_columns: "
-            f"{family}: {', '.join(missing)}"
+            f"missing_factor_input_columns: {family}: {', '.join(missing)}"
         )
 
 

@@ -18,10 +18,10 @@ SOURCE_IDENTIFIER_FIELDS = {
 }
 
 
-def csmar_field_role(column: str) -> ColumnRole:
+def field_role(column: str) -> ColumnRole:
     if column in SOURCE_IDENTIFIER_FIELDS:
         return ColumnRole.SOURCE
     return ColumnRole.CONTEXT
 
 
-__all__ = ["SOURCE_IDENTIFIER_FIELDS", "csmar_field_role"]
+__all__ = ["SOURCE_IDENTIFIER_FIELDS", "field_role"]

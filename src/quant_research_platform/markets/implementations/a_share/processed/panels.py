@@ -7,12 +7,14 @@ from collections.abc import Sequence
 import pandas as pd
 
 from quant_research_platform.catalog.fields import canonical_field_names
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
     compute_listing_age_trading_days,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
+    _require_supported_panel_frequency,
 )
 
 _CANONICAL_NAMES = canonical_field_names()
@@ -27,34 +29,38 @@ ST_STATUS_CODES = {2, 3, 5, 6, 8, 9, 11, 12, 14, 15}
 
 
 def compute_market_panel(
-    market_bars_1d: pd.DataFrame,
+    market_bars: pd.DataFrame,
     *,
+    frequency: DataFrequency | str = DataFrequency.DAILY,
     stock_master: pd.DataFrame,
     market_cap: pd.DataFrame,
     trading_calendar: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compute the A-share processed market_panel_1d from source interim frames."""
+    """Compute the A-share processed market panel from source interim frames."""
 
-    daily = _ensure_datetime(
-        _with_a_share_time_fields(_with_a_share_asset_keys(market_bars_1d)),
+    _require_supported_panel_frequency(frequency, context="market panel")
+    market_bars = _ensure_datetime(
+        _with_time_fields(_with_asset_keys(market_bars)),
         ["timestamp", "session_date", "available_at"],
     ).copy()
-    daily = _with_a_share_market_semantics(daily)
-    daily = daily.loc[daily["is_a_share_scope"].astype(bool)].copy()
+    market_bars = _with_market_semantics(market_bars)
+    market_bars = market_bars.loc[market_bars["is_a_share_scope"].astype(bool)].copy()
     missing_canonical = [
-        column for column in MARKET_PANEL_KEY_COLUMNS if column not in daily.columns
+        column
+        for column in MARKET_PANEL_KEY_COLUMNS
+        if column not in market_bars.columns
     ]
     if missing_canonical:
         raise ValueError(
-            "market_bars_1d_interim_missing_canonical_columns: "
+            "market_bars_interim_missing_canonical_columns: "
             + ", ".join(missing_canonical)
         )
     stocks = _ensure_datetime(
-        _with_a_share_asset_keys(stock_master),
+        _with_asset_keys(stock_master),
         ["listing_date", "delisting_date", "status_change_date"],
     )
     cap = _ensure_datetime(
-        _with_a_share_asset_keys(market_cap),
+        _with_asset_keys(market_cap),
         ["timestamp", "share_change_date"],
     )
     if "timestamp" not in cap or cap["timestamp"].isna().any():
@@ -74,7 +80,7 @@ def compute_market_panel(
         )
         if column in stocks.columns
     ]
-    panel = _asof_join_stock_master(daily, stocks[keep_stock_columns])
+    panel = _asof_join_stock_master(market_bars, stocks[keep_stock_columns])
     panel["listing_age_days"] = (panel["timestamp"] - panel["listing_date"]).dt.days
 
     cap_columns = [
@@ -156,7 +162,7 @@ def compute_market_panel(
     return panel[ordered]
 
 
-def _with_a_share_asset_keys(frame: pd.DataFrame) -> pd.DataFrame:
+def _with_asset_keys(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     if "asset_id" not in result.columns:
         if "source_asset_id" not in result.columns:
@@ -166,7 +172,7 @@ def _with_a_share_asset_keys(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _with_a_share_time_fields(frame: pd.DataFrame) -> pd.DataFrame:
+def _with_time_fields(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     if "timestamp" not in result.columns:
         raise ValueError("missing_source_timestamp")
@@ -177,7 +183,7 @@ def _with_a_share_time_fields(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _with_a_share_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
+def _with_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     result["trading_status_code"] = pd.to_numeric(
         result["trading_status_code"],

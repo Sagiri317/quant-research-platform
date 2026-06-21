@@ -74,7 +74,7 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
 )
 
 
-def a_share_field_catalog() -> FieldCatalog:
+def field_catalog() -> FieldCatalog:
     """Return platform canonical fields plus A-share-only processed fields."""
 
     catalog = platform_field_catalog()
@@ -83,4 +83,4 @@ def a_share_field_catalog() -> FieldCatalog:
     return catalog
 
 
-__all__ = ["FIELD_SPECS", "a_share_field_catalog"]
+__all__ = ["FIELD_SPECS", "field_catalog"]

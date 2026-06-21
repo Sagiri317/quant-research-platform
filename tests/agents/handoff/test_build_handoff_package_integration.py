@@ -34,19 +34,33 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     run_handoffs = "." + "run/handoffs"
     task_path.write_text(
         json.dumps(
-            {
-                "schema_version": "handoff-task-metadata/0.1",
-                "slug": slug,
-                "branch": "feature/qrp-clean-rewrite",
+                {
+                    "schema_version": "handoff-task-metadata/0.1",
+                    "slug": slug,
+                    "branch": "feature/qrp-clean-rewrite",
                 "base": base,
                 "final_head": final_head,
                 "final_sha": final_head,
-                "pr_url": "https://github.com/Sagiri317/quant-research-platform/pull/1",
-                "zip_logical_path": f"{run_handoffs}/{slug}.zip",
-                "sidecar_logical_path": f"{run_handoffs}/{slug}.json",
-                "validation_evidence": {
-                    "schema_version": "handoff-validation-evidence/0.1",
-                    "checks": [
+                    "pr_url": "https://github.com/Sagiri317/quant-research-platform/pull/1",
+                    "zip_logical_path": f"{run_handoffs}/{slug}.zip",
+                    "sidecar_logical_path": f"{run_handoffs}/{slug}.json",
+                    "handoff_evidence": {
+                        "generation": {"status": "FAIL", "final_head": "forged"},
+                        "source-tree-scan": {
+                            "status": "FAIL",
+                            "scanned_head": "forged",
+                        },
+                        "diff" + ".patch": {"status": "PASS"},
+                        "pr_body.md": {"status": "PASS"},
+                        "review" + "_evidence": {"status": "PASS"},
+                        "custom-note": {
+                            "schema_version": "custom-note/0.1",
+                            "status": "PASS",
+                        },
+                    },
+                    "validation_evidence": {
+                        "schema_version": "handoff-validation-evidence/0.1",
+                        "checks": [
                         {
                             "name": "github_review_threads",
                             "status": "BLOCKED",
@@ -104,10 +118,17 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         names = set(archive.namelist())
         sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         manifest_raw = archive.read("artifact_manifest.json")
+        bundle_raw = archive.read("final-branch.bundle")
         manifest = json.loads(manifest_raw.decode("utf-8"))
         task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
         validation_evidence = json.loads(
             archive.read("validation_evidence.json").decode("utf-8")
+        )
+        generation = json.loads(
+            archive.read("handoff_evidence/generation.json").decode("utf-8")
+        )
+        source_tree_scan = json.loads(
+            archive.read("handoff_evidence/source-tree-scan.json").decode("utf-8")
         )
 
     required = {
@@ -121,7 +142,12 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert "pr_body.md" not in names
     assert "review_threads.json" not in names
     assert "diff" + ".patch" not in names
-    assert any(name.startswith("handoff_evidence/") for name in names)
+    assert "handoff_evidence/diff" + ".patch.json" not in names
+    assert "handoff_evidence/pr_body.md.json" not in names
+    assert "handoff_evidence/review" + "_evidence.json" not in names
+    assert "handoff_evidence/generation.json" in names
+    assert "handoff_evidence/source-tree-scan.json" in names
+    assert "handoff_evidence/custom-note.json" in names
     assert f"{slug}.json" not in names
     forbidden_prefixes = (
         "run_tools/",
@@ -150,6 +176,16 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         task_metadata["pr_url"]
         == "https://github.com/Sagiri317/quant-research-platform/pull/1"
     )
+    assert generation["mode"] == "evidence"
+    assert generation["base"] == base
+    assert generation["final_head"] == final_head
+    assert generation["zip_filename"] == f"{slug}.zip"
+    assert generation["zip_sha256"] == "external_sidecar"
+    assert generation["bundle_sha256"] == hashlib.sha256(bundle_raw).hexdigest()
+    assert sidecar["zip_sha256"]
+    assert source_tree_scan["status"] == "PASS"
+    assert source_tree_scan["scanned_head"] == final_head
+    assert source_tree_scan["expected_head"] == final_head
     checks = {
         row["name"]: row
         for row in validation_evidence["checks"]
@@ -251,11 +287,6 @@ def _init_synthetic_repo(repo: Path) -> None:
     shutil.copytree(
         HANDOFF_ROOT / "scripts" / "handoff",
         support_root / "scripts" / "handoff",
-    )
-    (support_root / "scripts").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(
-        HANDOFF_ROOT / "scripts" / "render_pr_body_from_validation_evidence.py",
-        support_root / "scripts" / "render_pr_body_from_validation_evidence.py",
     )
     shutil.copytree(
         HANDOFF_ROOT / "templates" / "handoff",

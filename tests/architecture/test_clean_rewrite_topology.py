@@ -77,7 +77,6 @@ def test_clean_rewrite_target_files_exist() -> None:
         "contracts/privacy.py",
         "contracts/workflows.py",
         "contracts/validation.py",
-        "contracts/workflow_run.py",
         "storage/layout.py",
         "storage/datasets.py",
         "storage/manifests.py",
@@ -526,7 +525,7 @@ def test_csmar_mapping_and_checksum_owners_are_split_from_raw_schemas() -> None:
     raw_text = _read_source(raw_path)
     raw_tree = _parse_source(raw_path)
     forbidden_raw_owners = {
-        "map_csmar_columns",
+        "map_columns",
         "missing_raw_columns",
         "missing_raw_column_names",
         "normalize_stock_code",
@@ -554,7 +553,7 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
         SOURCE_ROOT / "sources/csmar/field_mappings.py": {
             "missing_raw_columns",
             "missing_raw_column_names",
-            "map_csmar_columns",
+            "map_columns",
             "normalize_stock_code",
         },
         SOURCE_ROOT / "sources/csmar/checksums.py": {
@@ -666,6 +665,7 @@ def test_csmar_mapping_metadata_is_owned_by_field_mappings() -> None:
         "table_code",
         "table_name_zh",
         "required_columns",
+        "optional_columns",
     }
     assert {
         "COLUMN_MAPPINGS",

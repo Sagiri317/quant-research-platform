@@ -62,6 +62,7 @@ _ROW_SAMPLE_RE = re.compile(
 )
 _PRIVATE_MARKER_RE = re.compile(
     r"(?i)\b(?:csmar|source_id|provider_id|implementation_package|"
+    r"source[-_ ]?name|provider[-_ ]?name|data[-_ ]?provider|vendor[-_ ]?name|"
     r"provider[-_ ]?marker|source[-_ ]?marker|vendor[-_ ]?marker|"
     r"vendor[-_ ]?payload|raw[-_ ]?vendor|vendor(?:[-_ ]?source)?|"
     r"raw[-_ ]?source[-_ ]?marker)\b"

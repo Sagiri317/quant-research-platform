@@ -136,6 +136,10 @@ def test_private_marker_input_is_rejected_before_row_level_read() -> None:
         ("row sample: market_id=a_share asset_id=000001", "row_sample"),
         ("source marker from CSMAR export table", "private_marker"),
         ("vendor_marker=raw-provider", "private_marker"),
+        ("provider_name=raw-provider", "private_marker"),
+        ("source_name=raw-source", "private_marker"),
+        ("data_provider=raw-provider", "private_marker"),
+        ("vendor_name=raw-provider", "private_marker"),
     ],
 )
 def test_public_text_unsafe_reason_covers_public_safety_markers(

@@ -18,14 +18,25 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     InterimDataSpec,
     ProcessedDataKind,
+    market_bars_data_id,
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share.ids import (
+    market_context_data_id,
+    market_panel_data_id,
+)
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
-    a_share_processed_catalog,
+    processed_catalog,
+)
+from quant_research_platform.research.factors.price_volume import (
+    price_volume_window_column,
+)
+from quant_research_platform.research.labels.forward_returns import (
+    forward_return_label_column,
 )
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import (
@@ -36,6 +47,11 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.layout import StorageLayout
 
 SYNTHETIC_SOURCE_ID = SourceId("synthetic_vendor_a")
+MARKET_BARS_DATA_ID = market_bars_data_id()
+MARKET_PANEL_DATA_ID = market_panel_data_id()
+MARKET_CONTEXT_DATA_ID = market_context_data_id()
+FORWARD_RETURN_1D_COLUMN = forward_return_label_column(1)
+MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 
 
 def test_materialize_processed_data_writes_requested_panel_and_dependencies(
@@ -48,33 +64,33 @@ def test_materialize_processed_data_writes_requested_panel_and_dependencies(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
     )
 
-    assert set(written) == {"market_panel_1d"}
-    root = tmp_path / "data" / "processed" / "a_share" / "panel" / "market_panel_1d"
+    assert set(written) == {MARKET_PANEL_DATA_ID}
+    root = tmp_path / "data" / "processed" / "a_share" / "panel" / MARKET_PANEL_DATA_ID
     panel = read_dataset(root)
     assert len(panel) == 2
     assert panel["asset_id"].unique().tolist() == ["000001"]
     assert "source_asset_id" not in panel.columns
 
 
-def test_panel_materializer_reuses_market_bars_1d_inspection(
+def test_panel_materializer_reuses_market_bar_inspection(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
-    market_bars_1d_root = layout.interim_data_root(
+    market_bars_root = layout.interim_data_root(
         SYNTHETIC_SOURCE_ID,
-        "market_bars_1d",
+        MARKET_BARS_DATA_ID,
     )
     calls = 0
     original = materializer.inspect_dataset
 
     def spy_inspect_dataset(*args, **kwargs):
         nonlocal calls
-        if Path(args[0]) == market_bars_1d_root and "time_window" not in kwargs:
+        if Path(args[0]) == market_bars_root and "time_window" not in kwargs:
             calls += 1
         return original(*args, **kwargs)
 
@@ -84,33 +100,33 @@ def test_panel_materializer_reuses_market_bars_1d_inspection(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
     )
 
     assert calls == 1
 
 
-def test_panel_materializer_does_not_preload_full_market_bars_1d(
+def test_panel_materializer_does_not_preload_full_market_bars(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout, end_date="2014-01-10")
-    market_bars_1d_root = layout.interim_data_root(
+    market_bars_root = layout.interim_data_root(
         SYNTHETIC_SOURCE_ID,
-        "market_bars_1d",
+        MARKET_BARS_DATA_ID,
     )
     original = materializer.read_dataset
-    full_market_bars_1d_reads = 0
-    windowed_market_bars_1d_reads = 0
+    full_market_bars_reads = 0
+    windowed_market_bars_reads = 0
 
     def spy_read_dataset(root, **kwargs):
-        nonlocal full_market_bars_1d_reads, windowed_market_bars_1d_reads
-        if Path(root) == market_bars_1d_root:
+        nonlocal full_market_bars_reads, windowed_market_bars_reads
+        if Path(root) == market_bars_root:
             if kwargs.get("time_window") is None:
-                full_market_bars_1d_reads += 1
+                full_market_bars_reads += 1
             else:
-                windowed_market_bars_1d_reads += 1
+                windowed_market_bars_reads += 1
         return original(root, **kwargs)
 
     monkeypatch.setattr(materializer, "read_dataset", spy_read_dataset)
@@ -119,7 +135,7 @@ def test_panel_materializer_does_not_preload_full_market_bars_1d(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
         resource_policy=RuntimeResourcePolicy(
             available_memory_bytes=1_000,
             memory_budget_fraction=1.0,
@@ -128,8 +144,8 @@ def test_panel_materializer_does_not_preload_full_market_bars_1d(
         ),
     )
 
-    assert full_market_bars_1d_reads == 0
-    assert windowed_market_bars_1d_reads > 0
+    assert full_market_bars_reads == 0
+    assert windowed_market_bars_reads > 0
 
 
 def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) -> None:
@@ -139,7 +155,7 @@ def test_materialize_processed_data_rejects_existing_requested_root(tmp_path) ->
         "layout": layout,
         "source_id": SYNTHETIC_SOURCE_ID,
         "time_window": TimeWindow("2014-01-02", "2014-01-03"),
-        "data_ids": ("market_panel_1d",),
+        "data_ids": (MARKET_PANEL_DATA_ID,),
     }
 
     materializer.materialize_processed_data(**kwargs)
@@ -160,7 +176,7 @@ def test_materialize_processed_data_requires_exactly_one_selector(tmp_path) -> N
     with pytest.raises(ValueError, match="data_ids_xor_kinds_required"):
         materializer.materialize_processed_data(
             **common,
-            data_ids=("market_panel_1d",),
+            data_ids=(MARKET_PANEL_DATA_ID,),
             kinds=frozenset({ProcessedDataKind.PANEL}),
         )
 
@@ -178,9 +194,9 @@ def test_materialize_processed_data_by_kind_writes_dependency_and_target(
         kinds=frozenset({ProcessedDataKind.FACTOR}),
     )
 
-    assert set(written) == {"market_panel_1d", "price_volume"}
+    assert set(written) == {MARKET_PANEL_DATA_ID, "price_volume"}
     assert (
-        tmp_path / "data" / "processed" / "a_share" / "panel" / "market_panel_1d"
+        tmp_path / "data" / "processed" / "a_share" / "panel" / MARKET_PANEL_DATA_ID
     ).exists()
     assert (
         tmp_path / "data" / "processed" / "a_share" / "factor" / "price_volume"
@@ -199,8 +215,8 @@ def test_label_materializer_expands_same_run_panel_dependency_for_future_halo(
     )
     monkeypatch.setattr(
         materializer,
-        "a_share_processed_catalog",
-        lambda: _catalog_with_forward_return_1d_only(),
+        "processed_catalog",
+        lambda: _catalog_with_one_step_forward_return_only(),
     )
 
     materializer.materialize_processed_data(
@@ -210,12 +226,12 @@ def test_label_materializer_expands_same_run_panel_dependency_for_future_halo(
         data_ids=("forward_returns",),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
     labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
     jan3_label = labels.loc[
         pd.to_datetime(labels["timestamp"]).dt.date.astype(str).eq("2014-01-03"),
-        "forward_return_1d",
+        FORWARD_RETURN_1D_COLUMN,
     ].iloc[0]
     assert pd.notna(jan3_label)
 
@@ -232,23 +248,23 @@ def test_label_materializer_expands_requested_panel_dependency_for_future_halo(
     )
     monkeypatch.setattr(
         materializer,
-        "a_share_processed_catalog",
-        lambda: _catalog_with_forward_return_1d_only(),
+        "processed_catalog",
+        lambda: _catalog_with_one_step_forward_return_only(),
     )
 
     materializer.materialize_processed_data(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("market_panel_1d", "forward_returns"),
+        data_ids=(MARKET_PANEL_DATA_ID, "forward_returns"),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
     labels = read_dataset(_processed_root(tmp_path, "label", "forward_returns"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.max().isoformat() == "2014-01-07"
     jan3_label = labels.loc[
         pd.to_datetime(labels["timestamp"]).dt.date.astype(str).eq("2014-01-03"),
-        "forward_return_1d",
+        FORWARD_RETURN_1D_COLUMN,
     ].iloc[0]
     assert pd.notna(jan3_label)
 
@@ -265,8 +281,8 @@ def test_factor_materializer_expands_same_run_panel_dependency_for_history_halo(
     )
     monkeypatch.setattr(
         materializer,
-        "a_share_processed_catalog",
-        lambda: _catalog_with_mom_20d_only(),
+        "processed_catalog",
+        lambda: _catalog_with_momentum_20d_only(),
     )
 
     materializer.materialize_processed_data(
@@ -276,10 +292,10 @@ def test_factor_materializer_expands_same_run_panel_dependency_for_history_halo(
         data_ids=("price_volume",),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
     factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
-    assert pd.notna(factors["mom_20d"].iloc[0])
+    assert pd.notna(factors[MOMENTUM_20D_COLUMN].iloc[0])
 
 
 def test_factor_materializer_expands_requested_panel_dependency_for_history_halo(
@@ -294,21 +310,21 @@ def test_factor_materializer_expands_requested_panel_dependency_for_history_halo
     )
     monkeypatch.setattr(
         materializer,
-        "a_share_processed_catalog",
-        lambda: _catalog_with_mom_20d_only(),
+        "processed_catalog",
+        lambda: _catalog_with_momentum_20d_only(),
     )
 
     materializer.materialize_processed_data(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-31", "2014-01-31"),
-        data_ids=("market_panel_1d", "price_volume"),
+        data_ids=(MARKET_PANEL_DATA_ID, "price_volume"),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
     factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
     assert pd.to_datetime(panel["timestamp"]).dt.date.min().isoformat() == "2014-01-03"
-    assert pd.notna(factors["mom_20d"].iloc[0])
+    assert pd.notna(factors[MOMENTUM_20D_COLUMN].iloc[0])
 
 
 def test_materializer_empty_target_window_still_fails_closed(tmp_path) -> None:
@@ -320,7 +336,7 @@ def test_materializer_empty_target_window_still_fails_closed(tmp_path) -> None:
             layout=layout,
             source_id=SYNTHETIC_SOURCE_ID,
             time_window=TimeWindow("2009-01-01", "2009-01-31"),
-            data_ids=("market_panel_1d",),
+            data_ids=(MARKET_PANEL_DATA_ID,),
         )
 
 
@@ -332,13 +348,16 @@ def test_factor_materializer_rejects_unexpected_declared_processed_input(
     _write_interim_inputs(layout)
     catalog = _catalog_with_processed_inputs(
         "price_volume",
-        ("market_panel_1d", "market_context_1d"),
+        (MARKET_PANEL_DATA_ID, MARKET_CONTEXT_DATA_ID),
     )
-    monkeypatch.setattr(materializer, "a_share_processed_catalog", lambda: catalog)
+    monkeypatch.setattr(materializer, "processed_catalog", lambda: catalog)
 
     with pytest.raises(
         ValueError,
-        match="unexpected_processed_input_for_factor: price_volume: market_context_1d",
+        match=(
+            "unexpected_processed_input_for_factor: "
+            f"price_volume: {MARKET_CONTEXT_DATA_ID}"
+        ),
     ):
         materializer.materialize_processed_data(
             layout=layout,
@@ -355,11 +374,14 @@ def test_factor_materializer_requires_family_contract_input_declared_by_spec(
     layout = StorageLayout(project_root=tmp_path)
     _write_interim_inputs(layout)
     catalog = _catalog_with_processed_inputs("price_volume", ())
-    monkeypatch.setattr(materializer, "a_share_processed_catalog", lambda: catalog)
+    monkeypatch.setattr(materializer, "processed_catalog", lambda: catalog)
 
     with pytest.raises(
         ValueError,
-        match="missing_processed_input_for_factor: price_volume: market_panel_1d",
+        match=(
+            "missing_processed_input_for_factor: "
+            f"price_volume: {MARKET_PANEL_DATA_ID}"
+        ),
     ):
         materializer.materialize_processed_data(
             layout=layout,
@@ -377,7 +399,7 @@ def test_factor_materializer_unknown_family_fails_closed(
     _write_interim_inputs(layout)
     monkeypatch.setattr(
         materializer.factor_definitions,
-        "a_share_factor_catalog",
+        "factor_catalog",
         lambda: _factor_catalog_with_families(("alternative_price_family",)),
     )
 
@@ -401,7 +423,7 @@ def test_factor_materializer_mixed_families_fail_closed(
     _write_interim_inputs(layout)
     monkeypatch.setattr(
         materializer.factor_definitions,
-        "a_share_factor_catalog",
+        "factor_catalog",
         lambda: _factor_catalog_with_families(("price_volume", "other_factor")),
     )
 
@@ -425,7 +447,7 @@ def test_label_materializer_unknown_family_fails_closed(
     _write_interim_inputs(layout)
     monkeypatch.setattr(
         materializer.label_definitions,
-        "a_share_label_catalog",
+        "label_catalog",
         lambda: _label_catalog_with_families(("alternative_label_family",)),
     )
 
@@ -449,7 +471,7 @@ def test_label_materializer_mixed_families_fail_closed(
     _write_interim_inputs(layout)
     monkeypatch.setattr(
         materializer.label_definitions,
-        "a_share_label_catalog",
+        "label_catalog",
         lambda: _label_catalog_with_families(("forward_return", "other_label")),
     )
 
@@ -479,8 +501,8 @@ def test_materializer_reuses_same_run_dependency_for_empty_window_tail(
     )
 
     assert {
-        "market_panel_1d",
-        "market_context_1d",
+        MARKET_PANEL_DATA_ID,
+        MARKET_CONTEXT_DATA_ID,
         "default",
         "as_of",
         "execution",
@@ -497,7 +519,7 @@ def test_materialize_processed_data_existing_dependency_accepts_non_trading_end(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
     )
 
     written = materializer.materialize_processed_data(
@@ -528,7 +550,7 @@ def test_materialize_processed_data_writes_only_core_trading_sessions(
         data_ids=("price_volume",),
     )
 
-    panel = read_dataset(_processed_root(tmp_path, "panel", "market_panel_1d"))
+    panel = read_dataset(_processed_root(tmp_path, "panel", MARKET_PANEL_DATA_ID))
     factors = read_dataset(_processed_root(tmp_path, "factor", "price_volume"))
 
     assert panel["timestamp"].dt.date.astype(str).tolist() == [
@@ -552,7 +574,7 @@ def test_materialize_processed_data_existing_dependency_must_cover_trading_sessi
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
     )
 
     with pytest.raises(ValueError, match="insufficient_dataset_coverage"):
@@ -577,9 +599,13 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
         layout=source_layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2016-01-04"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
     )
-    source_panel_root = _processed_root(tmp_path / "source", "panel", "market_panel_1d")
+    source_panel_root = _processed_root(
+        tmp_path / "source",
+        "panel",
+        MARKET_PANEL_DATA_ID,
+    )
     panel = read_dataset(source_panel_root)
     panel_without_2015 = panel.loc[
         pd.to_datetime(panel["timestamp"]).dt.year.ne(2015)
@@ -591,11 +617,11 @@ def test_existing_dependency_coverage_rejects_missing_middle_sessions(
         start_date="2014-01-02",
         end_date="2016-01-04",
     )
-    panel_root = _processed_root(tmp_path / "coverage", "panel", "market_panel_1d")
+    panel_root = _processed_root(tmp_path / "coverage", "panel", MARKET_PANEL_DATA_ID)
     write_dataset(
         panel_root,
         panel_without_2015,
-        spec=a_share_processed_catalog().get("market_panel_1d"),
+        spec=processed_catalog().get(MARKET_PANEL_DATA_ID),
     )
 
     with pytest.raises(
@@ -623,7 +649,7 @@ def test_existing_dependency_coverage_accepts_non_trading_end_date(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2016-12-29", "2016-12-30"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
     )
 
     materializer.materialize_processed_data(
@@ -659,7 +685,7 @@ def test_annotation_materializer_uses_dependency_lookahead_session(tmp_path) -> 
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-30", "2014-02-07"),
-        data_ids=("market_panel_1d",),
+        data_ids=(MARKET_PANEL_DATA_ID,),
     )
 
     materializer.materialize_processed_data(
@@ -683,7 +709,7 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
 ) -> None:
     _assert_forced_tiny_chunks_match_default(
         tmp_path,
-        data_id="market_panel_1d",
+        data_id=MARKET_PANEL_DATA_ID,
         kind="panel",
         end_date="2014-01-08",
         time_window=TimeWindow("2014-01-02", "2014-01-07"),
@@ -789,7 +815,7 @@ def _catalog_with_processed_inputs(
     processed_input_data_ids: tuple[str, ...],
 ) -> ProcessedDataCatalog:
     catalog = ProcessedDataCatalog()
-    for spec in a_share_processed_catalog().list():
+    for spec in processed_catalog().list():
         if spec.data_id == target_data_id:
             spec = replace(
                 spec,
@@ -799,30 +825,30 @@ def _catalog_with_processed_inputs(
     return catalog
 
 
-def _catalog_with_forward_return_1d_only() -> ProcessedDataCatalog:
+def _catalog_with_one_step_forward_return_only() -> ProcessedDataCatalog:
     catalog = ProcessedDataCatalog()
-    for spec in a_share_processed_catalog().list():
+    for spec in processed_catalog().list():
         if spec.data_id == "forward_returns":
             column_roles = {
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "forward_return_1d": ColumnRole.LABEL,
+                FORWARD_RETURN_1D_COLUMN: ColumnRole.LABEL,
             }
             spec = replace(spec, column_roles=column_roles)
         catalog.register(spec)
     return catalog
 
 
-def _catalog_with_mom_20d_only() -> ProcessedDataCatalog:
+def _catalog_with_momentum_20d_only() -> ProcessedDataCatalog:
     catalog = ProcessedDataCatalog()
-    for spec in a_share_processed_catalog().list():
+    for spec in processed_catalog().list():
         if spec.data_id == "price_volume":
             column_roles = {
                 "market_id": ColumnRole.KEY,
                 "asset_id": ColumnRole.KEY,
                 "timestamp": ColumnRole.TIMESTAMP,
-                "mom_20d": ColumnRole.FACTOR,
+                MOMENTUM_20D_COLUMN: ColumnRole.FACTOR,
             }
             spec = replace(spec, column_roles=column_roles)
         catalog.register(spec)
@@ -831,7 +857,7 @@ def _catalog_with_mom_20d_only() -> ProcessedDataCatalog:
 
 def _factor_catalog_with_families(families: tuple[str, ...]) -> FactorCatalog:
     catalog = FactorCatalog()
-    definitions = materializer.factor_definitions.a_share_factor_definitions()
+    definitions = materializer.factor_definitions.factor_definitions()
     for index, definition in enumerate(definitions):
         family = families[min(index, len(families) - 1)]
         catalog.register(replace(definition, family=family))
@@ -840,7 +866,7 @@ def _factor_catalog_with_families(families: tuple[str, ...]) -> FactorCatalog:
 
 def _label_catalog_with_families(families: tuple[str, ...]) -> LabelCatalog:
     catalog = LabelCatalog()
-    definitions = materializer.label_definitions.a_share_label_definitions()
+    definitions = materializer.label_definitions.label_definitions()
     for index, definition in enumerate(definitions):
         family = families[min(index, len(families) - 1)]
         catalog.register(replace(definition, family=family))
@@ -849,7 +875,7 @@ def _label_catalog_with_families(families: tuple[str, ...]) -> LabelCatalog:
 
 def _interim_catalog() -> InterimDataCatalog:
     specs = {
-        "market_bars_1d": (
+        MARKET_BARS_DATA_ID: (
             "source_asset_id",
             "timestamp",
             "trade_date",
@@ -938,7 +964,7 @@ def _write_interim_inputs(
     catalog = _interim_catalog()
     source_id = SYNTHETIC_SOURCE_ID
     frames = {
-        "market_bars_1d": _market_bars_1d_frame(
+        MARKET_BARS_DATA_ID: _market_bars_frame(
             start_date=start_date,
             end_date=end_date,
         ),
@@ -958,7 +984,7 @@ def _write_interim_inputs(
         )
 
 
-def _market_bars_1d_frame(
+def _market_bars_frame(
     *,
     start_date: str = "2014-01-02",
     end_date: str = "2014-01-03",

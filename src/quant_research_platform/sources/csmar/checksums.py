@@ -6,9 +6,8 @@ from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 
-from quant_research_platform.sources.csmar.field_mappings import (
-    csmar_field_descriptions,
-)
+from quant_research_platform.sources.csmar.field_mappings import field_descriptions
+from quant_research_platform.sources.csmar.ids import market_bars_data_id
 from quant_research_platform.sources.csmar.raw_schemas import (
     RAW_TABLE_CONTRACTS,
     parse_raw_filename,
@@ -46,7 +45,7 @@ def _file_sha256(path: Path) -> str:
 def _metadata_frequency(dataset: str) -> str:
     if dataset == "trading_calendar":
         return "reference_calendar"
-    if dataset in {"market_bars_1d", "adjustment", "index_market"}:
+    if dataset in {market_bars_data_id(), "adjustment", "index_market"}:
         return "daily"
     return "event_or_static"
 
@@ -68,7 +67,7 @@ def build_raw_export_metadata(
     dataset = filename_metadata.dataset
     contract = RAW_TABLE_CONTRACTS[dataset]
     columns = read_export_header(export_path)
-    field_descriptions = csmar_field_descriptions(dataset)
+    descriptions = field_descriptions(dataset)
     row_count = _count_csv_rows(export_path) if export_path.suffix == ".csv" else None
     payload: dict[str, object] = {
         "source": "CSMAR",
@@ -86,7 +85,7 @@ def build_raw_export_metadata(
         "filters": dict(filters)
         if filters is not None
         else _default_metadata_filters(dataset, filename_metadata.market_scope),
-        "fields_zh": {column: field_descriptions.get(column, "") for column in columns},
+        "fields_zh": {column: descriptions.get(column, "") for column in columns},
         "fields_raw": list(columns),
         "row_count": row_count,
         "file_sha256": _file_sha256(export_path),

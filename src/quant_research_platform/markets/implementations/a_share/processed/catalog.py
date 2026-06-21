@@ -10,12 +10,13 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     ProcessedDataKind,
     ProcessedDataSpec,
+    market_bars_data_id,
 )
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.fields import (
-    a_share_field_catalog,
+    field_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
     AS_OF_MASK_ID,
@@ -127,7 +128,10 @@ EVALUATION_COLUMNS: tuple[str, ...] = (
     "can_exit",
 )
 
-def a_share_processed_catalog() -> ProcessedDataCatalog:
+MARKET_BARS_SOURCE_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
+
+
+def processed_catalog() -> ProcessedDataCatalog:
     """Register the first-stage A-share 0.1 processed data specs."""
 
     catalog = ProcessedDataCatalog()
@@ -145,7 +149,7 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
             data_id=market_panel_data_id(),
             columns=PANEL_COLUMNS,
             source_input_data_ids=(
-                "market_bars_1d",
+                MARKET_BARS_SOURCE_DATA_ID,
                 "stock_master",
                 "market_cap",
                 "trading_calendar",
@@ -242,7 +246,7 @@ def _column_roles(
     *,
     role_overrides: dict[str, ColumnRole] | None = None,
 ) -> dict[str, ColumnRole]:
-    fields = a_share_field_catalog()
+    fields = field_catalog()
     overrides = role_overrides or {}
     roles: dict[str, ColumnRole] = {}
     for column in columns:
@@ -256,7 +260,7 @@ def _column_roles(
 def _registered_factor_columns() -> tuple[str, ...]:
     return tuple(
         definition.output_column
-        for definition in factor_definitions.a_share_factor_catalog().list()
+        for definition in factor_definitions.factor_catalog().list()
     )
 
 
@@ -264,7 +268,7 @@ def _registered_label_columns() -> tuple[str, ...]:
     return tuple(
         definition.output_column
         for definition in sorted(
-            label_definitions.a_share_label_catalog().list(),
+            label_definitions.label_catalog().list(),
             key=lambda item: item.horizon,
         )
     )
@@ -277,5 +281,5 @@ __all__ = [
     "EVALUATION_COLUMNS",
     "EXECUTION_COLUMNS",
     "PANEL_COLUMNS",
-    "a_share_processed_catalog",
+    "processed_catalog",
 ]

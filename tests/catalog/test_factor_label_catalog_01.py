@@ -15,7 +15,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.fields import (
-    a_share_field_catalog,
+    field_catalog,
 )
 from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_columns,
@@ -27,9 +27,9 @@ def test_factor_catalog_is_pure_registry_without_market_bootstrap() -> None:
 
 
 def test_a_share_price_volume_factor_definitions_have_input_requirements() -> None:
-    catalog = factor_definitions.a_share_factor_catalog()
+    catalog = factor_definitions.factor_catalog()
     definitions = catalog.list()
-    registered_fields = set(a_share_field_catalog().list_names())
+    registered_fields = set(field_catalog().list_names())
 
     assert tuple(definition.output_column for definition in definitions) == (
         price_volume_factor_columns()

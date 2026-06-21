@@ -17,7 +17,11 @@ from quant_research_platform.compute.dataframe.portfolio_returns import (
     _simulate_weighted_long_short_returns_and_cost_from_validated_panel,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
-from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.contracts.portfolios import (
+    SUPPORTED_REBALANCE_FREQUENCIES,
+    PortfolioSpec,
+    normalize_rebalance_frequency,
+)
 from quant_research_platform.research.signals.materialization import (
     materialize_signal_frame,
 )
@@ -46,7 +50,10 @@ def construct_portfolio_positions(
 ) -> PortfolioResult:
     """Construct portfolio diagnostics from normalized SignalSpec scores."""
 
-    if spec.rebalance_frequency != "1d":
+    if (
+        normalize_rebalance_frequency(spec.rebalance_frequency)
+        not in SUPPORTED_REBALANCE_FREQUENCIES
+    ):
         raise ValueError("unsupported_portfolio_rebalance_frequency")
     panel = _portfolio_panel(
         frame,

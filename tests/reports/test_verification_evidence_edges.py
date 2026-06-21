@@ -34,6 +34,10 @@ def test_verification_evidence_unsafe_reason_variants() -> None:
         == "absolute_path"
     )
     assert (
+        verification_evidence._unsafe_text_reason("data/raw/csmar/export.csv")
+        == "absolute_path"
+    )
+    assert (
         verification_evidence._unsafe_text_reason("daily__vendor__export-20240101.csv")
         == "vendor_filename"
     )

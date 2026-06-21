@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
-from quant_research_platform.contracts.data import DataFrequency, horizon_unit_suffix
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    data_frequency_slug,
+)
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
@@ -19,10 +22,30 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
 )
+from quant_research_platform.research.factors.price_volume import (
+    price_volume_window_column,
+)
+from quant_research_platform.research.labels.forward_returns import (
+    forward_return_label_column,
+)
 from quant_research_platform.research.models.supervised import (
     model_algorithm_names,
     model_smoke_hyperparameters,
 )
+
+DEFAULT_MOMENTUM_WINDOW = 20
+DEFAULT_REVERSAL_WINDOW = 1
+DEFAULT_MOMENTUM_COLUMN = price_volume_window_column(
+    "mom",
+    DEFAULT_MOMENTUM_WINDOW,
+    DataFrequency.DAILY,
+)
+DEFAULT_REVERSAL_COLUMN = price_volume_window_column(
+    "rev",
+    DEFAULT_REVERSAL_WINDOW,
+    DataFrequency.DAILY,
+)
+DEFAULT_MOMENTUM_FEATURE_COLUMN = f"{DEFAULT_MOMENTUM_COLUMN}_zscore"
 
 
 @dataclass(frozen=True)
@@ -31,20 +54,29 @@ class _ScenarioDefaults:
     return_horizon: int = 20
     random_seed: int = 7
     max_train_rows: int = 5000
-    rebalance_frequency: str = "1d"
+    rebalance_frequency: str = field(
+        default_factory=lambda: data_frequency_slug(DataFrequency.DAILY)
+    )
     execution_lag_steps: int = 1
     test_end: str | None = None
     prediction_model_algorithm: str = "linear_regression"
-    signal_columns: tuple[str, ...] = ("mom_20d", "rev_1d", "mom_20d_zscore")
-    model_factor_inputs: tuple[str, ...] = ("mom_20d", "rev_1d")
-    model_feature_inputs: tuple[str, ...] = ("mom_20d_zscore",)
-    baseline_factor_inputs: tuple[str, ...] = ("mom_20d",)
+    signal_columns: tuple[str, ...] = (
+        DEFAULT_MOMENTUM_COLUMN,
+        DEFAULT_REVERSAL_COLUMN,
+        DEFAULT_MOMENTUM_FEATURE_COLUMN,
+    )
+    model_factor_inputs: tuple[str, ...] = (
+        DEFAULT_MOMENTUM_COLUMN,
+        DEFAULT_REVERSAL_COLUMN,
+    )
+    model_feature_inputs: tuple[str, ...] = (DEFAULT_MOMENTUM_FEATURE_COLUMN,)
+    baseline_factor_inputs: tuple[str, ...] = (DEFAULT_MOMENTUM_COLUMN,)
 
 
 SCENARIO_DEFAULTS = _ScenarioDefaults()
-DEFAULT_RETURN_SOURCE_COLUMN = (
-    f"forward_return_{SCENARIO_DEFAULTS.return_horizon}"
-    f"{horizon_unit_suffix(SCENARIO_DEFAULTS.frequency)}"
+DEFAULT_RETURN_SOURCE_COLUMN = forward_return_label_column(
+    SCENARIO_DEFAULTS.return_horizon,
+    SCENARIO_DEFAULTS.frequency,
 )
 DEFAULT_MODEL_RANDOM_SEED = SCENARIO_DEFAULTS.random_seed
 DEFAULT_MAX_TRAIN_ROWS = SCENARIO_DEFAULTS.max_train_rows
@@ -55,27 +87,27 @@ DEFAULT_PREDICTION_MODEL_ALGORITHM = SCENARIO_DEFAULTS.prediction_model_algorith
 def build_signal_specs() -> tuple[SignalSpec, ...]:
     return (
         SignalSpec(
-            signal_id="mom_20d",
+            signal_id=DEFAULT_MOMENTUM_COLUMN,
             source_kind="factor",
-            source_column="mom_20d",
+            source_column=DEFAULT_MOMENTUM_COLUMN,
             direction="higher_is_better",
         ),
         SignalSpec(
-            signal_id="rev_1d",
+            signal_id=DEFAULT_REVERSAL_COLUMN,
             source_kind="factor",
-            source_column="rev_1d",
+            source_column=DEFAULT_REVERSAL_COLUMN,
             direction="lower_is_better",
         ),
         SignalSpec(
-            signal_id="mom_20d_zscore",
+            signal_id=DEFAULT_MOMENTUM_FEATURE_COLUMN,
             source_kind="feature",
-            source_column="mom_20d_zscore",
+            source_column=DEFAULT_MOMENTUM_FEATURE_COLUMN,
             direction="higher_is_better",
         ),
     )
 
 
-def build_a_share_model_specs(
+def build_model_specs(
     *,
     model_algorithms: Iterable[str] = model_algorithm_names(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
@@ -85,12 +117,12 @@ def build_a_share_model_specs(
 ) -> tuple[ModelSpec, ...]:
     return tuple(
         ModelSpec(
-            model_id=_a_share_model_id(model_algorithm, return_source_column),
+            model_id=_model_id(model_algorithm, return_source_column),
             model_algorithm=model_algorithm,
-            input_factor_columns=_a_share_model_factor_inputs(model_algorithm),
-            input_feature_columns=_a_share_model_feature_inputs(model_algorithm),
+            input_factor_columns=_model_factor_inputs(model_algorithm),
+            input_feature_columns=_model_feature_inputs(model_algorithm),
             label_column=return_source_column,
-            hyperparameters=_a_share_model_hyperparameters(
+            hyperparameters=_model_hyperparameters(
                 model_algorithm,
                 hyperparameter_preset=hyperparameter_preset,
             ),
@@ -101,7 +133,7 @@ def build_a_share_model_specs(
     )
 
 
-def build_a_share_prediction_specs(
+def build_prediction_specs(
     *,
     train_end: str,
     test_start: str,
@@ -111,8 +143,8 @@ def build_a_share_prediction_specs(
 ) -> tuple[PredictionSpec, ...]:
     return tuple(
         PredictionSpec(
-            prediction_id=_a_share_prediction_id(model_algorithm, test_start),
-            model_id=_a_share_model_id(model_algorithm, return_source_column),
+            prediction_id=_prediction_id(model_algorithm, test_start),
+            model_id=_model_id(model_algorithm, return_source_column),
             research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             train_end=train_end,
             test_start=test_start,
@@ -160,7 +192,7 @@ def build_portfolio_specs(
     )
 
 
-def build_a_share_model_catalog(
+def build_model_catalog(
     *,
     model_algorithms: Iterable[str] = model_algorithm_names(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
@@ -169,7 +201,7 @@ def build_a_share_model_catalog(
     hyperparameter_preset: str = "smoke",
 ) -> ModelCatalog:
     catalog = ModelCatalog()
-    for spec in build_a_share_model_specs(
+    for spec in build_model_specs(
         model_algorithms=model_algorithms,
         return_source_column=return_source_column,
         max_train_rows=max_train_rows,
@@ -180,7 +212,7 @@ def build_a_share_model_catalog(
     return catalog
 
 
-def build_a_share_prediction_catalog(
+def build_prediction_catalog(
     *,
     train_end: str,
     test_start: str,
@@ -189,7 +221,7 @@ def build_a_share_prediction_catalog(
     test_end: str | None = DEFAULT_TEST_END,
 ) -> PredictionCatalog:
     catalog = PredictionCatalog()
-    for spec in build_a_share_prediction_specs(
+    for spec in build_prediction_specs(
         model_algorithms=model_algorithms,
         return_source_column=return_source_column,
         train_end=train_end,
@@ -239,15 +271,15 @@ def default_evaluation_run_id(
     return f"signal_{return_source_column}"
 
 
-def default_a_share_prediction_smoke_id(
+def default_prediction_smoke_id(
     *,
     model_algorithm: str = DEFAULT_PREDICTION_MODEL_ALGORITHM,
     test_start: str,
 ) -> str:
-    return _a_share_prediction_id(model_algorithm, test_start)
+    return _prediction_id(model_algorithm, test_start)
 
 
-def default_a_share_prediction_oos_period(
+def default_prediction_oos_period(
     *,
     test_start: str,
     evaluation_end: str,
@@ -255,7 +287,7 @@ def default_a_share_prediction_oos_period(
     model_algorithm: str = DEFAULT_PREDICTION_MODEL_ALGORITHM,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> str:
-    spec = build_a_share_prediction_specs(
+    spec = build_prediction_specs(
         model_algorithms=(model_algorithm,),
         train_end=train_end,
         test_start=test_start,
@@ -272,28 +304,28 @@ def default_evaluation_period(
     return f"{evaluation_start} through {evaluation_end}"
 
 
-def _a_share_model_id(model_algorithm: str, return_source_column: str) -> str:
-    return f"{model_algorithm}_mom_20d_{return_source_column}"
+def _model_id(model_algorithm: str, return_source_column: str) -> str:
+    return f"{model_algorithm}_{DEFAULT_MOMENTUM_COLUMN}_{return_source_column}"
 
 
-def _a_share_prediction_id(model_algorithm: str, test_start: str) -> str:
+def _prediction_id(model_algorithm: str, test_start: str) -> str:
     year = test_start[:4]
-    return f"{model_algorithm}_mom_20d_prediction_{year}"
+    return f"{model_algorithm}_{DEFAULT_MOMENTUM_COLUMN}_prediction_{year}"
 
 
-def _a_share_model_factor_inputs(model_algorithm: str) -> tuple[str, ...]:
+def _model_factor_inputs(model_algorithm: str) -> tuple[str, ...]:
     if model_algorithm == "single_factor_baseline":
         return SCENARIO_DEFAULTS.baseline_factor_inputs
     return SCENARIO_DEFAULTS.model_factor_inputs
 
 
-def _a_share_model_feature_inputs(model_algorithm: str) -> tuple[str, ...]:
+def _model_feature_inputs(model_algorithm: str) -> tuple[str, ...]:
     if model_algorithm == "single_factor_baseline":
         return ()
     return SCENARIO_DEFAULTS.model_feature_inputs
 
 
-def _a_share_model_hyperparameters(
+def _model_hyperparameters(
     model_algorithm: str,
     *,
     hyperparameter_preset: str,
@@ -310,11 +342,11 @@ __all__ = [
     "DEFAULT_TEST_END",
     "build_evaluation_catalog",
     "build_evaluation_specs",
-    "build_a_share_model_catalog",
-    "build_a_share_model_specs",
+    "build_model_catalog",
+    "build_model_specs",
     "build_portfolio_catalog",
     "build_portfolio_specs",
-    "build_a_share_prediction_catalog",
-    "build_a_share_prediction_specs",
+    "build_prediction_catalog",
+    "build_prediction_specs",
     "build_signal_specs",
 ]

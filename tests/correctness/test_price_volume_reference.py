@@ -458,7 +458,7 @@ def test_price_volume_factor_read_window_expands_for_sparse_asset_history() -> N
         panel.loc[:, ["asset_id", "timestamp"]],
         definitions=tuple(
             definition
-            for definition in factor_definitions.a_share_factor_definitions()
+            for definition in factor_definitions.factor_definitions()
             if definition.output_column == "mom_20d"
         ),
         read_window=window.read,
@@ -570,7 +570,7 @@ def test_forward_return_label_read_window_expands_for_sparse_asset_future() -> N
         panel.loc[:, ["asset_id", "timestamp"]],
         definitions=tuple(
             definition
-            for definition in label_definitions.a_share_label_definitions()
+            for definition in label_definitions.label_definitions()
             if definition.output_column == "forward_return_10d"
         ),
         read_window=window.read,
@@ -669,7 +669,7 @@ def calculate_in_session_chunks(
     )
     definitions = tuple(
         definition
-        for definition in factor_definitions.a_share_factor_definitions()
+        for definition in factor_definitions.factor_definitions()
         if definition.output_column in factor_columns
     )
     parts = []
@@ -729,7 +729,7 @@ def calculate_in_session_chunks_by_size(
     )
     definitions = tuple(
         definition
-        for definition in factor_definitions.a_share_factor_definitions()
+        for definition in factor_definitions.factor_definitions()
         if definition.output_column in factor_columns
     )
     parts = []
@@ -787,7 +787,7 @@ def calculate_forward_returns_in_session_chunks(
     parts = []
     definitions = tuple(
         definition
-        for definition in label_definitions.a_share_label_definitions()
+        for definition in label_definitions.label_definitions()
         if definition.horizon in horizons
     )
     max_lookahead = label_calculations.label_lookahead_bars(definitions)

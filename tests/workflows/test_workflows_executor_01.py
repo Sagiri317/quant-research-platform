@@ -7,10 +7,10 @@ import pytest
 
 import quant_research_platform.workflows.executor as executor_module
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowNode,
+    WorkflowRunPolicy,
     WorkflowRunSummary,
     WorkflowSpec,
 )

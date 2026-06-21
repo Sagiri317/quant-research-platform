@@ -18,11 +18,11 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.sources.csmar.field_mappings import (
-    map_csmar_columns,
+    map_columns,
     normalize_stock_code,
 )
-from quant_research_platform.sources.csmar.fields import csmar_field_role
-from quant_research_platform.sources.csmar.ids import SOURCE_ID
+from quant_research_platform.sources.csmar.fields import field_role
+from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_data_id
 from quant_research_platform.sources.csmar.raw_exports import (
     dataset_files_by_id,
     iter_private_export_chunks,
@@ -30,15 +30,16 @@ from quant_research_platform.sources.csmar.raw_exports import (
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
+MARKET_BARS_DATA_ID = market_bars_data_id()
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
-    "market_bars_1d",
+    MARKET_BARS_DATA_ID,
     "stock_master",
     "adjustment",
     "market_cap",
     "index_info",
     "trading_calendar",
 )
-TIME_RANGE_FILTER_DATA_IDS = {"market_bars_1d"}
+TIME_RANGE_FILTER_DATA_IDS = {MARKET_BARS_DATA_ID}
 END_ONLY_FILTER_DATA_IDS = {"market_cap"}
 START_END_FILTER_DATA_IDS = {"adjustment"}
 SOURCE_REFERENCE_DATA_IDS = {"stock_master", "index_info"}
@@ -117,7 +118,7 @@ TRADING_CALENDAR_INTERIM_COLUMNS: tuple[str, ...] = (
     "source_state",
 )
 INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
-    "market_bars_1d": MARKET_BARS_INTERIM_COLUMNS,
+    MARKET_BARS_DATA_ID: MARKET_BARS_INTERIM_COLUMNS,
     "stock_master": STOCK_MASTER_INTERIM_COLUMNS,
     "market_cap": MARKET_CAP_INTERIM_COLUMNS,
     "adjustment": ADJUSTMENT_INTERIM_COLUMNS,
@@ -125,7 +126,7 @@ INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "trading_calendar": TRADING_CALENDAR_INTERIM_COLUMNS,
 }
 AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
-    "market_bars_1d": {
+    MARKET_BARS_DATA_ID: {
         "return_with_dividend": "derived as period_return",
         "comparable_close_with_dividend": "derived as adj_close",
         "float_market_cap_thousand": "converted to float_market_cap",
@@ -133,7 +134,7 @@ AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
     }
 }
 OPTIONAL_COLUMNS: dict[str, dict[str, str]] = {
-    "market_bars_1d": {
+    MARKET_BARS_DATA_ID: {
         "return_without_dividend": "not retained in the source interim contract",
         "comparable_close_without_dividend": (
             "not retained in the source interim contract"
@@ -154,7 +155,7 @@ OPTIONAL_COLUMNS: dict[str, dict[str, str]] = {
 
 
 @dataclass(frozen=True)
-class CSMARInterimImportResult:
+class InterimImportResult:
     """Summary of a CSMAR interim materialization run."""
 
     artifact_roots: dict[str, Path]
@@ -287,7 +288,7 @@ def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
 ) -> pd.DataFrame:
-    mapped = map_csmar_columns(frame, _raw_dataset_for_interim(data_id))
+    mapped = map_columns(frame, _raw_dataset_for_interim(data_id))
     if "stock_code" in mapped.columns:
         mapped["stock_code"] = normalize_stock_code(mapped["stock_code"])
     if "index_code" in mapped.columns:
@@ -295,7 +296,7 @@ def normalize_raw_frame(
 
     if data_id == "trading_calendar":
         return _normalize_trading_calendar_frame(mapped)
-    if data_id == "market_bars_1d":
+    if data_id == MARKET_BARS_DATA_ID:
         result = mapped.copy()
         result["trade_date"] = pd.to_datetime(result["trade_date"])
         result["timestamp"] = result["trade_date"]
@@ -431,7 +432,7 @@ def materialize_interim_data(
     end_date: str | None = "2025-12-31",
     override_path: Path | None = None,
     chunksize: int = 500_000,
-) -> CSMARInterimImportResult:
+) -> InterimImportResult:
     catalog = interim_catalog()
     source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
     overrides = load_column_overrides(override_path) if override_path else None
@@ -466,7 +467,7 @@ def materialize_interim_data(
         write_dataset(artifact_root, _iter_with_first(first_frame, frames), spec=spec)
         written[data_id] = artifact_root
 
-    return CSMARInterimImportResult(
+    return InterimImportResult(
         artifact_roots=written,
         skipped=tuple(skipped),
         pruning_report_text=render_column_pruning_report(pruning_reports),
@@ -627,7 +628,7 @@ def _column_roles(
         elif column in primary_key:
             roles[column] = ColumnRole.KEY
         else:
-            roles[column] = csmar_field_role(column)
+            roles[column] = field_role(column)
     return roles
 
 
@@ -665,7 +666,7 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _date_column(data_id: str) -> str:
     if data_id in {
-        "market_bars_1d",
+        MARKET_BARS_DATA_ID,
         "adjustment",
         "market_cap",
         "stock_master",
@@ -719,7 +720,7 @@ def _iter_with_first(
 
 
 __all__ = [
-    "CSMARInterimImportResult",
+    "InterimImportResult",
     "DEFAULT_INTERIM_DATA_IDS",
     "apply_output_column_rules",
     "default_override_payload",

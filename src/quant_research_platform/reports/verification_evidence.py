@@ -33,6 +33,14 @@ _COMPARE_STATUSES = frozenset({"NOT_APPLICABLE", "PASS", "FAIL"})
 _FULL_HORIZON_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
 _COMPARE_EVIDENCE_FIELDS = frozenset({"comparison_path", "verification_scope"})
 _FULL_HORIZON_EVIDENCE_FIELDS = frozenset({"evidence_path", "verification_scope"})
+_JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
+    {
+        "manifest_path",
+        "output_root",
+        "run_manifest_path",
+        "validation_summary_path",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -560,6 +568,8 @@ def _unsafe_text_reason(text: str) -> str | None:
         return "vendor_filename"
     if _SOURCE_LOCAL_RE.search(text):
         return "source_local_key"
+    if _LOGICAL_PRIVATE_PATH_RE.search(text):
+        return "absolute_path"
     shared_reason = public_text_unsafe_reason(
         _LOGICAL_PRIVATE_PATH_RE.sub("[logical-private-path]", text)
     )
@@ -615,6 +625,8 @@ def _unsafe_json_value_reason(value: object, *, key: str | None = None) -> str |
                 return reason
         return None
     if isinstance(value, str):
+        if key in _JSON_LOGICAL_PATH_VALUE_KEYS:
+            value = _LOGICAL_PRIVATE_PATH_RE.sub("[logical-private-path]", value)
         return _unsafe_text_reason(value)
     return None
 

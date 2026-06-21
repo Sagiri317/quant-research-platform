@@ -12,7 +12,7 @@ NORMALIZED_CALENDAR_COLUMNS = frozenset(
 )
 
 
-def a_share_unified_trading_sessions(
+def unified_trading_sessions(
     calendar: pd.DataFrame,
     *,
     market_types: Iterable[int] = CURRENT_MARKET_TYPES,
@@ -62,7 +62,7 @@ def warmup_start_date_for_window(
         normalized.duplicated(["source_market_type", "calendar_date"], keep=False).any()
     ):
         raise ValueError("duplicate_trading_calendar_key")
-    sessions = a_share_unified_trading_sessions(normalized)
+    sessions = unified_trading_sessions(normalized)
     if sessions.empty:
         raise ValueError("trading_calendar_no_unified_sessions")
     requested_start = pd.Timestamp(start_date).normalize()
@@ -136,7 +136,7 @@ def compute_listing_age_trading_days(
 
     fallback_mask = valid & ~assigned
     if bool(fallback_mask.any()):
-        unified_sessions = a_share_unified_trading_sessions(normalized)
+        unified_sessions = unified_trading_sessions(normalized)
         if not unified_sessions.empty:
             result.loc[fallback_mask] = _count_sessions_between(
                 unified_sessions,
@@ -177,7 +177,7 @@ def _count_sessions_between(
 
 __all__ = [
     "CURRENT_MARKET_TYPES",
-    "a_share_unified_trading_sessions",
+    "unified_trading_sessions",
     "compute_listing_age_trading_days",
     "market_type_trading_sessions",
     "warmup_start_date_for_window",

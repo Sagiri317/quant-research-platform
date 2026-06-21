@@ -85,7 +85,7 @@ def test_internal_market_bars_1d_validation_excludes_annotation_fields() -> None
         is_a_share_scope=[True, False],
         volume=[1.0, -1.0],
     )
-    report = internal_tables.check_market_bars_1d(
+    report = internal_tables.check_market_bars(
         frame,
         expected_year=2024,
         file="synthetic.parquet",
