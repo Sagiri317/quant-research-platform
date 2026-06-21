@@ -48,6 +48,11 @@ def test_compare_verification_evidence_accepts_parameterized_pairs(
     )
     assert payload["baseline_commit"] == "base-sha"
     assert tuple(payload["comparisons"]) == ("tiny",)
+    assert payload["overall_status"] == "FAIL"
+    assert payload["contract_failures"] == [
+        "missing_required_comparison_group: old_baseline",
+        "missing_required_comparison_group: refreshed_prediction_baseline",
+    ]
     assert payload["comparisons"]["tiny"]["status"] == "PASS"
     research = payload["comparisons"]["tiny"]["research_dataset"]
     assert research["row_count_match"] is True
@@ -176,23 +181,24 @@ def test_compare_verification_evidence_accepts_expected_pair_failures(
     _write_run(
         baseline,
         prediction_artifact_ids=(
-            "equal_weight_rank_ensemble",
-            "ic_weighted_rank_ensemble",
+            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
+            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
         ),
     )
     _write_run(
         final,
         swap_prediction_assets=True,
         prediction_artifact_ids=(
-            "equal_weight_rank_ensemble",
-            "ic_weighted_rank_ensemble",
+            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
+            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
         ),
     )
 
-    comparison = module.compare_run("old_baseline_3y", baseline, final)
+    comparison = module.compare_run("control_window_a", baseline, final)
     comparison = module.apply_pair_expectation(
         comparison,
         {
+            "comparison_group": "old_baseline",
             "expected_status": "FAIL_EXPECTED",
             "expected_failure_reason": "stale_rank_ensemble_prediction_baseline",
             "expected_failed_artifacts": [
@@ -206,6 +212,10 @@ def test_compare_verification_evidence_accepts_expected_pair_failures(
     assert comparison["actual_status"] == "FAIL"
     assert comparison["expected_failure_match"] is True
     assert comparison["reason_code"] == "stale_rank_ensemble_prediction_baseline"
+    assert comparison["failed_artifact_ids"] == [
+        "equal_weight_rank_ensemble_mom_20d_prediction_2020",
+        "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
+    ]
     assert comparison["failed_artifacts"] == [
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",
@@ -228,9 +238,10 @@ def test_compare_verification_evidence_rejects_self_authorized_expected_failures
             {
                 "pairs": [
                     {
-                        "label": "old_baseline_tiny",
+                        "label": "control_window_a",
                         "baseline": str(baseline),
                         "final": str(final),
+                        "comparison_group": "old_baseline",
                         "expected_status": "FAIL_EXPECTED",
                         "expected_failure_reason": "stale_prediction_baseline",
                         "expected_failed_artifacts": ["tiny_model"],
@@ -259,11 +270,11 @@ def test_compare_verification_evidence_rejects_self_authorized_expected_failures
     payload = json.loads(
         (goal_root / "baseline-final-compare.json").read_text(encoding="utf-8")
     )
-    comparison = payload["comparisons"]["old_baseline_tiny"]
+    comparison = payload["comparisons"]["control_window_a"]
     assert payload["overall_status"] == "FAIL"
     assert payload["validation_decision"] == "FAIL"
-    assert "missing_required_comparison: old_baseline_3y" in payload[
-        "contract_failures"
+    assert "expected_failure_reason_mismatch" in comparison[
+        "expected_failure_policy_failures"
     ]
     assert comparison["status"] == "FAIL"
     assert "expected_failure_policy_mismatch" in comparison["failures"]
@@ -274,7 +285,8 @@ def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> No
 
     failures = module.compare_contract_failures(
         {
-            "old_baseline_3y": {
+            "control_window_a": {
+                "comparison_group": "old_baseline",
                 "status": "FAIL_EXPECTED",
                 "reason_code": "stale_rank_ensemble_prediction_baseline",
                 "failed_artifacts": [
@@ -282,7 +294,8 @@ def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> No
                     "ic_weighted_rank_ensemble",
                 ],
             },
-            "old_baseline_6y": {
+            "control_window_b": {
+                "comparison_group": "old_baseline",
                 "status": "FAIL_EXPECTED",
                 "reason_code": "stale_rank_ensemble_prediction_baseline",
                 "failed_artifacts": [
@@ -290,19 +303,23 @@ def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> No
                     "ic_weighted_rank_ensemble",
                 ],
             },
-            "refreshed_prediction_baseline_3y": {
-                "status": "PASS",
-                "prediction_summary": {
-                    "artifact_ids": ["equal_weight_rank_ensemble"],
-                    "failed_artifacts": [],
-                },
-            },
-            "refreshed_prediction_baseline_6y": {
+            "candidate_window_a": {
+                "comparison_group": "refreshed_prediction_baseline",
                 "status": "PASS",
                 "prediction_summary": {
                     "artifact_ids": [
-                        "equal_weight_rank_ensemble",
-                        "ic_weighted_rank_ensemble",
+                        "equal_weight_rank_ensemble_mom_20d_prediction_2020"
+                    ],
+                    "failed_artifacts": [],
+                },
+            },
+            "candidate_window_b": {
+                "comparison_group": "refreshed_prediction_baseline",
+                "status": "PASS",
+                "prediction_summary": {
+                    "artifact_ids": [
+                        "equal_weight_rank_ensemble_mom_20d_prediction_2021",
+                        "ic_weighted_rank_ensemble_mom_20d_prediction_2021",
                     ],
                     "failed_artifacts": [],
                 },
@@ -313,8 +330,88 @@ def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> No
     assert failures == [
         (
             "refreshed_baseline_missing_rank_ensemble_artifact: "
-            "refreshed_prediction_baseline_3y:ic_weighted_rank_ensemble"
+            "candidate_window_a:ic_weighted_rank_ensemble"
         )
+    ]
+
+
+def test_compare_verification_evidence_requires_explicit_expected_failure_group(
+    tmp_path: Path,
+) -> None:
+    module = _load_compare_module()
+    baseline = tmp_path / "baseline"
+    final = tmp_path / "final"
+    _write_run(
+        baseline,
+        prediction_artifact_ids=(
+            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
+            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
+        ),
+    )
+    _write_run(
+        final,
+        swap_prediction_assets=True,
+        prediction_artifact_ids=(
+            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
+            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
+        ),
+    )
+
+    comparison = module.apply_pair_expectation(
+        module.compare_run("control_window_without_group", baseline, final),
+        {
+            "expected_status": "FAIL_EXPECTED",
+            "expected_failure_reason": "stale_rank_ensemble_prediction_baseline",
+            "expected_failed_artifacts": [
+                "equal_weight_rank_ensemble",
+                "ic_weighted_rank_ensemble",
+            ],
+        },
+    )
+
+    assert comparison["status"] == "FAIL"
+    assert "expected_failure_group_not_old_baseline" in comparison[
+        "expected_failure_policy_failures"
+    ]
+
+
+def test_compare_verification_evidence_rejects_loose_rank_artifact_prefix() -> None:
+    module = _load_compare_module()
+
+    failures = module.compare_contract_failures(
+        {
+            "control_window_a": {
+                "comparison_group": "old_baseline",
+                "status": "FAIL_EXPECTED",
+                "reason_code": "stale_rank_ensemble_prediction_baseline",
+                "failed_artifacts": [
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                ],
+            },
+            "candidate_window_a": {
+                "comparison_group": "refreshed_prediction_baseline",
+                "status": "PASS",
+                "prediction_summary": {
+                    "artifact_ids": [
+                        "equal_weight_rank_ensemble_smoke",
+                        "ic_weighted_rank_ensemble_smoke",
+                    ],
+                    "failed_artifacts": [],
+                },
+            },
+        }
+    )
+
+    assert failures == [
+        (
+            "refreshed_baseline_missing_rank_ensemble_artifact: "
+            "candidate_window_a:equal_weight_rank_ensemble"
+        ),
+        (
+            "refreshed_baseline_missing_rank_ensemble_artifact: "
+            "candidate_window_a:ic_weighted_rank_ensemble"
+        ),
     ]
 
 

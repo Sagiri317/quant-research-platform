@@ -836,6 +836,113 @@ def test_verify_rejects_pass_validation_command_placeholders() -> None:
     assert "validation_command_placeholder: targeted_tests" in failures
 
 
+def test_verify_baseline_final_compare_uses_metadata_groups() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _baseline_final_compare_payload(
+        {
+            "control_window_alpha": {
+                "comparison_group": "old_baseline",
+                "status": "FAIL_EXPECTED",
+                "reason_code": "stale_rank_ensemble_prediction_baseline",
+                "failed_artifacts": [
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                ],
+            },
+            "candidate_window_beta": {
+                "comparison_group": "refreshed_prediction_baseline",
+                "status": "PASS",
+                "prediction_summary": {
+                    "artifact_ids": [
+                        "equal_weight_rank_ensemble_mom_20d_prediction_2020",
+                        "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
+                    ],
+                    "failed_artifacts": [],
+                },
+            },
+        }
+    )
+
+    assert verifier.verify_baseline_final_compare(payload) == []
+
+
+def test_verify_baseline_final_compare_requires_refreshed_group() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _baseline_final_compare_payload(
+        {
+            "control_window_alpha": {
+                "comparison_group": "old_baseline",
+                "status": "FAIL_EXPECTED",
+                "reason_code": "stale_rank_ensemble_prediction_baseline",
+                "failed_artifacts": [
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                ],
+            },
+        }
+    )
+
+    failures = verifier.verify_baseline_final_compare(payload)
+
+    assert (
+        "baseline_final_compare_missing_required_group: refreshed_prediction_baseline"
+        in failures
+    )
+
+
+def test_verify_baseline_final_compare_rejects_loose_rank_artifact_prefix() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _baseline_final_compare_payload(
+        {
+            "control_window_alpha": {
+                "comparison_group": "old_baseline",
+                "status": "FAIL_EXPECTED",
+                "reason_code": "stale_rank_ensemble_prediction_baseline",
+                "failed_artifacts": [
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                ],
+            },
+            "candidate_window_beta": {
+                "comparison_group": "refreshed_prediction_baseline",
+                "status": "PASS",
+                "prediction_summary": {
+                    "artifact_ids": [
+                        "equal_weight_rank_ensemble_smoke",
+                        "ic_weighted_rank_ensemble_smoke",
+                    ],
+                    "failed_artifacts": [],
+                },
+            },
+        }
+    )
+
+    failures = verifier.verify_baseline_final_compare(payload)
+
+    assert (
+        "baseline_final_compare_refreshed_missing_artifact: "
+        "candidate_window_beta:equal_weight_rank_ensemble"
+    ) in failures
+    assert (
+        "baseline_final_compare_refreshed_missing_artifact: "
+        "candidate_window_beta:ic_weighted_rank_ensemble"
+    ) in failures
+
+
+def _baseline_final_compare_payload(
+    comparisons: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "schema_version": "qrp-baseline-final-compare-summary/0.1",
+        "overall_status": "PASS",
+        "old_baseline_compare_status": "FAIL_EXPECTED",
+        "refreshed_prediction_baseline_compare_status": "PASS",
+        "validation_decision": "PASS",
+        "contract_failures": [],
+        "comparisons": comparisons,
+    }
+
+
 def _write_review_threads_package(payload: dict[str, object]) -> zipfile.ZipFile:
     package = io.BytesIO()
     with zipfile.ZipFile(package, "w") as archive:

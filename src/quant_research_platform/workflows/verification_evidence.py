@@ -378,12 +378,11 @@ def validate_private_output_root(output_root: Path, repo_root: Path) -> None:
         return
     if len(parts) >= 2 and parts[0] == _RUN_WORKSPACE_DIR:
         run_root = parts[1]
-        if run_root in {
-            "private",
-            "smoke",
-            "smoke-final",
-            "smoke-refreshed-prediction-baseline",
-        } or re.fullmatch(r"s[0-9]+", run_root):
+        if (
+            run_root in {"private", "smoke"}
+            or re.fullmatch(r"s[0-9]+", run_root)
+            or re.fullmatch(r"evidence-[a-z0-9][a-z0-9-]*", run_root)
+        ):
             return
     raise ValueError("unignored_private_output_root")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,11 +40,11 @@ RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
     "equal_weight_rank_ensemble",
     "ic_weighted_rank_ensemble",
 )
-REQUIRED_COMPARE_LABELS = (
-    "old_baseline_3y",
-    "old_baseline_6y",
-    "refreshed_prediction_baseline_3y",
-    "refreshed_prediction_baseline_6y",
+OLD_BASELINE_GROUP = "old_baseline"
+REFRESHED_PREDICTION_BASELINE_GROUP = "refreshed_prediction_baseline"
+BASELINE_FINAL_COMPARE_GROUPS = (
+    OLD_BASELINE_GROUP,
+    REFRESHED_PREDICTION_BASELINE_GROUP,
 )
 FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
     ".agents/",
@@ -608,15 +609,11 @@ def verify_baseline_final_compare(payload: dict[str, object]) -> list[str]:
     comparisons = payload.get("comparisons")
     if not isinstance(comparisons, dict):
         return [*failures, "baseline_final_compare_comparisons_missing"]
-    missing = sorted(set(REQUIRED_COMPARE_LABELS) - set(comparisons))
-    failures.extend(
-        f"baseline_final_compare_missing_required_group: {label}"
-        for label in missing
-    )
-    for label in ("old_baseline_3y", "old_baseline_6y"):
-        comparison = comparisons.get(label)
-        if not isinstance(comparison, dict):
-            continue
+    grouped = comparisons_by_group(comparisons)
+    for group in BASELINE_FINAL_COMPARE_GROUPS:
+        if not grouped[group]:
+            failures.append(f"baseline_final_compare_missing_required_group: {group}")
+    for label, comparison in grouped[OLD_BASELINE_GROUP].items():
         if comparison.get("status") != "FAIL_EXPECTED":
             failures.append(f"baseline_final_compare_old_status_not_expected: {label}")
         if comparison.get("reason_code") != EXPECTED_FAILURE_REASON:
@@ -625,13 +622,7 @@ def verify_baseline_final_compare(payload: dict[str, object]) -> list[str]:
             RANK_ENSEMBLE_PREDICTION_ARTIFACTS
         ):
             failures.append(f"baseline_final_compare_old_artifacts_mismatch: {label}")
-    for label in (
-        "refreshed_prediction_baseline_3y",
-        "refreshed_prediction_baseline_6y",
-    ):
-        comparison = comparisons.get(label)
-        if not isinstance(comparison, dict):
-            continue
+    for label, comparison in grouped[REFRESHED_PREDICTION_BASELINE_GROUP].items():
         if comparison.get("status") != "PASS":
             failures.append(
                 f"baseline_final_compare_refreshed_status_not_pass: {label}"
@@ -641,9 +632,11 @@ def verify_baseline_final_compare(payload: dict[str, object]) -> list[str]:
         if not isinstance(prediction, dict):
             failures.append(f"baseline_final_compare_prediction_missing: {label}")
             continue
-        artifacts = set(prediction.get("artifact_ids", ()))
         for artifact in RANK_ENSEMBLE_PREDICTION_ARTIFACTS:
-            if artifact not in artifacts:
+            if not artifact_family_present(
+                prediction.get("artifact_ids", ()),
+                artifact,
+            ):
                 failures.append(
                     "baseline_final_compare_refreshed_missing_artifact: "
                     f"{label}:{artifact}"
@@ -653,6 +646,39 @@ def verify_baseline_final_compare(payload: dict[str, object]) -> list[str]:
                 f"baseline_final_compare_refreshed_failed_artifacts: {label}"
             )
     return failures
+
+
+def comparisons_by_group(
+    comparisons: dict[object, object],
+) -> dict[str, dict[str, dict[str, object]]]:
+    grouped: dict[str, dict[str, dict[str, object]]] = {
+        group: {} for group in BASELINE_FINAL_COMPARE_GROUPS
+    }
+    for label, comparison in comparisons.items():
+        if not isinstance(comparison, dict):
+            continue
+        group = comparison.get("comparison_group")
+        if group in grouped:
+            grouped[str(group)][str(label)] = comparison
+    return grouped
+
+
+def artifact_family_present(artifact_ids: object, expected_family: str) -> bool:
+    if not isinstance(artifact_ids, list):
+        return False
+    return any(
+        artifact_matches_family(str(artifact_id), expected_family)
+        for artifact_id in artifact_ids
+    )
+
+
+def artifact_matches_family(artifact_id: str, expected_family: str) -> bool:
+    return bool(
+        re.fullmatch(
+            rf"{re.escape(expected_family)}_[A-Za-z0-9_]+_[0-9]+d_prediction_[0-9]{{4}}",
+            artifact_id,
+        )
+    )
 
 
 def verify_source_tree_scan_evidence(

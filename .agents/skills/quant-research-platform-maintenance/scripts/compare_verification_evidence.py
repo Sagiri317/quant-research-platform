@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import subprocess
 from collections import defaultdict
 from collections.abc import Iterable
@@ -16,7 +17,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-GOAL_ROOT = Path(".run/goal/qrp-architecture-closure-review-fix")
+GOAL_ROOT = Path(".run/goal/verification-evidence-compare")
 KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
 FLOAT_ATOL = 1e-10
 FLOAT_RTOL = 1e-10
@@ -27,11 +28,11 @@ RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
     "equal_weight_rank_ensemble",
     "ic_weighted_rank_ensemble",
 )
-REQUIRED_COMPARE_LABELS = (
-    "old_baseline_3y",
-    "old_baseline_6y",
-    "refreshed_prediction_baseline_3y",
-    "refreshed_prediction_baseline_6y",
+OLD_BASELINE_GROUP = "old_baseline"
+REFRESHED_PREDICTION_BASELINE_GROUP = "refreshed_prediction_baseline"
+BASELINE_FINAL_COMPARE_GROUPS = (
+    OLD_BASELINE_GROUP,
+    REFRESHED_PREDICTION_BASELINE_GROUP,
 )
 
 RETIRED_RESEARCH_DATA_ID = "a_share" + "_price_volume_forward_returns"
@@ -227,16 +228,12 @@ def main() -> None:
     contract_failures = compare_contract_failures(comparisons)
     actual_overall_status = _overall_status(actual_statuses.values())
     overall_status = _overall_status(statuses.values(), contract_failures)
+    grouped = comparisons_by_group(comparisons)
     old_baseline_compare_status = _group_status(
-        status
-        for label, status in statuses.items()
-        if label.startswith("old_baseline_")
-        or comparisons[label].get("expected_status") == EXPECTED_FAILURE_STATUS
+        statuses[label] for label in grouped[OLD_BASELINE_GROUP]
     )
     refreshed_prediction_baseline_compare_status = _group_status(
-        status
-        for label, status in statuses.items()
-        if label.startswith("refreshed_prediction_baseline_")
+        statuses[label] for label in grouped[REFRESHED_PREDICTION_BASELINE_GROUP]
     )
 
     payload = {
@@ -293,6 +290,9 @@ def apply_pair_expectation(
     pair: dict[str, Any],
 ) -> dict[str, Any]:
     expected_status = str(pair.get("expected_status") or "PASS").strip().upper()
+    comparison_group = pair_comparison_group(pair)
+    if comparison_group:
+        comparison["comparison_group"] = comparison_group
     if expected_status == "PASS":
         comparison["expected_status"] = "PASS"
         return comparison
@@ -312,9 +312,16 @@ def apply_pair_expectation(
     comparison["expected_failure"] = True
     comparison["reason_code"] = reason
     comparison["expected_failed_artifacts"] = expected_artifacts
-    comparison["failed_artifacts"] = prediction_failed_artifacts(comparison)
+    failed_artifact_ids = prediction_failed_artifacts(comparison)
+    failed_artifact_families = artifact_families(
+        failed_artifact_ids,
+        expected_artifacts,
+    )
+    comparison["failed_artifact_ids"] = failed_artifact_ids
+    comparison["failed_artifacts"] = failed_artifact_families
     policy_failures = expected_failure_policy_failures(
         comparison,
+        comparison_group=comparison_group,
         expected_artifacts=expected_artifacts,
         reason=reason,
     )
@@ -333,13 +340,13 @@ def apply_pair_expectation(
 def expected_failure_policy_failures(
     comparison: dict[str, Any],
     *,
+    comparison_group: str,
     expected_artifacts: list[str],
     reason: str,
 ) -> list[str]:
     failures: list[str] = []
-    label = str(comparison.get("label") or "")
-    if label not in {"old_baseline_3y", "old_baseline_6y"}:
-        failures.append("expected_failure_label_not_old_baseline")
+    if comparison_group != OLD_BASELINE_GROUP:
+        failures.append("expected_failure_group_not_old_baseline")
     if reason != EXPECTED_FAILURE_REASON:
         failures.append("expected_failure_reason_mismatch")
     if expected_artifacts != sorted(RANK_ENSEMBLE_PREDICTION_ARTIFACTS):
@@ -373,12 +380,11 @@ def expected_failure_matches(
 
 def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[str]:
     failures: list[str] = []
-    missing = sorted(set(REQUIRED_COMPARE_LABELS) - set(comparisons))
-    failures.extend(f"missing_required_comparison: {label}" for label in missing)
-    for label in ("old_baseline_3y", "old_baseline_6y"):
-        comparison = comparisons.get(label)
-        if comparison is None:
-            continue
+    grouped = comparisons_by_group(comparisons)
+    for group in BASELINE_FINAL_COMPARE_GROUPS:
+        if not grouped[group]:
+            failures.append(f"missing_required_comparison_group: {group}")
+    for label, comparison in grouped[OLD_BASELINE_GROUP].items():
         if comparison.get("status") != EXPECTED_FAILURE_STATUS:
             failures.append(f"old_baseline_status_not_fail_expected: {label}")
         if comparison.get("reason_code") != EXPECTED_FAILURE_REASON:
@@ -387,20 +393,15 @@ def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[st
             RANK_ENSEMBLE_PREDICTION_ARTIFACTS
         ):
             failures.append(f"old_baseline_failed_artifacts_mismatch: {label}")
-    for label in (
-        "refreshed_prediction_baseline_3y",
-        "refreshed_prediction_baseline_6y",
-    ):
-        comparison = comparisons.get(label)
-        if comparison is None:
-            continue
+    for label, comparison in grouped[REFRESHED_PREDICTION_BASELINE_GROUP].items():
         if comparison.get("status") != "PASS":
             failures.append(f"refreshed_baseline_status_not_pass: {label}")
             continue
         prediction = comparison.get("prediction_summary", {})
-        artifact_ids = set(prediction.get("artifact_ids", ()))
         missing_artifacts = sorted(
-            set(RANK_ENSEMBLE_PREDICTION_ARTIFACTS) - artifact_ids
+            artifact
+            for artifact in RANK_ENSEMBLE_PREDICTION_ARTIFACTS
+            if not artifact_family_present(prediction.get("artifact_ids", ()), artifact)
         )
         failures.extend(
             f"refreshed_baseline_missing_rank_ensemble_artifact: {label}:{artifact}"
@@ -409,6 +410,58 @@ def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[st
         if prediction.get("failed_artifacts"):
             failures.append(f"refreshed_baseline_failed_artifacts_present: {label}")
     return failures
+
+
+def pair_comparison_group(pair: dict[str, Any]) -> str:
+    return str(
+        pair.get("comparison_group")
+        or pair.get("compare_group")
+        or pair.get("group")
+        or ""
+    ).strip()
+
+
+def comparisons_by_group(
+    comparisons: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    grouped: dict[str, dict[str, dict[str, Any]]] = {
+        group: {} for group in BASELINE_FINAL_COMPARE_GROUPS
+    }
+    for label, comparison in comparisons.items():
+        group = comparison.get("comparison_group")
+        if group in grouped:
+            grouped[str(group)][label] = comparison
+    return grouped
+
+
+def artifact_family_present(artifact_ids: Iterable[Any], expected_family: str) -> bool:
+    return any(
+        artifact_matches_family(str(artifact_id), expected_family)
+        for artifact_id in artifact_ids
+    )
+
+
+def artifact_families(
+    artifact_ids: Iterable[Any],
+    expected_families: Iterable[str],
+) -> list[str]:
+    families: set[str] = set()
+    expected = sorted(str(item) for item in expected_families)
+    for artifact_id in artifact_ids:
+        value = str(artifact_id)
+        for family in expected:
+            if artifact_matches_family(value, family):
+                families.add(family)
+    return sorted(families)
+
+
+def artifact_matches_family(artifact_id: str, expected_family: str) -> bool:
+    return bool(
+        re.fullmatch(
+            rf"{re.escape(expected_family)}_[A-Za-z0-9_]+_[0-9]+d_prediction_[0-9]{{4}}",
+            artifact_id,
+        )
+    )
 
 
 def prediction_failed_artifacts(comparison: dict[str, Any]) -> list[str]:
@@ -611,6 +664,10 @@ def run_pairs_from_file(path: Path) -> dict[str, dict[str, Any]]:
             "expected_status": raw_pair.get("expected_status", "PASS"),
             "expected_failure_reason": raw_pair.get("expected_failure_reason", ""),
             "expected_failed_artifacts": list(expected_failed_artifacts),
+            "comparison_group": raw_pair.get(
+                "comparison_group",
+                raw_pair.get("compare_group", raw_pair.get("group", "")),
+            ),
         }
     if not runs:
         raise ValueError("invalid_pairs_file: empty_pairs")
