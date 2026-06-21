@@ -27,10 +27,10 @@ def test_generic_catalogs_do_not_define_bootstrap_defaults() -> None:
     )
 
 
-def test_workflow_registry_uses_run_mode_factory() -> None:
+def test_workflow_registry_uses_run_policy_factory() -> None:
     """validate_only is official; write_artifacts fails closed until it lands.
 
-    Future artifact writing support must use workflow_node_registry(run_mode=...)
+    Future artifact writing support must use workflow_node_registry(run_policy=...)
     as the same entrypoint. Do not introduce separate fixture or long-term
     validate-only factories.
     """

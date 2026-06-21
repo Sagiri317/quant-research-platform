@@ -53,7 +53,7 @@ In a fresh directory with only the zip/json, first extract or copy
 tools from the cloned repository:
 
 ```bash
-git clone --branch feature/qrp-clean-rewrite final-branch.bundle repo
+git clone --branch <branch-from-sidecar> final-branch.bundle repo
 python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py
 python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py --zip <slug>.zip --json <slug>.json
 python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py <slug>.zip --json <slug>.json

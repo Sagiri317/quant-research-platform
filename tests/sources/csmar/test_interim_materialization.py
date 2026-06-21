@@ -676,46 +676,65 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, dict[str, object]] = {}
 
-    def fake_iter_interim_frames(**_: object):
-        yield pd.DataFrame(
-            {
-                "source_asset_id": ["000001"],
-                "timestamp": [pd.Timestamp("2024-01-02")],
-                "trade_date": [pd.Timestamp("2024-01-02")],
-                "market_type": [4],
-                "trading_status_code": [1],
-                "filling_flag": ["0"],
-                "open": [10.0],
-                "high": [10.5],
-                "low": [9.8],
-                "close": [10.2],
-                "volume": [1000],
-                "amount": [10200.0],
-                "prev_close": [9.9],
-                "limit_status": [0],
-                "period_return": [0.03],
-                "adj_close": [10.2],
-                "adj_open": [10.0],
-                "float_market_cap": [100.0],
-                "total_market_cap": [200.0],
-                "turnover": [0.01],
-            }
-        )
+    def fake_iter_interim_frames(**kwargs: object):
+        data_id = kwargs["data_id"]
+        if data_id == "market_bars_1d":
+            yield pd.DataFrame(
+                {
+                    "source_asset_id": ["000001"],
+                    "timestamp": [pd.Timestamp("2024-01-02")],
+                    "trade_date": [pd.Timestamp("2024-01-02")],
+                    "market_type": [4],
+                    "trading_status_code": [1],
+                    "filling_flag": ["0"],
+                    "open": [10.0],
+                    "high": [10.5],
+                    "low": [9.8],
+                    "close": [10.2],
+                    "volume": [1000],
+                    "amount": [10200.0],
+                    "prev_close": [9.9],
+                    "limit_status": [0],
+                    "period_return": [0.03],
+                    "adj_close": [10.2],
+                    "adj_open": [10.0],
+                    "float_market_cap": [100.0],
+                    "total_market_cap": [200.0],
+                    "turnover": [0.01],
+                }
+            )
+            return
+        if data_id == "market_cap":
+            yield pd.DataFrame(
+                {
+                    "source_asset_id": ["000001"],
+                    "timestamp": [pd.Timestamp("2024-01-02")],
+                    "share_change_date": [pd.Timestamp("2024-01-02")],
+                    "total_shares": [200.0],
+                    "a_float_shares": [100.0],
+                }
+            )
+            return
+        raise AssertionError(f"unexpected data_id: {data_id}")
 
     def fake_write_dataset(root: Path, data, *, spec) -> None:
         assert not isinstance(data, pd.DataFrame)
-        captured["root"] = root
-        captured["data_id"] = spec.data_id
-        captured["chunks"] = list(data)
+        captured[spec.data_id] = {
+            "root": root,
+            "chunks": list(data),
+        }
 
     raw_index_calls = 0
 
     def fake_dataset_files_by_id(_: Path) -> dict[str, tuple[Path, ...]]:
         nonlocal raw_index_calls
         raw_index_calls += 1
-        return {"market_bars_1d": (Path("raw"),)}
+        return {
+            "market_bars_1d": (Path("raw-market-bars"),),
+            "market_cap": (Path("raw-market-cap"),),
+        }
 
     monkeypatch.setattr(interim, "dataset_files_by_id", fake_dataset_files_by_id)
     monkeypatch.setattr(
@@ -728,15 +747,17 @@ def test_csmar_market_bars_1d_materializer_streams_chunks_to_storage(
 
     result = interim.materialize_interim_data(
         layout=StorageLayout(project_root=tmp_path),
-        data_ids=("market_bars_1d",),
+        data_ids=("market_bars_1d", "market_cap"),
         start_date="2024-01-01",
         end_date="2024-12-31",
         chunksize=1,
     )
 
-    assert captured["data_id"] == "market_bars_1d"
-    assert len(captured["chunks"]) == 1
-    assert result.artifact_roots["market_bars_1d"] == captured["root"]
+    assert set(captured) == {"market_bars_1d", "market_cap"}
+    assert len(captured["market_bars_1d"]["chunks"]) == 1
+    assert len(captured["market_cap"]["chunks"]) == 1
+    assert result.artifact_roots["market_bars_1d"] == captured["market_bars_1d"]["root"]
+    assert result.artifact_roots["market_cap"] == captured["market_cap"]["root"]
     assert raw_index_calls == 1
 
 

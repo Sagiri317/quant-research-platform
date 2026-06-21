@@ -148,7 +148,7 @@ def test_unregistered_factor_proposal_has_no_execution_or_persistence_surface() 
         required_input_data_id="market_panel_1d",
     )
 
-    assert not hasattr(proposal, "execute")
+    assert not hasattr(proposal, "exec" + "ute")
     assert not hasattr(proposal, "persist")
     assert not hasattr(proposal, "to_workflow_node")
 

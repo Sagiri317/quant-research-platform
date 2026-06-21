@@ -1,4 +1,4 @@
-"""Pure A-share annotation derivation from the processed daily panel."""
+"""Pure A-share annotation derivation from the processed market panel."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def derive_annotations(
     data_ids: tuple[str, ...] | None = None,
     min_listing_trading_days: int = 120,
 ) -> dict[str, pd.DataFrame]:
-    """Derive registered A-share annotation frames from a daily panel frame."""
+    """Derive registered A-share annotation frames from market_panel_1d."""
 
     catalog = a_share_processed_catalog()
     requested = set(data_ids) if data_ids is not None else None

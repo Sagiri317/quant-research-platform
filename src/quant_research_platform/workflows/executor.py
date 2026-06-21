@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quant_research_platform.contracts.execution import WorkflowRunMode
+from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowRunSummary,
@@ -30,24 +30,24 @@ def run_workflow(
     checkpoints: InMemoryCheckpointStore | None = None,
     *,
     allowed_spec_ids: set[str] | None = None,
-    run_mode: WorkflowRunMode | str | None = None,
+    run_policy: WorkflowRunPolicy | str | None = None,
     run_id: str = "workflow-validation-run",
 ) -> WorkflowRunSummary:
-    mode = _normalize_workflow_run_mode(run_mode)
-    if mode is WorkflowRunMode.WRITE_ARTIFACTS:
+    policy = _normalize_workflow_run_policy(run_policy)
+    if policy is WorkflowRunPolicy.WRITE_ARTIFACTS:
         raise NotImplementedError("workflow_write_artifacts_not_implemented")
-    node_registry = registry or workflow_node_registry(run_mode=mode)
+    node_registry = registry or workflow_node_registry(run_policy=policy)
     _validate_workflow_run(
         spec,
         allowed_spec_ids=allowed_spec_ids,
     )
     step_ids = plan_topological_steps(spec)
-    if mode is WorkflowRunMode.VALIDATE_ONLY:
+    if policy is WorkflowRunPolicy.VALIDATE_ONLY:
         _validate_registered_steps(step_ids, node_registry)
         return workflow_run_summary(
             spec,
             completed_nodes=(),
-            run_mode=mode,
+            run_policy=policy,
             run_id=run_id,
             status="validated",
         )
@@ -74,14 +74,14 @@ def workflow_run_summary(
     spec: WorkflowSpec,
     *,
     completed_nodes: tuple[str, ...],
-    run_mode: WorkflowRunMode | str | None = None,
+    run_policy: WorkflowRunPolicy | str | None = None,
     run_id: str = "workflow-validation-run",
     status: str = "validated",
 ) -> WorkflowRunSummary:
     return WorkflowRunSummary(
         workflow_id=spec.workflow_id,
         workflow_version=spec.workflow_version,
-        run_mode=WorkflowRunMode.normalize(run_mode),
+        run_policy=WorkflowRunPolicy.normalize(run_policy),
         run_id=run_id,
         status=status,
         market_id=str(spec.market_id) if spec.market_id else None,
@@ -95,12 +95,12 @@ def workflow_run_summary(
     )
 
 
-def _normalize_workflow_run_mode(
-    run_mode: WorkflowRunMode | str | None,
-) -> WorkflowRunMode:
-    if run_mode is None:
-        return WorkflowRunMode.VALIDATE_ONLY
-    return WorkflowRunMode.normalize(run_mode)
+def _normalize_workflow_run_policy(
+    run_policy: WorkflowRunPolicy | str | None,
+) -> WorkflowRunPolicy:
+    if run_policy is None:
+        return WorkflowRunPolicy.VALIDATE_ONLY
+    return WorkflowRunPolicy.normalize(run_policy)
 
 
 __all__ = [

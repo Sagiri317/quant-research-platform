@@ -13,7 +13,7 @@ from quant_research_platform.catalog.fields import (
 class AShareMarketAdapter:
     market_id = "a_share"
 
-    def with_daily_bar_canonical_fields(
+    def with_market_bars_1d_canonical_fields(
         self,
         frame: pd.DataFrame,
         *,

@@ -40,9 +40,13 @@ def test_public_safe_text_checks_use_runtime_privacy_single_source() -> None:
         encoding="utf-8"
     )
     handoff_safety = (HANDOFF_ROOT / "handoff_safety.py").read_text(encoding="utf-8")
+    report_safety = Path(
+        "src/quant_research_platform/reports/verification_evidence.py"
+    ).read_text(encoding="utf-8")
 
     assert "public_text_unsafe_reason" in agent_safety
     assert "public_text_unsafe_reason" in handoff_safety
+    assert "public_text_unsafe_reason" in report_safety
     forbidden_local_fact_sources = {
         "_UNSAFE_TEXT_PATTERNS",
         "DRIVE_ABSOLUTE_RE",
@@ -54,6 +58,6 @@ def test_public_safe_text_checks_use_runtime_privacy_single_source() -> None:
         "VENDOR_MARKER_RE",
         "RAW_TRACEBACK_RE",
     }
-    combined = agent_safety + "\n" + handoff_safety
+    combined = agent_safety + "\n" + handoff_safety + "\n" + report_safety
 
     assert [name for name in forbidden_local_fact_sources if name in combined] == []

@@ -40,7 +40,9 @@ def test_daily_lifecycle_names_are_replaced() -> None:
         "next" + "_day_": re.compile(
             r"\b" + re.escape("next" + "_day_") + r"[A-Za-z0-9_]*\b"
         ),
-        "valid" + "_daily_bar": _literal_pattern("valid" + "_daily_bar"),
+        "valid" + "_" + "daily" + "_bar": _literal_pattern(
+            "valid" + "_" + "daily" + "_bar"
+        ),
         "return" + "_1d": _literal_pattern("return" + "_1d"),
         "private" + "_real": _literal_pattern("private" + "_real"),
         "private" + "_data": _literal_pattern("private" + "_data"),

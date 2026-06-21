@@ -12,7 +12,7 @@ data/
   processed/a_share/
 
 reports/
-  private_real/<market>/<run_type>/<run_id>/
+  private_research/<market>/<run_type>/<run_id>/
 ```
 
 Rules:
@@ -22,10 +22,10 @@ Rules:
   catalog/spec writers.
 - `data/processed/a_share/` keeps processed market data and approved research
   input layers only.
-- `reports/private_real/` is a private boundary by default.
+- `reports/private_research/` is a private boundary by default.
 - Private boundary checks do not depend on a suffix convention.
 - Prediction, evaluation, diagnostics, factor-generation, and model-output run
-  artifacts must be written under `reports/private_real/<market>/<run_type>/<run_id>/`.
+  artifacts must be written under `reports/private_research/<market>/<run_type>/<run_id>/`.
 - Run artifact paths are derived from `StorageLayout + ReportSpec + run_id`;
   API/CLI and business services do not accept arbitrary public output roots.
 - Run reports and model outputs must not be written to `data/processed/`.

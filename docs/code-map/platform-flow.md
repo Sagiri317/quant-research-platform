@@ -109,8 +109,8 @@ promise returns, and does not output row-level private data.
 ## Narrow Follow-up Notes
 
 - Workflow summaries currently expose `completed_nodes`; a future summary model
-  may separate `planned_nodes` from `completed_nodes` so dry-run plans are not
-  represented as completed work.
+  may separate `planned_nodes` from `completed_nodes` so validation-only plans
+  are not represented as completed work.
 - Storage writer root validation currently validates spec-shaped legal suffixes;
   a future implementation should make this project-root-relative, likely by
   passing `StorageLayout.project_root` or equivalent through writer validation

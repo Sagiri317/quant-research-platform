@@ -186,9 +186,7 @@ def main() -> int:
     trusted_fixture = 'unsafe_cases = {"vendor_marker": "vendor_marker"}'
     if unsafe_text_reason(trusted_fixture, name="run_tools/self_test.py") is not None:
         return fail("trusted_run_tool_fixture_flagged")
-    clone_command = (
-        "git clone --branch feature/qrp-clean-rewrite final-branch.bundle repo"
-    )
+    clone_command = "git clone --branch <branch-from-sidecar> final-branch.bundle repo"
     if clone_command not in readme:
         return fail("readme_missing_branch_clone_command")
     if "not handoff contract requirements" not in readme:

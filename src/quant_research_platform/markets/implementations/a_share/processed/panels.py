@@ -1,4 +1,4 @@
-"""Pure A-share daily panel calculations from source-normalized interim frames."""
+"""Pure A-share market-panel calculations from source-normalized interim frames."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def compute_market_panel(
     market_cap: pd.DataFrame,
     trading_calendar: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compute the A-share processed daily panel from source interim frames."""
+    """Compute the A-share processed market_panel_1d from source interim frames."""
 
     daily = _ensure_datetime(
         _with_a_share_time_fields(_with_a_share_asset_keys(market_bars_1d)),
@@ -211,7 +211,10 @@ def _ensure_datetime(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return result
 
 
-def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
+def _asof_join_stock_master(
+    market_frame: pd.DataFrame,
+    stocks: pd.DataFrame,
+) -> pd.DataFrame:
     stock_rows = stocks.copy()
     stock_rows["stock_effective_date"] = _stock_master_effective_date(stock_rows)
     if stock_rows["stock_effective_date"].isna().any():
@@ -233,16 +236,16 @@ def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         for column in stocks.columns
         if column not in {"asset_id", "stock_effective_date"}
     ]
-    for asset_id, daily_stock_frame in daily.groupby("asset_id", sort=False):
+    for asset_id, market_bar_frame in market_frame.groupby("asset_id", sort=False):
         stock_frame = stock_rows[stock_rows["asset_id"] == asset_id]
         if stock_frame.empty:
-            stock_result = daily_stock_frame.copy()
+            stock_result = market_bar_frame.copy()
             for column in stock_output_columns:
                 if column not in stock_result.columns:
                     stock_result[column] = pd.NA
         else:
             stock_result = pd.merge_asof(
-                daily_stock_frame.sort_values("timestamp"),
+                market_bar_frame.sort_values("timestamp"),
                 stock_frame.sort_values("stock_effective_date"),
                 left_on="timestamp",
                 right_on="stock_effective_date",
@@ -264,7 +267,7 @@ def _asof_join_stock_master(daily: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
             )
         merged_groups.append(stock_result)
     if not merged_groups:
-        stock_result = daily.copy()
+        stock_result = market_frame.copy()
         for column in stock_output_columns:
             if column not in stock_result.columns:
                 stock_result[column] = _empty_stock_master_column(column)

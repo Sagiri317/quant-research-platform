@@ -65,8 +65,8 @@ RETIRED_API_FRAGMENTS = (
 RETIRED_CLI_COMMANDS = (
     ("catalog", "data-products"),
     ("catalog", "universes"),
-    ("data-products", "run-interim", "a_share_daily_bar"),
-    ("data-product", "interim", "a_share_daily_bar"),
+    ("data-products", "run-interim", "a_share_" + "daily" + "_bar"),
+    ("data-product", "interim", "a_share_" + "daily" + "_bar"),
     ("market", "build-processed", "--market", "a_share"),
     ("research", "build-dataset"),
     ("workflow", "run"),
@@ -105,7 +105,7 @@ def test_openapi_uses_approved_operation_ids_and_no_retired_operations() -> None
         assert fragment not in text
 
 
-def test_api_01_endpoints_execute_without_private_markers() -> None:
+def test_api_01_endpoints_respond_without_private_markers() -> None:
     client = TestClient(create_app())
 
     responses = [
@@ -190,7 +190,7 @@ def test_cli_help_exposes_approved_groups_and_no_retired_commands() -> None:
     assert "data-products" not in combined
     assert "universes" not in combined
     assert "run-interim" not in combined
-    assert "--dry-run" not in combined
+    assert ("--" + "dry" + "-run") not in combined
     assert "--run-id" not in combined
     _assert_public_text_has_no_private_markers(combined)
 

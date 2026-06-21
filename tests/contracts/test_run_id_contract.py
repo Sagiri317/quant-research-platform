@@ -4,11 +4,11 @@ import pytest
 
 import quant_research_platform.contracts.evaluations as evaluations_contracts
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 from quant_research_platform.contracts.workflows import WorkflowRunSummary
 
 
@@ -110,7 +110,7 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
         WorkflowRunSummary(
             workflow_id="workflow",
             workflow_version="0.1",
-            run_mode=WorkflowRunMode.VALIDATE_ONLY,
+            run_policy=WorkflowRunPolicy.VALIDATE_ONLY,
             run_id="000001.sz",
             status="failed",
             market_id="a_share",

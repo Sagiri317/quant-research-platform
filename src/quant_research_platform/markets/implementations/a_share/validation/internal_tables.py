@@ -50,7 +50,7 @@ BENCHMARK_INDEX_REQUIRED_COLUMNS = (
 def check_market_bars_1d(
     frame: pd.DataFrame, *, expected_year: int | None = None, file: str = ""
 ) -> QualityReport:
-    """检查单个标准化 daily market interim frame。"""
+    """检查单个标准化 market_bars_1d interim frame。"""
 
     result = frame.copy()
     result["timestamp"] = to_datetime(result["timestamp"])

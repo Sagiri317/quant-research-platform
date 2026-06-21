@@ -18,7 +18,6 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
 )
-from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import (
@@ -43,6 +42,7 @@ from quant_research_platform.contracts.run_id import (
     validate_run_id,
 )
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 
 CONTRACT_VERSION = "0.1"
 
@@ -79,7 +79,7 @@ __all__ = [
     "SourceId",
     "TradabilityConfig",
     "WeightConfig",
-    "WorkflowRunMode",
+    "WorkflowRunPolicy",
     "data_frequency_slug",
     "horizon_unit_suffix",
     "normalize_data_frequency",

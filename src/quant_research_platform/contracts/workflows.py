@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 
 
 class WorkflowCheckpointPolicy(StrEnum):
@@ -80,7 +80,7 @@ class WorkflowSpec:
 class WorkflowRunSummary:
     workflow_id: str
     workflow_version: str
-    run_mode: WorkflowRunMode
+    run_policy: WorkflowRunPolicy
     run_id: str
     status: str
     market_id: str | None
@@ -100,7 +100,7 @@ class WorkflowRunSummary:
         payload: dict[str, object] = {
             "workflow_id": self.workflow_id,
             "workflow_version": self.workflow_version,
-            "run_mode": self.run_mode.value,
+            "run_policy": self.run_policy.value,
             "run_id": self.run_id,
             "status": self.status,
             "market_id": self.market_id,
@@ -121,6 +121,7 @@ __all__ = [
     "WorkflowArtifactWriterPolicy",
     "WorkflowCheckpointPolicy",
     "WorkflowNode",
+    "WorkflowRunPolicy",
     "WorkflowRunSummary",
     "WorkflowSpec",
 ]

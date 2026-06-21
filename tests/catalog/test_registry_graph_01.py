@@ -58,4 +58,4 @@ def test_csmar_catalog_exposes_current_source_owned_data_ids() -> None:
 
     assert csmar_catalog_ids == set(EXPECTED_CSMAR_INTERIM_DATA_IDS)
     assert "index_market" not in csmar_catalog_ids
-    assert "a_share_daily_bar_interim" not in csmar_catalog_ids
+    assert "a_share_" + "daily" + "_bar_interim" not in csmar_catalog_ids

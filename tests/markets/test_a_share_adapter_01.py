@@ -8,11 +8,11 @@ from quant_research_platform.markets.implementations.a_share.adapter import (
 )
 
 
-def test_a_share_adapter_generates_canonical_daily_stock_fields() -> None:
+def test_a_share_adapter_generates_canonical_market_bar_fields() -> None:
     frame = pd.DataFrame({"stock_code": ["7"], "trade_date": ["2014-01-02"]})
     adapter = AShareMarketAdapter()
 
-    result = adapter.with_daily_bar_canonical_fields(
+    result = adapter.with_market_bars_1d_canonical_fields(
         frame,
         source_id="csmar",
         source_asset_column="stock_code",
@@ -33,7 +33,7 @@ def test_a_share_adapter_generates_index_asset_namespace() -> None:
     frame = pd.DataFrame({"index_code": ["000985"], "trade_date": ["2014-01-02"]})
     adapter = AShareMarketAdapter()
 
-    result = adapter.with_daily_bar_canonical_fields(
+    result = adapter.with_market_bars_1d_canonical_fields(
         frame,
         source_id="csmar",
         source_asset_column="index_code",

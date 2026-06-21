@@ -14,7 +14,7 @@
 
 - 有 `--help`。
 - 有明确 exit code：`0` 通过，`1` 检查失败，`2` 输入/环境错误。
-- 支持 check-only / dry-run（如适用）。
+- 支持 check-only / validation-only preview（如适用）。
 - 输出应短；机器结果用 `PASS/FAIL/NOT_RUN/BLOCKED` 或 JSON。
 - 脚本失败时只输出定位所需信息，不 dump 大日志。
 

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 import quant_research_platform.workflows.executor as executor_module
-from quant_research_platform.contracts.execution import WorkflowRunMode
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 from quant_research_platform.contracts.workflows import (
     WorkflowArtifactWriterPolicy,
     WorkflowNode,
@@ -31,8 +31,8 @@ from quant_research_platform.workflows.services import run_registered_workflow
 
 
 def test_workflow_node_registry_factory_supports_validate_only_modes() -> None:
-    for run_mode in (None, "validate_only", WorkflowRunMode.VALIDATE_ONLY):
-        registry = workflow_node_registry(run_mode=run_mode)
+    for run_policy in (None, "validate_only", WorkflowRunPolicy.VALIDATE_ONLY):
+        registry = workflow_node_registry(run_policy=run_policy)
 
         assert isinstance(registry, WorkflowNodeRegistry)
         assert (
@@ -42,15 +42,15 @@ def test_workflow_node_registry_factory_supports_validate_only_modes() -> None:
 
 
 def test_workflow_node_registry_factory_write_artifacts_fails_closed() -> None:
-    for run_mode in ("write_artifacts", WorkflowRunMode.WRITE_ARTIFACTS):
+    for run_policy in ("write_artifacts", WorkflowRunPolicy.WRITE_ARTIFACTS):
         with pytest.raises(
             NotImplementedError,
             match="workflow_write_artifacts_not_implemented",
         ):
-            workflow_node_registry(run_mode=run_mode)
+            workflow_node_registry(run_policy=run_policy)
 
 
-def test_workflow_runner_default_run_mode_validates_only() -> None:
+def test_workflow_runner_default_run_policy_validates_only() -> None:
     spec = WorkflowSpec(
         workflow_id="executor_smoke",
         nodes=(
@@ -82,7 +82,7 @@ def test_workflow_runner_default_run_mode_validates_only() -> None:
 
     assert calls == []
     assert isinstance(summary, WorkflowRunSummary)
-    assert summary.run_mode is WorkflowRunMode.VALIDATE_ONLY
+    assert summary.run_policy is WorkflowRunPolicy.VALIDATE_ONLY
     assert summary.status == "validated"
     assert summary.completed_nodes == ()
 
@@ -108,7 +108,7 @@ def test_workflow_runner_records_memory_checkpoints_only() -> None:
         spec,
         registry=registry,
         checkpoints=checkpoints,
-        run_mode="validate_only",
+        run_policy="validate_only",
     )
 
     assert checkpoints.list() == ()
@@ -133,7 +133,7 @@ def test_workflow_validate_only_does_not_call_handlers_or_write_checkpoints() ->
         spec,
         registry=registry,
         checkpoints=checkpoints,
-        run_mode="validate_only",
+        run_policy="validate_only",
     )
     with pytest.raises(
         NotImplementedError,
@@ -142,7 +142,7 @@ def test_workflow_validate_only_does_not_call_handlers_or_write_checkpoints() ->
         run_workflow(
             spec,
             registry=registry,
-            run_mode="write_artifacts",
+            run_policy="write_artifacts",
         )
 
     assert calls == []
@@ -161,7 +161,7 @@ def test_workflow_validate_only_rejects_unknown_registered_node() -> None:
         run_workflow(
             spec,
             registry=WorkflowNodeRegistry(),
-            run_mode="validate_only",
+            run_policy="validate_only",
         )
 
 
@@ -225,7 +225,7 @@ def test_workflow_summary_is_sanitized() -> None:
     summary = workflow_run_summary(
         spec,
         completed_nodes=("node",),
-        run_mode="write_artifacts",
+        run_policy="write_artifacts",
         run_id="workflow-validation-run",
     )
 
@@ -274,7 +274,7 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
     )
 
     assert summary["status"] == "validated"
-    assert summary["run_mode"] == "validate_only"
+    assert summary["run_policy"] == "validate_only"
     assert "results" not in summary
     assert "C:" not in str(summary)
     assert "/mnt/" not in str(summary)

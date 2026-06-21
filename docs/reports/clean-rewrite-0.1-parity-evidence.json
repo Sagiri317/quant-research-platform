@@ -310,7 +310,7 @@
       "mean_abs_delta": 0.0,
       "tolerance": 0.0,
       "accepted_explained_delta": false,
-      "explanation": "Exact aggregate parity verified for full historical daily panel from local private artifacts, without row-level output.",
+      "explanation": "Exact aggregate parity verified for full historical market_panel_1d from local private artifacts, without row-level output.",
       "explanation_details": {
         "expected_period": "2014-01-01 through 2025-12-31",
         "observed_period": "2014-01-01 through 2025-12-31",

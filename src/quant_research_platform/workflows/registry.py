@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from quant_research_platform.contracts.execution import WorkflowRunMode
+from quant_research_platform.contracts.workflow_run import WorkflowRunPolicy
 
 NodeHandler = Callable[[], Any]
 
@@ -43,20 +43,20 @@ class WorkflowNodeRegistry:
 
 def workflow_node_registry(
     *,
-    run_mode: WorkflowRunMode | str | None = None,
+    run_policy: WorkflowRunPolicy | str | None = None,
 ) -> WorkflowNodeRegistry:
-    mode = _normalize_workflow_run_mode(run_mode)
-    if mode is WorkflowRunMode.WRITE_ARTIFACTS:
+    policy = _normalize_workflow_run_policy(run_policy)
+    if policy is WorkflowRunPolicy.WRITE_ARTIFACTS:
         raise NotImplementedError("workflow_write_artifacts_not_implemented")
     return _build_workflow_node_registry_for_validation()
 
 
-def _normalize_workflow_run_mode(
-    run_mode: WorkflowRunMode | str | None,
-) -> WorkflowRunMode:
-    if run_mode is None:
-        return WorkflowRunMode.VALIDATE_ONLY
-    return WorkflowRunMode.normalize(run_mode)
+def _normalize_workflow_run_policy(
+    run_policy: WorkflowRunPolicy | str | None,
+) -> WorkflowRunPolicy:
+    if run_policy is None:
+        return WorkflowRunPolicy.VALIDATE_ONLY
+    return WorkflowRunPolicy.normalize(run_policy)
 
 
 def _build_workflow_node_registry_for_validation() -> WorkflowNodeRegistry:

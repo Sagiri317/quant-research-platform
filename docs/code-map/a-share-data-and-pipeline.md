@@ -73,7 +73,7 @@ profile.
   data, label data, and research dataset assembly are closed under explicit
   catalog/profile ownership.
 - `market_panel_1d` is a fact layer. It excludes derived `eligible*`,
-  `next_day*`, `can_enter`, and `can_exit` masks.
+  `next_bar*`, `can_enter`, and `can_exit` masks.
 - A-share trading semantics are owned by processed annotations. Label,
   evaluation, model, and prediction paths consume annotation outputs instead of
   recomputing ST, suspension, limit, eligibility, or execution rules.
@@ -136,7 +136,7 @@ profile.
   states it was rerun.
 - Evaluation supports `eligible`, `tradable`, and `unfiltered` filter modes.
   `tradable` means `eligible and can_enter and can_exit` and is an
-  execution-aware evaluation diagnostic only, not a backtest, real-money-executable PnL,
+  tradability-aware evaluation diagnostic only, not a backtest, real-money-executable PnL,
   or production order execution result.
 - Model training and historical prediction handoff support only `eligible` and
   `unfiltered` sample filter modes. They do not use `can_enter` or `can_exit`
@@ -164,10 +164,10 @@ profile.
   up/down rows remain tradable at the open-price abstraction used in this
   research batch.
 - Runtime resource policy controls internal processed/research chunk size.
-  A-share daily execution chunks by trading-session core windows with read halos:
-  next-session halo for daily panel construction and annotation execution masks,
-  per-asset valid daily bar warmup for factors, and per-asset valid daily bar
-  future lookahead for labels. Only core rows are written.
+  A-share 1d research chunks by trading-session core windows with read halos:
+  next-session halo for market_panel_1d construction and annotation entry/exit
+  masks, per-asset valid bar warmup for factors, and per-asset valid bar future
+  lookahead for labels. Only core rows are written.
 - `TimeWindow` is the public logical interval. `SessionWindow` is the internal
   execution interval used by processed materialization and research dataset
   assembly. Public API/CLI surfaces do not expose chunk controls.

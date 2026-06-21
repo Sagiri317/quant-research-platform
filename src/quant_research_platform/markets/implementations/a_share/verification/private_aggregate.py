@@ -420,7 +420,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
             "full_historical_market_panel_1d_status",
             (market_panel_1d,),
             FULL_HISTORY_PERIOD,
-            "full historical daily panel",
+            "full historical market_panel_1d",
         ),
     )
 
