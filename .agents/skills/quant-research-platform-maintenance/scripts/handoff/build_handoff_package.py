@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import importlib
 import io
 import json
 import re
@@ -1221,7 +1222,9 @@ def source_tree_active_test_literal_findings(
             relative,
             path,
         )
-        for rule, pattern in source_tree_active_test_literal_patterns().items():
+        for rule, pattern in source_tree_active_test_literal_patterns(
+            clone_dir
+        ).items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
                     continue
@@ -1251,7 +1254,7 @@ def source_tree_active_test_literal_findings(
                 skip_lines,
                 rule_definition_lines,
                 scan_group="active_test_literals",
-                patterns=source_tree_active_test_literal_patterns(),
+                patterns=source_tree_active_test_literal_patterns(clone_dir),
             )
         )
     return findings
@@ -1261,15 +1264,71 @@ def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
     return bool(SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative))
 
 
-def source_tree_active_test_literal_patterns() -> dict[str, re.Pattern[str]]:
+def source_tree_active_test_literal_patterns(
+    repo_root: Path | None = None,
+) -> dict[str, re.Pattern[str]]:
+    ensure_runtime_src_path(repo_root)
+    from quant_research_platform.contracts.data import (
+        DataFrequency,
+        data_frequency_slug,
+    )
+    from quant_research_platform.markets.implementations.a_share.ids import (
+        market_context_data_id,
+        market_panel_data_id,
+    )
+
+    market_bars_data_id = discover_market_bars_data_id_helper(repo_root)
+    frequency = DataFrequency.DAILY
+    daily_slug = re.escape(data_frequency_slug(frequency))
     return {
-        "active_market_bars_data_id": re.compile(r"\bmarket_bars_1d\b"),
-        "active_market_panel_data_id": re.compile(r"\bmarket_panel_1d\b"),
-        "active_market_context_data_id": re.compile(r"\bmarket_context_1d\b"),
+        "active_market_bars_data_id": re.compile(
+            rf"\b{re.escape(market_bars_data_id(frequency))}\b"
+        ),
+        "active_market_panel_data_id": re.compile(
+            rf"\b{re.escape(market_panel_data_id(frequency))}\b"
+        ),
+        "active_market_context_data_id": re.compile(
+            rf"\b{re.escape(market_context_data_id(frequency))}\b"
+        ),
         "active_frequency_slug": re.compile(
-            r"(?:[\"']1d[\"']|(?<![A-Za-z0-9_])1d(?![A-Za-z0-9_]))"
+            rf"(?:[\"']{daily_slug}[\"']|"
+            rf"(?<![A-Za-z0-9_]){daily_slug}(?![A-Za-z0-9_]))"
         ),
     }
+
+
+def discover_market_bars_data_id_helper(repo_root: Path | None) -> object:
+    src_root = ensure_runtime_src_path(repo_root)
+    source_root = src_root / "quant_research_platform" / "sources"
+    for path in sorted(source_root.rglob("ids.py")) if source_root.exists() else ():
+        if "market_bars_data_id" not in path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ):
+            continue
+        module_name = ".".join(path.relative_to(src_root).with_suffix("").parts)
+        module = importlib.import_module(module_name)
+        helper = getattr(module, "market_bars_data_id", None)
+        if callable(helper):
+            return helper
+    raise RuntimeError("active market bars data id helper unavailable")
+
+
+def ensure_runtime_src_path(repo_root: Path | None = None) -> Path:
+    search_roots = []
+    if repo_root is not None:
+        search_roots.append(repo_root)
+    search_roots.extend([Path.cwd(), *SCRIPT_DIR.parents])
+    for parent in search_roots:
+        src_root = parent / "src"
+        if (src_root / "quant_research_platform").is_dir():
+            if str(src_root) not in sys.path:
+                sys.path.insert(0, str(src_root))
+            return src_root
+    raise RuntimeError(
+        "active literal source helpers unavailable: "
+        "expected src/quant_research_platform under repo root"
+    )
 
 
 def source_tree_sensitive_negative_literal_findings(

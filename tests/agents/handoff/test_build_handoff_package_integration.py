@@ -304,6 +304,19 @@ def _init_synthetic_repo(repo: Path) -> None:
         REPO_ROOT / "src" / "quant_research_platform" / "runtime" / "privacy.py",
         runtime_root / "privacy.py",
     )
+    for relative in (
+        "contracts/columns.py",
+        "contracts/data.py",
+        "contracts/ids.py",
+        "markets/implementations/a_share/ids.py",
+        "sources/csmar/ids.py",
+    ):
+        target = repo / "src" / "quant_research_platform" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(
+            REPO_ROOT / "src" / "quant_research_platform" / relative,
+            target,
+        )
     (repo / "evidence.txt").write_text("base\n", encoding="utf-8")
     _git(repo, "init")
     _git(repo, "config", "user.email", "handoff-integration@example.invalid")
