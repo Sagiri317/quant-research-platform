@@ -154,17 +154,6 @@ SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
         },
     },
     Path("tests/agents/handoff/test_handoff_tools.py"): {
-        "forbidden_local_private_path": {
-            '"E:/repo/data/processed/a_share/factor/demo",',
-            '"E:/repo/data/research/a_share/demo",',
-            '"E:/repo/reports/private_research/a_share/run",',
-            '"/workspace/qrp/data/processed/a_share/factor/demo",',
-            '"/workspaces/qrp/data/research/a_share/demo",',
-            '"/mnt/data/reports/private_research/a_share/run",',
-            '"/workspace/qrp/data/research/a_share/demo",',
-            '"/workspaces/qrp/reports/private_research/a_share/run",',
-            '"old workspace example /workspace/qrp/data/research/a_share/demo",',
-        },
         "forbidden_private_data": {
             '"reports/private_data/a_share/run/summary.json",',
         },
@@ -174,36 +163,11 @@ SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
         },
     },
     Path("tests/agents/handoff/test_package_safety_check.py"): {
-        "forbidden_local_private_path": {
-            '"/workspace/qrp/data/research/a_share/demo",',
-            '"/workspaces/qrp/reports/private_research/a_share/run",',
-        },
         "forbidden_private_data": {
             '"reports/private_data/a_share/run/summary.json",',
         },
         "forbidden_private_real": {
             '"reports/private_real/a_share/run/summary.json",',
-        },
-    },
-    Path("tests/runtime/test_privacy_01.py"): {
-        "forbidden_local_private_path": {
-            (
-                'text = "/workspace/qrp/data/research/a_share/demo/_manifest/'
-                'manifest.json"'
-            ),
-            '"/workspace/qrp/data/research/a_share/demo",',
-            '"/workspaces/qrp/reports/private_research/a_share/run",',
-            'r"C:\\repo\\data\\research\\a_share\\demo",',
-            'r"D:\\repo\\reports\\private_research\\a_share\\run",',
-            '"path": "D:" + r"\\quant-workspace\\data\\processed\\a_share",',
-        },
-        "forbidden_private_data": {
-            '"reports/private_data/a_share/run",',
-            '"/workspace/qrp/reports/private_data/a_share/run",',
-        },
-        "forbidden_private_real": {
-            '"reports/private_real/a_share/run",',
-            '"/workspace/qrp/reports/private_real/a_share/run",',
         },
     },
 }
@@ -1101,12 +1065,12 @@ def source_tree_token_synthesized_strings(source: str) -> list[tuple[int, str, s
     values: list[tuple[int, str, str]] = []
     index = 0
     while index < len(tokens):
-        token = tokens[index]
-        if token.type != tokenize.STRING:
+        lexical_item = tokens[index]
+        if lexical_item.type != tokenize.STRING:
             index += 1
             continue
         pieces: list[str] = []
-        line_number = token.start[0]
+        line_number = lexical_item.start[0]
         cursor = index
         expect_string = True
         saw_operator_or_adjacent = False

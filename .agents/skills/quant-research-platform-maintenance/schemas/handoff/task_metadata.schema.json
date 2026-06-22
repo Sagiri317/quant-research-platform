@@ -86,13 +86,97 @@
       "type": "array"
     },
     "validation_evidence": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "checks"],
+      "properties": {
+        "schema_version": {
+          "const": "handoff-validation-evidence/0.1"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "status", "evidence"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+              },
+              "evidence": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     },
     "handoff_evidence": {
-      "type": "object"
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "status"],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+          }
+        }
+      }
     },
     "source_tree_scan": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "scan_groups": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "retired_terms": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
+            "active_test_literals": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
+            "sensitive_negative_literals": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "source_tree_scan_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "finding_count", "findings"],
+      "properties": {
+        "status": {
+          "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+        },
+        "finding_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "findings": {
+          "type": "array"
+        }
+      }
     }
   },
   "allOf": [

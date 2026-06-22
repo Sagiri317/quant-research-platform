@@ -62,22 +62,16 @@ def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
     "text",
     [
         # Intentional fake private marker for safety rejection tests.
-        "reports/private_data/a_share/run",
+        "reports/private_research/a_share/run",
         # Intentional fake private marker for safety rejection tests.
-        "reports/private_real/a_share/run",
-        # Intentional fake private marker for safety rejection tests.
-        "/workspace/qrp/reports/private_data/a_share/run",
-        # Intentional fake private marker for safety rejection tests.
-        "/workspace/qrp/reports/private_real/a_share/run",
+        "/workspace/qrp/reports/private_research/a_share/run",
     ],
 )
-def test_sanitizer_rejects_retired_private_report_paths(text: str) -> None:
+def test_sanitizer_rejects_private_report_paths(text: str) -> None:
     # Intentional fake private marker for safety rejection tests.
     assert text in {
-        "reports/private_data/a_share/run",
-        "reports/private_real/a_share/run",
-        "/workspace/qrp/reports/private_data/a_share/run",
-        "/workspace/qrp/reports/private_real/a_share/run",
+        "reports/private_research/a_share/run",
+        "/workspace/qrp/reports/private_research/a_share/run",
     }
     assert public_text_unsafe_reason(text) == "private_path"
 

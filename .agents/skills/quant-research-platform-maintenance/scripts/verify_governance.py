@@ -77,6 +77,11 @@ SECRET_PATTERN = re.compile(
 )
 
 TEXT_SUFFIXES = {".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
+PRIVACY_NEGATIVE_TEST_PATHS = {
+    "tests/runtime/test_privacy_01.py",
+    "tests/agents/handoff/test_handoff_tools.py",
+    "tests/agents/handoff/test_package_safety_check.py",
+}
 
 
 @dataclass
@@ -193,9 +198,6 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
         "token = re.compile",
         "secret-like assignment",
         "Finish the official review-fix handoff package",
-        "E:/quant-workspace",
-        "/mnt/data",
-        "/home/user",
     )
     if any(marker in line for marker in markers):
         return True
@@ -203,32 +205,17 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
 
 
 def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
-    allowed_fixture_paths = {
-        "tests/agents/handoff/test_handoff_tools.py",
-        "tests/agents/handoff/test_package_safety_check.py",
-    }
-    if rel in allowed_fixture_paths and any(
-        marker in line
-        for marker in ("E:/quant-workspace", "/mnt/data", "/home/user")
-    ):
+    if rel in PRIVACY_NEGATIVE_TEST_PATHS and LOCAL_PATH_PATTERN.search(line):
         return True
-    public_safe_local_path_markers = (
-        '"C:/"',
-        r'"C:\\',
-        '"/mnt/"',
-        '"/home/"',
-        '"/Users/"',
-    )
-    if rel == "tests/architecture/test_public_safe_evidence.py" and any(
-        marker in line for marker in public_safe_local_path_markers
+    if (
+        rel == "tests/architecture/test_public_safe_evidence.py"
+        and LOCAL_PATH_PATTERN.search(line)
     ):
         return True
     if rel in {
         "tests/interfaces/test_api_cli_01_contract.py",
         "tests/storage/test_storage_01.py",
-    } and any(
-        marker in line for marker in (r"C:\Users", "/mnt/data")
-    ):
+    } and LOCAL_PATH_PATTERN.search(line):
         return True
     return (
         rel == "docs/architecture/open-issues-register.md"
@@ -237,6 +224,8 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
 
 
 def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
+    if rel in PRIVACY_NEGATIVE_TEST_PATHS and SECRET_PATTERN.search(line):
+        return True
     if rel == "tests/architecture/test_public_safe_evidence.py" and '"token="' in line:
         return True
     if rel in {

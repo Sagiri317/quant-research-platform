@@ -30,8 +30,23 @@ def _load_governance_module():
 
 def test_governance_allows_sanitization_negative_fixtures_only() -> None:
     module = _load_governance_module()
+    privacy_fixture_lines = Path("tests/runtime/test_privacy_01.py").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    local_path_line = next(
+        line for line in privacy_fixture_lines if "private.csv" in line
+    )
+    secret_line = next(line for line in privacy_fixture_lines if "token=" in line)
 
     assert module._is_allowed_local_path_fixture(
+        "tests/runtime/test_privacy_01.py",
+        local_path_line,
+    )
+    assert module._is_allowed_secret_fixture(
+        "tests/runtime/test_privacy_01.py",
+        secret_line,
+    )
+    assert not module._is_allowed_local_path_fixture(
         "tests/architecture/test_public_safe_evidence.py",
         '    "/mnt/",',
     )
