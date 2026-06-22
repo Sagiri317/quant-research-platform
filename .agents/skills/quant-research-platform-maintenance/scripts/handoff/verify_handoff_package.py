@@ -17,11 +17,11 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from build_handoff_package import (  # noqa: E402
-    FORBIDDEN_HANDOFF_EVIDENCE_KEYS,
     FORBIDDEN_PACKAGE_ENTRY_PARTS,
     FORBIDDEN_TASK_KEYS,
     FORBIDDEN_VALIDATION_KEYS,
     VALIDATION_ROW_KEYS,
+    handoff_evidence_forbidden_key_failures,
     is_reserved_handoff_evidence_path,
     source_tree_scan_from_clone,
 )
@@ -478,11 +478,7 @@ def handoff_evidence_forbidden_field_failures(
     name: str,
     payload: dict[str, object],
 ) -> list[str]:
-    return [
-        f"handoff_evidence_forbidden_field: {name}: {key}"
-        for key in sorted(FORBIDDEN_HANDOFF_EVIDENCE_KEYS)
-        if key in payload
-    ]
+    return handoff_evidence_forbidden_key_failures(name, payload)
 
 
 def verify_generation_evidence(

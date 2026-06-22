@@ -660,19 +660,26 @@ def test_verify_requires_pr_url_in_pr_closure_task_metadata() -> None:
     assert "task_metadata_schema_missing: pr_url" in failures
 
 
-def test_verify_rejects_pr_url_in_handoff_evidence_payload() -> None:
+def test_verify_recursively_rejects_forbidden_handoff_evidence_payload_keys() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
+    builder = _load_handoff_module("build_handoff_package")
+    forbidden_key = next(
+        key
+        for key in builder.HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES
+        if key == "check"
+    )
 
     failures = verifier.handoff_evidence_forbidden_field_failures(
         "handoff_evidence/custom.json",
         {
             "schema_version": "demo/0.1",
-            "pr_url": "https://github.com/example/repo/pull/1",
+            "checks": [{"nested": {forbidden_key: "old-row-key"}}],
         },
     )
 
     assert failures == [
-        "handoff_evidence_forbidden_field: handoff_evidence/custom.json: pr_url"
+        "handoff_evidence_forbidden_field: "
+        "handoff_evidence/custom.json: checks.0.nested.check"
     ]
 
 

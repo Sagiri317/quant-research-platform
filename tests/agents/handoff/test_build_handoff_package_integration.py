@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path.cwd()
 HANDOFF_ROOT = (
@@ -18,7 +21,23 @@ HANDOFF_ROOT = (
 HANDOFF_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "build_handoff_package.py"
 VERIFY_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "verify_handoff_package.py"
 TEST_BRANCH = "feature/synthetic-handoff-review"
+BUILDER_MODULE = None
 
+
+def _load_builder_module():
+    global BUILDER_MODULE
+    if BUILDER_MODULE is not None:
+        return BUILDER_MODULE
+    spec = importlib.util.spec_from_file_location(
+        "build_handoff_package",
+        HANDOFF_SCRIPT,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    BUILDER_MODULE = module
+    return module
 
 def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> None:
     repo = tmp_path / "synthetic-repo"
@@ -331,15 +350,14 @@ def test_build_handoff_package_rejects_non_object_handoff_evidence_entry(
     assert not list(out_dir.glob("*"))
 
 
+@pytest.mark.parametrize(
+    "forbidden_key",
+    _load_builder_module().HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES,
+)
 def test_build_handoff_package_rejects_forbidden_custom_evidence_key(
     tmp_path: Path,
+    forbidden_key: str,
 ) -> None:
-    builder = _load_builder_module()
-    forbidden_key = next(
-        key for key in sorted(builder.FORBIDDEN_HANDOFF_EVIDENCE_KEYS)
-        if key.endswith("_sha")
-    )
-
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
         {
@@ -483,20 +501,6 @@ def _load_verify_module():
     spec = importlib.util.spec_from_file_location(
         "verify_handoff_package",
         VERIFY_SCRIPT,
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _load_builder_module():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "build_handoff_package",
-        HANDOFF_SCRIPT,
     )
     assert spec is not None
     assert spec.loader is not None

@@ -280,6 +280,7 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "FORBIDDEN_TASK_KEYS",
         "FORBIDDEN_VALIDATION_KEYS",
         "FORBIDDEN_HANDOFF_EVIDENCE_KEYS",
+        "HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES",
         "source_tree_forbidden_patterns",
         "source_tree_active_test_literal_patterns",
         "source_tree_sensitive_negative_patterns",
@@ -446,7 +447,22 @@ FORBIDDEN_VALIDATION_KEYS = {
     "review_zip_path",
     "validation_table",
 }
-FORBIDDEN_HANDOFF_EVIDENCE_KEYS = FORBIDDEN_TASK_KEYS | {"pr_url"}
+HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES = (
+    "final_sha",
+    "review_zip_path",
+    "external_evidence_json_path",
+    "validation_table",
+    "check",
+    "pr_body_path",
+    "review_threads_path",
+    "review_threads_json",
+    "goal_status",
+)
+FORBIDDEN_HANDOFF_EVIDENCE_KEYS = (
+    FORBIDDEN_TASK_KEYS
+    | {"check", "pr_body_path", "pr_url"}
+    | set(HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES)
+)
 VALIDATION_ROW_KEYS = {"name", "status", "evidence"}
 
 
