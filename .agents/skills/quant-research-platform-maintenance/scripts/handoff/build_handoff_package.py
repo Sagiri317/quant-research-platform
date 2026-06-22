@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import tokenize
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -39,13 +39,25 @@ BUILDER_OWNED_HANDOFF_EVIDENCE = {
 }
 RESERVED_HANDOFF_EVIDENCE_STEMS = {
     "diff.patch",
+    "external_evidence_json_path",
+    "final_sha",
     "pr_body",
     "pr_body.md",
     "review_threads",
+    "review_threads.json",
     "review_evidence",
     "review_bundle",
     "review_package",
+    "review_sidecar",
     "review_zip_path",
+    "validation_table",
+}
+TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS = RESERVED_HANDOFF_EVIDENCE_STEMS | {
+    "generation",
+    "source-tree-scan",
+    "task_metadata",
+    "validation_evidence",
+    "verification-matrix",
 }
 FORBIDDEN_PACKAGE_ENTRY_PARTS = {
     "diff.patch",
@@ -731,17 +743,18 @@ def stage_handoff_evidence(
     zip_filename: str,
 ) -> None:
     handoff_evidence = task.get("handoff_evidence")
-    if isinstance(handoff_evidence, dict):
+    if handoff_evidence is not None and not isinstance(handoff_evidence, Mapping):
+        raise SystemExit("handoff_evidence_must_be_object")
+    if isinstance(handoff_evidence, Mapping):
         for raw_name, payload in sorted(handoff_evidence.items()):
-            name = normalize_zip_path(str(raw_name))
-            if not name.startswith("handoff_evidence/"):
-                name = "handoff_evidence/" + name
-            if not name.endswith(".json"):
-                name += ".json"
-            if name in BUILDER_OWNED_HANDOFF_EVIDENCE:
-                continue
-            if is_reserved_handoff_evidence_path(name):
-                continue
+            name = normalized_handoff_evidence_path(str(raw_name))
+            if is_task_provided_handoff_evidence_forbidden_path(name):
+                raise SystemExit(f"handoff_evidence_forbidden_path: {name}")
+            if not isinstance(payload, Mapping):
+                raise SystemExit(f"handoff_evidence_entry_must_be_object: {name}")
+            failures = handoff_evidence_forbidden_key_failures(name, payload)
+            if failures:
+                raise SystemExit(";".join(failures))
             write_text(stage_root / name, stable_json(json_sanitize(payload)))
     write_text(
         stage_root / VERIFICATION_MATRIX_EVIDENCE,
@@ -1511,6 +1524,75 @@ def is_reserved_handoff_evidence_path(name: str) -> bool:
         if part.endswith(".json") and part[:-5] in RESERVED_HANDOFF_EVIDENCE_STEMS:
             return True
     return False
+
+
+def is_task_provided_handoff_evidence_forbidden_path(name: str) -> bool:
+    if name in BUILDER_OWNED_HANDOFF_EVIDENCE:
+        return True
+    parts = PurePosixPath(name).parts
+    for part in parts:
+        if part in TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS:
+            return True
+        if (
+            part.endswith(".json")
+            and part[:-5] in TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS
+        ):
+            return True
+    return False
+
+
+def normalized_handoff_evidence_path(raw_name: str) -> str:
+    name = normalize_zip_path(raw_name)
+    if not name.startswith("handoff_evidence/"):
+        name = "handoff_evidence/" + name
+    if not name.endswith(".json"):
+        name += ".json"
+    return name
+
+
+def handoff_evidence_forbidden_key_failures(
+    evidence_path: str,
+    payload: Mapping[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    collect_handoff_evidence_forbidden_key_failures(
+        evidence_path,
+        payload,
+        failures,
+    )
+    return failures
+
+
+def collect_handoff_evidence_forbidden_key_failures(
+    evidence_path: str,
+    payload: object,
+    failures: list[str],
+    *,
+    key_path: tuple[str, ...] = (),
+) -> None:
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            key_text = str(key)
+            current_path = (*key_path, key_text)
+            if key_text in FORBIDDEN_HANDOFF_EVIDENCE_KEYS:
+                dotted = ".".join(current_path)
+                failures.append(
+                    f"handoff_evidence_forbidden_field: {evidence_path}: {dotted}"
+                )
+            collect_handoff_evidence_forbidden_key_failures(
+                evidence_path,
+                value,
+                failures,
+                key_path=current_path,
+            )
+    elif isinstance(payload, list):
+        for index, item in enumerate(payload):
+            collect_handoff_evidence_forbidden_key_failures(
+                evidence_path,
+                item,
+                failures,
+                key_path=(*key_path, str(index)),
+            )
 
 
 def sidecar_payload(

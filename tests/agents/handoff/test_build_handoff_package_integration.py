@@ -45,11 +45,6 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 "handoff_package_path": f"{run_handoffs}/{slug}.zip",
                 "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
                 "handoff_evidence": {
-                    "generation": {"status": "FAIL", "final_head": "forged"},
-                    "source-tree-scan": {
-                        "status": "FAIL",
-                        "scanned_head": "forged",
-                    },
                     "custom-note": {
                         "schema_version": "custom-note/0.1",
                         "status": "PASS",
@@ -281,6 +276,86 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert verifier.verify_handoff_package(package, sidecar_path) == []
 
 
+def test_build_handoff_package_rejects_reserved_handoff_evidence_path(
+    tmp_path: Path,
+) -> None:
+    builder = _load_builder_module()
+    reserved_name = sorted(builder.RESERVED_HANDOFF_EVIDENCE_STEMS)[0]
+
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {reserved_name: {"schema_version": "custom-note/0.1", "status": "PASS"}},
+    )
+
+    assert result.returncode != 0
+    assert "handoff_evidence_forbidden_path" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
+def test_build_handoff_package_rejects_internal_handoff_evidence_path(
+    tmp_path: Path,
+) -> None:
+    builder = _load_builder_module()
+    internal_name = sorted(builder.BUILDER_OWNED_HANDOFF_EVIDENCE)[0]
+
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {internal_name: {"schema_version": "custom-note/0.1", "status": "PASS"}},
+    )
+
+    assert result.returncode != 0
+    assert "handoff_evidence_forbidden_path" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
+def test_build_handoff_package_rejects_non_object_handoff_evidence(
+    tmp_path: Path,
+) -> None:
+    result, out_dir = _run_builder_with_handoff_evidence(tmp_path, "bad")
+
+    assert result.returncode != 0
+    assert "handoff_evidence_must_be_object" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
+def test_build_handoff_package_rejects_non_object_handoff_evidence_entry(
+    tmp_path: Path,
+) -> None:
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {"custom-note": "bad"},
+    )
+
+    assert result.returncode != 0
+    assert "handoff_evidence_entry_must_be_object" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
+def test_build_handoff_package_rejects_forbidden_custom_evidence_key(
+    tmp_path: Path,
+) -> None:
+    builder = _load_builder_module()
+    forbidden_key = next(
+        key for key in sorted(builder.FORBIDDEN_HANDOFF_EVIDENCE_KEYS)
+        if key.endswith("_sha")
+    )
+
+    result, out_dir = _run_builder_with_handoff_evidence(
+        tmp_path,
+        {
+            "custom-note": {
+                "schema_version": "custom-note/0.1",
+                "status": "PASS",
+                "details": {forbidden_key: "forged"},
+            }
+        },
+    )
+
+    assert result.returncode != 0
+    assert "handoff_evidence_forbidden_field" in result.stderr
+    assert not list(out_dir.glob("*"))
+
+
 def _init_synthetic_repo(repo: Path) -> None:
     repo.mkdir()
     support_root = (
@@ -326,6 +401,71 @@ def _init_synthetic_repo(repo: Path) -> None:
     _git(repo, "commit", "-m", "base")
 
 
+def _run_builder_with_handoff_evidence(
+    tmp_path: Path,
+    handoff_evidence: object,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    repo = tmp_path / "synthetic-repo"
+    _init_synthetic_repo(repo)
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "evidence.txt").write_text("final\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "final evidence change")
+    final_head = _git(repo, "rev-parse", "HEAD").strip()
+
+    out_dir = tmp_path / "out"
+    task_path = tmp_path / "task-input.json"
+    slug = "synthetic-handoff-negative"
+    run_handoffs = ".run/handoffs"
+    task_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "handoff-task-metadata/0.1",
+                "mode": "evidence",
+                "slug": slug,
+                "branch": TEST_BRANCH,
+                "base": base,
+                "final_head": final_head,
+                "handoff_package_path": f"{run_handoffs}/{slug}.zip",
+                "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
+                "handoff_evidence": handoff_evidence,
+                "validation_evidence": {
+                    "schema_version": "handoff-validation-evidence/0.1",
+                    "checks": [
+                        {
+                            "name": "handoff_builder_contract",
+                            "status": "PASS",
+                            "evidence": "negative input should fail before staging",
+                        }
+                    ],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(HANDOFF_SCRIPT),
+            "--repo-root",
+            str(repo),
+            "--task",
+            str(task_path),
+            "--out-dir",
+            str(out_dir),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, out_dir
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
@@ -343,6 +483,20 @@ def _load_verify_module():
     spec = importlib.util.spec_from_file_location(
         "verify_handoff_package",
         VERIFY_SCRIPT,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_builder_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_handoff_package",
+        HANDOFF_SCRIPT,
     )
     assert spec is not None
     assert spec.loader is not None
