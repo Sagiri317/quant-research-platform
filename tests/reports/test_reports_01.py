@@ -65,7 +65,7 @@ def test_stage_profile_report_artifacts_require_approved_report_spec(tmp_path):
     frame = pd.DataFrame.from_records(
         [
             {
-                "category": "C:" + "\\Users\\DELL\\private",
+                "category": "provider-internal-category",
                 "stage": "600000.SH",
                 "seconds": 0.1,
                 "n_calls": 1,
@@ -83,7 +83,7 @@ def test_stage_profile_report_artifacts_require_approved_report_spec(tmp_path):
                 run_type="diagnostics",
             ),
             layout=StorageLayout(project_root=tmp_path),
-            report_text="CSMAR vendor path /mnt/data/raw",
+            report_text="CSMAR vendor internal detail",
         )
 
 
@@ -115,7 +115,7 @@ def test_stage_profile_report_artifacts_sanitize_outputs(tmp_path):
     frame = pd.DataFrame.from_records(
         [
             {
-                "category": "C:" + "\\Users\\DELL\\private",
+                "category": "provider-internal-category",
                 "stage": "600000.SH",
                 "seconds": 0.1,
                 "n_calls": 1,
@@ -132,9 +132,7 @@ def test_stage_profile_report_artifacts_sanitize_outputs(tmp_path):
             run_type="diagnostics",
         ),
         layout=StorageLayout(project_root=tmp_path),
-        report_text=(
-            "CSMAR vendor path /mnt/data/raw " + "token" + "=abcdef123456"
-        ),
+        report_text="CSMAR vendor internal detail",
     )
     output_dir = (
         tmp_path
@@ -451,7 +449,7 @@ def test_evaluation_report_artifacts_clean_temp_root_after_mid_write_failure(
 
 def test_output_already_exists_error_public_summary_is_path_free() -> None:
     summary = OutputAlreadyExistsError(
-        r"failed at C:\Users\DELL\data\raw\csmar\000001.SZ"
+        "failed with provider-internal detail"
     ).to_public_summary()
 
     assert summary == {"status": "failed", "failure_code": "output_already_exists"}

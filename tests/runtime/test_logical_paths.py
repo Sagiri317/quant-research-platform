@@ -18,7 +18,7 @@ def test_logical_path_prefers_output_root_when_available(tmp_path: Path) -> None
 
 
 def test_logical_path_uses_last_generated_marker_under_parent_data_path() -> None:
-    path = Path("/mnt/data/team/qrp/reports/private_research/run/summary.json")
+    path = Path("sandbox-output/team/qrp/reports/private_research/run/summary.json")
 
     assert logical_path(path) == "reports/private_research/run/summary.json"
 
@@ -26,7 +26,7 @@ def test_logical_path_uses_last_generated_marker_under_parent_data_path() -> Non
 def test_dataset_layer_from_path_uses_dataset_root_segments() -> None:
     assert (
         dataset_layer_from_path(
-            Path("/mnt/data/team/qrp/data/research/a_share/demo")
+            Path("sandbox-output/team/qrp/data/research/a_share/demo")
         )
         == "research"
     )

@@ -11,7 +11,7 @@ SCAN_ROOTS = (
     Path("PROJECT_STATUS.md"),
     Path(".agents"),
 )
-RUNTIME_WORKSPACE_PART = "." + "run"
+RUNTIME_WORKSPACE_PART = ".run"
 EXCLUDED_PARTS = {
     (".git",),
     (RUNTIME_WORKSPACE_PART,),

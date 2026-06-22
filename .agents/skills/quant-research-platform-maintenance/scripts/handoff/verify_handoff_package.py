@@ -327,9 +327,7 @@ def verify_review_threads_entry(
     archive: ZipFile,
     sidecar: dict[str, object],
 ) -> list[str]:
-    if verify_task_mode_from_archive(archive) == "evidence":
-        return ["forbidden_evidence_mode_entry: review_threads.json"]
-    return verify_review_thread_closure(archive, sidecar)
+    return ["forbidden_entry: review_threads.json"]
 
 
 def metadata_consistency_failures(
@@ -777,13 +775,26 @@ def verify_source_tree_scan_evidence(
     if not isinstance(scan_groups, dict):
         failures.append("source_tree_scan_groups_invalid")
     else:
-        for group in ("retired_terms", "active_test_literals"):
+        for group in (
+            "retired_terms",
+            "active_test_literals",
+            "sensitive_negative_literals",
+        ):
             group_payload = scan_groups.get(group)
             if not isinstance(group_payload, dict):
                 failures.append(f"source_tree_scan_group_missing: {group}")
                 continue
-            if "finding_count" not in group_payload or "findings" not in group_payload:
+            if (
+                "status" not in group_payload
+                or "finding_count" not in group_payload
+                or "findings" not in group_payload
+            ):
                 failures.append(f"source_tree_scan_group_shape_invalid: {group}")
+                continue
+            if group_payload.get("status") != "PASS":
+                failures.append(f"source_tree_scan_group_not_pass: {group}")
+            if group_payload.get("finding_count") != 0:
+                failures.append(f"source_tree_scan_group_findings_present: {group}")
     if payload.get("scanned_head") != payload.get("expected_head"):
         failures.append("source_tree_scan_head_mismatch")
     final_head = sidecar.get("final_head")
@@ -999,7 +1010,7 @@ def contains_local_absolute_path_text(text: str) -> bool:
         "E:" + "/",
         "D:" + "/",
         "C:" + "/",
-        "/" + "mnt/data",
+        "/mnt/data",
         "/" + "home/",
         "/" + "Users/",
         "\\Users\\",

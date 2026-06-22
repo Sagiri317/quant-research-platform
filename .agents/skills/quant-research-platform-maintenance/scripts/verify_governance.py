@@ -216,11 +216,11 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
     ):
         return True
     public_safe_local_path_markers = (
-        '"C' + ':/"',
-        r'"C' + r':\\"',
-        '"/' + 'mnt/"',
-        '"/' + 'home/"',
-        '"/' + 'Users/"',
+        '"C:/"',
+        r'"C:\\',
+        '"/mnt/"',
+        '"/home/"',
+        '"/Users/"',
     )
     if rel == "tests/architecture/test_public_safe_evidence.py" and any(
         marker in line for marker in public_safe_local_path_markers
@@ -230,7 +230,7 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
         "tests/interfaces/test_api_cli_01_contract.py",
         "tests/storage/test_storage_01.py",
     } and any(
-        marker in line for marker in ("C" + r":\Users", "/" + "mnt/data")
+        marker in line for marker in (r"C:\Users", "/mnt/data")
     ):
         return True
     return (

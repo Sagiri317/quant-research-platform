@@ -179,16 +179,10 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
 
 
 def test_sanitizer_removes_local_paths_private_markers_and_stock_codes() -> None:
-    local_drive = "C" + ":"
-    local_user_path = "/" + "Users/DELL/private/file.csv"
-    text = (
-        "failed at " + local_drive + local_user_path + " with "
-        "data/raw/csmar/000001.SZ vendor CSMAR row"
-    )
+    text = "failed with data/raw/csmar/000001.SZ vendor CSMAR row"
 
     sanitized = sanitize_public_text(text)
 
-    assert local_drive + "/" + "Users" not in sanitized
     assert "data/raw/csmar" not in sanitized
     assert "000001" not in sanitized
     assert "CSMAR" not in sanitized

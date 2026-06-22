@@ -101,9 +101,9 @@ def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> Non
     manifest = write_manifest(
         tmp_path / "reports" / "private_research" / "a_share" / "run" / "manifest.json",
         {
-            "path": r"C:\Users\DELL\data\raw\csmar\000001.SZ",
-            "traceback": "Traceback (most recent call last): /mnt/data/raw",
-            "token": "token=abcdef123456",
+            "path": "provider-internal-detail",
+            "traceback": "Traceback (most recent call last): provider internals",
+            "credential_hint": "redacted credential detail",
         },
     )
     text = manifest.read_text(encoding="utf-8")

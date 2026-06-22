@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import io
 import json
 import re
 import subprocess
 import sys
 import tempfile
+import tokenize
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -377,6 +379,126 @@ SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
     Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
     Path("docs/architecture/open-issues-register.md"),
 }
+SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "build_handoff_package.py"
+    ): {
+        "active_market_bars_data_id",
+        "active_market_panel_data_id",
+        "active_market_context_data_id",
+        "active_frequency_slug",
+    },
+    Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"): {
+        "active_market_bars_data_id",
+        "active_market_panel_data_id",
+        "active_market_context_data_id",
+        "active_frequency_slug",
+    },
+    Path("docs/architecture/open-issues-register.md"): {
+        "active_market_bars_data_id",
+        "active_market_panel_data_id",
+        "active_market_context_data_id",
+        "active_frequency_slug",
+    },
+}
+SOURCE_TREE_RETIRED_TERM_RULE_ALLOWLIST = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "compare_verification_evidence.py"
+    ): {
+        "retired_daily_context",
+        "retired_daily_market",
+        "retired_daily_panel",
+    },
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "build_handoff_package.py"
+    ): {
+        "retired_dry_run_flag",
+        "retired_prediction_bundle",
+    },
+    Path("docs/architecture/open-issues-register.md"): {
+        "retired_backtest_spec",
+    },
+    Path("tests/architecture/test_retired_surface_absent.py"): {
+        "forbidden_render_pr_body",
+    },
+    Path("tests/agents/handoff/test_handoff_tools.py"): {
+        "forbidden_pr_body",
+    },
+}
+SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "build_handoff_package.py"
+    ): {"sensitive_local_private_path", "sensitive_secret"},
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "verify_governance.py"
+    ): {"sensitive_local_private_path", "sensitive_secret"},
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "package_safety_check.py"
+    ): {"sensitive_local_private_path", "sensitive_secret"},
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "handoff_safety.py"
+    ): {"sensitive_local_private_path", "sensitive_secret"},
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "verify_handoff_package.py"
+    ): {"sensitive_local_private_path", "sensitive_secret"},
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "self_test.py"
+    ): {"sensitive_local_private_path", "sensitive_secret"},
+    Path("tests/agents/handoff/test_handoff_tools.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+    },
+    Path("tests/agents/handoff/test_package_safety_check.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+    },
+    Path("tests/agents/test_verify_governance.py"): {
+        "sensitive_local_private_path": {
+            r'path = "C:\Users\DELL\data\raw\csmar"',
+        },
+        "sensitive_secret": {
+            "token=abcdef123456",
+            'token = "abcdef123456"',
+        },
+    },
+    Path("tests/reports/test_verification_evidence.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+    },
+    Path("tests/reports/test_verification_evidence_edges.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+    },
+    Path("tests/runtime/test_privacy_01.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+    },
+    Path("tests/storage/test_manifest_helper_edges.py"): {
+        "sensitive_local_private_path": {
+            '({"path": "C:" + r"\\\\private\\\\data"}, "absolute_path"),',
+            '({"path": r"\\\\" + r"\\\\server\\\\share"}, "absolute_path"),',
+            '({"path": "/" + "Users/local/private"}, "absolute_path"),',
+            r"C:\\private\\data",
+            r"C:\private\data",
+            r"\\\\server\\share",
+            r"\\server\share",
+            "/Users/local/private",
+        },
+        "sensitive_secret": {
+            '({"note": "token: " + "abcdefghi123456"}, "credential"),',
+            "token: abcdefghi123456",
+        },
+    },
+}
 TASK_CONTROL_KEYS = {
     "validation_evidence",
     "review_threads",
@@ -550,9 +672,6 @@ def build_once(
             stage_root / "git_status.txt",
             sanitize_handoff_text(git_status_text(repo_root)),
         )
-        if mode == "pr_closure":
-            review_threads = task_review_threads(task)
-            write_text(stage_root / "review_threads.json", stable_json(review_threads))
         stage_handoff_evidence(
             stage_root,
             task,
@@ -846,14 +965,24 @@ def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     retired_findings = source_tree_retired_term_findings(clone_dir)
     active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
+    sensitive_negative_literal_findings = (
+        source_tree_sensitive_negative_literal_findings(clone_dir)
+    )
     return {
         "retired_terms": {
+            "status": "PASS" if not retired_findings else "FAIL",
             "finding_count": len(retired_findings),
             "findings": retired_findings,
         },
         "active_test_literals": {
+            "status": "PASS" if not active_test_literal_findings else "FAIL",
             "finding_count": len(active_test_literal_findings),
             "findings": active_test_literal_findings,
+        },
+        "sensitive_negative_literals": {
+            "status": "PASS" if not sensitive_negative_literal_findings else "FAIL",
+            "finding_count": len(sensitive_negative_literal_findings),
+            "findings": sensitive_negative_literal_findings,
         },
     }
 
@@ -898,29 +1027,46 @@ def source_tree_split_string_findings(
     lines: list[str],
     skip_lines: set[int],
 ) -> list[dict[str, object]]:
+    return source_tree_synthesized_string_findings(
+        relative,
+        path,
+        lines,
+        skip_lines,
+        scan_group="retired_terms",
+        patterns=source_tree_forbidden_patterns(),
+    )
+
+
+def source_tree_synthesized_string_findings(
+    relative: Path,
+    path: Path,
+    lines: list[str],
+    skip_lines: set[int],
+    *,
+    scan_group: str,
+    patterns: dict[str, re.Pattern[str]],
+) -> list[dict[str, object]]:
     if path.suffix != ".py":
         return []
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        tree = ast.parse(source)
     except SyntaxError:
         return []
     findings: list[dict[str, object]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
-            continue
-        line_number = getattr(node, "lineno", 0)
+    for line_number, value, scan_mode in source_tree_python_synthesized_strings(
+        tree,
+        source,
+    ):
         if line_number in skip_lines:
             continue
-        value = source_tree_static_string_value(node)
-        if value is None:
-            continue
-        for rule, pattern in source_tree_forbidden_patterns().items():
+        for rule, pattern in patterns.items():
             if not pattern.search(value):
                 continue
             line_text = lines[line_number - 1].strip() if line_number else ""
             if source_tree_path_allowed(
                 relative,
-                scan_group="retired_terms",
+                scan_group=scan_group,
                 rule=rule,
                 line_text=line_text,
             ):
@@ -930,10 +1076,89 @@ def source_tree_split_string_findings(
                     "path": relative.as_posix(),
                     "line": line_number,
                     "rule": rule,
-                    "split_string_value": value,
+                    "scan_mode": scan_mode,
+                    "synthesized_value": value,
                 }
             )
     return findings
+
+
+def source_tree_python_synthesized_strings(
+    tree: ast.AST,
+    source: str,
+) -> list[tuple[int, str, str]]:
+    values: list[tuple[int, str, str]] = []
+    seen: set[tuple[int, str, str]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
+            continue
+        value = source_tree_static_string_value(node)
+        if value is None:
+            continue
+        item = (getattr(node, "lineno", 0), value, "ast_static_string")
+        if item not in seen:
+            seen.add(item)
+            values.append(item)
+    for item in source_tree_token_synthesized_strings(source):
+        if item not in seen:
+            seen.add(item)
+            values.append(item)
+    return values
+
+
+def source_tree_token_synthesized_strings(source: str) -> list[tuple[int, str, str]]:
+    try:
+        tokens = [
+            token
+            for token in tokenize.generate_tokens(io.StringIO(source).readline)
+            if token.type not in {tokenize.NL, tokenize.NEWLINE}
+        ]
+    except tokenize.TokenError:
+        return []
+    values: list[tuple[int, str, str]] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.type != tokenize.STRING:
+            index += 1
+            continue
+        pieces: list[str] = []
+        line_number = token.start[0]
+        cursor = index
+        expect_string = True
+        saw_operator_or_adjacent = False
+        while cursor < len(tokens):
+            current = tokens[cursor]
+            if expect_string:
+                if current.type != tokenize.STRING:
+                    break
+                try:
+                    pieces.append(str(ast.literal_eval(current.string)))
+                except (SyntaxError, ValueError):
+                    break
+                expect_string = False
+                cursor += 1
+                continue
+            if current.type == tokenize.OP and current.string == "+":
+                saw_operator_or_adjacent = True
+                expect_string = True
+                cursor += 1
+                continue
+            if current.type == tokenize.STRING:
+                saw_operator_or_adjacent = True
+                try:
+                    pieces.append(str(ast.literal_eval(current.string)))
+                except (SyntaxError, ValueError):
+                    break
+                cursor += 1
+                continue
+            break
+        if len(pieces) >= 2 and saw_operator_or_adjacent and not expect_string:
+            values.append((line_number, "".join(pieces), "token_static_string"))
+            index = cursor
+            continue
+        index += 1
+    return values
 
 
 def source_tree_static_string_value(node: ast.AST) -> str | None:
@@ -963,7 +1188,7 @@ def source_tree_allowlist_definition_lines(
         stripped = line.strip()
         if stripped.startswith("SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST ="):
             in_block = True
-        if stripped.startswith("SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS"):
+        if stripped.startswith("TASK_CONTROL_KEYS ="):
             in_block = False
         if in_block:
             skip_lines.add(line_number)
@@ -975,40 +1200,112 @@ def source_tree_active_test_literal_findings(
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_tracked_text_files(clone_dir):
-        if not relative.parts or relative.parts[0] != "tests":
-            continue
-        if source_tree_active_test_literal_path_allowed(relative):
+        if (
+            relative.parts[:1] != ("tests",)
+            and relative != Path("docs/architecture/open-issues-register.md")
+            and relative
+            != Path(
+                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+                "build_handoff_package.py"
+            )
+        ):
             continue
         path = clone_dir / relative
         if not path.exists():
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for token in source_tree_active_test_literal_tokens():
-            if token in text:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        for rule, pattern in source_tree_active_test_literal_patterns().items():
+            for line_number, line in enumerate(lines, start=1):
+                if line_number in skip_lines:
+                    continue
+                if not pattern.search(line):
+                    continue
+                if source_tree_path_allowed(
+                    relative,
+                    scan_group="active_test_literals",
+                    rule=rule,
+                    line_text=line.strip(),
+                ):
+                    continue
                 findings.append(
                     {
                         "path": relative.as_posix(),
-                        "rule": "active_test_literal",
-                        "token": token,
+                        "line": line_number,
+                        "rule": rule,
                     }
                 )
+        findings.extend(
+            source_tree_synthesized_string_findings(
+                relative,
+                path,
+                lines,
+                skip_lines,
+                scan_group="active_test_literals",
+                patterns=source_tree_active_test_literal_patterns(),
+            )
+        )
     return findings
 
 
 def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
-    return source_tree_path_allowed(relative, scan_group="active_test_literals")
+    return bool(SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative))
 
 
-def source_tree_active_test_literal_tokens() -> tuple[str, ...]:
-    return (
-        "market_bars_1d",
-        "market_panel_1d",
-        "market_context_1d",
-        '"1d"',
-        "'1d'",
-        '"1" + "d"',
-        "'1' + 'd'",
-    )
+def source_tree_active_test_literal_patterns() -> dict[str, re.Pattern[str]]:
+    return {
+        "active_market_bars_data_id": re.compile(r"\bmarket_bars_1d\b"),
+        "active_market_panel_data_id": re.compile(r"\bmarket_panel_1d\b"),
+        "active_market_context_data_id": re.compile(r"\bmarket_context_1d\b"),
+        "active_frequency_slug": re.compile(
+            r"(?:[\"']1d[\"']|(?<![A-Za-z0-9_])1d(?![A-Za-z0-9_]))"
+        ),
+    }
+
+
+def source_tree_sensitive_negative_literal_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.parts[:1] not in {(".agents",), ("tests",)}:
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        for rule, pattern in source_tree_sensitive_negative_patterns().items():
+            for line_number, line in enumerate(lines, start=1):
+                if line_number in skip_lines:
+                    continue
+                if not pattern.search(line):
+                    continue
+                if source_tree_path_allowed(
+                    relative,
+                    scan_group="sensitive_negative_literals",
+                    rule=rule,
+                    line_text=line.strip(),
+                ):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "rule": rule,
+                    }
+                )
+        findings.extend(
+            source_tree_synthesized_string_findings(
+                relative,
+                path,
+                lines,
+                skip_lines,
+                scan_group="sensitive_negative_literals",
+                patterns=source_tree_sensitive_negative_patterns(),
+            )
+        )
+    return findings
 
 
 def source_tree_tracked_text_files(clone_dir: Path) -> tuple[Path, ...]:
@@ -1034,9 +1331,22 @@ def source_tree_path_allowed(
         allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
         if rule is None or line_text is None:
             return False
+        if rule in SOURCE_TREE_RETIRED_TERM_RULE_ALLOWLIST.get(relative, set()):
+            return True
         return line_text in allowed_by_rule.get(rule, set())
     if scan_group == "active_test_literals":
-        return relative in SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS
+        allowed_rules = SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative, set())
+        return rule in allowed_rules
+    if scan_group == "sensitive_negative_literals":
+        allowed = SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST.get(
+            relative,
+            set(),
+        )
+        if isinstance(allowed, set):
+            return rule in allowed
+        if rule is None or line_text is None:
+            return False
+        return any(term in line_text for term in allowed.get(rule, set()))
     raise ValueError(f"unsupported_source_tree_scan_group: {scan_group}")
 
 
@@ -1060,6 +1370,22 @@ def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
         "retired_workflow_module": re.compile(r"\bcontracts\.workflow_run\b"),
         "retired_model_algorithm_collection": re.compile(r"\bMODEL_ALGORITHMS\b"),
         "retired_execution_mode": re.compile(r"\bExecutionMode\b"),
+        "retired_daily_panel": re.compile(r"\bdaily_panel\b"),
+        "retired_daily_market": re.compile(r"\bdaily_market\b"),
+        "retired_daily_context": re.compile(r"\bdaily_context\b"),
+        "retired_a_share_daily_bar": re.compile(r"\ba_share_daily_bar\b"),
+        "retired_a_share_daily_bar_interim": re.compile(
+            r"\ba_share_daily_bar_interim\b"
+        ),
+        "retired_daily_backtest": re.compile(r"\bdaily_backtest\b"),
+        "retired_daily_rebalance": re.compile(r"\bdaily_rebalance\b"),
+        "retired_daily_open": re.compile(r"\bdaily_open\b"),
+        "retired_backtest_spec": re.compile(r"\bBacktestSpec\b"),
+        "retired_dry_run_flag": re.compile(r"--dry-run\b"),
+        "retired_model_family": re.compile(r"\bmodel_family\b"),
+        "retired_prediction_bundle": re.compile(
+            r"\b(?:[A-Za-z0-9_]+_)?prediction_bundle(?:_[A-Za-z0-9_]+)?\b"
+        ),
         "forbidden_private_real": re.compile(r"\bprivate_real\b", re.IGNORECASE),
         "forbidden_private_data": re.compile(r"\bprivate_data\b", re.IGNORECASE),
         "forbidden_review_evidence": re.compile(r"\breview_evidence\b"),
@@ -1068,7 +1394,12 @@ def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
         "forbidden_render_pr_body": re.compile(
             r"\brender_pr_body(?:_from_validation_evidence)?(?:\.py)?\b"
         ),
-        "forbidden_local_private_path": re.compile(
+    }
+
+
+def source_tree_sensitive_negative_patterns() -> dict[str, re.Pattern[str]]:
+    return {
+        "sensitive_local_private_path": re.compile(
             r"(?i)(?:[A-Za-z]:[\\/][^\n]*(?:"
             r"data[\\/](?:raw|interim|processed|research)"
             r"|reports[\\/]private_research"
@@ -1076,7 +1407,14 @@ def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
             r"|/(?:Users|home|workspace|workspaces|mnt/data)[^\n]*(?:"
             r"data/(?:raw|interim|processed|research)"
             r"|reports/private_research"
-            r"))"
+            r")"
+            r"|[A-Za-z]:[\\/][^\n]*(?:private|Users)"
+            r"|/(?:Users|home)[^\n]*(?:private|data)"
+            r"|\\\\[^\n]*(?:server|share|private))"
+        ),
+        "sensitive_secret": re.compile(
+            r"(?i)(?:api[_-]?key|secret|token|password|cookie)"
+            r"\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
         ),
     }
 

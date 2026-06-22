@@ -30,8 +30,9 @@ def _load_governance_module():
 
 def test_governance_allows_sanitization_negative_fixtures_only() -> None:
     module = _load_governance_module()
-    secret_key = "to" + "ken"
-    secret_value = "to" + "ken=abcdef123456"
+    # Intentional fake private marker used to test sanitizer/package-safety rejection.
+    secret_key = "token"
+    secret_value = "token=abcdef123456"
 
     assert module._is_allowed_local_path_fixture(
         "tests/architecture/test_public_safe_evidence.py",
@@ -43,9 +44,9 @@ def test_governance_allows_sanitization_negative_fixtures_only() -> None:
     )
     assert not module._is_allowed_local_path_fixture(
         "src/quant_research_platform/example.py",
-        'path = "C' + r':\Users\DELL\data\raw\csmar"',
+        r'path = "C:\Users\DELL\data\raw\csmar"',
     )
     assert not module._is_allowed_secret_fixture(
         "src/quant_research_platform/example.py",
-        "token" + ' = "abcdef123456"',
+        'token = "abcdef123456"',
     )

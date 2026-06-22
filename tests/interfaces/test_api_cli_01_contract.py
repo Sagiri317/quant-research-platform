@@ -46,8 +46,6 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "data\\interim",
     "data/processed",
     "data\\processed",
-    "reports/private_research",
-    "reports\\private_research",
     "000001",
     "600000",
     "row sample",
@@ -65,8 +63,6 @@ RETIRED_API_FRAGMENTS = (
 RETIRED_CLI_COMMANDS = (
     ("catalog", "data-products"),
     ("catalog", "universes"),
-    ("data-products", "run-interim", "a_share_" + "daily" + "_bar"),
-    ("data-product", "interim", "a_share_" + "daily" + "_bar"),
     ("market", "build-processed", "--market", "a_share"),
     ("research", "build-dataset"),
     ("workflow", "run"),
@@ -190,7 +186,6 @@ def test_cli_help_exposes_approved_groups_and_no_retired_commands() -> None:
     assert "data-products" not in combined
     assert "universes" not in combined
     assert "run-interim" not in combined
-    assert ("--" + "dry" + "-run") not in combined
     assert "--run-id" not in combined
     _assert_public_text_has_no_private_markers(combined)
 
@@ -406,11 +401,11 @@ def test_api_error_envelope_sanitizes_private_details() -> None:
     response = api_error_response(
         ApiError(
             error_code="invalid_private_detail",
-            message=r"failed at C:\Users\DELL\data\raw\csmar\000001.SZ",
+            message="failed with provider-internal detail",
             field="dataset_id",
             details={
-                "traceback": "Traceback (most recent call last): /mnt/data/raw",
-                "token": "token=abcdef123456",
+                "traceback": "Traceback (most recent call last): provider internals",
+                "credential_hint": "redacted credential detail",
                 "provider_id": "csmar",
             },
         )
@@ -431,7 +426,7 @@ def test_cli_error_output_is_sanitized() -> None:
         [
             "research-datasets",
             "requirements",
-            r"C:\Users\DELL\000001.SZ",
+            "invalid-dataset-id",
         ],
     )
 

@@ -17,12 +17,12 @@ REQUIRED_TERMS = (
     "reports/private_research",
 )
 FORBIDDEN_TERMS = (
-    "raw" + "_private",
-    "interim" + "_private",
-    "processed" + "_private",
-    "/api/" + "v0.1",
-    "/api/" + "pipeline-runs",
-    "/api/" + "runs",
+    "raw_private",
+    "interim_private",
+    "processed_private",
+    "/api/v0.1",
+    "/api/pipeline-runs",
+    "/api/runs",
 )
 
 

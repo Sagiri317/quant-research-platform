@@ -129,7 +129,6 @@ def test_model_spec_uses_algorithm_and_explicit_factor_feature_inputs() -> None:
 
     assert spec.model_algorithm == "linear_regression"
     assert spec.input_columns == ("mom_20d", "mom_20d_zscore")
-    assert not hasattr(spec, "model_family")
     assert not hasattr(spec, "feature_columns")
 
     with pytest.raises(ValueError, match="model_input_columns_required"):

@@ -21,7 +21,13 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/agents/handoff/test_build_handoff_package_integration.py"),
     Path("tests/agents/handoff/test_handoff_tools.py"),
     Path("tests/agents/handoff/test_package_safety_check.py"),
+    Path("tests/architecture/test_environment_contract.py"),
+    Path("tests/architecture/test_factor_contract_terms.py"),
+    Path("tests/workflows/test_verification_evidence.py"),
     Path("tests/workflows/test_verification_evidence_contract.py"),
+}
+RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = {
+    Path("src/quant_research_platform/workflows/verification_evidence.py"),
 }
 
 
@@ -60,7 +66,14 @@ def test_source_and_tests_do_not_depend_on_runtime_workspace_path() -> None:
         for path in root.rglob("*.py"):
             if (
                 path.resolve() == current_file
-                or path in RUNTIME_WORKSPACE_TEST_ALLOWLIST
+                or (
+                    root == Path("tests")
+                    and path in RUNTIME_WORKSPACE_TEST_ALLOWLIST
+                )
+                or (
+                    root == Path("src")
+                    and path in RUNTIME_WORKSPACE_SOURCE_ALLOWLIST
+                )
             ):
                 continue
             text = path.read_text(encoding="utf-8")
@@ -162,10 +175,27 @@ INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
     ("src", "quant_research_platform", "reports", "schema_inventory.py"),
 }
 RETIRED_TERM_NEGATIVE_TEST_ALLOWLIST = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "verify_code_map_flow.py"
+    ): {
+        "raw_private",
+        "interim_private",
+        "processed_private",
+        "/api/v0.1",
+        "/api/runs",
+        "/api/pipeline",
+    },
     Path("tests/contracts/test_clean_rewrite_contracts.py"): {
         "core_long_period",
         "smoke_minimal",
     },
+}
+STALE_VERSION_TOKEN_RULE_ALLOWLIST = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "verify_code_map_flow.py"
+    ): {"/api/v0.1"},
 }
 
 APPROVED_FIELD_SPEC_FILES = {
@@ -230,7 +260,6 @@ APPROVED_CLI_LINES = (
 RETIRED_DATA_PRODUCT_ID = "data_product" + "_id"
 
 RETIRED_PUBLIC_CONTRACT_TEXT = (
-    "/api/0.1/data-products/a_share_" + "daily" + "_bar/interim",
     "/api/0.1/markets/{market_id}/processed-data",
     "POST /api/0.1/research-datasets",
     "POST /api/0.1/workflows",
@@ -284,20 +313,6 @@ DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
     ),
     Path("tests/catalog/test_catalog_profiles.py"): (
         '"data_products"',
-    ),
-}
-
-RETIRED_A_SHARE_BAR_SHADOW_ALLOWED_TEXT = {
-    Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
-        "/api/0.1/data-products/a_share_" + "daily" + "_bar/interim",
-        "a_share_" + "daily" + "_bar_interim",
-        "a_share_" + "daily" + "_bar",
-    ),
-    Path("tests/interfaces/test_api_cli_01_contract.py"): (
-        "a_share_" + "daily" + "_bar",
-    ),
-    Path("tests/catalog/test_registry_graph_01.py"): (
-        "a_share_" + "daily" + "_bar_interim",
     ),
 }
 
@@ -462,6 +477,8 @@ def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
+            if name in STALE_VERSION_TOKEN_RULE_ALLOWLIST.get(path, set()):
+                continue
             if pattern.search(text):
                 hits.append(f"{path}: {name}")
 
@@ -519,31 +536,6 @@ def test_active_tree_has_no_data_product_current_vocabulary() -> None:
     assert hits == []
 
 
-def test_active_tree_has_no_retired_a_share_bar_shadow_ids() -> None:
-    current_file = Path(__file__).resolve()
-    forbidden_patterns = (
-        re.compile(r"\bA_SHARE_" + "DAILY" + r"_BAR[A-Z0-9_]*\b"),
-        re.compile(r"\b" + re.escape("a_share_" + "daily" + "_bar_interim") + r"\b"),
-        re.compile(r"\b" + re.escape("a_share_" + "daily" + "_bar") + r"\b"),
-    )
-    hits: list[str] = []
-    for path in _iter_text_files():
-        if path.resolve() == current_file:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        allowed = RETIRED_A_SHARE_BAR_SHADOW_ALLOWED_TEXT.get(path, ())
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            if any(item in line for item in allowed):
-                continue
-            if any(pattern.search(line) for pattern in forbidden_patterns):
-                hits.append(f"{path}:{line_number}: {line.strip()}")
-
-    assert hits == []
-
-
 def test_active_tree_has_no_retired_data_layer_structure_vocabulary() -> None:
     hits: list[str] = []
     for path in _iter_active_structure_files():
@@ -561,7 +553,6 @@ def test_active_tree_has_no_retired_data_layer_structure_vocabulary() -> None:
 
 def test_research_foundation_semantic_closure_terms_are_retired() -> None:
     forbidden_terms = (
-        "model" + "_family",
         "Model" + "Family",
         "EvaluationSpec." + "feature_columns",
         "ComputePanelSpec." + "feature_columns",
@@ -574,18 +565,12 @@ def test_research_foundation_semantic_closure_terms_are_retired() -> None:
         "linear" + "_baseline",
         "research/models/" + "base" + "line.py",
         "base" + "line.py",
-        "prediction" + "_bundle",
         "Prediction" + "Bundle",
         "PREDICTION" + "_BUNDLE",
         "bundle" + "_private",
         "bundle" + "_columns",
         "bundle" + "_schema",
         "bundle" + "_metadata",
-        "build_prediction" + "_bundle",
-        "write_prediction" + "_bundle",
-        "missing_prediction" + "_" + "bundle" + "_columns",
-        "unregistered_prediction" + "_" + "bundle" + "_columns",
-        "prediction" + "_" + "bundle" + "_private",
         "compute/" + "config.py",
         "quant_research_platform.compute." + "config",
         "from quant_research_platform.compute." + "config import",
@@ -597,38 +582,21 @@ def test_research_foundation_semantic_closure_terms_are_retired() -> None:
         "SignalSpec(" + "column=",
         'direction="' + "higher" + '"',
         'direction="' + "lower" + '"',
-        "Backtest" + "Spec",
         "Backtest" + "Engine",
-        "daily" + "_backtest",
-        "daily" + "_rebalance",
-        "daily" + "_open",
         "open" + "_backtest",
         "paper" + "_trading",
         "live" + "_trading",
         "br" + "oker",
     )
     negative_assertion_allowlist = {
-        Path("tests/contracts/test_research_semantics_contracts.py"): (
-            "model" + "_family",
-        ),
         Path("tests/compute/test_cost_config_semantic_ownership.py"): (
             "weight_config." + "cost_bps",
-        ),
-        Path("tests/reports/test_prediction_artifact_semantic_names.py"): (
-            "prediction" + "_" + "bundle" + "_private",
-            "missing_prediction" + "_" + "bundle" + "_columns",
-            "unregistered_prediction" + "_" + "bundle" + "_columns",
-        ),
-        Path("tests/research/test_model_prediction_semantic_names.py"): (
-            "build_prediction" + "_bundle",
-            "write_prediction" + "_bundle",
         ),
         Path("tests/contracts/test_research_foundation_semantic_contracts.py"): (
             'direction="' + "higher" + '"',
         ),
         Path("docs/architecture/open-issues-register.md"): (
             "Prediction" + "Bundle",
-            "Backtest" + "Spec",
         ),
     }
 

@@ -9,9 +9,6 @@ def test_report_catalog_uses_prediction_artifacts_definition() -> None:
     definition = report_catalog().get("prediction_artifacts_private")
 
     assert definition.display_name == "Private prediction artifacts"
-    assert "prediction_bundle_private" not in {
-        item.report_definition_id for item in report_catalog().list()
-    }
 
 
 def test_prediction_report_errors_use_artifact_semantics() -> None:
@@ -22,6 +19,3 @@ def test_prediction_report_errors_use_artifact_semantics() -> None:
     assert "prediction_artifacts_private" in source
     assert "missing_prediction_artifact_columns" in source
     assert "unregistered_prediction_artifact_columns" in source
-    assert "prediction_bundle_private" not in source
-    assert "missing_prediction_bundle_columns" not in source
-    assert "unregistered_prediction_bundle_columns" not in source

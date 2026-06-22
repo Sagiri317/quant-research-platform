@@ -59,7 +59,7 @@ from quant_research_platform.storage.manifests import (
 )
 
 _LOGICAL_PATH_MARKERS = ("data", "reports", "manifests", "validations", "timings")
-_RUN_WORKSPACE_DIR = "." + "run"
+_RUN_WORKSPACE_DIR = ".run"
 
 
 @dataclass(frozen=True)

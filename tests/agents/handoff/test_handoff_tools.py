@@ -478,9 +478,9 @@ def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
 ) -> None:
     builder = _load_handoff_module("build_handoff_package")
 
-    rules = builder.source_tree_forbidden_patterns()
+    rules = builder.source_tree_sensitive_negative_patterns()
 
-    assert rules["forbidden_local_private_path"].search(text)
+    assert rules["sensitive_local_private_path"].search(text)
 
 
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
@@ -869,13 +869,13 @@ def test_verify_requires_pr_url_in_pr_closure_task_metadata() -> None:
     assert "task_metadata_schema_missing: pr_url" in failures
 
 
-def test_verify_rejects_review_threads_entry_in_evidence_mode() -> None:
+def test_verify_rejects_review_threads_entry_in_any_mode() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     package = _write_evidence_review_threads_package()
 
     failures = verifier.verify_review_threads_entry(package, {})
 
-    assert failures == ["forbidden_evidence_mode_entry: review_threads.json"]
+    assert failures == ["forbidden_entry: review_threads.json"]
 
 
 def test_verify_rejects_pr_fields_in_handoff_evidence_payload() -> None:

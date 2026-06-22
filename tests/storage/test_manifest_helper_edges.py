@@ -26,6 +26,7 @@ def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
+        # Intentional fake private marker used to test sanitizer/package-safety rejection.
         ({"path": "C:" + r"\\private\\data"}, "absolute_path"),
         ({"path": r"\\" + r"\\server\\share"}, "absolute_path"),
         ({"path": "/" + "Users/local/private"}, "absolute_path"),
@@ -105,6 +106,6 @@ def test_manifest_logical_path_falls_back_to_posix(tmp_path: Path) -> None:
 
 
 def test_manifest_logical_path_uses_last_generated_marker() -> None:
-    path = Path("/mnt/data/team/qrp/reports/private_research/run/manifests/run.json")
+    path = Path("sandbox/team/qrp/reports/private_research/run/manifests/run.json")
 
     assert logical_path(path) == "manifests/run.json"

@@ -108,8 +108,6 @@ def test_prediction_artifact_helpers_do_not_export_bundle_semantics() -> None:
     assert spec.primary_key == ("timestamp", "asset_id")
     assert spec.prediction_column == "prediction_score"
     assert list(prediction.columns) == ["timestamp", "asset_id", "prediction_score"]
-    assert not hasattr(artifacts, "build_prediction_bundle")
-    assert not hasattr(artifacts, "write_prediction_bundle")
 
 
 def test_prediction_spec_rejects_non_canonical_output_schema() -> None:

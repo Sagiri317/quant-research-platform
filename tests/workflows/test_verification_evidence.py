@@ -80,7 +80,7 @@ def test_verification_evidence_workflow_rejects_existing_output_root(
     tmp_path,
     monkeypatch,
 ):
-    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s1")
+    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s1")
     output_root.mkdir(parents=True)
     config = _verification_config(
         output_root=output_root,
@@ -267,32 +267,32 @@ def test_verification_evidence_output_root_respects_repo_private_boundary(
         repo_root,
     )
     module.validate_private_output_root(
-        repo_root / ("." + "run") / "private" / "s1",
+        repo_root / ".run" / "private" / "s1",
         repo_root,
     )
     module.validate_private_output_root(
-        repo_root / ("." + "run") / "smoke" / "s1",
+        repo_root / ".run" / "smoke" / "s1",
         repo_root,
     )
     module.validate_private_output_root(
-        repo_root / ("." + "run") / "evidence-final" / "commit-sha" / "window-a",
+        repo_root / ".run" / "evidence-final" / "commit-sha" / "window-a",
         repo_root,
     )
     module.validate_private_output_root(
         repo_root
-        / ("." + "run")
+        / ".run"
         / "evidence-refreshed-baseline"
         / "commit-sha"
         / "window-b",
         repo_root,
     )
     module.validate_private_output_root(
-        repo_root / ("." + "run") / "s86",
+        repo_root / ".run" / "s86",
         repo_root,
     )
     with pytest.raises(ValueError, match="unignored_private_output_root"):
         module.validate_private_output_root(
-            repo_root / ("." + "run") / "reviews" / "s1",
+            repo_root / ".run" / "reviews" / "s1",
             repo_root,
         )
     with pytest.raises(ValueError, match="unignored_private_output_root"):
@@ -487,7 +487,7 @@ def test_verification_evidence_workflow_resolves_independent_windows(
     output_root = _repo_output_root(
         tmp_path,
         monkeypatch,
-        "." + "run",
+        ".run",
         "private",
         "s-window",
     )
@@ -625,7 +625,7 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
     output_root = _repo_output_root(
         tmp_path,
         monkeypatch,
-        "." + "run",
+        ".run",
         "private",
         "s-policy",
     )
@@ -783,7 +783,7 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         prediction_spec.prediction_id for prediction_spec in _smoke_prediction_specs()
     ]
     expected_prediction_count = len(expected_prediction_ids)
-    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s1")
+    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s1")
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -906,7 +906,7 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
         lambda **kwargs: Path("portfolio"),
     )
 
-    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s8")
+    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s8")
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -967,7 +967,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
         lambda **kwargs: Path("portfolio"),
     )
 
-    output_root = _repo_output_root(tmp_path, monkeypatch, "." + "run", "s9")
+    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s9")
     result = run_verification_evidence(
         _verification_config(
             output_root=output_root,
@@ -1041,7 +1041,7 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
     output_root = _repo_output_root(
         tmp_path,
         monkeypatch,
-        "." + "run",
+        ".run",
         "private",
         "tiny-real-stack",
     )
