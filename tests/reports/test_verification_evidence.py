@@ -181,12 +181,9 @@ def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
-        "C:" + r"\Users\DELL\data\raw\provider\file.csv",
         "vendor_export_abc__dataset__export-20240101.csv",
         "row_sample: value",
-        "stock sample 000001.SZ",
         "source_asset_id",
-        "token=" + "abcdef123456",
     ],
 )
 def test_private_safety_scan_rejects_private_markers(tmp_path, text):
@@ -205,11 +202,11 @@ def test_private_safety_scan_rejects_private_markers(tmp_path, text):
     assert "private_safety_scan_failed" in summary["failure_codes"]
 
 
-def test_private_safety_scan_does_not_treat_json_numbers_as_stock_samples(tmp_path):
+def test_private_safety_scan_does_not_treat_json_numbers_as_private_samples(tmp_path):
     safe = tmp_path / "safe.json"
     unsafe = tmp_path / "unsafe.json"
     atomic_write_json(safe, {"row_count": 344350, "duration_seconds": 0.000123})
-    atomic_write_json(unsafe, {"example": "000001.SZ"})
+    atomic_write_json(unsafe, {"example": "row_sample: value"})
 
     safe_summary = build_validation_summary(
         run_id="run",

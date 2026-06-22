@@ -1,12 +1,12 @@
 # 交接打包（Handoff packaging）
 
-用于 review bundle / handoff package。目标是 public-safe、可复现、证据真实。
+用于 handoff package。目标是 public-safe、可复现、证据真实；review bundle 只作为 historical / migrated 旧称出现。
 
 ## 执行规则
 
 1. 使用 repo/local `.run` 官方 handoff 工具；不要临时拼包。
 2. 先读 `.run` summary/package rules/manifest，不读 raw logs。
-3. Git bundle 应放入 review bundle（如果项目规则要求），但 bundle 不得包含 private data。
+3. Git bundle 应放入 handoff package（如果项目规则要求），但 bundle 不得包含 private data。
 4. Package manifest 必须真实记录 `PASS/FAIL/NOT_RUN/BLOCKED`。
 5. 不把 handoff 结构反向写成架构规则。
 

@@ -53,6 +53,18 @@ def test_retired_workflow_run_module_is_absent() -> None:
     assert not Path("src/quant_research_platform/contracts/workflow_run.py").exists()
 
 
+def test_retired_public_constant_aliases_are_absent() -> None:
+    import quant_research_platform.contracts.models as contracts_models
+    from quant_research_platform.markets.implementations.a_share import (
+        ids as market_ids,
+    )
+    from quant_research_platform.sources.csmar import ids as source_ids
+
+    assert not hasattr(contracts_models, "MODEL_ALGORITHMS")
+    assert not hasattr(source_ids, "CSMAR_SOURCE_ID")
+    assert not hasattr(market_ids, "A_SHARE_MARKET_ID")
+
+
 def test_retired_handoff_evidence_names_are_absent() -> None:
     scan_groups = _load_handoff_builder().source_tree_scan_groups(Path("."))
 
@@ -61,8 +73,7 @@ def test_retired_handoff_evidence_names_are_absent() -> None:
 
 def test_retired_pr_body_renderer_is_absent() -> None:
     assert not Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/"
-        "render_pr_body_from_validation_evidence.py"
+        ".agents/skills/quant-research-platform-maintenance/scripts/render_pr_body_from_validation_evidence.py"
     ).exists()
     assert not Path("tests/agents/handoff/test_pr_body_consistency.py").exists()
 

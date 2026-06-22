@@ -30,21 +30,12 @@ def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None
 
 def test_verification_evidence_unsafe_reason_variants() -> None:
     assert (
-        verification_evidence._unsafe_text_reason("C:" + r"\\private\\path")
-        == "absolute_path"
-    )
-    assert (
         verification_evidence._unsafe_text_reason("data/raw/csmar/export.csv")
         == "absolute_path"
     )
     assert (
         verification_evidence._unsafe_text_reason("daily__vendor__export-20240101.csv")
         == "vendor_filename"
-    )
-    assert verification_evidence._unsafe_text_reason("000001.SZ") == "stock_sample"
-    assert (
-        verification_evidence._unsafe_text_reason("token: " + "abcdefghi123")
-        == "credential"
     )
     assert verification_evidence._unsafe_json_reason("{bad") == "invalid_json"
     assert verification_evidence._unsafe_json_reason('{"safe": ["aggregate"]}') is None

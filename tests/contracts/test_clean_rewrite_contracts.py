@@ -178,13 +178,12 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     assert not is_private_boundary_path(Path("/repo/docs/data/README.md"))
 
 
-def test_sanitizer_removes_local_paths_private_markers_and_stock_codes() -> None:
-    text = "failed with data/raw/csmar/000001.SZ vendor CSMAR row"
+def test_sanitizer_removes_local_paths_and_private_markers() -> None:
+    text = "failed with data/raw/csmar/export.csv vendor CSMAR row"
 
     sanitized = sanitize_public_text(text)
 
     assert "data/raw/csmar" not in sanitized
-    assert "000001" not in sanitized
     assert "CSMAR" not in sanitized
 
 

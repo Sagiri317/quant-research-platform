@@ -8,8 +8,8 @@
 | `standard-implementation` | 标准实现 | 有明确 owner layer 的功能或 bugfix | 只改 owner layer 和必要 tests/docs | current status、repo-map、context routing、owner routing、相关代码/tests | targeted pytest + ruff/py_compile + diff check |
 | `goal-closure` | 目标闭环 | 长任务、review-fix loop、overnight goal | 只在用户批准 envelope 内闭环 | task envelope、task modes、gates、owner routing、相关代码/tests | 每 slice narrow tests；最终 full relevant gates |
 | `independent-review` | 独立审查 | 只审查、不改代码 | read-only；输出 findings | diff/branch/目标文件；必要时 issue-family references | review checklist；未运行不得写 PASS |
-| `handoff-packaging` | 交接打包 | 生成 review bundle / handoff package | 使用 `.run` 官方工具；不改架构 | `.run` summary/package rules、evidence rules、package safety | package safety + manifest truth + artifact truth |
-| `merge-gate` | 合并门 | ff merge、branch gate、release merge | 只做 Git gate；不做业务修复 | branch status、diff、review evidence | git status/log/merge-base；禁止 force |
+| `handoff-packaging` | 交接打包 | 生成 handoff package | 使用 `.run` 官方工具；不改架构 | `.run` summary/package rules、handoff evidence rules、package safety | package safety + manifest truth + artifact truth |
+| `merge-gate` | 合并门 | ff merge、branch gate、release merge | 只做 Git gate；不做业务修复 | branch status、diff、handoff evidence；PR review 语境可读 review evidence | git status/log/merge-base；禁止 force |
 | `release-gate` | 发布门 | 发布/展示前检查 | check-only unless approved | README/PROJECT_STATUS/docs/api/docs/architecture | public surface + private safety + docs/status sync |
 | `docs-status-sync` | 文档状态同步 | active docs/status/brief/code-map 同步 | docs only；不改业务代码 | changed surface + active docs | markdown/path check + stale status scan |
 | `governance-redesign` | 治理重构 | 改 `AGENTS.md`、`.agents/`、skill、scripts、governance docs | governance-only；不改 `src/**`/business tests | governance files + evidence summary + code facts | governance script + package safety + docs consistency |

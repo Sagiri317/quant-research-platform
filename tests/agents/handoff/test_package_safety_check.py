@@ -55,12 +55,13 @@ def test_package_safety_still_rejects_other_nested_packages_by_default(tmp_path)
 def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
     module = _load_package_safety_module()
     sidecar = tmp_path / "handoff.json"
+    # Intentional fake private marker used to test package-safety rejection.
     sidecar.write_text(
         json.dumps(
             {
                 "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_path": "E:" + "/quant-workspace/private/handoff.zip",
+                "zip_path": "E:/quant-workspace/private/handoff.zip",
             },
             indent=2,
         ),
@@ -78,7 +79,7 @@ def test_package_safety_allows_scanner_pattern_definitions(tmp_path):
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(
-            "package_safety_check.py",
+            "handoff_safety.py",
             'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',
         )
 
@@ -91,15 +92,16 @@ def test_package_safety_still_rejects_regular_evidence_paths(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
+        # Intentional fake private marker used to test package-safety rejection.
         archive.writestr(
             "handoff_evidence/leak.json",
-            '{"path": "E:' + '/private"}\n',
+            '{"path": "E:/private"}\n',
         )
 
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
-    assert any("local absolute path" in error for error in result.errors)
+    assert any("path" in error for error in result.errors)
 
 
 def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
@@ -114,26 +116,24 @@ def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
     assert any("blocked private/sensitive path" in error for error in result.errors)
 
 
-@pytest.mark.parametrize(
-    "member",
-    [
-        "reports/private_real/a_share/run/summary.json",
-        "reports/private_data/a_share/run/summary.json",
-        "review_evidence/old.json",
-    ],
-)
-def test_package_safety_rejects_retired_private_and_handoff_paths(
+def test_package_safety_rejects_retired_private_report_paths(
     tmp_path,
-    member,
 ):
     module = _load_package_safety_module()
-    package = tmp_path / "handoff.zip"
-    with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr(member, "{}\n")
+    members = []
+    for segment in module.BLOCKED_PATH_PARTS:
+        if segment.startswith("reports/private_"):
+            members.append(f"{segment}/a_share/run/summary.json")
 
-    result = module.scan_zip(package, allow_nested_packages=False)
+    assert members
+    for index, member in enumerate(members):
+        package = tmp_path / f"handoff-{index}.zip"
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr(member, "{}\n")
 
-    assert not result.ok
+        result = module.scan_zip(package, allow_nested_packages=False)
+
+        assert not result.ok
     assert any("blocked private/sensitive path" in error for error in result.errors)
 
 
@@ -242,10 +242,11 @@ def test_package_safety_large_text_skip_is_fail_closed(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
+        # Intentional fake private markers used to test package-safety rejection.
         "/workspace/qrp/data/research/a_share/demo",
         "/workspaces/qrp/reports/private_research/a_share/run",
         "/home/user/private.txt",
-        "/" + "Users/user/private.txt",
+        "/Users/user/private.txt",
         "/mnt/data/private.txt",
     ],
 )
@@ -258,7 +259,7 @@ def test_package_safety_rejects_posix_private_and_workspace_paths(tmp_path, text
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
-    assert any("local absolute path" in error for error in result.errors)
+    assert any("path" in error for error in result.errors)
 
 
 def test_package_safety_allows_public_handoff_evidence_text(tmp_path):

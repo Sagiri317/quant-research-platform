@@ -77,12 +77,6 @@ def test_feature_transform_spec_uses_source_and_output_columns_only() -> None:
         )
 
 
-def test_contracts_models_do_not_export_algorithm_collection() -> None:
-    import quant_research_platform.contracts.models as models
-
-    assert not hasattr(models, "MODEL_ALGORITHMS")
-
-
 def test_portfolio_contract_uses_return_source_and_cost_config() -> None:
     spec = PortfolioSpec(
         portfolio_id="portfolio_demo",

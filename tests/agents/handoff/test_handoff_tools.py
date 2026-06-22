@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import io
 import json
 import subprocess
 import sys
@@ -30,6 +29,16 @@ def _load_handoff_module(name: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _retired_private_member_paths(
+    segments: tuple[str, ...],
+) -> tuple[str, ...]:
+    members: list[str] = []
+    for segment in segments:
+        if segment.startswith("reports/private_"):
+            members.append(f"{segment}/a_share/run/summary.json")
+    return tuple(members)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -72,31 +81,19 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
     out_dir = tmp_path / "out"
     task = {
         "slug": "handoff-test",
+        "mode": "evidence",
         "branch": TEST_BRANCH,
         "base": base,
         "final_head": final_head,
-        "final_sha": final_head,
         "validation_evidence": {
             "schema_version": "handoff-validation-evidence/0.1",
             "checks": [
                 {
-                    "name": "github_review_threads",
+                    "name": "handoff_external_access",
                     "status": "BLOCKED",
                     "evidence": "blocked",
                 }
             ],
-        },
-        "review_threads": {
-            "schema_version": "handoff-review-threads/0.1",
-            "status": "BLOCKED",
-            "counts_available": False,
-            "total_count": None,
-            "unresolved_count": None,
-            "threads": [],
-            "evidence": (
-                "Live GitHub review-thread access was unavailable; "
-                "counts are unknown."
-            ),
         },
     }
     result = builder.build_handoff_package(
@@ -169,14 +166,12 @@ def test_builder_writes_final_branch_bundle_without_patch_member(
 ) -> None:
     _repo, package, _sidecar, _base, _final_head = _build_test_package(tmp_path)
     with zipfile.ZipFile(package) as archive:
-        names = set(archive.namelist())
         bundle = archive.read("final-branch.bundle")
         manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
 
     bundle_entry = next(
         item for item in manifest["entries"] if item["path"] == "final-branch.bundle"
     )
-    assert "diff.patch" not in names
     assert bundle
     assert bundle_entry["sha256"] == hashlib.sha256(bundle).hexdigest()
 
@@ -218,45 +213,6 @@ def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> Non
     assert "duplicate_tracked_source_in_zip: src/copied.py" in failures
 
 
-def test_verifier_rejects_forbidden_patch_member(tmp_path: Path) -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
-    forbidden_entry = "diff.patch"
-    with zipfile.ZipFile(package, "a") as archive:
-        archive.writestr(forbidden_entry, b"not expected\n")
-    _refresh_manifest_and_sidecar(package, sidecar)
-
-    failures = verifier.verify_handoff_package(package, sidecar)
-
-    assert "forbidden_entry: " + forbidden_entry in failures
-
-
-@pytest.mark.parametrize(
-    "forbidden_member",
-    [
-        "handoff_evidence/diff.patch.json",
-        "handoff_evidence/pr_body.md.json",
-        "handoff_evidence/review_evidence.json",
-    ],
-)
-def test_verifier_rejects_reserved_handoff_evidence_members(
-    tmp_path: Path,
-    forbidden_member: str,
-) -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
-    with zipfile.ZipFile(package, "a") as archive:
-        archive.writestr(
-            forbidden_member,
-            json.dumps({"schema_version": "legacy/0.1", "status": "PASS"}) + "\n",
-        )
-    _refresh_manifest_and_sidecar(package, sidecar)
-
-    failures = verifier.verify_handoff_package(package, sidecar)
-
-    assert f"forbidden_handoff_evidence_entry: {forbidden_member}" in failures
-
-
 def test_verifier_rejects_generation_bundle_hash_mismatch(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
@@ -277,189 +233,41 @@ def test_verifier_rejects_generation_bundle_hash_mismatch(tmp_path: Path) -> Non
     assert "generation_bundle_sha256_mismatch" in failures
 
 
-def test_verifier_reruns_source_tree_scan_from_bundle(tmp_path: Path) -> None:
+def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    repo, package, sidecar, base, _final_head = _build_test_package(tmp_path)
-    legacy = repo / "src" / "legacy.py"
-    legacy.parent.mkdir(exist_ok=True)
-    legacy.write_text('LEGACY = "contracts.workflow_run"\n', encoding="utf-8")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "add hidden legacy surface")
-    forged_head = _git(repo, "rev-parse", "HEAD").strip()
-    forged_bundle = tmp_path / "forged-final-branch.bundle"
-    _git(
-        repo,
-        "bundle",
-        "create",
-        str(forged_bundle),
-        TEST_BRANCH,
+    final_head = "1" * 40
+    payload = {
+        "schema_version": "handoff-source-tree-scan/0.1",
+        "status": "PASS",
+        "scanned_head": final_head,
+        "expected_head": final_head,
+        "scanned_tree": "final-branch.bundle clone",
+        "finding_count": 0,
+        "findings": [{"path": "src/example.py", "rule": "demo"}],
+        "scan_groups": {
+            "retired_terms": {"status": "PASS", "finding_count": 0, "findings": []},
+            "active_test_literals": {
+                "status": "PASS",
+                "finding_count": 1,
+                "findings": [],
+            },
+            "sensitive_negative_literals": {
+                "status": "PASS",
+                "finding_count": 0,
+                "findings": [],
+            },
+            "extra": {"status": "PASS", "finding_count": 0, "findings": []},
+        },
+    }
+
+    failures = verifier.verify_source_tree_scan_evidence(
+        payload,
+        {"final_head": final_head},
     )
 
-    with zipfile.ZipFile(package) as archive:
-        task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
-        validation = json.loads(
-            archive.read("validation_evidence.json").decode("utf-8")
-        )
-        generation = json.loads(
-            archive.read("handoff_evidence/generation.json").decode("utf-8")
-        )
-        source_tree_scan = json.loads(
-            archive.read("handoff_evidence/source-tree-scan.json").decode("utf-8")
-        )
-    task_metadata.update(
-        {"base": base, "final_head": forged_head, "final_sha": forged_head}
-    )
-    validation.update(
-        {"base": base, "final_head": forged_head, "final_sha": forged_head}
-    )
-    generation.update(
-        {
-            "base": base,
-            "final_head": forged_head,
-            "bundle_sha256": hashlib.sha256(forged_bundle.read_bytes()).hexdigest(),
-        }
-    )
-    source_tree_scan.update(
-        {
-            "status": "PASS",
-            "expected_head": forged_head,
-            "scanned_head": forged_head,
-            "finding_count": 0,
-            "findings": [],
-            "failures": [],
-        }
-    )
-    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    sidecar_payload.update({"base": base, "final_head": forged_head})
-    sidecar.write_text(
-        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    _rewrite_package_member(package, "final-branch.bundle", forged_bundle.read_bytes())
-    _rewrite_package_member(
-        package,
-        "task_metadata.json",
-        (json.dumps(task_metadata, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _rewrite_package_member(
-        package,
-        "validation_evidence.json",
-        (json.dumps(validation, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _rewrite_package_member(
-        package,
-        "handoff_evidence/generation.json",
-        (json.dumps(generation, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _rewrite_package_member(
-        package,
-        "handoff_evidence/source-tree-scan.json",
-        (json.dumps(source_tree_scan, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _refresh_manifest_and_sidecar(package, sidecar)
-
-    failures = verifier.verify_handoff_package(package, sidecar)
-
-    assert "source_tree_scan_bundle_findings_present" in failures
-    assert any(
-        failure == "source_tree_scan_bundle_rule: retired_workflow_module"
-        for failure in failures
-    )
-
-
-def test_verifier_reruns_source_tree_scan_rejects_pr_body_renderer(
-    tmp_path: Path,
-) -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    repo, package, sidecar, base, _final_head = _build_test_package(tmp_path)
-    legacy = repo / "src" / "legacy.py"
-    legacy.parent.mkdir(exist_ok=True)
-    legacy.write_text(
-        'LEGACY = "render_pr_body_from_validation_evidence.py"\n',
-        encoding="utf-8",
-    )
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "add hidden pr body renderer")
-    forged_head = _git(repo, "rev-parse", "HEAD").strip()
-    forged_bundle = tmp_path / "forged-final-branch.bundle"
-    _git(
-        repo,
-        "bundle",
-        "create",
-        str(forged_bundle),
-        TEST_BRANCH,
-    )
-
-    with zipfile.ZipFile(package) as archive:
-        task_metadata = json.loads(archive.read("task_metadata.json").decode("utf-8"))
-        validation = json.loads(
-            archive.read("validation_evidence.json").decode("utf-8")
-        )
-        generation = json.loads(
-            archive.read("handoff_evidence/generation.json").decode("utf-8")
-        )
-        source_tree_scan = json.loads(
-            archive.read("handoff_evidence/source-tree-scan.json").decode("utf-8")
-        )
-    task_metadata.update(
-        {"base": base, "final_head": forged_head, "final_sha": forged_head}
-    )
-    validation.update(
-        {"base": base, "final_head": forged_head, "final_sha": forged_head}
-    )
-    generation.update(
-        {
-            "base": base,
-            "final_head": forged_head,
-            "bundle_sha256": hashlib.sha256(forged_bundle.read_bytes()).hexdigest(),
-        }
-    )
-    source_tree_scan.update(
-        {
-            "status": "PASS",
-            "expected_head": forged_head,
-            "scanned_head": forged_head,
-            "finding_count": 0,
-            "findings": [],
-            "failures": [],
-        }
-    )
-    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    sidecar_payload.update({"base": base, "final_head": forged_head})
-    sidecar.write_text(
-        json.dumps(sidecar_payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    _rewrite_package_member(package, "final-branch.bundle", forged_bundle.read_bytes())
-    _rewrite_package_member(
-        package,
-        "task_metadata.json",
-        (json.dumps(task_metadata, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _rewrite_package_member(
-        package,
-        "validation_evidence.json",
-        (json.dumps(validation, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _rewrite_package_member(
-        package,
-        "handoff_evidence/generation.json",
-        (json.dumps(generation, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _rewrite_package_member(
-        package,
-        "handoff_evidence/source-tree-scan.json",
-        (json.dumps(source_tree_scan, indent=2, sort_keys=True) + "\n").encode(),
-    )
-    _refresh_manifest_and_sidecar(package, sidecar)
-
-    failures = verifier.verify_handoff_package(package, sidecar)
-
-    assert "source_tree_scan_bundle_findings_present" in failures
-    assert any(
-        failure == "source_tree_scan_bundle_rule: forbidden_render_pr_body"
-        for failure in failures
-    )
+    assert "source_tree_scan_groups_unexpected" in failures
+    assert "source_tree_scan_group_count_mismatch: active_test_literals" in failures
+    assert "source_tree_scan_finding_count_mismatch" in failures
 
 
 @pytest.mark.parametrize(
@@ -495,7 +303,8 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
             {
                 "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": f"{run_handoffs}/handoff.zip",
+                "handoff_package_path": f"{run_handoffs}/handoff.zip",
+                "handoff_sidecar_path": f"{run_handoffs}/handoff.json",
                 "leaked_zip_path": "E:/quant-workspace/private/handoff.zip",
                 "also_bad": "/mnt/data/private/handoff.zip",
                 "home_bad": "/home/user/private/handoff.zip",
@@ -523,38 +332,38 @@ def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
     assert any("forbidden_path_segment" in item for item in result.failures)
 
 
-@pytest.mark.parametrize(
-    "member",
-    [
-        "reports/private_real/a_share/run/summary.json",
-        "reports/private_data/a_share/run/summary.json",
-        "review_evidence/old.json",
-    ],
-)
-def test_handoff_safety_rejects_retired_private_and_handoff_paths(
+def test_handoff_safety_rejects_retired_private_report_paths(
     tmp_path: Path,
-    member: str,
 ) -> None:
     safety = _load_handoff_module("handoff_safety")
-    package = tmp_path / "handoff.zip"
-    with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr(member, "{}\n")
+    members = _retired_private_member_paths(safety.FORBIDDEN_PATH_SEGMENTS)
 
-    result = safety.scan_handoff_zip(package)
+    assert members
+    for index, member in enumerate(members):
+        package = tmp_path / f"handoff-{index}.zip"
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr(member, "{}\n")
 
-    assert not result.ok
-    assert any("forbidden_path_segment" in item for item in result.failures)
+        result = safety.scan_handoff_zip(package)
+
+        assert not result.ok
+        assert any("forbidden_path_segment" in item for item in result.failures)
 
 
 def test_handoff_safety_rejects_retired_private_report_path_text(
     tmp_path: Path,
 ) -> None:
     safety = _load_handoff_module("handoff_safety")
+    retired_private_report_path = next(
+        segment
+        for segment in safety.FORBIDDEN_PATH_SEGMENTS
+        if segment.startswith("reports/private_")
+    )
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(
             "handoff_evidence/leak.md",
-            "retired path reports/private_real/a_share/run\n",
+            f"retired path {retired_private_report_path}/a_share/run\n",
         )
 
     result = safety.scan_handoff_zip(package)
@@ -563,40 +372,21 @@ def test_handoff_safety_rejects_retired_private_report_path_text(
     assert any("local_absolute_path_text" in item for item in result.failures)
 
 
-def test_task_metadata_drops_retired_review_payload_input_key() -> None:
+def test_task_metadata_rejects_pr_url_in_evidence_mode() -> None:
     builder = _load_handoff_module("build_handoff_package")
 
-    payload = builder.task_metadata(
-        {
-            "schema_version": "handoff-task-metadata/0.1",
-            "slug": "demo",
-            "branch": "feature/demo",
-            "base": "0" * 40,
-            "pr_url": "https://github.com/example/repo/pull/1",
-            "review_evidence": {"old": True},
-        }
-    )
-
-    assert "review_evidence" not in payload
-
-
-def test_task_metadata_drops_pr_fields_in_evidence_mode() -> None:
-    builder = _load_handoff_module("build_handoff_package")
-
-    payload = builder.task_metadata(
-        {
-            "schema_version": "handoff-task-metadata/0.1",
-            "mode": "evidence",
-            "slug": "demo",
-            "branch": "feature/demo",
-            "base": "0" * 40,
-            "pr_url": "https://github.com/example/repo/pull/1",
-            "pr_body": "stale body",
-        }
-    )
-
-    assert "pr_url" not in payload
-    assert "pr_body" not in payload
+    with pytest.raises(SystemExit, match="task_metadata_evidence_forbidden_field"):
+        builder.task_metadata(
+            {
+                "schema_version": "handoff-task-metadata/0.1",
+                "mode": "evidence",
+                "slug": "demo",
+                "branch": "feature/demo",
+                "base": "0" * 40,
+                "final_head": "1" * 40,
+                "pr_url": "https://github.com/example/repo/pull/1",
+            }
+        )
 
 
 def test_builder_requires_pr_url_for_pr_closure_even_without_verify(
@@ -751,9 +541,10 @@ def test_handoff_safety_rejects_absolute_paths_with_private_segments(
 
 def test_handoff_safety_rejects_local_paths_in_plain_text() -> None:
     safety = _load_handoff_module("handoff_safety")
+    # Intentional fake private marker used to test sanitizer/package-safety rejection.
     text = "\n".join(
         [
-            "old local example C" + ":/" + "Users/name/private.txt",
+            "old local example C:/Users/name/private.txt",
             "old workspace example /workspace/qrp/data/research/a_share/demo",
         ]
     )
@@ -788,7 +579,8 @@ def test_verify_fails_when_sidecar_safety_fails(tmp_path: Path) -> None:
             {
                 "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": f"{run_handoffs}/handoff.zip",
+                "handoff_package_path": f"{run_handoffs}/handoff.zip",
+                "handoff_sidecar_path": f"{run_handoffs}/handoff.json",
                 "zip_sha256": verifier.sha256_file(package),
                 "artifact_manifest_sha256": "0" * 64,
                 "branch": TEST_BRANCH,
@@ -830,7 +622,7 @@ def test_verify_allows_evidence_task_metadata_without_pr_url() -> None:
     assert "task_metadata_schema_missing: pr_url" not in failures
 
 
-def test_verify_rejects_pr_fields_in_evidence_task_metadata() -> None:
+def test_verify_rejects_pr_url_in_evidence_task_metadata() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
     failures = verifier.verify_task_metadata_schema(
@@ -840,17 +632,12 @@ def test_verify_rejects_pr_fields_in_evidence_task_metadata() -> None:
             "slug": "demo",
             "branch": TEST_BRANCH,
             "base": "0" * 40,
+            "final_head": "1" * 40,
             "pr_url": "https://github.com/example/repo/pull/1",
-            "pr_body": "stale body",
-            "review_threads": {},
         }
     )
 
-    assert failures == [
-        "task_metadata_evidence_forbidden_field: pr_url",
-        "task_metadata_evidence_forbidden_field: pr_body",
-        "task_metadata_evidence_forbidden_field: review_threads",
-    ]
+    assert failures == ["task_metadata_evidence_forbidden_field: pr_url"]
 
 
 def test_verify_requires_pr_url_in_pr_closure_task_metadata() -> None:
@@ -869,59 +656,23 @@ def test_verify_requires_pr_url_in_pr_closure_task_metadata() -> None:
     assert "task_metadata_schema_missing: pr_url" in failures
 
 
-def test_verify_rejects_review_threads_entry_in_any_mode() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    package = _write_evidence_review_threads_package()
-
-    failures = verifier.verify_review_threads_entry(package, {})
-
-    assert failures == ["forbidden_entry: review_threads.json"]
-
-
-def test_verify_rejects_pr_fields_in_handoff_evidence_payload() -> None:
+def test_verify_rejects_pr_url_in_handoff_evidence_payload() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
 
-    failures = verifier.handoff_evidence_pr_field_failures(
+    failures = verifier.handoff_evidence_forbidden_field_failures(
         "handoff_evidence/custom.json",
         {
             "schema_version": "demo/0.1",
             "pr_url": "https://github.com/example/repo/pull/1",
-            "pr_body": "stale body",
-            "review_threads": [],
         },
     )
 
     assert failures == [
-        "handoff_evidence_forbidden_pr_field: "
-        "handoff_evidence/custom.json: pr_url",
-        "handoff_evidence_forbidden_pr_field: "
-        "handoff_evidence/custom.json: pr_body",
-        "handoff_evidence_forbidden_pr_field: "
-        "handoff_evidence/custom.json: review_threads",
+        "handoff_evidence_forbidden_field: handoff_evidence/custom.json: pr_url"
     ]
 
 
-def test_verify_requires_review_thread_rows_to_represent_total_count() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    package = _write_review_threads_package(
-        {
-            "schema_version": "handoff-review-threads/0.1",
-            "status": "PASS",
-            "counts_available": True,
-            "total_count": 2,
-            "unresolved_count": 0,
-            "threads": [
-                _review_thread_row("thread-1"),
-            ],
-        }
-    )
-
-    failures = verifier.verify_review_thread_closure(package, {})
-
-    assert "review_threads_total_count_mismatch" in failures
-
-
-def test_verify_rejects_pass_validation_command_placeholders() -> None:
+def test_verify_rejects_validation_row_extra_fields() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     validation_payload = {
         "schema_version": "handoff-validation-evidence/0.1",
@@ -932,22 +683,12 @@ def test_verify_rejects_pass_validation_command_placeholders() -> None:
                 "command": "python verify.py --zip <zip> --json <json>",
                 "evidence": "PASS",
             },
-            {
-                "name": "targeted_tests",
-                "status": "PASS",
-                "command": (
-                    "python -m pytest targeted reports/workflows/storage/"
-                    "compute/interfaces suites"
-                ),
-                "evidence": "PASS",
-            },
         ],
     }
 
-    failures = verifier.validation_command_failures(validation_payload)
+    failures = verifier.verify_validation_evidence_schema(validation_payload)
 
-    assert "validation_command_placeholder: handoff_verify" in failures
-    assert "validation_command_placeholder: targeted_tests" in failures
+    assert "validation_evidence_row_forbidden_field: 0:command" in failures
 
 
 def test_verify_baseline_final_compare_uses_metadata_groups() -> None:
@@ -978,6 +719,39 @@ def test_verify_baseline_final_compare_uses_metadata_groups() -> None:
     )
 
     assert verifier.verify_baseline_final_compare(payload) == []
+
+
+def test_verify_baseline_final_compare_rejects_flat_status_aliases() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _baseline_final_compare_payload(
+        {
+            "control_window_alpha": {
+                "comparison_group": "old_baseline",
+                "status": "FAIL_EXPECTED",
+                "reason_code": "stale_rank_ensemble_prediction_baseline",
+                "failed_artifacts": [
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                ],
+            },
+            "candidate_window_beta": {
+                "comparison_group": "refreshed_prediction_baseline",
+                "status": "PASS",
+                "prediction_summary": {
+                    "artifact_ids": [
+                        "equal_weight_rank_ensemble_mom_20d_prediction_2020",
+                        "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
+                    ],
+                    "failed_artifacts": [],
+                },
+            },
+        }
+    )
+    payload["overall_status"] = "PASS"
+
+    failures = verifier.verify_baseline_final_compare(payload)
+
+    assert "baseline_final_compare_flat_alias_present: overall_status" in failures
 
 
 def test_verify_baseline_final_compare_requires_refreshed_group() -> None:
@@ -1048,75 +822,21 @@ def _baseline_final_compare_payload(
 ) -> dict[str, object]:
     return {
         "schema_version": "qrp-baseline-final-compare-summary/0.1",
-        "actual_overall_status": "FAIL",
-        "raw_overall_status": "FAIL",
-        "policy_adjusted_overall_status": "PASS",
-        "overall_status": "PASS",
+        "status": {
+            "raw": "FAIL",
+            "policy_adjusted": "PASS",
+            "validation_decision": "PASS",
+        },
         "baseline_commit": "0" * 8,
         "baseline_commit_full": "0" * 40,
-        "final_head": "1" * 8,
-        "final_head_full": "1" * 40,
+        "final_head": "1" * 40,
         "final_smoke_commit": "1" * 40,
         "git_status_before_smoke": "clean",
         "git_status_after_smoke": "clean_or_only_ignored_run_outputs",
-        "old_baseline_compare_status": "FAIL_EXPECTED",
-        "refreshed_prediction_baseline_compare_status": "PASS",
-        "validation_decision": "PASS",
+        "comparison_groups": {
+            "old_baseline": {"status": "FAIL_EXPECTED"},
+            "refreshed_prediction_baseline": {"status": "PASS"},
+        },
         "contract_failures": [],
         "comparisons": comparisons,
-    }
-
-
-def _write_review_threads_package(payload: dict[str, object]) -> zipfile.ZipFile:
-    package = io.BytesIO()
-    with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("review_threads.json", json.dumps(payload) + "\n")
-    package.seek(0)
-    return zipfile.ZipFile(package)
-
-
-def _write_evidence_review_threads_package() -> zipfile.ZipFile:
-    package = io.BytesIO()
-    with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr(
-            "task_metadata.json",
-            json.dumps(
-                {
-                    "schema_version": "handoff-task-metadata/0.1",
-                    "mode": "evidence",
-                    "slug": "demo",
-                    "branch": TEST_BRANCH,
-                    "base": "0" * 40,
-                }
-            )
-            + "\n",
-        )
-        archive.writestr(
-            "review_threads.json",
-            json.dumps(
-                {
-                    "schema_version": "handoff-review-threads/0.1",
-                    "status": "PASS",
-                    "counts_available": True,
-                    "total_count": 0,
-                    "unresolved_count": 0,
-                    "threads": [],
-                }
-            )
-            + "\n",
-        )
-    package.seek(0)
-    return zipfile.ZipFile(package)
-
-
-def _review_thread_row(thread_id: str) -> dict[str, object]:
-    return {
-        "thread_id": thread_id,
-        "path": "src/example.py",
-        "comment_id": "discussion_r1",
-        "classification": "codex_p2_resolved",
-        "resolution_status": "resolved",
-        "evidence": "Metadata-only thread row.",
-        "resolved_by_tool": True,
-        "manual_action_required": False,
     }

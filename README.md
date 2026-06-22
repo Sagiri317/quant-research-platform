@@ -91,7 +91,7 @@ data/research/a_share/
 reports/private_research/
 ```
 
-review / handoff 包不得包含 parquet、csv、pkl、pickle、feather、arrow、raw vendor data、row-level private data、credentials、tokens 或本地绝对路径。
+handoff package 不得包含 parquet、csv、pkl、pickle、feather、arrow、raw vendor data、row-level private data、credentials、tokens 或本地绝对路径。
 
 ## 进一步阅读
 

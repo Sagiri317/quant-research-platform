@@ -13,7 +13,6 @@ from quant_research_platform.research.models.supervised import (
     model_smoke_hyperparameters,
     predict_model_frame,
 )
-from quant_research_platform.research.predictions import artifacts
 from quant_research_platform.research.predictions.artifacts import (
     validate_prediction_artifacts,
 )

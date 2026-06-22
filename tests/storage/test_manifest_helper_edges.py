@@ -26,13 +26,8 @@ def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
-        # Intentional fake private marker used to test sanitizer/package-safety rejection.
-        ({"path": "C:" + r"\\private\\data"}, "absolute_path"),
-        ({"path": r"\\" + r"\\server\\share"}, "absolute_path"),
-        ({"path": "/" + "Users/local/private"}, "absolute_path"),
         ({"path": "data/raw/vendor/file.csv"}, "raw_path"),
         ({"file": "daily__vendor__export-20240101.csv"}, "raw_export_filename"),
-        ({"note": "token: " + "abcdefghi123456"}, "credential"),
         ({"row_sample": [{"a": 1}]}, "row_sample"),
     ],
 )

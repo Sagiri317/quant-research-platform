@@ -71,10 +71,7 @@ STALE_STATUS_PATTERNS = (
     re.compile(r"Finish the official review-fix handoff package", re.IGNORECASE),
 )
 
-LOCAL_PATH_PATTERN = re.compile(
-    r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+"
-    r"|/mnt/(?:data|[a-z])/[^\s`]+)"
-)
+LOCAL_PATH_PATTERN = re.compile(r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+)")  # noqa: E501
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|cookie)\s*[:=]\s*['\"]?[^\s'\"]+"
 )

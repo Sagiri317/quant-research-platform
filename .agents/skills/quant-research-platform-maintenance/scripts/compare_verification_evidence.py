@@ -38,19 +38,6 @@ BASELINE_FINAL_COMPARE_GROUPS = (
 )
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
-DATA_ID_RENAME_MAP = {
-    "a_share_as_of": "as_of",
-    "a_share_default": "default",
-    "a_share_evaluation": "evaluation",
-    "a_share_execution": "execution",
-    "a_share_price_volume_forward_returns": "price_volume_forward_returns",
-    "daily_context": "market_context_1d",
-    "daily_market": "market_bars_1d",
-    "daily_panel": "market_panel_1d",
-    "private_real": "private_research",
-}
-
-
 @dataclass
 class SeriesStats:
     count: int = 0
@@ -204,7 +191,6 @@ def main() -> None:
         run_metadata = run_pair_metadata_from_args(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    _write_json(goal_root / "compare-rename-map.json", _rename_map_payload())
     comparisons: dict[str, dict[str, Any]] = {}
     for label, paths in runs.items():
         comparison = compare_run_safely(
@@ -222,13 +208,16 @@ def main() -> None:
     }
     baseline_commit = str(args.baseline_commit)
     baseline_commit_full = _resolve_commit_full(baseline_commit)
-    final_head_full = str(currentness["head"])
-    smoke_evidence = final_smoke_evidence_from_metadata(run_metadata)
+    final_head = str(currentness["head"])
+    try:
+        smoke_evidence = final_smoke_evidence_from_metadata(run_metadata)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     contract_failures = compare_contract_failures(comparisons)
     contract_failures.extend(
         compare_metadata_contract_failures(
             baseline_commit_full=baseline_commit_full,
-            final_head_full=final_head_full,
+            final_head=final_head,
             smoke_evidence=smoke_evidence,
         )
     )
@@ -246,28 +235,30 @@ def main() -> None:
         "schema_version": "qrp-baseline-final-compare-summary/0.1",
         "baseline_commit": baseline_commit[:8],
         "baseline_commit_full": baseline_commit_full,
-        "final_head": final_head_full[:8],
-        "final_head_full": final_head_full,
+        "final_head": final_head,
         "current_git": currentness,
-        "actual_overall_status": raw_overall_status,
-        "raw_overall_status": raw_overall_status,
-        "policy_adjusted_overall_status": overall_status,
+        "status": {
+            "raw": raw_overall_status,
+            "policy_adjusted": overall_status,
+            "validation_decision": (
+                "PASS" if overall_status == "PASS" else overall_status
+            ),
+        },
         "contract_failures": contract_failures,
-        "overall_status": overall_status,
         "final_smoke_commit": smoke_evidence["final_smoke_commit"],
         "git_status_before_smoke": smoke_evidence["git_status_before_smoke"],
         "git_status_after_smoke": smoke_evidence["git_status_after_smoke"],
-        "old_baseline_compare_status": old_baseline_compare_status,
-        "refreshed_prediction_baseline_compare_status": (
-            refreshed_prediction_baseline_compare_status
-        ),
-        "validation_decision": "PASS" if overall_status == "PASS" else overall_status,
+        "comparison_groups": {
+            OLD_BASELINE_GROUP: {"status": old_baseline_compare_status},
+            REFRESHED_PREDICTION_BASELINE_GROUP: {
+                "status": refreshed_prediction_baseline_compare_status,
+            },
+        },
         "status_counts": {
             status: sum(1 for item in statuses.values() if item == status)
             for status in sorted(set(statuses.values()))
         },
         "comparisons": comparisons,
-        "rename_map_path": _safe_relative(goal_root / "compare-rename-map.json"),
         "privacy": "public_safe_aggregate_only_no_row_level_values",
     }
     _write_json(goal_root / "baseline-final-compare.json", payload)
@@ -429,18 +420,18 @@ def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[st
 def compare_metadata_contract_failures(
     *,
     baseline_commit_full: str,
-    final_head_full: str,
+    final_head: str,
     smoke_evidence: dict[str, str],
 ) -> list[str]:
     failures = []
     if not is_full_sha(baseline_commit_full):
         failures.append("baseline_commit_full_not_full_sha")
-    if not is_full_sha(final_head_full):
-        failures.append("final_head_full_not_full_sha")
+    if not is_full_sha(final_head):
+        failures.append("final_head_not_full_sha")
     final_smoke_commit = smoke_evidence["final_smoke_commit"]
     if not is_full_sha(final_smoke_commit):
         failures.append("final_smoke_commit_not_full_sha")
-    elif is_full_sha(final_head_full) and final_smoke_commit != final_head_full:
+    elif is_full_sha(final_head) and final_smoke_commit != final_head:
         failures.append("final_smoke_commit_not_current_head")
     if smoke_evidence["git_status_before_smoke"] != "clean":
         failures.append("git_status_before_smoke_not_clean")
@@ -457,12 +448,7 @@ def is_full_sha(value: object) -> bool:
 
 
 def pair_comparison_group(pair: dict[str, Any]) -> str:
-    return str(
-        pair.get("comparison_group")
-        or pair.get("compare_group")
-        or pair.get("group")
-        or ""
-    ).strip()
+    return str(pair.get("comparison_group") or "").strip()
 
 
 def comparisons_by_group(
@@ -528,27 +514,9 @@ def add_public_summary_fields(comparison: dict[str, Any]) -> dict[str, Any]:
 
 def research_dataset_summary(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "row_count": {
-            **payload["row_count"],
-            "match": payload["row_count_match"],
-        },
-        "row_count_baseline": payload["row_count"]["baseline"],
-        "row_count_final": payload["row_count"]["final"],
-        "row_count_match": payload["row_count_match"],
-        "asset_count": {
-            **payload["asset_count"],
-            "match": payload["asset_count_match"],
-        },
-        "asset_count_baseline": payload["asset_count"]["baseline"],
-        "asset_count_final": payload["asset_count"]["final"],
-        "asset_count_match": payload["asset_count_match"],
-        "timestamp_count": {
-            **payload["timestamp_count"],
-            "match": payload["timestamp_count_match"],
-        },
-        "timestamp_count_baseline": payload["timestamp_count"]["baseline"],
-        "timestamp_count_final": payload["timestamp_count"]["final"],
-        "timestamp_count_match": payload["timestamp_count_match"],
+        "row_count": payload["row_count"],
+        "asset_count": payload["asset_count"],
+        "timestamp_count": payload["timestamp_count"],
         "schema_columns_after_rename_match": payload[
             "schema_columns_after_rename_match"
         ],
@@ -655,51 +623,31 @@ def compare_run(label: str, baseline_root: Path, final_root: Path) -> dict[str, 
 
 
 def run_pairs_from_args(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
-    if args.pair and args.pairs_file:
-        raise ValueError("pair_arguments_are_mutually_exclusive")
-    if args.pairs_file:
-        return run_pairs_from_file(Path(args.pairs_file))
-    if not args.pair:
-        raise ValueError("missing_pair: provide --pair or --pairs-file")
-    runs: dict[str, dict[str, Any]] = {}
-    for raw_pair in args.pair:
-        if "=" not in raw_pair or "::" not in raw_pair:
-            raise ValueError(
-                "invalid_pair_format: expected label=baseline_root::final_root"
-            )
-        label, roots = raw_pair.split("=", 1)
-        baseline_root, final_root = roots.split("::", 1)
-        if not label:
-            raise ValueError("invalid_pair_format: missing_label")
-        if label in runs:
-            raise ValueError(f"duplicate_pair_label: {label}")
-        runs[label] = {
-            "baseline": Path(baseline_root),
-            "final": Path(final_root),
-        }
-    return runs
+    if not args.pairs_file:
+        raise ValueError("missing_pairs_file")
+    return run_pairs_from_file(Path(args.pairs_file))
 
 
 def run_pair_metadata_from_args(args: argparse.Namespace) -> dict[str, Any]:
     if not args.pairs_file:
-        return {}
+        raise ValueError("missing_pairs_file")
     return run_pair_metadata_from_file(Path(args.pairs_file))
 
 
 def run_pair_metadata_from_file(path: Path) -> dict[str, Any]:
-    payload = _read_json(path)
-    metadata = payload.get("metadata", {})
-    if metadata is None:
-        return {}
+    payload = read_pairs_payload(path)
+    if "metadata" not in payload:
+        raise ValueError("invalid_pairs_file: metadata_required")
+    metadata = payload["metadata"]
     if not isinstance(metadata, dict):
         raise ValueError("invalid_pairs_file: metadata_must_be_object")
     return metadata
 
 
 def final_smoke_evidence_from_metadata(metadata: dict[str, Any]) -> dict[str, str]:
-    raw = metadata.get("final_smoke", metadata)
+    raw = metadata.get("final_smoke")
     if not isinstance(raw, dict):
-        raw = {}
+        raise ValueError("invalid_pairs_file: final_smoke_metadata_required")
     return {
         "final_smoke_commit": str(raw.get("final_smoke_commit") or "NOT_PROVIDED"),
         "git_status_before_smoke": str(
@@ -712,14 +660,19 @@ def final_smoke_evidence_from_metadata(metadata: dict[str, Any]) -> dict[str, st
 
 
 def run_pairs_from_file(path: Path) -> dict[str, dict[str, Any]]:
-    payload = _read_json(path)
-    raw_pairs = payload.get("pairs", payload)
+    payload = read_pairs_payload(path)
+    raw_pairs = payload.get("pairs")
     if not isinstance(raw_pairs, list):
-        raise ValueError("invalid_pairs_file: expected list or {pairs: list}")
+        raise ValueError("invalid_pairs_file: pairs_must_be_list")
     runs: dict[str, dict[str, Any]] = {}
     for raw_pair in raw_pairs:
         if not isinstance(raw_pair, dict):
             raise ValueError("invalid_pairs_file: pair_must_be_object")
+        unexpected = sorted(set(raw_pair) - pair_file_pair_keys())
+        if unexpected:
+            raise ValueError(
+                "invalid_pairs_file: pair_unapproved_key: " + ",".join(unexpected)
+            )
         try:
             label = str(raw_pair["label"])
             baseline_root = Path(str(raw_pair["baseline"]))
@@ -739,14 +692,35 @@ def run_pairs_from_file(path: Path) -> dict[str, dict[str, Any]]:
             "expected_status": raw_pair.get("expected_status", "PASS"),
             "expected_failure_reason": raw_pair.get("expected_failure_reason", ""),
             "expected_failed_artifacts": list(expected_failed_artifacts),
-            "comparison_group": raw_pair.get(
-                "comparison_group",
-                raw_pair.get("compare_group", raw_pair.get("group", "")),
-            ),
+            "comparison_group": raw_pair.get("comparison_group", ""),
         }
     if not runs:
         raise ValueError("invalid_pairs_file: empty_pairs")
     return runs
+
+
+def read_pairs_payload(path: Path) -> dict[str, Any]:
+    payload = _read_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid_pairs_file: payload_must_be_object")
+    unexpected = sorted(set(payload) - {"metadata", "pairs"})
+    if unexpected:
+        raise ValueError(
+            "invalid_pairs_file: unapproved_key: " + ",".join(unexpected)
+        )
+    return payload
+
+
+def pair_file_pair_keys() -> set[str]:
+    return {
+        "label",
+        "baseline",
+        "final",
+        "expected_status",
+        "expected_failure_reason",
+        "expected_failed_artifacts",
+        "comparison_group",
+    }
 
 
 def compare_research_dataset(baseline_root: Path, final_root: Path) -> dict[str, Any]:
@@ -847,18 +821,21 @@ def compare_research_dataset(baseline_root: Path, final_root: Path) -> dict[str,
         "partial_partitions": memory_guard_partitions,
         "baseline_dataset": _safe_relative(baseline_dataset),
         "final_dataset": _safe_relative(final_dataset),
-        "row_count": {"baseline": left["row_count"], "final": right["row_count"]},
-        "row_count_match": left["row_count"] == right["row_count"],
+        "row_count": {
+            "baseline": left["row_count"],
+            "final": right["row_count"],
+            "match": left["row_count"] == right["row_count"],
+        },
         "asset_count": {
             "baseline": len(left["asset_ids"]),
             "final": len(right["asset_ids"]),
+            "match": len(left["asset_ids"]) == len(right["asset_ids"]),
         },
-        "asset_count_match": len(left["asset_ids"]) == len(right["asset_ids"]),
         "timestamp_count": {
             "baseline": len(left["timestamps"]),
             "final": len(right["timestamps"]),
+            "match": len(left["timestamps"]) == len(right["timestamps"]),
         },
-        "timestamp_count_match": len(left["timestamps"]) == len(right["timestamps"]),
         "schema_columns_after_rename_match": schema_match,
         "key_bound_hash_match": key_hash_match,
         "key_bound_hash": {"baseline": left["key_hash"], "final": right["key_hash"]},
@@ -1275,7 +1252,7 @@ def compare_validation_summaries(
     baseline_summary: dict[str, Any],
     final_summary: dict[str, Any],
 ) -> dict[str, Any]:
-    date_range_mismatches = date_range_mismatches_after_rename(
+    range_mismatches = date_range_mismatches(
         baseline_summary,
         final_summary,
     )
@@ -1288,8 +1265,8 @@ def compare_validation_summaries(
         == final_summary["validation_summary"]["label_nan_profile"]
     )
     failures = []
-    if date_range_mismatches:
-        failures.append("date_range_mismatch_after_rename_map")
+    if range_mismatches:
+        failures.append("date_range_mismatch")
     if not factor_nan_profile_match:
         failures.append("factor_nan_profile_mismatch")
     if not label_nan_profile_match:
@@ -1306,7 +1283,7 @@ def compare_validation_summaries(
     return {
         "status": "PASS" if not failures else "FAIL",
         "failures": failures,
-        "date_range_mismatches_after_rename_map": date_range_mismatches,
+        "date_range_mismatches": range_mismatches,
         "factor_nan_profile_match": factor_nan_profile_match,
         "label_nan_profile_match": label_nan_profile_match,
         "manifest_status": {
@@ -1647,12 +1624,12 @@ def normalized_report_hash_frame(
     return normalized
 
 
-def date_range_mismatches_after_rename(
+def date_range_mismatches(
     baseline_summary: dict[str, Any],
     final_summary: dict[str, Any],
 ) -> dict[str, Any]:
     baseline_ranges = {
-        DATA_ID_RENAME_MAP.get(item["data_id"], item["data_id"]): {
+        item["data_id"]: {
             "date_min": item["date_min"],
             "date_max": item["date_max"],
             "partition_count": item["partition_count"],
@@ -1725,31 +1702,11 @@ def _resolve_commit_full(commit: str) -> str:
     if resolved != "UNKNOWN" and len(resolved) == 40:
         return resolved
     return "UNKNOWN"
-
-
-def _rename_map_payload() -> dict[str, Any]:
-    return {
-        "schema_version": "qrp-compare-rename-map/0.1",
-        "data_ids": DATA_ID_RENAME_MAP,
-        "report_paths": {
-            "reports/private_real": "reports/private_research",
-            "a_share_<run_id>": "<run_id>",
-        },
-        "columns": {
-            "frequency": "rebalance_frequency",
-            "return_1d": "period_return",
-            "valid_daily_bar": "valid_bar",
-            "next_day_*": "next_bar_*",
-        },
-        "privacy": "rename metadata only; no row-level data",
-    }
-
-
 def _markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# QRP baseline-final compare",
         "",
-        f"- overall_status: {payload['overall_status']}",
+        f"- overall_status: {payload['status']['policy_adjusted']}",
         f"- current_head: {payload['current_git']['head']}",
         f"- dirty_worktree: {payload['current_git']['dirty']}",
         f"- currentness_note: {payload['current_git']['currentness_note']}",
@@ -1781,12 +1738,9 @@ def _markdown(payload: dict[str, Any]) -> str:
                 f"- status: {comparison['status']}",
                 f"- baseline_run_label: {comparison['baseline_run_label']}",
                 f"- final_run_label: {comparison['final_run_label']}",
-                f"- row_count_match: {research['row_count_match']} "
-                f"({research['row_count']})",
-                f"- asset_count_match: {research['asset_count_match']} "
-                f"({research['asset_count']})",
-                f"- timestamp_count_match: {research['timestamp_count_match']} "
-                f"({research['timestamp_count']})",
+                f"- row_count: {research['row_count']}",
+                f"- asset_count: {research['asset_count']}",
+                f"- timestamp_count: {research['timestamp_count']}",
                 f"- schema_columns_after_rename_match: "
                 f"{research['schema_columns_after_rename_match']}",
                 f"- key_bound_hash_match: {research['key_bound_hash_match']}",
@@ -1835,16 +1789,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pairs-file",
         help=(
-            "JSON list or {pairs: list} of objects with label, baseline, and final "
-            "run roots. Mutually exclusive with --pair."
-        ),
-    )
-    parser.add_argument(
-        "--pair",
-        action="append",
-        help=(
-            "Repeatable compare pair in label=baseline_root::final_root form. "
-            "Use :: so Windows drive letters are not ambiguous."
+            "JSON object with pairs list containing label, baseline, and final "
+            "run roots."
         ),
     )
     return parser.parse_args()

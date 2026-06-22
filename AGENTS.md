@@ -123,7 +123,7 @@ data/research/a_share/
 reports/private_research/
 ```
 
-review bundle、handoff package、public-safe artifacts 禁止包含 parquet、csv、pkl、pickle、feather、arrow、raw vendor exports、row-level private data、credentials、tokens、旧 handoff zip/json，除非 package rule 明确允许脱敏摘要。
+handoff package、public-safe artifacts 禁止包含 parquet、csv、pkl、pickle、feather、arrow、raw vendor exports、row-level private data、credentials、tokens、旧 handoff zip/json，除非 package rule 明确允许脱敏摘要。
 
 ## 9. Git 安全
 

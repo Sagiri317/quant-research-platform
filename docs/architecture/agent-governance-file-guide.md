@@ -26,7 +26,7 @@
 - `governance-gates.md`：一遍过 gates 清单。把“不要返工”落成具体检查门。
 - `owner-layer-routing.md`：owner layer 路由表。防止一个小任务跨层乱改。
 - `contracts-and-verification.md`：公共接口、artifact truth、private safety 和验证阶梯。
-- `evidence-and-handoff.md`：`.run`、handoff 包、review bundle、Git bundle 的证据规则。
+- `evidence-and-handoff.md`：`.run`、handoff package、handoff evidence、Git bundle 的证据规则；review bundle 是 historical / migrated 旧称。
 - `review-fix-loop.md`：review 后怎么按 issue family 修，避免只修一个点。
 - `script-portability.md`：治理脚本跨 Win11/macOS/Linux/WSL 的规则。
 - `governance-verification-checklist.md`：治理变更后的验证清单。
@@ -41,7 +41,7 @@
 - `focused-implementation.md`：有明确 owner layer 的实现任务。
 - `focused-audit.md`：只读审查任务。
 - `goal-closure.md`：长目标和 review-fix loop。
-- `handoff-packaging.md`：生成 public-safe handoff/review bundle。
+- `handoff-packaging.md`：生成 public-safe handoff package。
 - `git-operations.md`：commit、push、merge、branch cleanup。
 - `docs-status-sync.md`：同步 README、PROJECT_STATUS、briefs 等 active docs。
 - `apply-only-validation.md`：精确应用 patch/zip，只验证不重新设计。
@@ -49,7 +49,7 @@
 ### `scripts/`
 
 - `verify_governance.py`：检查治理层变更有没有碰业务代码、private roots、repo-local `.codex`、blocked extensions、stale status、明显敏感内容。
-- `package_safety_check.py`：扫描 review/handoff 包，防止包含 private data、blocked extensions、secret-like 内容、本地路径。
+- `package_safety_check.py`：扫描 handoff package，防止包含 private data、blocked extensions、secret-like 内容、本地路径。
 - `verify_code_map_flow.py`：检查 `docs/code-map/platform-flow.md` 是否仍包含当前 clean rewrite 的关键锚点。
 
 ## `docs/architecture/`

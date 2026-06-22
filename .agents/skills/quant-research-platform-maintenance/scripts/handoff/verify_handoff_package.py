@@ -1,4 +1,4 @@
-"""Verify a generic QRP handoff zip with one external JSON sidecar."""
+"""Verify a generic QRP handoff zip with one handoff sidecar JSON."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -17,6 +17,11 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from build_handoff_package import (  # noqa: E402
+    FORBIDDEN_HANDOFF_EVIDENCE_KEYS,
+    FORBIDDEN_PACKAGE_ENTRY_PARTS,
+    FORBIDDEN_TASK_KEYS,
+    FORBIDDEN_VALIDATION_KEYS,
+    VALIDATION_ROW_KEYS,
     is_reserved_handoff_evidence_path,
     source_tree_scan_from_clone,
 )
@@ -31,7 +36,6 @@ REQUIRED_ZIP_ENTRIES = {
     "task_metadata.json",
     "validation_evidence.json",
 }
-DIFF_PATCH_ENTRY = "diff.patch"
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
@@ -112,10 +116,10 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                 failures.append("external_json_in_zip")
             missing = sorted(REQUIRED_ZIP_ENTRIES - name_set)
             failures.extend(f"missing_required_entry: {name}" for name in missing)
-            if DIFF_PATCH_ENTRY in name_set:
-                failures.append("forbidden_entry: " + DIFF_PATCH_ENTRY)
-            if "pr_body.md" in name_set:
-                failures.append("forbidden_entry: pr_body.md")
+            failures.extend(
+                f"forbidden_entry: {name}"
+                for name in sorted(forbidden_package_entries(names))
+            )
             failures.extend(
                 f"forbidden_handoff_evidence_entry: {name}"
                 for name in sorted(names)
@@ -140,8 +144,6 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
                     failures.append(f"missing_required_entry: {required_evidence}")
             failures.extend(verify_artifact_manifest(archive, sidecar))
             failures.extend(verify_metadata_entries(archive, sidecar))
-            if "review_threads.json" in name_set:
-                failures.extend(verify_review_threads_entry(archive, sidecar))
             failures.extend(verify_handoff_evidence_json(archive, sidecar))
             failures.extend(verify_final_branch_bundle(archive, sidecar))
             failures.extend(verify_git_status(archive))
@@ -155,7 +157,8 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     allowed = {
         "schema_version",
         "zip_filename",
-        "zip_logical_path",
+        "handoff_package_path",
+        "handoff_sidecar_path",
         "zip_sha256",
         "artifact_manifest_sha256",
         "branch",
@@ -170,11 +173,22 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
         failures.append("sidecar_schema_version_mismatch")
     if sidecar.get("zip_filename") != zip_path.name:
         failures.append("sidecar_zip_filename_mismatch")
-    logical = sidecar.get("zip_logical_path")
-    if not isinstance(logical, str) or "\\" in logical or not logical.endswith(
+    package_path = sidecar.get("handoff_package_path")
+    if (
+        not isinstance(package_path, str)
+        or "\\" in package_path
+        or not package_path.endswith(
         "/" + zip_path.name
+        )
     ):
-        failures.append("sidecar_zip_logical_path_invalid")
+        failures.append("sidecar_handoff_package_path_invalid")
+    sidecar_path = sidecar.get("handoff_sidecar_path")
+    if (
+        not isinstance(sidecar_path, str)
+        or "\\" in sidecar_path
+        or not sidecar_path.endswith(".json")
+    ):
+        failures.append("sidecar_handoff_sidecar_path_invalid")
     if sha256_file(zip_path) != sidecar.get("zip_sha256"):
         failures.append("zip_sha256_mismatch")
     for key in ("branch", "base", "final_head", "generated_at_utc"):
@@ -202,6 +216,18 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     return failures
 
 
+def forbidden_package_entries(names: list[str]) -> list[str]:
+    entries: list[str] = []
+    for name in names:
+        parts = PurePosixPath(name.replace("\\", "/")).parts
+        if any(part in FORBIDDEN_PACKAGE_ENTRY_PARTS for part in parts):
+            entries.append(name)
+            continue
+        if is_reserved_handoff_evidence_path(name):
+            entries.append(name)
+    return entries
+
+
 def verify_sidecar_schema(sidecar: dict[str, object]) -> list[str]:
     failures: list[str] = []
     if sidecar.get("schema_version") != "handoff-sidecar/0.1":
@@ -209,7 +235,8 @@ def verify_sidecar_schema(sidecar: dict[str, object]) -> list[str]:
     allowed = {
         "schema_version",
         "zip_filename",
-        "zip_logical_path",
+        "handoff_package_path",
+        "handoff_sidecar_path",
         "zip_sha256",
         "artifact_manifest_sha256",
         "branch",
@@ -280,6 +307,7 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
             metadata_consistency_failures("task_metadata", task_payload, sidecar)
         )
     if isinstance(validation_payload, dict):
+        failures.extend(verify_validation_evidence_schema(validation_payload))
         failures.extend(
             metadata_consistency_failures(
                 "validation_evidence",
@@ -288,46 +316,55 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
             )
         )
         failures.extend(validation_sidecar_status_failures(validation_payload, sidecar))
-        failures.extend(validation_command_failures(validation_payload))
+    return failures
+
+
+def verify_validation_evidence_schema(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    forbidden = FORBIDDEN_VALIDATION_KEYS.intersection(payload)
+    failures.extend(
+        f"validation_evidence_forbidden_field: {key}"
+        for key in sorted(forbidden)
+    )
+    rows = payload.get("checks")
+    if not isinstance(rows, list):
+        failures.append("validation_evidence_checks_missing")
+        return failures
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            failures.append(f"validation_evidence_check_not_object: {index}")
+            continue
+        extra = sorted(set(row) - VALIDATION_ROW_KEYS)
+        failures.extend(
+            f"validation_evidence_row_forbidden_field: {index}:{key}"
+            for key in extra
+        )
+        for key in ("name", "status", "evidence"):
+            if key not in row:
+                failures.append(f"validation_evidence_row_missing: {index}:{key}")
     return failures
 
 
 def verify_task_metadata_schema(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    required = {"schema_version", "slug", "branch", "base"}
+    required = {"schema_version", "mode", "slug", "branch", "base", "final_head"}
     missing = sorted(key for key in required if not payload.get(key))
     failures.extend(f"task_metadata_schema_missing: {key}" for key in missing)
     if payload.get("schema_version") != "handoff-task-metadata/0.1":
         failures.append("task_metadata_schema_version_mismatch")
-    mode = str(payload.get("mode") or "evidence").strip()
+    mode = str(payload["mode"]).strip() if "mode" in payload else ""
     if mode not in {"evidence", "pr_closure"}:
         failures.append("task_metadata_mode_invalid")
     if mode == "pr_closure" and not payload.get("pr_url"):
         failures.append("task_metadata_schema_missing: pr_url")
-    if mode == "evidence":
-        for key in ("pr_url", "pr_body", "review_threads"):
-            if key in payload:
-                failures.append(f"task_metadata_evidence_forbidden_field: {key}")
-    if "goal_status" in payload:
-        failures.append("task_metadata_goal_status_not_allowed")
+    forbidden = FORBIDDEN_TASK_KEYS.intersection(payload)
+    failures.extend(
+        f"task_metadata_forbidden_field: {key}"
+        for key in sorted(forbidden)
+    )
+    if mode == "evidence" and "pr_url" in payload:
+        failures.append("task_metadata_evidence_forbidden_field: pr_url")
     return failures
-
-
-def verify_task_mode_from_archive(archive: ZipFile) -> str:
-    try:
-        payload = json.loads(archive.read("task_metadata.json").decode("utf-8"))
-    except Exception:
-        return "evidence"
-    if not isinstance(payload, dict):
-        return "evidence"
-    return str(payload.get("mode") or "evidence").strip()
-
-
-def verify_review_threads_entry(
-    archive: ZipFile,
-    sidecar: dict[str, object],
-) -> list[str]:
-    return ["forbidden_entry: review_threads.json"]
 
 
 def metadata_consistency_failures(
@@ -338,7 +375,6 @@ def metadata_consistency_failures(
     failures: list[str] = []
     expected = {
         "branch": sidecar.get("branch"),
-        "final_sha": sidecar.get("final_head"),
         "final_head": sidecar.get("final_head"),
         "head_commit_after_task": sidecar.get("final_head"),
         "base": sidecar.get("base"),
@@ -382,14 +418,14 @@ def validation_sidecar_status_failures(
 
 
 def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
-    rows = payload.get("checks", payload.get("validation_table", []))
+    rows = payload["checks"]
     if not isinstance(rows, list):
         return {}
     result: dict[str, str] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
-        name = row.get("name", row.get("check"))
+        name = row.get("name")
         status = str(row.get("status") or "").strip().upper()
         if isinstance(name, str) and status in VALID_STATUSES:
             result[name] = status
@@ -410,122 +446,6 @@ def aggregate_status(statuses: object) -> str:
     return "PASS"
 
 
-def verify_review_thread_closure(
-    archive: ZipFile,
-    sidecar: dict[str, object],
-) -> list[str]:
-    del sidecar
-    failures: list[str] = []
-    try:
-        payload = json.loads(archive.read("review_threads.json").decode("utf-8"))
-    except (KeyError, json.JSONDecodeError):
-        return ["review_threads_json_decode_failed"]
-    if not isinstance(payload, dict):
-        return ["review_threads_must_be_object"]
-    status = str(payload.get("status") or "").strip().upper()
-    counts_available = payload.get("counts_available")
-    total_count = payload.get("total_count")
-    unresolved_count = payload.get("unresolved_count")
-    if status == "BLOCKED":
-        if counts_available is not False:
-            failures.append("review_threads_blocked_counts_available_not_false")
-        if total_count is not None or unresolved_count is not None:
-            failures.append("review_threads_blocked_counts_must_be_null")
-        evidence = str(payload.get("evidence") or "").lower()
-        if "counts unknown" not in evidence and "counts are unknown" not in evidence:
-            failures.append("review_threads_blocked_counts_unknown_evidence_missing")
-    elif status == "PASS":
-        if counts_available is not True:
-            failures.append("review_threads_pass_counts_available_required")
-        if not isinstance(total_count, int) or not isinstance(unresolved_count, int):
-            failures.append("review_threads_pass_counts_must_be_int")
-    threads = payload.get("threads")
-    if not isinstance(threads, list):
-        failures.append("review_threads_table_missing")
-        threads = []
-    required_fields = {
-        "thread_id",
-        "path",
-        "comment_id",
-        "classification",
-        "resolution_status",
-        "evidence",
-        "resolved_by_tool",
-        "manual_action_required",
-    }
-    for index, row in enumerate(threads):
-        if not isinstance(row, dict):
-            failures.append(f"review_thread_row_not_object: {index}")
-            continue
-        missing = sorted(required_fields.difference(row))
-        if missing:
-            failures.append(
-                "review_thread_row_missing_fields: "
-                + str(index)
-                + ":"
-                + ",".join(missing)
-            )
-        forbidden_body_fields = {
-            "body",
-            "comment_body",
-            "comment_bodies",
-            "comments",
-        }.intersection(row)
-        if forbidden_body_fields:
-            failures.append(
-                "review_thread_row_contains_comment_body: "
-                + str(index)
-                + ":"
-                + ",".join(sorted(forbidden_body_fields))
-            )
-    if (
-        status == "PASS"
-        and isinstance(total_count, int)
-        and len(threads) != total_count
-    ):
-        failures.append("review_threads_total_count_mismatch")
-    return failures
-
-
-def validation_command_failures(payload: dict[str, object]) -> list[str]:
-    rows = payload.get("checks", payload.get("validation_table", []))
-    if not isinstance(rows, list):
-        return []
-    failures: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name", row.get("check")) or "").strip()
-        status = str(row.get("status") or "").strip().upper()
-        command = str(row.get("command") or "").strip()
-        if status != "PASS":
-            continue
-        if not command:
-            failures.append(f"validation_command_missing: {name}")
-            continue
-        if _validation_command_has_placeholder(command):
-            failures.append(f"validation_command_placeholder: {name}")
-        if contains_local_absolute_path_text(command):
-            failures.append(f"validation_command_local_absolute_path: {name}")
-    return failures
-
-
-def _validation_command_has_placeholder(command: str) -> bool:
-    lowered = command.lower()
-    if "targeted reports/workflows/storage/compute/interfaces suites" in lowered:
-        return True
-    if "<" in command or ">" in command:
-        return True
-    return any(
-        marker in lowered
-        for marker in (
-            "<zip>",
-            "<json>",
-            "<official-rendered-pr-body>",
-        )
-    )
-
-
 def verify_handoff_evidence_json(
     archive: ZipFile,
     sidecar: dict[str, object],
@@ -542,7 +462,7 @@ def verify_handoff_evidence_json(
         if not isinstance(payload, dict):
             failures.append(f"handoff_evidence_must_be_object: {name}")
             continue
-        failures.extend(handoff_evidence_pr_field_failures(name, payload))
+        failures.extend(handoff_evidence_forbidden_field_failures(name, payload))
         if name == GENERATION_EVIDENCE:
             failures.extend(verify_generation_evidence(payload, sidecar, archive))
         if name == SOURCE_TREE_SCAN_EVIDENCE:
@@ -554,13 +474,13 @@ def verify_handoff_evidence_json(
     return failures
 
 
-def handoff_evidence_pr_field_failures(
+def handoff_evidence_forbidden_field_failures(
     name: str,
     payload: dict[str, object],
 ) -> list[str]:
     return [
-        f"handoff_evidence_forbidden_pr_field: {name}: {key}"
-        for key in ("pr_url", "pr_body", "review_threads")
+        f"handoff_evidence_forbidden_field: {name}: {key}"
+        for key in sorted(FORBIDDEN_HANDOFF_EVIDENCE_KEYS)
         if key in payload
     ]
 
@@ -642,24 +562,44 @@ def verify_baseline_final_compare(
     failures: list[str] = []
     if payload.get("schema_version") != "qrp-baseline-final-compare-summary/0.1":
         failures.append("baseline_final_compare_schema_version_mismatch")
-    if payload.get("overall_status") != "PASS":
+    for key in (
+        "actual_overall_status",
+        "raw_overall_status",
+        "policy_adjusted_overall_status",
+        "overall_status",
+        "old_baseline_compare_status",
+        "refreshed_prediction_baseline_compare_status",
+        "validation_decision",
+        "final_head_full",
+    ):
+        if key in payload:
+            failures.append(f"baseline_final_compare_flat_alias_present: {key}")
+    status = payload.get("status")
+    if not isinstance(status, dict):
+        failures.append("baseline_final_compare_status_missing")
+        status = {}
+    if status.get("policy_adjusted") != "PASS":
         failures.append("baseline_final_compare_overall_status_not_pass")
-    if payload.get("old_baseline_compare_status") != "FAIL_EXPECTED":
-        failures.append("baseline_final_compare_old_status_mismatch")
-    if payload.get("refreshed_prediction_baseline_compare_status") != "PASS":
-        failures.append("baseline_final_compare_refreshed_status_mismatch")
-    if payload.get("validation_decision") != "PASS":
+    if status.get("validation_decision") != "PASS":
         failures.append("baseline_final_compare_validation_decision_not_pass")
+    if "raw" not in status:
+        failures.append("baseline_final_compare_raw_status_missing")
+    comparison_groups = payload.get("comparison_groups")
+    if not isinstance(comparison_groups, dict):
+        failures.append("baseline_final_compare_groups_missing")
+        comparison_groups = {}
+    old_group = comparison_groups.get(OLD_BASELINE_GROUP)
+    if not isinstance(old_group, dict) or old_group.get("status") != "FAIL_EXPECTED":
+        failures.append("baseline_final_compare_old_status_mismatch")
+    refreshed_group = comparison_groups.get(REFRESHED_PREDICTION_BASELINE_GROUP)
+    if not isinstance(refreshed_group, dict) or refreshed_group.get("status") != "PASS":
+        failures.append("baseline_final_compare_refreshed_status_mismatch")
     if payload.get("contract_failures"):
         failures.append("baseline_final_compare_contract_failures_present")
-    if payload.get("raw_overall_status") != payload.get("actual_overall_status"):
-        failures.append("baseline_final_compare_raw_status_mismatch")
-    if payload.get("policy_adjusted_overall_status") != payload.get("overall_status"):
-        failures.append("baseline_final_compare_policy_status_mismatch")
     if not is_full_sha(payload.get("baseline_commit_full")):
         failures.append("baseline_final_compare_baseline_commit_full_missing")
-    if not is_full_sha(payload.get("final_head_full")):
-        failures.append("baseline_final_compare_final_head_full_missing")
+    if not is_full_sha(payload.get("final_head")):
+        failures.append("baseline_final_compare_final_head_missing")
     final_smoke_commit = payload.get("final_smoke_commit")
     if not is_full_sha(final_smoke_commit):
         failures.append("baseline_final_compare_final_smoke_commit_missing")
@@ -775,11 +715,15 @@ def verify_source_tree_scan_evidence(
     if not isinstance(scan_groups, dict):
         failures.append("source_tree_scan_groups_invalid")
     else:
-        for group in (
+        expected_groups = {
             "retired_terms",
             "active_test_literals",
             "sensitive_negative_literals",
-        ):
+        }
+        actual_groups = set(scan_groups)
+        if actual_groups != expected_groups:
+            failures.append("source_tree_scan_groups_unexpected")
+        for group in expected_groups:
             group_payload = scan_groups.get(group)
             if not isinstance(group_payload, dict):
                 failures.append(f"source_tree_scan_group_missing: {group}")
@@ -791,8 +735,14 @@ def verify_source_tree_scan_evidence(
             ):
                 failures.append(f"source_tree_scan_group_shape_invalid: {group}")
                 continue
+            findings = group_payload.get("findings")
+            if not isinstance(findings, list):
+                failures.append(f"source_tree_scan_group_findings_invalid: {group}")
+                continue
             if group_payload.get("status") != "PASS":
                 failures.append(f"source_tree_scan_group_not_pass: {group}")
+            if group_payload.get("finding_count") != len(findings):
+                failures.append(f"source_tree_scan_group_count_mismatch: {group}")
             if group_payload.get("finding_count") != 0:
                 failures.append(f"source_tree_scan_group_findings_present: {group}")
     if payload.get("scanned_head") != payload.get("expected_head"):
@@ -806,6 +756,9 @@ def verify_source_tree_scan_evidence(
         failures.append("source_tree_scan_tree_mismatch")
     if payload.get("finding_count") != 0:
         failures.append("source_tree_scan_findings_present")
+    findings = payload.get("findings")
+    if isinstance(findings, list) and payload.get("finding_count") != len(findings):
+        failures.append("source_tree_scan_finding_count_mismatch")
     return failures
 
 
@@ -970,6 +923,9 @@ def validate_payload_with_tracked_schema(
                 failures.append(f"{label}_required_missing: {key}")
     properties = schema.get("properties")
     if isinstance(properties, dict):
+        if schema.get("additionalProperties") is False:
+            extra = sorted(set(payload) - set(properties))
+            failures.extend(f"{label}_additional_property: {key}" for key in extra)
         for key, raw_rule in properties.items():
             if key not in payload or not isinstance(raw_rule, dict):
                 continue
@@ -1007,12 +963,12 @@ def git_text(repo: Path, *args: str) -> str:
 
 def contains_local_absolute_path_text(text: str) -> bool:
     markers = (
-        "E:" + "/",
-        "D:" + "/",
-        "C:" + "/",
+        "E:/",
+        "D:/",
+        "C:/",
         "/mnt/data",
-        "/" + "home/",
-        "/" + "Users/",
+        "/home/",
+        "/Users/",
         "\\Users\\",
         "\\\\Users\\\\",
     )

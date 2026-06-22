@@ -23,6 +23,7 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/agents/handoff/test_package_safety_check.py"),
     Path("tests/architecture/test_environment_contract.py"),
     Path("tests/architecture/test_factor_contract_terms.py"),
+    Path("tests/architecture/test_handoff_package_contract.py"),
     Path("tests/workflows/test_verification_evidence.py"),
     Path("tests/workflows/test_verification_evidence_contract.py"),
 }
@@ -459,8 +460,7 @@ def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
             "handoff-v1",
             re.compile(
                 r"handoff-(?:sidecar|task-metadata|artifact-manifest|"
-                r"validation-evidence|review-threads|review-evidence|"
-                r"verification-matrix)/v1"
+                r"validation-evidence|verification-matrix)/v1"
             ),
         ),
         ("/api/v0.1", re.compile(r"/api/v0\.1\b")),

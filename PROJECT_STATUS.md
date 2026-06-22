@@ -49,7 +49,7 @@ public evaluate、predict 或 report command；不是 simulated or real-money or
 ## 当前 blocker / 风险
 
 1. Public surface（公共接口面）必须保持最小，除非有单独批准。
-2. 私有数据和私有报告不得进入 public-safe artifact 或 review/handoff 包。
+2. 私有数据和私有报告不得进入 public-safe artifact 或 handoff package。
 3. 未运行检查必须标记为 `NOT_RUN` 或 `BLOCKED`，不能写成 `PASS`。
 4. 后续 clean -> main 需要单独 merge gate / release gate 决策，不要直接碰 `main`。
 5. 后续功能或治理修补默认从 `feature/qrp-clean-rewrite` 新开分支。

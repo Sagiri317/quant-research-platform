@@ -21,9 +21,8 @@ public-safe `validation_evidence` and optional `handoff_evidence`. In
 - `validation_evidence.json`
 - `handoff_evidence/*.json`
 
-`pr_closure` mode may require PR metadata in task inputs, but the package must
-not include `review_threads.json`. Narrative PR text is outside the handoff
-package contract.
+`pr_closure` mode may require PR metadata in task inputs, but narrative PR text
+and thread tables are outside the handoff package contract.
 
 Do not include private row-level data, local absolute paths, raw tracebacks,
 vendor filenames, credentials, tokens, or exact private runtime payloads.
@@ -35,7 +34,7 @@ The builder writes exactly:
 - `<slug>.zip`
 - `<slug>.json`
 
-The external JSON sidecar is not placed in the zip. It contains only the zip
+The handoff sidecar JSON is not placed in the zip. It contains only the zip
 filename, logical zip path, zip hash, artifact manifest hash, branch/base/head,
 generation timestamp, and minimal status summary.
 

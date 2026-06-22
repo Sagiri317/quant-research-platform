@@ -38,14 +38,11 @@ def test_current_source_and_market_ids_are_frequency_derived() -> None:
     assert market_ids.SUPPORTED_MARKET_PANEL_FREQUENCIES == (DataFrequency.DAILY,)
     assert market_ids.market_panel_data_id(DataFrequency.DAILY) == "market_panel_1d"
     assert market_ids.market_context_data_id(DataFrequency.DAILY) == "market_context_1d"
-    assert not hasattr(source_ids, "CSMAR_SOURCE_ID")
-    assert not hasattr(market_ids, "A_SHARE_MARKET_ID")
 
 
 def test_regular_tests_do_not_hardcode_active_frequency_literals() -> None:
     allowed = {
         Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
-        Path("tests/architecture/test_retired_surface_absent.py"),
     }
     forbidden = (
         "market_bars_1d",

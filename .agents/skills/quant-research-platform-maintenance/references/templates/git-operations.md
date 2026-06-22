@@ -21,7 +21,7 @@ git diff --name-only
 
 ## Merge gate
 
-- 先确认 base/head 和 review evidence。
+- 先确认 base/head 和 handoff evidence；PR review 语境才使用 review evidence。
 - 优先 fast-forward merge。
 - 不在 merge gate 中修业务 bug。
 - merge 到 `main` 必须单独获得用户明确批准。

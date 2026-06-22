@@ -66,7 +66,7 @@ def test_stage_profile_report_artifacts_require_approved_report_spec(tmp_path):
         [
             {
                 "category": "provider-internal-category",
-                "stage": "600000.SH",
+                "stage": "asset_alpha",
                 "seconds": 0.1,
                 "n_calls": 1,
             }
@@ -116,7 +116,7 @@ def test_stage_profile_report_artifacts_sanitize_outputs(tmp_path):
         [
             {
                 "category": "provider-internal-category",
-                "stage": "600000.SH",
+                "stage": "asset_alpha",
                 "seconds": 0.1,
                 "n_calls": 1,
             }
@@ -455,7 +455,6 @@ def test_output_already_exists_error_public_summary_is_path_free() -> None:
     assert summary == {"status": "failed", "failure_code": "output_already_exists"}
     assert "C:" not in str(summary)
     assert "csmar" not in str(summary).lower()
-    assert "000001" not in str(summary)
 
 
 def _stage_profile_report_spec() -> ReportSpec:

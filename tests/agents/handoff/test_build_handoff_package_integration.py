@@ -35,37 +35,33 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     run_handoffs = ".run/handoffs"
     task_path.write_text(
         json.dumps(
-                {
-                    "schema_version": "handoff-task-metadata/0.1",
-                    "mode": "evidence",
-                    "slug": slug,
-                    "branch": TEST_BRANCH,
+            {
+                "schema_version": "handoff-task-metadata/0.1",
+                "mode": "evidence",
+                "slug": slug,
+                "branch": TEST_BRANCH,
                 "base": base,
                 "final_head": final_head,
-                "final_sha": final_head,
-                    "zip_logical_path": f"{run_handoffs}/{slug}.zip",
-                    "sidecar_logical_path": f"{run_handoffs}/{slug}.json",
-                    "handoff_evidence": {
-                        "generation": {"status": "FAIL", "final_head": "forged"},
-                        "source-tree-scan": {
-                            "status": "FAIL",
-                            "scanned_head": "forged",
-                        },
-                        "diff.patch": {"status": "PASS"},
-                        "pr_body.md": {"status": "PASS"},
-                        "review_evidence": {"status": "PASS"},
-                        "custom-note": {
-                            "schema_version": "custom-note/0.1",
-                            "status": "PASS",
-                        },
+                "handoff_package_path": f"{run_handoffs}/{slug}.zip",
+                "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
+                "handoff_evidence": {
+                    "generation": {"status": "FAIL", "final_head": "forged"},
+                    "source-tree-scan": {
+                        "status": "FAIL",
+                        "scanned_head": "forged",
                     },
-                    "validation_evidence": {
-                        "schema_version": "handoff-validation-evidence/0.1",
-                        "checks": [
+                    "custom-note": {
+                        "schema_version": "custom-note/0.1",
+                        "status": "PASS",
+                    },
+                },
+                "validation_evidence": {
+                    "schema_version": "handoff-validation-evidence/0.1",
+                    "checks": [
                         {
-                            "name": "github_review_threads",
+                            "name": "handoff_external_access",
                             "status": "BLOCKED",
-                            "evidence": "live GitHub access unavailable",
+                            "evidence": "external access unavailable",
                         }
                     ],
                 },
@@ -113,6 +109,14 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         validation_evidence = json.loads(
             archive.read("validation_evidence.json").decode("utf-8")
         )
+        assert (
+            validation_evidence["handoff_package_path"]
+            == f"{run_handoffs}/{slug}.zip"
+        )
+        assert (
+            validation_evidence["handoff_sidecar_path"]
+            == f"{run_handoffs}/{slug}.json"
+        )
         generation = json.loads(
             archive.read("handoff_evidence/generation.json").decode("utf-8")
         )
@@ -128,12 +132,6 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         "artifact_manifest.json",
     }
     assert required.issubset(names)
-    assert "pr_body.md" not in names
-    assert "review_threads.json" not in names
-    assert "diff.patch" not in names
-    assert "handoff_evidence/diff.patch.json" not in names
-    assert "handoff_evidence/pr_body.md.json" not in names
-    assert "handoff_evidence/review_evidence.json" not in names
     assert "handoff_evidence/generation.json" in names
     assert "handoff_evidence/source-tree-scan.json" in names
     assert "handoff_evidence/custom-note.json" in names
@@ -161,6 +159,8 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         manifest_raw
     ).hexdigest()
     assert task_metadata["final_head"] == final_head
+    assert task_metadata["handoff_package_path"] == f"{run_handoffs}/{slug}.zip"
+    assert task_metadata["handoff_sidecar_path"] == f"{run_handoffs}/{slug}.json"
     assert "pr_url" not in task_metadata
     assert task_metadata["mode"] == "evidence"
     assert generation["mode"] == "evidence"
@@ -207,27 +207,14 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         if isinstance(row, dict) and "name" in row
     }
     assert checks["handoff_verify"]["status"] == "PASS"
-    assert checks["handoff_verify"]["command"] == (
-        "python .agents/skills/quant-research-platform-maintenance/scripts/"
-        f"handoff/verify_handoff_package.py --zip {run_handoffs}/{slug}.zip "
-        f"--json {run_handoffs}/{slug}.json"
-    )
     assert checks["package_safety_check_zip"] == {
         "name": "package_safety_check_zip",
         "status": "PASS",
-        "command": (
-            "python .agents/skills/quant-research-platform-maintenance/scripts/"
-            f"package_safety_check.py {run_handoffs}/{slug}.zip"
-        ),
         "evidence": "package_safety_check.py completed for final zip with PASS",
     }
     assert checks["package_safety_check_sidecar"] == {
         "name": "package_safety_check_sidecar",
         "status": "PASS",
-        "command": (
-            "python .agents/skills/quant-research-platform-maintenance/scripts/"
-            f"package_safety_check.py {run_handoffs}/{slug}.json"
-        ),
         "evidence": "package_safety_check.py completed for sidecar JSON with PASS",
     }
     assert task_path.name not in names

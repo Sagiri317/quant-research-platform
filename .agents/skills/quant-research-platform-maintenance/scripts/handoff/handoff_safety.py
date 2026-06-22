@@ -63,7 +63,13 @@ FORBIDDEN_PATH_SEGMENTS = (
     "reports/private_research",
     "reports/private_real",
     "reports/private_data",
+    "diff.patch",
+    "pr_body.md",
+    "review_threads",
     "review_evidence",
+    "review_bundle",
+    "review_package",
+    "review_zip_path",
     ".codex",
     "credentials",
     "secrets",
@@ -480,10 +486,10 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
         "secret-like assignment",
         "[A-Za-z]:\\\\",
         "\\\\Users",
-        "/" + "Users" + "/[^\\s`]+",
-        "/" + "home" + "/[^\\s`]+",
-        "/" + "mnt" + "/[a-z]/[^\\s`]+",
-        "/" + "mnt" + "/data",
+        "/Users/[^\\s`]+",
+        "/home/[^\\s`]+",
+        "/mnt/[a-z]/[^\\s`]+",
+        "/mnt/data",
         "/" + "workspace",
         "/" + "workspaces",
         "quant-workspace",
@@ -509,9 +515,9 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
         )
         and (
             ":\\\\" in line
-            or "/" + "Users" + "/" in line
-            or "/" + "home" + "/" in line
-            or "/" + "mnt" + "/" in line
+            or "/Users/" in line
+            or "/home/" in line
+            or "/mnt/" in line
         )
     )
 

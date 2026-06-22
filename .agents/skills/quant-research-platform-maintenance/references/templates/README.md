@@ -8,7 +8,7 @@
 | `focused-implementation.md` | `standard-implementation` | 有明确 owner layer 的实现/bugfix |
 | `focused-audit.md` | `independent-review` | 只读审查，不改代码 |
 | `goal-closure.md` | `goal-closure` | 长任务和 review-fix loop |
-| `handoff-packaging.md` | `handoff-packaging` | review/handoff 包装 |
+| `handoff-packaging.md` | `handoff-packaging` | handoff package 包装 |
 | `git-operations.md` | `merge-gate` / git task | commit、push、merge、branch cleanup |
 | `docs-status-sync.md` | `docs-status-sync` | active docs/status/brief 同步 |
 | `apply-only-validation.md` | `apply-only-validation` | 精确应用外部 patch/zip 并验证 |

@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "QRP handoff external sidecar",
+  "title": "QRP handoff sidecar",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "zip_filename",
-    "zip_logical_path",
+    "handoff_package_path",
+    "handoff_sidecar_path",
     "zip_sha256",
     "artifact_manifest_sha256",
     "branch",
@@ -22,7 +23,10 @@
     "zip_filename": {
       "type": "string"
     },
-    "zip_logical_path": {
+    "handoff_package_path": {
+      "type": "string"
+    },
+    "handoff_sidecar_path": {
       "type": "string"
     },
     "zip_sha256": {

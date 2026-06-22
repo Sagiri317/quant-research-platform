@@ -4,10 +4,8 @@ import inspect
 
 
 def test_model_algorithms_live_only_in_supervised_model_facts() -> None:
-    import quant_research_platform.contracts.models as contracts_models
     import quant_research_platform.research.models.supervised as supervised
 
-    assert not hasattr(contracts_models, "MODEL_ALGORITHMS")
     names = supervised.model_algorithm_names()
     assert names
     assert names == tuple(sorted(names))

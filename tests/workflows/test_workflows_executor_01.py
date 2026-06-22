@@ -257,7 +257,7 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
     registry.register(
         WorkflowNodeDefinition(
             node_id="validate",
-            handler=lambda: Path("/mnt/data/000001.SZ"),
+            handler=lambda: Path("tmp-output/result.txt"),
         )
     )
     spec = WorkflowSpec(
@@ -277,6 +277,5 @@ def test_registered_workflow_returns_sanitized_summary_only() -> None:
     assert summary["status"] == "validated"
     assert summary["run_policy"] == "validate_only"
     assert "results" not in summary
-    assert "C:" not in str(summary)
-    assert "/mnt/" not in str(summary)
-    assert "000001" not in str(summary)
+    assert "tmp-output" not in str(summary)
+    assert "result.txt" not in str(summary)

@@ -19,7 +19,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from build_handoff_package import sanitize_handoff_text  # noqa: E402
 from handoff_safety import scan_handoff_zip, unsafe_text_reason  # noqa: E402
-from verify_handoff_package import verify_review_thread_closure  # noqa: E402
 
 
 def main() -> int:
@@ -64,8 +63,6 @@ def main() -> int:
     )
     if task_template.get("schema_version") != "handoff-task-metadata/0.1":
         return fail("task_metadata_template_schema_version_invalid")
-    if "goal_status" in task_template:
-        return fail("task_metadata_template_goal_status_forbidden")
     sidecar_schema = json.loads(
         support_path(
             "schemas/sidecar.schema.json",
@@ -98,7 +95,8 @@ def main() -> int:
         'parser.add_argument("--verify"',
         '"schema_version": PACKAGE_SCHEMA_VERSION',
         '"zip_filename"',
-        '"zip_logical_path"',
+        '"handoff_package_path"',
+        '"handoff_sidecar_path"',
         '"artifact_manifest_sha256"',
         "verify_handoff_package(zip_path, json_path)",
         "scan_handoff_zip(zip_path, json_path=json_path)",
@@ -127,8 +125,9 @@ def main() -> int:
         return fail("builder_forbidden_terms=" + ",".join(found_forbidden))
     if '"cat-file", "-t"' in safety or '"cat-file", "-p"' in safety:
         return fail("handoff_bundle_scan_uses_per_blob_cat_file")
-    unsafe_status = " M C:" + "/" + "Users/DELL/private/file.txt\n"
-    if "C:" + "/" + "Users" in sanitize_handoff_text(unsafe_status):
+    # Intentional fake private marker used to test sanitizer/package-safety rejection.
+    unsafe_status = " M C:/Users/DELL/private/file.txt\n"
+    if "C:/Users" in sanitize_handoff_text(unsafe_status):
         return fail("git_status_sanitizer_fixture_failed")
     scanner_fixture = (
         "\\\\Users\\\\ site-packages conda env path vendor_marker "
@@ -148,18 +147,18 @@ def main() -> int:
     sidecar_safety = scan_handoff_zip(package, json_path=sidecar)
     if sidecar_safety.ok:
         return fail("sidecar_text_content_not_scanned")
-    if not _blocked_review_thread_zero_counts_rejected():
-        return fail("blocked_review_thread_zero_counts_not_rejected")
+    # Intentional fake private marker used to test package-safety rejection.
     bundle_zip = _bundle_zip_with_text(
         "leak.txt",
-        "path=" + "C:" + "/" + "Users/DELL/private.txt\n",
+        "path=C:/Users/DELL/private.txt\n",
     )
     bundle_safety = scan_handoff_zip(bundle_zip)
     if bundle_safety.ok:
         return fail("bundle_text_content_not_scanned")
+    # Intentional fake private marker used to test deleted bundle history handling.
     deleted_bundle_zip = _bundle_zip_with_deleted_text(
         "deleted-leak.txt",
-        "path=" + "C:" + "/" + "Users/DELL/deleted-private.txt\n",
+        "path=C:/Users/DELL/deleted-private.txt\n",
     )
     deleted_bundle_safety = scan_handoff_zip(deleted_bundle_zip)
     if not deleted_bundle_safety.ok:
@@ -213,7 +212,8 @@ def _zip_and_sidecar_with_leak() -> tuple[Path, Path]:
             {
                 "schema_version": "handoff-sidecar/0.1",
                 "zip_filename": "handoff.zip",
-                "zip_logical_path": ".run/handoffs/handoff.zip",
+                "handoff_package_path": ".run/handoffs/handoff.zip",
+                "handoff_sidecar_path": ".run/handoffs/handoff.json",
                 "zip_path": "E:/quant-workspace/private/handoff.zip",
             },
             indent=2,
@@ -221,25 +221,6 @@ def _zip_and_sidecar_with_leak() -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return package, sidecar
-
-
-def _blocked_review_thread_zero_counts_rejected() -> bool:
-    temp = Path(tempfile.mkdtemp(prefix="handoff-review-threads-self-test-"))
-    package = temp / "handoff.zip"
-    payload = {
-        "schema_version": "handoff-review-threads/0.1",
-        "status": "BLOCKED",
-        "counts_available": False,
-        "total_count": 0,
-        "unresolved_count": 0,
-        "threads": [],
-        "evidence": "Live GitHub access unavailable; counts unknown.",
-    }
-    with ZipFile(package, "w") as archive:
-        archive.writestr("review_threads.json", json.dumps(payload) + "\n")
-    with ZipFile(package) as archive:
-        failures = verify_review_thread_closure(archive, {})
-    return "review_threads_blocked_counts_must_be_null" in failures
 
 
 def _bundle_zip_with_text(relative: str, text: str) -> Path:

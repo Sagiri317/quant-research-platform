@@ -27,7 +27,7 @@ Stop conditions:
 ## 默认路由
 
 - “检查/审查/review/有没有问题” => `independent-review`，默认不改代码。
-- “生成 handoff/打包/review bundle” => `handoff-packaging`，默认不做业务实现。
+- “生成 handoff/打包/handoff package” => `handoff-packaging`，默认不做业务实现；review bundle 是 historical / migrated 旧称。
 - “merge/push/commit/branch” => `merge-gate` 或 git task，默认不改业务代码。
 - “治理/AGENTS/skill/template/Codex” => `governance-redesign`，默认不改 `src/**` 或业务 tests。
 - “应用 patch/zip” => `apply-only-validation`，默认 apply exactly，不重新设计。

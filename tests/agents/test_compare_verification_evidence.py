@@ -27,6 +27,28 @@ def test_compare_verification_evidence_accepts_parameterized_pairs(
     _write_run(baseline)
     _write_run(final, split_research_partition=True)
     goal_root = tmp_path / "goal-output"
+    pairs_file = tmp_path / "pairs.json"
+    pairs_file.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "final_smoke": {
+                        "final_smoke_commit": "NOT_PROVIDED",
+                        "git_status_before_smoke": "NOT_PROVIDED",
+                        "git_status_after_smoke": "NOT_PROVIDED",
+                    }
+                },
+                "pairs": [
+                    {
+                        "label": "tiny",
+                        "baseline": str(baseline),
+                        "final": str(final),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -36,8 +58,8 @@ def test_compare_verification_evidence_accepts_parameterized_pairs(
             str(goal_root),
             "--baseline-commit",
             "base-sha",
-            "--pair",
-            f"tiny={baseline}::{final}",
+            "--pairs-file",
+            str(pairs_file),
         ],
     )
 
@@ -48,7 +70,10 @@ def test_compare_verification_evidence_accepts_parameterized_pairs(
     )
     assert payload["baseline_commit"] == "base-sha"
     assert tuple(payload["comparisons"]) == ("tiny",)
-    assert payload["overall_status"] == "FAIL"
+    assert payload["status"]["policy_adjusted"] == "FAIL"
+    assert payload["status"]["validation_decision"] == "FAIL"
+    assert "overall_status" not in payload
+    assert "validation_decision" not in payload
     assert payload["contract_failures"] == [
         "missing_required_comparison_group: old_baseline",
         "missing_required_comparison_group: refreshed_prediction_baseline",
@@ -59,9 +84,9 @@ def test_compare_verification_evidence_accepts_parameterized_pairs(
     ]
     assert payload["comparisons"]["tiny"]["status"] == "PASS"
     research = payload["comparisons"]["tiny"]["research_dataset"]
-    assert research["row_count_match"] is True
-    assert research["asset_count_match"] is True
-    assert research["timestamp_count_match"] is True
+    assert research["row_count"]["match"] is True
+    assert research["asset_count"]["match"] is True
+    assert research["timestamp_count"]["match"] is True
     assert "eligible" not in research["numeric_diffs"]
     assert research["typed_value_hash_match"] is True
 
@@ -267,7 +292,7 @@ def test_compare_verification_evidence_reads_final_smoke_metadata(
     smoke = module.final_smoke_evidence_from_metadata(metadata)
     failures = module.compare_metadata_contract_failures(
         baseline_commit_full="0" * 40,
-        final_head_full=final_head,
+        final_head=final_head,
         smoke_evidence=smoke,
     )
 
@@ -277,17 +302,13 @@ def test_compare_verification_evidence_reads_final_smoke_metadata(
 
 def test_compare_verification_evidence_rejects_missing_final_smoke_metadata() -> None:
     module = _load_compare_module()
-    smoke = module.final_smoke_evidence_from_metadata({})
 
-    failures = module.compare_metadata_contract_failures(
-        baseline_commit_full="0" * 40,
-        final_head_full="1" * 40,
-        smoke_evidence=smoke,
-    )
-
-    assert "final_smoke_commit_not_full_sha" in failures
-    assert "git_status_before_smoke_not_clean" in failures
-    assert "git_status_after_smoke_not_clean" in failures
+    try:
+        module.final_smoke_evidence_from_metadata({})
+    except ValueError as exc:
+        assert str(exc) == "invalid_pairs_file: final_smoke_metadata_required"
+    else:
+        raise AssertionError("missing final_smoke metadata should fail")
 
 
 def test_compare_verification_evidence_accepts_expected_pair_failures(
@@ -354,6 +375,13 @@ def test_compare_verification_evidence_rejects_self_authorized_expected_failures
     pairs_file.write_text(
         json.dumps(
             {
+                "metadata": {
+                    "final_smoke": {
+                        "final_smoke_commit": "NOT_PROVIDED",
+                        "git_status_before_smoke": "NOT_PROVIDED",
+                        "git_status_after_smoke": "NOT_PROVIDED",
+                    }
+                },
                 "pairs": [
                     {
                         "label": "control_window_a",
@@ -389,8 +417,8 @@ def test_compare_verification_evidence_rejects_self_authorized_expected_failures
         (goal_root / "baseline-final-compare.json").read_text(encoding="utf-8")
     )
     comparison = payload["comparisons"]["control_window_a"]
-    assert payload["overall_status"] == "FAIL"
-    assert payload["validation_decision"] == "FAIL"
+    assert payload["status"]["policy_adjusted"] == "FAIL"
+    assert payload["status"]["validation_decision"] == "FAIL"
     assert "expected_failure_reason_mismatch" in comparison[
         "expected_failure_policy_failures"
     ]
@@ -533,13 +561,12 @@ def test_compare_verification_evidence_rejects_loose_rank_artifact_prefix() -> N
     ]
 
 
-def test_compare_verification_evidence_rejects_malformed_pair_arg() -> None:
+def test_compare_verification_evidence_requires_pairs_file() -> None:
     module = _load_compare_module()
     args = type(
         "Args",
         (),
         {
-            "pair": ["18m=baseline-only"],
             "pairs_file": None,
         },
     )()
@@ -547,33 +574,80 @@ def test_compare_verification_evidence_rejects_malformed_pair_arg() -> None:
     try:
         module.run_pairs_from_args(args)
     except ValueError as exc:
-        assert str(exc) == (
-            "invalid_pair_format: expected label=baseline_root::final_root"
-        )
+        assert str(exc) == "missing_pairs_file"
     else:
-        raise AssertionError("malformed pair should fail")
+        raise AssertionError("missing pairs file should fail")
 
 
-def test_compare_verification_evidence_rejects_duplicate_pair_labels() -> None:
+def test_compare_verification_evidence_rejects_duplicate_pair_labels(
+    tmp_path: Path,
+) -> None:
     module = _load_compare_module()
+    pairs_file = tmp_path / "duplicate-pairs.json"
     args = type(
         "Args",
         (),
         {
-            "pair": [
-                "window=baseline-a::final-a",
-                "window=baseline-b::final-b",
-            ],
-            "pairs_file": None,
+            "pairs_file": str(pairs_file),
         },
     )()
 
     try:
+        pairs_file.write_text(
+            json.dumps(
+                {
+                    "pairs": [
+                        {
+                            "label": "window",
+                            "baseline": "baseline-a",
+                            "final": "final-a",
+                        },
+                        {
+                            "label": "window",
+                            "baseline": "baseline-b",
+                            "final": "final-b",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
         module.run_pairs_from_args(args)
     except ValueError as exc:
         assert str(exc) == "duplicate_pair_label: window"
     else:
         raise AssertionError("duplicate pair label should fail")
+
+
+def test_compare_verification_evidence_rejects_unapproved_pair_keys(
+    tmp_path: Path,
+) -> None:
+    module = _load_compare_module()
+    pairs_file = tmp_path / "pairs.json"
+    pairs_file.write_text(
+        json.dumps(
+            {
+                "pairs": [
+                    {
+                        "label": "window",
+                        "baseline": "baseline-a",
+                        "final": "final-a",
+                        "unexpected_key": "value",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        module.run_pairs_from_file(pairs_file)
+    except ValueError as exc:
+        assert str(exc) == (
+            "invalid_pairs_file: pair_unapproved_key: unexpected_key"
+        )
+    else:
+        raise AssertionError("old pair alias key should fail")
 
 
 def test_compare_verification_evidence_rejects_invalid_pairs_file(
@@ -629,6 +703,28 @@ def test_compare_verification_evidence_requires_baseline_commit(
     final = tmp_path / "final"
     _write_run(baseline)
     _write_run(final)
+    pairs_file = tmp_path / "pairs.json"
+    pairs_file.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "final_smoke": {
+                        "final_smoke_commit": "NOT_PROVIDED",
+                        "git_status_before_smoke": "NOT_PROVIDED",
+                        "git_status_after_smoke": "NOT_PROVIDED",
+                    }
+                },
+                "pairs": [
+                    {
+                        "label": "tiny",
+                        "baseline": str(baseline),
+                        "final": str(final),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -636,8 +732,8 @@ def test_compare_verification_evidence_requires_baseline_commit(
             "compare_verification_evidence.py",
             "--goal-root",
             str(tmp_path / "goal-output"),
-            "--pair",
-            f"tiny={baseline}::{final}",
+            "--pairs-file",
+            str(pairs_file),
         ],
     )
 
@@ -660,6 +756,33 @@ def test_compare_verification_evidence_records_blocked_pair_without_stopping(
     _write_run(final)
     goal_root = tmp_path / "goal-output"
     missing = tmp_path / "missing"
+    pairs_file = tmp_path / "pairs.json"
+    pairs_file.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "final_smoke": {
+                        "final_smoke_commit": "NOT_PROVIDED",
+                        "git_status_before_smoke": "NOT_PROVIDED",
+                        "git_status_after_smoke": "NOT_PROVIDED",
+                    }
+                },
+                "pairs": [
+                    {
+                        "label": "good",
+                        "baseline": str(baseline),
+                        "final": str(final),
+                    },
+                    {
+                        "label": "bad",
+                        "baseline": str(missing),
+                        "final": str(final),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -669,10 +792,8 @@ def test_compare_verification_evidence_records_blocked_pair_without_stopping(
             str(goal_root),
             "--baseline-commit",
             "base-sha",
-            "--pair",
-            f"good={baseline}::{final}",
-            "--pair",
-            f"bad={missing}::{final}",
+            "--pairs-file",
+            str(pairs_file),
         ],
     )
 
@@ -681,7 +802,7 @@ def test_compare_verification_evidence_records_blocked_pair_without_stopping(
     payload = json.loads(
         (goal_root / "baseline-final-compare.json").read_text(encoding="utf-8")
     )
-    assert payload["overall_status"] == "FAIL"
+    assert payload["status"]["policy_adjusted"] == "FAIL"
     assert payload["comparisons"]["good"]["status"] == "PASS"
     assert payload["comparisons"]["bad"]["status"] == "BLOCKED"
     assert payload["comparisons"]["bad"]["failures"] == ["compare_input_error"]

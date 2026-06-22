@@ -1,6 +1,6 @@
 # 证据与交接（Evidence and handoff）
 
-本文件用于 review bundle、handoff package、public-safe evidence 和 `.run` 工具任务。
+本文件用于 handoff package、handoff evidence、public-safe evidence 和 `.run` 工具任务。旧的 review bundle 说法只用于 historical / migrated 语境。
 
 ## `.run` 的定位
 
@@ -15,7 +15,7 @@
 
 ## package safety（包安全）
 
-Review/handoff 包默认禁止：
+Handoff package 默认禁止：
 
 ```text
 .parquet .csv .pkl .pickle .feather .arrow .orc .db .sqlite .sqlite3
@@ -26,9 +26,9 @@ local absolute paths
 old handoff zips/json unless sanitized summary is explicitly allowed
 ```
 
-## Git bundle 与 review bundle
+## Git bundle 与 handoff package
 
-Git bundle 是可复现当前分支的 repo 状态；review bundle 是证据包。若任务要求 handoff，Git bundle 应放在 review bundle 内，但不得包含 private data。
+Git bundle 是可复现当前分支的 repo 状态；handoff package 是证据包。若任务要求 handoff，Git bundle 应放在 handoff package 内，但不得包含 private data。Historical / migrated 文档中出现的 review bundle 是旧称。
 
 ## truthfulness（真实性）
 

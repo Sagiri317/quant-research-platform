@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """QRP public-safe package scanner.
 
-Scan review or handoff packages for private paths, blocked file types,
+Scan handoff packages for private paths, blocked file types,
 secret-like text, local absolute paths, and stock-code samples.
-Uses only the Python standard library.
+Uses runtime privacy as the single public/private text-safety source.
 """
+
+# ruff: noqa: E402, I001
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import zipfile
 from dataclasses import dataclass, field
@@ -21,19 +22,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-try:
-    from quant_research_platform.runtime.privacy import public_text_unsafe_reason
-except ImportError:  # pragma: no cover - fallback for copied standalone use
-    _FALLBACK_PRIVATE_MARKER_RE = re.compile(
-        r"(?i)\b(?:source[-_ ]?id|provider[-_ ]?id|implementation[-_ ]?package|"
-        r"provider[-_ ]?name|source[-_ ]?name|data[-_ ]?provider|"
-        r"vendor[-_ ]?name|raw[-_ ]?vendor|vendor[-_ ]?payload)\b"
-    )
-
-    def public_text_unsafe_reason(text: str) -> str | None:
-        if _FALLBACK_PRIVATE_MARKER_RE.search(text):
-            return "private_marker"
-        return None
+from quant_research_platform.runtime.privacy import public_text_unsafe_reason  # noqa: E402
 
 BLOCKED_EXTENSIONS = {
     ".parquet",
@@ -56,7 +45,13 @@ BLOCKED_PATH_PARTS = {
     "reports/private_research",
     "reports/private_real",
     "reports/private_data",
+    "diff.patch",
+    "pr_body.md",
+    "review_threads",
     "review_evidence",
+    "review_bundle",
+    "review_package",
+    "review_zip_path",
     "secrets",
     "credentials",
     ".env",
@@ -66,32 +61,7 @@ BLOCKED_PATH_PARTS = {
 PACKAGE_EXTENSIONS = {".zip", ".bundle"}
 TEXT_EXTENSIONS = {".md", ".patch", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}
 MAX_TEXT_SCAN_BYTES = 2_000_000
-PRIVATE_REPORT_PATH_PATTERN = "|".join(
-    re.escape(path_name)
-    for path_name in ("private_research", "private_real", "private_data")
-)
-
-LOCAL_PATH_PATTERN = re.compile(
-    r"((?<![A-Za-z])[A-Za-z]:[\\/]"
-    r"|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+"
-    r"|/workspace/[^\s`]+|/workspaces/[^\s`]+"
-    r"|(?:[A-Za-z]:[\\/]|/)(?:[^\s`]+[\\/])*"
-    r"(?:data[\\/](?:raw|interim|processed|research)"
-    r"|reports[\\/](?:"
-    + PRIVATE_REPORT_PATH_PATTERN
-    + r"))"
-    r"|\\\\Users\\\\|\\\\quant-workspace\\\\|\bquant-workspace\b"
-    r"|\bconda env path\b|\bsite-packages\b)"
-)
-SECRET_PATTERN = re.compile(
-    r"(?i)(api[_-]?key|secret|token|password|cookie)"
-    r"\s*[:=]\s*['\"]?[^\s'\"]+"
-)
-STOCK_SAMPLE_PATTERN = re.compile(r"\b[03468]\d{5}\.(?:SZ|SH|BJ)\b")
-PRIVATE_RUN_PATH_PATTERN = re.compile(
-    r"(?i)(?:^|[\s`'\"])\.run[\\/]+(?:private|smoke|s[0-9]+)"
-    r"(?:[\\/]+|[\s`'\"]|$)"
-)
+PRIVATE_RUN_PATH_ROOTS = (".run/private", ".run/smoke")
 
 
 @dataclass
@@ -138,7 +108,9 @@ def check_entry_path(
             result.errors.append(f"blocked private/sensitive path: {norm}")
     if len(parts) >= 2 and parts[0] == ".run":
         run_root = parts[1]
-        if run_root in {"private", "smoke"} or re.fullmatch(r"s[0-9]+", run_root):
+        if run_root in {"private", "smoke"} or (
+            run_root.startswith("s") and run_root[1:].isdigit()
+        ):
             result.errors.append(f"blocked private/sensitive path: {norm}")
 
 
@@ -148,7 +120,6 @@ def _is_scanner_source(name: str) -> bool:
         (
             "build_handoff_package.py",
             "handoff_safety.py",
-            "package_safety_check.py",
             "self_test.py",
             "verify_handoff_package.py",
             "verify_governance.py",
@@ -160,9 +131,6 @@ def _skip_pattern_line(line: str, name: str) -> bool:
     if not _is_scanner_source(name):
         return False
     markers = (
-        "SECRET_PATTERN",
-        "LOCAL_PATH_PATTERN",
-        "STOCK_SAMPLE_PATTERN",
         "STALE_STATUS_PATTERNS",
         "STALE_STATUS_MARKERS",
         "CREDENTIAL_RE",
@@ -187,6 +155,31 @@ def _skip_pattern_line(line: str, name: str) -> bool:
     )
 
 
+def contains_private_run_path_text(text: str) -> bool:
+    normalized = text.replace("\\", "/").lower()
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    if any(root in normalized for root in PRIVATE_RUN_PATH_ROOTS):
+        return True
+    marker = ".run/s"
+    start = 0
+    while True:
+        index = normalized.find(marker, start)
+        if index < 0:
+            return False
+        suffix = normalized[index + len(marker) :]
+        digits = 0
+        for char in suffix:
+            if not char.isdigit():
+                break
+            digits += 1
+        if digits > 0:
+            tail = suffix[digits : digits + 1]
+            if not tail or tail in {"/", " ", "\t", "\r", "\n", '"', "'", ",", "}"}:
+                return True
+        start = index + 1
+
+
 def check_text(result: SafetyResult, name: str, data: bytes) -> None:
     if len(data) > MAX_TEXT_SCAN_BYTES:
         result.errors.append(f"text scan exceeded maximum size: {name}")
@@ -200,26 +193,23 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
     for line_number, line in enumerate(text.splitlines(), start=1):
         if _skip_pattern_line(line, name):
             continue
-        if PRIVATE_RUN_PATH_PATTERN.search(line):
+        if contains_private_run_path_text(line):
             result.errors.append(f"private run path in {name}:{line_number}")
-        if SECRET_PATTERN.search(line):
-            result.errors.append(
-                f"possible secret-like assignment in {name}:{line_number}"
-            )
-        if LOCAL_PATH_PATTERN.search(line):
+        shared_reason = public_text_unsafe_reason(line)
+        if shared_reason == "local_path":
             result.errors.append(f"local absolute path in {name}:{line_number}")
-        if STOCK_SAMPLE_PATTERN.search(line):
+        if shared_reason == "private_marker":
+            result.errors.append(f"private marker in {name}:{line_number}")
+        if shared_reason == "private_path":
+            result.errors.append(f"private path in {name}:{line_number}")
+        if shared_reason == "row_sample":
+            result.errors.append(f"row sample in {name}:{line_number}")
+        if shared_reason == "credential":
+            result.errors.append(f"credential text in {name}:{line_number}")
+        if shared_reason == "stock_code_sample":
             result.warnings.append(
                 f"possible stock-code sample in {name}:{line_number}"
             )
-        if public_text_unsafe_reason is not None:
-            shared_reason = public_text_unsafe_reason(line)
-            if shared_reason == "private_marker":
-                result.errors.append(f"private marker in {name}:{line_number}")
-            if shared_reason == "private_path":
-                result.errors.append(f"private path in {name}:{line_number}")
-            if shared_reason == "row_sample":
-                result.errors.append(f"row sample in {name}:{line_number}")
 
 def scan_zip(path: Path, allow_nested_packages: bool) -> SafetyResult:
     result = SafetyResult()
@@ -270,7 +260,7 @@ def scan_target(path: Path, allow_nested_packages: bool) -> SafetyResult:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Scan a QRP handoff/review package for public-safe rules."
+        description="Scan a QRP handoff package for public-safe rules."
     )
     parser.add_argument("target", help="Zip file or directory to scan.")
     parser.add_argument(
