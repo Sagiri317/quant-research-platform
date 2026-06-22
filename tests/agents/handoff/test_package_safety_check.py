@@ -78,6 +78,7 @@ def test_package_safety_allows_scanner_pattern_definitions(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
+        # Intentional fake private markers in a scanner rule definition fixture.
         archive.writestr(
             "handoff_safety.py",
             'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',

@@ -273,6 +273,7 @@ def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> No
 @pytest.mark.parametrize(
     "text",
     [
+        # Intentional fake private markers used to test handoff safety rejection.
         "E:/repo/data/processed/a_share/factor/demo",
         "E:/repo/data/research/a_share/demo",
         "E:/repo/reports/private_research/a_share/run",
@@ -305,6 +306,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
                 "zip_filename": "handoff.zip",
                 "handoff_package_path": f"{run_handoffs}/handoff.zip",
                 "handoff_sidecar_path": f"{run_handoffs}/handoff.json",
+                # Intentional fake private markers for handoff safety rejection.
                 "leaked_zip_path": "E:/quant-workspace/private/handoff.zip",
                 "also_bad": "/mnt/data/private/handoff.zip",
                 "home_bad": "/home/user/private/handoff.zip",
@@ -519,6 +521,7 @@ def test_handoff_safety_rejects_codex_in_bundle_head_tree(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "text",
     [
+        # Intentional fake private markers used to test handoff safety rejection.
         "/workspace/qrp/data/research/a_share/demo",
         "/workspaces/qrp/reports/private_research/a_share/run",
         "/opt/qrp/data/processed/a_share/factor/demo",
@@ -594,6 +597,7 @@ def test_verify_fails_when_sidecar_safety_fails(tmp_path: Path) -> None:
                     "blocked_count": 0,
                     "fail_count": 0,
                 },
+                # Intentional fake private marker for handoff safety rejection.
                 "zip_path": "E:/quant-workspace/private/handoff.zip",
             },
             indent=2,
