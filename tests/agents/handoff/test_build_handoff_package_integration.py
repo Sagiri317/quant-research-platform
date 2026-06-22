@@ -374,46 +374,6 @@ def test_build_handoff_package_rejects_forbidden_custom_evidence_key(
     assert not list(out_dir.glob("*"))
 
 
-def test_build_handoff_package_rejects_top_level_check_evidence_key(
-    tmp_path: Path,
-) -> None:
-    result, out_dir = _run_builder_with_handoff_evidence(
-        tmp_path,
-        {
-            "custom-note": {
-                "schema_version": "custom-note/0.1",
-                "status": "PASS",
-                "check": "old row key",
-            }
-        },
-    )
-
-    assert result.returncode != 0
-    assert "handoff_evidence_forbidden_field" in result.stderr
-    assert not (out_dir / "synthetic-handoff-negative.zip").exists()
-    assert not (out_dir / "synthetic-handoff-negative.json").exists()
-
-
-def test_build_handoff_package_rejects_top_level_pr_body_path_evidence_key(
-    tmp_path: Path,
-) -> None:
-    result, out_dir = _run_builder_with_handoff_evidence(
-        tmp_path,
-        {
-            "custom-note": {
-                "schema_version": "custom-note/0.1",
-                "status": "PASS",
-                "pr_body_path": "old pr body input",
-            }
-        },
-    )
-
-    assert result.returncode != 0
-    assert "handoff_evidence_forbidden_field" in result.stderr
-    assert not (out_dir / "synthetic-handoff-negative.zip").exists()
-    assert not (out_dir / "synthetic-handoff-negative.json").exists()
-
-
 def _init_synthetic_repo(repo: Path) -> None:
     repo.mkdir()
     support_root = (

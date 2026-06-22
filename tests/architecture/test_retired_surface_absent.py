@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_retired_owner_local_function_names_are_absent() -> None:
     modules = {
@@ -87,6 +89,30 @@ def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
     assert "forbidden_render_pr_body" in patterns
 
 
+@pytest.mark.parametrize("forbidden_key", ("check", "pr_body_path"))
+def test_retired_handoff_evidence_input_fields_fail_fast(
+    tmp_path: Path,
+    forbidden_key: str,
+) -> None:
+    module = _load_handoff_builder_integration_tests()
+
+    result, out_dir = module._run_builder_with_handoff_evidence(
+        tmp_path,
+        {
+            "custom-note": {
+                "schema_version": "custom-note/0.1",
+                "status": "PASS",
+                forbidden_key: "old input",
+            }
+        },
+    )
+
+    assert result.returncode != 0
+    assert "handoff_evidence_forbidden_field" in result.stderr
+    assert not (out_dir / "synthetic-handoff-negative.zip").exists()
+    assert not (out_dir / "synthetic-handoff-negative.json").exists()
+
+
 def _load_handoff_builder():
     script = (
         Path(".agents")
@@ -97,6 +123,20 @@ def _load_handoff_builder():
         / "build_handoff_package.py"
     )
     spec = importlib.util.spec_from_file_location("build_handoff_package", script)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_handoff_builder_integration_tests():
+    script = Path("tests/agents/handoff/test_build_handoff_package_integration.py")
+    spec = importlib.util.spec_from_file_location(
+        "test_build_handoff_package_integration",
+        script,
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
