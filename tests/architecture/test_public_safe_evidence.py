@@ -14,6 +14,13 @@ from quant_research_platform.markets.implementations.a_share.verification import
 from quant_research_platform.storage.datasets import DatasetReadMode
 from tests.helpers import frequency_ids
 
+DOC_MARKET_PANEL_LOGICAL_ROOT = (
+    "processed/a_share/panel/<market_panel_data_id(DataFrequency.DAILY)>"
+)
+DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA = (
+    "full_historical_market_panel_data_id_daily_status"
+)
+
 REQUIRED_AREAS = {
     "processed_panel_parity",
     "factor_value_parity",
@@ -23,7 +30,7 @@ REQUIRED_AREAS = {
     "evaluation_parity",
     "prediction_oos_smoke_parity",
     "supporting_layers_coverage_2014_2025",
-    frequency_ids.full_historical_market_panel_status_area(),
+    DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
 }
 
 REQUIRED_FIELDS = {
@@ -249,7 +256,7 @@ def test_full_historical_market_panel_daily_covers_full_2014_2025_period() -> No
     area = next(
         item
         for item in payload["areas"]
-        if item["area"] == frequency_ids.full_historical_market_panel_status_area()
+        if item["area"] == DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA
     )
 
     assert area["period"] == "2014-01-01 through 2025-12-31"
@@ -698,13 +705,13 @@ def test_private_verification_summary_covers_full_historical_panel() -> None:
     market_panel_daily = next(
         item
         for item in payload["dataset_inventory"]
-        if item["logical_root"] == frequency_ids.market_panel_logical_root()
+        if item["logical_root"] == DOC_MARKET_PANEL_LOGICAL_ROOT
     )
 
     assert market_panel_daily["period"] == "2014-01-01 through 2025-12-31"
     assert (
         market_panel_daily["covered_by_evidence_area"]
-        == frequency_ids.full_historical_market_panel_status_area()
+        == DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA
     )
 
 

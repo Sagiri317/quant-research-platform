@@ -65,10 +65,10 @@ runtime/     privacy, sanitization, logging, profiling, errors, resources
 ## 当前 A-share / research 事实
 
 - A-share 是第一个启用市场；其他市场是未来设计，不新增空实现包。
-- `market_panel_1d` 是 A-share fact layer（事实层），不拥有派生 eligibility/execution masks。
+- `market_panel_data_id(DataFrequency.DAILY)` 派生的 A-share panel 是 fact layer（事实层），不拥有派生 eligibility/execution masks。
 - A-share trading semantics（交易语义）归 `markets/implementations/a_share/processed/annotations.py`；下游 labels/evaluation/model/prediction 应消费 annotation outputs，不重新计算 ST、停牌、涨跌停、eligibility 或 execution 规则。
 - `ResearchDatasetSpec.base_input_data_id` 必填；assembler market-agnostic，先读 explicit base，再按 `market_id, asset_id, timestamp` left join 其他输入。
-- 当前 `price_volume` factors 和 `forward_return` labels 按合同使用 `market_panel_1d` 作为 primary processed input。
+- 当前 `price_volume` factors 和 `forward_return` labels 按合同使用 `market_panel_data_id(DataFrequency.DAILY)` 派生的 panel 作为 primary processed input。
 - Evaluation / prediction evidence 当前应视为 smoke-scoped（烟雾范围）证据，不是 2014-2025 全历史模型/绩效证明。
 
 ## 当前资源事实

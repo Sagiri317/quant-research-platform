@@ -72,7 +72,7 @@ profile.
   to interim, A-share fact panel, A-share annotations/masks/context, factor
   data, label data, and research dataset assembly are closed under explicit
   catalog/profile ownership.
-- `market_panel_1d` is a fact layer. It excludes derived `eligible*`,
+- `market_panel_data_id(DataFrequency.DAILY)` derives the fact-layer panel. It excludes derived `eligible*`,
   `next_bar*`, `can_enter`, and `can_exit` masks.
 - A-share trading semantics are owned by processed annotations. Label,
   evaluation, model, and prediction paths consume annotation outputs instead of
@@ -122,7 +122,7 @@ profile.
   spec-driven writers.
 - 2014-2025 `price_volume_forward_returns` ResearchDataset materialized
   through the ResearchDataset assembler.
-- Full historical `market_panel_1d` aggregate coverage is verified for
+- Full historical `market_panel_data_id(DataFrequency.DAILY)` aggregate coverage is verified for
   `2014-01-01` through `2025-12-31` by local private aggregate verification
   without committing row-level output artifacts.
 - Evaluation and prediction remain 2014 smoke evidence; they have not been
@@ -165,7 +165,7 @@ profile.
   research batch.
 - Runtime resource policy controls internal processed/research chunk size.
   A-share 1d research chunks by trading-session core windows with read halos:
-  next-session halo for market_panel_1d construction and annotation entry/exit
+  next-session halo for `market_panel_data_id(DataFrequency.DAILY)` construction and annotation entry/exit
   masks, per-asset valid bar warmup for factors, and per-asset valid bar future
   lookahead for labels. Only core rows are written.
 - `TimeWindow` is the public logical interval. `SessionWindow` is the internal
