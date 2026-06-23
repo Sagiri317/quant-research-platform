@@ -1,4 +1,4 @@
-"""Command-line interface for the QRP 0.1 clean rewrite."""
+"""Command-line interface for the QRP local research platform."""
 
 from __future__ import annotations
 

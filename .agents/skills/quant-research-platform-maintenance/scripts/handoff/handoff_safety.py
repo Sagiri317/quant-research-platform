@@ -22,7 +22,10 @@ if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
 if str(SCRIPT_PARENT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_PARENT))
 
-from governance_contract import PACKAGE_FORBIDDEN_PATH_PARTS  # noqa: E402
+from governance_contract import (  # noqa: E402
+    PACKAGE_FORBIDDEN_PATH_PARTS,
+    is_scanner_definition_line as is_shared_scanner_definition_line,
+)
 from quant_research_platform.runtime.privacy import public_text_unsafe_reason
 
 TEXT_LIKE_SUFFIXES = {
@@ -460,36 +463,7 @@ def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
     )
     if not scanner_source:
         return False
-    markers = (
-        "PRIVATE_RUNTIME_PAYLOAD_RE",
-        "SECRET_PATTERN",
-        "LOCAL_PATH_PATTERN",
-        "STOCK_SAMPLE_PATTERN",
-        "RAW_EXPORT_FILENAME_RE",
-        "token = re.compile",
-        "secret-like assignment",
-        "[A-Za-z]:\\\\",
-        "\\\\Users",
-        "/Users/[^\\s`]+",
-        "/home/[^\\s`]+",
-        "/mnt/[a-z]/[^\\s`]+",
-        "/mnt/data",
-        "/" + "workspace",
-        "/" + "workspaces",
-        "quant-workspace",
-        "site-packages",
-        "conda env path",
-    )
-    if any(marker in line for marker in markers):
-        return True
-    if scanner_source and (
-        "vendor_marker" in line
-        or "raw_vendor" in line
-        or "raw_traceback" in line
-        or "private_runtime_payload" in line
-        or "Traceback (most recent call last):" in line
-        or "runtime_payload" in line
-    ):
+    if is_shared_scanner_definition_line(name, line):
         return True
     return bool(
         (

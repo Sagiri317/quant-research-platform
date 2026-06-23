@@ -25,7 +25,10 @@ if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from governance_contract import PACKAGE_FORBIDDEN_PATH_PARTS  # noqa: E402
+from governance_contract import (  # noqa: E402
+    PACKAGE_FORBIDDEN_PATH_PARTS,
+    is_scanner_definition_line,
+)
 from quant_research_platform.runtime.privacy import public_text_unsafe_reason  # noqa: E402
 
 BLOCKED_EXTENSIONS = {
@@ -115,29 +118,7 @@ def _is_scanner_source(name: str) -> bool:
 def _skip_pattern_line(line: str, name: str) -> bool:
     if not _is_scanner_source(name):
         return False
-    markers = (
-        "STALE_STATUS_PATTERNS",
-        "STALE_STATUS_MARKERS",
-        "CREDENTIAL_RE",
-        "VENDOR_MARKER_RE",
-        "RAW_TRACEBACK_RE",
-        "PRIVATE_RUNTIME_PAYLOAD_RE",
-        "RAW_EXPORT_FILENAME_RE",
-        "re.compile(",
-        "token = re.compile",
-        "secret-like assignment",
-        "\\\\Users\\\\",
-        "quant-workspace",
-        "site-packages",
-        "conda env path",
-        "vendor_marker",
-        "raw_vendor",
-        "Traceback (most recent call last):",
-        "runtime_payload",
-    )
-    return any(marker in line for marker in markers) or line.lstrip().startswith(
-        ("r\"", "r'")
-    )
+    return is_scanner_definition_line(name, line)
 
 
 def contains_private_run_path_text(text: str) -> bool:

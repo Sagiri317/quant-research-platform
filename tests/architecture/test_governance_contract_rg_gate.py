@@ -19,9 +19,8 @@ if str(GOVERNANCE_SCRIPT_DIR) not in sys.path:
 
 from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS as CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS,
-    RETIRED_GOVERNANCE_EXACT_PATHS,
-    is_negative_test_allowlisted,
-    stale_governance_truth_patterns,
+    active_doc_forbidden_patterns,
+    is_retired_path_policy_line,
 )
 
 SCAN_ROOTS = (
@@ -50,10 +49,7 @@ RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = {
 ACTIVE_GOVERNANCE_DOC_ROOTS = (
     Path(root.rstrip("/")) for root in CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS
 )
-STALE_GOVERNANCE_TRUTH_PATTERNS = stale_governance_truth_patterns()
-RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
-    "docs/reports/clean-rewrite",
-)
+ACTIVE_DOC_FORBIDDEN_PATTERNS = active_doc_forbidden_patterns()
 
 
 def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
@@ -114,31 +110,27 @@ def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:
     for path in _iter_active_governance_doc_files():
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
-            if _is_retired_path_policy_line(path, line):
+            if is_retired_path_policy_line(path, line):
                 continue
-            for name, pattern in STALE_GOVERNANCE_TRUTH_PATTERNS.items():
+            for name, pattern in ACTIVE_DOC_FORBIDDEN_PATTERNS.items():
                 if pattern.search(line):
                     hits.append(f"{path}:{line_number}: {name}")
 
     assert hits == []
 
 
-def test_stale_governance_truth_patterns_cover_required_examples() -> None:
+def test_active_doc_forbidden_patterns_cover_required_examples() -> None:
     examples = {
         "old_feature_branch_current_truth": "当前分支是 feature/qrp-clean-rewrite",
         "clean_rewrite": "clean rewrite 是当前状态",
         "run_official_tool_source": ".run official tool source",
+        "retired_execution_mode": "ExecutionMode 是当前公开模式",
+        "retired_daily_panel": "daily-panel 是当前数据产物",
+        "retired_model_family": "model_family 是当前模型选择字段",
     }
 
     for name, text in examples.items():
-        assert STALE_GOVERNANCE_TRUTH_PATTERNS[name].search(text)
-
-
-def _is_retired_path_policy_line(path: Path, line: str) -> bool:
-    return is_negative_test_allowlisted(
-        path.as_posix(),
-        "retired_path_policy_docs",
-    ) and any(marker in line for marker in RETIRED_PATH_POLICY_MARKERS)
+        assert ACTIVE_DOC_FORBIDDEN_PATTERNS[name].search(text)
 
 
 def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:
@@ -334,7 +326,7 @@ RETIRED_PUBLIC_CONTRACT_TEXT = (
 )
 
 RETIRED_DATA_PRODUCT_ALLOWED_NEGATIVE_TESTS = {
-    Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
+    Path("tests/architecture/test_governance_contract_rg_gate.py"): (
         "POST /api/0.1/data-products/{"
         + RETIRED_DATA_PRODUCT_ID
         + "}/interim-runs",
@@ -347,7 +339,7 @@ RETIRED_DATA_PRODUCT_ALLOWED_NEGATIVE_TESTS = {
 }
 
 DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
-    Path("tests/architecture/test_clean_rewrite_rg_gate.py"): (
+    Path("tests/architecture/test_governance_contract_rg_gate.py"): (
         "GET  /api/0.1/catalog/data-products",
         "qrp catalog data-products",
         "DATA_PRODUCT",
@@ -800,27 +792,12 @@ def _iter_public_surface_files() -> list[Path]:
 
 def _public_surface_scan_text(path: Path) -> str:
     text = path.read_text(encoding="utf-8")
-    if path != Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "build_handoff_package.py"
+    if path == Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "governance_contract.py"
     ):
-        return text
-    lines = text.splitlines()
-    filtered: list[str] = []
-    in_allowlist = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST ="):
-            in_allowlist = True
-        if stripped.startswith("TASK_CONTROL_KEYS"):
-            in_allowlist = False
-        if stripped.startswith("def source_tree_forbidden_patterns"):
-            in_allowlist = True
-        if stripped.startswith("def is_reserved_handoff_evidence_path"):
-            in_allowlist = False
-        if not in_allowlist:
-            filtered.append(line)
-    return "\n".join(filtered)
+        return ""
+    return text
 
 
 def _is_internal_provider_doc(path: Path) -> bool:

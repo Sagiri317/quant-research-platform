@@ -55,7 +55,7 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - 历史 evidence 不进入 `docs/` 作为长期事实源。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、package safety 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生。
 - retired governance paths 只要复活即 `FAIL`，不靠文本关键词绕过。
 
 ## 验证原则

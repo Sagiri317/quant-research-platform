@@ -22,13 +22,16 @@ if str(SCRIPT_DIR) not in sys.path:
 from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS,
     PACKAGE_FORBIDDEN_PATH_PARTS,
+    PRIVACY_NEGATIVE_TEST_PATHS,
     RETIRED_GOVERNANCE_EXACT_PATHS,
     RETIRED_GOVERNANCE_PREFIXES,
-    is_governance_rule_definition_path,
+    STALE_NEGATIVE_TEST_PATHS,
+    active_doc_forbidden_patterns,
+    is_allowed_stale_or_retired_fixture,
     is_negative_test_allowlisted,
     is_retired_governance_path,
+    is_scanner_definition_line,
     retired_governance_path_findings,
-    stale_governance_truth_patterns,
 )
 
 BASE_GOVERNANCE_PREFIXES = (
@@ -66,12 +69,15 @@ REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
     "src/quant_research_platform/reports/verification_evidence.py",
 }
 
+GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS = {
+    "src/quant_research_platform/interfaces/cli/commands.py",
+    "src/quant_research_platform/markets/implementations/a_share/verification/"
+    "private_aggregate.py",
+}
+
 RETIRED_DOC_DELETION_PATHS = set(RETIRED_GOVERNANCE_EXACT_PATHS)
 
 RETIRED_DOC_DELETION_PREFIXES = RETIRED_GOVERNANCE_PREFIXES
-RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
-    "docs/reports/clean-rewrite",
-)
 
 PRIVATE_ROOTS = (
     "data/raw/",
@@ -101,7 +107,7 @@ REQUIRED_AGENTS_TERMS = (
     ("current-contract-only",),
 )
 
-STALE_STATUS_PATTERNS = tuple(stale_governance_truth_patterns().values())
+ACTIVE_DOC_FORBIDDEN_PATTERNS = active_doc_forbidden_patterns()
 
 LOCAL_PATH_PATTERN = re.compile(r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+)")  # noqa: E501
 SECRET_PATTERN = re.compile(
@@ -109,15 +115,6 @@ SECRET_PATTERN = re.compile(
 )
 
 TEXT_SUFFIXES = {".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
-PRIVACY_NEGATIVE_TEST_PATHS = {
-    "tests/runtime/test_privacy_01.py",
-    "tests/agents/handoff/test_handoff_tools.py",
-    "tests/agents/handoff/test_package_safety_check.py",
-}
-STALE_NEGATIVE_TEST_PATHS = {
-    "tests/agents/test_verify_governance.py",
-    "tests/architecture/test_clean_rewrite_rg_gate.py",
-}
 
 
 @dataclass
@@ -254,6 +251,8 @@ def is_governance_only_allowed_path(
         return True
     if path in REPORTS_EVIDENCE_RENDERER_EXCEPTIONS:
         return True
+    if path in GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS:
+        return True
     return is_retired_doc_deletion(repo, path)
 
 
@@ -280,75 +279,7 @@ def iter_text_files(repo: Path, paths: list[str]) -> list[Path]:
 
 
 def _skip_regex_definition_line(rel: str, line: str) -> bool:
-    markers = (
-        "SECRET_PATTERN",
-        "LOCAL_PATH_PATTERN",
-        "STALE_STATUS_PATTERNS",
-        "STALE_STATUS_MARKERS",
-        "STOCK_SAMPLE_PATTERN",
-        "re.compile(",
-        "token = re.compile",
-        "secret-like assignment",
-        "Finish the official review-fix handoff package",
-    )
-    if any(marker in line for marker in markers):
-        return True
-    if rel.startswith(".agents/skills/quant-research-platform-maintenance/scripts/"):
-        scanner_markers = (
-            "QRP Clean Rewrite",
-            "clean rewrite",
-            "clean-rewrite",
-            "feature/qrp-clean-rewrite",
-            "feature/agent-governance-redesign",
-            "feature/(?:qrp-clean-rewrite|agent-governance-redesign)",
-            "draft PR",
-            "pre-merge",
-            "merge-ready",
-            ".run\\s+official",
-            "official\\s+\\.run",
-            ".run official",
-            "official .run",
-            "PROJECT_STATUS\\.md",
-            "current-qrp-status\\.md",
-            "PROJECT_STATUS.md",
-            "PROJECT_STATUS",
-            "project_status",
-            "ProjectStatus",
-            "project-status",
-            "current-qrp-status.md",
-            "current_qrp_status",
-            "CurrentQrpStatus",
-            "currentQrpStatus",
-            "open-issues-register",
-            "open_issues_register",
-            "OpenIssuesRegister",
-            "openIssuesRegister",
-            "docs/reports/clean-rewrite-0.1-",
-            "clean_rewrite",
-            "CleanRewrite",
-            "cleanRewrite",
-            "merge_ready",
-            "MergeReady",
-            "mergeReady",
-            "pre_merge",
-            "PreMerge",
-            "preMerge",
-            "draft_pr",
-            "DraftPr",
-            "draftPr",
-            "E:/",
-            "D:/",
-            "C:/",
-            "\\Users\\",
-            "\\\\Users\\\\",
-            "/Users/",
-            "/home/",
-            "/mnt/",
-            "/mnt/data",
-        )
-        if any(marker in line for marker in scanner_markers):
-            return True
-    return rel.endswith(".py") and line.lstrip().startswith(("r\"", "r'"))
+    return is_scanner_definition_line(rel, line)
 
 
 def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
@@ -381,52 +312,7 @@ def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
 
 
 def _is_allowed_stale_fixture(rel: str, line: str) -> bool:
-    if is_governance_rule_definition_path(rel):
-        return True
-    if is_negative_test_allowlisted(rel, "retired_path_policy_docs") and any(
-        marker in line for marker in RETIRED_PATH_POLICY_MARKERS
-    ):
-        return True
-    return (
-        rel in STALE_NEGATIVE_TEST_PATHS
-        or is_negative_test_allowlisted(rel, "stale_governance_truth")
-        or is_negative_test_allowlisted(rel, "retired_name")
-    ) and any(
-        marker in line
-        for marker in (
-            "feature/qrp-clean-rewrite",
-            "feature/agent-governance-redesign",
-            "clean rewrite",
-            "clean-rewrite",
-            "draft PR",
-            "pre-merge",
-            "merge-ready",
-            ".run official",
-            "official .run",
-            "PROJECT_STATUS",
-            "current-qrp-status",
-            "project_status",
-            "ProjectStatus",
-            "project-status",
-            "PROJECT_STATUS.md",
-            "open-issues-register",
-            "open_issues_register",
-            "OpenIssuesRegister",
-            "openIssuesRegister",
-            "current_qrp_status",
-            "CurrentQrpStatus",
-            "currentQrpStatus",
-            "clean_rewrite",
-            "CleanRewrite",
-            "cleanRewrite",
-            "merge_ready",
-            "MergeReady",
-            "pre_merge",
-            "PreMerge",
-            "draft_pr",
-            "DraftPr",
-        )
-    )
+    return is_allowed_stale_or_retired_fixture(rel, line)
 
 
 def _should_scan_stale_governance_truth(rel: str) -> bool:
@@ -467,11 +353,14 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
                     f"local absolute path pattern in {rel}:{line_number}"
                 )
             if _should_scan_stale_governance_truth(rel):
-                for match in STALE_STATUS_PATTERNS:
-                    if match.search(line) and not _is_allowed_stale_fixture(rel, line):
+                for rule, pattern in ACTIVE_DOC_FORBIDDEN_PATTERNS.items():
+                    if pattern.search(line) and not _is_allowed_stale_fixture(
+                        rel,
+                        line,
+                    ):
                         result.errors.append(
-                            "stale N2/status wording in "
-                            f"{rel}:{line_number}: {match.pattern}"
+                            "governance forbidden wording in "
+                            f"{rel}:{line_number}: {rule}: {pattern.pattern}"
                         )
             if (
                 "NOT_RUN" in line

@@ -8,9 +8,10 @@ QRP 的治理目标是让 agent 能在最少上下文下正确执行，并通过
 2. 文档不保存当前状态。
 3. `.agents` 是 tracked tooling source。
 4. `.run` 是 output/evidence layer。
-5. `PASS` 必须绑定实际命令或 artifact。
-6. current-contract-only 是默认策略。
-7. 旧字段和旧路径只进入 negative tests 或 allowlist。
+5. `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。
+6. `PASS` 必须绑定实际命令或 artifact。
+7. current-contract-only 是默认策略。
+8. 旧字段和旧路径只进入 negative tests 或 allowlist。
 
 ## Agent 文件分层
 

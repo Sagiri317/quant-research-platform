@@ -59,7 +59,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-active doc roots、retired governance paths、retired naming、stale truth、package forbidden path parts 和 status token 必须从这里读取或派生。
+active doc roots、retired governance paths、retired naming、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token 必须从这里读取或派生。
 
 ### Code-map gate
 

@@ -223,11 +223,11 @@ RETIRED_PUBLIC_SURFACE_RULES = (
 NEGATIVE_TEST_ALLOWLIST = {
     "stale_governance_truth": (
         "tests/agents/test_verify_governance.py",
-        "tests/architecture/test_clean_rewrite_rg_gate.py",
+        "tests/architecture/test_governance_contract_rg_gate.py",
     ),
     "retired_name": (
         "tests/agents/test_verify_governance.py",
-        "tests/architecture/test_clean_rewrite_rg_gate.py",
+        "tests/architecture/test_governance_contract_rg_gate.py",
         "tests/architecture/test_handoff_package_contract.py",
     ),
     "governance_rule_definition": (
@@ -263,6 +263,419 @@ PACKAGE_FORBIDDEN_PATH_PARTS = (
 )
 
 VALID_STATUS_TOKENS = ("PASS", "FAIL", "NOT_RUN", "BLOCKED", "TIMEOUT")
+
+RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
+    "docs/reports/clean-rewrite",
+)
+
+PRIVACY_NEGATIVE_TEST_PATHS = (
+    "tests/runtime/test_privacy_01.py",
+    "tests/agents/handoff/test_handoff_tools.py",
+    "tests/agents/handoff/test_package_safety_check.py",
+)
+
+STALE_NEGATIVE_TEST_PATHS = (
+    "tests/agents/test_verify_governance.py",
+    "tests/architecture/test_governance_contract_rg_gate.py",
+)
+
+SCANNER_DEFINITION_MARKERS = (
+    "SECRET_PATTERN",
+    "LOCAL_PATH_PATTERN",
+    "STALE_STATUS_PATTERNS",
+    "ACTIVE_DOC_FORBIDDEN_PATTERNS",
+    "STALE_STATUS_MARKERS",
+    "STOCK_SAMPLE_PATTERN",
+    "CREDENTIAL_RE",
+    "VENDOR_MARKER_RE",
+    "RAW_TRACEBACK_RE",
+    "PRIVATE_RUNTIME_PAYLOAD_RE",
+    "RAW_EXPORT_FILENAME_RE",
+    "re.compile(",
+    "token = re.compile",
+    "secret-like assignment",
+    "Finish the official review-fix handoff package",
+)
+
+SCANNER_SCRIPT_DEFINITION_MARKERS = (
+    "QRP Clean Rewrite",
+    "clean rewrite",
+    "clean-rewrite",
+    "feature/qrp-clean-rewrite",
+    "feature/agent-governance-redesign",
+    "feature/(?:qrp-clean-rewrite|agent-governance-redesign)",
+    "draft PR",
+    "pre-merge",
+    "merge-ready",
+    ".run\\s+official",
+    "official\\s+\\.run",
+    ".run official",
+    "official .run",
+    "PROJECT_STATUS\\.md",
+    "current-qrp-status\\.md",
+    "PROJECT_STATUS.md",
+    "PROJECT_STATUS",
+    "project_status",
+    "ProjectStatus",
+    "project-status",
+    "current-qrp-status.md",
+    "current_qrp_status",
+    "CurrentQrpStatus",
+    "currentQrpStatus",
+    "open-issues-register",
+    "open_issues_register",
+    "OpenIssuesRegister",
+    "openIssuesRegister",
+    "docs/reports/clean-rewrite-0.1-",
+    "clean_rewrite",
+    "CleanRewrite",
+    "cleanRewrite",
+    "merge_ready",
+    "MergeReady",
+    "mergeReady",
+    "pre_merge",
+    "PreMerge",
+    "preMerge",
+    "draft_pr",
+    "DraftPr",
+    "draftPr",
+    "ExecutionMode",
+    "execution_mode",
+    "execution-mode",
+    "--execution-mode",
+    "daily_panel",
+    "daily-panel",
+    "DailyPanel",
+    "daily_market",
+    "daily-market",
+    "DailyMarket",
+    "daily_context",
+    "daily-context",
+    "DailyContext",
+    "a_share_daily_bar",
+    "a-share-daily-bar",
+    "AShareDailyBar",
+    "BacktestSpec",
+    "backtest_spec",
+    "backtest-spec",
+    "prediction_bundle",
+    "prediction-bundle",
+    "PredictionBundle",
+    "model_family",
+    "model-family",
+    "ModelFamily",
+    "CSMAR_SOURCE_ID",
+    "csmar_source_id",
+    "A_SHARE_MARKET_ID",
+    "a_share_market_id",
+    "MODEL_ALGORITHMS",
+    "model_algorithms",
+    "E:/",
+    "D:/",
+    "C:/",
+    "\\Users\\",
+    "\\\\Users\\\\",
+    "/Users/",
+    "/home/",
+    "/mnt/",
+    "/mnt/data",
+    "vendor_marker",
+    "raw_vendor",
+    "Traceback (most recent call last):",
+    "runtime_payload",
+)
+
+CODE_MAP_FORBIDDEN_TERMS = (
+    "QRP Clean Rewrite",
+    "clean rewrite",
+    "clean-rewrite",
+    "raw_private",
+    "interim_private",
+    "processed_private",
+    "reports/private_research",
+    "/api/v0.1",
+    "/api/pipeline-runs",
+    "/api/runs",
+)
+
+GOVERNANCE_CONTRACT_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/"
+    "governance_contract.py"
+)
+BUILD_HANDOFF_PACKAGE_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+    "build_handoff_package.py"
+)
+HANDOFF_SAFETY_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+    "handoff_safety.py"
+)
+HANDOFF_SELF_TEST_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+    "self_test.py"
+)
+VERIFY_HANDOFF_PACKAGE_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+    "verify_handoff_package.py"
+)
+PACKAGE_SAFETY_CHECK_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/"
+    "package_safety_check.py"
+)
+VERIFY_GOVERNANCE_SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/"
+    "verify_governance.py"
+)
+
+SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
+    HANDOFF_SAFETY_SCRIPT: {
+        "forbidden_diff_patch": {'"diff.patch",'},
+        "forbidden_pr_body": {'"pr_body.md",'},
+        "forbidden_review_threads": {'"review_threads",'},
+        "forbidden_private_real": {'"reports/private_real",'},
+        "forbidden_private_data": {'"reports/private_data",'},
+        "forbidden_review_evidence": {'"review_evidence",'},
+        "forbidden_review_bundle": {'"review_bundle",'},
+        "forbidden_review_package": {'"review_package",'},
+        "forbidden_review_zip_path": {'"review_zip_path",'},
+    },
+    VERIFY_HANDOFF_PACKAGE_SCRIPT: {
+        "forbidden_final_head_full": {'"final_head_full",'},
+    },
+    PACKAGE_SAFETY_CHECK_SCRIPT: {
+        "forbidden_diff_patch": {'"diff.patch",'},
+        "forbidden_pr_body": {'"pr_body.md",'},
+        "forbidden_review_threads": {'"review_threads",'},
+        "forbidden_private_real": {
+            'for path_name in ("private_research", "private_real", "private_data")',
+            '"reports/private_real",',
+        },
+        "forbidden_private_data": {
+            'for path_name in ("private_research", "private_real", "private_data")',
+            '"reports/private_data",',
+        },
+        "forbidden_review_evidence": {'"review_evidence",'},
+        "forbidden_review_bundle": {'"review_bundle",'},
+        "forbidden_review_package": {'"review_package",'},
+        "forbidden_review_zip_path": {'"review_zip_path",'},
+    },
+    Path("src/quant_research_platform/runtime/privacy.py"): {
+        "forbidden_private_real": {'"private_real",'},
+        "forbidden_private_data": {'"private_data",'},
+    },
+    Path("tests/architecture/test_retired_surface_absent.py"): {
+        "retired_a_share_market_definition": {'"a_share_market_definition",'},
+        "retired_a_share_field_catalog": {'"a_share_field_catalog",'},
+        "retired_a_share_processed_catalog": {'"a_share_processed_catalog",'},
+        "retired_a_share_factor_catalog": {'"a_share_factor_catalog",'},
+        "retired_a_share_label_catalog": {'"a_share_label_catalog",'},
+        "retired_build_a_share": {
+            '"build_a_share_research_dataset_catalog",',
+            '"build_a_share_research_dataset_specs",',
+            '"build_a_share_model_catalog",',
+            '"build_a_share_model_specs",',
+            '"build_a_share_prediction_catalog",',
+            '"build_a_share_prediction_specs",',
+            '"build_a_share_portfolio_catalog",',
+            '"build_a_share_portfolio_specs",',
+        },
+        "retired_default_a_share": {
+            '"default_a_share_prediction_smoke_id",',
+            '"default_a_share_prediction_oos_period",',
+        },
+        "retired_workflow_module": {
+            'importlib.util.find_spec("quant_research_platform.contracts.workflow_run")',
+        },
+        "retired_model_algorithm_collection": {
+            'assert not hasattr(contracts_models, "MODEL_ALGORITHMS")',
+        },
+        "retired_csmar_source_alias": {
+            'assert not hasattr(source_ids, "CSMAR_SOURCE_ID")',
+        },
+        "retired_a_share_market_alias": {
+            'assert not hasattr(market_ids, "A_SHARE_MARKET_ID")',
+        },
+        "forbidden_render_pr_body": {
+            '".agents/skills/quant-research-platform-maintenance/scripts/render_pr_body_from_validation_evidence.py"',
+            '"render_pr_body_from_validation_evidence.py"',
+        },
+    },
+    Path("tests/agents/handoff/test_handoff_tools.py"): {
+        "forbidden_private_data": {
+            '"reports/private_data/a_share/run/summary.json",',
+        },
+        "forbidden_private_real": {
+            '"reports/private_real/a_share/run/summary.json",',
+            '"retired path reports/private_real/a_share/run\\n",',
+        },
+    },
+    Path("tests/agents/handoff/test_package_safety_check.py"): {
+        "forbidden_private_data": {
+            '"reports/private_data/a_share/run/summary.json",',
+        },
+        "forbidden_private_real": {
+            '"reports/private_real/a_share/run/summary.json",',
+        },
+    },
+}
+
+SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
+    Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
+}
+
+SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS = tuple(
+    Path(root.rstrip("/")) for root in ACTIVE_GOVERNANCE_DOC_ROOTS
+)
+
+SOURCE_TREE_RETIRED_TERM_ROOTS = SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS + (
+    Path("src/quant_research_platform/interfaces"),
+    Path("src/quant_research_platform/agents"),
+    Path("src/quant_research_platform/reports"),
+    Path(".agents/skills/quant-research-platform-maintenance/scripts/handoff"),
+    PACKAGE_SAFETY_CHECK_SCRIPT,
+)
+
+SOURCE_TREE_RETIRED_PATH_POLICY_MARKERS = RETIRED_PATH_POLICY_MARKERS
+
+SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
+    BUILD_HANDOFF_PACKAGE_SCRIPT: {
+        "active_market_bars_data_id",
+        "active_market_panel_data_id",
+        "active_market_context_data_id",
+        "active_frequency_slug",
+    },
+    Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"): {
+        "active_market_bars_data_id",
+        "active_market_panel_data_id",
+        "active_market_context_data_id",
+        "active_frequency_slug",
+    },
+}
+
+SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
+    BUILD_HANDOFF_PACKAGE_SCRIPT: {rule.name for rule in RETIRED_PUBLIC_SURFACE_RULES},
+    Path("tests/architecture/test_retired_surface_absent.py"): {
+        "retired_csmar_source_alias",
+        "retired_a_share_market_alias",
+        "retired_model_algorithm_collection",
+        "forbidden_render_pr_body",
+    },
+}
+
+SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
+    GOVERNANCE_CONTRACT_SCRIPT: {
+        "RETIRED_NAME_RULES",
+        "STALE_GOVERNANCE_TRUTH_RULES",
+        "RETIRED_PUBLIC_SURFACE_RULES",
+        "NEGATIVE_TEST_ALLOWLIST",
+        "PACKAGE_FORBIDDEN_PATH_PARTS",
+        "RETIRED_PATH_POLICY_MARKERS",
+        "SCANNER_DEFINITION_MARKERS",
+        "SCANNER_SCRIPT_DEFINITION_MARKERS",
+        "CODE_MAP_FORBIDDEN_TERMS",
+        "SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST",
+        "SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST",
+        "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
+        "SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST",
+        "active_doc_forbidden_patterns",
+        "stale_fixture_markers",
+        "is_allowed_stale_or_retired_fixture",
+    },
+    BUILD_HANDOFF_PACKAGE_SCRIPT: {
+        "RESERVED_HANDOFF_EVIDENCE_STEMS",
+        "FORBIDDEN_PACKAGE_ENTRY_PARTS",
+        "TASK_CONTROL_KEYS",
+        "TASK_METADATA_KEYS",
+        "TASK_INPUT_KEYS",
+        "FORBIDDEN_TASK_KEYS",
+        "FORBIDDEN_VALIDATION_KEYS",
+        "FORBIDDEN_HANDOFF_EVIDENCE_KEYS",
+        "HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES",
+        "source_tree_forbidden_patterns",
+        "source_tree_active_test_literal_patterns",
+        "source_tree_governance_truth_patterns",
+        "source_tree_sensitive_negative_patterns",
+        "sanitize_handoff_text",
+    },
+    HANDOFF_SAFETY_SCRIPT: {
+        "FORBIDDEN_PATH_SEGMENTS",
+        "PRIVATE_RUN_PATH_RE",
+        "unsafe_text_reason",
+        "is_scanner_definition_line",
+    },
+    HANDOFF_SELF_TEST_SCRIPT: {"main", "_zip_and_sidecar_with_leak"},
+    VERIFY_HANDOFF_PACKAGE_SCRIPT: {
+        "contains_local_absolute_path_text",
+    },
+    PACKAGE_SAFETY_CHECK_SCRIPT: {
+        "BLOCKED_PATH_PARTS",
+        "_skip_pattern_line",
+    },
+    VERIFY_GOVERNANCE_SCRIPT: {
+        "LOCAL_PATH_PATTERN",
+        "SECRET_PATTERN",
+        "_skip_regex_definition_line",
+        "_is_allowed_local_path_fixture",
+        "_is_allowed_secret_fixture",
+        "check_text_safety",
+        "check_markdown_paths",
+    },
+}
+
+SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = {
+    GOVERNANCE_CONTRACT_SCRIPT: {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+        "sensitive_stock_code_sample",
+    },
+    BUILD_HANDOFF_PACKAGE_SCRIPT: {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    VERIFY_GOVERNANCE_SCRIPT: {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    PACKAGE_SAFETY_CHECK_SCRIPT: {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    HANDOFF_SAFETY_SCRIPT: {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    VERIFY_HANDOFF_PACKAGE_SCRIPT: {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    HANDOFF_SELF_TEST_SCRIPT: {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    Path("tests/agents/handoff/test_handoff_tools.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    Path("tests/agents/handoff/test_package_safety_check.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+    },
+    Path("tests/runtime/test_privacy_01.py"): {
+        "sensitive_local_private_path",
+        "sensitive_secret",
+        "sensitive_provider_marker",
+        "sensitive_stock_code_sample",
+    },
+}
 
 
 def normalize_repo_path(path: str | Path) -> str:
@@ -365,6 +778,72 @@ def stale_governance_truth_patterns() -> dict[str, re.Pattern[str]]:
 
 def retired_public_surface_patterns() -> dict[str, re.Pattern[str]]:
     return name_rule_patterns(RETIRED_PUBLIC_SURFACE_RULES)
+
+
+def active_doc_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    patterns = stale_governance_truth_patterns()
+    patterns.update(retired_public_surface_patterns())
+    return patterns
+
+
+def code_map_forbidden_terms() -> tuple[str, ...]:
+    return CODE_MAP_FORBIDDEN_TERMS
+
+
+def stale_fixture_markers() -> tuple[str, ...]:
+    markers: list[str] = [
+        "feature/qrp-clean-rewrite",
+        "feature/agent-governance-redesign",
+        ".run official",
+        "official .run",
+    ]
+    for rule in RETIRED_NAME_RULES + RETIRED_PUBLIC_SURFACE_RULES:
+        if isinstance(rule, TextRule):
+            markers.append(rule.pattern)
+        else:
+            markers.extend(rule.forms)
+    return tuple(dict.fromkeys(markers))
+
+
+def is_retired_path_policy_line(path: str | Path, line: str) -> bool:
+    return is_negative_test_allowlisted(path, "retired_path_policy_docs") and any(
+        marker in line for marker in RETIRED_PATH_POLICY_MARKERS
+    )
+
+
+def is_allowed_stale_or_retired_fixture(path: str | Path, line: str) -> bool:
+    if is_governance_rule_definition_path(path):
+        return True
+    if is_retired_path_policy_line(path, line):
+        return True
+    return (
+        normalize_repo_path(path) in STALE_NEGATIVE_TEST_PATHS
+        or is_negative_test_allowlisted(path, "stale_governance_truth")
+        or is_negative_test_allowlisted(path, "retired_name")
+    ) and any(marker in line for marker in stale_fixture_markers())
+
+
+def is_scanner_definition_line(path: str | Path, line: str) -> bool:
+    normalized = normalize_repo_path(path)
+    if any(marker in line for marker in SCANNER_DEFINITION_MARKERS):
+        return True
+    scanner_source = normalized.startswith(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+    ) or normalized.startswith("run_tools/") or normalized.endswith(
+        (
+            "build_handoff_package.py",
+            "handoff_safety.py",
+            "package_safety_check.py",
+            "self_test.py",
+            "verify_handoff_package.py",
+            "verify_governance.py",
+        )
+    )
+    if scanner_source and any(
+        marker in line for marker in SCANNER_SCRIPT_DEFINITION_MARKERS
+    ):
+        return True
+    return normalized.endswith(".py") and line.lstrip().startswith(("r\"", "r'"))
 
 
 def _bounded_literal_pattern(form: str) -> str:

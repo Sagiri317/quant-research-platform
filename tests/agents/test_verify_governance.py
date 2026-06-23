@@ -220,6 +220,40 @@ def test_active_doc_scan_fails_stale_current_truth(tmp_path: Path) -> None:
         assert not result.ok, text
 
 
+def test_active_doc_scan_fails_retired_public_surface_terms(tmp_path: Path) -> None:
+    module = _load_governance_module()
+    cases = {
+        "retired_execution_mode": "ExecutionMode is the current public mode.",
+        "retired_daily_panel": "daily-panel is the current dataset.",
+        "retired_model_family": "model_family is the current model selector.",
+        "retired_backtest_spec": "BacktestSpec is the active backtest contract.",
+        "retired_prediction_bundle": "prediction_bundle is the active artifact.",
+        "retired_csmar_source_alias": "CSMAR_SOURCE_ID is the active source alias.",
+        "retired_model_algorithm_collection": (
+            "MODEL_ALGORITHMS is the active algorithm list."
+        ),
+    }
+
+    for rule, text in cases.items():
+        doc = tmp_path / f"{rule}.md"
+        doc.write_text(text, encoding="utf-8")
+        result = module.Result()
+
+        module.check_text_safety(result, tmp_path, [doc.name])
+
+        assert any(rule in error for error in result.errors), (rule, result.errors)
+
+
+def test_active_doc_forbidden_patterns_include_retired_public_surface() -> None:
+    contract = _load_contract_module()
+
+    patterns = contract.active_doc_forbidden_patterns()
+
+    assert patterns["retired_execution_mode"].search("ExecutionMode")
+    assert patterns["retired_daily_panel"].search("daily-panel")
+    assert patterns["retired_model_family"].search("model_family")
+
+
 def test_retired_naming_rules_cover_required_derived_forms() -> None:
     contract = _load_contract_module()
     examples = {

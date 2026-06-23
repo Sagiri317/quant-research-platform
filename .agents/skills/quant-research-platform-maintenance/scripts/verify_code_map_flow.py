@@ -8,6 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from governance_contract import code_map_forbidden_terms  # noqa: E402
+
 REQUIRED_TERMS = (
     "local research platform",
     "data -> feature -> signal/model -> evaluate -> evidence",
@@ -19,18 +25,7 @@ REQUIRED_TERMS = (
     "no trading execution",
     "no production trading boundary",
 )
-FORBIDDEN_TERMS = (
-    "QRP Clean Rewrite",
-    "clean rewrite",
-    "clean-rewrite",
-    "raw_private",
-    "interim_private",
-    "processed_private",
-    "reports/private_research",
-    "/api/v0.1",
-    "/api/pipeline-runs",
-    "/api/runs",
-)
+FORBIDDEN_TERMS = code_map_forbidden_terms()
 
 
 def main() -> int:

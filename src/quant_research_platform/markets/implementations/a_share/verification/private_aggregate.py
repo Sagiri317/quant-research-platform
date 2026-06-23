@@ -559,7 +559,7 @@ def _area_record(
         else (
             f"Aggregate verification for {area_input.explanation_name} "
             f"covered {summary.period}; expected {area_input.expected_period}. "
-            "Human approval is required before merge-ready status."
+            "Human approval is required before review-ready status."
         )
     )
     return {
@@ -596,7 +596,7 @@ def _area_record(
         "downstream_impact": (
             "no downstream parity impact detected from aggregate fields"
             if not human_approval_required
-            else "merge-ready status requires human approval for the coverage gap"
+            else "review-ready status requires human approval for the coverage gap"
         ),
         "generated_by": GENERATED_BY,
         "source_data_visibility": "private_local_only",
