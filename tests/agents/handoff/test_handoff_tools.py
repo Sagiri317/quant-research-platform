@@ -713,6 +713,30 @@ def test_verify_recursively_rejects_forbidden_handoff_evidence_payload_keys() ->
     ]
 
 
+def test_handoff_evidence_forbidden_keys_are_fast_contract_checks() -> None:
+    builder = _load_handoff_module("build_handoff_package")
+
+    failures_by_key = {
+        key: builder.handoff_evidence_forbidden_key_failures(
+            "handoff_evidence/custom.json",
+            {
+                "schema_version": "demo/0.1",
+                "status": "PASS",
+                "details": {key: "forged"},
+            },
+        )
+        for key in builder.HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES
+    }
+
+    assert failures_by_key
+    for key, failures in failures_by_key.items():
+        assert any(
+            failure.startswith("handoff_evidence_forbidden_field: ")
+            and failure.endswith(f".{key}")
+            for failure in failures
+        )
+
+
 def test_verify_rejects_validation_row_extra_fields() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     validation_payload = {

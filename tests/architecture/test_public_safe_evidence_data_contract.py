@@ -7,12 +7,6 @@ import pandas as pd
 import pytest
 
 pytestmark = pytest.mark.data_dependency
-pytest.importorskip("pyarrow")
-
-from quant_research_platform.markets.implementations.a_share.verification import (  # noqa: E402
-    private_aggregate,
-)
-from quant_research_platform.storage.datasets import DatasetReadMode  # noqa: E402
 from tests.architecture.test_public_safe_evidence import (  # noqa: E402
     HASH_RE,
     DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
@@ -22,9 +16,28 @@ from tests.architecture.test_public_safe_evidence import (  # noqa: E402
 from tests.helpers import frequency_ids  # noqa: E402
 
 
+@pytest.fixture
+def private_aggregate():
+    pytest.importorskip("pyarrow")
+    from quant_research_platform.markets.implementations.a_share.verification import (
+        private_aggregate,
+    )
+
+    return private_aggregate
+
+
+@pytest.fixture
+def dataset_read_mode():
+    pytest.importorskip("pyarrow")
+    from quant_research_platform.storage.datasets import DatasetReadMode
+
+    return DatasetReadMode
+
+
 def test_current_public_safe_aggregate_payload_includes_key_value_paired_hash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    private_aggregate,
 ) -> None:
     summary = private_aggregate.AggregateSummary(
         row_count=1,
@@ -84,6 +97,7 @@ def test_current_public_safe_aggregate_payload_includes_key_value_paired_hash(
 
 def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
     monkeypatch: pytest.MonkeyPatch,
+    private_aggregate,
 ) -> None:
     frames = (
         pd.DataFrame(
@@ -121,6 +135,7 @@ def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
 
 def test_full_historical_market_panel_daily_generation_always_uses_chunks(
     monkeypatch: pytest.MonkeyPatch,
+    private_aggregate,
 ) -> None:
     chunk = pd.DataFrame(
         {
@@ -148,6 +163,7 @@ def test_full_historical_market_panel_daily_generation_always_uses_chunks(
 
 def test_generated_panel_generation_uses_runtime_resource_policy(
     monkeypatch: pytest.MonkeyPatch,
+    private_aggregate,
 ) -> None:
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog,
@@ -245,7 +261,9 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
     assert sum(len(chunk) for chunk in chunks) == len(sessions)
 
 
-def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers() -> None:
+def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers(
+    private_aggregate,
+) -> None:
     for name in (
         "_dynamic_" + "asset_chunk_size",
         "chunked_" + "values",
@@ -259,7 +277,7 @@ def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers() -> No
         assert not hasattr(private_aggregate, name)
 
 
-def test_aggregate_summary_checksum_is_invariant_to_chunking() -> None:
+def test_aggregate_summary_checksum_is_invariant_to_chunking(private_aggregate) -> None:
     combined = pd.DataFrame(
         {
             "market_id": ["a_share"] * 12,
@@ -281,7 +299,9 @@ def test_aggregate_summary_checksum_is_invariant_to_chunking() -> None:
     assert chunk_summary.aggregate_checksum == full_summary.aggregate_checksum
 
 
-def test_aggregate_summary_detects_duplicate_keys_across_chunks() -> None:
+def test_aggregate_summary_detects_duplicate_keys_across_chunks(
+    private_aggregate,
+) -> None:
     first = pd.DataFrame(
         {
             "market_id": ["a_share"],
@@ -309,6 +329,8 @@ def test_aggregate_summary_detects_duplicate_keys_across_chunks() -> None:
 def test_dataset_root_summary_uses_dataframe_chunks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    private_aggregate,
+    dataset_read_mode,
 ) -> None:
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / "fixture"
     calls: list[dict[str, object]] = []
@@ -353,7 +375,7 @@ def test_dataset_root_summary_uses_dataframe_chunks(
                 "2025-01-01",
                 "2025-12-31",
             ),
-            "mode": DatasetReadMode.CHUNKED,
+            "mode": dataset_read_mode.CHUNKED,
         }
     ]
     assert summary.row_count == 2
@@ -363,6 +385,7 @@ def test_dataset_root_summary_uses_dataframe_chunks(
 
 def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
     tmp_path: Path,
+    private_aggregate,
 ) -> None:
     from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
@@ -388,7 +411,9 @@ def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
     assert summary.period == "2025-01-02 through 2025-01-03"
 
 
-def test_verification_evidence_source_fixture_is_not_public_market_contract() -> None:
+def test_verification_evidence_source_fixture_is_not_public_market_contract(
+    private_aggregate,
+) -> None:
     source = Path(private_aggregate.__file__).read_text(encoding="utf-8")
     public_payloads = "\n".join(
         (

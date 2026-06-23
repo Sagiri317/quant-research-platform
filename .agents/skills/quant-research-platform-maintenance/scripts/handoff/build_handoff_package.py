@@ -787,7 +787,12 @@ def source_tree_synthesized_string_scan_findings(
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_tracked_text_files(clone_dir):
-        if not source_tree_should_scan_retired_text(relative):
+        if relative.suffix.lower() != ".py":
+            continue
+        if is_negative_test_allowlisted(
+            relative.as_posix(),
+            "stale_governance_truth",
+        ) or is_negative_test_allowlisted(relative.as_posix(), "retired_name"):
             continue
         path = clone_dir / relative
         if not path.exists():

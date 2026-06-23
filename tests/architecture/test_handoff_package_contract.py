@@ -179,7 +179,7 @@ def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> Non
     ]
 
 
-def test_source_tree_scan_independently_rejects_python_symbols_and_synthesized_strings(
+def test_source_tree_scan_independently_rejects_synthesized_strings(
     tmp_path: Path,
 ) -> None:
     builder = _load_handoff_builder()
@@ -188,13 +188,11 @@ def test_source_tree_scan_independently_rejects_python_symbols_and_synthesized_s
     _git(repo, "init")
     _git(repo, "config", "user.email", "governance-contract@example.invalid")
     _git(repo, "config", "user.name", "Governance Contract Test")
-    path = repo / "docs" / "architecture" / "hack_fixture.py"
+    path = repo / "tools" / "hack_synthesized.py"
     path.parent.mkdir(parents=True)
     path.write_text(
         "\n".join(
             [
-                "class QRPCleanRewriteHelper:",
-                "    pass",
                 'adjacent = "QRP " "Clean Rewrite"',
                 'joined = "".join(["clean", "-rewrite"])',
                 "",
@@ -207,32 +205,57 @@ def test_source_tree_scan_independently_rejects_python_symbols_and_synthesized_s
 
     groups = builder.source_tree_scan_groups(repo)
 
-    assert groups["python_symbols"]["status"] == "FAIL"
+    assert groups["python_symbols"]["status"] == "PASS"
     assert groups["synthesized_strings"]["status"] == "FAIL"
-    assert {
-        (finding["path"], finding["symbol"], finding["rule"])
-        for finding in groups["python_symbols"]["findings"]
-    } == {
-        (
-            "docs/architecture/hack_fixture.py",
-            "QRPCleanRewriteHelper",
-            "clean_rewrite",
-        )
-    }
+    assert groups["retired_text"]["status"] == "PASS"
     observed = {
         (finding["path"], finding["rule"], finding["scan_mode"])
         for finding in groups["synthesized_strings"]["findings"]
     }
     assert (
-        "docs/architecture/hack_fixture.py",
+        "tools/hack_synthesized.py",
         "clean_rewrite",
         "token_static_string",
     ) in observed
     assert (
-        "docs/architecture/hack_fixture.py",
+        "tools/hack_synthesized.py",
         "clean_rewrite",
         "ast_join_string",
     ) in observed
+
+
+def test_source_tree_scan_independently_rejects_python_symbols(
+    tmp_path: Path,
+) -> None:
+    builder = _load_handoff_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "governance-contract@example.invalid")
+    _git(repo, "config", "user.name", "Governance Contract Test")
+    path = repo / "tools" / "hack_symbol.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                "class QRPCleanRewriteHelper:",
+                "    pass",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add retired symbol fixture")
+
+    groups = builder.source_tree_scan_groups(repo)
+
+    assert groups["python_symbols"]["status"] == "FAIL"
+    assert groups["synthesized_strings"]["status"] == "PASS"
+    assert {
+        (finding["path"], finding["symbol"], finding["rule"])
+        for finding in groups["python_symbols"]["findings"]
+    } == {("tools/hack_symbol.py", "QRPCleanRewriteHelper", "clean_rewrite")}
 
 
 def test_handoff_source_tree_rules_import_governance_contract() -> None:

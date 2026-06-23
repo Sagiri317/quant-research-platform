@@ -391,13 +391,8 @@ def test_build_handoff_package_rejects_non_object_handoff_evidence_entry(
     assert not list(out_dir.glob("*"))
 
 
-@pytest.mark.parametrize(
-    "forbidden_key",
-    _load_builder_module().HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES,
-)
-def test_build_handoff_package_rejects_forbidden_custom_evidence_key(
+def test_build_handoff_package_rejects_one_forbidden_custom_evidence_key(
     tmp_path: Path,
-    forbidden_key: str,
 ) -> None:
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
@@ -405,7 +400,7 @@ def test_build_handoff_package_rejects_forbidden_custom_evidence_key(
             "custom-note": {
                 "schema_version": "custom-note/0.1",
                 "status": "PASS",
-                "details": {forbidden_key: "forged"},
+                "details": {"check": "forged"},
             }
         },
     )
