@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,12 +14,26 @@ VERIFY_GOVERNANCE = (
     / "scripts"
     / "verify_governance.py"
 )
+GOVERNANCE_CONTRACT = VERIFY_GOVERNANCE.with_name("governance_contract.py")
 
 
 def _load_governance_module():
     spec = importlib.util.spec_from_file_location(
         "verify_governance",
         VERIFY_GOVERNANCE,
+    )
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_contract_module():
+    spec = importlib.util.spec_from_file_location(
+        "governance_contract",
+        GOVERNANCE_CONTRACT,
     )
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -77,14 +92,113 @@ def test_active_doc_scan_collects_non_empty_clean_tree_file_set() -> None:
     assert "data/README.md" in paths
 
 
+def test_active_doc_scan_cli_collects_non_empty_clean_tree_file_set() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VERIFY_GOVERNANCE),
+            "--governance-only",
+            "--scan-scope",
+            "active-docs",
+            "--json",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    payload = __import__("json").loads(result.stdout)
+
+    assert payload["status"] == "PASS"
+    assert payload["scan_scope"] == "active-docs"
+    assert payload["checked_count"] > 0
+    assert payload["checked_files"]
+
+
+def test_governance_only_requires_explicit_scan_scope() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VERIFY_GOVERNANCE),
+            "--governance-only",
+            "--json",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "--scan-scope" in result.stderr
+
+
+def test_removed_active_doc_flags_are_not_accepted() -> None:
+    for flag in ("--allow-active-docs", "--scan-active-docs"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(VERIFY_GOVERNANCE),
+                "--governance-only",
+                "--scan-scope",
+                "active-docs",
+                flag,
+                "--json",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "unrecognized arguments" in result.stderr
+
+
 def test_active_doc_scan_empty_file_set_is_failure() -> None:
     module = _load_governance_module()
     result = module.Result()
 
-    module.check_active_doc_scan_non_empty(result, [])
+    module.check_scan_non_empty(result, [], scan_scope="active-docs")
 
     assert not result.ok
-    assert "active-doc scan found no files" in result.errors
+    assert "checked_files_empty: active-docs" in result.errors
+
+
+def test_retired_governance_exact_paths_existing_in_worktree_fail(
+    tmp_path: Path,
+) -> None:
+    contract = _load_contract_module()
+
+    for retired in contract.RETIRED_GOVERNANCE_EXACT_PATHS:
+        repo = tmp_path / retired.replace("/", "_")
+        path = repo / retired
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("retired path resurrected\n", encoding="utf-8")
+
+        findings = contract.retired_governance_path_findings(repo)
+
+        assert findings
+        assert findings[0]["path"] == retired
+
+
+def test_retired_governance_prefix_existing_in_worktree_fails(
+    tmp_path: Path,
+) -> None:
+    contract = _load_contract_module()
+    retired = tmp_path / "docs" / "reports" / "clean-rewrite-0.1-test.md"
+    retired.parent.mkdir(parents=True)
+    retired.write_text("retired report resurrected\n", encoding="utf-8")
+
+    findings = contract.retired_governance_path_findings(tmp_path)
+
+    assert findings == [
+        {
+            "path": "docs/reports/clean-rewrite-0.1-test.md",
+            "rule": "retired_governance_prefix",
+        }
+    ]
 
 
 def test_active_doc_scan_fails_stale_current_truth(tmp_path: Path) -> None:
@@ -106,6 +220,46 @@ def test_active_doc_scan_fails_stale_current_truth(tmp_path: Path) -> None:
         assert not result.ok, text
 
 
+def test_retired_naming_rules_cover_required_derived_forms() -> None:
+    contract = _load_contract_module()
+    examples = {
+        "project_status": [
+            "PROJECT_STATUS.md",
+            "project_status",
+            "PROJECT_STATUS",
+            "ProjectStatus",
+            "project-status",
+        ],
+        "current_qrp_status": [
+            "current-qrp-status",
+            "current_qrp_status",
+            "CurrentQrpStatus",
+            "currentQrpStatus",
+        ],
+        "clean_rewrite": [
+            "clean-rewrite",
+            "clean_rewrite",
+            "clean rewrite",
+            "CleanRewrite",
+            "cleanRewrite",
+        ],
+        "retired_execution_mode": [
+            "ExecutionMode",
+            "execution_mode",
+            "execution-mode",
+            "--execution-mode",
+        ],
+    }
+
+    patterns = contract.retired_name_patterns()
+
+    for rule, forms in examples.items():
+        assert rule in patterns
+        for form in forms:
+            assert patterns[rule].search(form), (rule, form)
+    assert not patterns["clean_rewrite"].search("clean")
+
+
 def test_changed_files_only_and_active_doc_scan_use_distinct_inputs() -> None:
     module = _load_governance_module()
     changed_only = ["README.md"]
@@ -116,14 +270,14 @@ def test_changed_files_only_and_active_doc_scan_use_distinct_inputs() -> None:
 
 
 def test_retired_status_documents_are_not_required_active_docs() -> None:
-    module = _load_governance_module()
+    contract = _load_contract_module()
 
-    assert "PROJECT_STATUS.md" not in module.BASE_GOVERNANCE_PREFIXES
+    assert "PROJECT_STATUS.md" not in contract.ACTIVE_GOVERNANCE_DOC_ROOTS
     assert all(
         "current-qrp-status.md" not in prefix
-        for prefix in module.ACTIVE_DOCS_PREFIXES
+        for prefix in contract.ACTIVE_GOVERNANCE_DOC_ROOTS
     )
     assert all(
         "clean-rewrite-0.1" not in prefix
-        for prefix in module.ACTIVE_DOCS_PREFIXES
+        for prefix in contract.ACTIVE_GOVERNANCE_DOC_ROOTS
     )

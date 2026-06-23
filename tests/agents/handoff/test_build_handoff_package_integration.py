@@ -194,12 +194,21 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert source_tree_scan["expected_head"] == final_head
     assert set(source_tree_scan["scan_groups"]) == {
         "retired_terms",
+        "retired_governance_paths",
         "active_test_literals",
         "governance_truth",
         "sensitive_negative_literals",
     }
     assert source_tree_scan["scan_groups"]["retired_terms"]["status"] == "PASS"
     assert source_tree_scan["scan_groups"]["retired_terms"]["finding_count"] == 0
+    assert (
+        source_tree_scan["scan_groups"]["retired_governance_paths"]["status"]
+        == "PASS"
+    )
+    assert (
+        source_tree_scan["scan_groups"]["retired_governance_paths"]["finding_count"]
+        == 0
+    )
     assert (
         source_tree_scan["scan_groups"]["active_test_literals"]["status"]
         == "PASS"
@@ -388,6 +397,15 @@ def _init_synthetic_repo(repo: Path) -> None:
     shutil.copytree(
         HANDOFF_ROOT / "scripts" / "handoff",
         support_root / "scripts" / "handoff",
+    )
+    scripts_root = support_root / "scripts"
+    shutil.copyfile(
+        HANDOFF_ROOT / "scripts" / "governance_contract.py",
+        scripts_root / "governance_contract.py",
+    )
+    shutil.copyfile(
+        HANDOFF_ROOT / "scripts" / "package_safety_check.py",
+        scripts_root / "package_safety_check.py",
     )
     shutil.copytree(
         HANDOFF_ROOT / "templates" / "handoff",

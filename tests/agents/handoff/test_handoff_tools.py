@@ -246,6 +246,11 @@ def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> No
         "findings": [{"path": "src/example.py", "rule": "demo"}],
         "scan_groups": {
             "retired_terms": {"status": "PASS", "finding_count": 0, "findings": []},
+            "retired_governance_paths": {
+                "status": "PASS",
+                "finding_count": 0,
+                "findings": [],
+            },
             "active_test_literals": {
                 "status": "PASS",
                 "finding_count": 1,

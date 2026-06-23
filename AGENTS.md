@@ -41,6 +41,8 @@ git branch -a
 
 `.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、package safety、governance check 等工具必须从这里读取。
 
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、retired governance paths、retired naming、stale truth、package forbidden path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
+
 `.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
 
 ## 5. 验证状态语义
@@ -51,6 +53,7 @@ git branch -a
 - `FAIL`：实际运行并失败，必须说明失败范围和下一步。
 - `NOT_RUN`：未运行，不得伪装为 PASS。
 - `BLOCKED`：因环境、依赖、权限、超时或边界无法运行，必须说明阻塞条件。
+- `TIMEOUT`：命令实际超时，不能写成 `PASS`。
 
 pytest PASS、governance PASS、handoff verifier PASS、package safety PASS、source-tree scan PASS、compare PASS、sidecar PASS 不能互相替代。每个 PASS 只覆盖对应命令和对应 scope。
 
@@ -59,6 +62,8 @@ pytest PASS、governance PASS、handoff verifier PASS、package safety PASS、so
 QRP 采用 current-contract-only。普通 tests 只保护当前合同。旧字段、旧路径、旧 artifact 字段、旧执行模式、旧命名和兼容 alias 只能出现在 retired-surface negative tests 或明确 allowlist 中。除非用户批准兼容期，禁止 fallback read、silent drop、compatibility field 和 alias field。
 
 新实现应替代旧实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
+
+Retired governance paths 不得复活。`PROJECT_STATUS.md`、`.agents/briefs/current-qrp-status.md`、`docs/architecture/open-issues-register.md` 和 `docs/reports/clean-rewrite-0.1-*` 只要在 tracked tree 或 working tree 中存在，治理 gate 必须 `FAIL`。
 
 ## 7. private safety
 
@@ -76,7 +81,7 @@ QRP 采用 current-contract-only。普通 tests 只保护当前合同。旧字�
 
 ```bash
 git diff --check
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --allow-active-docs --json
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 python -m pytest tests/agents tests/architecture -q
 ```

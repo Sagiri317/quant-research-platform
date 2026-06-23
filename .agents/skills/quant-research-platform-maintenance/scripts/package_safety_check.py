@@ -18,10 +18,14 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+SCRIPT_DIR = Path(__file__).resolve().parent
 SRC_ROOT = REPO_ROOT / "src"
 if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
+from governance_contract import PACKAGE_FORBIDDEN_PATH_PARTS  # noqa: E402
 from quant_research_platform.runtime.privacy import public_text_unsafe_reason  # noqa: E402
 
 BLOCKED_EXTENSIONS = {
@@ -37,26 +41,7 @@ BLOCKED_EXTENSIONS = {
     ".sqlite3",
 }
 
-BLOCKED_PATH_PARTS = {
-    "data/raw",
-    "data/interim",
-    "data/processed",
-    "data/research",
-    "reports/private_research",
-    "reports/private_real",
-    "reports/private_data",
-    "diff.patch",
-    "pr_body.md",
-    "review_threads",
-    "review_evidence",
-    "review_bundle",
-    "review_package",
-    "review_zip_path",
-    "secrets",
-    "credentials",
-    ".env",
-    "auth.json",
-}
+BLOCKED_PATH_PARTS = PACKAGE_FORBIDDEN_PATH_PARTS
 
 PACKAGE_EXTENSIONS = {".zip", ".bundle"}
 TEXT_EXTENSIONS = {".md", ".patch", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}

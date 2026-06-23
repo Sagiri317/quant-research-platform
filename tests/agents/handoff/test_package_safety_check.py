@@ -26,6 +26,30 @@ def _load_package_safety_module():
     return module
 
 
+def _load_governance_contract_module():
+    script = (
+        Path(".agents")
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+        / "governance_contract.py"
+    )
+    spec = importlib.util.spec_from_file_location("governance_contract", script)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_package_safety_uses_shared_governance_forbidden_path_parts():
+    module = _load_package_safety_module()
+    contract = _load_governance_contract_module()
+
+    assert module.BLOCKED_PATH_PARTS == contract.PACKAGE_FORBIDDEN_PATH_PARTS
+
+
 def test_package_safety_allows_handoff_final_branch_bundle_by_default(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"

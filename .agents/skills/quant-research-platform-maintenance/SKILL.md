@@ -62,13 +62,21 @@ references/prompt-patterns.md
 
 所有报告只用：`PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。
 
-`PASS` 必须绑定实际命令或 artifact。完整测试超时不能写 PASS。分段测试通过只能覆盖对应分段。
+`PASS` 必须绑定实际命令或 artifact。完整测试超时写 `TIMEOUT`，不能写 PASS。分段测试通过只能覆盖对应分段。
+
+内部治理规则事实源是：
+
+```text
+.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
+```
+
+`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 必须引用该事实源或由它派生规则。retired governance paths 存在即 `FAIL`。
 
 建议命令：
 
 ```bash
 git diff --check
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --allow-active-docs --json
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 python -m pytest tests/agents tests/architecture -q
 ```

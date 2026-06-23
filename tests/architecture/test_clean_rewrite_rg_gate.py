@@ -2,9 +2,27 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from pathlib import Path
 
 from tests.helpers import frequency_ids
+
+GOVERNANCE_SCRIPT_DIR = (
+    Path(__file__).resolve().parents[2]
+    / ".agents"
+    / "skills"
+    / "quant-research-platform-maintenance"
+    / "scripts"
+)
+if str(GOVERNANCE_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(GOVERNANCE_SCRIPT_DIR))
+
+from governance_contract import (  # noqa: E402
+    ACTIVE_GOVERNANCE_DOC_ROOTS as CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS,
+    RETIRED_GOVERNANCE_EXACT_PATHS,
+    is_negative_test_allowlisted,
+    stale_governance_truth_patterns,
+)
 
 SCAN_ROOTS = (
     Path("src"),
@@ -30,33 +48,12 @@ RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = {
     Path("src/quant_research_platform/workflows/verification_evidence.py"),
 }
 ACTIVE_GOVERNANCE_DOC_ROOTS = (
-    Path("AGENTS.md"),
-    Path("README.md"),
-    Path(".agents/briefs"),
-    Path(".agents/skills/quant-research-platform-maintenance/SKILL.md"),
-    Path(".agents/skills/quant-research-platform-maintenance/references"),
-    Path("docs/architecture"),
-    Path("docs/code-map"),
-    Path("docs/api"),
-    Path("docs/data"),
-    Path("data/README.md"),
+    Path(root.rstrip("/")) for root in CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS
 )
-STALE_GOVERNANCE_TRUTH_PATTERNS = {
-    "old_feature_branch_current_truth": re.compile(
-        r"feature/(?:qrp-clean-rewrite|agent-governance-redesign)"
-    ),
-    "clean_rewrite_current_state": re.compile(r"\bclean[- ]rewrite\b", re.I),
-    "draft_pr_current_state": re.compile(r"\bdraft PR\b", re.I),
-    "pre_merge_current_state": re.compile(r"\bpre-merge\b", re.I),
-    "merge_ready_current_state": re.compile(r"\bmerge-ready\b", re.I),
-    "run_official_tool_source": re.compile(
-        r"(?:\.run\s+official|official\s+\.run)",
-        re.I,
-    ),
-    "retired_status_source": re.compile(
-        r"(?:PROJECT_STATUS\.md|current-qrp-status\.md)"
-    ),
-}
+STALE_GOVERNANCE_TRUTH_PATTERNS = stale_governance_truth_patterns()
+RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
+    "docs/reports/clean-rewrite",
+)
 
 
 def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
@@ -117,6 +114,8 @@ def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:
     for path in _iter_active_governance_doc_files():
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
+            if _is_retired_path_policy_line(path, line):
+                continue
             for name, pattern in STALE_GOVERNANCE_TRUTH_PATTERNS.items():
                 if pattern.search(line):
                     hits.append(f"{path}:{line_number}: {name}")
@@ -127,12 +126,19 @@ def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:
 def test_stale_governance_truth_patterns_cover_required_examples() -> None:
     examples = {
         "old_feature_branch_current_truth": "当前分支是 feature/qrp-clean-rewrite",
-        "clean_rewrite_current_state": "clean rewrite 是当前状态",
+        "clean_rewrite": "clean rewrite 是当前状态",
         "run_official_tool_source": ".run official tool source",
     }
 
     for name, text in examples.items():
         assert STALE_GOVERNANCE_TRUTH_PATTERNS[name].search(text)
+
+
+def _is_retired_path_policy_line(path: Path, line: str) -> bool:
+    return is_negative_test_allowlisted(
+        path.as_posix(),
+        "retired_path_policy_docs",
+    ) and any(marker in line for marker in RETIRED_PATH_POLICY_MARKERS)
 
 
 def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:
@@ -670,6 +676,13 @@ def test_research_foundation_semantic_closure_terms_are_retired() -> None:
             ".agents/skills/quant-research-platform-maintenance/references/"
             "current-contract.md"
         ): ("br" + "oker",),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/"
+            "governance_contract.py"
+        ): (
+            "Prediction" + "Bundle",
+            "Model" + "Family",
+        ),
     }
 
     current_file = Path(__file__).resolve()

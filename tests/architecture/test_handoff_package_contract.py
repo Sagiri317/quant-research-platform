@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 HANDOFF_ROOT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff"
+)
+GOVERNANCE_CONTRACT = (
+    Path(".agents")
+    / "skills"
+    / "quant-research-platform-maintenance"
+    / "scripts"
+    / "governance_contract.py"
 )
 
 
@@ -23,6 +32,7 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     assert "handoff_generation.json" not in verifier
     source_tree_scan = _load_handoff_builder().source_tree_scan_groups(Path("."))
     assert source_tree_scan["retired_terms"]["findings"] == []
+    assert source_tree_scan["retired_governance_paths"]["findings"] == []
     assert source_tree_scan["governance_truth"]["findings"] == []
     assert "governance_truth" in verifier
     assert '".run/handoffs"' in builder
@@ -93,6 +103,40 @@ def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
     )
 
 
+def test_source_tree_scan_rejects_retired_governance_path_resurrection(
+    tmp_path: Path,
+) -> None:
+    builder = _load_handoff_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "governance-contract@example.invalid")
+    _git(repo, "config", "user.name", "Governance Contract Test")
+    (repo / "PROJECT_STATUS.md").write_text("retired status\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add retired governance path")
+
+    groups = builder.source_tree_scan_groups(repo)
+
+    assert groups["retired_governance_paths"]["status"] == "FAIL"
+    assert groups["retired_governance_paths"]["findings"] == [
+        {"path": "PROJECT_STATUS.md", "rule": "retired_governance_exact_path"}
+    ]
+
+
+def test_handoff_source_tree_rules_import_governance_contract() -> None:
+    builder = _load_handoff_builder()
+    contract = _load_governance_contract()
+
+    assert tuple(
+        path.as_posix() + ("/" if path.is_dir() else "")
+        for path in builder.SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS
+    ) == contract.ACTIVE_GOVERNANCE_DOC_ROOTS
+    assert builder.source_tree_forbidden_patterns().keys() == (
+        contract.retired_public_surface_patterns().keys()
+    )
+
+
 def test_public_safe_text_checks_use_runtime_privacy_single_source() -> None:
     agent_safety = Path("src/quant_research_platform/agents/safety.py").read_text(
         encoding="utf-8"
@@ -142,3 +186,27 @@ def _load_handoff_verifier():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_governance_contract():
+    spec = importlib.util.spec_from_file_location(
+        "governance_contract_contract_test",
+        GOVERNANCE_CONTRACT,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout

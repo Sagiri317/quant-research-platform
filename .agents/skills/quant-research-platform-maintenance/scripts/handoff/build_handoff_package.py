@@ -25,10 +25,19 @@ if str(SCRIPT_DIR) not in sys.path:
 if str(SCRIPT_PARENT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_PARENT))
 
+from governance_contract import (  # noqa: E402
+    ACTIVE_GOVERNANCE_DOC_ROOTS,
+    RETIRED_GOVERNANCE_EXACT_PATHS,
+    is_negative_test_allowlisted,
+    VALID_STATUS_TOKENS,
+    retired_governance_path_findings,
+    retired_public_surface_patterns,
+    stale_governance_truth_patterns,
+)
 from handoff_safety import scan_handoff_zip  # noqa: E402
 
 PACKAGE_SCHEMA_VERSION = "handoff-sidecar/0.1"
-VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
+VALID_STATUSES = set(VALID_STATUS_TOKENS)
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
@@ -65,6 +74,8 @@ FORBIDDEN_PACKAGE_ENTRY_PARTS = {
     "review_threads.json",
 }
 HANDOFF_TOOL_SOURCE_PATHS = [
+    ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py",
@@ -186,17 +197,18 @@ SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
 SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
     Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
 }
-SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS = (
-    Path("AGENTS.md"),
-    Path("README.md"),
-    Path(".agents/briefs"),
-    Path(".agents/skills/quant-research-platform-maintenance/SKILL.md"),
-    Path(".agents/skills/quant-research-platform-maintenance/references"),
-    Path("docs/architecture"),
-    Path("docs/code-map"),
-    Path("docs/api"),
-    Path("docs/data"),
-    Path("data/README.md"),
+SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS = tuple(
+    Path(root.rstrip("/")) for root in ACTIVE_GOVERNANCE_DOC_ROOTS
+)
+SOURCE_TREE_RETIRED_TERM_ROOTS = SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS + (
+    Path("src/quant_research_platform/interfaces"),
+    Path("src/quant_research_platform/agents"),
+    Path("src/quant_research_platform/reports"),
+    Path(".agents/skills/quant-research-platform-maintenance/scripts/handoff"),
+    Path(".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py"),
+)
+SOURCE_TREE_RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
+    "docs/reports/clean-rewrite",
 )
 SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
     Path(
@@ -933,6 +945,9 @@ def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
 
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     retired_findings = source_tree_retired_term_findings(clone_dir)
+    retired_governance_path_findings_ = source_tree_retired_governance_path_findings(
+        clone_dir
+    )
     active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
     governance_truth_findings = source_tree_governance_truth_findings(clone_dir)
     sensitive_negative_literal_findings = (
@@ -943,6 +958,11 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             "status": "PASS" if not retired_findings else "FAIL",
             "finding_count": len(retired_findings),
             "findings": retired_findings,
+        },
+        "retired_governance_paths": {
+            "status": "PASS" if not retired_governance_path_findings_ else "FAIL",
+            "finding_count": len(retired_governance_path_findings_),
+            "findings": retired_governance_path_findings_,
         },
         "active_test_literals": {
             "status": "PASS" if not active_test_literal_findings else "FAIL",
@@ -962,9 +982,18 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     }
 
 
+def source_tree_retired_governance_path_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    tracked = tuple(path.as_posix() for path in source_tree_tracked_text_files(clone_dir))
+    return retired_governance_path_findings(clone_dir, tracked_paths=tracked)
+
+
 def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_tracked_text_files(clone_dir):
+        if not source_tree_should_scan_retired_terms(relative):
+            continue
         path = clone_dir / relative
         if not path.exists():
             continue
@@ -1006,6 +1035,15 @@ def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]
             )
         )
     return findings
+
+
+def source_tree_should_scan_retired_terms(relative: Path) -> bool:
+    if is_negative_test_allowlisted(relative.as_posix(), "retired_name"):
+        return False
+    return any(
+        relative == root or root in relative.parents
+        for root in SOURCE_TREE_RETIRED_TERM_ROOTS
+    )
 
 
 def source_tree_split_string_findings(
@@ -1284,6 +1322,8 @@ def source_tree_governance_truth_findings(
             for line_number, line in enumerate(lines, start=1):
                 if not pattern.search(line):
                     continue
+                if source_tree_retired_path_policy_line(relative, line):
+                    continue
                 findings.append(
                     {
                         "path": relative.as_posix(),
@@ -1292,6 +1332,13 @@ def source_tree_governance_truth_findings(
                     }
                 )
     return findings
+
+
+def source_tree_retired_path_policy_line(relative: Path, line: str) -> bool:
+    return is_negative_test_allowlisted(
+        relative.as_posix(),
+        "retired_path_policy_docs",
+    ) and any(marker in line for marker in SOURCE_TREE_RETIRED_PATH_POLICY_MARKERS)
 
 
 def source_tree_active_governance_doc_files(clone_dir: Path) -> tuple[Path, ...]:
@@ -1314,28 +1361,7 @@ def source_tree_active_governance_doc_files(clone_dir: Path) -> tuple[Path, ...]
 
 
 def source_tree_governance_truth_patterns() -> dict[str, re.Pattern[str]]:
-    return {
-        "stale_old_feature_branch_current_truth": re.compile(
-            r"feature/(?:qrp-clean-rewrite|agent-governance-redesign)"
-        ),
-        "stale_clean_rewrite_current_state": re.compile(
-            r"\bclean[- ]rewrite\b",
-            re.IGNORECASE,
-        ),
-        "stale_draft_pr_current_state": re.compile(r"\bdraft PR\b", re.IGNORECASE),
-        "stale_pre_merge_current_state": re.compile(r"\bpre-merge\b", re.IGNORECASE),
-        "stale_merge_ready_current_state": re.compile(
-            r"\bmerge-ready\b",
-            re.IGNORECASE,
-        ),
-        "stale_run_official_tool_source": re.compile(
-            r"(?:\.run\s+official|official\s+\.run)",
-            re.IGNORECASE,
-        ),
-        "stale_retired_status_source": re.compile(
-            r"(?:PROJECT_STATUS\.md|current-qrp-status\.md)"
-        ),
-    }
+    return stale_governance_truth_patterns()
 
 
 def source_tree_active_test_literal_patterns(
@@ -1519,68 +1545,7 @@ def source_tree_path_allowed(
 
 
 def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
-    return {
-        "retired_a_share_market_definition": re.compile(
-            r"\ba_share_market_definition\b"
-        ),
-        "retired_a_share_field_catalog": re.compile(r"\ba_share_field_catalog\b"),
-        "retired_a_share_processed_catalog": re.compile(
-            r"\ba_share_processed_catalog\b"
-        ),
-        "retired_a_share_factor_catalog": re.compile(r"\ba_share_factor_catalog\b"),
-        "retired_a_share_label_catalog": re.compile(r"\ba_share_label_catalog\b"),
-        "retired_build_a_share": re.compile(r"\bbuild_a_share_[A-Za-z0-9_]+\b"),
-        "retired_default_a_share": re.compile(
-            r"\bdefault_a_share_[A-Za-z0-9_]+\b"
-        ),
-        "retired_csmar_source_alias": re.compile(r"\bCSMAR_SOURCE_ID\b"),
-        "retired_a_share_market_alias": re.compile(r"\bA_SHARE_MARKET_ID\b"),
-        "retired_workflow_module": re.compile(r"\bcontracts\.workflow_run\b"),
-        "retired_model_algorithm_collection": re.compile(r"\bMODEL_ALGORITHMS\b"),
-        "retired_execution_mode": re.compile(r"\bExecutionMode\b"),
-        "retired_daily_panel": re.compile(r"\bdaily_panel\b"),
-        "retired_daily_market": re.compile(r"\bdaily_market\b"),
-        "retired_daily_context": re.compile(r"\bdaily_context\b"),
-        "retired_a_share_daily_bar": re.compile(r"\ba_share_daily_bar\b"),
-        "retired_a_share_daily_bar_interim": re.compile(
-            r"\ba_share_daily_bar_interim\b"
-        ),
-        "retired_daily_backtest": re.compile(r"\bdaily_backtest\b"),
-        "retired_daily_rebalance": re.compile(r"\bdaily_rebalance\b"),
-        "retired_daily_open": re.compile(r"\bdaily_open\b"),
-        "retired_backtest_spec": re.compile(r"\bBacktestSpec\b"),
-        "retired_dry_run_flag": re.compile(r"--dry-run\b"),
-        "retired_model_family": re.compile(r"\bmodel_family\b"),
-        "retired_prediction_bundle": re.compile(
-            r"\b(?:[A-Za-z0-9_]+_)?prediction_bundle(?:_[A-Za-z0-9_]+)?\b"
-        ),
-        "forbidden_private_real": re.compile(r"\bprivate_real\b", re.IGNORECASE),
-        "forbidden_private_data": re.compile(r"\bprivate_data\b", re.IGNORECASE),
-        "forbidden_review_evidence": re.compile(r"\breview_evidence\b"),
-        "forbidden_review_bundle": re.compile(r"\breview_bundle\b"),
-        "forbidden_review_package": re.compile(r"\breview_package\b"),
-        "forbidden_review_zip": re.compile(r"\breview_zip\b"),
-        "forbidden_review_sidecar": re.compile(r"\breview_sidecar\b"),
-        "forbidden_review_zip_path": re.compile(r"\breview_zip_path\b"),
-        "forbidden_external_evidence_json_path": re.compile(
-            r"\bexternal_evidence_json_path\b"
-        ),
-        "forbidden_final_sha": re.compile(r"\bfinal_sha\b"),
-        "forbidden_final_head_full": re.compile(r"\bfinal_head_full\b"),
-        "forbidden_validation_table": re.compile(r"\bvalidation_table\b"),
-        "forbidden_review_threads": re.compile(r"\breview_threads\b"),
-        "forbidden_review_threads_json": re.compile(r"\breview_threads\.json\b"),
-        "forbidden_task_review_threads": re.compile(r"\btask_review_threads\b"),
-        "forbidden_verify_review_thread_closure": re.compile(
-            r"\bverify_review_thread_closure\b"
-        ),
-        "forbidden_diff_patch": re.compile(r"\bdiff\.patch\b"),
-        "forbidden_pr_body": re.compile(r"\bpr_body(?:\.md)?\b"),
-        "forbidden_goal_status": re.compile(r"\bgoal_status\b"),
-        "forbidden_render_pr_body": re.compile(
-            r"\brender_pr_body(?:_from_validation_evidence)?(?:\.py)?\b"
-        ),
-    }
+    return retired_public_surface_patterns()
 
 
 def source_tree_sensitive_negative_patterns() -> dict[str, re.Pattern[str]]:

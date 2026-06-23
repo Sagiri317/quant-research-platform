@@ -13,9 +13,13 @@ from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_PARENT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+if str(SCRIPT_PARENT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_PARENT))
 
+from governance_contract import VALID_STATUS_TOKENS  # noqa: E402
 from build_handoff_package import (  # noqa: E402
     FORBIDDEN_PACKAGE_ENTRY_PARTS,
     FORBIDDEN_TASK_KEYS,
@@ -27,7 +31,7 @@ from build_handoff_package import (  # noqa: E402
 )
 from handoff_safety import scan_handoff_zip  # noqa: E402
 
-VALID_STATUSES = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
+VALID_STATUSES = set(VALID_STATUS_TOKENS)
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_ZIP_ENTRIES = {
     "artifact_manifest.json",
@@ -713,6 +717,7 @@ def verify_source_tree_scan_evidence(
     else:
         expected_groups = {
             "retired_terms",
+            "retired_governance_paths",
             "active_test_literals",
             "governance_truth",
             "sensitive_negative_literals",

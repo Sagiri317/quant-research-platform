@@ -28,29 +28,7 @@ Forbidden scope:
 
 ## P1 Deferred
 
-### QRP-GOV-001
-
-```text
-Severity: P1
-Owner layer: governance scripts
-Status: deferred
-Evidence: verify_governance 当前应支持 state-based active-doc scan，避免 clean tree 下 checked_files 为空仍 PASS。
-Next action: Codex 在真实仓库中修改 verify_governance.py 并补 tests/agents/test_verify_governance.py。
-Acceptance gate: active-doc scan 在 clean tree 上扫描非空 active docs；故意加入 stale active doc 时 FAIL。
-Forbidden scope: 不改业务逻辑，不恢复状态文档。
-```
-
-### QRP-GOV-002
-
-```text
-Severity: P1
-Owner layer: architecture tests
-Status: deferred
-Evidence: 文档硬切换删除历史 docs/reports 后，相关治理测试需要从保护历史文件改为保护 current contract。
-Next action: Codex 同步修 tests/agents/**、tests/architecture/** 和必要 reports evidence tests。
-Acceptance gate: targeted governance tests PASS；完整测试若环境超时必须写 BLOCKED/TIMEOUT。
-Forbidden scope: 不改 factor/model/backtest/storage runtime。
-```
+暂无。
 
 ## P2 Watchlist
 
@@ -58,10 +36,22 @@ Forbidden scope: 不改 factor/model/backtest/storage runtime。
 
 ```text
 Severity: P2
-Owner layer: handoff tooling
+Owner layer: tests
 Status: deferred
-Evidence: handoff source-tree scan 可进一步增加 stale active-doc patterns。
-Next action: 后续在 handoff builder/verifier 任务中处理。
-Acceptance gate: source-tree scan 对旧状态事实、旧 tool source 和 retired fields 有独立 scan group。
-Forbidden scope: 不改变 handoff artifact 公共合同，除非同步 schema 和 tests。
+Evidence: 部分治理/架构测试收集路径仍可能受 data/parquet 依赖影响，独立审查环境缺少 `pyarrow` 时不应阻塞纯治理 fast tests。
+Next action: 后续拆分纯治理 fast tests 与 data/parquet 依赖 tests。
+Acceptance gate: 缺少 data/parquet 依赖时，纯治理 fast tests 仍可收集和运行；依赖型测试明确写 `BLOCKED` 或 marker。
+Forbidden scope: 本议题不改业务数据读取语义，不移除必要的 data/parquet 合同测试。
+```
+
+### QRP-GOV-004
+
+```text
+Severity: P2
+Owner layer: handoff tests
+Status: deferred
+Evidence: handoff integration test 较慢，完整运行未运行或超时时不能由分段 PASS 替代。
+Next action: 后续区分 fast contract gate 与 slow integration test。
+Acceptance gate: fast handoff contract gate 可快速运行；slow integration 单独标记，full integration 未运行/超时必须写 `NOT_RUN`、`BLOCKED` 或 `TIMEOUT`。
+Forbidden scope: 不降低 builder、verifier、source-tree scan 或 package safety 的独立 gate。
 ```

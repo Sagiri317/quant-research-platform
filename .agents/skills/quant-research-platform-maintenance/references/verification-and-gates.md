@@ -8,8 +8,9 @@
 - `FAIL`：实际运行并失败，必须有失败范围和修复建议。
 - `NOT_RUN`：未运行。
 - `BLOCKED`：环境、依赖、权限、超时或边界阻塞。
+- `TIMEOUT`：命令实际超时。
 
-任何报告不得把 `NOT_RUN` 或 `BLOCKED` 写成 `PASS`。
+任何报告不得把 `NOT_RUN`、`BLOCKED` 或 `TIMEOUT` 写成 `PASS`。
 
 ## 2. PASS 不可替代
 
@@ -39,10 +40,26 @@ git diff --check
 ### Governance gate
 
 ```bash
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --allow-active-docs --json
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 ```
 
-该 gate 应支持 state-based active-doc scan。clean tree 不能因为没有 changed files 就跳过 active docs。
+这是官方 active-doc state gate。clean tree 也必须扫描非空 active docs；`checked_files=[]` 不得 `PASS`。
+
+Diff-only governance gate 使用：
+
+```bash
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope changed-files --base-ref <base> --json
+```
+
+`--allow-active-docs` 和 `--scan-active-docs` 不是当前有效参数。
+
+内部治理规则事实源是：
+
+```text
+.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
+```
+
+active doc roots、retired governance paths、retired naming、stale truth、package forbidden path parts 和 status token 必须从这里读取或派生。
 
 ### Code-map gate
 
@@ -78,6 +95,15 @@ data/README.md
 ```
 
 active docs 不得把历史 branch、历史阶段、历史 PR、历史 reports 当当前事实。
+
+Retired governance paths 存在即 `FAIL`。至少包括：
+
+```text
+PROJECT_STATUS.md
+.agents/briefs/current-qrp-status.md
+docs/architecture/open-issues-register.md
+docs/reports/clean-rewrite-0.1-*
+```
 
 ## 5. Retired surface
 

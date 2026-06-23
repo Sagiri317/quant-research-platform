@@ -15,10 +15,14 @@ from pathlib import Path
 from zipfile import ZipFile
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
+SCRIPT_PARENT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+if str(SCRIPT_PARENT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_PARENT))
 
+from governance_contract import PACKAGE_FORBIDDEN_PATH_PARTS  # noqa: E402
 from quant_research_platform.runtime.privacy import public_text_unsafe_reason
 
 TEXT_LIKE_SUFFIXES = {
@@ -54,26 +58,7 @@ FORBIDDEN_SUFFIXES = {
     ".pickle",
     ".pkl",
 }
-FORBIDDEN_PATH_SEGMENTS = (
-    "data/raw",
-    "data/interim",
-    "data/processed",
-    "data/research",
-    "reports/private_research",
-    "reports/private_real",
-    "reports/private_data",
-    "diff.patch",
-    "pr_body.md",
-    "review_threads",
-    "review_evidence",
-    "review_bundle",
-    "review_package",
-    "review_zip_path",
-    ".codex",
-    "credentials",
-    "secrets",
-    "vendor raw",
-)
+FORBIDDEN_PATH_SEGMENTS = PACKAGE_FORBIDDEN_PATH_PARTS
 ENVIRONMENT_PATH_RE = re.compile(
     r"(?i)(?:\bquant-workspace\b|\\\\quant-workspace\\\\|"
     r"\bsite-packages\b|\bconda env path\b|"

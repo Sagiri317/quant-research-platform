@@ -11,8 +11,25 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from governance_contract import (  # noqa: E402
+    ACTIVE_GOVERNANCE_DOC_ROOTS,
+    PACKAGE_FORBIDDEN_PATH_PARTS,
+    RETIRED_GOVERNANCE_EXACT_PATHS,
+    RETIRED_GOVERNANCE_PREFIXES,
+    is_governance_rule_definition_path,
+    is_negative_test_allowlisted,
+    is_retired_governance_path,
+    retired_governance_path_findings,
+    stale_governance_truth_patterns,
+)
 
 BASE_GOVERNANCE_PREFIXES = (
     "AGENTS.md",
@@ -28,18 +45,7 @@ ACTIVE_DOCS_PREFIXES = (
     "data/README.md",
 )
 
-ACTIVE_DOC_SCAN_ROOTS = (
-    "AGENTS.md",
-    "README.md",
-    ".agents/briefs/",
-    ".agents/skills/quant-research-platform-maintenance/SKILL.md",
-    ".agents/skills/quant-research-platform-maintenance/references/",
-    "docs/architecture/",
-    "docs/code-map/",
-    "docs/api/",
-    "docs/data/",
-    "data/README.md",
-)
+ACTIVE_DOC_SCAN_ROOTS = ACTIVE_GOVERNANCE_DOC_ROOTS
 
 BUSINESS_PREFIXES = (
     "src/",
@@ -60,14 +66,11 @@ REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
     "src/quant_research_platform/reports/verification_evidence.py",
 }
 
-RETIRED_DOC_DELETION_PATHS = {
-    "PROJECT_STATUS.md",
-    ".agents/briefs/current-qrp-status.md",
-    "docs/architecture/open-issues-register.md",
-}
+RETIRED_DOC_DELETION_PATHS = set(RETIRED_GOVERNANCE_EXACT_PATHS)
 
-RETIRED_DOC_DELETION_PREFIXES = (
-    "docs/reports/clean-rewrite-0.1-",
+RETIRED_DOC_DELETION_PREFIXES = RETIRED_GOVERNANCE_PREFIXES
+RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
+    "docs/reports/clean-rewrite",
 )
 
 PRIVATE_ROOTS = (
@@ -98,14 +101,7 @@ REQUIRED_AGENTS_TERMS = (
     ("current-contract-only",),
 )
 
-STALE_STATUS_PATTERNS = (
-    re.compile(r"feature/(?:qrp-clean-rewrite|agent-governance-redesign)"),
-    re.compile(r"\bclean[- ]rewrite\b", re.IGNORECASE),
-    re.compile(r"\b(?:draft PR|pre-merge|merge-ready)\b", re.IGNORECASE),
-    re.compile(r"(?:\.run\s+official|official\s+\.run)", re.IGNORECASE),
-    re.compile(r"PROJECT_STATUS\.md.*(?:active|status|source)", re.IGNORECASE),
-    re.compile(r"current-qrp-status\.md.*(?:active|status|source)", re.IGNORECASE),
-)
+STALE_STATUS_PATTERNS = tuple(stale_governance_truth_patterns().values())
 
 LOCAL_PATH_PATTERN = re.compile(r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+)")  # noqa: E501
 SECRET_PATTERN = re.compile(
@@ -188,35 +184,32 @@ def active_doc_files(repo: Path) -> list[str]:
                 for path in root.rglob("*")
                 if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES
             )
-    retired_fragments = (
-        "PROJECT_STATUS.md",
-        "current-qrp-status.md",
-        "docs/reports/clean-rewrite-0.1-",
-    )
-    return sorted(
-        {
-            path
-            for path in files
-            if not any(fragment in path for fragment in retired_fragments)
-        }
-    )
+    return sorted(set(files))
 
 
-def check_active_doc_scan_non_empty(result: Result, paths: list[str]) -> None:
+def check_scan_non_empty(
+    result: Result,
+    paths: list[str],
+    *,
+    scan_scope: str,
+) -> None:
     if not paths:
-        result.errors.append("active-doc scan found no files")
+        result.errors.append(f"checked_files_empty: {scan_scope}")
 
 
-def allowed_governance_prefixes(allow_active_docs: bool) -> tuple[str, ...]:
-    return BASE_GOVERNANCE_PREFIXES + (
-        ACTIVE_DOCS_PREFIXES if allow_active_docs else ()
-    )
+def check_checked_files_non_empty(result: Result, *, scan_scope: str) -> None:
+    if not result.checked_files:
+        result.errors.append(f"checked_files_empty: {scan_scope}")
 
 
-def is_governance_path(path: str, allow_active_docs: bool) -> bool:
+def allowed_governance_prefixes() -> tuple[str, ...]:
+    return BASE_GOVERNANCE_PREFIXES + ACTIVE_DOCS_PREFIXES
+
+
+def is_governance_path(path: str) -> bool:
     return any(
         path == prefix or path.startswith(prefix)
-        for prefix in allowed_governance_prefixes(allow_active_docs)
+        for prefix in allowed_governance_prefixes()
     )
 
 
@@ -224,10 +217,9 @@ def check_governance_only(
     result: Result,
     repo: Path,
     paths: list[str],
-    allow_active_docs: bool,
 ) -> None:
     for path in paths:
-        allowed = is_governance_only_allowed_path(repo, path, allow_active_docs)
+        allowed = is_governance_only_allowed_path(repo, path)
         if path.startswith(PRIVATE_ROOTS):
             result.errors.append(f"private root changed or included: {path}")
         if path.startswith(".codex/"):
@@ -255,9 +247,8 @@ def check_governance_only(
 def is_governance_only_allowed_path(
     repo: Path,
     path: str,
-    allow_active_docs: bool,
 ) -> bool:
-    if is_governance_path(path, allow_active_docs):
+    if is_governance_path(path):
         return True
     if path.startswith(GOVERNANCE_TEST_PREFIXES):
         return True
@@ -267,12 +258,16 @@ def is_governance_only_allowed_path(
 
 
 def is_retired_doc_deletion(repo: Path, path: str) -> bool:
-    if not (
-        path in RETIRED_DOC_DELETION_PATHS
-        or path.startswith(RETIRED_DOC_DELETION_PREFIXES)
-    ):
+    if not is_retired_governance_path(path):
         return False
     return not (repo / path).exists()
+
+
+def check_retired_governance_paths(result: Result, repo: Path) -> None:
+    for finding in retired_governance_path_findings(repo):
+        result.errors.append(
+            f"retired_governance_path_exists: {finding['path']}:{finding['rule']}"
+        )
 
 
 def iter_text_files(repo: Path, paths: list[str]) -> list[Path]:
@@ -316,8 +311,31 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
             "PROJECT_STATUS\\.md",
             "current-qrp-status\\.md",
             "PROJECT_STATUS.md",
+            "PROJECT_STATUS",
+            "project_status",
+            "ProjectStatus",
+            "project-status",
             "current-qrp-status.md",
+            "current_qrp_status",
+            "CurrentQrpStatus",
+            "currentQrpStatus",
+            "open-issues-register",
+            "open_issues_register",
+            "OpenIssuesRegister",
+            "openIssuesRegister",
             "docs/reports/clean-rewrite-0.1-",
+            "clean_rewrite",
+            "CleanRewrite",
+            "cleanRewrite",
+            "merge_ready",
+            "MergeReady",
+            "mergeReady",
+            "pre_merge",
+            "PreMerge",
+            "preMerge",
+            "draft_pr",
+            "DraftPr",
+            "draftPr",
             "E:/",
             "D:/",
             "C:/",
@@ -363,7 +381,17 @@ def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
 
 
 def _is_allowed_stale_fixture(rel: str, line: str) -> bool:
-    return rel in STALE_NEGATIVE_TEST_PATHS and any(
+    if is_governance_rule_definition_path(rel):
+        return True
+    if is_negative_test_allowlisted(rel, "retired_path_policy_docs") and any(
+        marker in line for marker in RETIRED_PATH_POLICY_MARKERS
+    ):
+        return True
+    return (
+        rel in STALE_NEGATIVE_TEST_PATHS
+        or is_negative_test_allowlisted(rel, "stale_governance_truth")
+        or is_negative_test_allowlisted(rel, "retired_name")
+    ) and any(
         marker in line
         for marker in (
             "feature/qrp-clean-rewrite",
@@ -377,8 +405,39 @@ def _is_allowed_stale_fixture(rel: str, line: str) -> bool:
             "official .run",
             "PROJECT_STATUS",
             "current-qrp-status",
+            "project_status",
+            "ProjectStatus",
+            "project-status",
+            "PROJECT_STATUS.md",
+            "open-issues-register",
+            "open_issues_register",
+            "OpenIssuesRegister",
+            "openIssuesRegister",
+            "current_qrp_status",
+            "CurrentQrpStatus",
+            "currentQrpStatus",
+            "clean_rewrite",
+            "CleanRewrite",
+            "cleanRewrite",
+            "merge_ready",
+            "MergeReady",
+            "pre_merge",
+            "PreMerge",
+            "draft_pr",
+            "DraftPr",
         )
     )
+
+
+def _should_scan_stale_governance_truth(rel: str) -> bool:
+    if rel.startswith(("src/", "tests/")):
+        return rel in STALE_NEGATIVE_TEST_PATHS or is_negative_test_allowlisted(
+            rel,
+            "stale_governance_truth",
+        )
+    if rel.startswith(".agents/skills/quant-research-platform-maintenance/scripts/"):
+        return False
+    return True
 
 
 def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
@@ -407,12 +466,13 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
                 result.errors.append(
                     f"local absolute path pattern in {rel}:{line_number}"
                 )
-            for match in STALE_STATUS_PATTERNS:
-                if match.search(line) and not _is_allowed_stale_fixture(rel, line):
-                    result.errors.append(
-                        "stale N2/status wording in "
-                        f"{rel}:{line_number}: {match.pattern}"
-                    )
+            if _should_scan_stale_governance_truth(rel):
+                for match in STALE_STATUS_PATTERNS:
+                    if match.search(line) and not _is_allowed_stale_fixture(rel, line):
+                        result.errors.append(
+                            "stale N2/status wording in "
+                            f"{rel}:{line_number}: {match.pattern}"
+                        )
             if (
                 "NOT_RUN" in line
                 and "PASS" in line
@@ -458,6 +518,8 @@ def check_script_portability(result: Result, repo: Path) -> None:
         return
     for p in script_root.rglob("*"):
         rel = normalize(str(p.relative_to(repo)))
+        if rel.endswith("/governance_contract.py"):
+            continue
         if p.is_file() and p.suffix.lower() == ".ps1":
             result.errors.append(f"ps1-only script remains in governance skill: {rel}")
         if p.is_file() and p.suffix.lower() in {".sh", ".bash"}:
@@ -494,6 +556,8 @@ def check_markdown_paths(result: Result, repo: Path, paths: list[str]) -> None:
                 for root in PRIVATE_ROOTS
             ):
                 continue
+            if is_retired_governance_path(candidate):
+                continue
             if not (repo / candidate).exists():
                 src_candidate = repo / "src" / "quant_research_platform" / candidate
                 if src_candidate.exists():
@@ -522,16 +586,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Governance-only mode forbids business code and private roots.",
     )
     parser.add_argument(
-        "--allow-active-docs",
-        action="store_true",
-        help="Allow active docs in governance-only mode.",
-    )
-    parser.add_argument(
-        "--scan-active-docs",
-        action="store_true",
+        "--scan-scope",
+        choices=("active-docs", "changed-files"),
+        default=None,
         help=(
-            "Scan current active governance docs from repository state instead "
-            "of only Git changed files."
+            "Required with --governance-only. active-docs scans current active "
+            "governance docs from repository state; changed-files scans Git diff "
+            "and worktree changes."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
@@ -541,31 +602,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Print a one-line summary for final reports.",
     )
     args = parser.parse_args(argv)
+    if args.governance_only and args.scan_scope is None:
+        parser.error("--governance-only requires --scan-scope")
 
     repo = Path(args.repo_root).resolve()
     result = Result()
-    try:
-        changed = changed_files(repo, args.base_ref)
-    except RuntimeError as exc:
-        result.errors.append(str(exc))
-        changed = []
-
-    paths = active_doc_files(repo) if args.scan_active_docs else changed
-    if args.scan_active_docs:
-        check_active_doc_scan_non_empty(result, paths)
+    scan_scope = args.scan_scope or "changed-files"
+    check_retired_governance_paths(result, repo)
+    changed: list[str] = []
+    if scan_scope == "changed-files":
+        try:
+            changed = changed_files(repo, args.base_ref)
+        except RuntimeError as exc:
+            result.errors.append(str(exc))
+            changed = []
+        paths = changed
+    else:
+        paths = active_doc_files(repo)
+    check_scan_non_empty(result, paths, scan_scope=scan_scope)
 
     if args.governance_only:
-        check_governance_only(result, repo, paths, args.allow_active_docs)
+        check_governance_only(result, repo, paths)
     check_text_safety(result, repo, paths)
+    check_checked_files_non_empty(result, scan_scope=scan_scope)
     check_agents_size_and_terms(result, repo)
     check_script_portability(result, repo)
     check_markdown_paths(result, repo, paths)
 
     summary = {
         "status": "PASS" if result.ok else "FAIL",
-        "scan_mode": "active_docs" if args.scan_active_docs else "changed_files",
+        "scan_scope": scan_scope,
         "changed_files": changed,
         "checked_files": result.checked_files,
+        "checked_count": len(result.checked_files),
         "scanned_files": paths,
         "findings": result.errors,
         "errors": result.errors,
@@ -576,7 +645,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.summary:
         print(
             f"governance_check_status={summary['status']} "
-            f"scan_mode={summary['scan_mode']} "
+            f"scan_scope={summary['scan_scope']} "
             f"changed_files={len(changed)} "
             f"checked_files={len(result.checked_files)} "
             f"errors={len(result.errors)} "
@@ -584,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print(f"governance_check_status={summary['status']}")
-        print(f"scan_mode={summary['scan_mode']}")
+        print(f"scan_scope={summary['scan_scope']}")
         print(f"changed_files={len(changed)}")
         print(f"checked_files={len(result.checked_files)}")
         print(f"errors={len(result.errors)}")

@@ -21,7 +21,7 @@ src/         QRP 源码
 tests/       当前合同测试、治理测试、架构测试
 docs/        当前合同文档和代码地图
 data/        本地数据占位说明，不提交私有数据
-.run/        本地运行输出和 evidence，不作为 tracked tooling
+.run/        本地运行输出和 evidence，不作为 tracked tooling source
 ```
 
 ## 当前 public surface
@@ -55,16 +55,18 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - 历史 evidence 不进入 `docs/` 作为长期事实源。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。
+- retired governance paths 只要复活即 `FAIL`，不靠文本关键词绕过。
 
 ## 验证原则
 
-所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。`PASS` 必须对应实际命令或可检查 artifact。未运行的检查不能写成 PASS。
+所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`、`TIMEOUT`。`PASS` 必须对应实际命令或可检查 artifact。未运行、阻塞或超时的检查不能写成 PASS。
 
 常用治理验证：
 
 ```bash
 git diff --check
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --allow-active-docs --json
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 python -m pytest tests/agents tests/architecture -q
 ```

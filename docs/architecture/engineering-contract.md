@@ -13,13 +13,13 @@
 ```bash
 git diff --check
 python -m pytest tests/agents tests/architecture -q
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --allow-active-docs --json
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 ```
 
 ## 状态 token
 
-只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。不要写 “looks good”“probably pass” 这类不可验证语义。
+只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`、`TIMEOUT`。不要写 “looks good”“probably pass” 这类不可验证语义。
 
 ## 文件路径
 
@@ -36,3 +36,9 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 ## 测试职责
 
 普通 tests 保护当前合同。retired-surface negative tests 保护旧表面不复活。不要让普通 tests 保护历史结构。
+
+## 治理规则事实源
+
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 只能从这里读取或派生治理规则。
+
+Retired governance paths 不能复活；路径本身存在即 `FAIL`，不依赖文案关键词。

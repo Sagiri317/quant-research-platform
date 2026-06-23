@@ -1,6 +1,6 @@
 # Handoff Scripts
 
-本目录保存 tracked handoff tooling。所有 handoff 构建、验证和 safety check 应使用这里的脚本，不得从 `.run/` 中复制或推断工具逻辑。
+本目录保存 tracked handoff tooling。所有 handoff 构建、验证和 safety check 应使用这里的脚本，不得从 `.run/` 中复制或推断工具逻辑。治理规则从 `../governance_contract.py` 读取；该文件是共享规则依赖，不是 `.run/` 产物。
 
 ## 文件
 

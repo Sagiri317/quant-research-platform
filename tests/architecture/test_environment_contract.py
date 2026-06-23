@@ -100,7 +100,9 @@ def test_engineering_contract_includes_current_formal_commands() -> None:
     assert "```bash" in text
     assert "git diff --check" in text
     assert "python -m pytest tests/agents tests/architecture -q" in text
-    assert "verify_governance.py --governance-only --allow-active-docs" in text
+    assert (
+        "verify_governance.py --governance-only --scan-scope active-docs" in text
+    )
     assert "verify_code_map_flow.py --repo-root ." in text
 
 
