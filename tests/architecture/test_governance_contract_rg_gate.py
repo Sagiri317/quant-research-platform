@@ -221,32 +221,34 @@ INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
     ("docs", "code-map", "source-csmar-contracts.md"),
     ("src", "quant_research_platform", "reports", "schema_inventory.py"),
 }
-RETIRED_TERM_NEGATIVE_TEST_ALLOWLIST = {
-    Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/"
-        "verify_code_map_flow.py"
-    ): {
-        "raw_private",
-        "interim_private",
-        "processed_private",
-        "/api/v0.1",
-        "/api/runs",
-        "/api/pipeline",
+ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST = {
+    "retired_term": {
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/"
+            "verify_code_map_flow.py"
+        ): {
+            "raw_private",
+            "interim_private",
+            "processed_private",
+            "/api/v0.1",
+            "/api/runs",
+            "/api/pipeline",
+        },
+        Path("tests/contracts/test_platform_contracts.py"): {
+            "core_long_period",
+            "smoke_minimal",
+        },
+        Path("tests/agents/test_verify_governance.py"): {
+            "/api/v0.1",
+        },
     },
-    Path("tests/contracts/test_platform_contracts.py"): {
-        "core_long_period",
-        "smoke_minimal",
+    "stale_version_token": {
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/"
+            "verify_code_map_flow.py"
+        ): {"/api/v0.1"},
+        Path("tests/agents/test_verify_governance.py"): {"/api/v0.1"},
     },
-    Path("tests/agents/test_verify_governance.py"): {
-        "/api/v0.1",
-    },
-}
-STALE_VERSION_TOKEN_RULE_ALLOWLIST = {
-    Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/"
-        "verify_code_map_flow.py"
-    ): {"/api/v0.1"},
-    Path("tests/agents/test_verify_governance.py"): {"/api/v0.1"},
 }
 
 APPROVED_FIELD_SPEC_FILES = {
@@ -510,7 +512,9 @@ def test_active_tree_has_no_retired_terms() -> None:
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
-            if name in RETIRED_TERM_NEGATIVE_TEST_ALLOWLIST.get(path, set()):
+            if name in ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST[
+                "retired_term"
+            ].get(path, set()):
                 continue
             if pattern.search(text):
                 hits.append(f"{path}: {name}")
@@ -541,7 +545,9 @@ def test_active_tree_has_no_stale_qrp_owned_version_tokens() -> None:
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
-            if name in STALE_VERSION_TOKEN_RULE_ALLOWLIST.get(path, set()):
+            if name in ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST[
+                "stale_version_token"
+            ].get(path, set()):
                 continue
             if pattern.search(text):
                 hits.append(f"{path}: {name}")

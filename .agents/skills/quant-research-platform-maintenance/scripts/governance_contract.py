@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import ast
 import io
+import json
 import re
 import subprocess
+import tomllib
 import tokenize
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +92,14 @@ RETIRED_NAME_RULES = (
             "clean rewrite",
             "CleanRewrite",
             "cleanRewrite",
+            "CLEAN_REWRITE",
+            "Clean Rewrite",
+            "Clean-Rewrite",
+            "QRP Clean Rewrite",
+            "QrpCleanRewrite",
+            "QRPCleanRewrite",
+            "qrp-clean-rewrite",
+            "qrp_clean_rewrite",
         ),
     ),
     NameRule(
@@ -262,7 +272,7 @@ RETIRED_PUBLIC_SYMBOL_RULE_NAMES = {
     "retired_model_algorithm_collection",
 }
 
-LEGITIMATE_RUNTIME_NAME_ALLOWLIST = {
+LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST = {
     Path("src/quant_research_platform/catalog/profiles.py"): {
         "retired_csmar_source_alias": {"_a_share_csmar_source_id"},
     },
@@ -287,11 +297,20 @@ LEGITIMATE_RUNTIME_NAME_ALLOWLIST = {
             "test_all_model_algorithms_fit_and_predict_synthetic_data",
         },
     },
+    Path("src/quant_research_platform/reports/verification_evidence.py"): {
+        "merge_ready": {"merge_ready"},
+    },
+    Path(
+        "src/quant_research_platform/markets/implementations/a_share/verification/"
+        "private_aggregate.py"
+    ): {
+        "merge_ready": {"merge_ready"},
+    },
 }
 
 NEGATIVE_TEST_SYMBOL_ALLOWLIST: dict[Path, dict[str, set[str]]] = {}
 
-NEGATIVE_TEST_ALLOWLIST = {
+NEGATIVE_TEST_LITERAL_ALLOWLIST = {
     "stale_governance_truth": (
         "tests/agents/test_verify_governance.py",
         "tests/architecture/test_governance_contract_rg_gate.py",
@@ -301,14 +320,15 @@ NEGATIVE_TEST_ALLOWLIST = {
         "tests/architecture/test_governance_contract_rg_gate.py",
         "tests/architecture/test_handoff_package_contract.py",
     ),
-    "governance_rule_definition": (
-        ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
-    ),
     "retired_path_policy_docs": (
         "AGENTS.md",
         ".agents/skills/quant-research-platform-maintenance/references/verification-and-gates.md",
     ),
 }
+
+RULE_DEFINITION_ALLOWLIST = (
+    ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
+)
 
 PACKAGE_FORBIDDEN_PATH_PARTS = (
     "data/raw",
@@ -401,6 +421,14 @@ SCANNER_SCRIPT_DEFINITION_MARKERS = (
     "clean_rewrite",
     "CleanRewrite",
     "cleanRewrite",
+    "CLEAN_REWRITE",
+    "Clean Rewrite",
+    "Clean-Rewrite",
+    "QRP Clean Rewrite",
+    "QrpCleanRewrite",
+    "QRPCleanRewrite",
+    "qrp-clean-rewrite",
+    "qrp_clean_rewrite",
     "merge_ready",
     "MergeReady",
     "mergeReady",
@@ -641,9 +669,10 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "VERSION_SURFACE_FORBIDDEN_RULES",
         "RETIRED_PUBLIC_SURFACE_RULES",
         "RETIRED_PUBLIC_SYMBOL_RULE_NAMES",
-        "LEGITIMATE_RUNTIME_NAME_ALLOWLIST",
+        "LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST",
         "NEGATIVE_TEST_SYMBOL_ALLOWLIST",
-        "NEGATIVE_TEST_ALLOWLIST",
+        "NEGATIVE_TEST_LITERAL_ALLOWLIST",
+        "RULE_DEFINITION_ALLOWLIST",
         "PACKAGE_FORBIDDEN_PATH_PARTS",
         "RETIRED_PATH_POLICY_MARKERS",
         "SCANNER_DEFINITION_MARKERS",
@@ -656,10 +685,15 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "active_doc_forbidden_patterns",
         "path_name_forbidden_patterns",
         "python_symbol_forbidden_patterns",
+        "structured_key_forbidden_patterns",
         "synthesized_string_forbidden_patterns",
         "source_tree_forbidden_patterns",
         "stale_fixture_markers",
         "is_allowed_stale_or_retired_fixture",
+        "is_allowed_rule_definition",
+        "is_allowed_negative_test_literal",
+        "is_allowed_runtime_symbol",
+        "is_allowed_version_surface",
     },
     BUILD_HANDOFF_PACKAGE_SCRIPT: {
         "RESERVED_HANDOFF_EVIDENCE_STEMS",
@@ -920,8 +954,19 @@ def synthesized_string_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     return patterns
 
 
+def structured_key_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    return python_symbol_forbidden_patterns()
+
+
 def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
-    return retired_public_surface_patterns()
+    patterns = stale_governance_truth_patterns()
+    patterns.update(retired_public_surface_patterns())
+    patterns.update(version_surface_forbidden_patterns())
+    return patterns
+
+
+def path_name_forbidden_rule_ids() -> tuple[str, ...]:
+    return tuple(path_name_forbidden_patterns())
 
 
 def code_map_forbidden_terms() -> tuple[str, ...]:
@@ -1011,16 +1056,39 @@ def _bounded_literal_pattern(form: str) -> str:
 
 def is_negative_test_allowlisted(path: str | Path, category: str) -> bool:
     normalized = normalize_repo_path(path)
-    return normalized in NEGATIVE_TEST_ALLOWLIST.get(category, ())
+    if category == "governance_rule_definition":
+        return normalized in RULE_DEFINITION_ALLOWLIST
+    return normalized in NEGATIVE_TEST_LITERAL_ALLOWLIST.get(category, ())
+
+
+def is_allowed_rule_definition(path: str | Path, rule_id: str | None = None) -> bool:
+    del rule_id
+    return normalize_repo_path(path) in RULE_DEFINITION_ALLOWLIST
+
+
+def is_allowed_negative_test_literal(
+    path: str | Path,
+    rule_id: str | None = None,
+) -> bool:
+    if rule_id is None:
+        return any(
+            normalize_repo_path(path) in paths
+            for paths in NEGATIVE_TEST_LITERAL_ALLOWLIST.values()
+        )
+    return any(
+        normalize_repo_path(path) in paths
+        for category, paths in NEGATIVE_TEST_LITERAL_ALLOWLIST.items()
+        if category == rule_id or rule_id.startswith(category)
+    )
 
 
 def is_governance_rule_definition_path(path: str | Path) -> bool:
-    return is_negative_test_allowlisted(path, "governance_rule_definition")
+    return is_allowed_rule_definition(path)
 
 
 def is_allowed_runtime_symbol(path: str | Path, symbol: str, rule: str) -> bool:
     normalized = Path(normalize_repo_path(path))
-    return symbol in LEGITIMATE_RUNTIME_NAME_ALLOWLIST.get(normalized, {}).get(
+    return symbol in LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST.get(normalized, {}).get(
         rule,
         set(),
     )
@@ -1032,6 +1100,91 @@ def is_allowed_negative_test_symbol(path: str | Path, symbol: str, rule: str) ->
         rule,
         set(),
     )
+
+
+def is_allowed_version_surface(path: str | Path, version: str) -> bool:
+    del path
+    return version in VERSION_SURFACE_POLICY["allowed"]
+
+
+def structured_keys_from_text(
+    path: str | Path,
+    text: str,
+) -> list[dict[str, object]]:
+    suffix = Path(normalize_repo_path(path)).suffix.lower()
+    if suffix == ".json":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        return _structured_keys_from_mapping(payload)
+    if suffix == ".toml":
+        try:
+            payload = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return []
+        return _structured_keys_from_mapping(payload)
+    if suffix in {".yaml", ".yml"}:
+        return _yaml_like_keys(text)
+    return []
+
+
+def _structured_keys_from_mapping(
+    payload: object,
+    *,
+    key_path: tuple[str, ...] = (),
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_text = str(key)
+            current = (*key_path, key_text)
+            findings.append(
+                {
+                    "line": 0,
+                    "key_path": ".".join(current),
+                    "key": key_text,
+                }
+            )
+            findings.extend(_structured_keys_from_mapping(value, key_path=current))
+    elif isinstance(payload, list):
+        for index, item in enumerate(payload):
+            findings.extend(
+                _structured_keys_from_mapping(
+                    item,
+                    key_path=(*key_path, str(index)),
+                )
+            )
+    return findings
+
+
+def _yaml_like_keys(text: str) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    stack: list[tuple[int, str]] = []
+    key_re = re.compile(
+        r"^(?P<indent>\s*)(?P<quote>['\"]?)"
+        r"(?P<key>[A-Za-z0-9_.-]+)(?P=quote)\s*:"
+    )
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("- "):
+            continue
+        match = key_re.match(line)
+        if not match:
+            continue
+        indent = len(match.group("indent").replace("\t", "    "))
+        key = match.group("key")
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, key))
+        findings.append(
+            {
+                "line": line_number,
+                "key_path": ".".join(item for _indent, item in stack),
+                "key": key,
+            }
+        )
+    return findings
 
 
 def python_synthesized_strings(source: str) -> list[tuple[int, str, str]]:

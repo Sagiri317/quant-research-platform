@@ -39,8 +39,17 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 ## 治理规则事实源
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 只能从这里读取或派生 active docs、retired paths、retired naming、path/name/symbol/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 只能从这里读取或派生 active docs、retired paths、retired naming、path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。
 
 Retired governance paths 不能复活；路径本身存在即 `FAIL`，不依赖文案关键词。
 
-Retired stage naming 不能通过文件名、路径名、Python symbol 或静态字符串拼接复活。合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1` 和 schema/contract `0.1` 字段；带 `v` 前缀的 `0.1` API 版本路径只允许出现在规则定义或 negative tests。
+Retired stage naming 不能通过文件名、路径名、Python symbol、JSON/YAML/TOML key 或静态字符串拼接复活。合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1` 和 schema/contract `0.1` 字段；带 `v` 前缀的 `0.1` API 版本路径只允许出现在规则定义或 negative tests。
+
+public-safe evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
+
+```bash
+python -m pytest tests/architecture/test_public_safe_evidence.py -q
+python -m pytest tests/architecture/test_public_safe_evidence_data_contract.py -q -m data_dependency
+```
+
+handoff tests 分为 fast contract gate 和 slow integration gate；具体命令记录在 `README.md`、maintenance skill 和 verification reference 中。

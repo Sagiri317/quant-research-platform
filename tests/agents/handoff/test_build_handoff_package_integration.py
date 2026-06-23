@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.slow_integration
+
 REPO_ROOT = Path.cwd()
 HANDOFF_ROOT = (
     REPO_ROOT
@@ -197,6 +199,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         "retired_governance_paths",
         "retired_path_names",
         "active_test_literals",
+        "structured_keys",
         "governance_truth",
         "sensitive_negative_literals",
     }
@@ -221,6 +224,11 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     )
     assert (
         source_tree_scan["scan_groups"]["active_test_literals"]["finding_count"]
+        == 0
+    )
+    assert source_tree_scan["scan_groups"]["structured_keys"]["status"] == "PASS"
+    assert (
+        source_tree_scan["scan_groups"]["structured_keys"]["finding_count"]
         == 0
     )
     assert source_tree_scan["scan_groups"]["governance_truth"]["status"] == "PASS"

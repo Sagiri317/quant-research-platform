@@ -59,7 +59,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-active doc roots、retired governance paths、retired naming、retired path/name/symbol/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token 必须从这里读取或派生。
+active doc roots、retired governance paths、retired naming、retired path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token 必须从这里读取或派生。
 
 ### Code-map gate
 
@@ -110,6 +110,7 @@ Retired stage naming 不能通过以下表面复活：
 ```text
 file/path names
 Python function/class/fixture/constant/module-level assignment names
+JSON/YAML/TOML key names
 static string concatenation or simple join synthesis
 active docs current-truth wording
 ```
@@ -130,8 +131,17 @@ active docs current-truth wording
 ```text
 tests/agents/test_verify_governance.py
 tests/architecture/test_governance_contract_rg_gate.py
+tests/architecture/test_public_safe_evidence.py
+tests/architecture/test_public_safe_evidence_data_contract.py
 tests/architecture/test_platform_topology.py
 tests/contracts/test_platform_contracts.py
+```
+
+handoff 测试分层入口：
+
+```bash
+python -m pytest tests/agents/handoff tests/architecture/test_handoff_package_contract.py -q -m "not slow_integration"
+python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py -q -m slow_integration
 ```
 
 ## 6. Final report schema

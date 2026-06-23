@@ -32,10 +32,13 @@ from governance_contract import (  # noqa: E402
     SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST,
     SOURCE_TREE_RETIRED_TERM_ROOTS,
     SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST,
+    is_allowed_runtime_symbol,
     is_negative_test_allowlisted,
     is_retired_path_policy_line,
     path_name_forbidden_patterns,
     python_synthesized_strings,
+    structured_key_forbidden_patterns,
+    structured_keys_from_text,
     VALID_STATUS_TOKENS,
     retired_governance_path_findings,
     source_tree_forbidden_patterns as governance_source_tree_forbidden_patterns,
@@ -627,6 +630,7 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     )
     retired_path_name_findings = source_tree_retired_path_name_findings(clone_dir)
     active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
+    structured_key_findings = source_tree_structured_key_findings(clone_dir)
     governance_truth_findings = source_tree_governance_truth_findings(clone_dir)
     sensitive_negative_literal_findings = (
         source_tree_sensitive_negative_literal_findings(clone_dir)
@@ -651,6 +655,11 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             "status": "PASS" if not active_test_literal_findings else "FAIL",
             "finding_count": len(active_test_literal_findings),
             "findings": active_test_literal_findings,
+        },
+        "structured_keys": {
+            "status": "PASS" if not structured_key_findings else "FAIL",
+            "finding_count": len(structured_key_findings),
+            "findings": structured_key_findings,
         },
         "governance_truth": {
             "status": "PASS" if not governance_truth_findings else "FAIL",
@@ -682,6 +691,35 @@ def source_tree_retired_path_name_findings(
         for rule, pattern in patterns.items():
             if pattern.search(text):
                 findings.append({"path": text, "rule": rule})
+    return findings
+
+
+def source_tree_structured_key_findings(clone_dir: Path) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    patterns = structured_key_forbidden_patterns()
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.suffix.lower() not in {".json", ".toml", ".yaml", ".yml"}:
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for item in structured_keys_from_text(relative, text):
+            key = str(item["key"])
+            key_path = str(item["key_path"])
+            line_number = int(item["line"])
+            for rule, pattern in patterns.items():
+                if not pattern.search(key):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "key_path": key_path,
+                        "key": key,
+                        "rule": rule,
+                    }
+                )
     return findings
 
 
@@ -1127,6 +1165,9 @@ def source_tree_path_allowed(
         allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
         if rule is None or line_text is None:
             return False
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line_text):
+            if is_allowed_runtime_symbol(relative, token, rule):
+                return True
         if is_retired_path_policy_line(relative, line_text):
             return True
         if line_text in allowed_by_rule.get(rule, set()):

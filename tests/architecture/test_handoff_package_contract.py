@@ -34,6 +34,7 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     assert source_tree_scan["retired_terms"]["findings"] == []
     assert source_tree_scan["retired_governance_paths"]["findings"] == []
     assert source_tree_scan["retired_path_names"]["findings"] == []
+    assert source_tree_scan["structured_keys"]["findings"] == []
     assert source_tree_scan["governance_truth"]["findings"] == []
     assert "governance_truth" in verifier
     assert '".run/handoffs"' in builder
@@ -132,7 +133,7 @@ def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> No
     _git(repo, "init")
     _git(repo, "config", "user.email", "governance-contract@example.invalid")
     _git(repo, "config", "user.name", "Governance Contract Test")
-    path = repo / "tests" / "architecture" / "test_clean_rewrite_fake.py"
+    path = repo / "tests" / "architecture" / "test_CLEAN_REWRITE_fake.py"
     path.parent.mkdir(parents=True)
     path.write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
     _git(repo, "add", ".")
@@ -143,7 +144,34 @@ def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> No
     assert groups["retired_path_names"]["status"] == "FAIL"
     assert groups["retired_path_names"]["findings"] == [
         {
-            "path": "tests/architecture/test_clean_rewrite_fake.py",
+            "path": "tests/architecture/test_CLEAN_REWRITE_fake.py",
+            "rule": "clean_rewrite",
+        }
+    ]
+
+
+def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> None:
+    builder = _load_handoff_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "governance-contract@example.invalid")
+    _git(repo, "config", "user.name", "Governance Contract Test")
+    path = repo / "docs" / "metadata.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"CLEAN_REWRITE_FLAG": true}\n', encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add retired structured key")
+
+    groups = builder.source_tree_scan_groups(repo)
+
+    assert groups["structured_keys"]["status"] == "FAIL"
+    assert groups["structured_keys"]["findings"] == [
+        {
+            "path": "docs/metadata.json",
+            "line": 0,
+            "key_path": "CLEAN_REWRITE_FLAG",
+            "key": "CLEAN_REWRITE_FLAG",
             "rule": "clean_rewrite",
         }
     ]

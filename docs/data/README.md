@@ -26,6 +26,13 @@
 - artifact path structure
 - summary statistics without private rows
 
+相关测试分层：
+
+```bash
+python -m pytest tests/architecture/test_public_safe_evidence.py -q
+python -m pytest tests/architecture/test_public_safe_evidence_data_contract.py -q -m data_dependency
+```
+
 ## Agent 规则
 
 agent 不得读取、复制或摘要 private row-level data，除非用户明确要求并且输出仍保持 public-safe。任何 private-data-adjacent 任务必须在报告中说明安全边界。

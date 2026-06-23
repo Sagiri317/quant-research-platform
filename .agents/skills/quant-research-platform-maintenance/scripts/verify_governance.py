@@ -40,6 +40,8 @@ from governance_contract import (  # noqa: E402
     python_symbol_forbidden_patterns,
     python_synthesized_strings,
     retired_governance_path_findings,
+    structured_key_forbidden_patterns,
+    structured_keys_from_text,
     synthesized_string_forbidden_patterns,
 )
 
@@ -76,6 +78,10 @@ GOVERNANCE_TEST_PREFIXES = (
     "tests/reports/",
 )
 
+GOVERNANCE_CONFIG_EXCEPTIONS = {
+    "pyproject.toml",
+}
+
 REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
     "src/quant_research_platform/reports/verification_evidence.py",
 }
@@ -97,6 +103,8 @@ PRIVATE_ROOTS = (
     "data/research/",
     "reports/private_research/",
 )
+
+STRUCTURED_KEY_SUFFIXES = {".json", ".yaml", ".yml", ".toml"}
 
 BLOCKED_EXTENSIONS = {
     ".parquet",
@@ -173,19 +181,30 @@ def changed_files(repo: Path, base_ref: str | None) -> list[str]:
             sub_code, sub_out, _ = run_git(repo, args)
             if sub_code == 0:
                 names.extend(sub_out.splitlines())
+        status_code, status_out, _ = run_git(
+            repo,
+            ["status", "--short", "--untracked-files=all"],
+        )
+        if status_code == 0:
+            names.extend(_paths_from_status_short(status_out))
     else:
-        code, out, err = run_git(repo, ["status", "--short"])
+        code, out, err = run_git(repo, ["status", "--short", "--untracked-files=all"])
         if code != 0:
             raise RuntimeError(f"git status failed: {err.strip()}")
-        names = []
-        for line in out.splitlines():
-            if not line.strip():
-                continue
-            path = line[3:]
-            if " -> " in path:
-                path = path.split(" -> ", 1)[1]
-            names.append(path)
+        names = _paths_from_status_short(out)
     return sorted({normalize(name) for name in names if name})
+
+
+def _paths_from_status_short(output: str) -> list[str]:
+    names: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        names.append(path)
+    return names
 
 
 def active_doc_files(repo: Path) -> list[str]:
@@ -269,6 +288,8 @@ def is_governance_only_allowed_path(
         return True
     if path.startswith(GOVERNANCE_TEST_PREFIXES):
         return True
+    if path in GOVERNANCE_CONFIG_EXCEPTIONS:
+        return True
     if path in REPORTS_EVIDENCE_RENDERER_EXCEPTIONS:
         return True
     if path in GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS:
@@ -316,6 +337,11 @@ def _should_include_state_path(
     normalized = normalize(path)
     parts = Path(normalized).parts
     if any(part in IGNORED_STATE_PATH_PARTS for part in parts):
+        return False
+    if any(
+        normalized == root.rstrip("/") or normalized.startswith(root)
+        for root in PRIVATE_ROOTS
+    ):
         return False
     if suffixes is not None and Path(normalized).suffix.lower() not in suffixes:
         return False
@@ -424,6 +450,36 @@ def check_synthesized_strings(
                 result.errors.append(
                     "retired_synthesized_string: "
                     f"{rel}:{line_number}:{rule}:{scan_mode}"
+                )
+
+
+def check_structured_key_names(
+    result: Result,
+    repo: Path,
+    paths: list[str],
+) -> None:
+    patterns = structured_key_forbidden_patterns()
+    for rel in sorted({normalize(path) for path in paths}):
+        if Path(rel).suffix.lower() not in STRUCTURED_KEY_SUFFIXES:
+            continue
+        path = repo / rel
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            result.warnings.append(f"cannot decode structured file: {rel}")
+            continue
+        for item in structured_keys_from_text(rel, text):
+            key = str(item["key"])
+            key_path = str(item["key_path"])
+            line_number = int(item["line"])
+            for rule, pattern in patterns.items():
+                if not pattern.search(key):
+                    continue
+                result.errors.append(
+                    "retired_structured_key: "
+                    f"{rel}:{line_number}:{key_path}:{key}:{rule}"
                 )
 
 
@@ -660,6 +716,11 @@ def main(argv: list[str] | None = None) -> int:
     state_python_files = repo_state_file_paths(repo, suffixes={".py"})
     check_python_symbol_names(result, repo, state_python_files)
     check_synthesized_strings(result, repo, state_python_files)
+    state_structured_files = repo_state_file_paths(
+        repo,
+        suffixes=STRUCTURED_KEY_SUFFIXES,
+    )
+    check_structured_key_names(result, repo, state_structured_files)
     changed: list[str] = []
     if scan_scope == "changed-files":
         try:

@@ -720,6 +720,7 @@ def verify_source_tree_scan_evidence(
             "retired_governance_paths",
             "retired_path_names",
             "active_test_literals",
+            "structured_keys",
             "governance_truth",
             "sensitive_negative_literals",
         }

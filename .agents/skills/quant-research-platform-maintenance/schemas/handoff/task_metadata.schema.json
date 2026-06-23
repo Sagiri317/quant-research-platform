@@ -149,7 +149,19 @@
             "retired_terms": {
               "$ref": "#/$defs/source_tree_scan_group"
             },
+            "retired_governance_paths": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
+            "retired_path_names": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
             "active_test_literals": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
+            "structured_keys": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
+            "governance_truth": {
               "$ref": "#/$defs/source_tree_scan_group"
             },
             "sensitive_negative_literals": {

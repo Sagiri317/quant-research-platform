@@ -38,6 +38,8 @@ python_files = ["test_*.py"]
 addopts = ["--import-mode=importlib", "-m", "not private_slow"]
 markers = [
   "private_slow: private or slow verification cases excluded from the default merge gate",
+  "data_dependency: tests that require data/parquet stack dependencies",
+  "slow_integration: slow end-to-end integration tests",
 ]
 
 [tool.ruff]

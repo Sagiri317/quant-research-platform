@@ -70,7 +70,7 @@ references/prompt-patterns.md
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 必须引用该事实源或由它派生规则。retired governance paths 存在即 `FAIL`。retired public surface、retired naming、path/name/symbol/synthesized-string patterns、version surface policy、stale truth、negative-test allowlist、source-tree scan allowlist 和 package forbidden path parts 不得在 builder、verifier、safety 或 tests 中复制平行表。
+`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 必须引用该事实源或由它派生规则。retired governance paths 存在即 `FAIL`。retired public surface、retired naming、path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、negative-test allowlist、source-tree scan allowlist 和 package forbidden path parts 不得在 builder、verifier、safety 或 tests 中复制平行表。
 
 建议命令：
 
@@ -79,6 +79,15 @@ git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 python -m pytest tests/agents tests/architecture -q
+```
+
+需要区分 fast 与依赖/慢集成测试时，使用：
+
+```bash
+python -m pytest tests/architecture/test_public_safe_evidence.py -q
+python -m pytest tests/architecture/test_public_safe_evidence_data_contract.py -q -m data_dependency
+python -m pytest tests/agents/handoff tests/architecture/test_handoff_package_contract.py -q -m "not slow_integration"
+python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py -q -m slow_integration
 ```
 
 ## 5. handoff 纪律

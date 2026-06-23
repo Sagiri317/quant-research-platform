@@ -276,6 +276,14 @@ def test_retired_naming_rules_cover_required_derived_forms() -> None:
             "clean rewrite",
             "CleanRewrite",
             "cleanRewrite",
+            "CLEAN_REWRITE",
+            "Clean Rewrite",
+            "Clean-Rewrite",
+            "QRP Clean Rewrite",
+            "QrpCleanRewrite",
+            "QRPCleanRewrite",
+            "qrp-clean-rewrite",
+            "qrp_clean_rewrite",
         ],
         "retired_execution_mode": [
             "ExecutionMode",
@@ -294,6 +302,34 @@ def test_retired_naming_rules_cover_required_derived_forms() -> None:
     assert not patterns["clean_rewrite"].search("clean")
 
 
+def test_governance_contract_exposes_fixed_rule_helpers() -> None:
+    contract = _load_contract_module()
+
+    for name in (
+        "RETIRED_NAME_RULES",
+        "RETIRED_PUBLIC_SURFACE_RULES",
+        "VERSION_SURFACE_POLICY",
+        "LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST",
+        "NEGATIVE_TEST_LITERAL_ALLOWLIST",
+        "RULE_DEFINITION_ALLOWLIST",
+        "PACKAGE_FORBIDDEN_PATH_PARTS",
+        "VALID_STATUS_TOKENS",
+        "retired_name_patterns",
+        "retired_public_surface_patterns",
+        "active_doc_forbidden_patterns",
+        "source_tree_forbidden_patterns",
+        "path_name_forbidden_patterns",
+        "python_symbol_forbidden_patterns",
+        "structured_key_forbidden_patterns",
+        "synthesized_string_forbidden_patterns",
+        "is_allowed_rule_definition",
+        "is_allowed_negative_test_literal",
+        "is_allowed_runtime_symbol",
+        "is_allowed_version_surface",
+    ):
+        assert hasattr(contract, name), name
+
+
 def test_changed_files_only_and_active_doc_scan_use_distinct_inputs() -> None:
     module = _load_governance_module()
     changed_only = ["README.md"]
@@ -301,6 +337,45 @@ def test_changed_files_only_and_active_doc_scan_use_distinct_inputs() -> None:
 
     assert changed_only != active_docs
     assert len(active_docs) > len(changed_only)
+
+
+def test_changed_files_with_base_ref_includes_untracked_files(tmp_path: Path) -> None:
+    module = _load_governance_module()
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "governance@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Governance Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    new_file = tmp_path / "tests" / "architecture" / "new_gate.py"
+    new_file.parent.mkdir(parents=True)
+    new_file.write_text("VALUE = 1\n", encoding="utf-8")
+
+    paths = module.changed_files(tmp_path, base)
+
+    assert "tests/architecture/new_gate.py" in paths
 
 
 def test_retired_status_documents_are_not_required_active_docs() -> None:
@@ -320,7 +395,7 @@ def test_retired_status_documents_are_not_required_active_docs() -> None:
 def test_path_name_gate_fails_retired_stage_paths(tmp_path: Path) -> None:
     module = _load_governance_module()
     cases = (
-        "tests/architecture/test_clean_rewrite_fake.py",
+        "tests/architecture/test_CLEAN_REWRITE_fake.py",
         "tests/contracts/test_clean_rewrite_fake.py",
         "docs/clean-rewrite-guide.md",
         "docs/reports/clean-rewrite-0.1-test.md",
@@ -354,13 +429,23 @@ def test_python_symbol_gate_fails_retired_stage_and_surface_names(
                 "import pytest",
                 "class CleanRewriteFixture:",
                 "    pass",
+                "class QRPCleanRewriteHelper:",
+                "    pass",
+                "class QrpCleanRewriteHelper:",
+                "    pass",
                 "class ExecutionMode:",
                 "    pass",
                 "def test_current_qrp_status():",
                 "    pass",
+                "def test_CLEAN_REWRITE_fake_symbol():",
+                "    pass",
                 "@pytest.fixture",
                 "def daily_panel():",
                 "    return None",
+                "def clean_rewrite_fixture():",
+                "    return None",
+                "clean_rewrite_fixture_value = None",
+                "CLEAN_REWRITE_FLAG = False",
                 "MODEL_ALGORITHMS = ()",
                 "model_family = 'linear'",
             ]
@@ -392,6 +477,11 @@ def test_python_symbol_gate_allows_current_runtime_symbols(tmp_path: Path) -> No
         ),
         "src/quant_research_platform/markets/implementations/a_share/"
         "research_scenarios.py": "model_algorithms = ()\n",
+        "src/quant_research_platform/reports/verification_evidence.py": (
+            "merge_ready = False\n"
+        ),
+        "src/quant_research_platform/markets/implementations/a_share/"
+        "verification/private_aggregate.py": "merge_ready = False\n",
     }
 
     for relative, text in cases.items():
@@ -414,6 +504,9 @@ def test_synthesized_string_gate_fails_retired_stage_names(tmp_path: Path) -> No
         "\n".join(
             [
                 'stage = "clean" "-rewrite"',
+                'display = "QRP " "Clean Rewrite"',
+                'flag = "CLEAN" "_REWRITE"',
+                'title = "Clean" "-Rewrite"',
                 'branch = "feature/" + "qrp-clean-rewrite"',
                 'status_doc = "-".join(["current", "qrp", "status"])',
                 'register = "-".join(["open", "issues", "register"])',
@@ -435,6 +528,65 @@ def test_synthesized_string_gate_fails_retired_stage_names(tmp_path: Path) -> No
     )
     for rule in expected_rules:
         assert any(rule in error for error in result.errors), (rule, result.errors)
+
+
+def test_synthesized_string_gate_allows_current_version_surface(
+    tmp_path: Path,
+) -> None:
+    module = _load_governance_module()
+    path = tmp_path / "tests" / "sample_version_strings.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                'label = "QRP" " 0.1"',
+                'api = "/api/" "0.1"',
+                'version = "0." "1.0"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = module.Result()
+
+    module.check_synthesized_strings(result, tmp_path, ["tests/sample_version_strings.py"])
+
+    assert result.errors == []
+
+
+def test_structured_key_gate_fails_retired_keys_and_allows_values(
+    tmp_path: Path,
+) -> None:
+    module = _load_governance_module()
+    bad = tmp_path / "config.json"
+    bad.write_text(
+        (
+            "{\n"
+            '  "clean_rewrite": true,\n'
+            '  "CleanRewrite": true,\n'
+            '  "CLEAN_REWRITE_FLAG": true\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    good = tmp_path / "allowed.json"
+    good.write_text(
+        (
+            "{\n"
+            '  "retired_name": "clean-rewrite",\n'
+            '  "retired_branch": "feature/qrp-clean-rewrite"\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    result = module.Result()
+
+    module.check_structured_key_names(result, tmp_path, ["config.json", "allowed.json"])
+
+    assert any("config.json" in error and "clean_rewrite" in error for error in result.errors)
+    assert any("config.json" in error and "CleanRewrite" in error for error in result.errors)
+    assert any("config.json" in error and "CLEAN_REWRITE_FLAG" in error for error in result.errors)
+    assert not any("allowed.json" in error for error in result.errors)
 
 
 def test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate(

@@ -1,13 +1,13 @@
 # Open Issues
 
-本文件是当前 open 和 deferred 问题登记。它不保存 done、resolved、historical notes 或路线图。历史追溯使用 git history。
+本文只记录当前仍需处理或已确认 deferred 的问题，不保存 done、resolved、historical notes 或路线图。已关闭事项通过 git history 追溯。
 
 ## 读取规则
 
-- `open`：当前需要处理或会阻塞后续任务。
+- `open`：当前需要处理，或会阻塞后续任务。
 - `deferred`：已确认重要，但不阻塞当前任务。
-- 不记录已完成问题。
-- 不把本文当当前分支或当前阶段事实源。
+- 已完成事项不写入本文。
+- 本文不是当前分支、当前阶段、当前 PR 或当前 merge gate 的事实源。
 
 ## Issue 格式
 
@@ -24,58 +24,16 @@ Forbidden scope:
 
 ## P0 Current Blockers
 
-暂无。若出现会导致错误执行、错误验证、私有数据泄漏或旧合同复活的问题，应在这里登记，并在修复后从本文删除。
+暂无。
 
-## P1 Deferred
+## P1 Current Issues
 
 暂无。
 
-## P2 Watchlist
+## P2 Deferred
 
-### QRP-GOV-003
+暂无。
 
-```text
-Severity: P2
-Owner layer: tests
-Status: deferred
-Evidence: 部分治理/架构测试收集路径仍可能受 data/parquet 依赖影响，独立审查环境缺少 `pyarrow` 时不应阻塞纯治理 fast tests。
-Next action: 后续拆分纯治理 fast tests 与 data/parquet 依赖 tests。
-Acceptance gate: 缺少 data/parquet 依赖时，纯治理 fast tests 仍可收集和运行；依赖型测试明确写 `BLOCKED` 或 marker。
-Forbidden scope: 本议题不改业务数据读取语义，不移除必要的 data/parquet 合同测试。
-```
+## P3 Watchlist
 
-### QRP-GOV-004
-
-```text
-Severity: P2
-Owner layer: handoff tests
-Status: deferred
-Evidence: handoff integration test 较慢，完整运行未运行或超时时不能由分段 PASS 替代。
-Next action: 后续区分 fast contract gate 与 slow integration test。
-Acceptance gate: fast handoff contract gate 可快速运行；slow integration 单独标记，full integration 未运行/超时必须写 `NOT_RUN`、`BLOCKED` 或 `TIMEOUT`。
-Forbidden scope: 不降低 builder、verifier、source-tree scan 或 package safety 的独立 gate。
-```
-
-### QRP-GOV-005
-
-```text
-Severity: P2
-Owner layer: contracts/docs
-Status: deferred
-Evidence: `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、schema/contract `0.1` 和 handoff `0.1` 是合法当前版本面，但版本常量仍分散在 runtime、schemas、docs 和 tests。
-Next action: 后续在不改 public surface 的前提下评估是否需要内部版本常量收敛。
-Acceptance gate: 若执行收敛，版本 token 来源清晰且不把带 `v` 前缀的 `0.1` API 版本路径恢复为当前 API 形式。
-Forbidden scope: 本议题不改 public API、CLI、schema version、artifact contract 或 runtime 行为。
-```
-
-### QRP-GOV-006
-
-```text
-Severity: P2
-Owner layer: governance scan
-Status: deferred
-Evidence: 当前 retired naming gate 已覆盖 active docs、文件/路径名、Python symbol 和 Python 静态字符串拼接；非 Python 结构化文件中的 symbol-like key、front matter 或嵌套 manifest key 仍可后续扩展。
-Next action: 后续评估 JSON/YAML/TOML symbol-like key 扫描是否应纳入 `governance_contract.py` 派生规则。
-Acceptance gate: 非 Python 扩展扫描必须使用同一治理规则事实源，并避免误杀合法版本面和 current runtime 字段。
-Forbidden scope: 不为减少 rg 命中而隐藏旧词，不修改业务 artifact/schema 语义。
-```
+暂无。

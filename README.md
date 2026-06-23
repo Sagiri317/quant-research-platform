@@ -55,7 +55,7 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - 历史 evidence 不进入 `docs/` 作为长期事实源。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、package safety 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、package safety 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生；路径名、Python symbol、JSON/YAML/TOML key 和静态字符串合成都由同一规则派生。
 - retired governance paths 只要复活即 `FAIL`，不靠文本关键词绕过。
 - retired stage naming 不得通过文件名、路径名、Python symbol 或静态字符串拼接复活；合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0` 和 `/api/0.1`，不使用带 `v` 前缀的 `0.1` API 版本路径。
 
@@ -70,6 +70,15 @@ git diff --check
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --scan-scope active-docs --json
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 python -m pytest tests/agents tests/architecture -q
+```
+
+分层测试入口：
+
+```bash
+python -m pytest tests/architecture/test_public_safe_evidence.py -q
+python -m pytest tests/architecture/test_public_safe_evidence_data_contract.py -q -m data_dependency
+python -m pytest tests/agents/handoff tests/architecture/test_handoff_package_contract.py -q -m "not slow_integration"
+python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py -q -m slow_integration
 ```
 
 ## 数据安全
