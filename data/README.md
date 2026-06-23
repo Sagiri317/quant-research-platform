@@ -5,5 +5,6 @@
 - private data 不进入 git。
 - generated row-level data 不进入 git。
 - vendor marker、本地绝对路径、stock-code sample 不进入 git。
+- `.run/` 只保存本地 output/evidence/input artifact，不是 tracked tool source。
 
 数据合同见 `docs/data/README.md`。

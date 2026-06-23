@@ -15,3 +15,5 @@ a-share-data-flow.md
 ## 使用规则
 
 代码地图用于减少 agent 搜索成本。若代码地图与源码、contracts 或 tests 冲突，以可执行合同为准，并修正文档。
+
+代码地图只描述当前合同。治理规则事实源是 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py`；`.run/` 只是 output/evidence/input artifact layer，不是 tracked tool source。API 版本面使用 `/api/0.1`，不使用带 `v` 前缀的 `0.1` API 版本路径。

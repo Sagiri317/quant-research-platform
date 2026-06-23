@@ -6,13 +6,11 @@ import argparse
 import ast
 import hashlib
 import importlib
-import io
 import json
 import re
 import subprocess
 import sys
 import tempfile
-import tokenize
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -36,9 +34,11 @@ from governance_contract import (  # noqa: E402
     SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST,
     is_negative_test_allowlisted,
     is_retired_path_policy_line,
+    path_name_forbidden_patterns,
+    python_synthesized_strings,
     VALID_STATUS_TOKENS,
     retired_governance_path_findings,
-    retired_public_surface_patterns,
+    source_tree_forbidden_patterns as governance_source_tree_forbidden_patterns,
     active_doc_forbidden_patterns,
 )
 from handoff_safety import scan_handoff_zip  # noqa: E402
@@ -625,6 +625,7 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     retired_governance_path_findings_ = source_tree_retired_governance_path_findings(
         clone_dir
     )
+    retired_path_name_findings = source_tree_retired_path_name_findings(clone_dir)
     active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
     governance_truth_findings = source_tree_governance_truth_findings(clone_dir)
     sensitive_negative_literal_findings = (
@@ -640,6 +641,11 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             "status": "PASS" if not retired_governance_path_findings_ else "FAIL",
             "finding_count": len(retired_governance_path_findings_),
             "findings": retired_governance_path_findings_,
+        },
+        "retired_path_names": {
+            "status": "PASS" if not retired_path_name_findings else "FAIL",
+            "finding_count": len(retired_path_name_findings),
+            "findings": retired_path_name_findings,
         },
         "active_test_literals": {
             "status": "PASS" if not active_test_literal_findings else "FAIL",
@@ -662,8 +668,21 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
 def source_tree_retired_governance_path_findings(
     clone_dir: Path,
 ) -> list[dict[str, object]]:
-    tracked = tuple(path.as_posix() for path in source_tree_tracked_text_files(clone_dir))
+    tracked = tuple(path.as_posix() for path in source_tree_tracked_paths(clone_dir))
     return retired_governance_path_findings(clone_dir, tracked_paths=tracked)
+
+
+def source_tree_retired_path_name_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    patterns = path_name_forbidden_patterns()
+    for relative in source_tree_tracked_paths(clone_dir):
+        text = relative.as_posix()
+        for rule, pattern in patterns.items():
+            if pattern.search(text):
+                findings.append({"path": text, "rule": rule})
+    return findings
 
 
 def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]]:
@@ -794,90 +813,8 @@ def source_tree_python_synthesized_strings(
     tree: ast.AST,
     source: str,
 ) -> list[tuple[int, str, str]]:
-    values: list[tuple[int, str, str]] = []
-    seen: set[tuple[int, str, str]] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
-            continue
-        value = source_tree_static_string_value(node)
-        if value is None:
-            continue
-        item = (getattr(node, "lineno", 0), value, "ast_static_string")
-        if item not in seen:
-            seen.add(item)
-            values.append(item)
-    for item in source_tree_token_synthesized_strings(source):
-        if item not in seen:
-            seen.add(item)
-            values.append(item)
-    return values
-
-
-def source_tree_token_synthesized_strings(source: str) -> list[tuple[int, str, str]]:
-    try:
-        tokens = [
-            token
-            for token in tokenize.generate_tokens(io.StringIO(source).readline)
-            if token.type not in {tokenize.NL, tokenize.NEWLINE}
-        ]
-    except tokenize.TokenError:
-        return []
-    values: list[tuple[int, str, str]] = []
-    index = 0
-    while index < len(tokens):
-        lexical_item = tokens[index]
-        if lexical_item.type != tokenize.STRING:
-            index += 1
-            continue
-        pieces: list[str] = []
-        line_number = lexical_item.start[0]
-        cursor = index
-        expect_string = True
-        saw_operator_or_adjacent = False
-        while cursor < len(tokens):
-            current = tokens[cursor]
-            if expect_string:
-                if current.type != tokenize.STRING:
-                    break
-                try:
-                    pieces.append(str(ast.literal_eval(current.string)))
-                except (SyntaxError, ValueError):
-                    break
-                expect_string = False
-                cursor += 1
-                continue
-            if current.type == tokenize.OP and current.string == "+":
-                saw_operator_or_adjacent = True
-                expect_string = True
-                cursor += 1
-                continue
-            if current.type == tokenize.STRING:
-                saw_operator_or_adjacent = True
-                try:
-                    pieces.append(str(ast.literal_eval(current.string)))
-                except (SyntaxError, ValueError):
-                    break
-                cursor += 1
-                continue
-            break
-        if len(pieces) >= 2 and saw_operator_or_adjacent and not expect_string:
-            values.append((line_number, "".join(pieces), "token_static_string"))
-            index = cursor
-            continue
-        index += 1
-    return values
-
-
-def source_tree_static_string_value(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = source_tree_static_string_value(node.left)
-        right = source_tree_static_string_value(node.right)
-        if left is None or right is None:
-            return None
-        return left + right
-    return None
+    del tree
+    return python_synthesized_strings(source)
 
 
 def source_tree_governance_rule_definition_lines(
@@ -1158,15 +1095,18 @@ def source_tree_sensitive_negative_literal_findings(
 
 
 def source_tree_tracked_text_files(clone_dir: Path) -> tuple[Path, ...]:
-    raw = git_text(clone_dir, "ls-files")
     result: list[Path] = []
-    for line in raw.splitlines():
-        relative = Path(line)
+    for relative in source_tree_tracked_paths(clone_dir):
         text_suffixes = {".py", ".md", ".json", ".toml", ".yaml", ".yml"}
         if relative.suffix.lower() not in text_suffixes:
             continue
         result.append(relative)
     return tuple(result)
+
+
+def source_tree_tracked_paths(clone_dir: Path) -> tuple[Path, ...]:
+    raw = git_text(clone_dir, "ls-files")
+    return tuple(Path(line) for line in raw.splitlines() if line.strip())
 
 
 def source_tree_path_allowed(
@@ -1187,6 +1127,8 @@ def source_tree_path_allowed(
         allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
         if rule is None or line_text is None:
             return False
+        if is_retired_path_policy_line(relative, line_text):
+            return True
         if line_text in allowed_by_rule.get(rule, set()):
             return True
         allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(
@@ -1219,7 +1161,7 @@ def source_tree_path_allowed(
 
 
 def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
-    return retired_public_surface_patterns()
+    return governance_source_tree_forbidden_patterns()
 
 
 def source_tree_sensitive_negative_patterns() -> dict[str, re.Pattern[str]]:

@@ -36,6 +36,7 @@ templates/     机器输入模板
 
 - diff gate：检查 patch 格式。
 - governance gate：检查 active docs、privacy、stale facts、status token。
+- naming gate：检查 retired governance path、文件/路径名、Python symbol 和静态字符串拼接。
 - code-map gate：检查代码地图与当前合同一致。
 - handoff gate：检查 builder、verifier、source-tree scan、package safety。
 - test gate：检查当前合同测试。

@@ -315,3 +315,166 @@ def test_retired_status_documents_are_not_required_active_docs() -> None:
         "clean-rewrite-0.1" not in prefix
         for prefix in contract.ACTIVE_GOVERNANCE_DOC_ROOTS
     )
+
+
+def test_path_name_gate_fails_retired_stage_paths(tmp_path: Path) -> None:
+    module = _load_governance_module()
+    cases = (
+        "tests/architecture/test_clean_rewrite_fake.py",
+        "tests/contracts/test_clean_rewrite_fake.py",
+        "docs/clean-rewrite-guide.md",
+        "docs/reports/clean-rewrite-0.1-test.md",
+        ".agents/briefs/current-qrp-status.md",
+    )
+    for relative in cases:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("temporary retired naming fixture\n", encoding="utf-8")
+
+    result = module.Result()
+
+    module.check_forbidden_path_names(result, tmp_path)
+
+    for relative in cases:
+        assert any(relative in error for error in result.errors), (
+            relative,
+            result.errors,
+        )
+
+
+def test_python_symbol_gate_fails_retired_stage_and_surface_names(
+    tmp_path: Path,
+) -> None:
+    module = _load_governance_module()
+    path = tmp_path / "tests" / "sample_symbols.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "class CleanRewriteFixture:",
+                "    pass",
+                "class ExecutionMode:",
+                "    pass",
+                "def test_current_qrp_status():",
+                "    pass",
+                "@pytest.fixture",
+                "def daily_panel():",
+                "    return None",
+                "MODEL_ALGORITHMS = ()",
+                "model_family = 'linear'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = module.Result()
+
+    module.check_python_symbol_names(result, tmp_path, ["tests/sample_symbols.py"])
+
+    expected_rules = (
+        "clean_rewrite",
+        "current_qrp_status",
+        "retired_execution_mode",
+        "retired_daily_panel",
+        "retired_model_algorithm_collection",
+        "retired_model_family",
+    )
+    for rule in expected_rules:
+        assert any(rule in error for error in result.errors), (rule, result.errors)
+
+
+def test_python_symbol_gate_allows_current_runtime_symbols(tmp_path: Path) -> None:
+    module = _load_governance_module()
+    cases = {
+        "src/quant_research_platform/catalog/profiles.py": (
+            "_a_share_csmar_source_id = 'source'\n"
+        ),
+        "src/quant_research_platform/markets/implementations/a_share/"
+        "research_scenarios.py": "model_algorithms = ()\n",
+    }
+
+    for relative, text in cases.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    result = module.Result()
+
+    module.check_python_symbol_names(result, tmp_path, list(cases))
+
+    assert result.errors == []
+
+
+def test_synthesized_string_gate_fails_retired_stage_names(tmp_path: Path) -> None:
+    module = _load_governance_module()
+    path = tmp_path / "tests" / "sample_split_strings.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                'stage = "clean" "-rewrite"',
+                'branch = "feature/" + "qrp-clean-rewrite"',
+                'status_doc = "-".join(["current", "qrp", "status"])',
+                'register = "-".join(["open", "issues", "register"])',
+                'snake = "_".join(["clean", "rewrite"])',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = module.Result()
+
+    module.check_synthesized_strings(result, tmp_path, ["tests/sample_split_strings.py"])
+
+    expected_rules = (
+        "clean_rewrite",
+        "old_feature_branch_current_truth",
+        "current_qrp_status",
+        "open_issues_register",
+    )
+    for rule in expected_rules:
+        assert any(rule in error for error in result.errors), (rule, result.errors)
+
+
+def test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate(
+    tmp_path: Path,
+) -> None:
+    module = _load_governance_module()
+    contract = _load_contract_module()
+    legal_doc = tmp_path / "legal.md"
+    legal_doc.write_text(
+        "\n".join(
+            [
+                "QRP 0.1 是当前合同版本。",
+                "GET /api/0.1/catalog/factors",
+                'contract_version = "0.1"',
+                'schema_version = "0.1"',
+                'definition_version = "0.1"',
+                'workflow_version = "0.1"',
+                'package = "handoff-sidecar/0.1"',
+                'project_version = "0.1.0"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = module.Result()
+    module.check_text_safety(result, tmp_path, ["legal.md"])
+
+    assert result.errors == []
+    assert "/api/0.1" in contract.VERSION_SURFACE_POLICY["allowed"]
+    assert "/api/v0.1" in contract.VERSION_SURFACE_POLICY["forbidden"]
+
+
+def test_version_surface_policy_rejects_legacy_v_api_prefix(tmp_path: Path) -> None:
+    module = _load_governance_module()
+    path = tmp_path / "docs" / "api.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("GET /api/v0.1/catalog/factors\n", encoding="utf-8")
+    result = module.Result()
+
+    module.check_text_safety(result, tmp_path, ["docs/api.md"])
+
+    assert any("forbidden_versioned_api_prefix" in error for error in result.errors)

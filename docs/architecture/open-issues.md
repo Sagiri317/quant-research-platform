@@ -55,3 +55,27 @@ Next action: 后续区分 fast contract gate 与 slow integration test。
 Acceptance gate: fast handoff contract gate 可快速运行；slow integration 单独标记，full integration 未运行/超时必须写 `NOT_RUN`、`BLOCKED` 或 `TIMEOUT`。
 Forbidden scope: 不降低 builder、verifier、source-tree scan 或 package safety 的独立 gate。
 ```
+
+### QRP-GOV-005
+
+```text
+Severity: P2
+Owner layer: contracts/docs
+Status: deferred
+Evidence: `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、schema/contract `0.1` 和 handoff `0.1` 是合法当前版本面，但版本常量仍分散在 runtime、schemas、docs 和 tests。
+Next action: 后续在不改 public surface 的前提下评估是否需要内部版本常量收敛。
+Acceptance gate: 若执行收敛，版本 token 来源清晰且不把带 `v` 前缀的 `0.1` API 版本路径恢复为当前 API 形式。
+Forbidden scope: 本议题不改 public API、CLI、schema version、artifact contract 或 runtime 行为。
+```
+
+### QRP-GOV-006
+
+```text
+Severity: P2
+Owner layer: governance scan
+Status: deferred
+Evidence: 当前 retired naming gate 已覆盖 active docs、文件/路径名、Python symbol 和 Python 静态字符串拼接；非 Python 结构化文件中的 symbol-like key、front matter 或嵌套 manifest key 仍可后续扩展。
+Next action: 后续评估 JSON/YAML/TOML symbol-like key 扫描是否应纳入 `governance_contract.py` 派生规则。
+Acceptance gate: 非 Python 扩展扫描必须使用同一治理规则事实源，并避免误杀合法版本面和 current runtime 字段。
+Forbidden scope: 不为减少 rg 命中而隐藏旧词，不修改业务 artifact/schema 语义。
+```

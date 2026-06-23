@@ -70,7 +70,7 @@ references/prompt-patterns.md
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 必须引用该事实源或由它派生规则。retired governance paths 存在即 `FAIL`。retired public surface、retired naming、stale truth、negative-test allowlist、source-tree scan allowlist 和 package forbidden path parts 不得在 builder、verifier、safety 或 tests 中复制平行表。
+`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 必须引用该事实源或由它派生规则。retired governance paths 存在即 `FAIL`。retired public surface、retired naming、path/name/symbol/synthesized-string patterns、version surface policy、stale truth、negative-test allowlist、source-tree scan allowlist 和 package forbidden path parts 不得在 builder、verifier、safety 或 tests 中复制平行表。
 
 建议命令：
 

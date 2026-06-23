@@ -33,6 +33,7 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     source_tree_scan = _load_handoff_builder().source_tree_scan_groups(Path("."))
     assert source_tree_scan["retired_terms"]["findings"] == []
     assert source_tree_scan["retired_governance_paths"]["findings"] == []
+    assert source_tree_scan["retired_path_names"]["findings"] == []
     assert source_tree_scan["governance_truth"]["findings"] == []
     assert "governance_truth" in verifier
     assert '".run/handoffs"' in builder
@@ -124,6 +125,30 @@ def test_source_tree_scan_rejects_retired_governance_path_resurrection(
     ]
 
 
+def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> None:
+    builder = _load_handoff_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "governance-contract@example.invalid")
+    _git(repo, "config", "user.name", "Governance Contract Test")
+    path = repo / "tests" / "architecture" / "test_clean_rewrite_fake.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add retired stage path")
+
+    groups = builder.source_tree_scan_groups(repo)
+
+    assert groups["retired_path_names"]["status"] == "FAIL"
+    assert groups["retired_path_names"]["findings"] == [
+        {
+            "path": "tests/architecture/test_clean_rewrite_fake.py",
+            "rule": "clean_rewrite",
+        }
+    ]
+
+
 def test_handoff_source_tree_rules_import_governance_contract() -> None:
     builder = _load_handoff_builder()
     contract = _load_governance_contract()
@@ -133,7 +158,7 @@ def test_handoff_source_tree_rules_import_governance_contract() -> None:
         for path in builder.SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS
     ) == contract.ACTIVE_GOVERNANCE_DOC_ROOTS
     assert builder.source_tree_forbidden_patterns().keys() == (
-        contract.retired_public_surface_patterns().keys()
+        contract.source_tree_forbidden_patterns().keys()
     )
 
 

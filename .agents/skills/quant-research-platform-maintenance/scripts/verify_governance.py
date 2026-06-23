@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -27,11 +28,19 @@ from governance_contract import (  # noqa: E402
     RETIRED_GOVERNANCE_PREFIXES,
     STALE_NEGATIVE_TEST_PATHS,
     active_doc_forbidden_patterns,
+    git_tracked_paths,
+    is_allowed_negative_test_symbol,
+    is_allowed_runtime_symbol,
     is_allowed_stale_or_retired_fixture,
+    is_governance_rule_definition_path,
     is_negative_test_allowlisted,
     is_retired_governance_path,
     is_scanner_definition_line,
+    path_name_forbidden_patterns,
+    python_symbol_forbidden_patterns,
+    python_synthesized_strings,
     retired_governance_path_findings,
+    synthesized_string_forbidden_patterns,
 )
 
 BASE_GOVERNANCE_PREFIXES = (
@@ -62,6 +71,8 @@ BUSINESS_PREFIXES = (
 GOVERNANCE_TEST_PREFIXES = (
     "tests/agents/",
     "tests/architecture/",
+    "tests/contracts/",
+    "tests/interfaces/",
     "tests/reports/",
 )
 
@@ -115,6 +126,15 @@ SECRET_PATTERN = re.compile(
 )
 
 TEXT_SUFFIXES = {".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
+
+IGNORED_STATE_PATH_PARTS = {
+    ".git",
+    ".run",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "__pycache__",
+}
 
 
 @dataclass
@@ -267,6 +287,144 @@ def check_retired_governance_paths(result: Result, repo: Path) -> None:
         result.errors.append(
             f"retired_governance_path_exists: {finding['path']}:{finding['rule']}"
         )
+
+
+def repo_state_file_paths(
+    repo: Path,
+    *,
+    suffixes: set[str] | None = None,
+) -> list[str]:
+    found: set[str] = set()
+    for path in git_tracked_paths(repo):
+        if _should_include_state_path(path, suffixes=suffixes):
+            found.add(path)
+    if repo.exists():
+        for path in repo.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = normalize(str(path.relative_to(repo)))
+            if _should_include_state_path(rel, suffixes=suffixes):
+                found.add(rel)
+    return sorted(found)
+
+
+def _should_include_state_path(
+    path: str,
+    *,
+    suffixes: set[str] | None,
+) -> bool:
+    normalized = normalize(path)
+    parts = Path(normalized).parts
+    if any(part in IGNORED_STATE_PATH_PARTS for part in parts):
+        return False
+    if suffixes is not None and Path(normalized).suffix.lower() not in suffixes:
+        return False
+    return True
+
+
+def check_forbidden_path_names(result: Result, repo: Path) -> None:
+    patterns = path_name_forbidden_patterns()
+    for rel in repo_state_file_paths(repo):
+        for rule, pattern in patterns.items():
+            if pattern.search(rel):
+                result.errors.append(f"retired_path_name: {rel}:{rule}")
+
+
+def check_python_symbol_names(
+    result: Result,
+    repo: Path,
+    paths: list[str],
+) -> None:
+    patterns = python_symbol_forbidden_patterns()
+    for rel in sorted({normalize(path) for path in paths}):
+        if Path(rel).suffix.lower() != ".py":
+            continue
+        path = repo / rel
+        if not path.is_file():
+            continue
+        if is_governance_rule_definition_path(rel):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            result.warnings.append(f"cannot parse python for symbol scan: {rel}: {exc}")
+            continue
+        for line_number, symbol, symbol_kind in _python_symbols(tree):
+            for rule, pattern in patterns.items():
+                if not pattern.search(symbol):
+                    continue
+                if is_allowed_runtime_symbol(rel, symbol, rule):
+                    continue
+                if is_allowed_negative_test_symbol(rel, symbol, rule):
+                    continue
+                result.errors.append(
+                    "retired_python_symbol: "
+                    f"{rel}:{line_number}:{symbol_kind}:{symbol}:{rule}"
+                )
+
+
+def _python_symbols(tree: ast.Module) -> list[tuple[int, str, str]]:
+    symbols: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.append((node.lineno, node.name, type(node).__name__))
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                symbols.extend(
+                    (getattr(target, "lineno", getattr(node, "lineno", 0)), name, "Assign")
+                    for name in _assignment_target_names(target)
+                )
+        elif isinstance(node, ast.AnnAssign):
+            symbols.extend(
+                (getattr(node.target, "lineno", getattr(node, "lineno", 0)), name, "AnnAssign")
+                for name in _assignment_target_names(node.target)
+            )
+    return symbols
+
+
+def _assignment_target_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for item in target.elts:
+            names.extend(_assignment_target_names(item))
+        return names
+    return []
+
+
+def check_synthesized_strings(
+    result: Result,
+    repo: Path,
+    paths: list[str],
+) -> None:
+    patterns = synthesized_string_forbidden_patterns()
+    for rel in sorted({normalize(path) for path in paths}):
+        if Path(rel).suffix.lower() != ".py":
+            continue
+        path = repo / rel
+        if not path.is_file():
+            continue
+        if is_governance_rule_definition_path(rel):
+            continue
+        if is_negative_test_allowlisted(rel, "stale_governance_truth") or (
+            is_negative_test_allowlisted(rel, "retired_name")
+        ):
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            result.warnings.append(f"cannot decode python for string scan: {rel}")
+            continue
+        for line_number, value, scan_mode in python_synthesized_strings(source):
+            for rule, pattern in patterns.items():
+                if not pattern.search(value):
+                    continue
+                result.errors.append(
+                    "retired_synthesized_string: "
+                    f"{rel}:{line_number}:{rule}:{scan_mode}"
+                )
 
 
 def iter_text_files(repo: Path, paths: list[str]) -> list[Path]:
@@ -429,7 +587,7 @@ def check_script_portability(result: Result, repo: Path) -> None:
 
 def check_markdown_paths(result: Result, repo: Path, paths: list[str]) -> None:
     token = re.compile(
-        r"`((?:AGENTS\.md|README\.md|PROJECT_STATUS\.md|\.agents/|docs/|src/|tests/|data/|reports/)[^`\s]*)`"
+        r"`((?:AGENTS\.md|README\.md|\.agents/|docs/|src/|tests/|data/|reports/)[^`\s]*)`"
     )
     for p in iter_text_files(repo, paths):
         if p.suffix.lower() != ".md":
@@ -498,6 +656,10 @@ def main(argv: list[str] | None = None) -> int:
     result = Result()
     scan_scope = args.scan_scope or "changed-files"
     check_retired_governance_paths(result, repo)
+    check_forbidden_path_names(result, repo)
+    state_python_files = repo_state_file_paths(repo, suffixes={".py"})
+    check_python_symbol_names(result, repo, state_python_files)
+    check_synthesized_strings(result, repo, state_python_files)
     changed: list[str] = []
     if scan_scope == "changed-files":
         try:

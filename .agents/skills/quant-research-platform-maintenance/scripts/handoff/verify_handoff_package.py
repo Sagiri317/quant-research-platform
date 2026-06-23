@@ -718,6 +718,7 @@ def verify_source_tree_scan_evidence(
         expected_groups = {
             "retired_terms",
             "retired_governance_paths",
+            "retired_path_names",
             "active_test_literals",
             "governance_truth",
             "sensitive_negative_literals",

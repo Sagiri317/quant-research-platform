@@ -251,6 +251,11 @@ def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> No
                 "finding_count": 0,
                 "findings": [],
             },
+            "retired_path_names": {
+                "status": "PASS",
+                "finding_count": 0,
+                "findings": [],
+            },
             "active_test_literals": {
                 "status": "PASS",
                 "finding_count": 1,

@@ -41,7 +41,7 @@ git branch -a
 
 `.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、package safety、governance check 等工具必须从这里读取。
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、retired governance paths、retired naming、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、retired governance paths、retired naming、retired path/name/symbol/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
 
 `.run/` 只是 output layer 和 evidence layer。它可以保存运行产物、handoff zip、manifest、logs、reports、temporary evidence，但不能反向定义架构、合同、工具入口或当前状态。
 
@@ -64,6 +64,8 @@ QRP 采用 current-contract-only。普通 tests 只保护当前合同。旧字�
 新实现应替代旧实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
 
 Retired governance paths 不得复活。`PROJECT_STATUS.md`、`.agents/briefs/current-qrp-status.md`、`docs/architecture/open-issues-register.md` 和 `docs/reports/clean-rewrite-0.1-*` 只要在 tracked tree 或 working tree 中存在，治理 gate 必须 `FAIL`。
+
+Retired stage naming 不得以文件名、路径名、Python function/class/fixture/常量名或静态字符串拼接形式复活。合法版本面包括 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`contract_version="0.1"`、`schema_version="0.1"`、`definition_version`、`workflow_version` 和 handoff `0.1` schema；带 `v` 前缀的 `0.1` API 版本路径不是当前 API 形式，只能出现在规则定义或 negative tests 中。
 
 ## 7. private safety
 

@@ -195,6 +195,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert set(source_tree_scan["scan_groups"]) == {
         "retired_terms",
         "retired_governance_paths",
+        "retired_path_names",
         "active_test_literals",
         "governance_truth",
         "sensitive_negative_literals",
@@ -207,6 +208,11 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     )
     assert (
         source_tree_scan["scan_groups"]["retired_governance_paths"]["finding_count"]
+        == 0
+    )
+    assert source_tree_scan["scan_groups"]["retired_path_names"]["status"] == "PASS"
+    assert (
+        source_tree_scan["scan_groups"]["retired_path_names"]["finding_count"]
         == 0
     )
     assert (

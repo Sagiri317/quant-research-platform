@@ -59,7 +59,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_governa
 .agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py
 ```
 
-active doc roots、retired governance paths、retired naming、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token 必须从这里读取或派生。
+active doc roots、retired governance paths、retired naming、retired path/name/symbol/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token 必须从这里读取或派生。
 
 ### Code-map gate
 
@@ -105,9 +105,34 @@ docs/architecture/open-issues-register.md
 docs/reports/clean-rewrite-0.1-*
 ```
 
+Retired stage naming 不能通过以下表面复活：
+
+```text
+file/path names
+Python function/class/fixture/constant/module-level assignment names
+static string concatenation or simple join synthesis
+active docs current-truth wording
+```
+
+版本面规则：
+
+```text
+允许：QRP 0.1、0.1、0.1.0、/api/0.1、contract_version="0.1"、schema_version="0.1"、definition_version、workflow_version、handoff */0.1
+禁止：带 `v` 前缀的 `0.1` API 版本路径，除非位于规则定义或 negative tests
+```
+
 ## 5. Retired surface
 
 旧字段、旧路径、旧 artifact key、旧 execution mode 只允许在 retired-surface negative tests 或明确 allowlist 中出现。allowlist 必须说明目的和移除条件。
+
+关键测试入口：
+
+```text
+tests/agents/test_verify_governance.py
+tests/architecture/test_governance_contract_rg_gate.py
+tests/architecture/test_platform_topology.py
+tests/contracts/test_platform_contracts.py
+```
 
 ## 6. Final report schema
 

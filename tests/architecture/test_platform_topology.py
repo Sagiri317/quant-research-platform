@@ -16,7 +16,7 @@ def _parse_source(path: Path) -> ast.Module:
     return ast.parse(_read_source(path), filename=str(path))
 
 
-def test_clean_rewrite_topology_has_required_packages() -> None:
+def test_platform_topology_has_required_packages() -> None:
     required = {
         "contracts",
         "storage",
@@ -63,7 +63,7 @@ def test_retired_top_level_source_packages_are_absent() -> None:
     assert existing.isdisjoint(retired)
 
 
-def test_clean_rewrite_target_files_exist() -> None:
+def test_platform_target_files_exist() -> None:
     required_files = {
         "contracts/ids.py",
         "contracts/time.py",

@@ -5,8 +5,11 @@ This module is an internal tooling fact source. It is not a public API.
 
 from __future__ import annotations
 
+import ast
+import io
 import re
 import subprocess
+import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -137,6 +140,31 @@ STALE_GOVERNANCE_TRUTH_RULES = (
     ),
 )
 
+VERSION_SURFACE_POLICY = {
+    "allowed": (
+        "QRP 0.1",
+        "0.1",
+        "0.1.0",
+        "/api/0.1",
+        'contract_version="0.1"',
+        'schema_version="0.1"',
+        "definition_version",
+        "workflow_version",
+        "handoff-sidecar/0.1",
+        "handoff-package/0.1",
+    ),
+    "forbidden": (
+        "/api/v0.1",
+    ),
+}
+
+VERSION_SURFACE_FORBIDDEN_RULES = (
+    TextRule(
+        "forbidden_versioned_api_prefix",
+        r"(?<![A-Za-z0-9_./-])/api/v0\.1(?![A-Za-z0-9_.-])",
+    ),
+)
+
 RETIRED_PUBLIC_SURFACE_RULES = (
     NameRule(
         "retired_execution_mode",
@@ -219,6 +247,49 @@ RETIRED_PUBLIC_SURFACE_RULES = (
         r"\brender_pr_body(?:_from_validation_evidence)?(?:\.py)?\b",
     ),
 )
+
+RETIRED_PUBLIC_SYMBOL_RULE_NAMES = {
+    "retired_execution_mode",
+    "retired_daily_panel",
+    "retired_daily_market",
+    "retired_daily_context",
+    "retired_a_share_daily_bar",
+    "retired_backtest_spec",
+    "retired_prediction_bundle",
+    "retired_model_family",
+    "retired_csmar_source_alias",
+    "retired_a_share_market_alias",
+    "retired_model_algorithm_collection",
+}
+
+LEGITIMATE_RUNTIME_NAME_ALLOWLIST = {
+    Path("src/quant_research_platform/catalog/profiles.py"): {
+        "retired_csmar_source_alias": {"_a_share_csmar_source_id"},
+    },
+    Path(
+        "src/quant_research_platform/markets/implementations/a_share/"
+        "research_scenarios.py"
+    ): {
+        "retired_model_algorithm_collection": {"model_algorithms"},
+    },
+    Path("tests/architecture/test_model_algorithm_single_source.py"): {
+        "retired_model_algorithm_collection": {
+            "test_model_algorithms_live_only_in_supervised_model_facts",
+        },
+    },
+    Path("tests/research/test_filter_modes.py"): {
+        "retired_model_algorithm_collection": {
+            "test_required_model_algorithms_fit_and_predict",
+        },
+    },
+    Path("tests/research/test_model_prediction_semantic_names.py"): {
+        "retired_model_algorithm_collection": {
+            "test_all_model_algorithms_fit_and_predict_synthetic_data",
+        },
+    },
+}
+
+NEGATIVE_TEST_SYMBOL_ALLOWLIST: dict[Path, dict[str, set[str]]] = {}
 
 NEGATIVE_TEST_ALLOWLIST = {
     "stale_governance_truth": (
@@ -566,7 +637,12 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
     GOVERNANCE_CONTRACT_SCRIPT: {
         "RETIRED_NAME_RULES",
         "STALE_GOVERNANCE_TRUTH_RULES",
+        "VERSION_SURFACE_POLICY",
+        "VERSION_SURFACE_FORBIDDEN_RULES",
         "RETIRED_PUBLIC_SURFACE_RULES",
+        "RETIRED_PUBLIC_SYMBOL_RULE_NAMES",
+        "LEGITIMATE_RUNTIME_NAME_ALLOWLIST",
+        "NEGATIVE_TEST_SYMBOL_ALLOWLIST",
         "NEGATIVE_TEST_ALLOWLIST",
         "PACKAGE_FORBIDDEN_PATH_PARTS",
         "RETIRED_PATH_POLICY_MARKERS",
@@ -578,6 +654,10 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
         "SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST",
         "active_doc_forbidden_patterns",
+        "path_name_forbidden_patterns",
+        "python_symbol_forbidden_patterns",
+        "synthesized_string_forbidden_patterns",
+        "source_tree_forbidden_patterns",
         "stale_fixture_markers",
         "is_allowed_stale_or_retired_fixture",
     },
@@ -766,6 +846,26 @@ def name_rule_patterns(
     return patterns
 
 
+def name_rule_patterns_for_surface(
+    rules: tuple[NameRule | TextRule, ...],
+    *,
+    pattern_builder,
+    include_text_rules: bool = True,
+) -> dict[str, re.Pattern[str]]:
+    patterns: dict[str, re.Pattern[str]] = {}
+    for rule in rules:
+        if isinstance(rule, TextRule):
+            if include_text_rules:
+                patterns[rule.name] = rule.compile()
+            continue
+        alternatives = "|".join(
+            pattern for form in rule.forms if (pattern := pattern_builder(form))
+        )
+        if alternatives:
+            patterns[rule.name] = re.compile(alternatives)
+    return patterns
+
+
 def retired_name_patterns() -> dict[str, re.Pattern[str]]:
     return name_rule_patterns(RETIRED_NAME_RULES + RETIRED_PUBLIC_SURFACE_RULES)
 
@@ -780,10 +880,48 @@ def retired_public_surface_patterns() -> dict[str, re.Pattern[str]]:
     return name_rule_patterns(RETIRED_PUBLIC_SURFACE_RULES)
 
 
+def retired_public_symbol_rules() -> tuple[NameRule | TextRule, ...]:
+    return tuple(
+        rule
+        for rule in RETIRED_PUBLIC_SURFACE_RULES
+        if rule.name in RETIRED_PUBLIC_SYMBOL_RULE_NAMES
+    )
+
+
+def version_surface_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    return compile_text_rules(VERSION_SURFACE_FORBIDDEN_RULES)
+
+
 def active_doc_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     patterns = stale_governance_truth_patterns()
     patterns.update(retired_public_surface_patterns())
+    patterns.update(version_surface_forbidden_patterns())
     return patterns
+
+
+def path_name_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    return name_rule_patterns_for_surface(
+        RETIRED_NAME_RULES,
+        pattern_builder=_path_literal_pattern,
+    )
+
+
+def python_symbol_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    return name_rule_patterns_for_surface(
+        RETIRED_NAME_RULES + retired_public_symbol_rules(),
+        pattern_builder=_symbol_literal_pattern,
+        include_text_rules=False,
+    )
+
+
+def synthesized_string_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    patterns = stale_governance_truth_patterns()
+    patterns.update(version_surface_forbidden_patterns())
+    return patterns
+
+
+def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+    return retired_public_surface_patterns()
 
 
 def code_map_forbidden_terms() -> tuple[str, ...]:
@@ -796,6 +934,7 @@ def stale_fixture_markers() -> tuple[str, ...]:
         "feature/agent-governance-redesign",
         ".run official",
         "official .run",
+        *VERSION_SURFACE_POLICY["forbidden"],
     ]
     for rule in RETIRED_NAME_RULES + RETIRED_PUBLIC_SURFACE_RULES:
         if isinstance(rule, TextRule):
@@ -846,6 +985,21 @@ def is_scanner_definition_line(path: str | Path, line: str) -> bool:
     return normalized.endswith(".py") and line.lstrip().startswith(("r\"", "r'"))
 
 
+def _path_literal_pattern(form: str) -> str:
+    escaped = re.escape(form)
+    if form.startswith("--"):
+        return rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_-])"
+    if form.endswith(".md"):
+        return rf"(?<![A-Za-z0-9.]){escaped}(?![A-Za-z0-9.])"
+    return rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
+
+
+def _symbol_literal_pattern(form: str) -> str:
+    if " " in form or "-" in form or "/" in form or "." in form:
+        return ""
+    return re.escape(form)
+
+
 def _bounded_literal_pattern(form: str) -> str:
     escaped = re.escape(form)
     if form.startswith("--"):
@@ -862,3 +1016,137 @@ def is_negative_test_allowlisted(path: str | Path, category: str) -> bool:
 
 def is_governance_rule_definition_path(path: str | Path) -> bool:
     return is_negative_test_allowlisted(path, "governance_rule_definition")
+
+
+def is_allowed_runtime_symbol(path: str | Path, symbol: str, rule: str) -> bool:
+    normalized = Path(normalize_repo_path(path))
+    return symbol in LEGITIMATE_RUNTIME_NAME_ALLOWLIST.get(normalized, {}).get(
+        rule,
+        set(),
+    )
+
+
+def is_allowed_negative_test_symbol(path: str | Path, symbol: str, rule: str) -> bool:
+    normalized = Path(normalize_repo_path(path))
+    return symbol in NEGATIVE_TEST_SYMBOL_ALLOWLIST.get(normalized, {}).get(
+        rule,
+        set(),
+    )
+
+
+def python_synthesized_strings(source: str) -> list[tuple[int, str, str]]:
+    values: list[tuple[int, str, str]] = []
+    seen: set[tuple[int, str, str]] = set()
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                value = static_string_value(node)
+                if value is not None:
+                    item = (getattr(node, "lineno", 0), value, "ast_static_string")
+                    if item not in seen:
+                        seen.add(item)
+                        values.append(item)
+            if isinstance(node, ast.Call):
+                value = join_call_string_value(node)
+                if value is not None:
+                    item = (getattr(node, "lineno", 0), value, "ast_join_string")
+                    if item not in seen:
+                        seen.add(item)
+                        values.append(item)
+    for item in token_synthesized_strings(source):
+        if item not in seen:
+            seen.add(item)
+            values.append(item)
+    return values
+
+
+def token_synthesized_strings(source: str) -> list[tuple[int, str, str]]:
+    try:
+        tokens = [
+            token
+            for token in tokenize.generate_tokens(io.StringIO(source).readline)
+            if token.type not in {tokenize.NL, tokenize.NEWLINE}
+        ]
+    except tokenize.TokenError:
+        return []
+    values: list[tuple[int, str, str]] = []
+    index = 0
+    while index < len(tokens):
+        lexical_item = tokens[index]
+        if lexical_item.type != tokenize.STRING:
+            index += 1
+            continue
+        pieces: list[str] = []
+        line_number = lexical_item.start[0]
+        cursor = index
+        expect_string = True
+        saw_operator_or_adjacent = False
+        while cursor < len(tokens):
+            current = tokens[cursor]
+            if expect_string:
+                if current.type != tokenize.STRING:
+                    break
+                try:
+                    pieces.append(str(ast.literal_eval(current.string)))
+                except (SyntaxError, ValueError):
+                    break
+                expect_string = False
+                cursor += 1
+                continue
+            if current.type == tokenize.OP and current.string == "+":
+                saw_operator_or_adjacent = True
+                expect_string = True
+                cursor += 1
+                continue
+            if current.type == tokenize.STRING:
+                saw_operator_or_adjacent = True
+                try:
+                    pieces.append(str(ast.literal_eval(current.string)))
+                except (SyntaxError, ValueError):
+                    break
+                cursor += 1
+                continue
+            break
+        if len(pieces) >= 2 and saw_operator_or_adjacent and not expect_string:
+            values.append((line_number, "".join(pieces), "token_static_string"))
+            index = cursor
+            continue
+        index += 1
+    return values
+
+
+def static_string_value(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = static_string_value(node.left)
+        right = static_string_value(node.right)
+        if left is None or right is None:
+            return None
+        return left + right
+    return None
+
+
+def join_call_string_value(node: ast.Call) -> str | None:
+    if not isinstance(node.func, ast.Attribute) or node.func.attr != "join":
+        return None
+    if not isinstance(node.func.value, ast.Constant) or not isinstance(
+        node.func.value.value,
+        str,
+    ):
+        return None
+    if len(node.args) != 1 or node.keywords:
+        return None
+    sequence = node.args[0]
+    if not isinstance(sequence, (ast.List, ast.Tuple)):
+        return None
+    pieces: list[str] = []
+    for item in sequence.elts:
+        if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+            return None
+        pieces.append(item.value)
+    return node.func.value.value.join(pieces)

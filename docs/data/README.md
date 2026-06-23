@@ -13,7 +13,7 @@
 
 ## 数据位置
 
-本地数据应放在用户本地 workspace 或 `.run/` 下的运行产物目录中。tracked repo 只保存代码、contracts、schemas、docs、tests 和 public-safe templates。
+本地数据应放在用户本地 workspace 或 `.run/` 下的运行产物目录中。tracked repo 只保存代码、contracts、schemas、docs、tests 和 public-safe templates。`.run/` 只是 output/evidence/input artifact layer，不是 tracked tool source。
 
 ## Public-safe evidence
 

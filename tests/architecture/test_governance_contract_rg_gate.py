@@ -233,9 +233,12 @@ RETIRED_TERM_NEGATIVE_TEST_ALLOWLIST = {
         "/api/runs",
         "/api/pipeline",
     },
-    Path("tests/contracts/test_clean_rewrite_contracts.py"): {
+    Path("tests/contracts/test_platform_contracts.py"): {
         "core_long_period",
         "smoke_minimal",
+    },
+    Path("tests/agents/test_verify_governance.py"): {
+        "/api/v0.1",
     },
 }
 STALE_VERSION_TOKEN_RULE_ALLOWLIST = {
@@ -243,6 +246,7 @@ STALE_VERSION_TOKEN_RULE_ALLOWLIST = {
         ".agents/skills/quant-research-platform-maintenance/scripts/"
         "verify_code_map_flow.py"
     ): {"/api/v0.1"},
+    Path("tests/agents/test_verify_governance.py"): {"/api/v0.1"},
 }
 
 APPROVED_FIELD_SPEC_FILES = {

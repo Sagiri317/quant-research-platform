@@ -143,7 +143,7 @@ def test_api_cli_adapters_do_not_scan_parquet_paths() -> None:
         assert term not in module_source
 
 
-def test_cli_exposes_only_clean_rewrite_public_commands() -> None:
+def test_cli_exposes_only_current_public_commands() -> None:
     runner = CliRunner()
 
     commands = [
@@ -436,7 +436,7 @@ def test_cli_error_output_is_sanitized() -> None:
     assert "csmar" not in result.output.lower()
 
 
-def test_clean_rewrite_cli_does_not_expose_retired_commands() -> None:
+def test_cli_excludes_retired_public_commands() -> None:
     runner = CliRunner()
     retired = [
         ["private", "--help"],
