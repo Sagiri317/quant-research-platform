@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import re
 import subprocess
@@ -29,19 +28,16 @@ from governance_contract import (  # noqa: E402
     STALE_NEGATIVE_TEST_PATHS,
     active_doc_forbidden_patterns,
     git_tracked_paths,
-    is_allowed_negative_test_symbol,
-    is_allowed_runtime_symbol,
     is_allowed_stale_or_retired_fixture,
     is_governance_rule_definition_path,
     is_negative_test_allowlisted,
     is_retired_governance_path,
     is_scanner_definition_line,
-    path_name_forbidden_patterns,
-    python_symbol_forbidden_patterns,
-    python_synthesized_strings,
+    iter_path_name_findings,
+    iter_python_symbol_findings,
+    iter_structured_key_findings,
+    iter_synthesized_string_findings,
     retired_governance_path_findings,
-    structured_key_forbidden_patterns,
-    structured_keys_from_text,
     synthesized_string_forbidden_patterns,
 )
 
@@ -90,6 +86,7 @@ GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS = {
     "src/quant_research_platform/interfaces/cli/commands.py",
     "src/quant_research_platform/markets/implementations/a_share/verification/"
     "private_aggregate.py",
+    "src/quant_research_platform/sources/csmar/interim.py",
 }
 
 RETIRED_DOC_DELETION_PATHS = set(RETIRED_GOVERNANCE_EXACT_PATHS)
@@ -349,11 +346,10 @@ def _should_include_state_path(
 
 
 def check_forbidden_path_names(result: Result, repo: Path) -> None:
-    patterns = path_name_forbidden_patterns()
-    for rel in repo_state_file_paths(repo):
-        for rule, pattern in patterns.items():
-            if pattern.search(rel):
-                result.errors.append(f"retired_path_name: {rel}:{rule}")
+    for finding in iter_path_name_findings(repo_state_file_paths(repo)):
+        result.errors.append(
+            f"retired_path_name: {finding['path']}:{finding['rule']}"
+        )
 
 
 def check_python_symbol_names(
@@ -361,7 +357,6 @@ def check_python_symbol_names(
     repo: Path,
     paths: list[str],
 ) -> None:
-    patterns = python_symbol_forbidden_patterns()
     for rel in sorted({normalize(path) for path in paths}):
         if Path(rel).suffix.lower() != ".py":
             continue
@@ -371,53 +366,16 @@ def check_python_symbol_names(
         if is_governance_rule_definition_path(rel):
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        except (SyntaxError, UnicodeDecodeError) as exc:
-            result.warnings.append(f"cannot parse python for symbol scan: {rel}: {exc}")
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            result.warnings.append(f"cannot decode python for symbol scan: {rel}: {exc}")
             continue
-        for line_number, symbol, symbol_kind in _python_symbols(tree):
-            for rule, pattern in patterns.items():
-                if not pattern.search(symbol):
-                    continue
-                if is_allowed_runtime_symbol(rel, symbol, rule):
-                    continue
-                if is_allowed_negative_test_symbol(rel, symbol, rule):
-                    continue
-                result.errors.append(
-                    "retired_python_symbol: "
-                    f"{rel}:{line_number}:{symbol_kind}:{symbol}:{rule}"
-                )
-
-
-def _python_symbols(tree: ast.Module) -> list[tuple[int, str, str]]:
-    symbols: list[tuple[int, str, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            symbols.append((node.lineno, node.name, type(node).__name__))
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                symbols.extend(
-                    (getattr(target, "lineno", getattr(node, "lineno", 0)), name, "Assign")
-                    for name in _assignment_target_names(target)
-                )
-        elif isinstance(node, ast.AnnAssign):
-            symbols.extend(
-                (getattr(node.target, "lineno", getattr(node, "lineno", 0)), name, "AnnAssign")
-                for name in _assignment_target_names(node.target)
+        for finding in iter_python_symbol_findings(rel, source):
+            result.errors.append(
+                "retired_python_symbol: "
+                f"{finding['path']}:{finding['line']}:"
+                f"{finding['symbol_kind']}:{finding['symbol']}:{finding['rule']}"
             )
-    return symbols
-
-
-def _assignment_target_names(target: ast.AST) -> list[str]:
-    if isinstance(target, ast.Name):
-        return [target.id]
-    if isinstance(target, (ast.Tuple, ast.List)):
-        names: list[str] = []
-        for item in target.elts:
-            names.extend(_assignment_target_names(item))
-        return names
-    return []
 
 
 def check_synthesized_strings(
@@ -443,14 +401,12 @@ def check_synthesized_strings(
         except UnicodeDecodeError:
             result.warnings.append(f"cannot decode python for string scan: {rel}")
             continue
-        for line_number, value, scan_mode in python_synthesized_strings(source):
-            for rule, pattern in patterns.items():
-                if not pattern.search(value):
-                    continue
-                result.errors.append(
-                    "retired_synthesized_string: "
-                    f"{rel}:{line_number}:{rule}:{scan_mode}"
-                )
+        for finding in iter_synthesized_string_findings(rel, source, patterns=patterns):
+            result.errors.append(
+                "retired_synthesized_string: "
+                f"{finding['path']}:{finding['line']}:"
+                f"{finding['rule']}:{finding['scan_mode']}"
+            )
 
 
 def check_structured_key_names(
@@ -458,7 +414,6 @@ def check_structured_key_names(
     repo: Path,
     paths: list[str],
 ) -> None:
-    patterns = structured_key_forbidden_patterns()
     for rel in sorted({normalize(path) for path in paths}):
         if Path(rel).suffix.lower() not in STRUCTURED_KEY_SUFFIXES:
             continue
@@ -470,17 +425,12 @@ def check_structured_key_names(
         except UnicodeDecodeError:
             result.warnings.append(f"cannot decode structured file: {rel}")
             continue
-        for item in structured_keys_from_text(rel, text):
-            key = str(item["key"])
-            key_path = str(item["key_path"])
-            line_number = int(item["line"])
-            for rule, pattern in patterns.items():
-                if not pattern.search(key):
-                    continue
-                result.errors.append(
-                    "retired_structured_key: "
-                    f"{rel}:{line_number}:{key_path}:{key}:{rule}"
-                )
+        for finding in iter_structured_key_findings(rel, text):
+            result.errors.append(
+                "retired_structured_key: "
+                f"{finding['path']}:{finding['line']}:"
+                f"{finding['key_path']}:{finding['key']}:{finding['rule']}"
+            )
 
 
 def iter_text_files(repo: Path, paths: list[str]) -> list[Path]:

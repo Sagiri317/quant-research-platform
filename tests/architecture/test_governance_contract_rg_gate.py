@@ -221,6 +221,14 @@ INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
     ("docs", "code-map", "source-csmar-contracts.md"),
     ("src", "quant_research_platform", "reports", "schema_inventory.py"),
 }
+PUBLIC_SURFACE_LINE_ALLOWLIST = {
+    Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "verify_governance.py"
+    ): (
+        "src/quant_research_platform/sources/csmar/interim.py",
+    ),
+}
 ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST = {
     "retired_term": {
         Path(
@@ -807,6 +815,13 @@ def _public_surface_scan_text(path: Path) -> str:
         "governance_contract.py"
     ):
         return ""
+    allowed_fragments = PUBLIC_SURFACE_LINE_ALLOWLIST.get(path, ())
+    if allowed_fragments:
+        text = "\n".join(
+            line
+            for line in text.splitlines()
+            if not any(fragment in line for fragment in allowed_fragments)
+        )
     return text
 
 

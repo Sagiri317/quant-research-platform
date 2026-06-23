@@ -1107,6 +1107,159 @@ def is_allowed_version_surface(path: str | Path, version: str) -> bool:
     return version in VERSION_SURFACE_POLICY["allowed"]
 
 
+def iter_path_name_findings(paths: object) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    patterns = path_name_forbidden_patterns()
+    for raw_path in paths:
+        path = normalize_repo_path(raw_path)
+        for rule, pattern in patterns.items():
+            if pattern.search(path):
+                findings.append({"path": path, "rule": rule})
+    return findings
+
+
+def python_symbols_from_source(source: str) -> list[dict[str, object]]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    symbols: list[dict[str, object]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.append(
+                {
+                    "line": node.lineno,
+                    "symbol": node.name,
+                    "symbol_kind": type(node).__name__,
+                }
+            )
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                for name in _assignment_target_names(target):
+                    symbols.append(
+                        {
+                            "line": getattr(
+                                target,
+                                "lineno",
+                                getattr(node, "lineno", 0),
+                            ),
+                            "symbol": name,
+                            "symbol_kind": "Assign",
+                        }
+                    )
+        elif isinstance(node, ast.AnnAssign):
+            for name in _assignment_target_names(node.target):
+                symbols.append(
+                    {
+                        "line": getattr(
+                            node.target,
+                            "lineno",
+                            getattr(node, "lineno", 0),
+                        ),
+                        "symbol": name,
+                        "symbol_kind": "AnnAssign",
+                    }
+                )
+    return symbols
+
+
+def iter_python_symbol_findings(
+    path: str | Path,
+    source: str,
+) -> list[dict[str, object]]:
+    if is_governance_rule_definition_path(path):
+        return []
+    findings: list[dict[str, object]] = []
+    for item in python_symbols_from_source(source):
+        symbol = str(item["symbol"])
+        for rule, pattern in python_symbol_forbidden_patterns().items():
+            if not pattern.search(symbol):
+                continue
+            if is_allowed_runtime_symbol(path, symbol, rule):
+                continue
+            if is_allowed_negative_test_symbol(path, symbol, rule):
+                continue
+            findings.append(
+                {
+                    "path": normalize_repo_path(path),
+                    "line": int(item["line"]),
+                    "symbol_kind": str(item["symbol_kind"]),
+                    "symbol": symbol,
+                    "rule": rule,
+                }
+            )
+    return findings
+
+
+def iter_structured_key_findings(
+    path: str | Path,
+    text: str,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for item in structured_keys_from_text(path, text):
+        key = str(item["key"])
+        key_path = str(item["key_path"])
+        line_number = int(item["line"])
+        for rule, pattern in structured_key_forbidden_patterns().items():
+            if not pattern.search(key):
+                continue
+            findings.append(
+                {
+                    "path": normalize_repo_path(path),
+                    "line": line_number,
+                    "key_path": key_path,
+                    "key": key,
+                    "rule": rule,
+                }
+            )
+    return findings
+
+
+def iter_synthesized_string_findings(
+    path: str | Path,
+    source: str,
+    *,
+    patterns: dict[str, re.Pattern[str]] | None = None,
+    allow_negative_tests: bool = True,
+    skip_rule_definition: bool = True,
+) -> list[dict[str, object]]:
+    if skip_rule_definition and is_governance_rule_definition_path(path):
+        return []
+    if allow_negative_tests and (
+        is_negative_test_allowlisted(path, "stale_governance_truth")
+        or is_negative_test_allowlisted(path, "retired_name")
+    ):
+        return []
+    active_patterns = patterns or synthesized_string_forbidden_patterns()
+    findings: list[dict[str, object]] = []
+    for line_number, value, scan_mode in python_synthesized_strings(source):
+        for rule, pattern in active_patterns.items():
+            if not pattern.search(value):
+                continue
+            findings.append(
+                {
+                    "path": normalize_repo_path(path),
+                    "line": line_number,
+                    "rule": rule,
+                    "scan_mode": scan_mode,
+                    "synthesized_value": value,
+                }
+            )
+    return findings
+
+
+def _assignment_target_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for item in target.elts:
+            names.extend(_assignment_target_names(item))
+        return names
+    return []
+
+
 def structured_keys_from_text(
     path: str | Path,
     text: str,

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -32,6 +35,44 @@ from quant_research_platform.runtime.privacy import (
 from quant_research_platform.sources.csmar import interim as csmar_interim
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_platform_contracts_import_without_pyarrow() -> None:
+    script = """
+import importlib
+import importlib.abc
+import sys
+
+class PyArrowBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "pyarrow" or fullname.startswith("pyarrow."):
+            raise ModuleNotFoundError("blocked pyarrow import")
+        return None
+
+sys.meta_path.insert(0, PyArrowBlocker())
+importlib.import_module("tests.contracts.test_platform_contracts")
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(REPO_ROOT / "src"),
+            str(REPO_ROOT),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_dataspec_hierarchy_uses_data_id_without_retired_id_fields() -> None:

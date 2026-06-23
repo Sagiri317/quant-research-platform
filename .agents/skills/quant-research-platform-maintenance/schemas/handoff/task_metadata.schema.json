@@ -146,13 +146,19 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "retired_terms": {
+            "retired_text": {
               "$ref": "#/$defs/source_tree_scan_group"
             },
             "retired_governance_paths": {
               "$ref": "#/$defs/source_tree_scan_group"
             },
             "retired_path_names": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
+            "python_symbols": {
+              "$ref": "#/$defs/source_tree_scan_group"
+            },
+            "synthesized_strings": {
               "$ref": "#/$defs/source_tree_scan_group"
             },
             "active_test_literals": {

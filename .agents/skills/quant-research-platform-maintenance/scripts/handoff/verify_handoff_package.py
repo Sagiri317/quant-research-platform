@@ -716,9 +716,11 @@ def verify_source_tree_scan_evidence(
         failures.append("source_tree_scan_groups_invalid")
     else:
         expected_groups = {
-            "retired_terms",
+            "retired_text",
             "retired_governance_paths",
             "retired_path_names",
+            "python_symbols",
+            "synthesized_strings",
             "active_test_literals",
             "structured_keys",
             "governance_truth",

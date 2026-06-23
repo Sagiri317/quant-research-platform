@@ -31,9 +31,11 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier
     source_tree_scan = _load_handoff_builder().source_tree_scan_groups(Path("."))
-    assert source_tree_scan["retired_terms"]["findings"] == []
+    assert source_tree_scan["retired_text"]["findings"] == []
     assert source_tree_scan["retired_governance_paths"]["findings"] == []
     assert source_tree_scan["retired_path_names"]["findings"] == []
+    assert source_tree_scan["python_symbols"]["findings"] == []
+    assert source_tree_scan["synthesized_strings"]["findings"] == []
     assert source_tree_scan["structured_keys"]["findings"] == []
     assert source_tree_scan["governance_truth"]["findings"] == []
     assert "governance_truth" in verifier
@@ -63,7 +65,7 @@ def test_source_tree_scan_synthesizes_static_string_fragments(tmp_path: Path) ->
         source.splitlines(),
         set(),
         set(),
-        scan_group="retired_terms",
+        scan_group="synthesized_strings",
         patterns={
             "synthetic_alpha": re.compile(r"\balpha\b"),
             "synthetic_beta": re.compile(r"\bbeta\b"),
@@ -89,7 +91,7 @@ def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
 
     assert not builder.source_tree_path_allowed(
         relative,
-        scan_group="retired_terms",
+        scan_group="retired_text",
         rule=rule,
         line_text='"rule-definition-example"',
         line_number=10,
@@ -97,7 +99,7 @@ def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
     )
     assert builder.source_tree_path_allowed(
         relative,
-        scan_group="retired_terms",
+        scan_group="retired_text",
         rule=rule,
         line_text='"rule-definition-example"',
         line_number=10,
@@ -175,6 +177,62 @@ def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> Non
             "rule": "clean_rewrite",
         }
     ]
+
+
+def test_source_tree_scan_independently_rejects_python_symbols_and_synthesized_strings(
+    tmp_path: Path,
+) -> None:
+    builder = _load_handoff_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "governance-contract@example.invalid")
+    _git(repo, "config", "user.name", "Governance Contract Test")
+    path = repo / "docs" / "architecture" / "hack_fixture.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                "class QRPCleanRewriteHelper:",
+                "    pass",
+                'adjacent = "QRP " "Clean Rewrite"',
+                'joined = "".join(["clean", "-rewrite"])',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add retired symbol fixture")
+
+    groups = builder.source_tree_scan_groups(repo)
+
+    assert groups["python_symbols"]["status"] == "FAIL"
+    assert groups["synthesized_strings"]["status"] == "FAIL"
+    assert {
+        (finding["path"], finding["symbol"], finding["rule"])
+        for finding in groups["python_symbols"]["findings"]
+    } == {
+        (
+            "docs/architecture/hack_fixture.py",
+            "QRPCleanRewriteHelper",
+            "clean_rewrite",
+        )
+    }
+    observed = {
+        (finding["path"], finding["rule"], finding["scan_mode"])
+        for finding in groups["synthesized_strings"]["findings"]
+    }
+    assert (
+        "docs/architecture/hack_fixture.py",
+        "clean_rewrite",
+        "token_static_string",
+    ) in observed
+    assert (
+        "docs/architecture/hack_fixture.py",
+        "clean_rewrite",
+        "ast_join_string",
+    ) in observed
 
 
 def test_handoff_source_tree_rules_import_governance_contract() -> None:

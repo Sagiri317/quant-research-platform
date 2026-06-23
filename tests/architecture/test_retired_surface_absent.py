@@ -70,7 +70,9 @@ def test_retired_public_constant_aliases_are_absent() -> None:
 def test_retired_handoff_evidence_names_are_absent() -> None:
     scan_groups = _load_handoff_builder().source_tree_scan_groups(Path("."))
 
-    assert scan_groups["retired_terms"]["findings"] == []
+    assert scan_groups["retired_text"]["findings"] == []
+    assert scan_groups["python_symbols"]["findings"] == []
+    assert scan_groups["synthesized_strings"]["findings"] == []
 
 
 def test_retired_pr_body_renderer_is_absent() -> None:

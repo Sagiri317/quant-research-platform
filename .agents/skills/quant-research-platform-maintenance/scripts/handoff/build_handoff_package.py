@@ -35,10 +35,10 @@ from governance_contract import (  # noqa: E402
     is_allowed_runtime_symbol,
     is_negative_test_allowlisted,
     is_retired_path_policy_line,
-    path_name_forbidden_patterns,
-    python_synthesized_strings,
-    structured_key_forbidden_patterns,
-    structured_keys_from_text,
+    iter_path_name_findings,
+    iter_python_symbol_findings,
+    iter_structured_key_findings,
+    iter_synthesized_string_findings,
     VALID_STATUS_TOKENS,
     retired_governance_path_findings,
     source_tree_forbidden_patterns as governance_source_tree_forbidden_patterns,
@@ -620,15 +620,24 @@ def source_tree_scan_from_clone(
 
 
 def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
-    return source_tree_scan_groups(clone_dir)["retired_terms"]["findings"]
+    groups = source_tree_scan_groups(clone_dir)
+    return [
+        *groups["retired_text"]["findings"],
+        *groups["python_symbols"]["findings"],
+        *groups["synthesized_strings"]["findings"],
+    ]
 
 
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
-    retired_findings = source_tree_retired_term_findings(clone_dir)
+    retired_text_findings = source_tree_retired_text_findings(clone_dir)
     retired_governance_path_findings_ = source_tree_retired_governance_path_findings(
         clone_dir
     )
     retired_path_name_findings = source_tree_retired_path_name_findings(clone_dir)
+    python_symbol_findings = source_tree_python_symbol_findings(clone_dir)
+    synthesized_string_findings = source_tree_synthesized_string_scan_findings(
+        clone_dir
+    )
     active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
     structured_key_findings = source_tree_structured_key_findings(clone_dir)
     governance_truth_findings = source_tree_governance_truth_findings(clone_dir)
@@ -636,10 +645,10 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
         source_tree_sensitive_negative_literal_findings(clone_dir)
     )
     return {
-        "retired_terms": {
-            "status": "PASS" if not retired_findings else "FAIL",
-            "finding_count": len(retired_findings),
-            "findings": retired_findings,
+        "retired_text": {
+            "status": "PASS" if not retired_text_findings else "FAIL",
+            "finding_count": len(retired_text_findings),
+            "findings": retired_text_findings,
         },
         "retired_governance_paths": {
             "status": "PASS" if not retired_governance_path_findings_ else "FAIL",
@@ -650,6 +659,16 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             "status": "PASS" if not retired_path_name_findings else "FAIL",
             "finding_count": len(retired_path_name_findings),
             "findings": retired_path_name_findings,
+        },
+        "python_symbols": {
+            "status": "PASS" if not python_symbol_findings else "FAIL",
+            "finding_count": len(python_symbol_findings),
+            "findings": python_symbol_findings,
+        },
+        "synthesized_strings": {
+            "status": "PASS" if not synthesized_string_findings else "FAIL",
+            "finding_count": len(synthesized_string_findings),
+            "findings": synthesized_string_findings,
         },
         "active_test_literals": {
             "status": "PASS" if not active_test_literal_findings else "FAIL",
@@ -684,19 +703,26 @@ def source_tree_retired_governance_path_findings(
 def source_tree_retired_path_name_findings(
     clone_dir: Path,
 ) -> list[dict[str, object]]:
+    return iter_path_name_findings(
+        relative.as_posix() for relative in source_tree_tracked_paths(clone_dir)
+    )
+
+
+def source_tree_python_symbol_findings(clone_dir: Path) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    patterns = path_name_forbidden_patterns()
-    for relative in source_tree_tracked_paths(clone_dir):
-        text = relative.as_posix()
-        for rule, pattern in patterns.items():
-            if pattern.search(text):
-                findings.append({"path": text, "rule": rule})
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.suffix.lower() != ".py":
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        findings.extend(iter_python_symbol_findings(relative, source))
     return findings
 
 
 def source_tree_structured_key_findings(clone_dir: Path) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
-    patterns = structured_key_forbidden_patterns()
     for relative in source_tree_tracked_text_files(clone_dir):
         if relative.suffix.lower() not in {".json", ".toml", ".yaml", ".yml"}:
             continue
@@ -704,29 +730,14 @@ def source_tree_structured_key_findings(clone_dir: Path) -> list[dict[str, objec
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        for item in structured_keys_from_text(relative, text):
-            key = str(item["key"])
-            key_path = str(item["key_path"])
-            line_number = int(item["line"])
-            for rule, pattern in patterns.items():
-                if not pattern.search(key):
-                    continue
-                findings.append(
-                    {
-                        "path": relative.as_posix(),
-                        "line": line_number,
-                        "key_path": key_path,
-                        "key": key,
-                        "rule": rule,
-                    }
-                )
+        findings.extend(iter_structured_key_findings(relative, text))
     return findings
 
 
-def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]]:
+def source_tree_retired_text_findings(clone_dir: Path) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_tracked_text_files(clone_dir):
-        if not source_tree_should_scan_retired_terms(relative):
+        if not source_tree_should_scan_retired_text(relative):
             continue
         path = clone_dir / relative
         if not path.exists():
@@ -745,7 +756,7 @@ def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]
                     continue
                 if source_tree_path_allowed(
                     relative,
-                    scan_group="retired_terms",
+                    scan_group="retired_text",
                     rule=rule,
                     line_text=line.strip(),
                     line_number=line_number,
@@ -759,25 +770,46 @@ def source_tree_retired_term_findings(clone_dir: Path) -> list[dict[str, object]
                         "rule": rule,
                     }
                 )
-        findings.extend(
-            source_tree_split_string_findings(
-                relative,
-                path,
-                lines,
-                skip_lines,
-                rule_definition_lines,
-            )
-        )
     return findings
 
 
-def source_tree_should_scan_retired_terms(relative: Path) -> bool:
+def source_tree_should_scan_retired_text(relative: Path) -> bool:
     if is_negative_test_allowlisted(relative.as_posix(), "retired_name"):
         return False
     return any(
         relative == root or root in relative.parents
         for root in SOURCE_TREE_RETIRED_TERM_ROOTS
     )
+
+
+def source_tree_synthesized_string_scan_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if not source_tree_should_scan_retired_text(relative):
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        rule_definition_lines = source_tree_governance_rule_definition_lines(
+            relative,
+            path,
+        )
+        findings.extend(
+            source_tree_synthesized_string_findings(
+                relative,
+                path,
+                lines,
+                skip_lines,
+                rule_definition_lines,
+                scan_group="synthesized_strings",
+                patterns=source_tree_forbidden_patterns(),
+            )
+        )
+    return findings
 
 
 def source_tree_split_string_findings(
@@ -793,7 +825,7 @@ def source_tree_split_string_findings(
         lines,
         skip_lines,
         rule_definition_lines,
-        scan_group="retired_terms",
+        scan_group="synthesized_strings",
         patterns=source_tree_forbidden_patterns(),
     )
 
@@ -810,40 +842,34 @@ def source_tree_synthesized_string_findings(
 ) -> list[dict[str, object]]:
     if path.suffix != ".py":
         return []
-    try:
-        source = path.read_text(encoding="utf-8", errors="ignore")
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
+    source = path.read_text(encoding="utf-8", errors="ignore")
     findings: list[dict[str, object]] = []
-    for line_number, value, scan_mode in source_tree_python_synthesized_strings(
-        tree,
+    for item in iter_synthesized_string_findings(
+        relative,
         source,
+        patterns=patterns,
+        allow_negative_tests=False,
+        skip_rule_definition=False,
     ):
+        line_number = int(item["line"])
         if line_number in skip_lines:
             continue
-        for rule, pattern in patterns.items():
-            if not pattern.search(value):
-                continue
-            line_text = lines[line_number - 1].strip() if line_number else ""
-            if source_tree_path_allowed(
-                relative,
-                scan_group=scan_group,
-                rule=rule,
-                line_text=line_text,
-                line_number=line_number,
-                rule_definition_lines=rule_definition_lines,
-            ):
-                continue
-            findings.append(
-                {
-                    "path": relative.as_posix(),
-                    "line": line_number,
-                    "rule": rule,
-                    "scan_mode": scan_mode,
-                    "synthesized_value": value,
-                }
-            )
+        line_text = lines[line_number - 1].strip() if line_number else ""
+        if source_tree_path_allowed(
+            relative,
+            scan_group=scan_group,
+            rule=str(item["rule"]),
+            line_text=line_text,
+            line_number=line_number,
+            rule_definition_lines=rule_definition_lines,
+        ):
+            continue
+        findings.append(
+            {
+                **item,
+                "path": relative.as_posix(),
+            }
+        )
     return findings
 
 
@@ -852,7 +878,19 @@ def source_tree_python_synthesized_strings(
     source: str,
 ) -> list[tuple[int, str, str]]:
     del tree
-    return python_synthesized_strings(source)
+    return [
+        (
+            int(finding["line"]),
+            str(finding["synthesized_value"]),
+            str(finding["scan_mode"]),
+        )
+        for finding in iter_synthesized_string_findings(
+            "source_tree_python_synthesized_strings.py",
+            source,
+            allow_negative_tests=False,
+            skip_rule_definition=False,
+        )
+    ]
 
 
 def source_tree_governance_rule_definition_lines(
@@ -1161,7 +1199,7 @@ def source_tree_path_allowed(
         and rule_definition_lines is not None
         and line_number in rule_definition_lines
     )
-    if scan_group == "retired_terms":
+    if scan_group in {"retired_text", "synthesized_strings", "retired_terms"}:
         allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
         if rule is None or line_text is None:
             return False

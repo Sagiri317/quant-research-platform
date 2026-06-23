@@ -15,7 +15,6 @@ from quant_research_platform.runtime.logical_paths import (
 )
 from quant_research_platform.runtime.privacy import public_text_unsafe_reason
 from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
-from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_manifest
 
 _RAW_EXPORT_FILENAME_RE = re.compile(
@@ -41,6 +40,12 @@ _JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
         "validation_summary_path",
     }
 )
+
+
+def inspect_dataset(*args: Any, **kwargs: Any) -> Any:
+    from quant_research_platform.storage.datasets import inspect_dataset as _inspect_dataset
+
+    return _inspect_dataset(*args, **kwargs)
 
 
 @dataclass(frozen=True)

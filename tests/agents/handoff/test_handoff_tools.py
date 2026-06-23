@@ -245,13 +245,23 @@ def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> No
         "finding_count": 0,
         "findings": [{"path": "src/example.py", "rule": "demo"}],
         "scan_groups": {
-            "retired_terms": {"status": "PASS", "finding_count": 0, "findings": []},
+            "retired_text": {"status": "PASS", "finding_count": 0, "findings": []},
             "retired_governance_paths": {
                 "status": "PASS",
                 "finding_count": 0,
                 "findings": [],
             },
             "retired_path_names": {
+                "status": "PASS",
+                "finding_count": 0,
+                "findings": [],
+            },
+            "python_symbols": {
+                "status": "PASS",
+                "finding_count": 0,
+                "findings": [],
+            },
+            "synthesized_strings": {
                 "status": "PASS",
                 "finding_count": 0,
                 "findings": [],

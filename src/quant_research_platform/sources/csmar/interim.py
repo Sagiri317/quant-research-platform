@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -27,8 +28,9 @@ from quant_research_platform.sources.csmar.raw_exports import (
     dataset_files_by_id,
     iter_private_export_chunks,
 )
-from quant_research_platform.storage.datasets import write_dataset
-from quant_research_platform.storage.layout import StorageLayout
+
+if TYPE_CHECKING:
+    from quant_research_platform.storage.layout import StorageLayout
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
@@ -161,6 +163,12 @@ class InterimImportResult:
     artifact_roots: dict[str, Path]
     skipped: tuple[str, ...]
     pruning_report_text: str
+
+
+def write_dataset(*args: object, **kwargs: object) -> object:
+    from quant_research_platform.storage.datasets import write_dataset as _write_dataset
+
+    return _write_dataset(*args, **kwargs)
 
 
 def default_override_payload() -> dict[str, dict[str, object]]:
@@ -425,7 +433,7 @@ def iter_interim_frames(
 
 def materialize_interim_data(
     *,
-    layout: StorageLayout,
+    layout: "StorageLayout",
     raw_root: Path | None = None,
     data_ids: tuple[str, ...] = DEFAULT_INTERIM_DATA_IDS,
     start_date: str | None = "2014-01-01",

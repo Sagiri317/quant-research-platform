@@ -25,7 +25,9 @@ def test_daily_lifecycle_names_are_replaced() -> None:
     builder = _load_handoff_builder()
     scan_groups = builder.source_tree_scan_groups(Path("."))
 
-    assert scan_groups["retired_terms"]["findings"] == []
+    assert scan_groups["retired_text"]["findings"] == []
+    assert scan_groups["python_symbols"]["findings"] == []
+    assert scan_groups["synthesized_strings"]["findings"] == []
 
 
 def test_shared_test_helpers_do_not_handwrite_active_derived_names() -> None:

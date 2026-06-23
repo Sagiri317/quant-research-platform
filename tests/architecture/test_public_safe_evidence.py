@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from quant_research_platform.reports.verification_evidence import (
@@ -118,6 +121,7 @@ INVENTORY_FIELDS = {
 }
 PLACEHOLDER_HASH_VALUES = {"passed", "accepted"}
 STATUS_TOKENS = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _hash(seed: str) -> str:
@@ -302,6 +306,44 @@ def test_current_public_safe_parity_evidence_json_schema() -> None:
         if item["max_abs_delta"] > item["tolerance"]:
             assert item["accepted_explained_delta"] or item["human_approval_required"]
             assert item["explanation"]
+
+
+def test_public_safe_evidence_renderer_imports_without_pyarrow() -> None:
+    script = """
+import importlib.abc
+import sys
+
+class PyArrowBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "pyarrow" or fullname.startswith("pyarrow."):
+            raise ModuleNotFoundError("blocked pyarrow import")
+        return None
+
+sys.meta_path.insert(0, PyArrowBlocker())
+from quant_research_platform.reports.verification_evidence import (
+    render_public_safe_evidence_markdown,
+)
+assert callable(render_public_safe_evidence_markdown)
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(REPO_ROOT / "src"),
+            str(REPO_ROOT),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_current_public_safe_parity_evidence_is_aggregate_status_payload() -> None:
