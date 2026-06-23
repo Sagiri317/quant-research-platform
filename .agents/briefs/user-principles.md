@@ -1,26 +1,36 @@
-# 用户长期工程原则
+# User Principles
 
-本文件保存稳定偏好，供任务路由和审查时按需读取。它不是完整标准；详细执行规则在 `AGENTS.md`、skill references、代码和 tests 中。
+本文件记录长期偏好，不记录短期状态。
 
-## 核心原则
+## 项目边界
 
-- Semantic closure（语义收口）：接口、命名、contracts、tests、docs、artifacts、handoff 证据必须闭合。
-- Naming first-class（命名一等）：命名是架构问题，不是 cosmetic（表面修饰）。避免 `v2`、实现细节泄漏和过渡期命名。
-- Replace over parallel（替代优先）：能替代就删除旧路径；能参数化就不要新增函数/类/模块；不保留 legacy alias、compatibility shim、旧 re-export、旧 wrapper。
-- Minimal public API（最小公共接口）：新增 public API / CLI / registry / store / facade 默认禁止。
-- Evidence over claims（证据优先）：未运行就是 `NOT_RUN`，失败就是 `FAIL`；不能为了 final report 把状态写成 `PASS`。
-- Private-data safety（私有数据安全）：public-safe evidence 只能是聚合/脱敏证据，不泄露 row-level private data。
-- Layer-local change standard（局部改动标准）：新功能原则上主要改 owner layer 的少量代码；跨层大改先做架构收口。
-- No handoff-driven architecture（handoff 不反向驱动架构）：handoff 是证据层，不是架构源。
-- Extensibility without abstraction creep（可扩展但不抽象膨胀）：未来 ML/DL、时序、factor factory、多市场、高频、前端等要预留方向，但不提前落地泛化框架。
+QRP 是本地量化研究平台，不是生产交易系统，不是 live trading，不接 broker 或 exchange。当前主线偏 A-share 日频研究，后续可以扩展到更多模型、预测和评估流程，但每次扩展必须通过当前合同和验证门禁。
 
-## 执行偏好
+## 架构偏好
 
-1. 能不新增就不新增。
-2. 能合并就合并。
-3. 能删除就删除。
-4. 旧测试要迁移到新结构，不保护旧结构。
-5. 速度优先于峰值内存；全局内存预算以 `RuntimeResourcePolicy` 的代码默认值 `DEFAULT_MEMORY_BUDGET_FRACTION = 0.80` 和 `QRP_MEMORY_BUDGET_FRACTION` 为事实源；中小规模分块应尽量为 1。
-6. 人读的治理文件中文为主；路径、命令、API、代码符号、mode ID、status token 保留英文。
-7. 架构 review 需要严格检查命名、路径、语义、owner layer、未来扩展兼容性和最小变更面。
-8. 短提示词应能精准命中 task mode；治理层必须减少用户重复输入、减少 token、减少返工。
+- semantic closure：数据、factor、feature、model、prediction、signal、evaluation、portfolio、report 的命名和合同必须闭合。
+- replace over parallel：语义相同的新实现应替代旧实现，不保留双轨。
+- naming first-class：命名应稳定、清晰、长期可维护，不使用 v2 这类临时后缀。
+- current-contract-only：不为旧字段和旧路径保留兼容读取，除非用户明确批准兼容期。
+- fail fast：builder 应在写出非法 artifact 前失败，verifier 和 source-tree scan 是独立后续门。
+
+## 验证偏好
+
+- 未运行写 `NOT_RUN`。
+- 环境、权限、依赖、超时阻塞写 `BLOCKED`。
+- 不允许把 sidecar PASS、package safety PASS、pytest PASS、compare PASS 互相替代。
+- sandbox 或 Codex 环境中，允许在边界内安装缺失依赖进行测试；缺依赖不是默认跳过理由。
+
+## 文档偏好
+
+- 中文为主，路径、命令、字段名和 status token 保留英文。
+- 文档保留长期合同，不保存当前分支、当前阶段、当前 PR、最近运行状态。
+- 删除历史比保留历史更安全；需要追溯用 git history。
+- 控制 token：启动文档短，细节放 references，按需读取。
+
+## Git 偏好
+
+- feature 分支工作。
+- commit 后必须 push。
+- 禁止 force push。
+- 禁止未经批准的 rebase、amend、squash、main push、merge main。

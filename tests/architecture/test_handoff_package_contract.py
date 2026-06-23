@@ -23,6 +23,8 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     assert "handoff_generation.json" not in verifier
     source_tree_scan = _load_handoff_builder().source_tree_scan_groups(Path("."))
     assert source_tree_scan["retired_terms"]["findings"] == []
+    assert source_tree_scan["governance_truth"]["findings"] == []
+    assert "governance_truth" in verifier
     assert '".run/handoffs"' in builder
     assert '"evidence"' in builder
     assert '"pr_closure"' in builder

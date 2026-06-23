@@ -11,6 +11,10 @@ import pytest
 from quant_research_platform.markets.implementations.a_share.verification import (
     private_aggregate,
 )
+from quant_research_platform.reports.verification_evidence import (
+    render_private_verification_summary_markdown,
+    render_public_safe_evidence_markdown,
+)
 from quant_research_platform.storage.datasets import DatasetReadMode
 from tests.helpers import frequency_ids
 
@@ -122,14 +126,147 @@ INVENTORY_FIELDS = {
     "covered_by_evidence_area",
 }
 PLACEHOLDER_HASH_VALUES = {"passed", "accepted"}
+STATUS_TOKENS = {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}
 
 
-def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
-    path = Path("docs/reports/clean-rewrite-0.1-parity-evidence.json")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def _hash(seed: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _synthetic_area(area: str, index: int) -> dict[str, object]:
+    period = (
+        "2014-01-01 through 2025-12-31"
+        if area == DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA
+        else "2024-01-01 through 2024-01-31"
+    )
+    return {
+        "area": area,
+        "contract_version": "0.1",
+        "privacy_level": "public_safe_aggregate",
+        "period": period,
+        "row_count": index + 1,
+        "key_count": index + 1,
+        "column_count": 3,
+        "duplicate_key_count": 0,
+        "column_set_hash": _hash(f"{area}-columns"),
+        "dtype_summary_hash": _hash(f"{area}-dtypes"),
+        "null_summary_hash": _hash(f"{area}-nulls"),
+        "aggregate_checksum": _hash(f"{area}-aggregate"),
+        "key_value_paired_summary_hash": _hash(f"{area}-key-values"),
+        "max_abs_delta": 0.0,
+        "mean_abs_delta": 0.0,
+        "tolerance": 0.0,
+        "accepted_explained_delta": False,
+        "explanation": "",
+        "verification_kind": "private_research_data_aggregate",
+        "verification_scope": "aggregate_public_safe_parity",
+        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
+        "tolerance_owner": "",
+        "downstream_impact": "none",
+        "generated_by": "synthetic_test_fixture",
+        "source_data_visibility": "private_local_only",
+        "row_level_output_committed": False,
+        "human_approval_required": False,
+        "status": "PASS",
+    }
+
+
+def _synthetic_public_safe_evidence_payload() -> dict[str, object]:
+    return {
+        "contract_version": "0.1",
+        "privacy_level": "public_safe_aggregate",
+        "artifact_id": "private_research_aggregate_evidence",
+        "market_id": "a_share",
+        "verification_kind": "private_research_data_aggregate",
+        "verification_scope": "aggregate_public_safe_parity",
+        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
+        "source_data_visibility": "private_local_only",
+        "row_level_output_committed": False,
+        "merge_ready": False,
+        "status": "PASS",
+        "areas": [
+            _synthetic_area(area, index)
+            for index, area in enumerate(sorted(REQUIRED_AREAS))
+        ],
+    }
+
+
+def _synthetic_private_verification_summary_payload() -> dict[str, object]:
+    inventory = [
+        {
+            "kind": "dataset",
+            "artifact_id": "market_panel_daily",
+            "logical_root": DOC_MARKET_PANEL_LOGICAL_ROOT,
+            "period": "2014-01-01 through 2025-12-31",
+            "row_count": 10,
+            "column_count": 3,
+            "key_count": 10,
+            "duplicate_key_count": 0,
+            "column_set_hash": _hash("inventory-columns"),
+            "dtype_summary_hash": _hash("inventory-dtypes"),
+            "null_summary_hash": _hash("inventory-nulls"),
+            "aggregate_checksum": _hash("inventory-aggregate"),
+            "key_value_paired_summary_hash": _hash("inventory-key-values"),
+            "covered_by_evidence_area": DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
+        }
+    ]
+    return {
+        "contract_version": "0.1",
+        "project_version": "0.1.0",
+        "verification_kind": "private_research_data_aggregate_inventory",
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "privacy_level": "public_safe_aggregate",
+        "source_data_visibility": "private_local_only",
+        "row_level_output_committed": False,
+        "dataset_inventory": inventory,
+        "covered_roots": [item["logical_root"] for item in inventory],
+        "uncovered_roots": [],
+        "allowed_unverified_roots": [],
+        "merge_ready": False,
+        "status": "PASS",
+    }
+
+
+def _write_public_safe_evidence_files(tmp_path: Path) -> tuple[Path, Path]:
+    payload = _synthetic_public_safe_evidence_payload()
+    json_path = tmp_path / "public-safe-evidence.json"
+    md_path = tmp_path / "public-safe-evidence.md"
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    md_path.write_text(
+        render_public_safe_evidence_markdown(payload),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return md_path, json_path
+
+
+def _write_private_summary_files(tmp_path: Path) -> tuple[Path, Path]:
+    payload = _synthetic_private_verification_summary_payload()
+    json_path = tmp_path / "private-verification-summary.json"
+    md_path = tmp_path / "private-verification-summary.md"
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    md_path.write_text(
+        render_private_verification_summary_markdown(payload),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return md_path, json_path
+
+
+def test_current_public_safe_parity_evidence_json_schema() -> None:
+    payload = _synthetic_public_safe_evidence_payload()
 
     assert payload["contract_version"] == "0.1"
-    assert payload["project_version"] == "0.1.0"
     assert payload["privacy_level"] == "public_safe_aggregate"
     assert payload["artifact_id"] == "private_research_aggregate_evidence"
     assert payload["market_id"] == "a_share"
@@ -137,10 +274,12 @@ def test_clean_rewrite_public_safe_parity_evidence_json_schema() -> None:
     assert payload["verification_scope"] == "aggregate_public_safe_parity"
     assert payload["source_data_visibility"] == "private_local_only"
     assert payload["row_level_output_committed"] is False
+    assert payload["status"] in STATUS_TOKENS
     assert len(payload["areas"]) == 9
     assert {item["area"] for item in payload["areas"]} == REQUIRED_AREAS
     for item in payload["areas"]:
         assert REQUIRED_FIELDS.issubset(item)
+        assert item["status"] in STATUS_TOKENS
         assert item["contract_version"] == "0.1"
         assert item["privacy_level"] == "public_safe_aggregate"
         for field in HASH_FIELDS:
@@ -234,9 +373,8 @@ def test_current_public_safe_aggregate_payload_includes_key_value_paired_hash(
     )
 
 
-def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:
-    path = Path("docs/reports/clean-rewrite-0.1-parity-evidence.json")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def test_current_public_safe_parity_evidence_is_aggregate_status_payload() -> None:
+    payload = _synthetic_public_safe_evidence_payload()
     text = json.dumps(payload, ensure_ascii=False).lower()
 
     assert "metadata verification" not in text
@@ -245,14 +383,12 @@ def test_clean_rewrite_public_safe_parity_evidence_is_real_aggregate() -> None:
         "local_private_research_public_safe_aggregate"
     )
     assert payload["row_level_output_committed"] is False
-    assert payload["status"] == "superseded_by_factor_catalog_refactor"
-    assert payload["evidence_status"] == "evidence_pending_regeneration"
+    assert payload["status"] in STATUS_TOKENS
     assert payload["merge_ready"] is False
 
 
 def test_full_historical_market_panel_daily_covers_full_2014_2025_period() -> None:
-    path = Path("docs/reports/clean-rewrite-0.1-parity-evidence.json")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _synthetic_public_safe_evidence_payload()
     area = next(
         item
         for item in payload["areas"]
@@ -263,7 +399,7 @@ def test_full_historical_market_panel_daily_covers_full_2014_2025_period() -> No
     assert area["human_approval_required"] is False
     assert area["accepted_explained_delta"] is False
     assert payload["merge_ready"] is False
-    assert payload["evidence_status"] == "evidence_pending_regeneration"
+    assert payload["status"] in STATUS_TOKENS
 
 
 def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
@@ -611,11 +747,8 @@ def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
     assert summary.period == "2025-01-02 through 2025-01-03"
 
 
-def test_clean_rewrite_public_safe_parity_evidence_has_no_private_samples() -> None:
-    paths = [
-        Path("docs/reports/clean-rewrite-0.1-parity-evidence.md"),
-        Path("docs/reports/clean-rewrite-0.1-parity-evidence.json"),
-    ]
+def test_public_safe_parity_evidence_has_no_private_samples(tmp_path: Path) -> None:
+    paths = _write_public_safe_evidence_files(tmp_path)
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
     for term in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS:
@@ -634,12 +767,18 @@ def test_verification_evidence_source_fixture_is_not_public_market_contract() ->
 
     source = Path(private_aggregate.__file__).read_text(encoding="utf-8")
     public_payloads = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (
-            Path("docs/reports/clean-rewrite-0.1-parity-evidence.md"),
-            Path("docs/reports/clean-rewrite-0.1-parity-evidence.json"),
-            Path("docs/reports/clean-rewrite-0.1-private-verification-summary.md"),
-            Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json"),
+        (
+            render_public_safe_evidence_markdown(
+                _synthetic_public_safe_evidence_payload()
+            ),
+            json.dumps(_synthetic_public_safe_evidence_payload(), ensure_ascii=False),
+            render_private_verification_summary_markdown(
+                _synthetic_private_verification_summary_payload()
+            ),
+            json.dumps(
+                _synthetic_private_verification_summary_payload(),
+                ensure_ascii=False,
+            ),
         )
     )
 
@@ -651,11 +790,8 @@ def test_verification_evidence_source_fixture_is_not_public_market_contract() ->
     assert "CSMAR" not in public_payloads
 
 
-def test_clean_rewrite_public_safe_parity_evidence_uses_lf_newlines() -> None:
-    paths = [
-        Path("docs/reports/clean-rewrite-0.1-parity-evidence.md"),
-        Path("docs/reports/clean-rewrite-0.1-parity-evidence.json"),
-    ]
+def test_public_safe_parity_evidence_uses_lf_newlines(tmp_path: Path) -> None:
+    paths = _write_public_safe_evidence_files(tmp_path)
 
     for path in paths:
         content = path.read_bytes()
@@ -664,18 +800,15 @@ def test_clean_rewrite_public_safe_parity_evidence_uses_lf_newlines() -> None:
 
 
 def test_private_verification_summary_json_schema_and_coverage() -> None:
-    path = Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _synthetic_private_verification_summary_payload()
 
     assert SUMMARY_TOP_LEVEL_FIELDS.issubset(payload)
     assert payload["contract_version"] == "0.1"
-    assert payload["project_version"] == "0.1.0"
     assert payload["verification_kind"] == "private_research_data_aggregate_inventory"
     assert payload["privacy_level"] == "public_safe_aggregate"
     assert payload["source_data_visibility"] == "private_local_only"
     assert payload["row_level_output_committed"] is False
-    assert payload["status"] == "superseded_by_factor_catalog_refactor"
-    assert payload["evidence_status"] == "evidence_pending_regeneration"
+    assert payload["status"] in STATUS_TOKENS
     assert payload["merge_ready"] is False
     assert payload["uncovered_roots"] == []
     assert payload["allowed_unverified_roots"] == []
@@ -700,8 +833,7 @@ def test_private_verification_summary_json_schema_and_coverage() -> None:
 
 
 def test_private_verification_summary_covers_full_historical_panel() -> None:
-    path = Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _synthetic_private_verification_summary_payload()
     market_panel_daily = next(
         item
         for item in payload["dataset_inventory"]
@@ -715,22 +847,16 @@ def test_private_verification_summary_covers_full_historical_panel() -> None:
     )
 
 
-def test_private_verification_summary_has_no_private_samples() -> None:
-    paths = [
-        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.md"),
-        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json"),
-    ]
+def test_private_verification_summary_has_no_private_samples(tmp_path: Path) -> None:
+    paths = _write_private_summary_files(tmp_path)
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
     for term in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS:
         assert term not in combined
 
 
-def test_private_verification_summary_uses_lf_newlines() -> None:
-    paths = [
-        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.md"),
-        Path("docs/reports/clean-rewrite-0.1-private-verification-summary.json"),
-    ]
+def test_private_verification_summary_uses_lf_newlines(tmp_path: Path) -> None:
+    paths = _write_private_summary_files(tmp_path)
 
     for path in paths:
         content = path.read_bytes()

@@ -41,7 +41,6 @@ BUNDLE_CONTENT_SCAN_EXEMPT_ROOTS = (
 )
 BUNDLE_CONTENT_SCAN_EXEMPT_FILES = {
     "AGENTS.md",
-    "PROJECT_STATUS.md",
     "README.md",
     "data/README.md",
     "environment.yml",

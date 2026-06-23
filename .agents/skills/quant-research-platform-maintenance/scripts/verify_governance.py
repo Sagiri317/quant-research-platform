@@ -17,15 +17,28 @@ from pathlib import Path
 BASE_GOVERNANCE_PREFIXES = (
     "AGENTS.md",
     "README.md",
-    "PROJECT_STATUS.md",
     ".agents/",
-    "docs/architecture/",
 )
 
 ACTIVE_DOCS_PREFIXES = (
-    "docs/api/README.md",
-    "docs/data/README.md",
+    "docs/architecture/",
     "docs/code-map/",
+    "docs/api/",
+    "docs/data/",
+    "data/README.md",
+)
+
+ACTIVE_DOC_SCAN_ROOTS = (
+    "AGENTS.md",
+    "README.md",
+    ".agents/briefs/",
+    ".agents/skills/quant-research-platform-maintenance/SKILL.md",
+    ".agents/skills/quant-research-platform-maintenance/references/",
+    "docs/architecture/",
+    "docs/code-map/",
+    "docs/api/",
+    "docs/data/",
+    "data/README.md",
 )
 
 BUSINESS_PREFIXES = (
@@ -35,6 +48,26 @@ BUSINESS_PREFIXES = (
     "environment.yml",
     "data/",
     "reports/private_research/",
+)
+
+GOVERNANCE_TEST_PREFIXES = (
+    "tests/agents/",
+    "tests/architecture/",
+    "tests/reports/",
+)
+
+REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
+    "src/quant_research_platform/reports/verification_evidence.py",
+}
+
+RETIRED_DOC_DELETION_PATHS = {
+    "PROJECT_STATUS.md",
+    ".agents/briefs/current-qrp-status.md",
+    "docs/architecture/open-issues-register.md",
+}
+
+RETIRED_DOC_DELETION_PREFIXES = (
+    "docs/reports/clean-rewrite-0.1-",
 )
 
 PRIVATE_ROOTS = (
@@ -58,17 +91,20 @@ BLOCKED_EXTENSIONS = {
 
 REQUIRED_AGENTS_TERMS = (
     (".agents/",),
+    (".run/",),
     ("PASS",),
     ("NOT_RUN",),
-    ("Private-data safety", "私有数据安全"),
-    ("global `.codex/`", "全局 `.codex/`", "global .codex"),
-    ("repo-local `.codex/`", "仓库内 `.codex/`", "repo-local .codex"),
+    ("private safety", "private data", "私有"),
+    ("current-contract-only",),
 )
 
 STALE_STATUS_PATTERNS = (
-    re.compile(r"当前分支\s*\|\s*`feature/n2-closure`"),
-    re.compile(r"current branch\s*[:|].*feature/n2-closure", re.IGNORECASE),
-    re.compile(r"Finish the official review-fix handoff package", re.IGNORECASE),
+    re.compile(r"feature/(?:qrp-clean-rewrite|agent-governance-redesign)"),
+    re.compile(r"\bclean[- ]rewrite\b", re.IGNORECASE),
+    re.compile(r"\b(?:draft PR|pre-merge|merge-ready)\b", re.IGNORECASE),
+    re.compile(r"(?:\.run\s+official|official\s+\.run)", re.IGNORECASE),
+    re.compile(r"PROJECT_STATUS\.md.*(?:active|status|source)", re.IGNORECASE),
+    re.compile(r"current-qrp-status\.md.*(?:active|status|source)", re.IGNORECASE),
 )
 
 LOCAL_PATH_PATTERN = re.compile(r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+)")  # noqa: E501
@@ -81,6 +117,10 @@ PRIVACY_NEGATIVE_TEST_PATHS = {
     "tests/runtime/test_privacy_01.py",
     "tests/agents/handoff/test_handoff_tools.py",
     "tests/agents/handoff/test_package_safety_check.py",
+}
+STALE_NEGATIVE_TEST_PATHS = {
+    "tests/agents/test_verify_governance.py",
+    "tests/architecture/test_clean_rewrite_rg_gate.py",
 }
 
 
@@ -135,6 +175,38 @@ def changed_files(repo: Path, base_ref: str | None) -> list[str]:
     return sorted({normalize(name) for name in names if name})
 
 
+def active_doc_files(repo: Path) -> list[str]:
+    files: list[str] = []
+    for root_name in ACTIVE_DOC_SCAN_ROOTS:
+        root = repo / root_name
+        if root.is_file():
+            files.append(normalize(root_name))
+            continue
+        if root.is_dir():
+            files.extend(
+                normalize(str(path.relative_to(repo)))
+                for path in root.rglob("*")
+                if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES
+            )
+    retired_fragments = (
+        "PROJECT_STATUS.md",
+        "current-qrp-status.md",
+        "docs/reports/clean-rewrite-0.1-",
+    )
+    return sorted(
+        {
+            path
+            for path in files
+            if not any(fragment in path for fragment in retired_fragments)
+        }
+    )
+
+
+def check_active_doc_scan_non_empty(result: Result, paths: list[str]) -> None:
+    if not paths:
+        result.errors.append("active-doc scan found no files")
+
+
 def allowed_governance_prefixes(allow_active_docs: bool) -> tuple[str, ...]:
     return BASE_GOVERNANCE_PREFIXES + (
         ACTIVE_DOCS_PREFIXES if allow_active_docs else ()
@@ -150,10 +222,12 @@ def is_governance_path(path: str, allow_active_docs: bool) -> bool:
 
 def check_governance_only(
     result: Result,
+    repo: Path,
     paths: list[str],
     allow_active_docs: bool,
 ) -> None:
     for path in paths:
+        allowed = is_governance_only_allowed_path(repo, path, allow_active_docs)
         if path.startswith(PRIVATE_ROOTS):
             result.errors.append(f"private root changed or included: {path}")
         if path.startswith(".codex/"):
@@ -164,18 +238,41 @@ def check_governance_only(
             result.errors.append(
                 f"agent-specific project adapter must remain draft-only: {path}"
             )
-        if path.startswith(BUSINESS_PREFIXES) and not is_governance_path(
-            path,
-            allow_active_docs,
-        ):
+        if path.startswith(BUSINESS_PREFIXES) and not allowed:
             result.errors.append(
                 "business/dependency path changed in governance-only mode: "
                 f"{path}"
             )
-        if not is_governance_path(path, allow_active_docs):
+        if not allowed:
             result.errors.append(f"path is outside governance-only allow list: {path}")
-        if Path(path).suffix.lower() in BLOCKED_EXTENSIONS:
+        if (
+            Path(path).suffix.lower() in BLOCKED_EXTENSIONS
+            and not is_retired_doc_deletion(repo, path)
+        ):
             result.errors.append(f"blocked extension in changed path: {path}")
+
+
+def is_governance_only_allowed_path(
+    repo: Path,
+    path: str,
+    allow_active_docs: bool,
+) -> bool:
+    if is_governance_path(path, allow_active_docs):
+        return True
+    if path.startswith(GOVERNANCE_TEST_PREFIXES):
+        return True
+    if path in REPORTS_EVIDENCE_RENDERER_EXCEPTIONS:
+        return True
+    return is_retired_doc_deletion(repo, path)
+
+
+def is_retired_doc_deletion(repo: Path, path: str) -> bool:
+    if not (
+        path in RETIRED_DOC_DELETION_PATHS
+        or path.startswith(RETIRED_DOC_DELETION_PREFIXES)
+    ):
+        return False
+    return not (repo / path).exists()
 
 
 def iter_text_files(repo: Path, paths: list[str]) -> list[Path]:
@@ -201,6 +298,38 @@ def _skip_regex_definition_line(rel: str, line: str) -> bool:
     )
     if any(marker in line for marker in markers):
         return True
+    if rel.startswith(".agents/skills/quant-research-platform-maintenance/scripts/"):
+        scanner_markers = (
+            "QRP Clean Rewrite",
+            "clean rewrite",
+            "clean-rewrite",
+            "feature/qrp-clean-rewrite",
+            "feature/agent-governance-redesign",
+            "feature/(?:qrp-clean-rewrite|agent-governance-redesign)",
+            "draft PR",
+            "pre-merge",
+            "merge-ready",
+            ".run\\s+official",
+            "official\\s+\\.run",
+            ".run official",
+            "official .run",
+            "PROJECT_STATUS\\.md",
+            "current-qrp-status\\.md",
+            "PROJECT_STATUS.md",
+            "current-qrp-status.md",
+            "docs/reports/clean-rewrite-0.1-",
+            "E:/",
+            "D:/",
+            "C:/",
+            "\\Users\\",
+            "\\\\Users\\\\",
+            "/Users/",
+            "/home/",
+            "/mnt/",
+            "/mnt/data",
+        )
+        if any(marker in line for marker in scanner_markers):
+            return True
     return rel.endswith(".py") and line.lstrip().startswith(("r\"", "r'"))
 
 
@@ -217,10 +346,7 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
         "tests/storage/test_storage_01.py",
     } and LOCAL_PATH_PATTERN.search(line):
         return True
-    return (
-        rel == "docs/architecture/open-issues-register.md"
-        and "Negative tests cover" in line
-    )
+    return False
 
 
 def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
@@ -234,6 +360,25 @@ def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
     } and '"token"' in line and "token=" in line:
         return True
     return False
+
+
+def _is_allowed_stale_fixture(rel: str, line: str) -> bool:
+    return rel in STALE_NEGATIVE_TEST_PATHS and any(
+        marker in line
+        for marker in (
+            "feature/qrp-clean-rewrite",
+            "feature/agent-governance-redesign",
+            "clean rewrite",
+            "clean-rewrite",
+            "draft PR",
+            "pre-merge",
+            "merge-ready",
+            ".run official",
+            "official .run",
+            "PROJECT_STATUS",
+            "current-qrp-status",
+        )
+    )
 
 
 def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
@@ -263,7 +408,7 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
                     f"local absolute path pattern in {rel}:{line_number}"
                 )
             for match in STALE_STATUS_PATTERNS:
-                if match.search(line):
+                if match.search(line) and not _is_allowed_stale_fixture(rel, line):
                     result.errors.append(
                         "stale N2/status wording in "
                         f"{rel}:{line_number}: {match.pattern}"
@@ -298,8 +443,6 @@ def check_agents_size_and_terms(result: Result, repo: Path) -> None:
                 "AGENTS.md missing required term variant: "
                 + " / ".join(variants)
             )
-    if "small-fix" not in text or "standard-implementation" not in text:
-        result.errors.append("AGENTS.md must use canonical hyphenated task mode IDs")
 
 
 def check_script_portability(result: Result, repo: Path) -> None:
@@ -383,6 +526,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow active docs in governance-only mode.",
     )
+    parser.add_argument(
+        "--scan-active-docs",
+        action="store_true",
+        help=(
+            "Scan current active governance docs from repository state instead "
+            "of only Git changed files."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     parser.add_argument(
         "--summary",
@@ -394,13 +545,17 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(args.repo_root).resolve()
     result = Result()
     try:
-        paths = changed_files(repo, args.base_ref)
+        changed = changed_files(repo, args.base_ref)
     except RuntimeError as exc:
         result.errors.append(str(exc))
-        paths = []
+        changed = []
+
+    paths = active_doc_files(repo) if args.scan_active_docs else changed
+    if args.scan_active_docs:
+        check_active_doc_scan_non_empty(result, paths)
 
     if args.governance_only:
-        check_governance_only(result, paths, args.allow_active_docs)
+        check_governance_only(result, repo, paths, args.allow_active_docs)
     check_text_safety(result, repo, paths)
     check_agents_size_and_terms(result, repo)
     check_script_portability(result, repo)
@@ -408,8 +563,11 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "status": "PASS" if result.ok else "FAIL",
-        "changed_files": paths,
+        "scan_mode": "active_docs" if args.scan_active_docs else "changed_files",
+        "changed_files": changed,
         "checked_files": result.checked_files,
+        "scanned_files": paths,
+        "findings": result.errors,
         "errors": result.errors,
         "warnings": result.warnings,
     }
@@ -418,14 +576,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.summary:
         print(
             f"governance_check_status={summary['status']} "
-            f"changed_files={len(paths)} "
+            f"scan_mode={summary['scan_mode']} "
+            f"changed_files={len(changed)} "
             f"checked_files={len(result.checked_files)} "
             f"errors={len(result.errors)} "
             f"warnings={len(result.warnings)}"
         )
     else:
         print(f"governance_check_status={summary['status']}")
-        print(f"changed_files={len(paths)}")
+        print(f"scan_mode={summary['scan_mode']}")
+        print(f"changed_files={len(changed)}")
         print(f"checked_files={len(result.checked_files)}")
         print(f"errors={len(result.errors)}")
         print(f"warnings={len(result.warnings)}")

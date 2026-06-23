@@ -186,6 +186,18 @@ SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
 SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
     Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
 }
+SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS = (
+    Path("AGENTS.md"),
+    Path("README.md"),
+    Path(".agents/briefs"),
+    Path(".agents/skills/quant-research-platform-maintenance/SKILL.md"),
+    Path(".agents/skills/quant-research-platform-maintenance/references"),
+    Path("docs/architecture"),
+    Path("docs/code-map"),
+    Path("docs/api"),
+    Path("docs/data"),
+    Path("data/README.md"),
+)
 SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
@@ -253,9 +265,6 @@ SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
         "forbidden_goal_status",
         "forbidden_render_pr_body",
     },
-    Path("docs/architecture/open-issues-register.md"): {
-        "retired_backtest_spec",
-    },
     Path("tests/architecture/test_retired_surface_absent.py"): {
         "retired_csmar_source_alias",
         "retired_a_share_market_alias",
@@ -283,6 +292,7 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES",
         "source_tree_forbidden_patterns",
         "source_tree_active_test_literal_patterns",
+        "source_tree_governance_truth_patterns",
         "source_tree_sensitive_negative_patterns",
         "source_tree_public_text_unsafe_patterns",
         "sanitize_handoff_text",
@@ -924,6 +934,7 @@ def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
 def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
     retired_findings = source_tree_retired_term_findings(clone_dir)
     active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
+    governance_truth_findings = source_tree_governance_truth_findings(clone_dir)
     sensitive_negative_literal_findings = (
         source_tree_sensitive_negative_literal_findings(clone_dir)
     )
@@ -937,6 +948,11 @@ def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
             "status": "PASS" if not active_test_literal_findings else "FAIL",
             "finding_count": len(active_test_literal_findings),
             "findings": active_test_literal_findings,
+        },
+        "governance_truth": {
+            "status": "PASS" if not governance_truth_findings else "FAIL",
+            "finding_count": len(governance_truth_findings),
+            "findings": governance_truth_findings,
         },
         "sensitive_negative_literals": {
             "status": "PASS" if not sensitive_negative_literal_findings else "FAIL",
@@ -1255,6 +1271,71 @@ def source_tree_active_test_literal_findings(
 
 def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
     return bool(SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative))
+
+
+def source_tree_governance_truth_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_active_governance_doc_files(clone_dir):
+        path = clone_dir / relative
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        for rule, pattern in source_tree_governance_truth_patterns().items():
+            for line_number, line in enumerate(lines, start=1):
+                if not pattern.search(line):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "rule": rule,
+                    }
+                )
+    return findings
+
+
+def source_tree_active_governance_doc_files(clone_dir: Path) -> tuple[Path, ...]:
+    tracked = set(source_tree_tracked_text_files(clone_dir))
+    result: list[Path] = []
+    for root in SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS:
+        path = clone_dir / root
+        if path.is_file() and root in tracked:
+            result.append(root)
+            continue
+        if path.is_dir():
+            result.extend(
+                relative
+                for relative in sorted(tracked)
+                if relative.is_relative_to(root)
+                and relative.suffix.lower() in {".md", ".txt"}
+                and (clone_dir / relative).is_file()
+            )
+    return tuple(sorted(set(result)))
+
+
+def source_tree_governance_truth_patterns() -> dict[str, re.Pattern[str]]:
+    return {
+        "stale_old_feature_branch_current_truth": re.compile(
+            r"feature/(?:qrp-clean-rewrite|agent-governance-redesign)"
+        ),
+        "stale_clean_rewrite_current_state": re.compile(
+            r"\bclean[- ]rewrite\b",
+            re.IGNORECASE,
+        ),
+        "stale_draft_pr_current_state": re.compile(r"\bdraft PR\b", re.IGNORECASE),
+        "stale_pre_merge_current_state": re.compile(r"\bpre-merge\b", re.IGNORECASE),
+        "stale_merge_ready_current_state": re.compile(
+            r"\bmerge-ready\b",
+            re.IGNORECASE,
+        ),
+        "stale_run_official_tool_source": re.compile(
+            r"(?:\.run\s+official|official\s+\.run)",
+            re.IGNORECASE,
+        ),
+        "stale_retired_status_source": re.compile(
+            r"(?:PROJECT_STATUS\.md|current-qrp-status\.md)"
+        ),
+    }
 
 
 def source_tree_active_test_literal_patterns(

@@ -8,7 +8,6 @@ SCAN_ROOTS = (
     Path("tests"),
     Path("docs"),
     Path("README.md"),
-    Path("PROJECT_STATUS.md"),
     Path(".agents"),
 )
 RUNTIME_WORKSPACE_PART = ".run"
@@ -16,7 +15,6 @@ EXCLUDED_PARTS = {
     (".git",),
     (RUNTIME_WORKSPACE_PART,),
     ("__pycache__",),
-    ("docs", "architecture", "open-issues-register.md"),
     ("docs", "archive"),
     ("reports", "private_research"),
 }

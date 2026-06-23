@@ -48,7 +48,7 @@ def test_public_safe_evidence_markdown_renders_status_rows() -> None:
     markdown = render_public_safe_evidence_markdown(payload)
 
     assert "factor value parity" in markdown
-    assert "human approval required before merge-ready status" in markdown
+    assert "human approval required before final review status" in markdown
     assert "`merge_ready | false`" in markdown
 
 

@@ -6,12 +6,18 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
-ENVIRONMENT_CONTRACT = PROJECT_ROOT / "docs/architecture/environment-contract.md"
+ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
+ENGINEERING_CONTRACT = PROJECT_ROOT / "docs/architecture/engineering-contract.md"
 README = PROJECT_ROOT / "README.md"
-CONTRACTS_AND_VERIFICATION = (
+VERIFICATION_AND_GATES = (
     PROJECT_ROOT
     / ".agents/skills/quant-research-platform-maintenance/references"
-    / "contracts-and-verification.md"
+    / "verification-and-gates.md"
+)
+TOOLING_AND_PORTABILITY = (
+    PROJECT_ROOT
+    / ".agents/skills/quant-research-platform-maintenance/references"
+    / "tooling-and-portability.md"
 )
 
 EXPECTED_PYTHON_SPEC = ">=3.13,<3.14"
@@ -75,36 +81,35 @@ def test_core_dependencies_have_version_boundaries() -> None:
     assert _unbounded(dev) == []
 
 
-def test_environment_contract_document_matches_python_contract() -> None:
-    text = ENVIRONMENT_CONTRACT.read_text(encoding="utf-8")
+def test_engineering_contract_points_to_executable_environment_contracts() -> None:
+    text = ENGINEERING_CONTRACT.read_text(encoding="utf-8")
+    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
 
-    assert "Official Python: Python 3.13.x" in text
-    assert f"`{EXPECTED_PYTHON_SPEC}`" in text
-    assert "Unsupported / not guaranteed: Python 3.11 / 3.12 / 3.14+" in text
-    assert "Primary verified OS: Windows 11 + conda `quantlab313`" in text
-    assert "macOS/Linux PASS only after tests run on those systems" in text
-
-
-def test_environment_contract_includes_windows_and_bash_commands() -> None:
-    text = ENVIRONMENT_CONTRACT.read_text(encoding="utf-8")
-
-    assert "```powershell" in text
-    assert "```bash" in text
-    assert "conda env update -f environment.yml" in text
-    assert "python -m pytest tests/architecture -q" in text
-    assert (
-        "python -m pytest tests/correctness/test_price_volume_reference.py -q"
-        in text
+    assert "pyproject.toml" in text
+    assert "environment.yml" in text
+    assert f'requires-python = "{EXPECTED_PYTHON_SPEC}"' in PYPROJECT.read_text(
+        encoding="utf-8"
     )
-    assert "python -m ruff check src tests" in text
-    assert "python -m pytest --cov=quant_research_platform" in text
+    assert "python=3.13" in environment
+    assert "quantlab313" in environment
+
+
+def test_engineering_contract_includes_current_formal_commands() -> None:
+    text = ENGINEERING_CONTRACT.read_text(encoding="utf-8")
+
+    assert "```bash" in text
+    assert "git diff --check" in text
+    assert "python -m pytest tests/agents tests/architecture -q" in text
+    assert "verify_governance.py --governance-only --allow-active-docs" in text
+    assert "verify_code_map_flow.py --repo-root ." in text
 
 
 def test_default_environment_update_commands_do_not_prune_quantlab313() -> None:
     checked = {
         "README.md": README,
-        "docs/architecture/environment-contract.md": ENVIRONMENT_CONTRACT,
-        "contracts-and-verification.md": CONTRACTS_AND_VERIFICATION,
+        "docs/architecture/engineering-contract.md": ENGINEERING_CONTRACT,
+        "verification-and-gates.md": VERIFICATION_AND_GATES,
+        "tooling-and-portability.md": TOOLING_AND_PORTABILITY,
     }
     unsafe_defaults: list[str] = []
     for label, path in checked.items():
@@ -119,8 +124,9 @@ def test_default_environment_update_commands_do_not_prune_quantlab313() -> None:
 def test_prune_mentions_are_marked_as_non_default_qrp_minimal_rebuild() -> None:
     checked = {
         "README.md": README,
-        "docs/architecture/environment-contract.md": ENVIRONMENT_CONTRACT,
-        "contracts-and-verification.md": CONTRACTS_AND_VERIFICATION,
+        "docs/architecture/engineering-contract.md": ENGINEERING_CONTRACT,
+        "verification-and-gates.md": VERIFICATION_AND_GATES,
+        "tooling-and-portability.md": TOOLING_AND_PORTABILITY,
     }
     missing_context: list[str] = []
     for label, path in checked.items():
@@ -143,7 +149,7 @@ def test_prune_mentions_are_marked_as_non_default_qrp_minimal_rebuild() -> None:
 
 
 def test_formal_verification_commands_do_not_depend_on_private_artifacts() -> None:
-    text = ENVIRONMENT_CONTRACT.read_text(encoding="utf-8")
+    text = ENGINEERING_CONTRACT.read_text(encoding="utf-8")
     command_sections = "\n".join(_code_blocks(text))
 
     hits = [
@@ -157,7 +163,7 @@ def test_formal_verification_commands_do_not_depend_on_private_artifacts() -> No
 
 def test_environment_contract_docs_do_not_hardcode_local_absolute_paths() -> None:
     checked = {
-        "docs/architecture/environment-contract.md": ENVIRONMENT_CONTRACT,
+        "docs/architecture/engineering-contract.md": ENGINEERING_CONTRACT,
         "README.md": README,
     }
     hits: list[str] = []

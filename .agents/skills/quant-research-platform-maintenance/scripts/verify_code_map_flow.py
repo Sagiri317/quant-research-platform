@@ -9,17 +9,24 @@ import sys
 from pathlib import Path
 
 REQUIRED_TERMS = (
-    "QRP Clean Rewrite",
-    "0.1.0",
-    "/api/0.1",
-    "research-datasets",
-    "workflows/",
-    "reports/private_research",
+    "local research platform",
+    "data -> feature -> signal/model -> evaluate -> evidence",
+    ".agents tooling",
+    ".run output/evidence",
+    "private data safety",
+    "current contract",
+    "current-contract-only",
+    "no trading execution",
+    "no production trading boundary",
 )
 FORBIDDEN_TERMS = (
+    "QRP Clean Rewrite",
+    "clean rewrite",
+    "clean-rewrite",
     "raw_private",
     "interim_private",
     "processed_private",
+    "reports/private_research",
     "/api/v0.1",
     "/api/pipeline-runs",
     "/api/runs",

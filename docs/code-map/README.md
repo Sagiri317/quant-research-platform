@@ -1,28 +1,17 @@
 # Code Map
 
-This directory maps the current QRP Clean Rewrite `0.1.0` implementation. It is
-for code reading and onboarding, not roadmap, status, or governance.
+本目录提供当前代码地图。它不记录当前阶段或历史运行结果。
 
-## Files
+## 文件
 
-| File | Purpose |
-|---|---|
-| `platform-flow.md` | Global data flow, API, CLI, and package ownership map |
-| `a-share-data-and-pipeline.md` | A-share data flow and migration targets |
-| `reports-api.md` | Evaluation/prediction report ownership and API/CLI handoff |
-| `compute-portfolio-boundary.md` | Portfolio compute split boundary and 0.1.0 limitation |
+```text
+platform-flow.md
+  平台总体流程和模块边界。
 
-## Reading Order
+a-share-data-flow.md
+  A-share 内部供应商数据路径和 source/dataset 边界。
+```
 
-1. `platform-flow.md`
-2. `a-share-data-and-pipeline.md`
-3. `reports-api.md`
-4. `compute-portfolio-boundary.md`
+## 使用规则
 
-## Maintenance
-
-- Keep maps aligned with code and tests, not with old branch history.
-- Do not include private absolute paths, row samples, stock-code samples, run
-  IDs, commit SHAs, or debug output.
-- When the 0.1 API/CLI or processed-data layout changes, update this directory
-  in the same slice.
+代码地图用于减少 agent 搜索成本。若代码地图与源码、contracts 或 tests 冲突，以可执行合同为准，并修正文档。

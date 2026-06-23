@@ -1,63 +1,38 @@
-﻿# QRP Handoff Tools
+# Handoff Scripts
 
-Tracked source for building and checking public-safe QRP handoff packages.
-Generated packages do not copy these tracked files into the zip. The final zip
-contains the branch bundle plus task-specific evidence; reviewers can clone the
-bundle and run the tracked tools from that clone.
+本目录保存 tracked handoff tooling。所有 handoff 构建、验证和 safety check 应使用这里的脚本，不得从 `.run/` 中复制或推断工具逻辑。
 
-## Task Input
+## 文件
 
-The builder takes one public-safe task JSON:
-
-```powershell
-<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py --task <task_metadata_input.json> --out-dir .run/handoffs --verify
+```text
+build_handoff_package.py
+verify_handoff_package.py
+handoff_safety.py
+self_test.py
 ```
 
-The task JSON must provide `slug`, `branch`, `base`, and `final_head` plus
-public-safe `validation_evidence` and optional `handoff_evidence`. In
-`evidence` mode, the zip normalizes this input into:
+## 分层
 
-- `task_metadata.json`
-- `validation_evidence.json`
-- `handoff_evidence/*.json`
+- builder 负责生成 bundle、manifest、sidecar、task metadata 和 evidence。
+- verifier 负责独立验证 bundle 合同。
+- source-tree scan 负责检查当前源码树中的 forbidden surface。
+- package safety 负责 public-safe、路径、private marker 和 forbidden content 检查。
 
-`pr_closure` mode may require PR metadata in task inputs, but narrative PR text
-and thread tables are outside the handoff package contract.
+这些 gate 互不替代。任何报告必须分别写出状态。
 
-Do not include private row-level data, local absolute paths, raw tracebacks,
-vendor filenames, credentials, tokens, or exact private runtime payloads.
+## 输出
 
-## Outputs
+handoff 输出应写到 `.run/` 或用户指定目录。`.run/` 是 output layer，不是工具事实源。
 
-The builder writes exactly:
+review bundle 内的 `final-branch.bundle` 应可用以下形式重建分支：
 
-- `<slug>.zip`
-- `<slug>.json`
-
-The handoff sidecar JSON is not placed in the zip. It contains only the zip
-filename, logical zip path, zip hash, artifact manifest hash, branch/base/head,
-generation timestamp, and minimal status summary.
-
-## Verification
-
-From an existing checkout:
-
-```powershell
-<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py
-<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py --zip .run/handoffs/<slug>.zip --json .run/handoffs/<slug>.json
-<PYTHON_EXE> .agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py .run/handoffs/<slug>.zip --json .run/handoffs/<slug>.json
-```
-
-In a fresh directory with only the zip/json, first extract or copy
-`final-branch.bundle` from the zip, then clone the bundle and run the tracked
-tools from the cloned repository:
-
-```bash
+```text
 git clone --branch <branch-from-sidecar> final-branch.bundle repo
-python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py
-python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py --zip <slug>.zip --json <slug>.json
-python repo/.agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py <slug>.zip --json <slug>.json
 ```
 
-The legacy `factor_chunk_diagnostic.py`, `n2_artifact_validation.py`, and
-`smoke_compare.py` files are not handoff contract requirements.
+旧的临时 run tools are not handoff contract requirements；当前合同只以本目录
+tracked scripts、schemas 和 templates 为准。
+
+## 运行纪律
+
+运行前先确认 live git baseline。生成 bundle 后记录 hash、manifest、sidecar、source-tree scan、package safety、git bundle verify 和 list-heads。未运行项写 `NOT_RUN`，环境或超时阻塞写 `BLOCKED`。

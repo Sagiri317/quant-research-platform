@@ -1,0 +1,44 @@
+# Governance
+
+QRP 的治理目标是让 agent 能在最少上下文下正确执行，并通过可验证 gate 防止返工、私有数据泄漏和旧合同复活。
+
+## 核心规则
+
+1. live git baseline 是现场事实入口。
+2. 文档不保存当前状态。
+3. `.agents` 是 tracked tooling source。
+4. `.run` 是 output/evidence layer。
+5. `PASS` 必须绑定实际命令或 artifact。
+6. current-contract-only 是默认策略。
+7. 旧字段和旧路径只进入 negative tests 或 allowlist。
+
+## Agent 文件分层
+
+```text
+AGENTS.md      根规则，短而硬
+SKILL.md       skill 入口和触发规则
+references/    按需读取的长规则
+scripts/       可执行治理工具
+schemas/       机器合同
+templates/     机器输入模板
+```
+
+## 禁止状态文档
+
+仓库不保存单独的状态文档或状态简报。任何需要“当前状态”的任务都必须先运行 git baseline。
+
+## Open issues
+
+`open-issues.md` 只保存 current open 和 deferred 问题，不保存 done/history。历史用 git history 追溯。
+
+## Gate 分层
+
+- diff gate：检查 patch 格式。
+- governance gate：检查 active docs、privacy、stale facts、status token。
+- code-map gate：检查代码地图与当前合同一致。
+- handoff gate：检查 builder、verifier、source-tree scan、package safety。
+- test gate：检查当前合同测试。
+
+## 返工防护
+
+如果 Codex 或其他 agent 尝试恢复过期文档、旧字段兼容、fallback read、alias 或 silent drop，必须停止并要求用户确认。

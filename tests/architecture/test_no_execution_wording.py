@@ -25,7 +25,6 @@ def test_runtime_workflow_outputs_do_not_use_action_wording() -> None:
     )
     allowed_paths = {
         Path("tests/architecture/test_no_execution_wording.py"),
-        Path("docs/architecture/open-issues-register.md"),
     }
     hits: list[str] = []
     for root in (

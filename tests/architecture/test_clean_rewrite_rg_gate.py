@@ -14,7 +14,6 @@ SCAN_ROOTS = (
     Path("README.md"),
     Path("data/README.md"),
     Path("AGENTS.md"),
-    Path("PROJECT_STATUS.md"),
     Path("pyproject.toml"),
 )
 RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
@@ -29,6 +28,34 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
 }
 RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = {
     Path("src/quant_research_platform/workflows/verification_evidence.py"),
+}
+ACTIVE_GOVERNANCE_DOC_ROOTS = (
+    Path("AGENTS.md"),
+    Path("README.md"),
+    Path(".agents/briefs"),
+    Path(".agents/skills/quant-research-platform-maintenance/SKILL.md"),
+    Path(".agents/skills/quant-research-platform-maintenance/references"),
+    Path("docs/architecture"),
+    Path("docs/code-map"),
+    Path("docs/api"),
+    Path("docs/data"),
+    Path("data/README.md"),
+)
+STALE_GOVERNANCE_TRUTH_PATTERNS = {
+    "old_feature_branch_current_truth": re.compile(
+        r"feature/(?:qrp-clean-rewrite|agent-governance-redesign)"
+    ),
+    "clean_rewrite_current_state": re.compile(r"\bclean[- ]rewrite\b", re.I),
+    "draft_pr_current_state": re.compile(r"\bdraft PR\b", re.I),
+    "pre_merge_current_state": re.compile(r"\bpre-merge\b", re.I),
+    "merge_ready_current_state": re.compile(r"\bmerge-ready\b", re.I),
+    "run_official_tool_source": re.compile(
+        r"(?:\.run\s+official|official\s+\.run)",
+        re.I,
+    ),
+    "retired_status_source": re.compile(
+        r"(?:PROJECT_STATUS\.md|current-qrp-status\.md)"
+    ),
 }
 
 
@@ -83,6 +110,29 @@ def test_source_and_tests_do_not_depend_on_runtime_workspace_path() -> None:
                     hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert hits == []
+
+
+def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:
+    hits: list[str] = []
+    for path in _iter_active_governance_doc_files():
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for name, pattern in STALE_GOVERNANCE_TRUTH_PATTERNS.items():
+                if pattern.search(line):
+                    hits.append(f"{path}:{line_number}: {name}")
+
+    assert hits == []
+
+
+def test_stale_governance_truth_patterns_cover_required_examples() -> None:
+    examples = {
+        "old_feature_branch_current_truth": "当前分支是 feature/qrp-clean-rewrite",
+        "clean_rewrite_current_state": "clean rewrite 是当前状态",
+        "run_official_tool_source": ".run official tool source",
+    }
+
+    for name, text in examples.items():
+        assert STALE_GOVERNANCE_TRUTH_PATTERNS[name].search(text)
 
 
 def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:
@@ -167,11 +217,9 @@ PUBLIC_SURFACE_SCAN_ROOTS = (
     Path("README.md"),
     Path("data/README.md"),
     Path("AGENTS.md"),
-    Path("PROJECT_STATUS.md"),
 )
 
 INTERNAL_PROVIDER_SCAN_EXCLUSIONS = {
-    ("docs", "architecture", "open-issues-register.md"),
     ("docs", "code-map", "source-csmar-contracts.md"),
     ("src", "quant_research_platform", "reports", "schema_inventory.py"),
 }
@@ -238,12 +286,11 @@ PUBLIC_CONTRACT_DOCS = (
     Path("README.md"),
     Path("docs/api/README.md"),
     Path("docs/code-map/platform-flow.md"),
-    Path(".agents/briefs/current-qrp-status.md"),
     Path(
         ".agents/skills/quant-research-platform-maintenance/references/"
-        "contracts-and-verification.md"
+        "current-contract.md"
     ),
-    Path("PROJECT_STATUS.md"),
+    Path("docs/architecture/open-issues.md"),
 )
 
 APPROVED_API_LINES = (
@@ -341,7 +388,6 @@ ACTIVE_STRUCTURE_SCAN_ROOTS = (
     Path("README.md"),
     Path("data/README.md"),
     Path("AGENTS.md"),
-    Path("PROJECT_STATUS.md"),
 )
 
 FUTURE_PUBLIC_TODO_TERMS = (
@@ -388,6 +434,22 @@ def _iter_text_files() -> list[Path]:
             if path.is_file() and not _is_excluded(path):
                 files.append(path)
     return files
+
+
+def _iter_active_governance_doc_files() -> tuple[Path, ...]:
+    files: list[Path] = []
+    for root in ACTIVE_GOVERNANCE_DOC_ROOTS:
+        if not root.exists():
+            raise AssertionError(f"active_governance_doc_root_missing: {root}")
+        if root.is_file():
+            files.append(root)
+            continue
+        files.extend(
+            path
+            for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".md", ".txt"}
+        )
+    return tuple(sorted(files))
 
 
 def _iter_python_files() -> list[Path]:
@@ -595,9 +657,19 @@ def test_research_foundation_semantic_closure_terms_are_retired() -> None:
         Path("tests/contracts/test_research_foundation_semantic_contracts.py"): (
             'direction="' + "higher" + '"',
         ),
-        Path("docs/architecture/open-issues-register.md"): (
+        Path("docs/architecture/open-issues.md"): (
             "Prediction" + "Bundle",
         ),
+        Path("AGENTS.md"): ("br" + "oker",),
+        Path("README.md"): ("br" + "oker",),
+        Path(".agents/briefs/user-principles.md"): ("br" + "oker",),
+        Path(".agents/skills/quant-research-platform-maintenance/SKILL.md"): (
+            "br" + "oker",
+        ),
+        Path(
+            ".agents/skills/quant-research-platform-maintenance/references/"
+            "current-contract.md"
+        ): ("br" + "oker",),
     }
 
     current_file = Path(__file__).resolve()
@@ -825,15 +897,15 @@ def test_public_docs_capture_naming_rules_and_future_only_items() -> None:
     missing = [
         rule for rule in required_naming_rules if rule not in api_doc
     ]
-    missing_future = [
-        term for term in FUTURE_PUBLIC_TODO_TERMS if term not in combined
+    stale_future = [
+        term for term in FUTURE_PUBLIC_TODO_TERMS if term in combined
     ]
     missing_private_cli = [
         line for line in PRIVATE_LOCAL_CLI_LINES if line not in combined
     ]
 
     assert missing == []
-    assert missing_future == []
+    assert stale_future == []
     assert missing_private_cli == []
 
 

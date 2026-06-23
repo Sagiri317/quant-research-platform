@@ -1,101 +1,74 @@
-﻿# Quant Research Platform（QRP）
+# QRP
 
-QRP 是一个面向多市场扩展的本地量化研究平台。当前启用市场是 A-share（A 股），当前阶段是 local research platform（本地研究平台），不是 simulated order execution（模拟交易）、real-money order execution（实盘交易）或生产交易系统。
+QRP 是一个本地量化研究平台，用于组织数据合同、因子研究、特征处理、模型训练、预测、评估、组合构建、报告与 evidence。它面向研究和演示，不是生产交易系统，不接 broker 或 exchange，不提供 investment advice。
 
-## 当前目标
+## 当前定位
 
-当前 clean rewrite 的目标是建立一条可验证、可扩展、private-safe（私有数据安全）的研究链路：
+QRP 的长期定位是：用严格合同、可复现 evidence 和受控 agent workflow 支撑量化研究迭代。仓库文档只描述长期合同和操作规则，不记录当前分支、当前阶段、当前 PR、最近运行结果或下一步任务。
 
-```text
-market/source data
--> processed dataset
--> factor / label / filter / context
--> research dataset
--> evaluation / diagnostics
--> model / prediction
--> report artifacts
--> public-safe evidence / handoff
+当前状态必须从 git 和当前任务现场读取：
+
+```bash
+git status --short --branch
+git log -1 --date=iso-strict --format="%H%n%cd%n%s"
 ```
 
-当前 public surface（公共接口面）保持最小：
+## 目录概览
+
+```text
+.agents/     agent 指令、skills、governance scripts、handoff tooling
+src/         QRP 源码
+tests/       当前合同测试、治理测试、架构测试
+docs/        当前合同文档和代码地图
+data/        本地数据占位说明，不提交私有数据
+.run/        本地运行输出和 evidence，不作为 tracked tooling
+```
+
+## 当前 public surface
+
+当前 public API 只有：
 
 ```text
 GET  /api/0.1/catalog/factors
 GET  /api/0.1/catalog/labels
 GET  /api/0.1/research-datasets/{dataset_id}/requirements
+```
+
+当前 public CLI 只有：
+
+```text
 qrp catalog factors
 qrp catalog labels
 qrp research-datasets requirements <dataset_id>
 ```
 
-Approved private local CLI（获批私有本地命令行）只有：
+## agent 入口
 
-```text
-qrp-private schema-inventory --project-root . --output <path>
-qrp-private evidence run
+coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/quant-research-platform-maintenance/SKILL.md`。需要深入执行时，再按需读取 `.agents/skills/quant-research-platform-maintenance/references/**`。
+
+`AGENTS.md` 不是状态板。仓库不再保存单独的状态文档或状态简报。需要当前事实时，必须使用 live git baseline。
+
+## 文档原则
+
+- 文档保存当前合同，不保存历史叙事。
+- open issues 只保存当前 open 或 deferred 问题。
+- 历史 evidence 不进入 `docs/` 作为长期事实源。
+- `.agents` 是 tracked tooling source。
+- `.run` 是 output layer 和 evidence layer。
+
+## 验证原则
+
+所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。`PASS` 必须对应实际命令或可检查 artifact。未运行的检查不能写成 PASS。
+
+常用治理验证：
+
+```bash
+git diff --check
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --allow-active-docs --json
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
+python -m pytest tests/agents tests/architecture -q
 ```
 
-`qrp-private evidence run` 是 private local verification harness，用于本地
-smoke/evidence generation；不是 public CLI；不是 public execution mode；不是
-public evaluate、predict 或 report command；不是 simulated or real-money order execution；不承诺收益；
-不输出 row-level private data。
+## 数据安全
 
-## 治理入口
-
-AI agents 必须先读根目录 `AGENTS.md`。项目内治理根是 `.agents/`，不是 repo-local `.codex/`。
-
-常用入口：
-
-```text
-AGENTS.md
-.agents/briefs/current-qrp-status.md
-.agents/briefs/repo-map.md
-.agents/briefs/user-principles.md
-.agents/skills/quant-research-platform-maintenance/SKILL.md
-.agents/skills/quant-research-platform-maintenance/references/task-modes.md
-.agents/skills/quant-research-platform-maintenance/references/token-economy.md
-.agents/skills/quant-research-platform-maintenance/references/templates/README.md
-```
-
-日常任务不要默认读取所有 docs、templates、`.run` evidence 或旧 handoff。先做 task mode routing（任务模式路由），再按需加载最小上下文。
-
-## 工程原则
-
-- Semantic closure（语义收口）：接口、命名、contracts、tests、docs、artifacts、handoff 证据必须一致。
-- Naming first-class（命名一等）：命名是架构问题。
-- Replace over parallel（替代优先）：替代旧结构时删除旧路径，不保留 legacy alias / compatibility shim。
-- Minimal public API（最小公共接口）：不默认新增 API、CLI、registry、store、facade。
-- Evidence over claims（证据优先）：未运行就是 `NOT_RUN`，失败就是 `FAIL`。
-- Private-data safety（私有数据安全）：public-safe evidence 不包含行级私有数据。
-- Layer-local change（局部改动）：新功能主要改 owner layer，跨层大改先做架构收口。
-
-## Python 与资源策略
-
-项目 Python 要求以 `pyproject.toml` 为准。当前 clean baseline 使用 `>=3.13,<3.14`；用户本地 Python 为 `3.13.14`。
-
-运行时内存预算以代码事实源为准：`src/quant_research_platform/runtime/resources.py` 中 `DEFAULT_MEMORY_BUDGET_FRACTION = 0.80`，并可通过 `QRP_MEMORY_BUDGET_FRACTION` 覆盖。不要在治理文档中维护第二套不同数字。
-
-## 外部工具边界
-
-用户本地可能已有 Context7 MCP、GitHub MCP、Binance plugin、superpowers skills 和其他 global skills。QRP repo 不修改这些全局能力，也不创建 repo-local `.codex/`。外部工具可以辅助查询和审查，但不能绕过 QRP 的 task mode、owner layer、public surface、private safety 和 artifact truth gates。
-
-## 私有数据边界
-
-以下路径只用于本地私有数据或私有报告，不进入 public-safe bundle：
-
-```text
-data/raw/<internal-provider>/
-data/interim/<internal-provider>/
-data/processed/a_share/
-data/research/a_share/
-reports/private_research/
-```
-
-handoff package 不得包含 parquet、csv、pkl、pickle、feather、arrow、raw vendor data、row-level private data、credentials、tokens 或本地绝对路径。
-
-## 进一步阅读
-
-- `PROJECT_STATUS.md`：当前阶段和下一步。
-- `docs/architecture/agent-governance.md`：智能体治理架构。
-- `docs/architecture/agent-governance-file-guide.md`：用人话解释治理目录和文件。
-- `docs/architecture/open-issues-register.md`：开放问题登记。
+禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。公开 evidence 只能包含 public-safe 摘要、schema、计数、hash、命令状态和路径结构。

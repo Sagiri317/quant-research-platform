@@ -1,37 +1,65 @@
-# QRP 路由地图
+# Repo Map
 
-本文件是 token-saving repo map（节约 token 的仓库索引）。它只帮助 agent 判断先读哪里，不替代 `docs/code-map/**` 或源码事实。
+本文件只给 agent 提供仓库导航，不记录当前状态。
 
-## 源码 owner layer
+## 主要路径
 
 ```text
-contracts/   稳定 spec、ID、合同对象。改 public contract 前必须过 Public Surface Gate。
-storage/     数据布局、读写、manifest、partition、checksum、storage privacy。
-catalog/     可查询 catalog、research profile composition。
-sources/     vendor/source 输入到 canonical interim data。
-markets/     市场语义；当前 active implementation 是 a_share。
-research/    factors、labels、datasets、evaluations、models、predictions、portfolios。
-workflows/   本地 DAG、执行计划、checkpoint、resume。
-compute/     dataframe/tensor 计算工具。
-agents/      proposal-only planning/spec boundaries；不调用外部 LLM API。
-interfaces/  API/CLI 适配层；public surface 最小化。
-reports/     report catalog、private report artifact writers。
-runtime/     privacy、sanitization、logging、profiling、errors、resources。
+AGENTS.md
+README.md
+.agents/briefs/user-principles.md
+.agents/skills/quant-research-platform-maintenance/SKILL.md
+.agents/skills/quant-research-platform-maintenance/references/
+.agents/skills/quant-research-platform-maintenance/scripts/
+docs/architecture/
+docs/code-map/
+docs/api/
+docs/data/
+src/quant_research_platform/
+tests/
 ```
 
-## 读取顺序建议
+## 源码分层
 
-- Review / merge / apply-only：先读 diff，不先读源码。
-- Implementation：先根据 owner layer 定位目标模块和 tests。
-- Public API/CLI 相关：先看 `interfaces/`、contracts、tests，再看 docs。
-- A-share 语义相关：先看 `markets/implementations/a_share/`。
-- Factor/label/research dataset：先看 `research/` 里对应 owner 子层。
-- Private safety / package：先看 `.agents` references 和 scripts，再看 `.run` summary/manifest。
+```text
+contracts/       字段、schema、ID、time、privacy、run id、workflow 合同
+catalog/         dataset、factor、label、model、report 等注册描述
+sources/         A-share 内部 provider source 层和 raw/interim 映射
+storage/         dataset 读写、manifest、fingerprint、compare、layout
+research/        factors、features、labels、models、predictions、evaluations、portfolios、signals
+compute/         dataframe/tensor 计算工具和 portfolio math
+runtime/         logging、privacy、resources、execution metrics
+reports/         public-safe evidence 与 report artifact
+interfaces/      API、CLI、service facade
+agents/          workflow planning 和 proposal 组件
+```
 
-## 不要默认读取
+## 文档分层
 
-- 私有数据目录。
-- `.run` raw logs / 大 stdout。
-- 旧 handoff zip/json。
-- 全部 templates。
-- 全部 docs/architecture。
+```text
+docs/architecture/   当前架构合同、治理合同、open issues
+docs/code-map/       代码流程地图和 A-share 数据流
+docs/api/            API 边界
+docs/data/           数据目录合同
+```
+
+## agent skill 分层
+
+```text
+SKILL.md                  skill 入口和路由
+references/current-contract.md
+references/task-routing.md
+references/verification-and-gates.md
+references/handoff-and-evidence.md
+references/tooling-and-portability.md
+references/prompt-patterns.md
+scripts/verify_governance.py
+scripts/verify_code_map_flow.py
+scripts/handoff/
+schemas/handoff/
+templates/handoff/
+```
+
+## 读取规则
+
+先用 live git baseline 确认现场，再按任务选择最小文件集合。不要为了找当前状态而读取历史 reports、旧 handoff 或 `.run/` 产物。

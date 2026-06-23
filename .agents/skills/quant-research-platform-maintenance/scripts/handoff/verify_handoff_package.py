@@ -714,6 +714,7 @@ def verify_source_tree_scan_evidence(
         expected_groups = {
             "retired_terms",
             "active_test_literals",
+            "governance_truth",
             "sensitive_negative_literals",
         }
         actual_groups = set(scan_groups)

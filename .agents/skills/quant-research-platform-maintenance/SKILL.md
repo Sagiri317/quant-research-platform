@@ -1,78 +1,102 @@
 ---
 name: quant-research-platform-maintenance
-description: 用于 QRP / quant-research-platform 仓库内的治理、维护、任务路由、实现边界、审查、handoff 包装、merge gate、private-safety、公有 API/CLI 合同检查、owner-layer routing，以及 Codex/GPT/Claude 工作流纪律。不要用于 real-money order execution、deployment、vendor login、广泛 private data access 或外部 API 集成。
+description: QRP 仓库维护 skill。用于 governance、handoff、contracts、docs、tests、agent workflow、public-safe evidence、architecture gates 和 review-fix loop。不要用于业务策略扩张、生产交易、broker/exchange 连接或 private data 读取。
 ---
 
-# QRP 维护与治理 skill（Quant Research Platform Maintenance）
+# QRP Maintenance Skill
 
-本 skill 是 QRP 的操作路由层。它的目标是让用户用很短的提示词也能让 Codex 精准命中任务、遵守长期原则、少读上下文、少返工、一遍过。不要把本文件扩写成百科；详细规则按需进入 `references/`。
+## 0. 触发范围
 
-## 加载顺序
+使用本 skill 的任务包括：
 
-1. 先读 repo 根目录 `AGENTS.md`。
-2. 读用户本轮任务 envelope（任务边界）。
-3. 当前事实需要时读 `.agents/briefs/current-qrp-status.md`。
-4. 路由实现或审查时读 `.agents/briefs/repo-map.md`。
-5. 涉及架构、命名、public surface、跨层 scope 或治理时读 `.agents/briefs/user-principles.md`。
-6. 用 `references/task-modes.md` 选择 mode ID。
-7. 用 `references/token-economy.md` 限制读取预算。
-8. 用 `references/context-routing.md` 只加载最小相关上下文。
-9. 用 `references/governance-gates.md` 选择必过 gates。
-10. 涉及 public API/CLI、artifacts、data、report、private safety 或 verification semantics 时读 `references/contracts-and-verification.md`。
-11. 需要实现或路由 P2/P3 时读 `references/owner-layer-routing.md`。
-12. 涉及 MCP、plugins、hooks、subagents、Codex exec、GitHub Action 时读 `references/external-tools-and-adapters.md`。
+- governance docs、agent instructions、prompt templates、handoff workflow
+- `verify_governance.py`、`verify_code_map_flow.py`、handoff builder/verifier/safety scripts
+- `tests/agents/**`、`tests/architecture/**`、retired-surface negative tests
+- docs hard cutover、open issues、public-safe evidence
+- current-contract-only、private safety、PASS taxonomy
 
-## 默认执行设置
+不要用本 skill 直接处理 factor/model/backtest/storage runtime 的业务正确性，除非用户明确授权并指定 scope。
 
-- 输出语言：面向用户的最终回复和治理 Markdown 默认中文；路径、命令、API route、字段名、错误码、status token、mode ID 保留英文。
-- 分支：实现、架构、docs/rules、治理修改默认使用 `feature/<task-name>`；当前治理第二轮修补应继续在 `feature/agent-governance-redesign` 上追加 commit。
-- 上下文：先 targeted `rg` 和 diff summary，再窄读文件。不要默认 broad-load private data、generated outputs、旧 handoff packages、全部 docs 或全部 templates。
-- Subagents：默认不用。只有 review/goal/release/governance 等复杂并行审查可用，且默认 read-only；main agent 负责 integration、truthfulness、commit、push、handoff。
-- Hooks/MCP/plugins/repo-local `.codex`：默认 draft-only，不在 repo 内直接启用。
+## 1. 必做 preflight
 
-## 任务模式
+任何操作前运行：
 
-编辑前先分类：
-
-```text
-small-fix | standard-implementation | goal-closure | independent-review |
-handoff-packaging | merge-gate | release-gate | docs-status-sync |
-governance-redesign | apply-only-validation | ambiguous
+```bash
+git status --short --branch
+git log -1 --date=iso-strict --format="%H%n%cd%n%s"
+git branch -a
 ```
 
-如果分类不清，只有出现 blocking ambiguity（阻塞性歧义）时才问用户；不要为了小不确定性浪费一轮对话。不要把 review、handoff、merge、packaging、governance 任务改成业务实现。
+不得使用历史分支名、旧 commit、旧 PR 状态或旧 handoff 作为当前事实。
 
-## 必过 gates
+## 2. 读取顺序
 
-中等及以上任务按 `references/governance-gates.md` 选择相关 gates：
-
-```text
-Task Router | Scope | Context | Owner Layer | Blast Radius | Red Test |
-Same Issue Family Scan | Artifact Truth | Public Surface | Private Safety |
-Memory/Performance Awareness | Docs/Status Sync | .run Tooling |
-Script Portability | Handoff | Final Truthfulness
-```
-
-## 真实性规则
-
-- `PASS`：检查实际运行且通过。
-- `FAIL`：检查实际运行且失败；不得重命名。
-- `NOT_RUN`：没有运行证据。
-- `BLOCKED`：环境、依赖、权限或输入缺失导致无法运行。
-- final report 必须列出实际运行、未运行和剩余风险；不要粘贴长日志，除非失败定位需要。
-
-## 私有输出规则
-
-任何可能持久化 private-derived row-level output（私有派生行级输出）的命令、API handler、workflow、report writer、exporter、package builder、metadata writer 或 handoff tool，都必须通过 Private Safety Gate。Public-safe bundle 必须排除 private data 和 blocked file types。
-
-## 验证脚本
-
-相关时使用 `scripts/` 里的跨平台 Python 脚本：
+先读：
 
 ```text
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --help
-python .agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py --help
-python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --help
+AGENTS.md
+.agents/briefs/repo-map.md
+.agents/briefs/user-principles.md
 ```
 
-这些脚本是 deterministic helpers（确定性辅助检查），不能替代 tests、代码审查或任务专项验证。
+再按任务读 references：
+
+```text
+references/current-contract.md
+references/task-routing.md
+references/verification-and-gates.md
+references/handoff-and-evidence.md
+references/tooling-and-portability.md
+references/prompt-patterns.md
+```
+
+只读相关文件，不要为了“全面”把所有 docs、old reports 或 `.run/` 全量读入上下文。
+
+## 3. 事实源纪律
+
+仓库不再保存单独的 status 文档或状态简报。当前状态来自 live git baseline、当前用户指令、当前 open issues 和可执行合同。
+
+`.agents` 是 tracked tooling source。`.run` 是 output/evidence layer。禁止把 `.run` 作为官方工具入口。
+
+## 4. 验证纪律
+
+所有报告只用：`PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。
+
+`PASS` 必须绑定实际命令或 artifact。完整测试超时不能写 PASS。分段测试通过只能覆盖对应分段。
+
+建议命令：
+
+```bash
+git diff --check
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py --governance-only --allow-active-docs --json
+python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
+python -m pytest tests/agents tests/architecture -q
+```
+
+## 5. handoff 纪律
+
+handoff scripts 位于：
+
+```text
+.agents/skills/quant-research-platform-maintenance/scripts/handoff/
+```
+
+builder、verifier、source-tree scan、package safety 是不同 gate，不能互相替代。handoff artifact 输出到 `.run/` 或用户指定输出目录，不得把 `.run/` 中的历史产物当当前合同。
+
+## 6. 修改边界
+
+修文档时，如果删除或改名 active docs，必须同步修治理脚本和测试。不要为了让测试继续通过而恢复过期事实源。
+
+修脚本时，优先修 state-based scan 和测试覆盖。业务逻辑文件默认禁止修改。唯一例外是 reports/evidence layer 在 public-safe evidence 路径硬编码需要最小同步时，可在报告中单独说明。
+
+## 7. 结束报告
+
+最终报告必须包含：
+
+- branch 和 HEAD
+- changed files
+- deleted files
+- commands run
+- 每条命令的 PASS/FAIL/NOT_RUN/BLOCKED
+- remaining issues
+- working tree status

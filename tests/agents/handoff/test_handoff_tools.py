@@ -251,6 +251,11 @@ def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> No
                 "finding_count": 1,
                 "findings": [],
             },
+            "governance_truth": {
+                "status": "PASS",
+                "finding_count": 0,
+                "findings": [],
+            },
             "sensitive_negative_literals": {
                 "status": "PASS",
                 "finding_count": 0,
