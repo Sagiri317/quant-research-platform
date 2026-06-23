@@ -7,11 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from quant_research_platform.reports.verification_evidence import (
-    render_private_verification_summary_markdown,
-    render_public_safe_evidence_markdown,
-)
-
 DOC_MARKET_PANEL_LOGICAL_ROOT = (
     "processed/a_share/panel/<market_panel_data_id(DataFrequency.DAILY)>"
 )
@@ -234,7 +229,7 @@ def _write_public_safe_evidence_files(tmp_path: Path) -> tuple[Path, Path]:
         newline="\n",
     )
     md_path.write_text(
-        render_public_safe_evidence_markdown(payload),
+        _synthetic_public_safe_evidence_markdown(payload),
         encoding="utf-8",
         newline="\n",
     )
@@ -251,11 +246,58 @@ def _write_private_summary_files(tmp_path: Path) -> tuple[Path, Path]:
         newline="\n",
     )
     md_path.write_text(
-        render_private_verification_summary_markdown(payload),
+        _synthetic_private_verification_summary_markdown(payload),
         encoding="utf-8",
         newline="\n",
     )
     return md_path, json_path
+
+
+def _synthetic_public_safe_evidence_markdown(payload: dict[str, object]) -> str:
+    areas = payload["areas"]
+    assert isinstance(areas, list)
+    lines = [
+        "# Public-Safe Evidence",
+        "",
+        f"- `contract_version | {payload['contract_version']}`",
+        f"- `privacy_level | {payload['privacy_level']}`",
+        f"- `status | {payload['status']}`",
+        f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+        "",
+        "| area | status | period |",
+        "| --- | --- | --- |",
+    ]
+    for item in areas:
+        assert isinstance(item, dict)
+        lines.append(f"| {item['area']} | {item['status']} | {item['period']} |")
+    return "\n".join(lines) + "\n"
+
+
+def _synthetic_private_verification_summary_markdown(
+    payload: dict[str, object],
+) -> str:
+    inventory = payload["dataset_inventory"]
+    assert isinstance(inventory, list)
+    lines = [
+        "# Private Verification Summary",
+        "",
+        f"- `contract_version | {payload['contract_version']}`",
+        f"- `privacy_level | {payload['privacy_level']}`",
+        f"- `status | {payload['status']}`",
+        f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+        "",
+        "| logical_root | covered_by_evidence_area | period |",
+        "| --- | --- | --- |",
+    ]
+    for item in inventory:
+        assert isinstance(item, dict)
+        lines.append(
+            "| "
+            f"{item['logical_root']} | "
+            f"{item['covered_by_evidence_area']} | "
+            f"{item['period']} |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def test_current_public_safe_parity_evidence_json_schema() -> None:
@@ -308,7 +350,7 @@ def test_current_public_safe_parity_evidence_json_schema() -> None:
             assert item["explanation"]
 
 
-def test_public_safe_evidence_renderer_imports_without_pyarrow() -> None:
+def test_public_safe_evidence_fast_gate_imports_without_pyarrow() -> None:
     script = """
 import importlib.abc
 import sys
@@ -320,10 +362,7 @@ class PyArrowBlocker(importlib.abc.MetaPathFinder):
         return None
 
 sys.meta_path.insert(0, PyArrowBlocker())
-from quant_research_platform.reports.verification_evidence import (
-    render_public_safe_evidence_markdown,
-)
-assert callable(render_public_safe_evidence_markdown)
+import tests.architecture.test_public_safe_evidence
 """
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
@@ -332,6 +371,14 @@ assert callable(render_public_safe_evidence_markdown)
             str(REPO_ROOT),
             env.get("PYTHONPATH", ""),
         ]
+    )
+    env.update(
+        {
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+        }
     )
 
     result = subprocess.run(

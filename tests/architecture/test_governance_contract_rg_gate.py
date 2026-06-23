@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +52,9 @@ ACTIVE_GOVERNANCE_DOC_ROOTS = (
     Path(root.rstrip("/")) for root in CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS
 )
 ACTIVE_DOC_FORBIDDEN_PATTERNS = active_doc_forbidden_patterns()
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REPORT_ARTIFACTS = Path("src/quant_research_platform/reports/report_artifacts.py")
+RUNTIME_PROFILING = Path("src/quant_research_platform/runtime/profiling.py")
 
 
 def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
@@ -1072,6 +1077,42 @@ def _literal_string_items(node: ast.expr) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _function_arg_names(path: Path, function_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return {arg.arg for arg in node.args.args}
+    raise AssertionError(f"function not found: {function_name}")
+
+
+def _class_method_arg_names(path: Path, class_name: str, method_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for child in node.body:
+            if isinstance(child, ast.FunctionDef) and child.name == method_name:
+                return {arg.arg for arg in child.args.args}
+    raise AssertionError(f"method not found: {class_name}.{method_name}")
+
+
+def _class_field_names(path: Path, class_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    fields: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for child in node.body:
+            if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                fields.add(child.target.id)
+            elif isinstance(child, ast.Assign):
+                for target in child.targets:
+                    if isinstance(target, ast.Name):
+                        fields.add(target.id)
+        return fields
+    raise AssertionError(f"class not found: {class_name}")
+
+
 def _is_write_mode(mode: str) -> bool:
     return any(flag in mode for flag in ("w", "a", "x", "+"))
 
@@ -1084,23 +1125,58 @@ def test_direct_write_gate_detects_chained_open_write() -> None:
 
 
 def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> None:
-    import inspect
-
-    from quant_research_platform.reports.report_artifacts import (
-        write_evaluation_report_artifacts,
-        write_prediction_report_artifacts,
-        write_stage_profile_report_artifacts,
-    )
-    from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
-
-    writer_signatures = (
-        inspect.signature(write_stage_profile_report_artifacts),
-        inspect.signature(write_prediction_report_artifacts),
-        inspect.signature(write_evaluation_report_artifacts),
-        inspect.signature(StageProfiler.write_artifacts),
+    writer_arg_sets = (
+        _function_arg_names(REPORT_ARTIFACTS, "write_stage_profile_report_artifacts"),
+        _function_arg_names(REPORT_ARTIFACTS, "write_prediction_report_artifacts"),
+        _function_arg_names(REPORT_ARTIFACTS, "write_evaluation_report_artifacts"),
+        _class_method_arg_names(RUNTIME_PROFILING, "StageProfiler", "write_artifacts"),
     )
 
-    assert "output_dir" not in ProfileConfig.__dataclass_fields__
-    for signature in writer_signatures:
-        assert "output_root" not in signature.parameters
-        assert "output_dir" not in signature.parameters
+    assert "output_dir" not in _class_field_names(RUNTIME_PROFILING, "ProfileConfig")
+    for arg_names in writer_arg_sets:
+        assert "output_root" not in arg_names
+        assert "output_dir" not in arg_names
+
+
+def test_governance_contract_gate_imports_without_pyarrow() -> None:
+    script = """
+import importlib
+import importlib.abc
+import sys
+
+class PyArrowBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "pyarrow" or fullname.startswith("pyarrow."):
+            raise ModuleNotFoundError("blocked pyarrow import")
+        return None
+
+sys.meta_path.insert(0, PyArrowBlocker())
+importlib.import_module("tests.architecture.test_governance_contract_rg_gate")
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(REPO_ROOT / "src"),
+            str(REPO_ROOT),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+    env.update(
+        {
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

@@ -32,7 +32,6 @@ from quant_research_platform.runtime.privacy import (
     is_private_boundary_path,
     sanitize_public_text,
 )
-from quant_research_platform.sources.csmar import interim as csmar_interim
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 
@@ -61,6 +60,14 @@ importlib.import_module("tests.contracts.test_platform_contracts")
             str(REPO_ROOT),
             env.get("PYTHONPATH", ""),
         ]
+    )
+    env.update(
+        {
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+        }
     )
 
     result = subprocess.run(
@@ -229,6 +236,9 @@ def test_sanitizer_removes_local_paths_and_private_markers() -> None:
 
 
 def test_csmar_market_bars_daily_normalization_stays_source_local() -> None:
+    pytest.importorskip("pyarrow")
+    from quant_research_platform.sources.csmar import interim as csmar_interim
+
     raw = pd.DataFrame(
         {
             "Stkcd": ["1"],
