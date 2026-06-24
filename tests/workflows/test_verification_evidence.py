@@ -81,7 +81,8 @@ def test_verification_evidence_workflow_rejects_existing_output_root(
     tmp_path,
     monkeypatch,
 ):
-    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s1")
+    _repo_output_root(tmp_path, monkeypatch, ".run", "s1")
+    output_root = Path(".run") / "s1"
     output_root.mkdir(parents=True)
     config = _verification_config(
         output_root=output_root,
@@ -827,6 +828,12 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         assert layer_manifest.is_file()
         assert list(layer_root.rglob("layer_manifest.json")) == [layer_manifest]
     summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
+    run_config = json.loads(
+        (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
+    )
+    run_manifest = json.loads(
+        (output_root / "manifests" / "run_manifest.json").read_text(encoding="utf-8")
+    )
     validation = json.loads(
         (output_root / "validations" / "validation_summary.json").read_text(
             encoding="utf-8"
@@ -839,6 +846,8 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
     assert summary["status"] == "FAIL"
     assert validation["status"] == "PASS"
     assert summary["run_id"] == "s1"
+    assert run_config["output_root"] == "s1"
+    assert run_manifest["output_root"] == "s1"
     assert summary["manifest_status"]["run_output_count"] == (
         expected_prediction_count + 2
     )

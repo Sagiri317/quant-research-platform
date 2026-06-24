@@ -114,7 +114,7 @@ def run_local_verification(
     if start > end:
         raise ValueError("start_date_after_end_date")
     effective_windows = _resolve_effective_windows(config)
-    output_root = Path(config.output_root)
+    output_root = Path(config.output_root).resolve(strict=False)
     run_id = resolve_local_verification_run_id(config.run_id, output_root)
     _prepare_output_root(output_root, replace_output=config.replace_output)
     layout = LocalVerificationLayout.from_output_root(output_root)
