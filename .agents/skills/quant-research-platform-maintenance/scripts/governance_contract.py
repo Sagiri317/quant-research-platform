@@ -1042,6 +1042,10 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = {
         "sensitive_secret",
         "sensitive_provider_marker",
     },
+    # Intentional policy negative test fixtures for share-safety detection.
+    Path("tests/policy/test_share_safety.py"): {
+        "sensitive_local_private_path",
+    },
     Path("tests/runtime/test_privacy_01.py"): {
         "sensitive_local_private_path",
         "sensitive_secret",
