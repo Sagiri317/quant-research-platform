@@ -40,6 +40,7 @@ BASELINE_FINAL_COMPARE_GROUPS = (
 )
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+
 @dataclass
 class SeriesStats:
     count: int = 0
@@ -227,9 +228,7 @@ def main() -> None:
     overall_status = _overall_status(statuses.values(), contract_failures)
     grouped = comparisons_by_group(comparisons)
     comparison_groups = {
-        group: {
-            "status": _group_status(statuses[label] for label in group_comparisons)
-        }
+        group: {"status": _group_status(statuses[label] for label in group_comparisons)}
         for group, group_comparisons in grouped.items()
         if group_comparisons
     }
@@ -441,10 +440,7 @@ def compare_metadata_contract_failures(
         failures.append("final_smoke_commit_not_current_head")
     if smoke_evidence["git_status_before_smoke"] != "clean":
         failures.append("git_status_before_smoke_not_clean")
-    if (
-        smoke_evidence["git_status_after_smoke"]
-        != "clean_or_only_ignored_run_outputs"
-    ):
+    if smoke_evidence["git_status_after_smoke"] != "clean_or_only_ignored_run_outputs":
         failures.append("git_status_after_smoke_not_clean")
     return failures
 
@@ -711,9 +707,7 @@ def read_pairs_payload(path: Path) -> dict[str, Any]:
         raise ValueError("invalid_pairs_file: payload_must_be_object")
     unexpected = sorted(set(payload) - {"metadata", "pairs"})
     if unexpected:
-        raise ValueError(
-            "invalid_pairs_file: unapproved_key: " + ",".join(unexpected)
-        )
+        raise ValueError("invalid_pairs_file: unapproved_key: " + ",".join(unexpected))
     return payload
 
 
@@ -1185,11 +1179,7 @@ def _max_required_field_abs_diff(
 ) -> float:
     values: list[float] = []
     for section, field in fields:
-        diff = (
-            payload.get(section, {})
-            .get("required_field_diffs", {})
-            .get(field, {})
-        )
+        diff = payload.get(section, {}).get("required_field_diffs", {}).get(field, {})
         values.extend(
             _abs_stat_diff(diff, key)
             for key in ("count_diff", "mean_diff", "std_diff", "min_diff", "max_diff")
@@ -1279,13 +1269,10 @@ def compare_validation_summaries(
         failures.append("label_nan_profile_mismatch")
     if baseline_summary["manifest_status"] != final_summary["manifest_status"]:
         failures.append("manifest_status_mismatch")
-    if (
-        baseline_summary["validation_summary"]["private_safety_scan"]["status"]
-        != "PASS"
-    ):
-        failures.append("baseline_private_safety_not_pass")
-    if final_summary["validation_summary"]["private_safety_scan"]["status"] != "PASS":
-        failures.append("final_private_safety_not_pass")
+    if baseline_summary["validation_summary"]["share_safety_scan"]["status"] != "PASS":
+        failures.append("baseline_share_safety_not_pass")
+    if final_summary["validation_summary"]["share_safety_scan"]["status"] != "PASS":
+        failures.append("final_share_safety_not_pass")
     return {
         "status": "PASS" if not failures else "FAIL",
         "failures": failures,
@@ -1296,13 +1283,11 @@ def compare_validation_summaries(
             "baseline": baseline_summary["manifest_status"],
             "final": final_summary["manifest_status"],
         },
-        "private_safety_status": {
-            "baseline": baseline_summary["validation_summary"][
-                "private_safety_scan"
-            ]["status"],
-            "final": final_summary["validation_summary"]["private_safety_scan"][
+        "share_safety_status": {
+            "baseline": baseline_summary["validation_summary"]["share_safety_scan"][
                 "status"
             ],
+            "final": final_summary["validation_summary"]["share_safety_scan"]["status"],
         },
     }
 
@@ -1332,9 +1317,7 @@ def aggregate_column_stats(
     stats = {column: SeriesStats() for column in columns}
     for path in files:
         available_columns = set(pq.ParquetFile(path).schema_arrow.names)
-        selected_columns = [
-            column for column in columns if column in available_columns
-        ]
+        selected_columns = [column for column in columns if column in available_columns]
         if not selected_columns:
             continue
         for frame in parquet_batches(path, columns=tuple(selected_columns)):
@@ -1708,6 +1691,8 @@ def _resolve_commit_full(commit: str) -> str:
     if resolved != "UNKNOWN" and len(resolved) == 40:
         return resolved
     return "UNKNOWN"
+
+
 def _markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# QRP baseline-final compare",

@@ -271,9 +271,7 @@ def test_compare_verification_evidence_reads_final_smoke_metadata(
                     "final_smoke": {
                         "final_smoke_commit": final_head,
                         "git_status_before_smoke": "clean",
-                        "git_status_after_smoke": (
-                            "clean_or_only_ignored_run_outputs"
-                        ),
+                        "git_status_after_smoke": ("clean_or_only_ignored_run_outputs"),
                     }
                 },
                 "pairs": [
@@ -392,7 +390,7 @@ def test_compare_verification_evidence_rejects_self_authorized_expected_failures
                         "expected_failure_reason": "stale_prediction_baseline",
                         "expected_failed_artifacts": ["tiny_model"],
                     }
-                ]
+                ],
             }
         ),
         encoding="utf-8",
@@ -419,9 +417,10 @@ def test_compare_verification_evidence_rejects_self_authorized_expected_failures
     comparison = payload["comparisons"]["control_window_a"]
     assert payload["status"]["policy_adjusted"] == "FAIL"
     assert payload["status"]["validation_decision"] == "FAIL"
-    assert "expected_failure_reason_mismatch" in comparison[
-        "expected_failure_policy_failures"
-    ]
+    assert (
+        "expected_failure_reason_mismatch"
+        in comparison["expected_failure_policy_failures"]
+    )
     assert comparison["status"] == "FAIL"
     assert "expected_failure_policy_mismatch" in comparison["failures"]
 
@@ -516,9 +515,10 @@ def test_compare_verification_evidence_requires_explicit_expected_failure_group(
     )
 
     assert comparison["status"] == "FAIL"
-    assert "expected_failure_group_not_old_baseline" in comparison[
-        "expected_failure_policy_failures"
-    ]
+    assert (
+        "expected_failure_group_not_old_baseline"
+        in comparison["expected_failure_policy_failures"]
+    )
 
 
 def test_compare_verification_evidence_rejects_loose_rank_artifact_prefix() -> None:
@@ -643,9 +643,7 @@ def test_compare_verification_evidence_rejects_unapproved_pair_keys(
     try:
         module.run_pairs_from_file(pairs_file)
     except ValueError as exc:
-        assert str(exc) == (
-            "invalid_pairs_file: pair_unapproved_key: unexpected_key"
-        )
+        assert str(exc) == ("invalid_pairs_file: pair_unapproved_key: unexpected_key")
     else:
         raise AssertionError("old pair alias key should fail")
 
@@ -871,7 +869,7 @@ def _summary(run_id: str) -> dict[str, object]:
             ],
             "factor_nan_profile": {},
             "label_nan_profile": {},
-            "private_safety_scan": {"status": "PASS"},
+            "share_safety_scan": {"status": "PASS"},
         },
     }
 
