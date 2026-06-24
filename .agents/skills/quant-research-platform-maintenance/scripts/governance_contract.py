@@ -339,6 +339,7 @@ RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
 
 PRIVACY_NEGATIVE_TEST_PATHS = (
     "tests/runtime/test_privacy_01.py",
+    "tests/storage/test_manifest_helper_edges.py",
     "tests/agents/handoff/test_handoff_tools.py",
     "tests/agents/handoff/test_package_safety_check.py",
 )
@@ -766,6 +767,10 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = {
         "sensitive_secret",
         "sensitive_provider_marker",
         "sensitive_stock_code_sample",
+    },
+    Path("tests/storage/test_manifest_helper_edges.py"): {
+        "sensitive_local_private_path",
+        "sensitive_provider_marker",
     },
 }
 
