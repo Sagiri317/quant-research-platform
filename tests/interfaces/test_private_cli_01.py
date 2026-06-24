@@ -9,7 +9,9 @@ import pandas as pd
 from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.private_cli import app as private_app
-from quant_research_platform.reports.schema_inventory import build_schema_inventory
+from quant_research_platform.reports.schema_inventory import (
+    build_schema_inventory_payload,
+)
 from tests.helpers import frequency_ids
 from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
@@ -53,7 +55,7 @@ def test_qrp_private_script_entry_is_the_only_private_cli_addition() -> None:
 def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     _write_inventory_fixture(tmp_path)
 
-    inventory = build_schema_inventory(tmp_path)
+    inventory = build_schema_inventory_payload(tmp_path)
     roots = {item["logical_relative_root"] for item in inventory}
     combined = json.dumps(inventory, ensure_ascii=False)
 
@@ -125,7 +127,7 @@ def test_schema_inventory_infers_time_aware_reference_primary_key(tmp_path) -> N
         partition_columns=["year"],
     )
 
-    inventory = build_schema_inventory(tmp_path)
+    inventory = build_schema_inventory_payload(tmp_path)
     item = _inventory_item(inventory, "data/interim/csmar/index_info")
 
     assert item["primary_key"] == [
@@ -206,12 +208,11 @@ def test_qrp_private_schema_inventory_sanitizes_unexpected_failures(
 
     def fail_with_private_context(project_root):
         raise RuntimeError(
-            "boom at "
-            + str(project_root / "data" / "research" / "a_share" / "demo")
+            "boom at " + str(project_root / "data" / "research" / "a_share" / "demo")
         )
 
     monkeypatch.setattr(
-        "quant_research_platform.interfaces.private_cli.build_schema_inventory",
+        "quant_research_platform.interfaces.private_cli.build_schema_inventory_payload",
         fail_with_private_context,
     )
 
@@ -282,7 +283,7 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
         )()
 
     monkeypatch.setattr(
-        "quant_research_platform.interfaces.private_cli.run_verification_evidence",
+        "quant_research_platform.interfaces.private_cli.run_local_verification",
         fake_run,
     )
     runner = CliRunner()
@@ -340,7 +341,7 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
         )()
 
     monkeypatch.setattr(
-        "quant_research_platform.interfaces.private_cli.run_verification_evidence",
+        "quant_research_platform.interfaces.private_cli.run_local_verification",
         fake_run,
     )
     runner = CliRunner()
@@ -406,21 +407,11 @@ def test_qrp_verification_evidence_run_rejects_missing_required_options() -> Non
 def _write_inventory_fixture(project_root: Path) -> None:
     interim_root = frequency_ids.csmar_market_bars_interim_root(project_root)
     processed_root = (
-        project_root
-        / "data"
-        / "processed"
-        / "a_share"
-        / "factor"
-        / "price_volume"
+        project_root / "data" / "processed" / "a_share" / "factor" / "price_volume"
     )
     stock_master_root = project_root / "data" / "interim" / "csmar" / "stock_master"
     universe_root = (
-        project_root
-        / "data"
-        / "processed"
-        / "a_share"
-        / "annotation"
-        / "default"
+        project_root / "data" / "processed" / "a_share" / "annotation" / "default"
     )
     research_root = (
         project_root / "data" / "research" / "a_share" / "demo_research_dataset"
@@ -518,6 +509,7 @@ def _write_inventory_fixture(project_root: Path) -> None:
         primary_key=[],
         partition_columns=[],
     )
+
 
 def _inventory_item(
     inventory: list[dict[str, object]],

@@ -1,94 +1,27 @@
-"""Aggregate verification evidence report writers."""
+"""Aggregate verification evidence payload builders and renderers."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.policy.check_status import (
+    overall_verification_status,
+    validate_verification_statuses,
+)
+from quant_research_platform.policy.share_safety import (
+    contains_source_local_key,
+    evidence_json_unsafe_reason,
+    evidence_text_unsafe_reason,
+)
 from quant_research_platform.runtime.logical_paths import (
+    EVIDENCE_LOGICAL_PATH_MARKERS,
     dataset_layer_from_path,
     logical_path,
 )
-from quant_research_platform.runtime.privacy import public_text_unsafe_reason
-from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_manifest
-
-_SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
-_LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
-_SMOKE_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
-_COMPARE_STATUSES = frozenset({"NOT_APPLICABLE", "PASS", "FAIL"})
-_FULL_HORIZON_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
-_COMPARE_EVIDENCE_FIELDS = frozenset({"comparison_path", "verification_scope"})
-_FULL_HORIZON_EVIDENCE_FIELDS = frozenset({"evidence_path", "verification_scope"})
-_JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
-    {
-        "manifest_path",
-        "output_root",
-        "run_manifest_path",
-        "validation_summary_path",
-    }
-)
-
-
-@dataclass(frozen=True)
-class VerificationEvidenceLayout:
-    output_root: Path
-
-    @classmethod
-    def from_output_root(cls, output_root: Path) -> VerificationEvidenceLayout:
-        return cls(output_root=Path(output_root))
-
-    @property
-    def config_root(self) -> Path:
-        return self.output_root / "config"
-
-    @property
-    def data_root(self) -> Path:
-        return self.output_root / "data"
-
-    @property
-    def interim_root(self) -> Path:
-        return self.data_root / "interim"
-
-    @property
-    def processed_root(self) -> Path:
-        return self.data_root / "processed"
-
-    @property
-    def research_root(self) -> Path:
-        return self.data_root / "research"
-
-    @property
-    def evidence_root(self) -> Path:
-        return self.data_root / "evidence"
-
-    @property
-    def manifests_root(self) -> Path:
-        return self.output_root / "manifests"
-
-    @property
-    def validations_root(self) -> Path:
-        return self.output_root / "validations"
-
-    @property
-    def timings_root(self) -> Path:
-        return self.output_root / "timings"
-
-    @property
-    def logs_root(self) -> Path:
-        return self.output_root / "logs"
-
-    @property
-    def summary_json_path(self) -> Path:
-        return self.output_root / "summary.json"
-
-    @property
-    def summary_md_path(self) -> Path:
-        return self.output_root / "summary.md"
 
 
 def build_validation_summary(
@@ -113,18 +46,18 @@ def build_validation_summary(
             inspection = inspect_dataset(root)
         except ValueError:
             missing_dataset_manifests.append(
-                logical_path(root, markers=_LOGICAL_PATH_MARKERS)
+                logical_path(root, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
             )
             continue
         manifest = inspection.manifest
         if not manifest:
             missing_dataset_manifests.append(
-                logical_path(root, markers=_LOGICAL_PATH_MARKERS)
+                logical_path(root, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
             )
             continue
         data_id = str(
             manifest.get("data_id")
-            or logical_path(root, markers=_LOGICAL_PATH_MARKERS)
+            or logical_path(root, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
         )
         validation_status = manifest.get("validation_status")
         if validation_status is not None and str(validation_status).lower() not in {
@@ -144,7 +77,7 @@ def build_validation_summary(
         if dataset_layer_from_path(root) in {
             "processed",
             "research",
-        } and _contains_source_local_key(manifest):
+        } and contains_source_local_key(manifest):
             source_local_leaks.append(data_id)
         date_ranges.append(
             {
@@ -159,7 +92,7 @@ def build_validation_summary(
 
     layer_failures: list[str] = []
     missing_layer_manifests = [
-        logical_path(path, markers=_LOGICAL_PATH_MARKERS)
+        logical_path(path, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
         for path in layer_manifest_paths
         if not path.is_file()
     ]
@@ -170,7 +103,7 @@ def build_validation_summary(
         if manifest.get("layer_validation_status") != "pass":
             layer_failures.append(str(manifest.get("logical_layer") or path.name))
 
-    safety = _private_safety_scan(generated_text_paths)
+    safety = _share_safety_scan(generated_text_paths)
     failure_codes: list[str] = []
     if missing_dataset_manifests:
         failure_codes.append("dataset_manifest_missing")
@@ -189,12 +122,12 @@ def build_validation_summary(
     if layer_failures:
         failure_codes.append("layer_validation_failed")
     if safety["status"] != "PASS":
-        failure_codes.append("private_safety_scan_failed")
+        failure_codes.append("share_safety_scan_failed")
     return {
         "run_id": run_id,
         "output_root": logical_path(
             output_root,
-            markers=_LOGICAL_PATH_MARKERS,
+            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
         ),
         "status": "PASS" if not failure_codes else "FAIL",
         "failure_codes": failure_codes,
@@ -217,16 +150,12 @@ def build_validation_summary(
             "missing": missing_layer_manifests,
             "checked_count": len(layer_manifest_paths),
         },
-        "private_safety_scan": safety,
+        "share_safety_scan": safety,
         "created_at": _utc_now(),
     }
 
 
-def write_validation_summary(path: Path, payload: dict[str, Any]) -> Path:
-    return atomic_write_json(path, payload)
-
-
-def build_verification_evidence_summary(
+def build_verification_evidence_payload(
     *,
     run_id: str,
     date_range: dict[str, str],
@@ -235,14 +164,14 @@ def build_verification_evidence_summary(
     validation_summary: dict[str, object],
     output_root: Path,
     smoke_status: str = "NOT_RUN",
-    compare_status: str = "NOT_APPLICABLE",
+    compare_status: str = "NOT_RUN",
     full_horizon_status: str = "NOT_RUN",
     compare_evidence: dict[str, object] | None = None,
     full_horizon_evidence: dict[str, object] | None = None,
     runtime_resource_policy: dict[str, object] | None = None,
     runtime_execution_plan: dict[str, object] | None = None,
 ) -> dict[str, Any]:
-    statuses = _validate_verification_statuses(
+    statuses = validate_verification_statuses(
         smoke_status=smoke_status,
         compare_status=compare_status,
         full_horizon_status=full_horizon_status,
@@ -251,14 +180,14 @@ def build_verification_evidence_summary(
     )
     return {
         "run_id": run_id,
-        "status": _overall_verification_status(
+        "status": overall_verification_status(
             validation_summary.get("status", "FAIL"),
             statuses,
         ),
         "date_range": date_range,
         "output_root": logical_path(
             output_root,
-            markers=_LOGICAL_PATH_MARKERS,
+            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
         ),
         **statuses,
         "manifest_status": manifests,
@@ -266,24 +195,14 @@ def build_verification_evidence_summary(
         "runtime_execution_plan": runtime_execution_plan or {},
         "timings": timings,
         "validation_summary": validation_summary,
-        "privacy_level": "private_aggregate_only",
+        "output_scope": "REVIEW_SAFE",
         "row_level_output_committed": False,
         "source_level_compare_engine": False,
         "created_at": _utc_now(),
     }
 
 
-def write_verification_evidence_summary_json(
-    path: Path,
-    payload: dict[str, Any],
-) -> Path:
-    return atomic_write_json(path, payload)
-
-
-def write_verification_evidence_summary_md(
-    path: Path,
-    payload: dict[str, Any],
-) -> Path:
+def render_verification_evidence_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Verification Evidence Summary",
         "",
@@ -293,51 +212,29 @@ def write_verification_evidence_summary_md(
         f"- smoke_status: `{payload['smoke_status']}`",
         f"- compare_status: `{payload['compare_status']}`",
         f"- full_horizon_status: `{payload['full_horizon_status']}`",
+        f"- validation_status: `{payload['validation_summary']['status']}`",
         "- source_level_compare_engine: `false`",
         "",
     ]
-    return atomic_write_text(path, "\n".join(lines), encoding="utf-8")
+    return "\n".join(lines)
 
 
-def write_run_summary_json(path: Path, payload: dict[str, Any]) -> Path:
-    return atomic_write_json(path, payload)
-
-
-def write_run_summary_md(path: Path, payload: dict[str, Any]) -> Path:
-    text = "\n".join(
-        [
-            "# Verification Evidence Run Summary",
-            "",
-            f"- run_id: `{payload['run_id']}`",
-            f"- status: `{payload['status']}`",
-            f"- output_root: `{payload['output_root']}`",
-            f"- validation_status: `{payload['validation_summary']['status']}`",
-            f"- smoke_status: `{payload['smoke_status']}`",
-            f"- compare_status: `{payload['compare_status']}`",
-            f"- full_horizon_status: `{payload['full_horizon_status']}`",
-            "- source_level_compare_engine: `false`",
-            "",
-        ]
-    )
-    return atomic_write_text(path, text, encoding="utf-8")
-
-
-def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
-    """Render the public-safe evidence payload as Markdown."""
+def render_review_safe_aggregate_evidence_markdown(payload: dict[str, Any]) -> str:
+    """Render the review-safe aggregate evidence payload as Markdown."""
 
     lines = [
-        "# QRP Public-Safe Aggregate Evidence",
+        "# QRP Review-Safe Aggregate Evidence",
         "",
         (
-            "This evidence records public-safe aggregate validation for the "
-            "current QRP research contract. Public identifiers are "
-            "`artifact_id=private_research_aggregate_evidence`, "
+            "This evidence records review-safe aggregate validation for the "
+            "current QRP research contract. Review identifiers are "
+            "`artifact_id=review_safe_aggregate_evidence`, "
             "`market_id=a_share`, and contract version `0.1`."
         ),
         "",
         (
             "Machine-readable evidence is generated by the current local "
-            "evidence workflow and should remain public-safe."
+            "evidence workflow and should remain review-safe."
         ),
         "",
         "| Area | Rows | Columns | Period | Status |",
@@ -365,9 +262,9 @@ def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Public-safe status:",
+            "Review-safe status:",
             "",
-            f"- `privacy_level | {payload['privacy_level']}`",
+            f"- `output_scope | {payload['output_scope']}`",
             f"- `contract_version | {payload['contract_version']}`",
             f"- `verification_kind | {payload['verification_kind']}`",
             f"- `verification_scope | {payload['verification_scope']}`",
@@ -375,10 +272,7 @@ def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
             f"- `source_data_visibility | {payload['source_data_visibility']}`",
             "- `row_level_output_committed | false`",
             f"- `handoff_ready | {str(payload['handoff_ready']).lower()}`",
-            (
-                "- private local aggregate run completed without committed "
-                "row-level artifacts"
-            ),
+            ("- local aggregate run completed without committed row-level outputs"),
         ]
     )
     if not payload["handoff_ready"]:
@@ -386,11 +280,11 @@ def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str:
-    """Render the sealed dataset inventory summary as public-safe Markdown."""
+def render_local_verification_inventory_markdown(payload: dict[str, Any]) -> str:
+    """Render the local dataset inventory summary as review-safe Markdown."""
 
     lines = [
-        "# QRP Private Verification Summary",
+        "# QRP Local Verification Inventory",
         "",
         (
             "This summary records aggregate-only sealed dataset inventory "
@@ -399,7 +293,7 @@ def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str
         "",
         (
             "Machine-readable summary is generated by the current local "
-            "evidence workflow and should remain public-safe."
+            "evidence workflow and should remain review-safe."
         ),
         "",
         "| Logical Root | Area | Rows | Columns | Period |",
@@ -422,9 +316,9 @@ def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str
     lines.extend(
         [
             "",
-            "Public-safe status:",
+            "Review-safe status:",
             "",
-            f"- `privacy_level | {payload['privacy_level']}`",
+            f"- `output_scope | {payload['output_scope']}`",
             f"- `contract_version | {payload['contract_version']}`",
             f"- `verification_kind | {payload['verification_kind']}`",
             f"- `source_data_visibility | {payload['source_data_visibility']}`",
@@ -443,20 +337,20 @@ def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str
     return "\n".join(lines) + "\n"
 
 
-def _private_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
+def _share_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
     failures: list[dict[str, str]] = []
     existing_paths = tuple(path for path in paths if path.is_file())
     for path in existing_paths:
         text = path.read_text(encoding="utf-8")
-        reason = _unsafe_json_reason(text) if path.suffix == ".json" else None
+        reason = evidence_json_unsafe_reason(text) if path.suffix == ".json" else None
         if reason is None and path.suffix != ".json":
-            reason = _unsafe_text_reason(text)
+            reason = evidence_text_unsafe_reason(text)
         if reason is not None:
             failures.append(
                 {
                     "path": logical_path(
                         path,
-                        markers=_LOGICAL_PATH_MARKERS,
+                        markers=EVIDENCE_LOGICAL_PATH_MARKERS,
                     ),
                     "reason": reason,
                 }
@@ -469,165 +363,6 @@ def _private_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
         "existing_scanned_count": len(existing_paths),
         "missing_count": len(paths) - len(existing_paths),
     }
-
-
-def _validate_verification_statuses(
-    *,
-    smoke_status: str,
-    compare_status: str,
-    full_horizon_status: str,
-    compare_evidence: dict[str, object] | None,
-    full_horizon_evidence: dict[str, object] | None,
-) -> dict[str, object]:
-    smoke = smoke_status.upper()
-    compare = compare_status.upper()
-    full_horizon = full_horizon_status.upper()
-    if smoke not in _SMOKE_STATUSES:
-        raise ValueError("invalid_smoke_status")
-    if compare not in _COMPARE_STATUSES:
-        raise ValueError("invalid_compare_status")
-    if full_horizon not in _FULL_HORIZON_STATUSES:
-        raise ValueError("invalid_full_horizon_status")
-    if smoke == "NOT_RUN" and compare != "NOT_APPLICABLE":
-        raise ValueError("compare_status_requires_smoke")
-    if smoke != "NOT_RUN" and compare == "NOT_APPLICABLE":
-        raise ValueError("smoke_status_requires_compare_status")
-    if smoke == "FAIL" and compare == "PASS":
-        raise ValueError("compare_pass_requires_smoke_pass")
-    if compare in {"PASS", "FAIL"} and not compare_evidence:
-        raise ValueError("compare_evidence_required")
-    if compare == "NOT_APPLICABLE" and compare_evidence:
-        raise ValueError("compare_evidence_not_applicable")
-    if compare in {"PASS", "FAIL"}:
-        _require_evidence_fields(
-            compare_evidence,
-            required_fields=_COMPARE_EVIDENCE_FIELDS,
-            error_name="compare_evidence_missing_fields",
-        )
-    if full_horizon == "NOT_RUN" and full_horizon_evidence:
-        raise ValueError("full_horizon_evidence_not_applicable")
-    if full_horizon != "NOT_RUN" and not full_horizon_evidence:
-        raise ValueError("full_horizon_evidence_required")
-    if full_horizon != "NOT_RUN":
-        _require_evidence_fields(
-            full_horizon_evidence,
-            required_fields=_FULL_HORIZON_EVIDENCE_FIELDS,
-            error_name="full_horizon_evidence_missing_fields",
-        )
-    return {
-        "smoke_status": smoke,
-        "compare_status": compare,
-        "full_horizon_status": full_horizon,
-        "compare_evidence": dict(compare_evidence or {}),
-        "full_horizon_evidence": dict(full_horizon_evidence or {}),
-    }
-
-
-def _overall_verification_status(
-    validation_status: object,
-    statuses: dict[str, object],
-) -> str:
-    if str(validation_status).upper() != "PASS":
-        return "FAIL"
-    if statuses["smoke_status"] == "FAIL":
-        return "FAIL"
-    if statuses["compare_status"] == "FAIL":
-        return "FAIL"
-    if statuses["full_horizon_status"] == "FAIL":
-        return "FAIL"
-    return "PASS"
-
-
-def _require_evidence_fields(
-    evidence: dict[str, object] | None,
-    *,
-    required_fields: frozenset[str],
-    error_name: str,
-) -> None:
-    payload = evidence or {}
-    missing = [
-        field
-        for field in sorted(required_fields)
-        if not str(payload.get(field, "")).strip()
-    ]
-    if missing:
-        raise ValueError(error_name)
-
-
-def _unsafe_text_reason(
-    text: str,
-    *,
-    allow_logical_private_path: bool = False,
-) -> str | None:
-    shared_reason = public_text_unsafe_reason(
-        text,
-        allow_logical_private_path=allow_logical_private_path,
-    )
-    if shared_reason in {"private_path", "local_path"}:
-        return "absolute_path"
-    if shared_reason == "credential":
-        return "credential"
-    if shared_reason == "stock_code_sample":
-        return "stock_sample"
-    if shared_reason == "row_sample":
-        return "row_sample"
-    if shared_reason == "private_marker":
-        return "vendor_marker"
-    if shared_reason == "traceback":
-        return "traceback"
-    if shared_reason == "raw_export_filename":
-        return "vendor_filename"
-    if shared_reason == "source_local_key":
-        return "source_local_key"
-    if shared_reason == "private_runtime_payload":
-        return "private_runtime_payload"
-    if shared_reason == "private_run_path":
-        return "absolute_path"
-    return None
-
-
-def _contains_source_local_key(value: object) -> bool:
-    if isinstance(value, dict):
-        return any(
-            str(key) in _SOURCE_LOCAL_KEYS or _contains_source_local_key(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list | tuple | set | frozenset):
-        return any(_contains_source_local_key(item) for item in value)
-    return isinstance(value, str) and value in _SOURCE_LOCAL_KEYS
-
-
-def _unsafe_json_reason(text: str) -> str | None:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return "invalid_json"
-    return _unsafe_json_value_reason(payload)
-
-
-def _unsafe_json_value_reason(value: object, *, key: str | None = None) -> str | None:
-    if key is not None:
-        key_reason = _unsafe_text_reason(key)
-        if key_reason is not None:
-            return key_reason
-    if isinstance(value, dict):
-        for item_key, item in value.items():
-            reason = _unsafe_json_value_reason(item, key=str(item_key))
-            if reason is not None:
-                return reason
-        return None
-    if isinstance(value, list | tuple):
-        for item in value:
-            reason = _unsafe_json_value_reason(item)
-            if reason is not None:
-                return reason
-        return None
-    if isinstance(value, str):
-        return _unsafe_text_reason(
-            value,
-            allow_logical_private_path=key in _JSON_LOGICAL_PATH_VALUE_KEYS,
-        )
-    return None
 
 
 def _int_mapping(value: object) -> dict[str, int]:
@@ -646,14 +381,9 @@ def _utc_now() -> str:
 
 
 __all__ = [
-    "VerificationEvidenceLayout",
-    "build_verification_evidence_summary",
+    "build_verification_evidence_payload",
     "build_validation_summary",
-    "render_private_verification_summary_markdown",
-    "render_public_safe_evidence_markdown",
-    "write_verification_evidence_summary_json",
-    "write_verification_evidence_summary_md",
-    "write_run_summary_json",
-    "write_run_summary_md",
-    "write_validation_summary",
+    "render_local_verification_inventory_markdown",
+    "render_review_safe_aggregate_evidence_markdown",
+    "render_verification_evidence_markdown",
 ]

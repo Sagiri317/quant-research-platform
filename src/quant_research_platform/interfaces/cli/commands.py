@@ -6,9 +6,9 @@ from collections.abc import Callable
 
 import typer
 
-from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.interfaces import services
-from quant_research_platform.runtime.privacy import sanitize_public_text
+from quant_research_platform.policy.share_safety import sanitize_public_text
+from quant_research_platform.profiles.research import research_profile
 
 app = typer.Typer(add_completion=False)
 catalog_app = typer.Typer(add_completion=False, help="Catalog query commands.")

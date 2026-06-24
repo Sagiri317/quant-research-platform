@@ -1,4 +1,4 @@
-"""Public-safe aggregate evidence generation from local private artifacts."""
+"""Review-safe aggregate evidence generation from local run outputs."""
 
 from __future__ import annotations
 
@@ -32,10 +32,6 @@ from quant_research_platform.markets.session_windows import (
     SessionWindowPlanner,
     normalize_session_dates,
 )
-from quant_research_platform.reports.verification_evidence import (
-    render_private_verification_summary_markdown,
-    render_public_safe_evidence_markdown,
-)
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
     ResourceChunkPlanner,
@@ -52,13 +48,12 @@ from quant_research_platform.storage.datasets import (
 
 CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
-PRIVACY_LEVEL = "public_safe_aggregate"
-ARTIFACT_ID = "private_research_aggregate_evidence"
+OUTPUT_SCOPE = "REVIEW_SAFE"
+ARTIFACT_ID = "review_safe_aggregate_evidence"
 MARKET_ID = "a_share"
 FULL_HISTORY_PERIOD = "2014-01-01 through 2025-12-31"
 GENERATED_BY = (
-    "quant_research_platform.markets.implementations.a_share.verification."
-    "private_aggregate"
+    "quant_research_platform.markets.implementations.a_share.verification.aggregates"
 )
 HASH_MODULUS = 1 << 64
 KEY_VALUE_HASH_MIXER = np.uint64(0x9E3779B185EBCA87)
@@ -72,7 +67,7 @@ FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
 # Local verification evidence runner source fixture; not an A-share market contract.
-LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE = "csmar"
+LOCAL_EVIDENCE_INTERIM_SOURCE = "csmar"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     f"processed/a_share/panel/{market_panel_data_id()}": (
@@ -89,8 +84,7 @@ PROCESSED_ROOT_AREA_COVERAGE = {
     f"processed/a_share/annotation/{market_context_data_id()}": (
         "supporting_layers_coverage_2014_2025"
     ),
-    "research/a_share/"
-    "price_volume_forward_returns": "research_dataset_parity",
+    "research/a_share/price_volume_forward_returns": "research_dataset_parity",
 }
 
 _SummaryCache = dict[tuple[str, tuple[int, ...] | None], "AggregateSummary"]
@@ -153,40 +147,40 @@ class AggregateSummary:
         )
 
 
-def generate_public_safe_aggregate_evidence(
+def build_review_safe_aggregate_evidence_payload(
     project_root: Path = Path("."),
     *,
     generated_at: datetime | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> dict[str, Any]:
-    """Generate public-safe aggregate evidence from local private artifacts."""
+    """Build review-safe aggregate evidence from local run outputs."""
 
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
     policy = resource_policy or active_runtime_resource_policy()
     summary_cache: _SummaryCache = {}
     with runtime_resource_policy_scope(policy):
-        return _generate_public_safe_aggregate_evidence_with_cache(
+        return _build_review_safe_aggregate_evidence_payload_with_cache(
             root,
             generated_at=generated_at,
             summary_cache=summary_cache,
         )
 
 
-def generate_private_verification_summary(
+def build_local_verification_inventory_payload(
     project_root: Path = Path("."),
     *,
     evidence_payload: dict[str, Any] | None = None,
     generated_at: datetime | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> dict[str, Any]:
-    """Generate a public-safe inventory summary for sealed dataset artifacts."""
+    """Build a review-safe inventory summary for local dataset roots."""
 
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
     policy = resource_policy or active_runtime_resource_policy()
     if evidence_payload is None:
-        evidence_payload = generate_public_safe_aggregate_evidence(
+        evidence_payload = build_review_safe_aggregate_evidence_payload(
             root,
             generated_at=generated_at,
             resource_policy=policy,
@@ -194,9 +188,7 @@ def generate_private_verification_summary(
     with runtime_resource_policy_scope(policy):
         inventory = _dataset_inventory(root, summary_cache={})
     covered_roots = [
-        item["logical_root"]
-        for item in inventory
-        if item["covered_by_evidence_area"]
+        item["logical_root"] for item in inventory if item["covered_by_evidence_area"]
     ]
     uncovered_roots = [
         item["logical_root"]
@@ -212,13 +204,15 @@ def generate_private_verification_summary(
     return {
         "contract_version": CONTRACT_VERSION,
         "project_version": PROJECT_VERSION,
-        "verification_kind": "private_research_data_aggregate_inventory",
-        "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
+        "verification_kind": "local_run_output_aggregate_inventory",
+        "generated_at": generated_at.replace(microsecond=0)
+        .isoformat()
+        .replace(
             "+00:00",
             "Z",
         ),
-        "privacy_level": PRIVACY_LEVEL,
-        "source_data_visibility": "private_local_only",
+        "output_scope": OUTPUT_SCOPE,
+        "source_data_visibility": "local_only",
         "row_level_output_committed": False,
         "dataset_inventory": inventory,
         "covered_roots": covered_roots,
@@ -228,7 +222,7 @@ def generate_private_verification_summary(
     }
 
 
-def _generate_private_aggregate_payloads(
+def _build_aggregate_payloads(
     project_root: Path = Path("."),
     *,
     generated_at: datetime | None = None,
@@ -239,12 +233,12 @@ def _generate_private_aggregate_payloads(
     policy = resource_policy or active_runtime_resource_policy()
     summary_cache: _SummaryCache = {}
     with runtime_resource_policy_scope(policy):
-        evidence_payload = _generate_public_safe_aggregate_evidence_with_cache(
+        evidence_payload = _build_review_safe_aggregate_evidence_payload_with_cache(
             root,
             generated_at=generated_at,
             summary_cache=summary_cache,
         )
-        inventory_payload = _generate_private_verification_summary_with_cache(
+        inventory_payload = _build_local_verification_inventory_payload_with_cache(
             root,
             evidence_payload=evidence_payload,
             generated_at=generated_at,
@@ -253,7 +247,7 @@ def _generate_private_aggregate_payloads(
     return evidence_payload, inventory_payload
 
 
-def _generate_public_safe_aggregate_evidence_with_cache(
+def _build_review_safe_aggregate_evidence_payload_with_cache(
     root: Path,
     *,
     generated_at: datetime,
@@ -265,36 +259,35 @@ def _generate_public_safe_aggregate_evidence_with_cache(
     ]
     handoff_ready = not any(area["human_approval_required"] for area in areas)
     status = (
-        "private real-data aggregate verification completed"
+        "local aggregate verification completed"
         if handoff_ready
-        else (
-            "private real-data aggregate verification completed with "
-            "human approval required"
-        )
+        else ("local aggregate verification completed with human approval required")
     )
     return {
         "contract_version": CONTRACT_VERSION,
         "project_version": PROJECT_VERSION,
-        "privacy_level": PRIVACY_LEVEL,
+        "output_scope": OUTPUT_SCOPE,
         "artifact_id": ARTIFACT_ID,
         "market_id": MARKET_ID,
         "status": status,
         "handoff_ready": handoff_ready,
-        "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
+        "generated_at": generated_at.replace(microsecond=0)
+        .isoformat()
+        .replace(
             "+00:00",
             "Z",
         ),
-        "verification_kind": "private_research_data_aggregate",
-        "verification_scope": "aggregate_public_safe_parity",
-        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
-        "source_data_visibility": "private_local_only",
+        "verification_kind": "local_run_output_aggregate",
+        "verification_scope": "aggregate_review_safe_parity",
+        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
+        "source_data_visibility": "local_only",
         "row_level_output_committed": False,
         "verification_periods": sorted({area["period"] for area in areas}),
         "areas": areas,
     }
 
 
-def _generate_private_verification_summary_with_cache(
+def _build_local_verification_inventory_payload_with_cache(
     root: Path,
     *,
     evidence_payload: dict[str, Any],
@@ -303,9 +296,7 @@ def _generate_private_verification_summary_with_cache(
 ) -> dict[str, Any]:
     inventory = _dataset_inventory(root, summary_cache=summary_cache)
     covered_roots = [
-        item["logical_root"]
-        for item in inventory
-        if item["covered_by_evidence_area"]
+        item["logical_root"] for item in inventory if item["covered_by_evidence_area"]
     ]
     uncovered_roots = [
         item["logical_root"]
@@ -321,13 +312,15 @@ def _generate_private_verification_summary_with_cache(
     return {
         "contract_version": CONTRACT_VERSION,
         "project_version": PROJECT_VERSION,
-        "verification_kind": "private_research_data_aggregate_inventory",
-        "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
+        "verification_kind": "local_run_output_aggregate_inventory",
+        "generated_at": generated_at.replace(microsecond=0)
+        .isoformat()
+        .replace(
             "+00:00",
             "Z",
         ),
-        "privacy_level": PRIVACY_LEVEL,
-        "source_data_visibility": "private_local_only",
+        "output_scope": OUTPUT_SCOPE,
+        "source_data_visibility": "local_only",
         "row_level_output_committed": False,
         "dataset_inventory": inventory,
         "covered_roots": covered_roots,
@@ -339,7 +332,7 @@ def _generate_private_verification_summary_with_cache(
 
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
-    reports_root = root / "reports" / "private_research" / MARKET_ID
+    run_outputs_root = root / "run_outputs" / "local" / MARKET_ID
     market_panel_root = processed / "panel" / market_panel_data_id()
     factor = processed / "factor" / PRICE_VOLUME_PROCESSED_DATA_ID
     label = processed / "label" / "forward_returns"
@@ -351,19 +344,15 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     )
     context = processed / "annotation" / market_context_data_id()
     research = (
-        root
-        / "data"
-        / "research"
-        / MARKET_ID
-        / PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
+        root / "data" / "research" / MARKET_ID / PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
-    evaluation_roots = _report_category_roots(
-        reports_root,
+    evaluation_roots = _run_output_category_roots(
+        run_outputs_root,
         category="evaluation",
         preferred_id=default_evaluation_run_id(),
     )
-    prediction_roots = _report_category_roots(
-        reports_root,
+    prediction_roots = _run_output_category_roots(
+        run_outputs_root,
         category="prediction",
         preferred_id=default_prediction_smoke_id(test_start="2014-07-01"),
     )
@@ -407,14 +396,14 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
                 evaluation_end="2014-12-31",
             ),
             "evaluation",
-            summary_kind="report_artifacts",
+            summary_kind="run_outputs",
         ),
         AggregateInput(
             "prediction_oos_smoke_parity",
             prediction_roots,
             _prediction_oos_expected_period(),
             "prediction OOS smoke",
-            summary_kind="report_artifacts",
+            summary_kind="run_outputs",
         ),
         AggregateInput(
             "supporting_layers_coverage_2014_2025",
@@ -431,16 +420,16 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     )
 
 
-def _report_category_roots(
-    reports_root: Path,
+def _run_output_category_roots(
+    run_outputs_root: Path,
     *,
     category: str,
     preferred_id: str,
 ) -> tuple[Path, ...]:
-    preferred = reports_root / category / preferred_id
+    preferred = run_outputs_root / category / preferred_id
     if preferred.exists():
         return (preferred,)
-    category_root = reports_root / category
+    category_root = run_outputs_root / category
     if not category_root.exists():
         return (preferred,)
     discovered = tuple(
@@ -500,7 +489,7 @@ def _official_dataset_artifact_roots(root: Path) -> tuple[Path, ...]:
     processed_root = Path(root) / "data" / "processed" / MARKET_ID
     research_root = Path(root) / "data" / "research" / MARKET_ID
     if not processed_root.exists() and not research_root.exists():
-        raise FileNotFoundError("private_roots_missing")
+        raise FileNotFoundError("local_roots_missing")
     roots = [
         path
         for layer_root in (processed_root, research_root)
@@ -553,7 +542,7 @@ def _area_record(
     explanation = (
         (
             f"Exact aggregate parity verified for {area_input.explanation_name} "
-            "from local private artifacts, without row-level output."
+            "from local run outputs, without row-level output."
         )
         if period_matches
         else (
@@ -565,7 +554,7 @@ def _area_record(
     return {
         "area": area_input.area,
         "contract_version": CONTRACT_VERSION,
-        "privacy_level": PRIVACY_LEVEL,
+        "output_scope": OUTPUT_SCOPE,
         "period": summary.period,
         "row_count": summary.row_count,
         "key_count": summary.key_count,
@@ -589,9 +578,9 @@ def _area_record(
                 "not_required" if not human_approval_required else "required"
             ),
         },
-        "verification_kind": "private_research_data_aggregate",
-        "verification_scope": "aggregate_public_safe_parity",
-        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
+        "verification_kind": "local_run_output_aggregate",
+        "verification_scope": "aggregate_review_safe_parity",
+        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
         "tolerance_owner": "project_contract_0.1",
         "downstream_impact": (
             "no downstream parity impact detected from aggregate fields"
@@ -599,7 +588,7 @@ def _area_record(
             else "review-ready status requires human approval for the coverage gap"
         ),
         "generated_by": GENERATED_BY,
-        "source_data_visibility": "private_local_only",
+        "source_data_visibility": "local_only",
         "row_level_output_committed": False,
         "human_approval_required": human_approval_required,
     }
@@ -614,8 +603,8 @@ def _summarize_area_input(
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
         return _summarize_generated_full_market_panel(area_input.roots[0])
-    if area_input.summary_kind == "report_artifacts":
-        return _summarize_report_roots(area_input.roots)
+    if area_input.summary_kind == "run_outputs":
+        return _summarize_run_output_roots(area_input.roots)
     return _summarize_roots(
         area_input.roots,
         years=area_input.years,
@@ -659,12 +648,12 @@ def _iter_generated_full_market_panel_session_chunks(
         panels,
     )
 
-    interim_root = _private_interim_root(project_root)
+    interim_root = _local_interim_root(project_root)
     stock_master = read_dataset(interim_root / "stock_master")
     market_cap = read_dataset(interim_root / "market_cap")
     trading_calendar = read_dataset(interim_root / "trading_calendar")
     spec = processed_catalog.processed_catalog().get(market_panel_data_id())
-    market_bars_root = interim_root / _private_market_bars_data_id()
+    market_bars_root = interim_root / _local_market_bars_data_id()
     time_window = TimeWindow(FULL_HISTORY_START_DATE, FULL_HISTORY_END_DATE)
     sessions = _trading_sessions_from_calendar(trading_calendar)
     target_sessions = tuple(
@@ -717,15 +706,10 @@ def _iter_generated_full_market_panel_session_chunks(
         )
 
 
-def _private_interim_root(
+def _local_interim_root(
     project_root: Path,
 ) -> Path:
-    return (
-        Path(project_root)
-        / "data"
-        / "interim"
-        / LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE
-    )
+    return Path(project_root) / "data" / "interim" / LOCAL_EVIDENCE_INTERIM_SOURCE
 
 
 def _estimate_generated_full_panel_memory_bytes(
@@ -734,7 +718,7 @@ def _estimate_generated_full_panel_memory_bytes(
     session_count: int,
 ) -> int:
     compressed_bytes = int(
-        inspect_dataset(interim_root / _private_market_bars_data_id()).manifest.get(
+        inspect_dataset(interim_root / _local_market_bars_data_id()).manifest.get(
             "file_size_bytes",
             0,
         )
@@ -745,7 +729,7 @@ def _estimate_generated_full_panel_memory_bytes(
     )
 
 
-def _private_market_bars_data_id() -> str:
+def _local_market_bars_data_id() -> str:
     return csmar_ids.market_bars_data_id(DataFrequency.DAILY)
 
 
@@ -788,15 +772,15 @@ def _summarize_roots(
     return _combine_summaries(summaries)
 
 
-def _summarize_report_roots(roots: tuple[Path, ...]) -> AggregateSummary:
-    return _summarize_frames(_iter_report_artifact_frames(roots))
+def _summarize_run_output_roots(roots: tuple[Path, ...]) -> AggregateSummary:
+    return _summarize_frames(_iter_run_output_frames(roots))
 
 
-def _iter_report_artifact_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
+def _iter_run_output_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
     for root in roots:
         files = tuple(sorted(Path(root).rglob("*.parquet")))
         if not files:
-            raise FileNotFoundError("private_aggregate_input_missing")
+            raise FileNotFoundError("aggregates_input_missing")
         for file in files:
             yield pd.read_parquet(file, engine="pyarrow")
 
@@ -1051,8 +1035,9 @@ def _key_hash_blocks(
     block_rows = _hash_block_rows(value_width=max(1, len(key_columns)))
     for start in range(0, len(frame), block_rows):
         block = frame.iloc[start : start + block_rows].loc[:, key_columns]
-        yield start, pd.util.hash_pandas_object(block, index=False).to_numpy(
-            dtype="uint64"
+        yield (
+            start,
+            pd.util.hash_pandas_object(block, index=False).to_numpy(dtype="uint64"),
         )
 
 
@@ -1118,10 +1103,7 @@ def _mix_key_value_hashes(
 ) -> np.ndarray:
     with np.errstate(over="ignore"):
         mixed = key_hashes ^ (
-            value_hashes
-            + KEY_VALUE_HASH_MIXER
-            + (key_hashes << 6)
-            + (key_hashes >> 2)
+            value_hashes + KEY_VALUE_HASH_MIXER + (key_hashes << 6) + (key_hashes >> 2)
         )
         result = mixed ^ (
             column_hash + KEY_VALUE_HASH_MIXER + (mixed << 6) + (mixed >> 2)
@@ -1221,8 +1203,6 @@ def _sha256_json(payload: Any) -> str:
 
 
 __all__ = [
-    "generate_private_verification_summary",
-    "generate_public_safe_aggregate_evidence",
-    "render_private_verification_summary_markdown",
-    "render_public_safe_evidence_markdown",
+    "build_local_verification_inventory_payload",
+    "build_review_safe_aggregate_evidence_payload",
 ]

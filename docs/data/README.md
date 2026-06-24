@@ -1,6 +1,6 @@
 # Data Contract
 
-本目录描述数据目录和 private safety 规则。
+本目录描述数据目录和数据安全规则。
 
 ## 基本规则
 
@@ -13,13 +13,13 @@
 
 ## 数据位置
 
-本地数据应放在用户本地 workspace 或 `.run/` 下的运行产物目录中。tracked repo 只保存代码、contracts、schemas、docs、tests 和 public-safe templates。`.run/` 只是 output/evidence/input artifact layer，不是 tracked tool source。
+本地数据应放在用户本地 workspace 或 `.run/` 下的运行产物目录中。tracked repo 只保存代码、contracts、schemas、docs、tests 和 REVIEW_SAFE templates。`.run/` 只是 output/evidence/input artifact layer，不是 tracked tool source。
 
-`sources/` 负责摄取与 raw/interim 转换；`markets/implementations/a_share/` 负责 A 股 processed data 和市场语义；`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 layout。privacy 检测规则由 `runtime/privacy.py` 统一提供，storage 不维护平行正则。
+`sources/` 负责摄取与 raw/interim 转换；`markets/implementations/a_share/` 负责 A 股 processed data 和市场语义；`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data layout。共享安全检测规则由 `policy/share_safety.py` 提供，storage 不维护平行正则。
 
-## Public-safe evidence
+## REVIEW_SAFE Evidence
 
-允许写入 public-safe evidence 的内容：
+允许写入 REVIEW_SAFE evidence 的内容：
 
 - schema
 - counts
@@ -37,4 +37,4 @@ python -m pytest tests/architecture/test_public_safe_evidence_data_contract.py -
 
 ## Agent 规则
 
-agent 不得读取、复制或摘要 private row-level data，除非用户明确要求并且输出仍保持 public-safe。任何 private-data-adjacent 任务必须在报告中说明安全边界。
+agent 不得读取、复制或摘要 private row-level data，除非用户明确要求并且输出仍保持 REVIEW_SAFE。任何 private-data-adjacent 任务必须在报告中说明安全边界。

@@ -10,41 +10,37 @@ from quant_research_platform.markets.implementations.a_share.research_scenarios 
     default_prediction_smoke_id,
 )
 from quant_research_platform.markets.implementations.a_share.verification import (
-    private_aggregate,
+    aggregates,
 )
 from tests.helpers import frequency_ids
 
 
-def test_private_aggregate_summarizes_frames_without_row_level_output() -> None:
+def test_aggregates_summarizes_frames_without_row_level_output() -> None:
     frame = pd.DataFrame(
         {
             "market_id": ["a_share", "a_share", "a_share"],
             "asset_id": ["asset_a", "asset_a", "asset_b"],
-            "timestamp": pd.to_datetime(
-                ["2024-01-02", "2024-01-02", "2024-01-03"]
-            ),
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-03"]),
             "value": [1.0, 1.0, 2.0],
             "flag": [True, False, True],
         }
     )
 
-    summary = private_aggregate._summarize_frames([frame])
+    summary = aggregates._summarize_frames([frame])
 
     assert summary.row_count == 3
     assert summary.key_count == 2
     assert summary.duplicate_key_count == 1
     assert summary.period == "2024-01-02 through 2024-01-03"
     assert summary.column_count == 5
-    assert summary.dtype_summary_hash == private_aggregate._sha256_json(
-        summary.dtype_summary
-    )
+    assert summary.dtype_summary_hash == aggregates._sha256_json(summary.dtype_summary)
     assert len(summary.aggregate_checksum) == 64
     assert "value" in summary.content_summary
     assert summary.content_summary["flag"]["numeric_max"] == 1.0
 
 
-def test_private_aggregate_combines_summaries_and_area_records(monkeypatch) -> None:
-    first = private_aggregate._summarize_frames(
+def test_aggregates_combines_summaries_and_area_records(monkeypatch) -> None:
+    first = aggregates._summarize_frames(
         [
             pd.DataFrame(
                 {
@@ -57,7 +53,7 @@ def test_private_aggregate_combines_summaries_and_area_records(monkeypatch) -> N
             )
         ]
     )
-    second = private_aggregate._summarize_frames(
+    second = aggregates._summarize_frames(
         [
             pd.DataFrame(
                 {
@@ -67,26 +63,26 @@ def test_private_aggregate_combines_summaries_and_area_records(monkeypatch) -> N
             )
         ]
     )
-    combined = private_aggregate._combine_summaries([first, second])
+    combined = aggregates._combine_summaries([first, second])
 
     assert combined.row_count == 2
     assert combined.period == "2024-01-02 through 2024-01-03"
 
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_summarize_area_input",
         lambda *args, **kwargs: first,
     )
-    ok = private_aggregate._area_record(
-        private_aggregate.AggregateInput(
+    ok = aggregates._area_record(
+        aggregates.AggregateInput(
             area="factor_value_parity",
             roots=(Path("unused"),),
             expected_period=first.period,
             explanation_name="factor value",
         )
     )
-    gap = private_aggregate._area_record(
-        private_aggregate.AggregateInput(
+    gap = aggregates._area_record(
+        aggregates.AggregateInput(
             area="factor_value_parity",
             roots=(Path("unused"),),
             expected_period="2024-01-01 through 2024-01-01",
@@ -100,11 +96,11 @@ def test_private_aggregate_combines_summaries_and_area_records(monkeypatch) -> N
     assert gap["max_abs_delta"] == 1.0
 
 
-def test_public_safe_aggregate_evidence_orchestrates_area_inputs(
+def test_review_safe_aggregate_evidence_orchestrates_area_inputs(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    summary = private_aggregate._summarize_frames(
+    summary = aggregates._summarize_frames(
         [
             pd.DataFrame(
                 {
@@ -115,10 +111,10 @@ def test_public_safe_aggregate_evidence_orchestrates_area_inputs(
         ]
     )
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_area_inputs",
         lambda root: (
-            private_aggregate.AggregateInput(
+            aggregates.AggregateInput(
                 area="factor_value_parity",
                 roots=(root / "factor",),
                 expected_period=summary.period,
@@ -127,23 +123,23 @@ def test_public_safe_aggregate_evidence_orchestrates_area_inputs(
         ),
     )
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_summarize_area_input",
         lambda *args, **kwargs: summary,
     )
 
-    payload = private_aggregate.generate_public_safe_aggregate_evidence(tmp_path)
+    payload = aggregates.build_review_safe_aggregate_evidence_payload(tmp_path)
 
     assert payload["handoff_ready"] is True
     assert payload["verification_periods"] == [summary.period]
     assert payload["areas"][0]["area"] == "factor_value_parity"
 
 
-def test_private_aggregate_area_inputs_and_inventory_helpers(
+def test_aggregates_area_inputs_and_inventory_helpers(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    area_inputs = private_aggregate._area_inputs(tmp_path)
+    area_inputs = aggregates._area_inputs(tmp_path)
     assert {item.area for item in area_inputs} >= {
         "processed_panel_parity",
         "factor_value_parity",
@@ -155,8 +151,8 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         if item.area in {"evaluation_parity", "prediction_oos_smoke_parity"}
     }
     assert report_artifact_area_inputs == {
-        "evaluation_parity": "report_artifacts",
-        "prediction_oos_smoke_parity": "report_artifacts",
+        "evaluation_parity": "run_outputs",
+        "prediction_oos_smoke_parity": "run_outputs",
     }
     prediction_spec = build_prediction_specs(
         train_end="2014-06-30",
@@ -176,14 +172,14 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
     artifact_root = frequency_ids.market_panel_processed_root(tmp_path)
     artifact_root.mkdir(parents=True)
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_official_dataset_artifact_roots",
         lambda _root: (artifact_root,),
     )
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_summarize_dataset_root",
-        lambda *args, **kwargs: private_aggregate._summarize_frames(
+        lambda *args, **kwargs: aggregates._summarize_frames(
             [
                 pd.DataFrame(
                     {
@@ -196,22 +192,22 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
         ),
     )
 
-    inventory = private_aggregate._dataset_inventory(tmp_path)
+    inventory = aggregates._dataset_inventory(tmp_path)
 
     assert inventory[0]["kind"] == "panel"
     assert inventory[0]["artifact_id"] == frequency_ids.MARKET_PANEL_DATA_ID
     assert inventory[0]["covered_by_evidence_area"] == (
         frequency_ids.full_historical_market_panel_status_area()
     )
-    assert private_aggregate._logical_dataset_root(tmp_path, artifact_root) == (
+    assert aggregates._logical_dataset_root(tmp_path, artifact_root) == (
         frequency_ids.market_panel_logical_root()
     )
-    assert private_aggregate._dataset_kind_and_artifact_id(
+    assert aggregates._dataset_kind_and_artifact_id(
         "research/a_share/demo_dataset"
     ) == ("research_dataset", "demo_dataset")
 
 
-def test_private_aggregate_official_roots_use_inspection(
+def test_aggregates_official_roots_use_inspection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -226,50 +222,50 @@ def test_private_aggregate_official_roots_use_inspection(
             return object()
         raise ValueError("not_dataset")
 
-    monkeypatch.setattr(private_aggregate, "inspect_dataset", fake_inspect)
+    monkeypatch.setattr(aggregates, "inspect_dataset", fake_inspect)
 
-    assert private_aggregate._is_dataset_artifact_root(artifact_root) is True
-    assert private_aggregate._is_dataset_artifact_root(tmp_path) is False
-    assert private_aggregate._official_dataset_artifact_roots(tmp_path) == (
-        artifact_root,
-    )
+    assert aggregates._is_dataset_artifact_root(artifact_root) is True
+    assert aggregates._is_dataset_artifact_root(tmp_path) is False
+    assert aggregates._official_dataset_artifact_roots(tmp_path) == (artifact_root,)
     assert artifact_root in inspected
 
 
-def test_private_aggregate_helpers_validate_paths_and_periods(tmp_path: Path) -> None:
-    assert private_aggregate._private_interim_root(tmp_path).as_posix().endswith(
-        "data/interim/csmar"
+def test_aggregates_helpers_validate_paths_and_periods(tmp_path: Path) -> None:
+    assert (
+        aggregates._local_interim_root(tmp_path)
+        .as_posix()
+        .endswith("data/interim/csmar")
     )
     assert (
-        private_aggregate._time_window_from_years((2023, 2025)).start.isoformat()
+        aggregates._time_window_from_years((2023, 2025)).start.isoformat()
         == "2023-01-01"
     )
-    assert private_aggregate._time_window_from_years(None) is None
-    assert private_aggregate._parse_period("not_applicable") == (None, None)
-    assert private_aggregate._format_period(None, pd.Timestamp("2024-01-02")) == (
+    assert aggregates._time_window_from_years(None) is None
+    assert aggregates._parse_period("not_applicable") == (None, None)
+    assert aggregates._format_period(None, pd.Timestamp("2024-01-02")) == (
         "not_applicable"
     )
 
-    with pytest.raises(FileNotFoundError, match="private_roots_missing"):
-        private_aggregate._official_dataset_artifact_roots(tmp_path)
+    with pytest.raises(FileNotFoundError, match="local_roots_missing"):
+        aggregates._official_dataset_artifact_roots(tmp_path)
     with pytest.raises(ValueError, match="invalid_dataset_logical_root"):
-        private_aggregate._dataset_kind_and_artifact_id("bad")
+        aggregates._dataset_kind_and_artifact_id("bad")
     with pytest.raises(ValueError, match="invalid_dataset_logical_root"):
-        private_aggregate._dataset_kind_and_artifact_id("raw/a_share/demo")
+        aggregates._dataset_kind_and_artifact_id("raw/a_share/demo")
 
 
-def test_private_aggregate_filtering_and_calendar_helpers() -> None:
+def test_aggregates_filtering_and_calendar_helpers() -> None:
     calendar = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
             "is_trading_day": [True, False],
         }
     )
-    assert private_aggregate._trading_sessions_from_calendar(calendar) == (
+    assert aggregates._trading_sessions_from_calendar(calendar) == (
         pd.Timestamp("2024-01-02"),
     )
     with pytest.raises(ValueError, match="trading_calendar_columns_missing"):
-        private_aggregate._trading_sessions_from_calendar(pd.DataFrame())
+        aggregates._trading_sessions_from_calendar(pd.DataFrame())
 
     frame = pd.DataFrame(
         {
@@ -277,20 +273,20 @@ def test_private_aggregate_filtering_and_calendar_helpers() -> None:
             "value": [1, 2, 3],
         }
     )
-    filtered = private_aggregate._filter_output_sessions(
+    filtered = aggregates._filter_output_sessions(
         frame,
         (pd.Timestamp("2024-01-03"),),
     )
     assert filtered["value"].tolist() == [2]
 
 
-def test_private_verification_summary_uses_inventory(
+def test_local_verification_summary_uses_inventory(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     evidence = {"handoff_ready": True}
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_dataset_inventory",
         lambda *args, **kwargs: [
             {
@@ -304,7 +300,7 @@ def test_private_verification_summary_uses_inventory(
         ],
     )
 
-    summary = private_aggregate.generate_private_verification_summary(
+    summary = aggregates.build_local_verification_inventory_payload(
         tmp_path,
         evidence_payload=evidence,
     )

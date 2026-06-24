@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from quant_research_platform.contracts.workflows import WorkflowRunSummary
-from quant_research_platform.runtime.privacy import sanitize_public_object
+from quant_research_platform.policy.share_safety import sanitize_public_object
 
 
 def workflow_run_summary_to_public_record(

@@ -6,7 +6,7 @@ import quant_research_platform.contracts.evaluations as evaluations_contracts
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.workflows import (
     WorkflowRunPolicy,
@@ -15,29 +15,38 @@ from quant_research_platform.contracts.workflows import (
 
 
 def test_run_id_accepts_public_safe_lowercase_identifiers() -> None:
-    report = ReportSpec(
-        report_id="stage_profile",
-        report_definition_id="stage_profile_private_diagnostic",
+    report = RunOutputSpec(
+        output_id="stage_profile",
+        output_definition_id="stage_profile_local_diagnostic",
         run_id="run-01.alpha_beta",
         market_id=MarketId("a_share"),
         run_type="diagnostics",
+        scope=OutputScope.LOCAL_ONLY,
     )
 
     assert report.run_id == "run-01.alpha_beta"
-    assert ReportSpec(
-        report_id="date_profile",
-        report_definition_id="stage_profile_private_diagnostic",
-        run_id="run_202606",
-        market_id=MarketId("a_share"),
-        run_type="diagnostics",
-    ).run_id == "run_202606"
-    assert ReportSpec(
-        report_id="date_parts_profile",
-        report_definition_id="stage_profile_private_diagnostic",
-        run_id="run_2026_06",
-        market_id=MarketId("a_share"),
-        run_type="diagnostics",
-    ).run_id == "run_2026_06"
+    assert (
+        RunOutputSpec(
+            output_id="date_profile",
+            output_definition_id="stage_profile_local_diagnostic",
+            run_id="run_202606",
+            market_id=MarketId("a_share"),
+            run_type="diagnostics",
+            scope=OutputScope.LOCAL_ONLY,
+        ).run_id
+        == "run_202606"
+    )
+    assert (
+        RunOutputSpec(
+            output_id="date_parts_profile",
+            output_definition_id="stage_profile_local_diagnostic",
+            run_id="run_2026_06",
+            market_id=MarketId("a_share"),
+            run_type="diagnostics",
+            scope=OutputScope.LOCAL_ONLY,
+        ).run_id
+        == "run_2026_06"
+    )
 
 
 def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
@@ -72,14 +81,15 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
         "a" * 129,
     ],
 )
-def test_report_spec_rejects_invalid_run_ids(run_id: str) -> None:
+def test_run_output_spec_rejects_invalid_run_ids(run_id: str) -> None:
     with pytest.raises(ValueError, match="invalid_run_id"):
-        ReportSpec(
-            report_id="stage_profile",
-            report_definition_id="stage_profile_private_diagnostic",
+        RunOutputSpec(
+            output_id="stage_profile",
+            output_definition_id="stage_profile_local_diagnostic",
             run_id=run_id,
             market_id=MarketId("a_share"),
             run_type="diagnostics",
+            scope=OutputScope.LOCAL_ONLY,
         )
 
 
@@ -121,7 +131,7 @@ def test_evaluation_prediction_and_workflow_summaries_validate_run_ids() -> None
             output_spec_ids=(),
             node_count=0,
             completed_nodes=(),
-            private_boundary_required=True,
+            scope=True,
             artifact_writer_policy="none",
             failure_code="invalid_run_id",
         )

@@ -30,6 +30,9 @@ def test_platform_topology_has_required_packages() -> None:
         "interfaces",
         "reports",
         "runtime",
+        "artifacts",
+        "policy",
+        "profiles",
     }
 
     existing = {
@@ -43,7 +46,6 @@ def test_platform_topology_has_required_packages() -> None:
 
 def test_retired_top_level_source_packages_are_absent() -> None:
     retired = {
-        "artifacts",
         "datasets",
         "pipelines",
         "kernels",
@@ -76,7 +78,7 @@ def test_platform_target_files_exist() -> None:
         "contracts/models.py",
         "contracts/predictions.py",
         "contracts/portfolios.py",
-        "contracts/privacy.py",
+        "contracts/run_outputs.py",
         "contracts/workflows.py",
         "contracts/validation.py",
         "storage/layout.py",
@@ -96,18 +98,25 @@ def test_platform_target_files_exist() -> None:
         "workflows/planner.py",
         "workflows/executor.py",
         "workflows/checkpoints.py",
-        "workflows/verification_evidence.py",
+        "workflows/local_verification.py",
         "agents/factor_factory.py",
         "agents/label_factory.py",
         "agents/dataset_planner.py",
         "agents/workflow_planner.py",
         "agents/proposals.py",
         "agents/safety.py",
-        "reports/report_artifacts.py",
-        "reports/execution_metrics_artifacts.py",
+        "reports/execution_metrics.py",
         "reports/schema_inventory.py",
         "reports/verification_evidence.py",
-        "runtime/privacy.py",
+        "artifacts/definitions.py",
+        "artifacts/evidence.py",
+        "artifacts/execution_metrics.py",
+        "artifacts/layout.py",
+        "artifacts/run_outputs.py",
+        "policy/check_status.py",
+        "policy/identifiers.py",
+        "policy/share_safety.py",
+        "profiles/research.py",
         "runtime/logging.py",
         "runtime/profiling.py",
         "runtime/errors.py",
@@ -134,7 +143,7 @@ def test_platform_target_files_exist() -> None:
         "markets/implementations/a_share/factors/calculations.py",
         "markets/implementations/a_share/labels/definitions.py",
         "markets/implementations/a_share/labels/calculations.py",
-        "markets/implementations/a_share/verification/private_aggregate.py",
+        "markets/implementations/a_share/verification/aggregates.py",
         "research/labels/forward_returns.py",
         "interfaces/private_cli.py",
     }
@@ -274,7 +283,7 @@ def test_retired_csmar_compatibility_entrypoints_are_absent() -> None:
         SOURCE_ROOT / "sources/csmar/mappers.py",
         SOURCE_ROOT / "sources/csmar/dataset_contracts.py",
         SOURCE_ROOT / "markets/implementations/a_share/processed/migration.py",
-        SOURCE_ROOT / "reports/private_aggregate_verification.py",
+        SOURCE_ROOT / "reports/aggregates_verification.py",
         SOURCE_ROOT / "research/evaluations/parity.py",
         SOURCE_ROOT / "runtime/sanitization.py",
         SOURCE_ROOT / "storage/privacy.py",
@@ -541,9 +550,7 @@ def test_csmar_split_modules_own_mapping_and_checksum_functions() -> None:
     for path, names in expected.items():
         text = _read_source(path)
         tree = ast.parse(text, filename=str(path))
-        defined = {
-            node.name for node in tree.body if isinstance(node, ast.FunctionDef)
-        }
+        defined = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
         for name in sorted(names - defined):
             missing.append(f"{path}: {name}")
         for node in tree.body:
@@ -751,8 +758,9 @@ def test_csmar_data_additions_are_source_local_by_default() -> None:
 
     assert source_local_change_policy["public route additions"] == "forbidden"
     assert source_local_change_policy["public CLI group additions"] == "forbidden"
-    assert "sources/csmar/interim.py" in (
-        source_local_change_policy["new A-share CSMAR interim product"]
+    assert (
+        "sources/csmar/interim.py"
+        in (source_local_change_policy["new A-share CSMAR interim product"])
     )
 
 

@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
+from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
     read_research_dataset,

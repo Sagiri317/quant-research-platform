@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-from quant_research_platform.catalog.profiles import ResearchProfile
-from quant_research_platform.runtime.privacy import sanitize_public_object
+from quant_research_platform.policy.share_safety import sanitize_public_object
+from quant_research_platform.profiles.research import ResearchProfile
 
 API_VERSION = "0.1"
 
 
 def list_factors(profile: ResearchProfile) -> dict[str, object]:
-    return _response(
-        items=[item.to_manifest() for item in profile.factors.list()]
-    )
+    return _response(items=[item.to_manifest() for item in profile.factors.list()])
 
 
 def list_labels(profile: ResearchProfile) -> dict[str, object]:
-    return _response(
-        items=[item.to_manifest() for item in profile.labels.list()]
-    )
+    return _response(items=[item.to_manifest() for item in profile.labels.list()])
 
 
 def describe_research_dataset_requirements(

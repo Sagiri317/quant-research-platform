@@ -18,12 +18,8 @@ NEGATIVE_GATE_FILES = {
     Path("tests/architecture/test_data_layer_boundaries.py"),
 }
 # Only local/verification evidence fixture residue may name the source here.
-LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL = (
-    'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE = "csmar"'
-)
-PRIVATE_EVIDENCE_RUNNER_A_SHARE_BUILDER_IMPORT = (
-    PROJECT_SRC / "workflows/verification_evidence.py",
-    "quant_research_platform.markets.implementations.a_share",
+LOCAL_VERIFICATION_EVIDENCE_FIXTURE_SOURCE_LITERAL = (
+    'LOCAL_EVIDENCE_INTERIM_SOURCE = "csmar"'
 )
 A_SHARE_CSMAR_ID_IMPORTS = {
     (
@@ -39,8 +35,7 @@ A_SHARE_CSMAR_ID_IMPORTS = {
         "quant_research_platform.sources.csmar",
     ),
     (
-        PROJECT_SRC
-        / "markets/implementations/a_share/verification/private_aggregate.py",
+        PROJECT_SRC / "markets/implementations/a_share/verification/aggregates.py",
         "quant_research_platform.sources.csmar",
     ),
 }
@@ -58,7 +53,7 @@ A_SHARE_CSMAR_ID_RESIDUE_LINES = {
         "from quant_research_platform.sources.csmar import ids as csmar_ids",
     ),
     (
-        Path("verification/private_aggregate.py"),
+        Path("verification/aggregates.py"),
         "from quant_research_platform.sources.csmar import ids as csmar_ids",
     ),
 }
@@ -107,7 +102,7 @@ def test_active_source_has_no_old_catalog_or_defaults_entrypoints() -> None:
 
 
 def test_retired_public_profile_names_are_absent() -> None:
-    profiles_path = PROJECT_SRC / "catalog/profiles.py"
+    profiles_path = PROJECT_SRC / "profiles/research.py"
     defaults_path = PROJECT_SRC / "catalog/defaults.py"
     assert profiles_path.exists()
     assert not defaults_path.exists()
@@ -189,12 +184,11 @@ def test_interfaces_workflows_agents_use_profile_not_direct_implementations() ->
         f"{path}:{lineno} imports {module}"
         for path, lineno, module in _iter_imports(roots)
         if module.startswith(forbidden_prefixes)
-        and (path, module) != PRIVATE_EVIDENCE_RUNNER_A_SHARE_BUILDER_IMPORT
     ]
     profile_users = [
         path.as_posix()
         for path, _lineno, module in _iter_imports(roots)
-        if module == "quant_research_platform.catalog.profiles"
+        if module == "quant_research_platform.profiles.research"
     ]
 
     assert hits == []
@@ -225,14 +219,14 @@ def test_deep_layers_do_not_build_default_research_profile() -> None:
 
 
 def test_verification_workflow_uses_injected_profile_materialization_hooks() -> None:
-    workflow_path = PROJECT_SRC / "workflows/verification_evidence.py"
+    workflow_path = PROJECT_SRC / "workflows/local_verification.py"
     source = workflow_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(workflow_path))
     imported_profile_names = [
         alias.name
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module == "quant_research_platform.catalog.profiles"
+        and node.module == "quant_research_platform.profiles.research"
         for alias in node.names
     ]
 
@@ -254,14 +248,13 @@ def test_shared_services_receive_research_profile_by_parameter() -> None:
     function_parameters = {
         node.name: {arg.arg for arg in node.args.args}
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
-        and node.name in expected_profile_parameter
+        if isinstance(node, ast.FunctionDef) and node.name in expected_profile_parameter
     }
     forbidden_import_names = [
         alias.name
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module == "quant_research_platform.catalog.profiles"
+        and node.module == "quant_research_platform.profiles.research"
         for alias in node.names
         if alias.name == "research_profile"
     ]
@@ -362,7 +355,7 @@ def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> 
         ):
             hits.append(f"{path}:sources.csmar import")
         if re.search(r"(?i)\bcsmar\b", source):
-            if path == a_share_root / "verification/private_aggregate.py":
+            if path == a_share_root / "verification/aggregates.py":
                 for line in source.splitlines():
                     if re.search(r"(?i)\bcsmar\b", line):
                         csmar_hits.append(
@@ -380,8 +373,8 @@ def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> 
         {
             *A_SHARE_CSMAR_ID_RESIDUE_LINES,
             (
-                Path("verification/private_aggregate.py"),
-                LOCAL_PRIVATE_EVIDENCE_FIXTURE_SOURCE_LITERAL,
+                Path("verification/aggregates.py"),
+                LOCAL_VERIFICATION_EVIDENCE_FIXTURE_SOURCE_LITERAL,
             ),
         }
     )
@@ -430,11 +423,7 @@ def _python_files(roots: tuple[Path, ...]) -> tuple[Path, ...]:
         else:
             files.extend(path for path in root.rglob("*.py") if path.is_file())
     return tuple(
-        sorted(
-            path
-            for path in files
-            if path.resolve() != Path(__file__).resolve()
-        )
+        sorted(path for path in files if path.resolve() != Path(__file__).resolve())
     )
 
 

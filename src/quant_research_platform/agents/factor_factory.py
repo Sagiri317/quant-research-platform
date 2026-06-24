@@ -2,7 +2,7 @@
 
 from quant_research_platform.agents.proposals import FactorProposal
 from quant_research_platform.agents.safety import assert_proposal_is_public_safe
-from quant_research_platform.catalog.profiles import ResearchProfile
+from quant_research_platform.profiles.research import ResearchProfile
 
 
 def propose_factor(
@@ -60,8 +60,7 @@ def _unique_factor_input_data_id(profile: ResearchProfile) -> str:
         raise ValueError("factor_required_input_data_id_not_inferable")
     if len(candidates) > 1:
         raise ValueError(
-            "factor_required_input_data_id_ambiguous: "
-            + ", ".join(candidates)
+            "factor_required_input_data_id_ambiguous: " + ", ".join(candidates)
         )
     return candidates[0]
 

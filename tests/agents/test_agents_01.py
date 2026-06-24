@@ -21,12 +21,12 @@ from quant_research_platform.agents.safety import (
 )
 from quant_research_platform.agents.workflow_planner import plan_workflow
 from quant_research_platform.catalog.factors import FactorCatalog
-from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.markets.implementations.a_share.fields import (
     field_catalog,
 )
+from quant_research_platform.profiles.research import research_profile
 from tests.helpers import frequency_ids
 
 

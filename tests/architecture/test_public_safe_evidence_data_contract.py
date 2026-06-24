@@ -10,20 +10,20 @@ pytestmark = pytest.mark.data_dependency
 from tests.architecture.test_public_safe_evidence import (  # noqa: E402
     DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
     HASH_RE,
-    _synthetic_private_verification_summary_payload,
-    _synthetic_public_safe_evidence_payload,
+    _synthetic_local_verification_inventory_payload,
+    _synthetic_review_safe_evidence_payload,
 )
 from tests.helpers import frequency_ids  # noqa: E402
 
 
 @pytest.fixture
-def private_aggregate():
+def aggregates():
     pytest.importorskip("pyarrow")
     from quant_research_platform.markets.implementations.a_share.verification import (
-        private_aggregate,
+        aggregates,
     )
 
-    return private_aggregate
+    return aggregates
 
 
 @pytest.fixture
@@ -34,12 +34,12 @@ def dataset_read_mode():
     return DatasetReadMode
 
 
-def test_current_public_safe_aggregate_payload_includes_key_value_paired_hash(
+def test_current_review_safe_aggregate_payload_includes_key_value_paired_hash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    private_aggregate,
+    aggregates,
 ) -> None:
-    summary = private_aggregate.AggregateSummary(
+    summary = aggregates.AggregateSummary(
         row_count=1,
         key_count=1,
         column_count=4,
@@ -54,50 +54,45 @@ def test_current_public_safe_aggregate_payload_includes_key_value_paired_hash(
         },
     )
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_summarize_area_input",
         lambda *args, **kwargs: summary,
     )
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_summarize_dataset_root",
         lambda *args, **kwargs: summary,
     )
     artifact_root = (
-        tmp_path
-        / "data"
-        / "processed"
-        / "a_share"
-        / "factor"
-        / "price_volume"
+        tmp_path / "data" / "processed" / "a_share" / "factor" / "price_volume"
     )
     artifact_root.mkdir(parents=True)
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_official_dataset_artifact_roots",
         lambda _: (artifact_root,),
     )
 
-    area = private_aggregate._area_record(
-        private_aggregate.AggregateInput(
+    area = aggregates._area_record(
+        aggregates.AggregateInput(
             area="factor_value_parity",
             roots=(artifact_root,),
             expected_period=summary.period,
             explanation_name="factor values",
         )
     )
-    inventory = private_aggregate._dataset_inventory(tmp_path)
+    inventory = aggregates._dataset_inventory(tmp_path)
 
     assert HASH_RE.fullmatch(area["key_value_paired_summary_hash"])
     assert HASH_RE.fullmatch(inventory[0]["key_value_paired_summary_hash"])
     assert "key_value_pairs" in inspect.getsource(
-        private_aggregate.AggregateSummary.aggregate_checksum.fget
+        aggregates.AggregateSummary.aggregate_checksum.fget
     )
 
 
 def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
     monkeypatch: pytest.MonkeyPatch,
-    private_aggregate,
+    aggregates,
 ) -> None:
     frames = (
         pd.DataFrame(
@@ -121,12 +116,12 @@ def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
         return iter(frames)
 
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_iter_generated_full_market_panel_chunks",
         iter_chunks,
     )
 
-    summary = private_aggregate._summarize_generated_full_market_panel(Path("."))
+    summary = aggregates._summarize_generated_full_market_panel(Path("."))
 
     assert summary.row_count == 2
     assert summary.key_count == 2
@@ -135,7 +130,7 @@ def test_full_historical_market_panel_daily_summary_streams_generated_chunks(
 
 def test_full_historical_market_panel_daily_generation_always_uses_chunks(
     monkeypatch: pytest.MonkeyPatch,
-    private_aggregate,
+    aggregates,
 ) -> None:
     chunk = pd.DataFrame(
         {
@@ -150,12 +145,12 @@ def test_full_historical_market_panel_daily_generation_always_uses_chunks(
         return iter((chunk,))
 
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "_iter_generated_full_market_panel_session_chunks",
         iter_session_chunks,
     )
 
-    frames = list(private_aggregate._iter_generated_full_market_panel_chunks(Path(".")))
+    frames = list(aggregates._iter_generated_full_market_panel_chunks(Path(".")))
 
     assert len(frames) == 1
     assert frames[0].equals(chunk)
@@ -163,7 +158,7 @@ def test_full_historical_market_panel_daily_generation_always_uses_chunks(
 
 def test_generated_panel_generation_uses_runtime_resource_policy(
     monkeypatch: pytest.MonkeyPatch,
-    private_aggregate,
+    aggregates,
 ) -> None:
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog,
@@ -175,7 +170,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         manifest = {"file_size_bytes": 1000}
 
     sessions = pd.date_range("2014-01-02", periods=6, freq="B")
-    policy = private_aggregate.RuntimeResourcePolicy(
+    policy = aggregates.RuntimeResourcePolicy(
         available_memory_bytes=100,
         memory_budget_fraction=1.0,
         chunk_target_bytes=50,
@@ -241,20 +236,20 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
         )
 
     monkeypatch.setattr(
-        private_aggregate,
+        aggregates,
         "inspect_dataset",
         lambda _root: Inspection(),
     )
-    monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
+    monkeypatch.setattr(aggregates, "read_dataset", fake_read_dataset)
     monkeypatch.setattr(panels, "compute_market_panel", fake_compute_market_panel)
     monkeypatch.setattr(
-        private_aggregate.RuntimeResourcePolicy,
+        aggregates.RuntimeResourcePolicy,
         "from_environment",
         staticmethod(fake_from_environment),
     )
 
     chunks = list(
-        private_aggregate._iter_generated_full_market_panel_session_chunks(Path("."))
+        aggregates._iter_generated_full_market_panel_session_chunks(Path("."))
     )
 
     assert len(chunks) > 1
@@ -262,7 +257,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
 
 
 def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers(
-    private_aggregate,
+    aggregates,
 ) -> None:
     for name in (
         "_dynamic_" + "asset_chunk_size",
@@ -274,10 +269,10 @@ def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers(
         "_read_dataset_for_" + "assets",
         "_filter_" + "asset_frame",
     ):
-        assert not hasattr(private_aggregate, name)
+        assert not hasattr(aggregates, name)
 
 
-def test_aggregate_summary_checksum_is_invariant_to_chunking(private_aggregate) -> None:
+def test_aggregate_summary_checksum_is_invariant_to_chunking(aggregates) -> None:
     combined = pd.DataFrame(
         {
             "market_id": ["a_share"] * 12,
@@ -291,8 +286,8 @@ def test_aggregate_summary_checksum_is_invariant_to_chunking(private_aggregate) 
         for start in range(0, len(combined), 3)
     )
 
-    full_summary = private_aggregate._summarize_frames((combined,))
-    chunk_summary = private_aggregate._summarize_frames(chunks)
+    full_summary = aggregates._summarize_frames((combined,))
+    chunk_summary = aggregates._summarize_frames(chunks)
 
     assert "numeric_sum" not in full_summary.content_summary["timestamp"]
     assert "numeric_sum" not in full_summary.content_summary["value"]
@@ -300,7 +295,7 @@ def test_aggregate_summary_checksum_is_invariant_to_chunking(private_aggregate) 
 
 
 def test_aggregate_summary_detects_duplicate_keys_across_chunks(
-    private_aggregate,
+    aggregates,
 ) -> None:
     first = pd.DataFrame(
         {
@@ -319,7 +314,7 @@ def test_aggregate_summary_detects_duplicate_keys_across_chunks(
         }
     )
 
-    summary = private_aggregate._summarize_frames((first, second))
+    summary = aggregates._summarize_frames((first, second))
 
     assert summary.row_count == 2
     assert summary.key_count == 1
@@ -329,7 +324,7 @@ def test_aggregate_summary_detects_duplicate_keys_across_chunks(
 def test_dataset_root_summary_uses_dataframe_chunks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    private_aggregate,
+    aggregates,
     dataset_read_mode,
 ) -> None:
     root = tmp_path / "data" / "processed" / "a_share" / "factor" / "fixture"
@@ -364,14 +359,14 @@ def test_dataset_root_summary_uses_dataframe_chunks(
             ]
         )
 
-    monkeypatch.setattr(private_aggregate, "read_dataset", fake_read_dataset)
+    monkeypatch.setattr(aggregates, "read_dataset", fake_read_dataset)
 
-    summary = private_aggregate._summarize_dataset_root(root, years=(2025,))
+    summary = aggregates._summarize_dataset_root(root, years=(2025,))
 
     assert calls == [
         {
             "root": root,
-            "time_window": private_aggregate.TimeWindow(
+            "time_window": aggregates.TimeWindow(
                 "2025-01-01",
                 "2025-12-31",
             ),
@@ -385,7 +380,7 @@ def test_dataset_root_summary_uses_dataframe_chunks(
 
 def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
     tmp_path: Path,
-    private_aggregate,
+    aggregates,
 ) -> None:
     from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
@@ -404,7 +399,7 @@ def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
         partition_columns=("year",),
     )
 
-    summary = private_aggregate._summarize_dataset_root(root, years=(2025,))
+    summary = aggregates._summarize_dataset_root(root, years=(2025,))
 
     assert summary.row_count == 2
     assert summary.key_count == 2
@@ -412,26 +407,26 @@ def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
 
 
 def test_verification_evidence_source_fixture_is_not_public_market_contract(
-    private_aggregate,
+    aggregates,
 ) -> None:
-    source = Path(private_aggregate.__file__).read_text(encoding="utf-8")
+    source = Path(aggregates.__file__).read_text(encoding="utf-8")
     public_payloads = "\n".join(
         (
-            str(_synthetic_public_safe_evidence_payload()),
-            str(_synthetic_private_verification_summary_payload()),
+            str(_synthetic_review_safe_evidence_payload()),
+            str(_synthetic_local_verification_inventory_payload()),
         )
     )
 
-    assert private_aggregate.LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE == "csmar"
+    assert aggregates.LOCAL_EVIDENCE_INTERIM_SOURCE == "csmar"
     assert 'PRIVATE_INTERIM_SOURCE_ID = "csmar"' not in source
-    assert 'LOCAL_PRIVATE_EVIDENCE_INTERIM_SOURCE = "csmar"' in source
+    assert 'LOCAL_EVIDENCE_INTERIM_SOURCE = "csmar"' in source
     assert "not an A-share market contract" in source
     assert "csmar" not in public_payloads
     assert "CSMAR" not in public_payloads
 
 
 def test_private_summary_covers_full_historical_panel_synthetic_contract() -> None:
-    payload = _synthetic_private_verification_summary_payload()
+    payload = _synthetic_local_verification_inventory_payload()
     market_panel_daily = next(
         item
         for item in payload["dataset_inventory"]

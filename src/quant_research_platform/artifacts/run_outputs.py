@@ -1,4 +1,4 @@
-"""Private report artifact writers."""
+"""Local run output writers."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from quant_research_platform.artifacts.definitions import run_output_catalog
+from quant_research_platform.artifacts.layout import local_run_output_root
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -22,10 +24,8 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.reports import ReportSpec
-from quant_research_platform.reports.catalog import report_catalog
-from quant_research_platform.runtime.privacy import (
-    is_private_boundary_path,
+from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
+from quant_research_platform.policy.share_safety import (
     sanitize_public_object,
     sanitize_public_text,
 )
@@ -275,24 +275,24 @@ _PREDICTION_METADATA_KEYS = frozenset(
 
 
 @dataclass(frozen=True)
-class _PredictionReportWriteSummary:
+class _PredictionOutputWriteSummary:
     row_count: int
     effective_test_end: str
 
 
-def write_stage_profile_report_artifacts(
+def write_stage_profile_run_outputs(
     frame: pd.DataFrame,
     *,
-    spec: ReportSpec,
-    report_text: str,
+    spec: RunOutputSpec,
+    markdown_text: str,
     layout: StorageLayout,
 ) -> dict[str, Path]:
-    """Write private stage-profile report artifacts."""
+    """Write local stage-profile run outputs."""
 
-    destination = _derive_report_run_root(
-        report_spec=spec,
+    destination = _derive_run_output_root(
+        output_spec=spec,
         layout=layout,
-        expected_definition_id="stage_profile_private_diagnostic",
+        expected_definition_id="stage_profile_diagnostic",
         expected_run_id=spec.run_id,
     )
 
@@ -302,35 +302,52 @@ def write_stage_profile_report_artifacts(
         atomic_write_csv(safe_frame, temp_root / "stage_profile.csv", index=False)
         atomic_write_json(temp_root / "stage_profile.json", safe_rows)
         atomic_write_text(
-            temp_root / "stage_profile_report.md",
-            sanitize_public_text(report_text),
+            temp_root / "stage_profile.md",
+            sanitize_public_text(markdown_text),
             encoding="utf-8",
         )
         write_manifest(
             temp_root / "manifest.json",
-            _stage_profile_report_manifest_payload(spec=spec),
+            _stage_profile_run_output_manifest_payload(spec=spec),
         )
 
     atomic_write_directory(destination, _write)
     csv_path = destination / "stage_profile.csv"
     json_path = destination / "stage_profile.json"
-    report_path = destination / "stage_profile_report.md"
-    return {"csv": csv_path, "json": json_path, "report": report_path}
+    markdown_path = destination / "stage_profile.md"
+    return {"csv": csv_path, "json": json_path, "markdown": markdown_path}
 
 
-def write_prediction_report_artifacts(
-    frame: pd.DataFrame,
+def write_prediction_run_outputs(
+    frame: pd.DataFrame | None = None,
     *,
     spec: PredictionSpec,
-    report_spec: ReportSpec,
+    output_spec: RunOutputSpec,
     layout: StorageLayout,
+    output_chunks: Iterable[pd.DataFrame] | None = None,
+    model_metadata: Mapping[str, object] | None = None,
+    prediction_metadata_factory: Callable[[], Mapping[str, object]] | None = None,
 ) -> Path:
-    """Write private prediction report artifacts under reports/private_research."""
+    """Write local prediction run outputs."""
 
-    run_root = _derive_report_run_root(
-        report_spec=report_spec,
+    if output_chunks is not None:
+        if model_metadata is None or prediction_metadata_factory is None:
+            raise ValueError("prediction_chunk_metadata_required")
+        return _write_prediction_output_chunks(
+            output_chunks,
+            spec=spec,
+            output_spec=output_spec,
+            layout=layout,
+            model_metadata=model_metadata,
+            prediction_metadata_factory=prediction_metadata_factory,
+        )
+    if frame is None:
+        raise ValueError("prediction_output_frame_required")
+
+    run_root = _derive_run_output_root(
+        output_spec=output_spec,
         layout=layout,
-        expected_definition_id="prediction_artifacts_private",
+        expected_definition_id="prediction_outputs",
         expected_run_id=spec.prediction_id,
     )
     required = (*spec.primary_key, spec.prediction_column)
@@ -375,7 +392,7 @@ def write_prediction_report_artifacts(
     )
 
     def _write(temp_root: Path) -> None:
-        _atomic_write_report_parquet(
+        _write_parquet(
             frame.loc[:, list(required)],
             temp_root / "prediction.parquet",
             engine="pyarrow",
@@ -384,7 +401,7 @@ def write_prediction_report_artifacts(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _prediction_report_manifest_payload(
+            _prediction_run_output_manifest_payload(
                 spec=spec,
                 model_metadata=model_metadata,
                 prediction_metadata=prediction_metadata,
@@ -395,19 +412,19 @@ def write_prediction_report_artifacts(
     return run_root
 
 
-def _write_prediction_report_artifacts_from_chunks(
+def _write_prediction_output_chunks(
     frames: Iterable[pd.DataFrame],
     *,
     spec: PredictionSpec,
-    report_spec: ReportSpec,
+    output_spec: RunOutputSpec,
     layout: StorageLayout,
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
 ) -> Path:
-    run_root = _derive_report_run_root(
-        report_spec=report_spec,
+    run_root = _derive_run_output_root(
+        output_spec=output_spec,
         layout=layout,
-        expected_definition_id="prediction_artifacts_private",
+        expected_definition_id="prediction_outputs",
         expected_run_id=spec.prediction_id,
     )
     required = (*spec.primary_key, spec.prediction_column)
@@ -420,7 +437,7 @@ def _write_prediction_report_artifacts_from_chunks(
     _validate_model_metadata_consistency(model_metadata_payload, spec=spec)
 
     def _write(temp_root: Path) -> None:
-        write_summary = _atomic_write_report_parquet_chunks(
+        write_summary = _write_parquet_chunks(
             frames,
             temp_root / "prediction.parquet",
             required=required,
@@ -450,7 +467,7 @@ def _write_prediction_report_artifacts_from_chunks(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _prediction_report_manifest_payload(
+            _prediction_run_output_manifest_payload(
                 spec=spec,
                 model_metadata=effective_model_metadata,
                 prediction_metadata=prediction_metadata,
@@ -461,7 +478,7 @@ def _write_prediction_report_artifacts_from_chunks(
     return run_root
 
 
-def write_evaluation_report_artifacts(
+def write_evaluation_run_outputs(
     metrics: pd.DataFrame,
     grouped_label_values: pd.DataFrame,
     *,
@@ -469,34 +486,34 @@ def write_evaluation_report_artifacts(
     group_spread_summary: pd.DataFrame,
     evaluation_diagnostics: EvaluationDiagnostics,
     spec: EvaluationSpec,
-    report_spec: ReportSpec,
+    output_spec: RunOutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write private evaluation report artifacts under reports/private_research."""
+    """Write local evaluation run outputs under local output root."""
 
-    run_root = _derive_report_run_root(
-        report_spec=report_spec,
+    run_root = _derive_run_output_root(
+        output_spec=output_spec,
         layout=layout,
-        expected_definition_id="evaluation_report_private",
+        expected_definition_id="evaluation_outputs",
         expected_run_id=spec.run_id,
     )
 
-    _validate_report_frame(
+    _validate_output_frame(
         metrics,
         required=_EVALUATION_METRICS_COLUMNS,
         error_name="evaluation_metrics",
     )
-    _validate_report_frame(
+    _validate_output_frame(
         grouped_label_values,
         required=_EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
         error_name="evaluation_grouped_label_values",
     )
-    _validate_report_frame(
+    _validate_output_frame(
         ic_summary,
         required=_EVALUATION_IC_SUMMARY_COLUMNS,
         error_name="evaluation_ic_summary",
     )
-    _validate_report_frame(
+    _validate_output_frame(
         group_spread_summary,
         required=_EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
         error_name="evaluation_group_spread_summary",
@@ -519,28 +536,28 @@ def write_evaluation_report_artifacts(
     )
 
     def _write(temp_root: Path) -> None:
-        _atomic_write_report_parquet(
+        _write_parquet(
             metrics,
             temp_root / "metrics.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
         )
-        _atomic_write_report_parquet(
+        _write_parquet(
             grouped_label_values,
             temp_root / "grouped_label_values.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
         )
-        _atomic_write_report_parquet(
+        _write_parquet(
             ic_summary,
             temp_root / "ic_summary.parquet",
             engine="pyarrow",
             compression="zstd",
             index=False,
         )
-        _atomic_write_report_parquet(
+        _write_parquet(
             group_spread_summary,
             temp_root / "group_spread_summary.parquet",
             engine="pyarrow",
@@ -549,7 +566,7 @@ def write_evaluation_report_artifacts(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _evaluation_report_manifest_payload(
+            _evaluation_run_output_manifest_payload(
                 spec=spec,
                 evaluation_diagnostics=evaluation_diagnostics,
             ),
@@ -559,20 +576,39 @@ def write_evaluation_report_artifacts(
     return run_root
 
 
-def _write_portfolio_report_artifacts_from_chunks(
-    artifact_chunks: Iterable[Mapping[str, pd.DataFrame]],
+def write_portfolio_run_outputs(
     *,
-    summary_artifacts_factory: Callable[[], Mapping[str, pd.DataFrame]],
+    output_chunks: Iterable[Mapping[str, pd.DataFrame]],
+    summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     spec: PortfolioSpec,
-    report_spec: ReportSpec,
+    output_spec: RunOutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write private portfolio row artifacts from bounded chunks."""
+    """Write local portfolio run outputs."""
 
-    run_root = _derive_report_run_root(
-        report_spec=report_spec,
+    return _write_portfolio_output_chunks(
+        output_chunks,
+        summary_factory=summary_factory,
+        spec=spec,
+        output_spec=output_spec,
         layout=layout,
-        expected_definition_id="portfolio_report_private",
+    )
+
+
+def _write_portfolio_output_chunks(
+    output_chunks: Iterable[Mapping[str, pd.DataFrame]],
+    *,
+    summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
+    spec: PortfolioSpec,
+    output_spec: RunOutputSpec,
+    layout: StorageLayout,
+) -> Path:
+    """Write local portfolio row outputs from bounded chunks."""
+
+    run_root = _derive_run_output_root(
+        output_spec=output_spec,
+        layout=layout,
+        expected_definition_id="portfolio_outputs",
         expected_run_id=spec.portfolio_id,
     )
     required_columns = _portfolio_required_columns()
@@ -589,35 +625,35 @@ def _write_portfolio_report_artifacts_from_chunks(
 
     def _write(temp_root: Path) -> None:
         row_counts = _write_portfolio_row_artifact_chunks(
-            artifact_chunks,
+            output_chunks,
             temp_root=temp_root,
             row_artifacts=row_artifacts,
             required_columns=required_columns,
             spec=spec,
         )
-        summary_artifacts = summary_artifacts_factory()
+        summary_outputs = summary_factory()
         for artifact_name in summary_names:
-            _validate_report_frame(
-                summary_artifacts[artifact_name],
+            _validate_output_frame(
+                summary_outputs[artifact_name],
                 required=required_columns[artifact_name],
                 error_name=f"portfolio_{artifact_name}",
             )
             _validate_portfolio_signal_column(
-                summary_artifacts[artifact_name],
+                summary_outputs[artifact_name],
                 artifact_name=artifact_name,
                 spec=spec,
             )
-            _atomic_write_report_parquet(
-                summary_artifacts[artifact_name],
+            _write_parquet(
+                summary_outputs[artifact_name],
                 temp_root / _PORTFOLIO_ARTIFACTS[artifact_name],
                 engine="pyarrow",
                 compression="zstd",
                 index=False,
             )
-            row_counts[artifact_name] = int(len(summary_artifacts[artifact_name]))
+            row_counts[artifact_name] = int(len(summary_outputs[artifact_name]))
         write_manifest(
             temp_root / "manifest.json",
-            _portfolio_report_manifest_payload_from_row_counts(
+            _portfolio_run_output_manifest_payload_from_row_counts(
                 spec=spec,
                 row_counts=row_counts,
             ),
@@ -627,24 +663,27 @@ def _write_portfolio_report_artifacts_from_chunks(
     return run_root
 
 
-def _stage_profile_report_manifest_payload(*, spec: ReportSpec) -> dict[str, object]:
+def _stage_profile_run_output_manifest_payload(
+    *,
+    spec: RunOutputSpec,
+) -> dict[str, object]:
     return {
         "contract_version": spec.contract_version,
-        "report_id": spec.report_id,
-        "report_definition_id": spec.report_definition_id,
+        "output_id": spec.output_id,
+        "output_definition_id": spec.output_definition_id,
         "run_id": spec.run_id,
         "market_id": str(spec.market_id),
         "run_type": spec.run_type,
-        "private_boundary_required": spec.private_boundary_required,
+        "scope": spec.scope,
         "artifacts": [
             "stage_profile.csv",
             "stage_profile.json",
-            "stage_profile_report.md",
+            "stage_profile.md",
         ],
     }
 
 
-def _prediction_report_manifest_payload(
+def _prediction_run_output_manifest_payload(
     *,
     spec: PredictionSpec,
     model_metadata: dict[str, object],
@@ -669,7 +708,7 @@ def _prediction_report_manifest_payload(
     }
 
 
-def _evaluation_report_manifest_payload(
+def _evaluation_run_output_manifest_payload(
     *,
     spec: EvaluationSpec,
     evaluation_diagnostics: EvaluationDiagnostics,
@@ -690,7 +729,7 @@ def _evaluation_report_manifest_payload(
     }
 
 
-def _portfolio_report_manifest_payload(
+def _portfolio_run_output_manifest_payload(
     *,
     spec: PortfolioSpec,
     artifacts: Mapping[str, pd.DataFrame],
@@ -710,18 +749,17 @@ def _portfolio_report_manifest_payload(
         "cost_config": asdict(spec.cost_config),
         "artifacts": list(_PORTFOLIO_ARTIFACTS.values()),
         "row_counts": {
-            artifact_name: int(len(frame))
-            for artifact_name, frame in artifacts.items()
+            artifact_name: int(len(frame)) for artifact_name, frame in artifacts.items()
         },
     }
 
 
-def _portfolio_report_manifest_payload_from_row_counts(
+def _portfolio_run_output_manifest_payload_from_row_counts(
     *,
     spec: PortfolioSpec,
     row_counts: Mapping[str, int],
 ) -> dict[str, object]:
-    payload = _portfolio_report_manifest_payload(
+    payload = _portfolio_run_output_manifest_payload(
         spec=spec,
         artifacts={
             artifact_name: pd.DataFrame(index=range(int(row_counts[artifact_name])))
@@ -781,8 +819,7 @@ def _validate_portfolio_signal_column(
     if "signal" not in frame.columns:
         return
     artifact_signals = {
-        str(value)
-        for value in frame["signal"].dropna().unique().tolist()
+        str(value) for value in frame["signal"].dropna().unique().tolist()
     }
     if not artifact_signals.issubset(signal_ids):
         raise ValueError("portfolio_artifact_signal_mismatch: " + artifact_name)
@@ -806,7 +843,7 @@ def _write_portfolio_row_artifact_chunks(
         for artifact_chunk in artifact_chunks:
             for artifact_name in row_artifacts:
                 frame = artifact_chunk[artifact_name]
-                selected = _portfolio_report_chunk_frame(
+                selected = _portfolio_output_chunk_frame(
                     frame,
                     artifact_name=artifact_name,
                     required=required_columns[artifact_name],
@@ -830,7 +867,7 @@ def _write_portfolio_row_artifact_chunks(
         writers.clear()
         for artifact_name in row_artifacts:
             if row_counts[artifact_name] == 0:
-                _atomic_write_report_parquet(
+                _write_parquet(
                     pd.DataFrame(columns=list(required_columns[artifact_name])),
                     temp_paths[artifact_name],
                     engine="pyarrow",
@@ -844,14 +881,14 @@ def _write_portfolio_row_artifact_chunks(
     return row_counts
 
 
-def _portfolio_report_chunk_frame(
+def _portfolio_output_chunk_frame(
     frame: pd.DataFrame,
     *,
     artifact_name: str,
     required: tuple[str, ...],
     spec: PortfolioSpec,
 ) -> pd.DataFrame:
-    _validate_report_frame(
+    _validate_output_frame(
         frame,
         required=required,
         error_name=f"portfolio_{artifact_name}",
@@ -1308,8 +1345,10 @@ def _validate_evaluation_artifact_structure(
     groups = pd.to_numeric(grouped_label_values["group"], errors="coerce")
     if bool(groups.isna().any()):
         raise ValueError("evaluation_group_out_of_range")
-    if bool((groups % 1 != 0).any()) or bool(groups.lt(1).any()) or bool(
-        groups.gt(n_groups).any()
+    if (
+        bool((groups % 1 != 0).any())
+        or bool(groups.lt(1).any())
+        or bool(groups.gt(n_groups).any())
     ):
         raise ValueError("evaluation_group_out_of_range")
 
@@ -1410,7 +1449,7 @@ def _require_non_negative_metadata_int(
     return value
 
 
-def _validate_report_frame(
+def _validate_output_frame(
     frame: pd.DataFrame,
     *,
     required: tuple[str, ...],
@@ -1424,52 +1463,53 @@ def _validate_report_frame(
         raise ValueError(f"unregistered_{error_name}_columns: {', '.join(extra)}")
 
 
-def _derive_report_run_root(
+def _derive_run_output_root(
     *,
-    report_spec: ReportSpec,
+    output_spec: RunOutputSpec,
     layout: StorageLayout,
     expected_definition_id: str,
     expected_run_id: str,
 ) -> Path:
     try:
-        definition = report_catalog().get(
-            report_spec.report_definition_id
-        )
+        definition = run_output_catalog().get(output_spec.output_definition_id)
     except KeyError as exc:
-        raise ValueError("report_spec_mismatch") from exc
-    if definition.report_definition_id != expected_definition_id:
-        raise ValueError("report_spec_mismatch")
-    if definition.contract_version != report_spec.contract_version:
-        raise ValueError("report_spec_mismatch")
-    if report_spec.run_id != expected_run_id:
-        raise ValueError("report_spec_mismatch")
-    if definition.run_type != report_spec.run_type:
-        raise ValueError("report_spec_mismatch")
+        raise ValueError("output_spec_mismatch") from exc
+    if definition.output_definition_id != expected_definition_id:
+        raise ValueError("output_spec_mismatch")
+    if definition.contract_version != output_spec.contract_version:
+        raise ValueError("output_spec_mismatch")
+    if output_spec.run_id != expected_run_id:
+        raise ValueError("output_spec_mismatch")
+    if definition.run_type != output_spec.run_type:
+        raise ValueError("output_spec_mismatch")
+    if definition.scope != output_spec.scope:
+        raise ValueError("output_spec_mismatch")
+    if output_spec.scope != OutputScope.LOCAL_ONLY:
+        raise ValueError("run_output_scope_must_be_local_only")
     run_root = (
-        layout.private_research_report_root(
-            report_spec.market_id,
-            report_spec.run_type,
+        local_run_output_root(
+            layout.project_root,
+            output_spec.market_id,
+            output_spec.run_type,
         )
-        / report_spec.run_id
+        / output_spec.run_id
     )
-    if report_spec.private_boundary_required and not is_private_boundary_path(run_root):
-        raise ValueError("outside_private_boundary")
     if any(
         f"data/{layer}" in run_root.as_posix()
         for layer in ("raw", "interim", "processed", "research")
     ):
-        raise ValueError("report_output_must_be_report_root")
+        raise ValueError("run_output_must_use_artifact_root")
     return run_root
 
 
-def _atomic_write_report_parquet_chunks(
+def _write_parquet_chunks(
     frames: Iterable[pd.DataFrame],
     path: Path,
     *,
     required: tuple[str, ...],
     key_columns: tuple[str, ...],
     compression: str,
-) -> _PredictionReportWriteSummary:
+) -> _PredictionOutputWriteSummary:
     final_path = Path(path)
     reject_if_exists(final_path)
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1481,7 +1521,7 @@ def _atomic_write_report_parquet_chunks(
     effective_test_end: str | None = None
     try:
         for frame in frames:
-            selected = _prediction_report_chunk_frame(
+            selected = _prediction_output_chunk_frame(
                 frame,
                 required=required,
                 key_columns=key_columns,
@@ -1518,13 +1558,13 @@ def _atomic_write_report_parquet_chunks(
         if temp_path.exists():
             temp_path.unlink()
         raise
-    return _PredictionReportWriteSummary(
+    return _PredictionOutputWriteSummary(
         row_count=row_count,
         effective_test_end=effective_test_end,
     )
 
 
-def _prediction_report_chunk_frame(
+def _prediction_output_chunk_frame(
     frame: pd.DataFrame,
     *,
     required: tuple[str, ...],
@@ -1550,7 +1590,7 @@ def _prediction_report_chunk_frame(
     return selected
 
 
-def _atomic_write_report_parquet(
+def _write_parquet(
     frame: pd.DataFrame,
     path: Path,
     **kwargs: object,
@@ -1589,7 +1629,8 @@ def _rename_with_transient_permission_retry(
 
 
 __all__ = [
-    "write_evaluation_report_artifacts",
-    "write_prediction_report_artifacts",
-    "write_stage_profile_report_artifacts",
+    "write_evaluation_run_outputs",
+    "write_prediction_run_outputs",
+    "write_portfolio_run_outputs",
+    "write_stage_profile_run_outputs",
 ]

@@ -34,7 +34,7 @@ def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     assert "if spec.model_algorithm ==" not in inspect.getsource(
         supervised.build_estimator_from_model_spec
     )
-    assert "spec.model_algorithm != \"linear_regression\"" not in inspect.getsource(
+    assert 'spec.model_algorithm != "linear_regression"' not in inspect.getsource(
         supervised._fit_model_result_from_frames
     )
     assert "_LinearRegressionEstimator" not in inspect.getsource(
@@ -59,11 +59,11 @@ def test_model_algorithm_ids_is_the_only_collection_helper() -> None:
 
 
 def test_reports_do_not_branch_on_one_model_algorithm() -> None:
-    from quant_research_platform.reports import report_artifacts
+    from quant_research_platform.artifacts import run_outputs
 
-    source = inspect.getsource(report_artifacts)
+    source = inspect.getsource(run_outputs)
     assert 'model_algorithm"] == "linear_regression"' not in source
-    assert "model_algorithm == \"linear_regression\"" not in source
+    assert 'model_algorithm == "linear_regression"' not in source
 
 
 def test_a_share_model_scenario_inputs_use_algorithm_facts_only() -> None:

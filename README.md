@@ -28,10 +28,17 @@ data/        本地数据占位说明，不提交私有数据
 
 - `sources/`：数据源摄取、raw schema、字段映射和 raw/interim 转换。
 - `markets/`：通用市场领域与 session window；A 股实现位于 `markets/implementations/a_share/`。
-- `research/`：通用研究算法，不依赖具体市场实现或 sources。
+- `policy/`：共享安全规则、ID 安全判断和 PASS/FAIL/NOT_RUN/BLOCKED 状态聚合。
+- `contracts/`：结构合同、枚举、ID、时间窗口和基础校验，不保存共享安全规则事实。
+- `catalog/`：generic registry class。
+- `profiles/`：API、CLI、agent 和 workflow 共用组合根，组装 catalog/source/market/materializer。
+- `research/`：通用研究计算，只构建 result，不写文件，不依赖具体市场实现或 sources。
 - `compute/`：dataframe/tensor、portfolio math 和 performance 数值核心。
-- `runtime/`：privacy、resources、logging 和结构化运行指标，不写 report artifact。
-- `reports/`：public-safe report 和 evidence artifact 写出。
+- `storage/`：只负责 dataset IO 与 data/raw、data/interim、data/processed、data/research layout。
+- `runtime/`：resources、logging、workflow records 和 execution metrics payload，不写 report artifact。
+- `reports/`：只 build/render evidence/report 内容，不写文件。
+- `artifacts/`：只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。
+- `workflows/`：只编排 research -> reports -> artifacts。
 - `.agents/`：治理、handoff 和 prompt tooling，不承载 runtime 业务逻辑。
 
 ## 当前 public surface
@@ -64,7 +71,7 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - open issues 只保存当前 open 或 deferred 问题。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、package safety 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生；路径名、Python symbol、JSON/YAML/TOML key 和静态字符串合成都由同一规则派生。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、single verifier package-safety scan 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生；路径名、Python symbol、JSON/YAML/TOML key 和静态字符串合成都由同一规则派生。
 - retired governance paths 只要复活即 `FAIL`，不靠文本关键词绕过。
 - retired stage naming 不得通过文件名、路径名、Python symbol 或静态字符串拼接复活；合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0` 和 `/api/0.1`，不使用带 `v` 前缀的 `0.1` API 版本路径。
 
@@ -92,4 +99,4 @@ python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py 
 
 ## 数据安全
 
-禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。公开 evidence 只能包含 public-safe 摘要、schema、计数、hash、命令状态和路径结构。
+禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只能包含摘要、schema、计数、hash、命令状态和路径结构；run output 架构主轴是 LOCAL_ONLY / REVIEW_SAFE，不是 private / public。

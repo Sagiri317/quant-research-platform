@@ -70,6 +70,7 @@ def _validate_workflow_run(
     ):
         raise ValueError("workflow_output_spec_required")
 
+
 def workflow_run_summary(
     spec: WorkflowSpec,
     *,
@@ -90,7 +91,7 @@ def workflow_run_summary(
         output_spec_ids=spec.output_spec_ids,
         node_count=len(spec.nodes),
         completed_nodes=tuple(sorted(completed_nodes)),
-        private_boundary_required=spec.requires_private_boundary,
+        scope=spec.scope,
         artifact_writer_policy=spec.artifact_writer_policy.value,
     )
 

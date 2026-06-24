@@ -1,6 +1,6 @@
 # Handoff and Evidence
 
-本文件定义 handoff 和 evidence 的当前合同。
+本文定义 handoff 和 evidence 的当前合同。
 
 ## 1. 工具位置
 
@@ -14,20 +14,18 @@ tracked handoff tooling 位于：
 
 ## 2. Handoff 分层
 
-handoff 至少分为四层：
+handoff 至少包含：
 
-1. builder：构建 bundle，写入必要 manifest、sidecar、metadata 和 evidence。
-2. verifier：独立验证 bundle 结构和合同。
-3. source-tree scan：扫描当前源码树是否含 forbidden surface。
-4. package safety：检查 public-safe、路径安全、private marker 和 forbidden content。
+1. builder：构建 bundle，写入必要 manifest、sidecar、metadata 和 evidence，并调用 verifier。
+2. verifier：唯一 handoff/package verifier，验证 bundle、manifest/hash、zip member、sidecar、source-tree scan 和 share-safety。
+3. source-tree scan：扫描当前源码树是否含 retired surface 或 forbidden current-contract surface；规则来自 `governance_contract.py`。
+4. policy share safety：文本、JSON、路径和 zip member 的共享安全规则来自 `policy/share_safety.py`。
 
-四层结果不能互相替代。builder 应 fail fast，不能先写出非法 artifact 再依赖 verifier 补救。
-
-handoff gate 只依据本轮实际运行的独立检查。
+这些结果不能互相替代。builder 应 fail fast，不能先写出非法 artifact 再依赖 verifier 补救。handoff gate 只依据本轮实际运行的独立检查。
 
 ## 3. Evidence 规则
 
-public-safe evidence 可以包含：
+REVIEW_SAFE evidence 可以包含：
 
 - command
 - status token
@@ -35,9 +33,9 @@ public-safe evidence 可以包含：
 - counts
 - schema hash
 - artifact hash
-- non-private path structure
+- REVIEW_SAFE path structure
 
-public-safe evidence 不得包含：
+REVIEW_SAFE evidence 不得包含：
 
 - private row-level data
 - vendor marker
@@ -46,10 +44,12 @@ public-safe evidence 不得包含：
 - raw traceback
 - private-derived sample
 
+LOCAL_ONLY run outputs 默认不进入 handoff。原因是共享边界、授权边界、体积边界和本地 path/provider/source 风险，而不是因为所有结果本身都必然是隐私。
+
 ## 4. Sidecar 规则
 
-sidecar 是机器可读 evidence summary，不是业务结论本身。sidecar PASS 只表示 sidecar 对应检查通过，不代表 full pytest、private validation 或 business correctness。
+sidecar 是机器可读 evidence summary，不是业务结论本身。sidecar PASS 只表示 sidecar 对应检查通过，不代表 full pytest、local private validation 或 business correctness。
 
-## 5. Git bundle
+## 5. Git Bundle
 
-handoff package 和 git bundle 是不同概念。handoff package 可以包含 reports、logs、manifest 和 evidence；git bundle 应能重建当前分支仓库状态。生成和验证时应记录 bundle hash、list-heads 和推荐 clone command。
+handoff package 和 git bundle 是不同概念。handoff package 可以包含 REVIEW_SAFE reports、logs、manifest 和 evidence；git bundle 应能重建当前分支仓库状态。生成和验证时应记录 bundle hash、list-heads 和推荐 clone command。

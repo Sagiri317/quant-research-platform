@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from quant_research_platform.artifacts.definitions import run_output_catalog
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
@@ -21,7 +22,7 @@ from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
 )
-from quant_research_platform.catalog.reports import ReportCatalog
+from quant_research_platform.catalog.run_outputs import RunOutputCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -55,7 +56,6 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as processed_materializer_module,
 )
-from quant_research_platform.reports.catalog import report_catalog
 from quant_research_platform.sources.csmar.catalog import source_definition
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_interim_catalog,
@@ -81,9 +81,11 @@ class ResearchProfile:
     portfolios: PortfolioCatalog
     sources: SourceRegistry
     markets: MarketRegistry
-    reports: ReportCatalog
+    run_outputs: RunOutputCatalog
     source_interim_catalogs: Mapping[str, InterimDataCatalog]
     source_id: SourceId
+    build_prediction_catalog: Callable[..., PredictionCatalog]
+    build_portfolio_catalog: Callable[..., PortfolioCatalog]
     materialize_interim_data: Callable[[StorageLayout, Path, str, str], object]
     materialize_processed_data: Callable[
         [StorageLayout, SourceId, TimeWindow, frozenset[ProcessedDataKind]],
@@ -132,18 +134,18 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         factors=factor_definitions.factor_catalog(),
         labels=label_definitions.label_catalog(),
         processed=processed_catalog_module.processed_catalog(),
-        research_datasets=(
-            a_share_research_profiles.build_research_dataset_catalog()
-        ),
+        research_datasets=(a_share_research_profiles.build_research_dataset_catalog()),
         evaluations=a_share_research_scenarios.build_evaluation_catalog(),
         models=a_share_research_scenarios.build_model_catalog(),
         predictions=PredictionCatalog(),
         portfolios=PortfolioCatalog(),
         sources=_a_share_csmar_source_registry(),
         markets=_a_share_market_registry(),
-        reports=report_catalog(),
+        run_outputs=run_output_catalog(),
         source_interim_catalogs=_a_share_csmar_source_interim_catalogs(),
-        source_id=_a_share_csmar_source_id(),
+        source_id=_active_source_id(),
+        build_prediction_catalog=a_share_research_scenarios.build_prediction_catalog,
+        build_portfolio_catalog=a_share_research_scenarios.build_portfolio_catalog,
         materialize_interim_data=_materialize_a_share_csmar_interim_data,
         materialize_processed_data=_materialize_processed_data,
     )
@@ -169,7 +171,7 @@ def _a_share_csmar_source_interim_catalogs() -> Mapping[str, InterimDataCatalog]
     return {next(iter(source_ids)): catalog}
 
 
-def _a_share_csmar_source_id() -> SourceId:
+def _active_source_id() -> SourceId:
     return SourceId(next(iter(_a_share_csmar_source_interim_catalogs())))
 
 

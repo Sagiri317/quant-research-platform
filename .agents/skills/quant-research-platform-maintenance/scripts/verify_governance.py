@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""QRP 治理层检查脚本。
-
-只使用 Python standard library，目标兼容 Win11、macOS、Linux、WSL。
-默认只检查 Git changed files，不扫描 private data roots。
-"""
+"""Verify QRP governance contracts and retired surfaces."""
 
 from __future__ import annotations
 
@@ -84,7 +80,7 @@ REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
 GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS = {
     "src/quant_research_platform/interfaces/cli/commands.py",
     "src/quant_research_platform/markets/implementations/a_share/verification/"
-    "private_aggregate.py",
+    "aggregates.py",
     "src/quant_research_platform/sources/csmar/interim.py",
 }
 
@@ -118,13 +114,15 @@ REQUIRED_AGENTS_TERMS = (
     (".run/",),
     ("PASS",),
     ("NOT_RUN",),
-    ("private safety", "private data", "私有"),
+    ("private safety", "private data", "绉佹湁"),
     ("current-contract-only",),
 )
 
 ACTIVE_DOC_FORBIDDEN_PATTERNS = active_doc_forbidden_patterns()
 
-LOCAL_PATH_PATTERN = re.compile(r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+)")  # noqa: E501
+LOCAL_PATH_PATTERN = re.compile(
+    r"((?<![A-Za-z])[A-Za-z]:[\\/]|/Users/[^\s`]+|/home/[^\s`]+|/mnt/(?:data|[a-z])/[^\s`]+)"
+)  # noqa: E501
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|cookie)\s*[:=]\s*['\"]?[^\s'\"]+"
 )
@@ -264,14 +262,14 @@ def check_governance_only(
             )
         if path.startswith(BUSINESS_PREFIXES) and not allowed:
             result.errors.append(
-                "business/dependency path changed in governance-only mode: "
-                f"{path}"
+                f"business/dependency path changed in governance-only mode: {path}"
             )
         if not allowed:
             result.errors.append(f"path is outside governance-only allow list: {path}")
-        if (
-            Path(path).suffix.lower() in BLOCKED_EXTENSIONS
-            and not is_retired_doc_deletion(repo, path)
+        if Path(
+            path
+        ).suffix.lower() in BLOCKED_EXTENSIONS and not is_retired_doc_deletion(
+            repo, path
         ):
             result.errors.append(f"blocked extension in changed path: {path}")
 
@@ -346,9 +344,7 @@ def _should_include_state_path(
 
 def check_forbidden_path_names(result: Result, repo: Path) -> None:
     for finding in iter_path_name_findings(repo_state_file_paths(repo)):
-        result.errors.append(
-            f"retired_path_name: {finding['path']}:{finding['rule']}"
-        )
+        result.errors.append(f"retired_path_name: {finding['path']}:{finding['rule']}")
 
 
 def check_python_symbol_names(
@@ -468,10 +464,15 @@ def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
         return True
     if rel == "tests/architecture/test_public_safe_evidence.py" and '"token="' in line:
         return True
-    if rel in {
-        "tests/interfaces/test_api_cli_01_contract.py",
-        "tests/storage/test_storage_01.py",
-    } and '"token"' in line and "token=" in line:
+    if (
+        rel
+        in {
+            "tests/interfaces/test_api_cli_01_contract.py",
+            "tests/storage/test_storage_01.py",
+        }
+        and '"token"' in line
+        and "token=" in line
+    ):
         return True
     return False
 
@@ -530,7 +531,7 @@ def check_text_safety(result: Result, repo: Path, paths: list[str]) -> None:
             if (
                 "NOT_RUN" in line
                 and "PASS" in line
-                and "不能" not in line
+                and "涓嶈兘" not in line
                 and "not" not in line.lower()
                 and re.search(
                     r"\b(status|result)\s*[:=]\s*`?PASS",
@@ -554,18 +555,13 @@ def check_agents_size_and_terms(result: Result, repo: Path) -> None:
     for variants in REQUIRED_AGENTS_TERMS:
         if not any(term in text for term in variants):
             result.errors.append(
-                "AGENTS.md missing required term variant: "
-                + " / ".join(variants)
+                "AGENTS.md missing required term variant: " + " / ".join(variants)
             )
 
 
 def check_script_portability(result: Result, repo: Path) -> None:
     script_root = (
-        repo
-        / ".agents"
-        / "skills"
-        / "quant-research-platform-maintenance"
-        / "scripts"
+        repo / ".agents" / "skills" / "quant-research-platform-maintenance" / "scripts"
     )
     if not script_root.exists():
         result.warnings.append("script directory missing")

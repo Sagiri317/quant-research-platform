@@ -1,4 +1,4 @@
-"""Minimal removable verification evidence verification harness."""
+"""Local verification workflow orchestration."""
 
 from __future__ import annotations
 
@@ -11,38 +11,46 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.catalog.profiles import ResearchProfile
-from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.implementations.a_share import (
-    research_scenarios as scenarios,
+from quant_research_platform.artifacts.evidence import (
+    write_json_evidence,
+    write_run_summary_json,
+    write_run_summary_markdown,
+    write_validation_summary,
+    write_verification_evidence_json,
+    write_verification_evidence_markdown,
 )
-from quant_research_platform.reports.execution_metrics_artifacts import (
+from quant_research_platform.artifacts.execution_metrics import (
     write_execution_metrics_csv,
     write_execution_metrics_json,
 )
+from quant_research_platform.artifacts.layout import LocalVerificationLayout
+from quant_research_platform.artifacts.run_outputs import (
+    write_evaluation_run_outputs,
+    write_portfolio_run_outputs,
+    write_prediction_run_outputs,
+)
+from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.reports.verification_evidence import (
-    VerificationEvidenceLayout,
     build_validation_summary,
-    build_verification_evidence_summary,
-    write_run_summary_json,
-    write_run_summary_md,
-    write_validation_summary,
-    write_verification_evidence_summary_json,
-    write_verification_evidence_summary_md,
+    build_verification_evidence_payload,
+    render_verification_evidence_markdown,
 )
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
 )
 from quant_research_platform.research.evaluations.runner import (
-    run_evaluation_from_research_dataset,
+    build_evaluation_result_from_research_dataset,
 )
 from quant_research_platform.research.portfolios.runner import (
-    run_portfolio_from_research_dataset,
+    build_portfolio_result_from_research_dataset,
 )
+from quant_research_platform.research.predictions.outputs import PredictionResult
 from quant_research_platform.research.predictions.runner import (
-    run_prediction_from_research_dataset,
+    build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
 from quant_research_platform.runtime.logical_paths import logical_path
@@ -50,7 +58,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_manifest,
@@ -58,12 +65,19 @@ from quant_research_platform.storage.manifests import (
     write_run_manifest,
 )
 
-_LOGICAL_PATH_MARKERS = ("data", "reports", "manifests", "validations", "timings")
+_LOGICAL_PATH_MARKERS = (
+    "data",
+    "run_outputs",
+    "handoff_evidence",
+    "manifests",
+    "validations",
+    "timings",
+)
 _RUN_WORKSPACE_DIR = ".run"
 
 
 @dataclass(frozen=True)
-class VerificationEvidenceRunConfig:
+class LocalVerificationRunConfig:
     output_root: Path
     start_date: str
     end_date: str
@@ -80,33 +94,33 @@ class VerificationEvidenceRunConfig:
 
 
 @dataclass(frozen=True)
-class VerificationEvidenceRunResult:
+class LocalVerificationRunResult:
     status: str
     run_id: str
     output_root: str
     summary: dict[str, Any]
 
 
-_OWNERSHIP_MARKER_FILENAME = ".qrp-verification-evidence.json"
-_OWNERSHIP_MARKER = "qrp_verification_evidence_workflow"
+_OWNERSHIP_MARKER_FILENAME = ".qrp-local-verification.json"
+_OWNERSHIP_MARKER = "qrp_local_verification_workflow"
 _OWNERSHIP_CONTRACT_VERSION = "0.1"
 
 
-def run_verification_evidence(
-    config: VerificationEvidenceRunConfig,
-) -> VerificationEvidenceRunResult:
+def run_local_verification(
+    config: LocalVerificationRunConfig,
+) -> LocalVerificationRunResult:
     start = pd.Timestamp(config.start_date)
     end = pd.Timestamp(config.end_date)
     if start > end:
         raise ValueError("start_date_after_end_date")
     effective_windows = _resolve_effective_windows(config)
     output_root = Path(config.output_root)
-    run_id = resolve_verification_run_id(config.run_id, output_root)
+    run_id = resolve_local_verification_run_id(config.run_id, output_root)
     _prepare_output_root(output_root, replace_output=config.replace_output)
-    layout = VerificationEvidenceLayout.from_output_root(output_root)
+    layout = LocalVerificationLayout.from_output_root(output_root)
     _create_layout_directories(layout)
     resource_policy = RuntimeResourcePolicy.from_environment()
-    atomic_write_json(
+    write_json_evidence(
         layout.config_root / "run_config.json",
         {
             "run_id": run_id,
@@ -130,7 +144,7 @@ def run_verification_evidence(
     )
 
     with runtime_resource_policy_scope(resource_policy):
-        return _run_verification_evidence_with_policy(
+        return _run_local_verification_with_policy(
             config=config,
             effective_windows=effective_windows,
             output_root=output_root,
@@ -140,15 +154,15 @@ def run_verification_evidence(
         )
 
 
-def _run_verification_evidence_with_policy(
+def _run_local_verification_with_policy(
     *,
-    config: VerificationEvidenceRunConfig,
+    config: LocalVerificationRunConfig,
     effective_windows: dict[str, str | None],
     output_root: Path,
     run_id: str,
-    layout: VerificationEvidenceLayout,
+    layout: LocalVerificationLayout,
     resource_policy: RuntimeResourcePolicy,
-) -> VerificationEvidenceRunResult:
+) -> LocalVerificationRunResult:
     recorder = ExecutionMetricsRecorder()
     storage_layout = StorageLayout(project_root=output_root)
     time_window = TimeWindow(config.start_date, config.end_date)
@@ -157,11 +171,11 @@ def _run_verification_evidence_with_policy(
         effective_windows["evaluation_end_date"],
     )
     catalogs = config.profile
-    prediction_catalog = scenarios.build_prediction_catalog(
+    prediction_catalog = config.profile.build_prediction_catalog(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
     )
-    portfolio_catalog = scenarios.build_portfolio_catalog(
+    portfolio_catalog = config.profile.build_portfolio_catalog(
         rebalance_frequency=config.portfolio_frequency,
         execution_lag_steps=config.portfolio_execution_lag_steps,
     )
@@ -198,35 +212,65 @@ def _run_verification_evidence_with_policy(
             resource_policy=resource_policy,
         )
     with recorder.record("evaluation_generation", logical_layer="evidence"):
-        evaluation_root = run_evaluation_from_research_dataset(
+        evaluation_result = build_evaluation_result_from_research_dataset(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             evaluation_catalog=catalogs.evaluations,
             run_id="signal_forward_return_20d",
             time_window=evaluation_time_window,
         )
+        evaluation_root = write_evaluation_run_outputs(
+            evaluation_result.metrics,
+            evaluation_result.grouped_label_values,
+            ic_summary=evaluation_result.ic_summary,
+            group_spread_summary=evaluation_result.group_spread_summary,
+            evaluation_diagnostics=evaluation_result.diagnostics,
+            spec=evaluation_result.spec,
+            output_spec=_run_output_spec(
+                output_definition_id="evaluation_outputs",
+                run_id=evaluation_result.spec.run_id,
+                market_id=evaluation_result.spec.market_id,
+                run_type=evaluation_result.spec.run_type,
+            ),
+            layout=storage_layout,
+        )
     with recorder.record("prediction_generation", logical_layer="evidence"):
         prediction_roots = tuple(
-            run_prediction_from_research_dataset(
+            _write_prediction_result(
+                build_prediction_result_from_research_dataset(
+                    layout=storage_layout,
+                    dataset_catalog=catalogs.research_datasets,
+                    model_catalog=catalogs.models,
+                    prediction_catalog=prediction_catalog,
+                    prediction_id=prediction_spec.prediction_id,
+                    time_window=time_window,
+                    prediction_train_end=effective_windows["prediction_train_end"],
+                    prediction_test_start=effective_windows["prediction_test_start"],
+                    prediction_test_end=effective_windows["prediction_test_end"],
+                ),
                 layout=storage_layout,
-                dataset_catalog=catalogs.research_datasets,
-                model_catalog=catalogs.models,
-                prediction_catalog=prediction_catalog,
-                prediction_id=prediction_spec.prediction_id,
-                time_window=time_window,
-                prediction_train_end=effective_windows["prediction_train_end"],
-                prediction_test_start=effective_windows["prediction_test_start"],
-                prediction_test_end=effective_windows["prediction_test_end"],
             )
             for prediction_spec in prediction_catalog.list()
         )
     with recorder.record("portfolio_generation", logical_layer="evidence"):
-        portfolio_root = run_portfolio_from_research_dataset(
+        portfolio_result = build_portfolio_result_from_research_dataset(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             portfolio_catalog=portfolio_catalog,
             portfolio_id="signal_forward_return_20d_portfolio",
             time_window=evaluation_time_window,
+        )
+        portfolio_root = write_portfolio_run_outputs(
+            output_chunks=portfolio_result.output_chunks,
+            summary_factory=portfolio_result.summary_factory,
+            spec=portfolio_result.spec,
+            output_spec=_run_output_spec(
+                output_definition_id="portfolio_outputs",
+                run_id=portfolio_result.spec.portfolio_id,
+                market_id=portfolio_result.spec.market_id,
+                run_type=portfolio_result.spec.run_type,
+            ),
+            layout=storage_layout,
         )
 
     dataset_roots = _dataset_roots(
@@ -235,7 +279,7 @@ def _run_verification_evidence_with_policy(
         processed_roots=tuple(item.root for item in processed_result.values()),
         research_roots=(Path(research_root),),
     )
-    report_roots = (
+    run_output_roots = (
         Path(evaluation_root),
         *(Path(prediction_root) for prediction_root in prediction_roots),
         Path(portfolio_root),
@@ -313,14 +357,14 @@ def _run_verification_evidence_with_policy(
     )
     write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder)
     timings_payload = read_manifest(timings_json)
-    evidence_summary = build_verification_evidence_summary(
+    evidence_summary = build_verification_evidence_payload(
         run_id=run_id,
         date_range={"start_date": config.start_date, "end_date": config.end_date},
         manifests={
             "dataset_count": len(dataset_roots),
             "layer_count": len(layer_manifest_paths),
             "run_validation_status": run_manifest["run_validation_status"],
-            "report_count": len(report_roots),
+            "run_output_count": len(run_output_roots),
         },
         timings=timings_payload,
         validation_summary=validation_summary,
@@ -328,13 +372,14 @@ def _run_verification_evidence_with_policy(
         runtime_resource_policy=resource_policy.to_public_summary_payload(),
         runtime_execution_plan=_runtime_execution_plan_payload(),
     )
-    write_verification_evidence_summary_json(
+    evidence_markdown = render_verification_evidence_markdown(evidence_summary)
+    write_verification_evidence_json(
         layout.evidence_root / "evidence_summary.json",
         evidence_summary,
     )
-    write_verification_evidence_summary_md(
+    write_verification_evidence_markdown(
         layout.evidence_root / "evidence_summary.md",
-        evidence_summary,
+        evidence_markdown,
     )
     summary = {
         **evidence_summary,
@@ -347,17 +392,54 @@ def _run_verification_evidence_with_policy(
             markers=_LOGICAL_PATH_MARKERS,
         ),
     }
+    summary_markdown = render_verification_evidence_markdown(summary)
     write_run_summary_json(layout.summary_json_path, summary)
-    write_run_summary_md(layout.summary_md_path, summary)
-    return VerificationEvidenceRunResult(
-        status=str(validation_summary["status"]),
+    write_run_summary_markdown(layout.summary_md_path, summary_markdown)
+    return LocalVerificationRunResult(
+        status=str(evidence_summary["status"]),
         run_id=run_id,
         output_root=logical_path(output_root, markers=_LOGICAL_PATH_MARKERS),
         summary=summary,
     )
 
 
-def resolve_verification_run_id(
+def _write_prediction_result(
+    result: PredictionResult,
+    *,
+    layout: StorageLayout,
+) -> Path:
+    return write_prediction_run_outputs(
+        spec=result.spec,
+        output_spec=_run_output_spec(
+            output_definition_id="prediction_outputs",
+            run_id=result.spec.prediction_id,
+            run_type=result.spec.run_type,
+        ),
+        layout=layout,
+        output_chunks=result.output_chunks,
+        model_metadata=result.model_metadata,
+        prediction_metadata_factory=result.prediction_metadata_factory,
+    )
+
+
+def _run_output_spec(
+    *,
+    output_definition_id: str,
+    run_id: str,
+    run_type: str,
+    market_id: str = "a_share",
+) -> RunOutputSpec:
+    return RunOutputSpec(
+        output_id=output_definition_id,
+        output_definition_id=output_definition_id,
+        run_id=run_id,
+        market_id=market_id,
+        run_type=run_type,
+        scope=OutputScope.LOCAL_ONLY,
+    )
+
+
+def resolve_local_verification_run_id(
     config_run_id: str | None,
     output_root: Path,
 ) -> str:
@@ -365,28 +447,28 @@ def resolve_verification_run_id(
     return validate_run_id(run_id)
 
 
-def validate_private_output_root(output_root: Path, repo_root: Path) -> None:
+def validate_local_output_root(output_root: Path, repo_root: Path) -> None:
     root = Path(repo_root).resolve(strict=False)
     target = Path(output_root).resolve(strict=False)
     try:
         relative = target.relative_to(root)
     except ValueError:
-        raise ValueError("unignored_private_output_root") from None
+        raise ValueError("unignored_local_output_root") from None
     parts = relative.parts
-    if len(parts) >= 3 and parts[0] == "reports" and parts[1] == "private_research":
+    if len(parts) >= 2 and parts[0] == "run_outputs":
         return
     if len(parts) >= 2 and parts[0] == _RUN_WORKSPACE_DIR:
         run_root = parts[1]
         if (
-            run_root in {"private", "smoke"}
+            run_root in {"local", "smoke"}
             or re.fullmatch(r"s[0-9]+", run_root)
             or re.fullmatch(r"evidence-[a-z0-9][a-z0-9-]*", run_root)
         ):
             return
-    raise ValueError("unignored_private_output_root")
+    raise ValueError("unignored_local_output_root")
 
 
-def _resolve_private_boundary_repo_root(
+def _resolve_local_output_repo_root(
     output_root: Path,
     explicit_repo_root: Path | None,
 ) -> Path:
@@ -416,21 +498,21 @@ def _prepare_output_root(
     repo_root: Path | None = None,
 ) -> None:
     output_root = Path(path)
-    validate_private_output_root(
+    validate_local_output_root(
         output_root,
-        _resolve_private_boundary_repo_root(output_root, repo_root),
+        _resolve_local_output_repo_root(output_root, repo_root),
     )
     if output_root.exists() and not replace_output:
         raise ValueError("output_root_already_exists")
     if output_root.exists() and replace_output:
-        _assert_owned_verification_evidence_output(output_root)
+        _assert_owned_local_verification_output(output_root)
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=False)
     _write_ownership_marker(output_root)
 
 
 def _resolve_effective_windows(
-    config: VerificationEvidenceRunConfig,
+    config: LocalVerificationRunConfig,
 ) -> dict[str, str | None]:
     evaluation_start_date = config.evaluation_start_date or config.start_date
     evaluation_end_date = config.evaluation_end_date or config.end_date
@@ -449,9 +531,7 @@ def _resolve_effective_windows(
     train_end = pd.Timestamp(prediction_train_end)
     test_start = pd.Timestamp(prediction_test_start)
     test_end = (
-        pd.Timestamp(prediction_test_end)
-        if prediction_test_end is not None
-        else None
+        pd.Timestamp(prediction_test_end) if prediction_test_end is not None else None
     )
     if (
         train_end < evidence_start
@@ -491,8 +571,8 @@ def _runtime_execution_plan_payload() -> dict[str, object]:
         "report_writing": {
             "prediction_parquet": "chunked_internal",
             "evaluation_parquet": "materialized",
-            "portfolio_row_artifacts": "chunked_internal",
-            "portfolio_summary_artifacts": "aggregate_summary",
+            "portfolio_row_outputs": "chunked_internal",
+            "portfolio_summary_outputs": "aggregate_summary",
         },
         "full_horizon_tiling": {
             "status": "NOT_LANDED",
@@ -506,7 +586,7 @@ def _ownership_marker_path(output_root: Path) -> Path:
 
 
 def _write_ownership_marker(output_root: Path) -> Path:
-    return atomic_write_json(
+    return write_json_evidence(
         _ownership_marker_path(output_root),
         {
             "workflow_id": _OWNERSHIP_MARKER,
@@ -516,19 +596,19 @@ def _write_ownership_marker(output_root: Path) -> Path:
     )
 
 
-def _assert_owned_verification_evidence_output(output_root: Path) -> None:
+def _assert_owned_local_verification_output(output_root: Path) -> None:
     marker_path = _ownership_marker_path(output_root)
     if not marker_path.is_file():
-        raise ValueError("output_root_not_owned_by_verification_evidence_workflow")
+        raise ValueError("output_root_not_owned_by_local_verification_workflow")
     marker = read_manifest(marker_path)
     if (
         marker.get("workflow_id") != _OWNERSHIP_MARKER
         or marker.get("contract_version") != _OWNERSHIP_CONTRACT_VERSION
     ):
-        raise ValueError("output_root_not_owned_by_verification_evidence_workflow")
+        raise ValueError("output_root_not_owned_by_local_verification_workflow")
 
 
-def _create_layout_directories(layout: VerificationEvidenceLayout) -> None:
+def _create_layout_directories(layout: LocalVerificationLayout) -> None:
     for root in (
         layout.config_root,
         layout.interim_root,
@@ -544,7 +624,7 @@ def _create_layout_directories(layout: VerificationEvidenceLayout) -> None:
 
 
 def _dataset_roots(
-    layout: VerificationEvidenceLayout,
+    layout: LocalVerificationLayout,
     *,
     interim_roots: tuple[Path, ...] = (),
     processed_roots: tuple[Path, ...] = (),
@@ -565,12 +645,12 @@ def _logical_layer(dataset_root: Path, output_root: Path) -> str:
         return "interim"
     if relative.startswith("data/research/"):
         return "research"
-    if relative.startswith("reports/") or relative.startswith("data/evidence/"):
+    if relative.startswith("run_outputs/") or relative.startswith("handoff_evidence/"):
         return "evidence"
     return "processed"
 
 
-def _layer_for_root(dataset_root: Path, layout: VerificationEvidenceLayout) -> str:
+def _layer_for_root(dataset_root: Path, layout: LocalVerificationLayout) -> str:
     return _logical_layer(dataset_root, layout.output_root)
 
 
@@ -583,7 +663,7 @@ def _utc_now() -> str:
 
 
 __all__ = [
-    "VerificationEvidenceRunConfig",
-    "VerificationEvidenceRunResult",
-    "run_verification_evidence",
+    "LocalVerificationRunConfig",
+    "LocalVerificationRunResult",
+    "run_local_verification",
 ]

@@ -125,9 +125,7 @@ def _rewrite_package_member(package: Path, member: str, data: bytes) -> None:
 def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
     with zipfile.ZipFile(package, "r") as archive:
         names = sorted(
-            name
-            for name in archive.namelist()
-            if name != "artifact_manifest.json"
+            name for name in archive.namelist() if name != "artifact_manifest.json"
         )
         entries = [
             {
@@ -166,8 +164,7 @@ def _smoke_compare_status_payload(
         "record_status": "PASS",
         "overall_smoke_compare_status": overall,
         "results": [
-            {"name": name, "status": status, "reason": reason}
-            for name, status in rows
+            {"name": name, "status": status, "reason": reason} for name, status in rows
         ],
     }
 
@@ -177,7 +174,6 @@ def test_tracked_handoff_tool_source_of_truth_exists() -> None:
         "README.md",
         "build_handoff_package.py",
         "verify_handoff_package.py",
-        "handoff_safety.py",
         "self_test.py",
     }
 
@@ -370,13 +366,13 @@ def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
     ],
 )
 def test_handoff_safety_rejects_tampered_zip_member_paths(member: str) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
 
     assert safety.member_name_failures(member)
 
 
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     run_handoffs = ".run/handoffs"
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
@@ -406,7 +402,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
 
 
 def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("data/research/a_share/demo/manifest.json", "{}\n")
@@ -420,7 +416,7 @@ def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
 def test_handoff_safety_rejects_retired_private_report_paths(
     tmp_path: Path,
 ) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     members = _retired_private_member_paths(safety.FORBIDDEN_PATH_SEGMENTS)
 
     assert members
@@ -438,7 +434,7 @@ def test_handoff_safety_rejects_retired_private_report_paths(
 def test_handoff_safety_rejects_retired_private_report_path_text(
     tmp_path: Path,
 ) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     retired_private_report_path = next(
         segment
         for segment in safety.FORBIDDEN_PATH_SEGMENTS
@@ -509,7 +505,7 @@ def test_handoff_safety_rejects_private_run_members(
     tmp_path: Path,
     member: str,
 ) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(member, "{}\n")
@@ -528,7 +524,7 @@ def test_handoff_safety_rejects_private_run_path_in_sidecar(
     tmp_path: Path,
     logical_path: str,
 ) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("task_metadata.json", "{}\n")
@@ -545,7 +541,7 @@ def test_handoff_safety_rejects_private_run_path_in_sidecar(
 
 
 def test_handoff_safety_rejects_repo_local_codex_members(tmp_path: Path) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(".codex/config.json", "{}\n")
@@ -559,7 +555,7 @@ def test_handoff_safety_rejects_repo_local_codex_members(tmp_path: Path) -> None
 def test_handoff_safety_allows_historical_codex_in_bundle_when_head_is_clean(
     tmp_path: Path,
 ) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     repo = tmp_path / "repo"
     _init_handoff_repo(repo)
     codex_config = repo / ".codex" / "config.json"
@@ -581,7 +577,7 @@ def test_handoff_safety_allows_historical_codex_in_bundle_when_head_is_clean(
 
 
 def test_handoff_safety_rejects_codex_in_bundle_head_tree(tmp_path: Path) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     repo = tmp_path / "repo"
     _init_handoff_repo(repo)
     codex_config = repo / ".codex" / "config.json"
@@ -614,7 +610,7 @@ def test_handoff_safety_rejects_absolute_paths_with_private_segments(
     tmp_path: Path,
     text: str,
 ) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/leak.md", text)
@@ -626,7 +622,7 @@ def test_handoff_safety_rejects_absolute_paths_with_private_segments(
 
 
 def test_handoff_safety_rejects_local_paths_in_plain_text() -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     # Intentional fake private marker used to test sanitizer/package-safety rejection.
     text = "\n".join(
         [
@@ -639,7 +635,7 @@ def test_handoff_safety_rejects_local_paths_in_plain_text() -> None:
 
 
 def test_handoff_safety_allows_public_aggregate_evidence_counts() -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
     text = "\n".join(
         [
             "| processed panel parity | row_count_bucket=large | verified aggregate |",
@@ -666,7 +662,7 @@ def test_handoff_safety_delegates_text_privacy_semantics(
     text: str,
     reason: str,
 ) -> None:
-    safety = _load_handoff_module("handoff_safety")
+    safety = _load_handoff_module("verify_handoff_package")
 
     assert safety.unsafe_text_reason(text, name="handoff_evidence/leak.md") == reason
 
@@ -770,7 +766,7 @@ def test_verify_recursively_rejects_forbidden_handoff_evidence_payload_keys() ->
     builder = _load_handoff_module("build_handoff_package")
     forbidden_key = next(
         key
-        for key in builder.HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES
+        for key in builder.HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES
         if key == "check"
     )
 
@@ -885,7 +881,7 @@ def test_handoff_evidence_forbidden_keys_are_fast_contract_checks() -> None:
     builder = _load_handoff_module("build_handoff_package")
 
     failures_by_key = {
-        key: builder.handoff_evidence_forbidden_key_failures(
+        key: builder.handoff_evidence_blocked_key_failures(
             "handoff_evidence/custom.json",
             {
                 "schema_version": "demo/0.1",
@@ -893,7 +889,7 @@ def test_handoff_evidence_forbidden_keys_are_fast_contract_checks() -> None:
                 "details": {key: "forged"},
             },
         )
-        for key in builder.HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES
+        for key in builder.HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES
     }
 
     assert failures_by_key

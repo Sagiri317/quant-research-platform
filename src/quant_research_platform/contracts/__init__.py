@@ -35,11 +35,14 @@ from quant_research_platform.contracts.portfolios import (
     WeightConfig,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.privacy import PrivacyLevel
-from quant_research_platform.contracts.reports import ReportDefinition, ReportSpec
 from quant_research_platform.contracts.run_id import (
     RunIdValidationError,
     validate_run_id,
+)
+from quant_research_platform.contracts.run_outputs import (
+    OutputScope,
+    RunOutputDefinition,
+    RunOutputSpec,
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.workflows import WorkflowRunPolicy
@@ -69,10 +72,10 @@ __all__ = [
     "PredictionSpec",
     "ProcessedDataKind",
     "ProcessedDataSpec",
-    "PrivacyLevel",
     "ResearchDatasetSpec",
-    "ReportDefinition",
-    "ReportSpec",
+    "OutputScope",
+    "RunOutputDefinition",
+    "RunOutputSpec",
     "RunIdValidationError",
     "SignalSpec",
     "SourceAssetId",

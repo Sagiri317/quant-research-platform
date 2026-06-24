@@ -7,15 +7,16 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.artifacts.run_outputs import write_prediction_run_outputs
 from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.reports import ReportSpec
-from quant_research_platform.research.predictions.artifacts import (
-    _write_prediction_artifacts_from_frames,
+from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
+from quant_research_platform.research.predictions.outputs import (
+    build_prediction_result_from_frames,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -75,14 +76,15 @@ def write_prediction_artifact_and_read(
     model_metadata: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, Path, dict[str, object]]:
     layout = StorageLayout(project_root=project_root)
-    report_spec = ReportSpec(
-        report_id="prediction_artifacts",
-        report_definition_id="prediction_artifacts_private",
+    output_spec = RunOutputSpec(
+        output_id="prediction_outputs",
+        output_definition_id="prediction_outputs",
         run_id=spec.prediction_id,
         market_id=MarketId("a_share"),
         run_type=spec.run_type,
+        scope=OutputScope.LOCAL_ONLY,
     )
-    run_root = _write_prediction_artifacts_from_frames(
+    result = build_prediction_result_from_frames(
         frames,
         spec,
         coefficients,
@@ -90,14 +92,39 @@ def write_prediction_artifact_and_read(
         prediction_model=prediction_model,
         model_metadata=model_metadata
         or synthetic_prediction_model_metadata(spec, input_columns),
-        report_spec=report_spec,
+    )
+    run_root = write_prediction_run_outputs(
+        spec=result.spec,
+        output_spec=output_spec,
         layout=layout,
+        output_chunks=result.output_chunks,
+        model_metadata=result.model_metadata,
+        prediction_metadata_factory=result.prediction_metadata_factory,
     )
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     prediction = pd.read_parquet(run_root / "prediction.parquet")
     prediction.attrs["model_metadata"] = manifest["model_metadata"]
     prediction.attrs["prediction_metadata"] = manifest["prediction_metadata"]
     return prediction, run_root, manifest
+
+
+def write_prediction_result(layout: StorageLayout, result) -> Path:
+    output_spec = RunOutputSpec(
+        output_id="prediction_outputs",
+        output_definition_id="prediction_outputs",
+        run_id=result.spec.prediction_id,
+        market_id=MarketId("a_share"),
+        run_type=result.spec.run_type,
+        scope=OutputScope.LOCAL_ONLY,
+    )
+    return write_prediction_run_outputs(
+        spec=result.spec,
+        output_spec=output_spec,
+        layout=layout,
+        output_chunks=result.output_chunks,
+        model_metadata=result.model_metadata,
+        prediction_metadata_factory=result.prediction_metadata_factory,
+    )
 
 
 def synthetic_prediction_model_metadata(

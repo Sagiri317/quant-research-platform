@@ -25,7 +25,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.runtime.privacy import is_private_boundary_path
+from quant_research_platform.policy.share_safety import is_private_boundary_path
 from quant_research_platform.storage.manifests import (
     read_manifest,
     write_internal_artifact_manifest,
@@ -234,9 +234,7 @@ class _WriteStats:
                 "non_finite_count_summary": dict(
                     sorted(self.non_finite_count_summary.items())
                 ),
-                "duplicate_primary_key_count": int(
-                    self.duplicate_primary_key_count
-                ),
+                "duplicate_primary_key_count": int(self.duplicate_primary_key_count),
                 "factor_nan_profile": dict(sorted(self.factor_nan_profile.items())),
                 "label_nan_profile": dict(sorted(self.label_nan_profile.items())),
                 "validation_status": "fail" if validation_failed else "pass",
@@ -405,9 +403,7 @@ def fingerprint_dataset(
         time_window=time_window,
     )
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
-    hash_columns = tuple(
-        dict.fromkeys((*key_columns, *context.logical_columns))
-    )
+    hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
     hash_physical_columns = _read_columns_for_time_window(
         hash_columns,
         spec=context.spec,
@@ -932,9 +928,7 @@ def _prune_paths_for_time_window(
         for year in range(int(time_window.start.year), int(time_window.end.year) + 1)
     }
     return tuple(
-        path
-        for path in paths
-        if _relative_partition_label(data_root, path) in years
+        path for path in paths if _relative_partition_label(data_root, path) in years
     )
 
 
@@ -1220,24 +1214,33 @@ def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
         raise ValueError("outside_private_boundary")
     path_parts = _path_parts(root)
     if isinstance(spec, InterimDataSpec):
-        if _unique_matching_suffix(
-            path_parts,
-            lambda candidate: _is_interim_output_suffix(candidate, spec),
-        ) is None:
+        if (
+            _unique_matching_suffix(
+                path_parts,
+                lambda candidate: _is_interim_output_suffix(candidate, spec),
+            )
+            is None
+        ):
             raise ValueError("invalid_interim_output_root")
         return
     if isinstance(spec, ProcessedDataSpec):
-        if _unique_matching_suffix(
-            path_parts,
-            lambda candidate: _is_processed_output_suffix(candidate, spec),
-        ) is None:
+        if (
+            _unique_matching_suffix(
+                path_parts,
+                lambda candidate: _is_processed_output_suffix(candidate, spec),
+            )
+            is None
+        ):
             raise ValueError("invalid_processed_output_root")
         return
     if isinstance(spec, ResearchDatasetSpec):
-        if _unique_matching_suffix(
-            path_parts,
-            lambda candidate: _is_research_dataset_output_suffix(candidate, spec),
-        ) is None:
+        if (
+            _unique_matching_suffix(
+                path_parts,
+                lambda candidate: _is_research_dataset_output_suffix(candidate, spec),
+            )
+            is None
+        ):
             raise ValueError("invalid_research_dataset_output_root")
         return
     raise ValueError("unsupported_data_spec_type")
@@ -1258,9 +1261,7 @@ def _unique_matching_suffix(
     parts: tuple[str, ...],
     predicate: Any,
 ) -> tuple[str, ...] | None:
-    candidates = [
-        parts[index:] for index, part in enumerate(parts) if part == "data"
-    ]
+    candidates = [parts[index:] for index, part in enumerate(parts) if part == "data"]
     matches = [candidate for candidate in candidates if predicate(candidate)]
     storage_like_invalid = [
         candidate
@@ -1273,11 +1274,16 @@ def _unique_matching_suffix(
 
 
 def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
-    return len(parts) >= 2 and parts[0] == "data" and parts[1] in {
-        "interim",
-        "processed",
-        "research",
-    }
+    return (
+        len(parts) >= 2
+        and parts[0] == "data"
+        and parts[1]
+        in {
+            "interim",
+            "processed",
+            "research",
+        }
+    )
 
 
 def _is_interim_output_suffix(parts: tuple[str, ...], spec: InterimDataSpec) -> bool:
@@ -1320,10 +1326,7 @@ def _is_research_dataset_output_suffix(
 
 
 def _matches_artifact_segment(segment: str, expected: str) -> bool:
-    return (
-        segment == expected
-        or segment.startswith(f".{expected}.tmp-")
-    )
+    return segment == expected or segment.startswith(f".{expected}.tmp-")
 
 
 def _candidate_data_files(
@@ -1415,9 +1418,7 @@ def _relative_partition_label(data_root: Path, path: Path) -> str:
 
 
 def _partition_keys(fingerprint: DatasetFingerprint) -> tuple[str, ...]:
-    return tuple(
-        str(item["partition"]) for item in fingerprint.partition_fingerprints
-    )
+    return tuple(str(item["partition"]) for item in fingerprint.partition_fingerprints)
 
 
 def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:

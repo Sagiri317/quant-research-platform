@@ -3,13 +3,13 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from quant_research_platform.reports.execution_metrics_artifacts import (
+from quant_research_platform.reports.execution_metrics import (
     format_optional_mb,
     render_stage_profile_report,
 )
 from quant_research_platform.reports.verification_evidence import (
-    render_private_verification_summary_markdown,
-    render_public_safe_evidence_markdown,
+    render_local_verification_inventory_markdown,
+    render_review_safe_aggregate_evidence_markdown,
 )
 from quant_research_platform.runtime.profiling import (
     ProfileConfig,
@@ -20,14 +20,14 @@ from quant_research_platform.runtime.profiling import (
 from tests.helpers import frequency_ids
 
 
-def test_public_safe_evidence_markdown_renders_status_rows() -> None:
+def test_review_safe_evidence_markdown_renders_status_rows() -> None:
     payload = {
-        "privacy_level": "public_safe_aggregate",
+        "output_scope": "REVIEW_SAFE",
         "contract_version": "0.1",
-        "verification_kind": "private_research_data_aggregate",
-        "verification_scope": "aggregate_public_safe_parity",
-        "evidence_generation_mode": "local_private_research_public_safe_aggregate",
-        "source_data_visibility": "private_local_only",
+        "verification_kind": "local_run_output_aggregate",
+        "verification_scope": "aggregate_review_safe_parity",
+        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
+        "source_data_visibility": "local_only",
         "handoff_ready": False,
         "areas": [
             {
@@ -47,19 +47,19 @@ def test_public_safe_evidence_markdown_renders_status_rows() -> None:
         ],
     }
 
-    markdown = render_public_safe_evidence_markdown(payload)
+    markdown = render_review_safe_aggregate_evidence_markdown(payload)
 
     assert "factor value parity" in markdown
     assert "human approval required before final review status" in markdown
     assert "`handoff_ready | false`" in markdown
 
 
-def test_private_verification_summary_markdown_renders_inventory() -> None:
+def test_local_verification_inventory_markdown_renders_inventory() -> None:
     payload = {
-        "privacy_level": "public_safe_aggregate",
+        "output_scope": "REVIEW_SAFE",
         "contract_version": "0.1",
-        "verification_kind": "private_research_data_aggregate_inventory",
-        "source_data_visibility": "private_local_only",
+        "verification_kind": "local_run_output_aggregate_inventory",
+        "source_data_visibility": "local_only",
         "dataset_inventory": [
             {
                 "logical_root": frequency_ids.market_panel_logical_root(),
@@ -82,7 +82,7 @@ def test_private_verification_summary_markdown_renders_inventory() -> None:
         "handoff_ready": False,
     }
 
-    markdown = render_private_verification_summary_markdown(payload)
+    markdown = render_local_verification_inventory_markdown(payload)
 
     assert "processed/a_share/other/demo | uncovered" in markdown
     assert "uncovered dataset roots require review" in markdown

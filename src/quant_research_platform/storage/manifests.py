@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from quant_research_platform.runtime.logical_paths import logical_path
-from quant_research_platform.runtime.privacy import (
+from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
     sanitize_public_object,
 )
+from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage.atomic import atomic_write_text
 
 _LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
@@ -25,8 +25,7 @@ def read_manifest(path: Path) -> dict[str, Any]:
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
     text = (
-        json.dumps(sanitize_public_object(payload), ensure_ascii=False, indent=2)
-        + "\n"
+        json.dumps(sanitize_public_object(payload), ensure_ascii=False, indent=2) + "\n"
     )
     return atomic_write_text(path, text, encoding="utf-8")
 
@@ -89,9 +88,7 @@ def write_layer_manifest(
             "row_count": payload.get("row_count"),
             "date_min": payload.get("date_min"),
             "date_max": payload.get("date_max"),
-            "duplicate_primary_key_count": payload.get(
-                "duplicate_primary_key_count"
-            ),
+            "duplicate_primary_key_count": payload.get("duplicate_primary_key_count"),
             "validation_status": payload.get("validation_status"),
         }
         datasets.append(

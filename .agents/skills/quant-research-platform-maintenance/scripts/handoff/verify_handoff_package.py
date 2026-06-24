@@ -4,32 +4,65 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
 import sys
 import tempfile
+import time
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_PARENT = SCRIPT_DIR.parent
+SCRIPT_REPO_ROOT = SCRIPT_DIR.parents[4]
+SCRIPT_REPO_SRC = SCRIPT_REPO_ROOT / "src"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 if str(SCRIPT_PARENT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_PARENT))
+if str(SCRIPT_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_REPO_SRC))
 
 from build_handoff_package import (  # noqa: E402
-    FORBIDDEN_PACKAGE_ENTRY_PARTS,
-    FORBIDDEN_TASK_KEYS,
-    FORBIDDEN_VALIDATION_KEYS,
+    BLOCKED_PACKAGE_ENTRY_PARTS,
+    BLOCKED_TASK_KEYS,
+    BLOCKED_VALIDATION_KEYS,
     VALIDATION_ROW_KEYS,
-    handoff_evidence_forbidden_key_failures,
+    handoff_evidence_blocked_key_failures,
     is_reserved_handoff_evidence_path,
     source_tree_scan_from_clone,
 )
-from governance_contract import VALID_STATUS_TOKENS  # noqa: E402
-from handoff_safety import scan_handoff_zip  # noqa: E402
+from governance_contract import (  # noqa: E402
+    PACKAGE_FORBIDDEN_PATH_PARTS,
+    VALID_STATUS_TOKENS,
+)
+from governance_contract import (  # noqa: E402
+    is_scanner_definition_line as is_shared_scanner_definition_line,
+)
+from governance_contract import (  # noqa: E402
+    package_member_name_failures as shared_package_member_name_failures,
+)
+
+try:
+    from quant_research_platform.policy.share_safety import (  # noqa: E402
+        public_text_unsafe_reason,
+    )
+except ModuleNotFoundError:  # pragma: no cover - exercised by copied handoff tools.
+    policy_path = (
+        SCRIPT_REPO_SRC / "quant_research_platform" / "policy" / "share_safety.py"
+    )
+    policy_spec = importlib.util.spec_from_file_location(
+        "qrp_policy_share_safety",
+        policy_path,
+    )
+    if policy_spec is None or policy_spec.loader is None:
+        raise
+    policy_module = importlib.util.module_from_spec(policy_spec)
+    policy_spec.loader.exec_module(policy_module)
+    public_text_unsafe_reason = policy_module.public_text_unsafe_reason
 
 VALID_STATUSES = set(VALID_STATUS_TOKENS)
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -58,7 +91,7 @@ BASELINE_FINAL_COMPARE_GROUPS = (
     REFRESHED_PREDICTION_BASELINE_GROUP,
     DIRECT_BASELINE_FINAL_GROUP,
 )
-FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
+BLOCKED_DUPLICATE_SOURCE_ROOTS = (
     ".agents/",
     "docs/",
     "run_tools/",
@@ -70,12 +103,411 @@ FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
 TRACKED_HANDOFF_SOURCE_PATHS = (
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
     ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
     ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
     ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
 )
+
+
+TEXT_LIKE_SUFFIXES = {
+    ".json",
+    ".log",
+    ".md",
+    ".patch",
+    ".py",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+BUNDLE_CONTENT_SCAN_EXEMPT_ROOTS = (
+    ".agents/",
+    "code/",
+    "docs/",
+    "src/",
+    "tests/",
+)
+BUNDLE_CONTENT_SCAN_EXEMPT_FILES = {
+    "AGENTS.md",
+    "README.md",
+    "data/README.md",
+    "environment.yml",
+    "pyproject.toml",
+}
+FORBIDDEN_PATH_SEGMENTS = PACKAGE_FORBIDDEN_PATH_PARTS
+STALE_MARKERS: tuple[str, ...] = ()
+BUNDLE_TEXT_SIZE_CAP_BYTES = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class HandoffSafetyResult:
+    failures: tuple[str, ...]
+    text_like_count: int
+    member_count: int
+    bundle_member_count: int = 0
+    bundle_text_like_count: int = 0
+    scanned_blob_count: int = 0
+    text_blob_count: int = 0
+    skipped_binary_count: int = 0
+    sidecar_text_like_count: int = 0
+    duration_seconds: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+    def to_text(self) -> str:
+        lines = [
+            "handoff_safety_scan_status=" + ("PASS" if self.ok else "FAIL"),
+            f"member_count={self.member_count}",
+            f"text_like_count={self.text_like_count}",
+            f"bundle_member_count={self.bundle_member_count}",
+            f"bundle_text_like_count={self.bundle_text_like_count}",
+            f"scanned_blob_count={self.scanned_blob_count}",
+            f"text_blob_count={self.text_blob_count}",
+            f"skipped_binary_count={self.skipped_binary_count}",
+            f"sidecar_text_like_count={self.sidecar_text_like_count}",
+            f"duration_seconds={self.duration_seconds:.3f}",
+        ]
+        lines.extend(self.failures)
+        return "\n".join(lines) + "\n"
+
+
+def scan_handoff_zip(
+    zip_path: str | Path,
+    *,
+    json_path: str | Path | None = None,
+) -> HandoffSafetyResult:
+    failures: list[str] = []
+    text_like_count = 0
+    bundle_member_count = 0
+    bundle_text_like_count = 0
+    scanned_blob_count = 0
+    text_blob_count = 0
+    skipped_binary_count = 0
+    sidecar_text_like_count = 0
+    started = time.perf_counter()
+    with ZipFile(zip_path) as archive:
+        members = archive.infolist()
+        for member in members:
+            name = member.filename
+            failures.extend(member_name_failures(name))
+            suffix = Path(name).suffix.lower()
+            if suffix in {".bundle", ".zip"} and name != "final-branch.bundle":
+                failures.append(f"nested package/bundle not allowed by default: {name}")
+            if name == "final-branch.bundle":
+                bundle_result = scan_git_bundle(archive.read(member), name=name)
+                failures.extend(bundle_result.failures)
+                bundle_member_count += bundle_result.member_count
+                bundle_text_like_count += bundle_result.text_like_count
+                scanned_blob_count += bundle_result.scanned_blob_count
+                text_blob_count += bundle_result.text_blob_count
+                skipped_binary_count += bundle_result.skipped_binary_count
+            if suffix in TEXT_LIKE_SUFFIXES:
+                text_like_count += 1
+                raw = archive.read(member)
+                if len(raw) > BUNDLE_TEXT_SIZE_CAP_BYTES:
+                    failures.append(f"text scan exceeded maximum size: {name}")
+                    continue
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    failures.append(f"non_utf8_text_artifact: {name}")
+                    continue
+                if raw.startswith(b"\xef\xbb\xbf") or looks_like_utf16(raw):
+                    failures.append(f"non_utf8_text_artifact: {name}")
+                reason = unsafe_text_reason(text, name=name)
+                if reason is not None:
+                    failures.append(f"{reason}_text: {name}")
+    if json_path is not None:
+        sidecar_text_like_count = 1
+        sidecar = Path(json_path)
+        raw = sidecar.read_bytes()
+        if len(raw) > BUNDLE_TEXT_SIZE_CAP_BYTES:
+            failures.append(f"sidecar_text scan exceeded maximum size: {sidecar.name}")
+            raw = b""
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            failures.append(f"sidecar_non_utf8_text_artifact: {sidecar.name}")
+        else:
+            if raw.startswith(b"\xef\xbb\xbf") or looks_like_utf16(raw):
+                failures.append(f"sidecar_non_utf8_text_artifact: {sidecar.name}")
+            reason = unsafe_text_reason(text, name="sidecar.json")
+            if reason is not None:
+                failures.append(f"sidecar_{reason}_text: {sidecar.name}")
+    return HandoffSafetyResult(
+        failures=tuple(failures),
+        text_like_count=text_like_count,
+        member_count=len(members),
+        bundle_member_count=bundle_member_count,
+        bundle_text_like_count=bundle_text_like_count,
+        scanned_blob_count=scanned_blob_count,
+        text_blob_count=text_blob_count,
+        skipped_binary_count=skipped_binary_count,
+        sidecar_text_like_count=sidecar_text_like_count,
+        duration_seconds=time.perf_counter() - started,
+    )
+
+
+def scan_git_bundle(raw: bytes, *, name: str) -> HandoffSafetyResult:
+    failures: list[str] = []
+    text_like_count = 0
+    member_count = 0
+    skipped_binary_count = 0
+    started = time.perf_counter()
+    with tempfile.TemporaryDirectory(prefix="handoff-bundle-safety-") as temp:
+        root = Path(temp)
+        bundle = root / "bundle.bundle"
+        bundle.write_bytes(raw)
+        clone_dir = root / "clone"
+        verify_repo = root / "verify-repo"
+        subprocess.run(
+            ["git", "init", str(verify_repo)],
+            capture_output=True,
+            text=True,
+        )
+        verify = subprocess.run(
+            ["git", "bundle", "verify", str(bundle)],
+            cwd=verify_repo,
+            capture_output=True,
+            text=True,
+        )
+        if verify.returncode != 0:
+            return HandoffSafetyResult(
+                failures=(f"bundle_verify_failed: {name}",),
+                text_like_count=0,
+                member_count=0,
+            )
+        branch = bundle_branch(bundle, verify_repo)
+        clone_cmd = ["git", "clone"]
+        if branch:
+            clone_cmd.extend(["--branch", branch])
+        clone_cmd.extend([str(bundle), str(clone_dir)])
+        clone = subprocess.run(
+            clone_cmd,
+            capture_output=True,
+            text=True,
+        )
+        if clone.returncode != 0:
+            return HandoffSafetyResult(
+                failures=(f"bundle_clone_failed: {name}",),
+                text_like_count=0,
+                member_count=0,
+            )
+        tree = subprocess.run(
+            ["git", "ls-tree", "-r", "-l", "HEAD"],
+            cwd=clone_dir,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout
+        object_paths: list[tuple[str, str]] = []
+        for line in tree.splitlines():
+            metadata, _, path = line.partition("\t")
+            parts = metadata.split()
+            if len(parts) < 4 or not path:
+                failures.append(f"bundle_tree_entry_parse_failed: {name}")
+                continue
+            _mode, object_type, object_id, _size = parts[:4]
+            if object_type == "blob":
+                object_paths.append((object_id, path))
+        object_info = batch_object_info(
+            clone_dir,
+            tuple(sorted({object_id for object_id, _ in object_paths})),
+        )
+        text_candidates: list[tuple[str, str]] = []
+        for object_id, path in object_paths:
+            info = object_info.get(object_id)
+            if info is None:
+                failures.append(f"bundle_object_type_failed: {name}")
+                continue
+            object_type, object_size = info
+            if object_type != "blob":
+                continue
+            member_count += 1
+            for failure in member_name_failures(path):
+                failures.append(f"bundle_{failure}")
+            if is_bundle_content_scan_exempt(path):
+                continue
+            if Path(path).suffix.lower() not in TEXT_LIKE_SUFFIXES:
+                skipped_binary_count += 1
+                continue
+            if object_size > BUNDLE_TEXT_SIZE_CAP_BYTES:
+                skipped_binary_count += 1
+                continue
+            text_candidates.append((object_id, path))
+        for object_id, raw_file in batch_blob_contents(
+            clone_dir,
+            tuple(object_id for object_id, _ in text_candidates),
+        ):
+            path_by_id = {candidate_id: path for candidate_id, path in text_candidates}
+            path = path_by_id[object_id]
+            text_like_count += 1
+            try:
+                text = raw_file.decode("utf-8")
+            except UnicodeDecodeError:
+                failures.append(f"bundle_non_utf8_text_artifact: {path}")
+                continue
+            if raw_file.startswith(b"\xef\xbb\xbf") or looks_like_utf16(raw_file):
+                failures.append(f"bundle_non_utf8_text_artifact: {path}")
+                continue
+            reason = unsafe_text_reason(text, name=f"bundle/{path}")
+            if reason is not None:
+                failures.append(f"bundle_{reason}_text: {path}")
+    return HandoffSafetyResult(
+        failures=tuple(failures),
+        text_like_count=text_like_count,
+        member_count=member_count,
+        scanned_blob_count=member_count,
+        text_blob_count=text_like_count,
+        skipped_binary_count=skipped_binary_count,
+        duration_seconds=time.perf_counter() - started,
+    )
+
+
+def bundle_branch(bundle: Path, cwd: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "bundle", "list-heads", str(bundle)],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        _sha, _, ref = line.partition(" ")
+        if ref.startswith("refs/heads/"):
+            return ref.removeprefix("refs/heads/")
+    return None
+
+
+def batch_object_info(
+    repo: Path,
+    object_ids: tuple[str, ...],
+) -> dict[str, tuple[str, int]]:
+    if not object_ids:
+        return {}
+    result = subprocess.run(
+        ["git", "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+        cwd=repo,
+        input="\n".join(object_ids) + "\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    output: dict[str, tuple[str, int]] = {}
+    for line in result.stdout.splitlines():
+        object_id, object_type, object_size = line.split(" ", 2)
+        output[object_id] = (object_type, int(object_size))
+    return output
+
+
+def batch_blob_contents(
+    repo: Path,
+    object_ids: tuple[str, ...],
+) -> tuple[tuple[str, bytes], ...]:
+    if not object_ids:
+        return ()
+    result = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=repo,
+        input=("\n".join(object_ids) + "\n").encode("ascii"),
+        capture_output=True,
+        check=True,
+    )
+    output: list[tuple[str, bytes]] = []
+    raw = result.stdout
+    offset = 0
+    while offset < len(raw):
+        header_end = raw.index(b"\n", offset)
+        header = raw[offset:header_end].decode("ascii")
+        object_id, object_type, object_size = header.split(" ", 2)
+        size = int(object_size)
+        if object_type != "blob":
+            raise ValueError(f"unexpected_batch_object_type: {object_type}")
+        content_start = header_end + 1
+        content_end = content_start + size
+        output.append((object_id, raw[content_start:content_end]))
+        offset = content_end + 1
+    return tuple(output)
+
+
+def member_name_failures(name: str) -> list[str]:
+    return [
+        f"{failure}: {name}" for failure in shared_package_member_name_failures(name)
+    ]
+
+
+def is_bundle_content_scan_exempt(name: str) -> bool:
+    normalized = name.replace("\\", "/")
+    if normalized in BUNDLE_CONTENT_SCAN_EXEMPT_FILES:
+        return True
+    return any(normalized.startswith(root) for root in BUNDLE_CONTENT_SCAN_EXEMPT_ROOTS)
+
+
+def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
+    scan_text = "\n".join(
+        line
+        for line in text.splitlines()
+        if not is_scanner_definition_line(line, name=name)
+    )
+    shared_reason = public_text_unsafe_reason(scan_text)
+    if shared_reason in {"private_path", "local_path"}:
+        return "local_absolute_path"
+    if shared_reason == "credential":
+        return "credential"
+    if shared_reason == "private_marker":
+        return "vendor_marker"
+    if shared_reason == "stock_code_sample":
+        return "stock_sample"
+    if shared_reason == "traceback":
+        return "raw_traceback"
+    if shared_reason == "row_sample":
+        return "row_sample"
+    if shared_reason == "raw_export_filename":
+        return "vendor_filename"
+    if shared_reason == "source_local_key":
+        return "source_local_key"
+    if shared_reason == "private_runtime_payload":
+        return "private_runtime_payload"
+    if shared_reason == "private_run_path":
+        return "private_run_path"
+    if stale_marker(scan_text) is not None:
+        return "stale_marker"
+    return None
+
+
+def stale_marker(text: str) -> str | None:
+    return next((marker for marker in STALE_MARKERS if marker in text), None)
+
+
+def is_scanner_definition_line(line: str, *, name: str = "") -> bool:
+    scanner_source = name.startswith("run_tools/") or name.endswith(
+        (
+            "build_handoff_package.py",
+            "self_test.py",
+            "verify_handoff_package.py",
+            "verify_governance.py",
+        )
+    )
+    if not scanner_source:
+        return False
+    if is_shared_scanner_definition_line(name, line):
+        return True
+    return bool(
+        ("A-Za-z" in line or "[^" in line or '":\\\\' in line)
+        and (
+            ":\\\\" in line or "/Users/" in line or "/home/" in line or "/mnt/" in line
+        )
+    )
+
+
+def looks_like_utf16(raw: bytes) -> bool:
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return True
+    return bool(raw) and raw.count(b"\x00") / len(raw) > 0.20
 
 
 def main() -> int:
@@ -118,9 +550,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             names = archive.namelist()
             name_set = set(names)
             duplicates = sorted(name for name in name_set if names.count(name) > 1)
-            failures.extend(
-                f"duplicate_zip_member: {name}" for name in duplicates
-            )
+            failures.extend(f"duplicate_zip_member: {name}" for name in duplicates)
             if any("\\" in name for name in names):
                 failures.append("zip_paths_not_posix")
             if json_path.name in name_set:
@@ -128,11 +558,11 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             missing = sorted(REQUIRED_ZIP_ENTRIES - name_set)
             failures.extend(f"missing_required_entry: {name}" for name in missing)
             failures.extend(
-                f"forbidden_entry: {name}"
-                for name in sorted(forbidden_package_entries(names))
+                f"blocked_entry: {name}"
+                for name in sorted(blocked_package_entries(names))
             )
             failures.extend(
-                f"forbidden_handoff_evidence_entry: {name}"
+                f"blocked_handoff_evidence_entry: {name}"
                 for name in sorted(names)
                 if name.startswith("handoff_evidence/")
                 and is_reserved_handoff_evidence_path(name)
@@ -140,11 +570,10 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             duplicate_source = sorted(
                 name
                 for name in names
-                if name.startswith(FORBIDDEN_DUPLICATE_SOURCE_ROOTS)
+                if name.startswith(BLOCKED_DUPLICATE_SOURCE_ROOTS)
             )
             failures.extend(
-                f"duplicate_tracked_source_in_zip: {name}"
-                for name in duplicate_source
+                f"duplicate_tracked_source_in_zip: {name}" for name in duplicate_source
             )
             for required_evidence in (
                 GENERATION_EVIDENCE,
@@ -188,9 +617,7 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     if (
         not isinstance(package_path, str)
         or "\\" in package_path
-        or not package_path.endswith(
-        "/" + zip_path.name
-        )
+        or not package_path.endswith("/" + zip_path.name)
     ):
         failures.append("sidecar_handoff_package_path_invalid")
     sidecar_path = sidecar.get("handoff_sidecar_path")
@@ -227,11 +654,11 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     return failures
 
 
-def forbidden_package_entries(names: list[str]) -> list[str]:
+def blocked_package_entries(names: list[str]) -> list[str]:
     entries: list[str] = []
     for name in names:
         parts = PurePosixPath(name.replace("\\", "/")).parts
-        if any(part in FORBIDDEN_PACKAGE_ENTRY_PARTS for part in parts):
+        if any(part in BLOCKED_PACKAGE_ENTRY_PARTS for part in parts):
             entries.append(name)
             continue
         if is_reserved_handoff_evidence_path(name):
@@ -332,10 +759,9 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
 
 def verify_validation_evidence_schema(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    forbidden = FORBIDDEN_VALIDATION_KEYS.intersection(payload)
+    forbidden = BLOCKED_VALIDATION_KEYS.intersection(payload)
     failures.extend(
-        f"validation_evidence_forbidden_field: {key}"
-        for key in sorted(forbidden)
+        f"validation_evidence_forbidden_field: {key}" for key in sorted(forbidden)
     )
     rows = payload.get("checks")
     if not isinstance(rows, list):
@@ -347,8 +773,7 @@ def verify_validation_evidence_schema(payload: dict[str, object]) -> list[str]:
             continue
         extra = sorted(set(row) - VALIDATION_ROW_KEYS)
         failures.extend(
-            f"validation_evidence_row_forbidden_field: {index}:{key}"
-            for key in extra
+            f"validation_evidence_row_forbidden_field: {index}:{key}" for key in extra
         )
         for key in ("name", "status", "evidence"):
             if key not in row:
@@ -368,10 +793,9 @@ def verify_task_metadata_schema(payload: dict[str, object]) -> list[str]:
         failures.append("task_metadata_mode_invalid")
     if mode == "pr_closure" and not payload.get("pr_url"):
         failures.append("task_metadata_schema_missing: pr_url")
-    forbidden = FORBIDDEN_TASK_KEYS.intersection(payload)
+    forbidden = BLOCKED_TASK_KEYS.intersection(payload)
     failures.extend(
-        f"task_metadata_forbidden_field: {key}"
-        for key in sorted(forbidden)
+        f"task_metadata_forbidden_field: {key}" for key in sorted(forbidden)
     )
     if mode == "evidence" and "pr_url" in payload:
         failures.append("task_metadata_evidence_forbidden_field: pr_url")
@@ -445,9 +869,7 @@ def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
 
 def aggregate_status(statuses: object) -> str:
     values = (
-        tuple(statuses)
-        if not isinstance(statuses, dict)
-        else tuple(statuses.values())
+        tuple(statuses) if not isinstance(statuses, dict) else tuple(statuses.values())
     )
     if not values:
         return "NOT_RUN"
@@ -491,7 +913,7 @@ def handoff_evidence_forbidden_field_failures(
     name: str,
     payload: dict[str, object],
 ) -> list[str]:
-    return handoff_evidence_forbidden_key_failures(name, payload)
+    return handoff_evidence_blocked_key_failures(name, payload)
 
 
 def verify_generation_evidence(
@@ -626,10 +1048,7 @@ def verify_baseline_final_compare(
         failures.append("baseline_final_compare_final_smoke_commit_missing")
     if payload.get("git_status_before_smoke") != "clean":
         failures.append("baseline_final_compare_git_status_before_smoke_not_clean")
-    if (
-        payload.get("git_status_after_smoke")
-        != "clean_or_only_ignored_run_outputs"
-    ):
+    if payload.get("git_status_after_smoke") != "clean_or_only_ignored_run_outputs":
         failures.append("baseline_final_compare_git_status_after_smoke_not_clean")
     if sidecar is not None and final_smoke_commit != sidecar.get("final_head"):
         failures.append("baseline_final_compare_final_smoke_commit_mismatch")
@@ -938,9 +1357,7 @@ def verify_tracked_handoff_sources(repo: Path) -> list[str]:
             continue
         properties = payload.get("properties")
         version = (
-            properties.get("schema_version")
-            if isinstance(properties, dict)
-            else {}
+            properties.get("schema_version") if isinstance(properties, dict) else {}
         )
         if not isinstance(version, dict) or version.get("const") != schema_version:
             failures.append(f"tracked_schema_version_invalid: {relative}")

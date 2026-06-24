@@ -27,7 +27,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
-from quant_research_platform.runtime.privacy import (
+from quant_research_platform.policy.share_safety import (
     PRIVATE_BOUNDARY_ROOTS,
     is_private_boundary_path,
     sanitize_public_text,
@@ -197,9 +197,7 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     assert layout.interim_data_root(
         SourceId("csmar"),
         frequency_ids.MARKET_BARS_DATA_ID,
-    ) == Path(
-        f"/repo/data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}"
-    )
+    ) == Path(f"/repo/data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}")
     assert layout.processed_data_root(
         MarketId("a_share"),
         ProcessedDataKind.FACTOR,
@@ -208,12 +206,7 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     assert layout.research_dataset_root(MarketId("a_share"), "demo") == Path(
         "/repo/data/research/a_share/demo"
     )
-    assert layout.private_research_report_root(
-        MarketId("a_share"),
-        "evaluation",
-    ) == Path(
-        "/repo/reports/private_research/a_share/evaluation"
-    )
+    assert not hasattr(layout, "private_research_report_root")
     assert PRIVATE_BOUNDARY_ROOTS == (
         "data/raw",
         "data/interim",

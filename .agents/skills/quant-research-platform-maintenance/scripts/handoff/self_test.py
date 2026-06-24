@@ -17,9 +17,12 @@ SKILL_ROOT = SCRIPT_PARENT.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from build_handoff_package import sanitize_handoff_text  # noqa: E402
-from handoff_safety import scan_handoff_zip, unsafe_text_reason  # noqa: E402
-from verify_handoff_package import verify_smoke_compare_status  # noqa: E402
+from build_handoff_package import clean_handoff_text  # noqa: E402
+from verify_handoff_package import (  # noqa: E402
+    scan_handoff_zip,
+    unsafe_text_reason,
+    verify_smoke_compare_status,
+)
 
 
 def main() -> int:
@@ -29,7 +32,6 @@ def main() -> int:
     required = {
         "build_handoff_package.py",
         "verify_handoff_package.py",
-        "handoff_safety.py",
         "self_test.py",
         "README.md",
     }
@@ -98,7 +100,6 @@ def main() -> int:
 
     builder = (root / "build_handoff_package.py").read_text(encoding="utf-8-sig")
     verifier = (root / "verify_handoff_package.py").read_text(encoding="utf-8-sig")
-    safety = (root / "handoff_safety.py").read_text(encoding="utf-8-sig")
     readme = (root / "README.md").read_text(encoding="utf-8-sig")
 
     required_terms = (
@@ -121,9 +122,7 @@ def main() -> int:
         '"git", "cat-file", "--batch"',
     )
     missing_terms = [
-        term
-        for term in required_terms
-        if term not in builder and term not in verifier and term not in safety
+        term for term in required_terms if term not in builder and term not in verifier
     ]
     if missing_terms:
         return fail("missing_terms=" + ",".join(missing_terms))
@@ -135,17 +134,17 @@ def main() -> int:
     found_forbidden = [term for term in forbidden_builder_terms if term in builder]
     if found_forbidden:
         return fail("builder_forbidden_terms=" + ",".join(found_forbidden))
-    if '"cat-file", "-t"' in safety or '"cat-file", "-p"' in safety:
+    if '"cat-file", "-t"' in verifier or '"cat-file", "-p"' in verifier:
         return fail("handoff_bundle_scan_uses_per_blob_cat_file")
     # Intentional fake private marker used to test sanitizer/package-safety rejection.
     unsafe_status = " M C:/Users/DELL/private/file.txt\n"
-    if "C:/Users" in sanitize_handoff_text(unsafe_status):
+    if "C:/Users" in clean_handoff_text(unsafe_status):
         return fail("git_status_sanitizer_fixture_failed")
     scanner_fixture = (
         "\\\\Users\\\\ site-packages conda env path vendor_marker "
         "Traceback (most recent call last): runtime_payload"
     )
-    sanitized_scanner_fixture = sanitize_handoff_text(scanner_fixture)
+    sanitized_scanner_fixture = clean_handoff_text(scanner_fixture)
     if (
         "\\\\Users\\\\" in sanitized_scanner_fixture
         or "site-packages" in sanitized_scanner_fixture

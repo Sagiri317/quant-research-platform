@@ -55,24 +55,24 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/workflows/test_verification_evidence_contract.py"),
 } | {Path(path) for path in PRIVACY_NEGATIVE_TEST_PATHS}
 RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS = {
-    Path("src/quant_research_platform/workflows/verification_evidence.py"): (
+    Path("src/quant_research_platform/workflows/local_verification.py"): (
         "Owner: workflows. Rationale: verification output layout. "
         "Lifecycle: current workflow contract. Test coverage: workflow evidence tests."
     ),
-    Path("src/quant_research_platform/runtime/privacy.py"): (
-        "Owner: runtime privacy. Rationale: detect private run paths in public text. "
-        "Lifecycle: permanent privacy contract. Test coverage: runtime privacy tests."
+    Path("src/quant_research_platform/policy/share_safety.py"): (
+        "Owner: policy share safety. "
+        "Rationale: detect local run paths in share-safe text. "
+        "Lifecycle: permanent policy contract. "
+        "Test coverage: policy share safety tests."
     ),
 }
-RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = set(
-    RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS
-)
+RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = set(RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS)
 ACTIVE_GOVERNANCE_DOC_ROOTS = (
     Path(root.rstrip("/")) for root in CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS
 )
 ACTIVE_DOC_FORBIDDEN_PATTERNS = active_doc_forbidden_patterns()
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REPORT_ARTIFACTS = Path("src/quant_research_platform/reports/report_artifacts.py")
+RUN_OUTPUT_ARTIFACTS = Path("src/quant_research_platform/artifacts/run_outputs.py")
 RUNTIME_PROFILING = Path("src/quant_research_platform/runtime/profiling.py")
 GOVERNANCE_NEGATIVE_FIXTURE_FILES = (
     Path("tests/agents/test_verify_governance.py"),
@@ -118,14 +118,8 @@ def test_source_and_tests_do_not_depend_on_runtime_workspace_path() -> None:
         for path in root.rglob("*.py"):
             if (
                 path.resolve() == current_file
-                or (
-                    root == Path("tests")
-                    and path in RUNTIME_WORKSPACE_TEST_ALLOWLIST
-                )
-                or (
-                    root == Path("src")
-                    and path in RUNTIME_WORKSPACE_SOURCE_ALLOWLIST
-                )
+                or (root == Path("tests") and path in RUNTIME_WORKSPACE_TEST_ALLOWLIST)
+                or (root == Path("src") and path in RUNTIME_WORKSPACE_SOURCE_ALLOWLIST)
             ):
                 continue
             text = path.read_text(encoding="utf-8")
@@ -188,8 +182,7 @@ def test_governance_negative_fixtures_do_not_hardcode_rule_inventory() -> None:
     )
 
     rule_names = {
-        rule.name
-        for rule in (*RETIRED_NAME_RULES, *RETIRED_PUBLIC_SURFACE_RULES)
+        rule.name for rule in (*RETIRED_NAME_RULES, *RETIRED_PUBLIC_SURFACE_RULES)
     } | {rule.name for rule in STALE_GOVERNANCE_TRUTH_RULES}
     patterns = {
         **retired_name_patterns(),
@@ -236,9 +229,7 @@ def test_source_tree_sensitive_negative_rules_are_contract_owned() -> None:
 
 
 def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:
-    hot_paths = (
-        Path("src/quant_research_platform/research/portfolios/runner.py"),
-    )
+    hot_paths = (Path("src/quant_research_platform/research/portfolios/runner.py"),)
     forbidden_patterns = (
         re.compile(r"pd\.concat\(\s*chunks\b"),
         re.compile(r"pd\.concat\(\s*frames\b"),
@@ -256,7 +247,7 @@ def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> N
 
 def test_prediction_artifact_builder_does_not_prederive_oos_end() -> None:
     text = Path(
-        "src/quant_research_platform/research/predictions/artifacts.py"
+        "src/quant_research_platform/research/predictions/outputs.py"
     ).read_text(encoding="utf-8")
 
     assert '"oos_end"' not in text
@@ -264,15 +255,11 @@ def test_prediction_artifact_builder_does_not_prederive_oos_end() -> None:
 
 def test_verification_evidence_replaces_retired_public_names() -> None:
     expected_files = {
-        Path("src/quant_research_platform/workflows/verification_evidence.py"),
+        Path("src/quant_research_platform/workflows/local_verification.py"),
         Path("src/quant_research_platform/reports/verification_evidence.py"),
     }
     retired_files = {
-        Path(
-            "src/quant_research_platform/workflows/"
-            + "private"
-            + "_evidence.py"
-        ),
+        Path("src/quant_research_platform/workflows/" + "private" + "_evidence.py"),
         Path("src/quant_research_platform/reports/" + "private" + "_evidence.py"),
         Path("src/quant_research_platform/reports/evidence" + "_rendering.py"),
     }
@@ -303,6 +290,7 @@ def test_verification_evidence_replaces_retired_public_names() -> None:
     assert present == []
     assert hits == []
 
+
 EXCLUDED_SCAN_PARTS = {
     ("docs", "archive"),
     ("__pycache__",),
@@ -327,9 +315,7 @@ PUBLIC_SURFACE_LINE_ALLOWLIST = {
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/"
         "verify_governance.py"
-    ): (
-        "src/quant_research_platform/sources/csmar/interim.py",
-    ),
+    ): ("src/quant_research_platform/sources/csmar/interim.py",),
 }
 ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST = {
     "retired_term": {
@@ -373,10 +359,6 @@ APPROVED_WRITER_MODULES = {
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "handoff_safety.py"
-    ),
-    Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
         "self_test.py"
     ),
     Path(
@@ -390,8 +372,9 @@ APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/storage/atomic.py"),
     Path("src/quant_research_platform/storage/datasets.py"),
     Path("src/quant_research_platform/storage/manifests.py"),
-    Path("src/quant_research_platform/reports/report_artifacts.py"),
-    Path("src/quant_research_platform/reports/verification_evidence.py"),
+    Path("src/quant_research_platform/artifacts/evidence.py"),
+    Path("src/quant_research_platform/artifacts/execution_metrics.py"),
+    Path("src/quant_research_platform/artifacts/run_outputs.py"),
     Path("src/quant_research_platform/runtime/execution_metrics.py"),
 }
 
@@ -433,9 +416,7 @@ RETIRED_PUBLIC_CONTRACT_TEXT = (
     "qrp report show",
     "GET  /api/0.1/catalog/data-products",
     "GET  /api/0.1/catalog/universes",
-    "POST /api/0.1/data-products/{"
-    + RETIRED_DATA_PRODUCT_ID
-    + "}/interim-runs",
+    "POST /api/0.1/data-products/{" + RETIRED_DATA_PRODUCT_ID + "}/interim-runs",
     "qrp catalog data-products",
     "qrp catalog universes",
     "qrp data-products run-interim <" + RETIRED_DATA_PRODUCT_ID + ">",
@@ -443,9 +424,7 @@ RETIRED_PUBLIC_CONTRACT_TEXT = (
 
 RETIRED_DATA_PRODUCT_ALLOWED_NEGATIVE_TESTS = {
     Path("tests/architecture/test_governance_contract_rg_gate.py"): (
-        "POST /api/0.1/data-products/{"
-        + RETIRED_DATA_PRODUCT_ID
-        + "}/interim-runs",
+        "POST /api/0.1/data-products/{" + RETIRED_DATA_PRODUCT_ID + "}/interim-runs",
         "qrp data-products run-interim <" + RETIRED_DATA_PRODUCT_ID + ">",
         RETIRED_DATA_PRODUCT_ID,
     ),
@@ -473,9 +452,7 @@ DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
         "/api/0.1/catalog/data-products",
         "data-products",
     ),
-    Path("tests/catalog/test_catalog_profiles.py"): (
-        '"data_products"',
-    ),
+    Path("tests/catalog/test_catalog_profiles.py"): ('"data_products"',),
 }
 
 RETIRED_DATA_LAYER_STRUCTURE_PATTERNS = (
@@ -607,9 +584,7 @@ def test_active_tree_has_no_retired_terms() -> None:
         ("price_volume_factors_full", re.compile(r"price_volume_factors_full")),
         (
             "_".join(("csmar", "daily", "market", "interim")),
-            re.compile(
-                re.escape(f"csmar_{frequency_ids.MARKET_BARS_DATA_ID}_interim")
-            ),
+            re.compile(re.escape(f"csmar_{frequency_ids.MARKET_BARS_DATA_ID}_interim")),
         ),
     )
     current_file = Path(__file__).resolve()
@@ -622,9 +597,9 @@ def test_active_tree_has_no_retired_terms() -> None:
         except UnicodeDecodeError:
             continue
         for name, pattern in forbidden_patterns:
-            if name in ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST[
-                "retired_term"
-            ].get(path, set()):
+            if name in ARCHITECTURE_GATE_NEGATIVE_LITERAL_ALLOWLIST["retired_term"].get(
+                path, set()
+            ):
                 continue
             if pattern.search(text):
                 hits.append(f"{path}: {name}")
@@ -775,9 +750,7 @@ def test_research_foundation_semantic_closure_terms_are_retired() -> None:
         Path("tests/contracts/test_research_foundation_semantic_contracts.py"): (
             'direction="' + "higher" + '"',
         ),
-        Path("docs/architecture/open-issues.md"): (
-            "Prediction" + "Bundle",
-        ),
+        Path("docs/architecture/open-issues.md"): ("Prediction" + "Bundle",),
         Path("AGENTS.md"): ("br" + "oker",),
         Path("README.md"): ("br" + "oker",),
         Path(".agents/briefs/user-principles.md"): ("br" + "oker",),
@@ -928,9 +901,7 @@ def _public_surface_scan_text(path: Path) -> str:
 
 
 def _is_internal_provider_doc(path: Path) -> bool:
-    if path.parts[:2] == ("docs", "code-map") and path.name.startswith(
-        "source-csmar-"
-    ):
+    if path.parts[:2] == ("docs", "code-map") and path.name.startswith("source-csmar-"):
         return True
     parts = path.parts
     return any(
@@ -941,7 +912,6 @@ def _is_internal_provider_doc(path: Path) -> bool:
 
 def test_no_retired_top_level_source_directories_exist() -> None:
     retired = {
-        "artifacts",
         "datasets",
         "pipelines",
         "kernels",
@@ -1011,12 +981,8 @@ def test_public_docs_capture_naming_rules_and_future_only_items() -> None:
         "CLI group / command / option: kebab-case",
         "Python module/function: snake_case",
     )
-    missing = [
-        rule for rule in required_naming_rules if rule not in api_doc
-    ]
-    stale_future = [
-        term for term in FUTURE_PUBLIC_TODO_TERMS if term in combined
-    ]
+    missing = [rule for rule in required_naming_rules if rule not in api_doc]
+    stale_future = [term for term in FUTURE_PUBLIC_TODO_TERMS if term in combined]
     missing_private_cli = [
         line for line in PRIVATE_LOCAL_CLI_LINES if line not in combined
     ]
@@ -1223,9 +1189,9 @@ def test_direct_write_gate_detects_chained_open_write() -> None:
 
 def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> None:
     writer_arg_sets = (
-        _function_arg_names(REPORT_ARTIFACTS, "write_stage_profile_report_artifacts"),
-        _function_arg_names(REPORT_ARTIFACTS, "write_prediction_report_artifacts"),
-        _function_arg_names(REPORT_ARTIFACTS, "write_evaluation_report_artifacts"),
+        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_stage_profile_run_outputs"),
+        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_prediction_run_outputs"),
+        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_evaluation_run_outputs"),
     )
 
     assert "output_dir" not in _class_field_names(RUNTIME_PROFILING, "ProfileConfig")

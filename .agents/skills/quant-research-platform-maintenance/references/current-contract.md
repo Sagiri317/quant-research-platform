@@ -1,6 +1,6 @@
 # Current Contract
 
-本文件定义 QRP 当前合同的读取方式和硬边界。它不是状态板，不记录当前分支、当前阶段、当前 PR 或最近运行结果。
+本文定义 QRP 当前合同的读取方式和硬边界。它不是状态板，不记录当前分支、当前阶段、当前 PR 或最近运行结果。
 
 ## 1. 当前事实
 
@@ -20,7 +20,7 @@ QRP 是本地量化研究平台。它支持 research workflow，不支持 live e
 
 ## 3. 数据合同
 
-公开仓库不得包含 private data、vendor marker、row-level sample、本地绝对路径、股票代码样本或 raw traceback。公开 evidence 应只包含 public-safe 摘要、schema、计数、hash、命令状态和路径结构。
+公开仓库不得包含 private data、vendor marker、row-level sample、本地绝对路径、股票代码样本或 raw traceback。REVIEW_SAFE evidence 应只包含摘要、schema、计数、hash、命令状态和路径结构。run output 架构主轴是 `LOCAL_ONLY` 和 `REVIEW_SAFE`，不是 private/public。
 
 ## 4. current-contract-only
 
@@ -46,4 +46,4 @@ QRP 是本地量化研究平台。它支持 research workflow，不支持 live e
 
 ## 7. 架构职责
 
-sources 负责摄取与 raw/interim 转换；markets 负责通用市场领域，A 股语义位于 `markets/implementations/a_share/`；research 保持通用算法；compute 负责数值核心；runtime 提供横切运行时能力；reports 负责 report/evidence artifact；`.agents` 只提供治理和 handoff tooling。
+`policy/` 管共享安全、ID 安全和状态聚合。`contracts/` 只管结构合同。`catalog/` 只管 generic registry class。`profiles/` 是 API、CLI、agent、workflow 共用组合根。`research/` 只构建 result。`reports/` 只 build/render evidence/report 内容。`artifacts/` 只写文件。`workflows/` 只编排。`storage/` 只管 dataset IO 和 data layout。`.agents/` 只提供治理和 handoff tooling。

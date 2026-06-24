@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from pathlib import Path
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import cast
 
 import pandas as pd
@@ -16,11 +16,7 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
     RETURNS_COLUMNS,
 )
 from quant_research_platform.contracts.portfolios import PortfolioSpec
-from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.reports.report_artifacts import (
-    _write_portfolio_report_artifacts_from_chunks,
-)
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
 from quant_research_platform.research.portfolios.engine import (
@@ -33,14 +29,21 @@ from quant_research_platform.runtime.resources import ChunkAxis
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def run_portfolio_from_research_dataset(
+@dataclass(frozen=True)
+class PortfolioResult:
+    spec: PortfolioSpec
+    output_chunks: Iterable[Mapping[str, pd.DataFrame]]
+    summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
+
+
+def build_portfolio_result_from_research_dataset(
     *,
     layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
     portfolio_catalog: PortfolioCatalog,
     portfolio_id: str,
     time_window: TimeWindow | None = None,
-) -> Path:
+) -> PortfolioResult:
     spec = portfolio_catalog.get(portfolio_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
     read_columns = _portfolio_read_columns(spec)
@@ -50,8 +53,8 @@ def run_portfolio_from_research_dataset(
         "prediction": tuple(dataset_spec.context_columns),
     }
     summary_state = _new_portfolio_summary_state()
-    artifact_chunks = _observe_portfolio_summary_chunks(
-        _iter_portfolio_row_artifact_chunks(
+    output_chunks = _observe_portfolio_summary_chunks(
+        _iter_portfolio_output_chunks(
             _portfolio_input_chunks(
                 layout=layout,
                 market_id=dataset_spec.market_id,
@@ -64,19 +67,10 @@ def run_portfolio_from_research_dataset(
         ),
         summary_state,
     )
-    report_spec = ReportSpec(
-        report_id="portfolio_report",
-        report_definition_id="portfolio_report_private",
-        run_id=spec.portfolio_id,
-        market_id=spec.market_id,
-        run_type=spec.run_type,
-    )
-    return _write_portfolio_report_artifacts_from_chunks(
-        artifact_chunks,
-        summary_artifacts_factory=lambda: _portfolio_summary_artifacts(summary_state),
+    return PortfolioResult(
         spec=spec,
-        report_spec=report_spec,
-        layout=layout,
+        output_chunks=output_chunks,
+        summary_factory=lambda: _portfolio_summary_outputs(summary_state),
     )
 
 
@@ -122,7 +116,7 @@ def _portfolio_input_chunks(
     )
 
 
-def _iter_portfolio_row_artifact_chunks(
+def _iter_portfolio_output_chunks(
     chunks,
     spec: PortfolioSpec,
     *,
@@ -180,16 +174,16 @@ def _new_portfolio_summary_state() -> dict[str, object]:
 
 
 def _observe_portfolio_summary_chunks(
-    artifact_chunks: Iterable[dict[str, pd.DataFrame]],
+    output_chunks: Iterable[dict[str, pd.DataFrame]],
     summary_state: dict[str, object],
 ) -> Iterable[dict[str, pd.DataFrame]]:
-    for artifact_chunk in artifact_chunks:
+    for output_chunk in output_chunks:
         _update_portfolio_summary_state(
             summary_state,
-            positions=artifact_chunk["positions"],
-            portfolio_returns=artifact_chunk["portfolio_returns"],
+            positions=output_chunk["positions"],
+            portfolio_returns=output_chunk["portfolio_returns"],
         )
-        yield artifact_chunk
+        yield output_chunk
 
 
 def _update_portfolio_summary_state(
@@ -267,7 +261,7 @@ def _update_position_period_summary(
         )
 
 
-def _portfolio_summary_artifacts(
+def _portfolio_summary_outputs(
     summary_state: dict[str, object],
 ) -> dict[str, pd.DataFrame]:
     portfolio_returns = _portfolio_returns_summary_frame(summary_state)
@@ -451,4 +445,4 @@ def _empty_summary_frame(columns: Iterable[str]) -> pd.DataFrame:
     return frame
 
 
-__all__ = ["run_portfolio_from_research_dataset"]
+__all__ = ["PortfolioResult", "build_portfolio_result_from_research_dataset"]

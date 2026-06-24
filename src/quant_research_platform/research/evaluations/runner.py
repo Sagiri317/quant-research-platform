@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.reports.report_artifacts import (
-    write_evaluation_report_artifacts,
-)
 from quant_research_platform.research.datasets import validate_evaluation_input
 from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
 from quant_research_platform.research.evaluations.engine import (
@@ -21,7 +15,7 @@ from quant_research_platform.research.evaluations.engine import (
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def run_evaluation_from_research_dataset(
+def build_evaluation_result_from_research_dataset(
     *,
     layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
@@ -29,7 +23,7 @@ def run_evaluation_from_research_dataset(
     run_id: str,
     time_window: TimeWindow | None = None,
     n_groups: int | None = None,
-) -> Path:
+) -> EvaluationResult:
     spec = evaluation_catalog.get(run_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
     signal_columns = tuple(signal.source_column for signal in spec.signals)
@@ -46,7 +40,7 @@ def run_evaluation_from_research_dataset(
         time_window=time_window,
         columns=read_columns,
     )
-    result = _evaluate_signal_frame_chunks(
+    return _evaluate_signal_frame_chunks(
         _validated_evaluation_chunks(
             chunks,
             dataset_spec=dataset_spec,
@@ -56,31 +50,6 @@ def run_evaluation_from_research_dataset(
         spec,
         n_groups=spec.n_groups if n_groups is None else n_groups,
         source_columns_by_kind=_signal_source_columns_by_kind(dataset_spec),
-    )
-    return write_evaluation_result(result, layout=layout)
-
-
-def write_evaluation_result(
-    result: EvaluationResult,
-    *,
-    layout: StorageLayout,
-) -> Path:
-    report_spec = ReportSpec(
-        report_id="evaluation_report",
-        report_definition_id="evaluation_report_private",
-        run_id=result.spec.run_id,
-        market_id=result.spec.market_id,
-        run_type=result.spec.run_type,
-    )
-    return write_evaluation_report_artifacts(
-        result.metrics,
-        result.grouped_label_values,
-        ic_summary=result.ic_summary,
-        group_spread_summary=result.group_spread_summary,
-        evaluation_diagnostics=result.diagnostics,
-        spec=result.spec,
-        report_spec=report_spec,
-        layout=layout,
     )
 
 
@@ -109,4 +78,4 @@ def _signal_source_columns_by_kind(dataset_spec) -> dict[str, tuple[str, ...]]:
     }
 
 
-__all__ = ["run_evaluation_from_research_dataset", "write_evaluation_result"]
+__all__ = ["build_evaluation_result_from_research_dataset"]

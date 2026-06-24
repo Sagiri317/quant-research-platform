@@ -11,6 +11,10 @@ import pytest
 import quant_research_platform.research.datasets.assembler as assembler_module
 import quant_research_platform.research.evaluations.runner as evaluation_runner_module
 import quant_research_platform.research.predictions.runner as prediction_runner_module
+from quant_research_platform.artifacts.run_outputs import (
+    write_evaluation_run_outputs,
+    write_prediction_run_outputs,
+)
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -34,6 +38,7 @@ from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
 )
+from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import (
@@ -44,20 +49,70 @@ from quant_research_platform.research.datasets import (
 )
 from quant_research_platform.research.evaluations.engine import evaluate_signal_frame
 from quant_research_platform.research.evaluations.runner import (
-    run_evaluation_from_research_dataset,
+    build_evaluation_result_from_research_dataset,
 )
 from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
-    run_prediction_from_research_dataset,
+    build_prediction_result_from_research_dataset,
 )
-from quant_research_platform.research.predictions.artifacts import (
-    _write_prediction_artifacts_from_frames,
+from quant_research_platform.research.predictions.outputs import (
+    build_prediction_result_from_frames,
 )
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.research.prediction_artifact_helpers import (
     write_prediction_artifact_and_read,
 )
+
+
+def _run_output_spec(
+    *,
+    output_definition_id: str,
+    run_id: str,
+    run_type: str,
+    market_id: MarketId | None = None,
+) -> RunOutputSpec:
+    return RunOutputSpec(
+        output_id=output_definition_id,
+        output_definition_id=output_definition_id,
+        run_id=run_id,
+        market_id=market_id or MarketId("a_share"),
+        run_type=run_type,
+        scope=OutputScope.LOCAL_ONLY,
+    )
+
+
+def _write_prediction_result(layout: StorageLayout, result) -> Path:
+    return write_prediction_run_outputs(
+        spec=result.spec,
+        output_spec=_run_output_spec(
+            output_definition_id="prediction_outputs",
+            run_id=result.spec.prediction_id,
+            run_type=result.spec.run_type,
+        ),
+        layout=layout,
+        output_chunks=result.output_chunks,
+        model_metadata=result.model_metadata,
+        prediction_metadata_factory=result.prediction_metadata_factory,
+    )
+
+
+def _write_evaluation_result(layout: StorageLayout, result) -> Path:
+    return write_evaluation_run_outputs(
+        result.metrics,
+        result.grouped_label_values,
+        ic_summary=result.ic_summary,
+        group_spread_summary=result.group_spread_summary,
+        evaluation_diagnostics=result.diagnostics,
+        spec=result.spec,
+        output_spec=_run_output_spec(
+            output_definition_id="evaluation_outputs",
+            run_id=result.spec.run_id,
+            market_id=result.spec.market_id,
+            run_type=result.spec.run_type,
+        ),
+        layout=layout,
+    )
 
 
 def _signal(column: str, *, source_kind: str = "factor") -> SignalSpec:
@@ -401,8 +456,7 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
         tiny.reset_index(drop=True),
     )
     assert (
-        inspect_dataset(tiny_root).file_count
-        > inspect_dataset(default_root).file_count
+        inspect_dataset(tiny_root).file_count > inspect_dataset(default_root).file_count
     )
 
 
@@ -585,11 +639,11 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
     assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
     assert run_root.as_posix().endswith(
-        "reports/private_research/a_share/prediction/pred_demo"
+        "run_outputs/local/a_share/prediction/pred_demo"
     )
     assert (
         "output_root"
-        not in inspect.signature(_write_prediction_artifacts_from_frames).parameters
+        not in inspect.signature(build_prediction_result_from_frames).parameters
     )
 
 
@@ -628,16 +682,17 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
         )
     )
 
-    run_root = run_prediction_from_research_dataset(
+    result = build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
     )
+    run_root = _write_prediction_result(layout, result)
 
     assert run_root.as_posix().endswith(
-        "reports/private_research/a_share/prediction/pred_demo"
+        "run_outputs/local/a_share/prediction/pred_demo"
     )
     assert (run_root / "prediction.parquet").is_file()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
@@ -693,13 +748,14 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
         )
     )
 
-    run_root = run_prediction_from_research_dataset(
+    result = build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
     )
+    run_root = _write_prediction_result(layout, result)
 
     assert (run_root / "prediction.parquet").is_file()
 
@@ -752,7 +808,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
 
     original_iter = prediction_runner_module._iter_research_dataset_chunks
     original_fit = prediction_runner_module._fit_model_result_from_frames
-    original_write = prediction_runner_module._write_prediction_artifacts_from_frames
+    original_write = prediction_runner_module.build_prediction_result_from_frames
     read_chunk_rows: list[int] = []
     fit_chunk_rows: list[int] = []
     prediction_chunk_rows: list[int] = []
@@ -795,17 +851,18 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     )
     monkeypatch.setattr(
         prediction_runner_module,
-        "_write_prediction_artifacts_from_frames",
+        "build_prediction_result_from_frames",
         wrapped_write,
     )
 
-    run_root = run_prediction_from_research_dataset(
+    result = build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
     )
+    run_root = _write_prediction_result(layout, result)
 
     assert (run_root / "prediction.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1
@@ -843,15 +900,16 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
         )
     )
 
-    run_root = run_evaluation_from_research_dataset(
+    result = build_evaluation_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         evaluation_catalog=evaluation_catalog,
         run_id="eval_demo",
     )
+    run_root = _write_evaluation_result(layout, result)
 
     assert run_root.as_posix().endswith(
-        "reports/private_research/a_share/evaluation/eval_demo"
+        "run_outputs/local/a_share/evaluation/eval_demo"
     )
     assert (run_root / "metrics.parquet").is_file()
     assert (run_root / "grouped_label_values.parquet").is_file()
@@ -918,12 +976,13 @@ def test_evaluation_runner_streams_research_chunks(
         wrapped_iter,
     )
 
-    run_root = run_evaluation_from_research_dataset(
+    result = build_evaluation_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         evaluation_catalog=evaluation_catalog,
         run_id="eval_demo",
     )
+    run_root = _write_evaluation_result(layout, result)
 
     assert (run_root / "metrics.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1

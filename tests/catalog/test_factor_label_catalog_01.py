@@ -4,12 +4,14 @@ import pytest
 
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.profiles import research_profile
-from quant_research_platform.catalog.reports import ReportCatalog
+from quant_research_platform.catalog.run_outputs import RunOutputCatalog
 from quant_research_platform.catalog.workflows import WorkflowCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.reports import ReportDefinition
+from quant_research_platform.contracts.run_outputs import (
+    OutputScope,
+    RunOutputDefinition,
+)
 from quant_research_platform.contracts.workflows import WorkflowSpec
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
@@ -17,6 +19,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.fields import (
     field_catalog,
 )
+from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_columns,
 )
@@ -109,19 +112,20 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
     assert catalog.list() == (definition,)
 
 
-def test_report_catalog_rejects_duplicate_definitions() -> None:
-    catalog = ReportCatalog()
-    definition = ReportDefinition(
-        report_definition_id="evaluation_report_private",
+def test_run_output_catalog_rejects_duplicate_definitions() -> None:
+    catalog = RunOutputCatalog()
+    definition = RunOutputDefinition(
+        output_definition_id="evaluation_outputs",
         display_name="Evaluation report",
         run_type="evaluation",
+        scope=OutputScope.LOCAL_ONLY,
     )
 
     catalog.register(definition)
-    with pytest.raises(ValueError, match="duplicate_report_definition"):
+    with pytest.raises(ValueError, match="duplicate_output_definition"):
         catalog.register(definition)
 
-    assert catalog.get("evaluation_report_private") == definition
+    assert catalog.get("evaluation_outputs") == definition
     assert catalog.list() == (definition,)
 
 

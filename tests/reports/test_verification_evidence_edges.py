@@ -3,11 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from quant_research_platform.artifacts.evidence import (
+    write_run_summary_json,
+    write_run_summary_markdown,
+    write_validation_summary,
+)
+from quant_research_platform.policy.share_safety import (
+    evidence_json_unsafe_reason,
+    evidence_text_unsafe_reason,
+)
 from quant_research_platform.reports import verification_evidence
 from quant_research_platform.runtime.logical_paths import logical_path
 
 
-def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None:
+def test_share_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None:
     safe = tmp_path / "safe.md"
     safe.write_text("aggregate only", encoding="utf-8")
     json_leak = tmp_path / "payload.json"
@@ -15,7 +24,7 @@ def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None
     text_leak = tmp_path / "payload.md"
     text_leak.write_text("source_asset_id", encoding="utf-8")
 
-    result = verification_evidence._private_safety_scan(
+    result = verification_evidence._share_safety_scan(
         (safe, json_leak, text_leak, tmp_path / "missing.md")
     )
 
@@ -29,26 +38,18 @@ def test_private_safety_scan_detects_text_and_json_leaks(tmp_path: Path) -> None
 
 
 def test_verification_evidence_unsafe_reason_variants() -> None:
+    assert evidence_text_unsafe_reason("data/raw/csmar/export.csv") == "absolute_path"
     assert (
-        verification_evidence._unsafe_text_reason("data/raw/csmar/export.csv")
-        == "absolute_path"
-    )
-    assert (
-        verification_evidence._unsafe_text_reason("daily__vendor__export-20240101.csv")
+        evidence_text_unsafe_reason("daily__vendor__export-20240101.csv")
         == "vendor_filename"
     )
+    assert evidence_text_unsafe_reason("source_market_id") == "source_local_key"
     assert (
-        verification_evidence._unsafe_text_reason("source_market_id")
-        == "source_local_key"
-    )
-    assert (
-        verification_evidence._unsafe_text_reason(
-            "runtime_payload=private-aggregate"
-        )
+        evidence_text_unsafe_reason("runtime_payload=private-aggregate")
         == "private_runtime_payload"
     )
-    assert verification_evidence._unsafe_json_reason("{bad") == "invalid_json"
-    assert verification_evidence._unsafe_json_reason('{"safe": ["aggregate"]}') is None
+    assert evidence_json_unsafe_reason("{bad") == "invalid_json"
+    assert evidence_json_unsafe_reason('{"safe": ["aggregate"]}') is None
 
 
 def test_validation_summary_classifies_manifest_and_safety_failures(
@@ -103,7 +104,7 @@ def test_validation_summary_classifies_manifest_and_safety_failures(
         "source_local_key_leakage",
         "layer_manifest_missing",
         "layer_validation_failed",
-        "private_safety_scan_failed",
+        "share_safety_scan_failed",
     }
     assert result["factor_nan_profile"] == {"factor": 2}
     assert result["label_nan_profile"] == {"label": 3}
@@ -111,7 +112,7 @@ def test_validation_summary_classifies_manifest_and_safety_failures(
 
 def test_verification_evidence_writers_emit_utf8(tmp_path: Path) -> None:
     payload = {"status": "PASS", "rows": 1}
-    run_payload = verification_evidence.build_verification_evidence_summary(
+    run_payload = verification_evidence.build_verification_evidence_payload(
         run_id="run_demo",
         date_range={"start_date": "2014-01-01", "end_date": "2014-01-31"},
         manifests={"dataset_count": 1},
@@ -120,15 +121,15 @@ def test_verification_evidence_writers_emit_utf8(tmp_path: Path) -> None:
         output_root=Path("verification-output"),
     )
 
-    json_path = verification_evidence.write_validation_summary(
+    json_path = write_validation_summary(
         tmp_path / "summary.json",
         payload,
     )
-    md_path = verification_evidence.write_run_summary_md(
+    md_path = write_run_summary_markdown(
         tmp_path / "summary.md",
-        run_payload,
+        verification_evidence.render_verification_evidence_markdown(run_payload),
     )
-    run_json_path = verification_evidence.write_run_summary_json(
+    run_json_path = write_run_summary_json(
         tmp_path / "run_summary.json",
         run_payload,
     )

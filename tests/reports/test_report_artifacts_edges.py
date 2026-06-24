@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts import run_outputs
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -14,22 +15,21 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightConfig
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.reports import ReportSpec
+from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.reports import report_artifacts
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 
 
 def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns: ic"):
-        report_artifacts._validate_report_frame(
+        run_outputs._validate_output_frame(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             required=("timestamp", "ic"),
             error_name="evaluation_metrics",
         )
     with pytest.raises(ValueError, match="unregistered_evaluation_metrics_columns"):
-        report_artifacts._validate_report_frame(
+        run_outputs._validate_output_frame(
             pd.DataFrame(
                 {
                     "timestamp": [pd.Timestamp("2024-01-02")],
@@ -47,7 +47,7 @@ def test_prediction_report_artifact_validation_rejects_bad_frames(
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
@@ -55,54 +55,54 @@ def test_prediction_report_artifact_validation_rejects_bad_frames(
     valid = _prediction_frame(with_metadata=True)
 
     with pytest.raises(ValueError, match="missing_prediction_artifact_columns"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             valid.drop(columns=["prediction_score"]),
             spec=spec,
-        report_spec=report_spec,
-        layout=layout,
-    )
+            output_spec=report_spec,
+            layout=layout,
+        )
     with pytest.raises(ValueError, match="unregistered_prediction_artifact_columns"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             valid.assign(extra=1),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             pd.concat([valid, valid], ignore_index=True),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
 
-def test_prediction_report_artifacts_require_standard_metadata_attrs(
+def test_prediction_run_outputs_require_standard_metadata_attrs(
     tmp_path: Path,
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="missing_model_metadata"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             _prediction_frame(with_metadata=False),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
-    )
+        )
 
     model_only = _prediction_frame(with_metadata=False)
     model_only.attrs["model_metadata"] = _model_metadata()
     with pytest.raises(ValueError, match="missing_prediction_metadata"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             model_only,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -110,40 +110,40 @@ def test_prediction_report_artifacts_require_standard_metadata_attrs(
     generic_metadata.attrs["model_metadata"] = _model_metadata()
     generic_metadata.attrs["metadata"] = {"contract_version": "0.1"}
     with pytest.raises(ValueError, match="missing_prediction_metadata"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             generic_metadata,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     incomplete_model = _prediction_frame(with_metadata=True)
     incomplete_model.attrs["model_metadata"] = {"contract_version": "0.1"}
     with pytest.raises(ValueError, match="invalid_model_metadata"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             incomplete_model,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     incomplete_prediction = _prediction_frame(with_metadata=True)
     incomplete_prediction.attrs["prediction_metadata"] = {"contract_version": "0.1"}
     with pytest.raises(ValueError, match="invalid_prediction_metadata"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             incomplete_prediction,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
 
-def test_prediction_report_artifacts_reject_inconsistent_metadata(
+def test_prediction_run_outputs_reject_inconsistent_metadata(
     tmp_path: Path,
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
@@ -155,10 +155,10 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
         "prediction_rows": 2,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_rows,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -168,10 +168,10 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
         "test_start": "2024-01-03",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_window,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -181,10 +181,10 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
         "train_end": "2024-01-02",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_train_end,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -194,10 +194,10 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
         "coefficient_count": 0,
     }
     with pytest.raises(ValueError, match="invalid_model_metadata"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_model,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -207,20 +207,20 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
         "input_columns": ["factor", "other_input"],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_feature_columns,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
 
-def test_prediction_report_artifacts_reject_bad_row_count_chain_and_filter_contract(
+def test_prediction_run_outputs_reject_bad_row_count_chain_and_filter_contract(
     tmp_path: Path,
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
@@ -232,10 +232,10 @@ def test_prediction_report_artifacts_reject_bad_row_count_chain_and_filter_contr
         "rows_after_input_dropna": 0,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_prediction_counts,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -245,10 +245,10 @@ def test_prediction_report_artifacts_reject_bad_row_count_chain_and_filter_contr
         "rows_after_filter_mode": 1,
     }
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_model_counts,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -258,10 +258,10 @@ def test_prediction_report_artifacts_reject_bad_row_count_chain_and_filter_contr
         "filter_columns_used": [],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_prediction_filter,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -271,20 +271,20 @@ def test_prediction_report_artifacts_reject_bad_row_count_chain_and_filter_contr
         "filter_definition": "no eligible/can_enter/can_exit filter",
     }
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_model_filter,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
 
-def test_prediction_report_artifacts_reject_bad_effective_test_end(
+def test_prediction_run_outputs_reject_bad_effective_test_end(
     tmp_path: Path,
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
@@ -295,20 +295,20 @@ def test_prediction_report_artifacts_reject_bad_effective_test_end(
     }
 
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_effective_end,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
 
 
-def test_prediction_report_artifacts_reject_unparseable_prediction_timestamp(
+def test_prediction_run_outputs_reject_unparseable_prediction_timestamp(
     tmp_path: Path,
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
@@ -316,15 +316,15 @@ def test_prediction_report_artifacts_reject_unparseable_prediction_timestamp(
     bad_timestamp["timestamp"] = ["bad-date"]
 
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_timestamp,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
 
 
-def test_prediction_report_artifacts_reject_effective_test_end_after_requested_end(
+def test_prediction_run_outputs_reject_effective_test_end_after_requested_end(
     tmp_path: Path,
 ) -> None:
     spec = PredictionSpec(
@@ -336,7 +336,7 @@ def test_prediction_report_artifacts_reject_effective_test_end_after_requested_e
         test_end="2024-01-02",
     )
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
@@ -356,20 +356,20 @@ def test_prediction_report_artifacts_reject_effective_test_end_after_requested_e
     }
 
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             late_prediction,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
 
 
-def test_prediction_report_artifacts_reject_model_train_window_after_spec_train_end(
+def test_prediction_run_outputs_reject_model_train_window_after_spec_train_end(
     tmp_path: Path,
 ) -> None:
     spec = _prediction_spec()
     report_spec = _report_spec(
-        "prediction_artifacts_private",
+        "prediction_outputs",
         spec.prediction_id,
         "prediction",
     )
@@ -381,10 +381,10 @@ def test_prediction_report_artifacts_reject_model_train_window_after_spec_train_
     }
 
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
-        report_artifacts.write_prediction_report_artifacts(
+        run_outputs.write_prediction_run_outputs(
             bad_model_window,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
 
@@ -392,33 +392,33 @@ def test_prediction_report_artifacts_reject_model_train_window_after_spec_train_
 def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
 
-    with pytest.raises(ValueError, match="report_spec_mismatch"):
-        report_artifacts._derive_report_run_root(
-            report_spec=_report_spec("unknown", "run_demo", "prediction"),
+    with pytest.raises(ValueError, match="output_spec_mismatch"):
+        run_outputs._derive_run_output_root(
+            output_spec=_report_spec("unknown", "run_demo", "prediction"),
             layout=layout,
-            expected_definition_id="prediction_artifacts_private",
+            expected_definition_id="prediction_outputs",
             expected_run_id="run_demo",
-    )
-    with pytest.raises(ValueError, match="report_spec_mismatch"):
-        report_artifacts._derive_report_run_root(
-            report_spec=_report_spec(
-                "evaluation_report_private",
+        )
+    with pytest.raises(ValueError, match="output_spec_mismatch"):
+        run_outputs._derive_run_output_root(
+            output_spec=_report_spec(
+                "evaluation_outputs",
                 "run_demo",
                 "evaluation",
             ),
             layout=layout,
-            expected_definition_id="prediction_artifacts_private",
+            expected_definition_id="prediction_outputs",
             expected_run_id="run_demo",
         )
-    with pytest.raises(ValueError, match="report_spec_mismatch"):
-        report_artifacts._derive_report_run_root(
-            report_spec=_report_spec(
-                "prediction_artifacts_private",
+    with pytest.raises(ValueError, match="output_spec_mismatch"):
+        run_outputs._derive_run_output_root(
+            output_spec=_report_spec(
+                "prediction_outputs",
                 "other_run",
                 "prediction",
             ),
             layout=layout,
-            expected_definition_id="prediction_artifacts_private",
+            expected_definition_id="prediction_outputs",
             expected_run_id="run_demo",
         )
 
@@ -430,26 +430,30 @@ def test_report_run_root_rejects_mismatched_specs(tmp_path: Path) -> None:
 def test_report_run_root_rejects_dataset_roots(
     tmp_path: Path,
     data_layer: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class DatasetRootLayout(StorageLayout):
-        def private_research_report_root(self, market_id, run_type):  # noqa: ANN001
-            del market_id, run_type
-            return tmp_path / "data" / data_layer / "a_share" / "report"
+    monkeypatch.setattr(
+        run_outputs,
+        "local_run_output_root",
+        lambda _root, _market_id, _run_type: (
+            tmp_path / "data" / data_layer / "a_share" / "report"
+        ),
+    )
 
-    with pytest.raises(ValueError, match="report_output_must_be_report_root"):
-        report_artifacts._derive_report_run_root(
-            report_spec=_report_spec(
-                "prediction_artifacts_private",
+    with pytest.raises(ValueError, match="run_output_must_use_artifact_root"):
+        run_outputs._derive_run_output_root(
+            output_spec=_report_spec(
+                "prediction_outputs",
                 "prediction_demo",
                 "prediction",
             ),
-            layout=DatasetRootLayout(project_root=tmp_path),
-            expected_definition_id="prediction_artifacts_private",
+            layout=StorageLayout(project_root=tmp_path),
+            expected_definition_id="prediction_outputs",
             expected_run_id="prediction_demo",
         )
 
 
-def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None:
+def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> None:
     spec = EvaluationSpec(
         run_id="eval_demo",
         market_id=MarketId("a_share"),
@@ -457,46 +461,46 @@ def test_evaluation_report_validation_rejects_bad_inputs(tmp_path: Path) -> None
         signals=(_signal_spec(),),
         label_columns=("label",),
     )
-    report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
+    report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
 
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
 
     with pytest.raises(ValueError, match="missing_evaluation_ic_summary_columns"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=pd.DataFrame({"signal": ["signal"]}),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
 
     with pytest.raises(ValueError, match="missing_evaluation_group_spread_summary"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=pd.DataFrame({"signal": ["signal"]}),
             evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
         )
 
 
-def test_evaluation_report_rejects_inconsistent_diagnostics(tmp_path: Path) -> None:
+def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> None:
     spec = EvaluationSpec(
         run_id="eval_demo",
         market_id=MarketId("a_share"),
@@ -504,59 +508,59 @@ def test_evaluation_report_rejects_inconsistent_diagnostics(tmp_path: Path) -> N
         signals=(_signal_spec(),),
         label_columns=("label",),
     )
-    report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
+    report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
     layout = StorageLayout(project_root=tmp_path)
 
     bad_metric_rows = replace(_evaluation_diagnostics(), metric_rows=2)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=bad_metric_rows,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     bad_filter_mode = replace(_evaluation_diagnostics(), filter_mode="unfiltered")
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=bad_filter_mode,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     bad_timestamp_count = replace(_evaluation_diagnostics(), timestamp_count=2)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=bad_timestamp_count,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     skipped_metrics = _evaluation_metrics_frame().assign(n_obs=[1])
     bad_skipped = replace(_evaluation_diagnostics(), skipped_timestamp_count=0)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             skipped_metrics,
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=bad_skipped,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -568,19 +572,19 @@ def test_evaluation_report_rejects_inconsistent_diagnostics(tmp_path: Path) -> N
         max_timestamp=None,
     )
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             bad_timestamp_metrics,
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=bad_timestamp_diagnostics,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
 
-def test_evaluation_report_rejects_bad_keys_features_groups_and_counts(
+def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
     tmp_path: Path,
 ) -> None:
     spec = EvaluationSpec(
@@ -590,7 +594,7 @@ def test_evaluation_report_rejects_bad_keys_features_groups_and_counts(
         signals=(_signal_spec(),),
         label_columns=("label",),
     )
-    report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
+    report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
     layout = StorageLayout(project_root=tmp_path)
 
     duplicate_metrics = pd.concat(
@@ -603,58 +607,58 @@ def test_evaluation_report_rejects_bad_keys_features_groups_and_counts(
         rows_after_signal_label_dropna=4,
     )
     with pytest.raises(ValueError, match="duplicate_evaluation_metrics_keys"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             duplicate_metrics,
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=duplicate_diagnostics,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     bad_feature_metrics = _evaluation_metrics_frame().assign(signal="other")
     with pytest.raises(ValueError, match="evaluation_artifact_signal_label_mismatch"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             bad_feature_metrics,
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     bad_group = _evaluation_grouped_label_values_frame().assign(group=3)
     with pytest.raises(ValueError, match="evaluation_group_out_of_range"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             _evaluation_metrics_frame(),
             bad_group,
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=_evaluation_diagnostics(),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
     bad_row_chain = replace(_evaluation_diagnostics(), rows_after_filter_mode=1)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        report_artifacts.write_evaluation_report_artifacts(
+        run_outputs.write_evaluation_run_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
             group_spread_summary=_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=bad_row_chain,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
 
-def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> None:
+def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> None:
     spec = EvaluationSpec(
         run_id="eval_demo",
         market_id=MarketId("a_share"),
@@ -662,16 +666,16 @@ def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> N
         signals=(_signal_spec(),),
         label_columns=("label",),
     )
-    report_spec = _report_spec("evaluation_report_private", spec.run_id, "evaluation")
+    report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
 
-    run_root = report_artifacts.write_evaluation_report_artifacts(
+    run_root = run_outputs.write_evaluation_run_outputs(
         _evaluation_metrics_frame(),
         _evaluation_grouped_label_values_frame(),
         ic_summary=_evaluation_ic_summary_frame(),
         group_spread_summary=_evaluation_group_spread_summary_frame(),
         evaluation_diagnostics=_evaluation_diagnostics(),
         spec=spec,
-        report_spec=report_spec,
+        output_spec=report_spec,
         layout=StorageLayout(project_root=tmp_path),
     )
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
@@ -690,7 +694,7 @@ def test_evaluation_report_writes_label_value_artifact_name(tmp_path: Path) -> N
     assert "metadata" not in manifest
 
 
-def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
+def test_portfolio_run_outputs_write_manifest_and_local_scope(
     tmp_path: Path,
 ) -> None:
     spec = _portfolio_spec()
@@ -698,8 +702,8 @@ def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
     run_root = _write_portfolio_chunks_for_test(
         artifacts,
         spec=spec,
-        report_spec=_report_spec(
-            "portfolio_report_private",
+        output_spec=_report_spec(
+            "portfolio_outputs",
             spec.portfolio_id,
             "portfolio",
         ),
@@ -708,7 +712,7 @@ def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
 
     assert run_root.as_posix().endswith(
-        "reports/private_research/a_share/portfolio/portfolio_demo"
+        "run_outputs/local/a_share/portfolio/portfolio_demo"
     )
     assert manifest["portfolio_id"] == "portfolio_demo"
     assert manifest["research_dataset_id"] == "research_demo"
@@ -739,7 +743,7 @@ def test_portfolio_report_artifacts_write_manifest_and_private_boundary(
     ]
 
 
-def test_portfolio_report_artifacts_write_row_artifacts_from_chunks(
+def test_portfolio_run_outputs_write_row_artifacts_from_chunks(
     tmp_path: Path,
 ) -> None:
     spec = _portfolio_spec()
@@ -761,16 +765,16 @@ def test_portfolio_report_artifacts_write_row_artifacts_from_chunks(
             for artifact_name in row_artifacts
         },
     )
-    run_root = report_artifacts._write_portfolio_report_artifacts_from_chunks(
+    run_root = run_outputs._write_portfolio_output_chunks(
         chunks,
-        summary_artifacts_factory=lambda: {
+        summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
             for artifact_name in artifacts
             if artifact_name not in row_artifacts
         },
         spec=spec,
-        report_spec=_report_spec(
-            "portfolio_report_private",
+        output_spec=_report_spec(
+            "portfolio_outputs",
             spec.portfolio_id,
             "portfolio",
         ),
@@ -784,10 +788,10 @@ def test_portfolio_report_artifacts_write_row_artifacts_from_chunks(
     assert len(pd.read_parquet(run_root / "portfolio_returns.parquet")) == 1
 
 
-def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
+def test_portfolio_run_outputs_reject_bad_frames(tmp_path: Path) -> None:
     spec = _portfolio_spec()
     report_spec = _report_spec(
-        "portfolio_report_private",
+        "portfolio_outputs",
         spec.portfolio_id,
         "portfolio",
     )
@@ -801,7 +805,7 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         _write_portfolio_chunks_for_test(
             missing_positions,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -813,7 +817,7 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         _write_portfolio_chunks_for_test(
             extra_returns,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -825,7 +829,7 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         _write_portfolio_chunks_for_test(
             wrong_return_source,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
@@ -837,38 +841,36 @@ def test_portfolio_report_artifacts_reject_bad_frames(tmp_path: Path) -> None:
         _write_portfolio_chunks_for_test(
             wrong_signal,
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
 
 
-def test_portfolio_report_artifacts_clean_temp_run_directory_on_failure(
+def test_portfolio_run_outputs_clean_temp_run_directory_on_failure(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     spec = _portfolio_spec()
     layout = StorageLayout(project_root=tmp_path)
     report_spec = _report_spec(
-        "portfolio_report_private",
+        "portfolio_outputs",
         spec.portfolio_id,
         "portfolio",
     )
-    run_parent = (
-        tmp_path / "reports" / "private_research" / "a_share" / "portfolio"
-    )
+    run_parent = tmp_path / "run_outputs" / "local" / "a_share" / "portfolio"
 
     def fail_write(frame, path, **kwargs):  # noqa: ANN001
         del frame, kwargs
         Path(path).write_text("partial", encoding="utf-8")
         raise RuntimeError("portfolio parquet failed")
 
-    monkeypatch.setattr(report_artifacts, "_atomic_write_report_parquet", fail_write)
+    monkeypatch.setattr(run_outputs, "_write_parquet", fail_write)
 
     with pytest.raises(RuntimeError, match="portfolio parquet failed"):
         _write_portfolio_chunks_for_test(
             _portfolio_artifacts(),
             spec=spec,
-            report_spec=report_spec,
+            output_spec=report_spec,
             layout=layout,
         )
     assert not (run_parent / spec.portfolio_id).exists()
@@ -888,7 +890,7 @@ def test_report_parquet_writer_cleans_temp_on_failure(
     monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_to_parquet)
 
     with pytest.raises(RuntimeError, match="write failed"):
-        report_artifacts._atomic_write_report_parquet(
+        run_outputs._write_parquet(
             frame,
             tmp_path / "report.parquet",
         )
@@ -1083,19 +1085,19 @@ def _write_portfolio_chunks_for_test(
     artifacts: dict[str, pd.DataFrame],
     *,
     spec: PortfolioSpec,
-    report_spec: ReportSpec,
+    output_spec: RunOutputSpec,
     layout: StorageLayout,
 ) -> Path:
     row_artifacts = _portfolio_row_artifact_names()
-    return report_artifacts._write_portfolio_report_artifacts_from_chunks(
+    return run_outputs._write_portfolio_output_chunks(
         ({artifact_name: artifacts[artifact_name] for artifact_name in row_artifacts},),
-        summary_artifacts_factory=lambda: {
+        summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
             for artifact_name in artifacts
             if artifact_name not in row_artifacts
         },
         spec=spec,
-        report_spec=report_spec,
+        output_spec=output_spec,
         layout=layout,
     )
 
@@ -1187,16 +1189,17 @@ def _signal_spec() -> SignalSpec:
 
 
 def _report_spec(
-    report_definition_id: str,
+    output_definition_id: str,
     run_id: str,
     run_type: str,
-) -> ReportSpec:
-    return ReportSpec(
-        report_id=f"{run_id}_report",
-        report_definition_id=report_definition_id,
+) -> RunOutputSpec:
+    return RunOutputSpec(
+        output_id=f"{run_id}_report",
+        output_definition_id=output_definition_id,
         run_id=run_id,
         market_id=MarketId("a_share"),
         run_type=run_type,
+        scope=OutputScope.LOCAL_ONLY,
     )
 
 

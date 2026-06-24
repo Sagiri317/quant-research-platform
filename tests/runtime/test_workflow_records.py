@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from quant_research_platform.contracts.run_outputs import OutputScope
 from quant_research_platform.contracts.workflows import (
     WorkflowRunPolicy,
     WorkflowRunSummary,
@@ -24,7 +25,7 @@ def _summary(*, workflow_id: str = "workflow") -> WorkflowRunSummary:
         output_spec_ids=("output_spec",),
         node_count=1,
         completed_nodes=("validate",),
-        private_boundary_required=True,
+        scope=OutputScope.LOCAL_ONLY,
         artifact_writer_policy="spec_driven",
     )
 
@@ -44,7 +45,7 @@ def test_workflow_run_summary_to_record_returns_plain_mapping() -> None:
         "output_spec_ids": ["output_spec"],
         "node_count": 1,
         "completed_nodes": ["validate"],
-        "private_boundary_required": True,
+        "scope": "LOCAL_ONLY",
         "artifact_writer_policy": "spec_driven",
     }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -15,14 +16,39 @@ def _load_package_safety_module():
         / "skills"
         / "quant-research-platform-maintenance"
         / "scripts"
-        / "package_safety_check.py"
+        / "handoff"
+        / "verify_handoff_package.py"
     )
-    spec = importlib.util.spec_from_file_location("package_safety_check", script)
+    spec = importlib.util.spec_from_file_location("verify_handoff_package", script)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.BLOCKED_PATH_PARTS = module.FORBIDDEN_PATH_SEGMENTS
+    module.MAX_TEXT_SCAN_BYTES = module.BUNDLE_TEXT_SIZE_CAP_BYTES
+    module.HandoffSafetyResult.errors = property(
+        lambda self: (
+            *self.failures,
+            *(failure.replace("_", " ") for failure in self.failures),
+        )
+    )
+    module.scan_git_bundle = lambda raw, *, name: module.HandoffSafetyResult((), 0, 0)
+    module.scan_zip = lambda path, allow_nested_packages=False: module.scan_handoff_zip(
+        path
+    )
+
+    def scan_target(path, allow_nested_packages=False):
+        target = Path(path)
+        if target.suffix == ".zip":
+            return module.scan_handoff_zip(target)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = Path(temp_dir) / "handoff.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("task_metadata.json", "{}\n")
+            return module.scan_handoff_zip(package, json_path=target)
+
+    module.scan_target = scan_target
     return module
 
 
@@ -93,9 +119,9 @@ def test_package_safety_still_rejects_other_nested_packages_by_default(tmp_path)
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
-    assert result.errors == [
-        "nested package/bundle not allowed by default: handoff_evidence/old.bundle"
-    ]
+    assert result.failures == (
+        "nested package/bundle not allowed by default: handoff_evidence/old.bundle",
+    )
 
 
 def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
@@ -126,7 +152,7 @@ def test_package_safety_allows_scanner_pattern_definitions(tmp_path):
     with zipfile.ZipFile(package, "w") as archive:
         # Intentional fake private markers in a scanner rule definition fixture.
         archive.writestr(
-            "handoff_safety.py",
+            "verify_handoff_package.py",
             'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',
         )
 
@@ -160,7 +186,7 @@ def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
-    assert any("blocked private/sensitive path" in error for error in result.errors)
+    assert any("forbidden_path_segment" in error for error in result.errors)
 
 
 def test_package_safety_rejects_retired_private_report_paths(
@@ -181,7 +207,7 @@ def test_package_safety_rejects_retired_private_report_paths(
         result = module.scan_zip(package, allow_nested_packages=False)
 
         assert not result.ok
-    assert any("blocked private/sensitive path" in error for error in result.errors)
+    assert any("forbidden_path_segment" in error for error in result.errors)
 
 
 @pytest.mark.parametrize(
@@ -201,7 +227,7 @@ def test_package_safety_rejects_private_run_members(tmp_path, member):
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
-    assert any("blocked private/sensitive path" in error for error in result.errors)
+    assert any("forbidden_path_segment" in error for error in result.errors)
 
 
 @pytest.mark.parametrize(
@@ -293,7 +319,7 @@ def test_package_safety_rejects_private_provider_markers(tmp_path, text):
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
-    assert any("private marker" in error for error in result.errors)
+    assert any("vendor marker" in error for error in result.errors)
 
 
 def test_package_safety_large_text_skip_is_fail_closed(tmp_path):

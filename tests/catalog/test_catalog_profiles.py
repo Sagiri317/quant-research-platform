@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
-from quant_research_platform.catalog.profiles import (
-    ResearchProfile,
-    research_profile,
-)
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.markets.implementations.a_share.definition import (
     market_definition,
@@ -24,6 +20,10 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.markets.implementations.a_share.research_profiles import (
     build_research_dataset_catalog,
+)
+from quant_research_platform.profiles.research import (
+    ResearchProfile,
+    research_profile,
 )
 from tests.helpers import frequency_ids
 
@@ -96,9 +96,7 @@ def test_local_profile_internal_registries_are_platform_composed() -> None:
     assert market.processed_spec_ids == owner_market.processed_spec_ids
     assert source.provider_id == "csmar"
     assert source.implementation_package == "quant_research_platform.sources.csmar"
-    assert catalogs.reports.get(
-        "evaluation_report_private"
-    ).run_type == "evaluation"
+    assert catalogs.run_outputs.get("evaluation_outputs").run_type == "evaluation"
 
 
 def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
@@ -106,9 +104,7 @@ def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
 
     assert set(source_catalogs) == {"csmar"}
     assert isinstance(source_catalogs["csmar"], InterimDataCatalog)
-    assert {
-        spec.data_id for spec in source_catalogs["csmar"].list()
-    } == {
+    assert {spec.data_id for spec in source_catalogs["csmar"].list()} == {
         frequency_ids.MARKET_BARS_DATA_ID,
         "stock_master",
         "market_cap",
@@ -117,17 +113,12 @@ def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
         "trading_calendar",
     }
     assert all(
-        not hasattr(spec, "market_id")
-        for spec in source_catalogs["csmar"].list()
+        not hasattr(spec, "market_id") for spec in source_catalogs["csmar"].list()
     )
 
 
 def test_processed_catalog_owner_matches_profile() -> None:
-    profile_ids = {
-        spec.data_id for spec in research_profile().processed.list()
-    }
-    owner_ids = {
-        spec.data_id for spec in processed_catalog.processed_catalog().list()
-    }
+    profile_ids = {spec.data_id for spec in research_profile().processed.list()}
+    owner_ids = {spec.data_id for spec in processed_catalog.processed_catalog().list()}
 
     assert profile_ids == owner_ids

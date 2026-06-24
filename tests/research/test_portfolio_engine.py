@@ -8,6 +8,7 @@ import pytest
 
 import quant_research_platform.research.portfolios as portfolios_package
 import quant_research_platform.research.portfolios.runner as portfolio_runner
+from quant_research_platform.artifacts.run_outputs import write_portfolio_run_outputs
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -19,11 +20,12 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioSpec,
     WeightConfig,
 )
+from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios import (
+    build_portfolio_result_from_research_dataset,
     construct_portfolio_positions,
-    run_portfolio_from_research_dataset,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -202,7 +204,7 @@ def test_portfolio_spec_rejects_unsupported_rebalance_frequency() -> None:
         )
 
 
-def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
+def test_portfolio_runner_writes_private_run_outputs(tmp_path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(_dataset_spec())
@@ -211,16 +213,17 @@ def test_portfolio_runner_writes_private_report_artifacts(tmp_path) -> None:
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
     write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
 
-    run_root = run_portfolio_from_research_dataset(
+    result = build_portfolio_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         portfolio_catalog=portfolio_catalog,
         portfolio_id="risk_signal_portfolio",
         time_window=TimeWindow("2024-01-02", "2024-02-02"),
     )
+    run_root = _write_portfolio_result(layout, result)
 
     assert run_root.as_posix().endswith(
-        "reports/private_research/a_share/portfolio/risk_signal_portfolio"
+        "run_outputs/local/a_share/portfolio/risk_signal_portfolio"
     )
     for filename in (
         "positions.parquet",
@@ -255,18 +258,19 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
     write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
 
+    result = build_portfolio_result_from_research_dataset(
+        layout=layout,
+        dataset_catalog=dataset_catalog,
+        portfolio_catalog=portfolio_catalog,
+        portfolio_id="risk_signal_portfolio",
+        time_window=TimeWindow("2023-01-01", "2023-12-31"),
+    )
     with pytest.raises(ValueError, match="empty_portfolio_input"):
-        run_portfolio_from_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            portfolio_catalog=portfolio_catalog,
-            portfolio_id="risk_signal_portfolio",
-            time_window=TimeWindow("2023-01-01", "2023-12-31"),
-        )
+        _write_portfolio_result(layout, result)
     run_root = (
         tmp_path
-        / "reports"
-        / "private_research"
+        / "run_outputs"
+        / "local"
         / "a_share"
         / "portfolio"
         / "risk_signal_portfolio"
@@ -378,12 +382,30 @@ def _run_demo_portfolio(project_root) -> Path:
     portfolio_catalog.register(_portfolio_spec())
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
     write_dataset(dataset_root, _portfolio_frame(), spec=_dataset_spec())
-    return run_portfolio_from_research_dataset(
+    result = build_portfolio_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         portfolio_catalog=portfolio_catalog,
         portfolio_id="risk_signal_portfolio",
         time_window=TimeWindow("2024-01-02", "2024-02-02"),
+    )
+    return _write_portfolio_result(layout, result)
+
+
+def _write_portfolio_result(layout: StorageLayout, result) -> Path:
+    return write_portfolio_run_outputs(
+        output_chunks=result.output_chunks,
+        summary_factory=result.summary_factory,
+        spec=result.spec,
+        output_spec=RunOutputSpec(
+            output_id="portfolio_outputs",
+            output_definition_id="portfolio_outputs",
+            run_id=result.spec.portfolio_id,
+            market_id=result.spec.market_id,
+            run_type=result.spec.run_type,
+            scope=OutputScope.LOCAL_ONLY,
+        ),
+        layout=layout,
     )
 
 

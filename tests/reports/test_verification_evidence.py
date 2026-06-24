@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from quant_research_platform.artifacts.evidence import write_run_summary_markdown
 from quant_research_platform.reports.verification_evidence import (
     build_validation_summary,
-    build_verification_evidence_summary,
-    write_run_summary_md,
+    build_verification_evidence_payload,
+    render_verification_evidence_markdown,
 )
 from quant_research_platform.storage.atomic import atomic_write_json
 
@@ -49,7 +50,7 @@ def test_validation_summary_detects_manifest_failures_and_private_safety(
 
     assert summary["status"] == "FAIL"
     assert "dataset_validation_failed" in summary["failure_codes"]
-    assert "private_safety_scan_failed" in summary["failure_codes"]
+    assert "share_safety_scan_failed" in summary["failure_codes"]
 
 
 def test_validation_summary_accepts_schema_only_dataset_manifest(tmp_path, monkeypatch):
@@ -162,7 +163,7 @@ def test_validation_summary_detects_source_local_keys_from_real_manifest_shape(
 
 def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
     validation = {"status": "PASS", "failure_codes": []}
-    evidence = build_verification_evidence_summary(
+    evidence = build_verification_evidence_payload(
         run_id="run",
         date_range={"start_date": "2014-01-01", "end_date": "2016-12-31"},
         manifests={"dataset_count": 1, "layer_count": 4},
@@ -170,10 +171,13 @@ def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
         validation_summary=validation,
         output_root=Path("verification-output") / "s1",
     )
-    md_path = write_run_summary_md(tmp_path / "summary.md", evidence)
+    md_path = write_run_summary_markdown(
+        tmp_path / "summary.md",
+        render_verification_evidence_markdown(evidence),
+    )
     text = md_path.read_text(encoding="utf-8")
 
-    assert evidence["status"] == "PASS"
+    assert evidence["status"] == "FAIL"
     assert "verification-output/s1" in text
     assert str(tmp_path) not in text
 
@@ -186,7 +190,7 @@ def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
         "source_asset_id",
     ],
 )
-def test_private_safety_scan_rejects_private_markers(tmp_path, text):
+def test_share_safety_scan_rejects_private_markers(tmp_path, text):
     path = tmp_path / "unsafe.md"
     path.write_text(text, encoding="utf-8")
 
@@ -199,10 +203,10 @@ def test_private_safety_scan_rejects_private_markers(tmp_path, text):
     )
 
     assert summary["status"] == "FAIL"
-    assert "private_safety_scan_failed" in summary["failure_codes"]
+    assert "share_safety_scan_failed" in summary["failure_codes"]
 
 
-def test_private_safety_scan_does_not_treat_json_numbers_as_private_samples(tmp_path):
+def test_share_safety_scan_does_not_treat_json_numbers_as_private_samples(tmp_path):
     safe = tmp_path / "safe.json"
     unsafe = tmp_path / "unsafe.json"
     atomic_write_json(safe, {"row_count": 344350, "duration_seconds": 0.000123})
@@ -227,7 +231,7 @@ def test_private_safety_scan_does_not_treat_json_numbers_as_private_samples(tmp_
     assert unsafe_summary["status"] == "FAIL"
 
 
-def test_private_safety_scan_counts_only_existing_scanned_paths(tmp_path):
+def test_share_safety_scan_counts_only_existing_scanned_paths(tmp_path):
     run_root = tmp_path / "verification-output" / "s1"
     run_root.mkdir(parents=True)
     safe = run_root / "safe.json"
@@ -242,7 +246,7 @@ def test_private_safety_scan_counts_only_existing_scanned_paths(tmp_path):
         generated_text_paths=(safe, missing),
     )
 
-    scan = summary["private_safety_scan"]
+    scan = summary["share_safety_scan"]
     assert summary["status"] == "PASS"
     assert scan["requested_count"] == 2
     assert scan["checked_count"] == 1

@@ -7,12 +7,12 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.interfaces import services
 from quant_research_platform.interfaces.api.errors import (
     ApiError,
     register_api_error_handlers,
 )
+from quant_research_platform.profiles.research import research_profile
 
 CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
 DEFAULT_CORS_ORIGINS = (

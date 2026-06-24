@@ -5,7 +5,7 @@ from pathlib import Path
 
 PROJECT_SRC = Path("src/quant_research_platform")
 CATALOG_INIT = PROJECT_SRC / "catalog" / "__init__.py"
-CATALOG_PROFILES = PROJECT_SRC / "catalog" / "profiles.py"
+RESEARCH_PROFILE = PROJECT_SRC / "profiles" / "research.py"
 SCAN_ROOTS = (Path("src"), Path("tests"))
 
 
@@ -34,21 +34,19 @@ def test_catalog_profiles_retired_entrypoints_are_not_imported_from_root() -> No
             retired_names = [
                 alias.name
                 for alias in node.names
-                if alias.name == "default_catalogs"
-                or alias.name.startswith("default_")
+                if alias.name == "default_catalogs" or alias.name.startswith("default_")
             ]
             if retired_names:
                 root_import_hits.append(f"{path}:{node.lineno}")
 
     assert not root_import_hits, (
-        "catalog_profiles_must_use_explicit_module: "
-        + "; ".join(root_import_hits)
+        "catalog_profiles_must_use_explicit_module: " + "; ".join(root_import_hits)
     )
 
 
 def test_catalog_profiles_remains_platform_composition_root() -> None:
-    source = CATALOG_PROFILES.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(CATALOG_PROFILES))
+    source = RESEARCH_PROFILE.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(RESEARCH_PROFILE))
     modules = {
         node.module
         for node in ast.walk(tree)
@@ -57,12 +55,11 @@ def test_catalog_profiles_remains_platform_composition_root() -> None:
     all_names = _module_all_names(tree)
 
     assert (
-        "quant_research_platform.markets.implementations.a_share.processed"
-        in modules
+        "quant_research_platform.markets.implementations.a_share.processed" in modules
     )
     assert "quant_research_platform.sources.csmar.catalog" in modules
     assert "quant_research_platform.sources.csmar.interim" in modules
-    assert "quant_research_platform.reports.catalog" in modules
+    assert "quant_research_platform.artifacts.definitions" in modules
     assert "csmar_interim_catalog(" in source
     assert "source_bindings" not in source
     assert "provider_binding" not in source
@@ -74,14 +71,14 @@ def test_catalog_profiles_remains_platform_composition_root() -> None:
 
 
 def test_catalog_profiles_does_not_call_retired_bootstrap_entrypoint() -> None:
-    source = CATALOG_PROFILES.read_text(encoding="utf-8")
+    source = RESEARCH_PROFILE.read_text(encoding="utf-8")
 
     assert ".bootstrap_default(" not in source
 
 
 def test_catalog_profiles_delegates_concrete_definitions_to_owners() -> None:
-    source = CATALOG_PROFILES.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(CATALOG_PROFILES))
+    source = RESEARCH_PROFILE.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(RESEARCH_PROFILE))
     forbidden_names = {
         "DataProductDefinition",
         "MarketDefinition",
@@ -99,9 +96,7 @@ def test_catalog_profiles_delegates_concrete_definitions_to_owners() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    violations = sorted(
-        forbidden_names & (imported_names | instantiated_names)
-    )
+    violations = sorted(forbidden_names & (imported_names | instantiated_names))
 
     assert not violations, (
         "profiles_must_delegate_concrete_definitions_to_owners: "
@@ -120,9 +115,7 @@ def test_a_share_owner_does_not_define_registry_factories() -> None:
         )
     }
     hits: list[str] = []
-    for path in (PROJECT_SRC / "markets" / "implementations" / "a_share").rglob(
-        "*.py"
-    ):
+    for path in (PROJECT_SRC / "markets" / "implementations" / "a_share").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name in forbidden:

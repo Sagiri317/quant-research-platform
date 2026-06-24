@@ -1,7 +1,8 @@
-"""Private boundary and public text sanitization helpers."""
+"""Share-safety rules and sanitization helpers."""
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -26,6 +27,18 @@ PRIVATE_DATA_LAYERS: tuple[str, ...] = (
     "research",
     "reference_docs",
 )
+PACKAGE_FORBIDDEN_SUFFIXES = (
+    ".arrow",
+    ".csv",
+    ".db",
+    ".feather",
+    ".orc",
+    ".parquet",
+    ".pickle",
+    ".pkl",
+    ".sqlite",
+    ".sqlite3",
+)
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
 _POSIX_PRIVATE_PATH_RE = re.compile(
@@ -38,16 +51,12 @@ _PRIVATE_REPORT_PATH_PATTERN = "|".join(
 _ABSOLUTE_REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)(?<!\w)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
     r"(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:"
-    + _PRIVATE_REPORT_PATH_PATTERN
-    + r")"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:" + _PRIVATE_REPORT_PATH_PATTERN + r")"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _REPO_PRIVATE_PATH_RE = re.compile(
     r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:"
-    + _PRIVATE_REPORT_PATH_PATTERN
-    + r")"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:" + _PRIVATE_REPORT_PATH_PATTERN + r")"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(
@@ -92,8 +101,15 @@ _TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
 _RAW_EXPORT_FILENAME_RE = re.compile(
     r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
 )
-_SOURCE_LOCAL_KEY_RE = re.compile(
-    r"(?i)\b(?:source_asset_id|source_market_id)\b"
+_SOURCE_LOCAL_KEY_RE = re.compile(r"(?i)\b(?:source_asset_id|source_market_id)\b")
+SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
+JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
+    {
+        "manifest_path",
+        "output_root",
+        "run_manifest_path",
+        "validation_summary_path",
+    }
 )
 _PRIVATE_RUNTIME_PAYLOAD_RE = re.compile(
     r"(?i)\b(?:runtime_payload|private_runtime_payload|"
@@ -179,6 +195,115 @@ def public_text_unsafe_reason(
         return "private_marker"
     if _STOCK_CODE_RE.search(value):
         return "stock_code_sample"
+    return None
+
+
+def evidence_text_unsafe_reason(
+    text: str,
+    *,
+    allow_logical_private_path: bool = False,
+) -> str | None:
+    shared_reason = public_text_unsafe_reason(
+        text,
+        allow_logical_private_path=allow_logical_private_path,
+    )
+    if shared_reason in {"private_path", "local_path"}:
+        return "absolute_path"
+    if shared_reason == "credential":
+        return "credential"
+    if shared_reason == "stock_code_sample":
+        return "stock_sample"
+    if shared_reason == "row_sample":
+        return "row_sample"
+    if shared_reason == "private_marker":
+        return "vendor_marker"
+    if shared_reason == "traceback":
+        return "traceback"
+    if shared_reason == "raw_export_filename":
+        return "vendor_filename"
+    if shared_reason == "source_local_key":
+        return "source_local_key"
+    if shared_reason == "private_runtime_payload":
+        return "private_runtime_payload"
+    if shared_reason == "private_run_path":
+        return "absolute_path"
+    return None
+
+
+def evidence_json_unsafe_reason(text: str) -> str | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return "invalid_json"
+    return evidence_json_value_unsafe_reason(payload)
+
+
+def evidence_json_value_unsafe_reason(
+    value: object,
+    *,
+    key: str | None = None,
+) -> str | None:
+    if key is not None:
+        key_reason = evidence_text_unsafe_reason(key)
+        if key_reason is not None:
+            return key_reason
+    if isinstance(value, Mapping):
+        for item_key, item in value.items():
+            reason = evidence_json_value_unsafe_reason(item, key=str(item_key))
+            if reason is not None:
+                return reason
+        return None
+    if isinstance(value, list | tuple):
+        for item in value:
+            reason = evidence_json_value_unsafe_reason(item)
+            if reason is not None:
+                return reason
+        return None
+    if isinstance(value, str):
+        return evidence_text_unsafe_reason(
+            value,
+            allow_logical_private_path=key in JSON_LOGICAL_PATH_VALUE_KEYS,
+        )
+    return None
+
+
+def contains_source_local_key(value: object) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            str(key) in SOURCE_LOCAL_KEYS or contains_source_local_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(contains_source_local_key(item) for item in value)
+    return isinstance(value, str) and value in SOURCE_LOCAL_KEYS
+
+
+def zip_member_unsafe_reason(name: object) -> str | None:
+    """Return why a zip member is unsafe for handoff sharing, if applicable."""
+
+    value = str(name).replace("\\", "/").lstrip("/")
+    if not value or ".." in PurePosixPath(value).parts:
+        return "invalid_path"
+    if _REPO_PRIVATE_PATH_RE.search(value):
+        return "private_path"
+    shared_reason = public_text_unsafe_reason(value)
+    if shared_reason in {
+        "private_path",
+        "local_path",
+        "private_marker",
+        "credential",
+        "stock_code_sample",
+        "row_sample",
+        "raw_export_filename",
+        "source_local_key",
+        "private_runtime_payload",
+        "private_run_path",
+        "traceback",
+    }:
+        return shared_reason
+    suffix = PurePosixPath(value.lower()).suffix
+    if suffix in PACKAGE_FORBIDDEN_SUFFIXES:
+        return "blocked_extension"
     return None
 
 
@@ -289,14 +414,21 @@ def internal_artifact_metadata_unsafe_reason(
         return "stock_code_sample"
     return None
 
+
 __all__ = [
     "PRIVATE_DATA_LAYERS",
     "PRIVATE_BOUNDARY_ROOTS",
     "PRIVATE_REPORT_PATH_NAMES",
+    "PACKAGE_FORBIDDEN_SUFFIXES",
+    "contains_source_local_key",
+    "evidence_json_unsafe_reason",
+    "evidence_json_value_unsafe_reason",
+    "evidence_text_unsafe_reason",
     "assert_internal_artifact_metadata_safe",
     "internal_artifact_metadata_unsafe_reason",
     "is_private_boundary_path",
     "public_text_unsafe_reason",
     "sanitize_public_object",
     "sanitize_public_text",
+    "zip_member_unsafe_reason",
 ]

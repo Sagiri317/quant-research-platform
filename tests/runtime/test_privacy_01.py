@@ -6,7 +6,7 @@ from quant_research_platform.agents.safety import (
     ProposalSafetyError,
     assert_public_safe_text,
 )
-from quant_research_platform.runtime.privacy import (
+from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
     public_text_unsafe_reason,
     sanitize_public_object,
@@ -79,7 +79,9 @@ def test_sanitizer_rejects_private_report_paths(text: str) -> None:
 
 def test_sanitizer_redacts_private_markers_stock_codes_and_credentials() -> None:
     # Intentional fake private marker for safety rejection tests.
-    text = "data/raw/csmar/export.csv stock code 600000.SH CSMAR vendor token=abcdef123456"  # noqa: E501
+    text = (
+        "data/raw/csmar/export.csv stock code 600000.SH CSMAR vendor token=abcdef123456"  # noqa: E501
+    )
 
     sanitized = sanitize_public_text(text)
 
@@ -90,9 +92,7 @@ def test_sanitizer_redacts_private_markers_stock_codes_and_credentials() -> None
 
 
 def test_stock_code_detector_does_not_flag_hash_payloads() -> None:
-    text = (
-        '{"sha256": "1ab57ebee6473a9012cb336cc004040e2130408ff5a08bcf"}'
-    )
+    text = '{"sha256": "1ab57ebee6473a9012cb336cc004040e2130408ff5a08bcf"}'
 
     assert public_text_unsafe_reason(text) is None
     assert sanitize_public_text(text) == text

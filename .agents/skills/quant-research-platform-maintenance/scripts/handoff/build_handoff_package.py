@@ -18,10 +18,14 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_PARENT = SCRIPT_DIR.parent
+SCRIPT_REPO_ROOT = SCRIPT_DIR.parents[4]
+SCRIPT_REPO_SRC = SCRIPT_REPO_ROOT / "src"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 if str(SCRIPT_PARENT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_PARENT))
+if str(SCRIPT_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_REPO_SRC))
 
 from governance_contract import (  # noqa: E402
     SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST,
@@ -47,7 +51,11 @@ from governance_contract import (  # noqa: E402
 from governance_contract import (  # noqa: E402
     source_tree_forbidden_patterns as governance_source_tree_forbidden_patterns,
 )
-from handoff_safety import scan_handoff_zip  # noqa: E402
+
+from quant_research_platform.policy.share_safety import (  # noqa: E402
+    sanitize_public_object,
+    sanitize_public_text,
+)
 
 PACKAGE_SCHEMA_VERSION = "handoff-sidecar/0.1"
 VALID_STATUSES = set(VALID_STATUS_TOKENS)
@@ -81,17 +89,15 @@ TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS = RESERVED_HANDOFF_EVIDENCE_STEMS 
     "validation_evidence",
     "verification-matrix",
 }
-FORBIDDEN_PACKAGE_ENTRY_PARTS = {
+BLOCKED_PACKAGE_ENTRY_PARTS = {
     "diff.patch",
     "pr_body.md",
     "review_threads.json",
 }
 HANDOFF_TOOL_SOURCE_PATHS = [
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/handoff_safety.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
     ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
     ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
@@ -123,7 +129,7 @@ TASK_METADATA_KEYS = {
     "source_tree_scan",
 }
 TASK_INPUT_KEYS = TASK_METADATA_KEYS | TASK_CONTROL_KEYS
-FORBIDDEN_TASK_KEYS = {
+BLOCKED_TASK_KEYS = {
     "diff.patch",
     "external_evidence_json_path",
     "final_head_full",
@@ -143,7 +149,7 @@ FORBIDDEN_TASK_KEYS = {
     "validation_table",
     "zip_logical_path",
 }
-FORBIDDEN_VALIDATION_KEYS = {
+BLOCKED_VALIDATION_KEYS = {
     "external_evidence_json_path",
     "final_head_full",
     "final_sha",
@@ -152,7 +158,7 @@ FORBIDDEN_VALIDATION_KEYS = {
     "review_zip_path",
     "validation_table",
 }
-HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES = (
+HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES = (
     "final_sha",
     "review_zip_path",
     "external_evidence_json_path",
@@ -163,10 +169,10 @@ HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES = (
     "review_threads_json",
     "goal_status",
 )
-FORBIDDEN_HANDOFF_EVIDENCE_KEYS = (
-    FORBIDDEN_TASK_KEYS
+BLOCKED_HANDOFF_EVIDENCE_KEYS = (
+    BLOCKED_TASK_KEYS
     | {"check", "pr_body_path", "pr_url"}
-    | set(HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES)
+    | set(HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES)
 )
 VALIDATION_ROW_KEYS = {"name", "status", "evidence"}
 
@@ -247,7 +253,7 @@ def build_handoff_package(
             handoff_sidecar_path=handoff_sidecar_path,
         )
         safety_status = (
-            "PASS" if scan_handoff_zip(zip_path, json_path=json_path).ok else "FAIL"
+            "PASS" if handoff_zip_scan(zip_path, json_path=json_path).ok else "FAIL"
         )
         if not verify:
             return {
@@ -265,8 +271,6 @@ def build_handoff_package(
         desired = {
             "handoff_verify": verify_status,
             "handoff_safety_scan": safety_status,
-            "package_safety_check_zip": package_safety_status(zip_path),
-            "package_safety_check_sidecar": package_safety_status(json_path),
         }
         if status_overrides == desired:
             return {
@@ -332,7 +336,7 @@ def build_once(
         )
         write_text(
             stage_root / "git_status.txt",
-            sanitize_handoff_text(git_status_text(repo_root)),
+            clean_handoff_text(git_status_text(repo_root)),
         )
         stage_handoff_evidence(
             stage_root,
@@ -384,16 +388,16 @@ def task_metadata(task: dict[str, object]) -> dict[str, object]:
     payload["mode"] = mode
     if mode == "pr_closure" and not str(payload.get("pr_url") or "").strip():
         raise SystemExit("task_pr_url_required_for_pr_closure")
-    return json_sanitize(payload)
+    return json_clean(payload)
 
 
 def validate_task_contract(task: dict[str, object], mode: str) -> None:
-    unknown = sorted(set(task) - TASK_INPUT_KEYS - FORBIDDEN_TASK_KEYS)
+    unknown = sorted(set(task) - TASK_INPUT_KEYS - BLOCKED_TASK_KEYS)
     if unknown:
         raise SystemExit("task_metadata_unapproved_field: " + ",".join(unknown))
-    forbidden = sorted(set(task) & FORBIDDEN_TASK_KEYS)
-    if forbidden:
-        raise SystemExit("task_metadata_forbidden_field: " + ",".join(forbidden))
+    blocked = sorted(set(task) & BLOCKED_TASK_KEYS)
+    if blocked:
+        raise SystemExit("task_metadata_forbidden_field: " + ",".join(blocked))
     if mode == "evidence" and "pr_url" in task:
         raise SystemExit("task_metadata_evidence_forbidden_field: pr_url")
     if mode == "pr_closure" and not str(task.get("pr_url") or "").strip():
@@ -434,7 +438,7 @@ def handoff_sidecar_path_value(task: dict[str, object], json_path: Path) -> str:
 def task_validation_evidence(task: dict[str, object]) -> dict[str, object]:
     payload = task.get("validation_evidence")
     if isinstance(payload, dict):
-        result = json_sanitize(payload)
+        result = json_clean(payload)
         validate_validation_evidence_contract(result)
         return result
     if payload is not None:
@@ -469,14 +473,14 @@ def stage_handoff_evidence(
     if isinstance(handoff_evidence, Mapping):
         for raw_name, payload in sorted(handoff_evidence.items()):
             name = normalized_handoff_evidence_path(str(raw_name))
-            if is_task_provided_handoff_evidence_forbidden_path(name):
+            if is_task_provided_handoff_evidence_blocked_path(name):
                 raise SystemExit(f"handoff_evidence_forbidden_path: {name}")
             if not isinstance(payload, Mapping):
                 raise SystemExit(f"handoff_evidence_entry_must_be_object: {name}")
-            failures = handoff_evidence_forbidden_key_failures(name, payload)
+            failures = handoff_evidence_blocked_key_failures(name, payload)
             if failures:
                 raise SystemExit(";".join(failures))
-            write_text(stage_root / name, stable_json(json_sanitize(payload)))
+            write_text(stage_root / name, stable_json(json_clean(payload)))
     write_text(
         stage_root / VERIFICATION_MATRIX_EVIDENCE,
         stable_json(verification_matrix_payload(validation_evidence)),
@@ -554,9 +558,7 @@ def validation_status(validation_evidence: dict[str, object]) -> str:
     if not isinstance(checks, list):
         return "BLOCKED"
     statuses = {
-        str(row.get("status") or "").upper()
-        for row in checks
-        if isinstance(row, dict)
+        str(row.get("status") or "").upper() for row in checks if isinstance(row, dict)
     }
     if statuses & {"FAIL"}:
         return "FAIL"
@@ -594,9 +596,7 @@ def source_tree_scan_from_clone(
     scanned_head = git_text(clone_dir, "rev-parse", "HEAD").strip()
     scan_groups = source_tree_scan_groups(clone_dir)
     findings = [
-        finding
-        for group in scan_groups.values()
-        for finding in group["findings"]
+        finding for group in scan_groups.values() for finding in group["findings"]
     ]
     failures = []
     if scanned_head != final_head:
@@ -608,7 +608,7 @@ def source_tree_scan_from_clone(
         "scanned_head": scanned_head,
         "expected_head": final_head,
         "scanned_tree": "final-branch.bundle clone",
-        "forbidden_rule_count": len(source_tree_forbidden_patterns()),
+        "forbidden_rule_count": len(source_tree_blocked_patterns()),
         "finding_count": len(findings),
         "findings": findings[:50],
         "failures": failures[:50],
@@ -751,7 +751,7 @@ def source_tree_retired_text_findings(clone_dir: Path) -> list[dict[str, object]
             relative,
             path,
         )
-        for rule, pattern in source_tree_forbidden_patterns().items():
+        for rule, pattern in source_tree_blocked_patterns().items():
             for line_number, line in enumerate(lines, start=1):
                 if line_number in skip_lines:
                     continue
@@ -814,7 +814,7 @@ def source_tree_synthesized_string_scan_findings(
                 skip_lines,
                 rule_definition_lines,
                 scan_group="synthesized_strings",
-                patterns=source_tree_forbidden_patterns(),
+                patterns=source_tree_blocked_patterns(),
             )
         )
     return findings
@@ -834,7 +834,7 @@ def source_tree_split_string_findings(
         skip_lines,
         rule_definition_lines,
         scan_group="synthesized_strings",
-        patterns=source_tree_forbidden_patterns(),
+        patterns=source_tree_blocked_patterns(),
     )
 
 
@@ -949,13 +949,9 @@ def source_tree_active_test_literal_findings(
 ) -> list[dict[str, object]]:
     findings: list[dict[str, object]] = []
     for relative in source_tree_tracked_text_files(clone_dir):
-        if (
-            relative.parts[:1] != ("tests",)
-            and relative
-            != Path(
-                ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-                "build_handoff_package.py"
-            )
+        if relative.parts[:1] != ("tests",) and relative != Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+            "build_handoff_package.py"
         ):
             continue
         path = clone_dir / relative
@@ -1247,7 +1243,7 @@ def source_tree_path_allowed(
     raise ValueError(f"unsupported_source_tree_scan_group: {scan_group}")
 
 
-def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
+def source_tree_blocked_patterns() -> dict[str, re.Pattern[str]]:
     return governance_source_tree_forbidden_patterns()
 
 
@@ -1261,7 +1257,7 @@ def is_reserved_handoff_evidence_path(name: str) -> bool:
     return False
 
 
-def is_task_provided_handoff_evidence_forbidden_path(name: str) -> bool:
+def is_task_provided_handoff_evidence_blocked_path(name: str) -> bool:
     if name in BUILDER_OWNED_HANDOFF_EVIDENCE:
         return True
     parts = PurePosixPath(name).parts
@@ -1285,12 +1281,12 @@ def normalized_handoff_evidence_path(raw_name: str) -> str:
     return name
 
 
-def handoff_evidence_forbidden_key_failures(
+def handoff_evidence_blocked_key_failures(
     evidence_path: str,
     payload: Mapping[str, object],
 ) -> list[str]:
     failures: list[str] = []
-    collect_handoff_evidence_forbidden_key_failures(
+    collect_handoff_evidence_blocked_key_failures(
         evidence_path,
         payload,
         failures,
@@ -1298,7 +1294,7 @@ def handoff_evidence_forbidden_key_failures(
     return failures
 
 
-def collect_handoff_evidence_forbidden_key_failures(
+def collect_handoff_evidence_blocked_key_failures(
     evidence_path: str,
     payload: object,
     failures: list[str],
@@ -1309,12 +1305,12 @@ def collect_handoff_evidence_forbidden_key_failures(
         for key, value in payload.items():
             key_text = str(key)
             current_path = (*key_path, key_text)
-            if key_text in FORBIDDEN_HANDOFF_EVIDENCE_KEYS:
+            if key_text in BLOCKED_HANDOFF_EVIDENCE_KEYS:
                 dotted = ".".join(current_path)
                 failures.append(
                     f"handoff_evidence_forbidden_field: {evidence_path}: {dotted}"
                 )
-            collect_handoff_evidence_forbidden_key_failures(
+            collect_handoff_evidence_blocked_key_failures(
                 evidence_path,
                 value,
                 failures,
@@ -1322,7 +1318,7 @@ def collect_handoff_evidence_forbidden_key_failures(
             )
     elif isinstance(payload, list):
         for index, item in enumerate(payload):
-            collect_handoff_evidence_forbidden_key_failures(
+            collect_handoff_evidence_blocked_key_failures(
                 evidence_path,
                 item,
                 failures,
@@ -1343,7 +1339,7 @@ def sidecar_payload(
     handoff_sidecar_path: str | None = None,
 ) -> dict[str, object]:
     status_map = validation_status_map(validation_evidence)
-    safety = scan_handoff_zip(zip_path)
+    safety = handoff_zip_scan(zip_path)
     zip_filename = zip_path.name
     package_logical = (
         handoff_package_path
@@ -1374,6 +1370,12 @@ def sidecar_payload(
             safety_status="PASS" if safety.ok else "FAIL",
         ),
     }
+
+
+def handoff_zip_scan(zip_path: Path, *, json_path: Path | None = None):
+    from verify_handoff_package import scan_handoff_zip
+
+    return scan_handoff_zip(zip_path, json_path=json_path)
 
 
 def status_summary_from_validation(
@@ -1419,19 +1421,13 @@ def enrich_validation_evidence(
     rows = payload.get("checks")
     if not isinstance(rows, list):
         raise SystemExit("validation_evidence_checks_must_be_list")
-    for name in (
-        "package_safety_check_zip",
-        "package_safety_check_sidecar",
-    ):
-        if name not in validation_status_map(payload):
-            set_check_status(rows, name, "NOT_RUN")
     return payload
 
 
 def validate_validation_evidence_contract(payload: dict[str, object]) -> None:
-    forbidden = sorted(set(payload) & FORBIDDEN_VALIDATION_KEYS)
-    if forbidden:
-        raise SystemExit("validation_evidence_forbidden_field: " + ",".join(forbidden))
+    blocked = sorted(set(payload) & BLOCKED_VALIDATION_KEYS)
+    if blocked:
+        raise SystemExit("validation_evidence_forbidden_field: " + ",".join(blocked))
     rows = payload.get("checks")
     if not isinstance(rows, list):
         raise SystemExit("validation_evidence_checks_must_be_list")
@@ -1443,8 +1439,7 @@ def validate_validation_evidence_contract(payload: dict[str, object]) -> None:
         extra = sorted(set(row) - VALIDATION_ROW_KEYS)
         if extra:
             raise SystemExit(
-                f"validation_evidence_row_unapproved_field: {index}:"
-                + ",".join(extra)
+                f"validation_evidence_row_unapproved_field: {index}:" + ",".join(extra)
             )
 
 
@@ -1472,14 +1467,10 @@ def set_check_status(
 
 
 def validation_status_evidence(check_name: str, status: str) -> str:
-    if check_name == "package_safety_check_zip":
-        return f"package_safety_check.py completed for final zip with {status}"
-    if check_name == "package_safety_check_sidecar":
-        return f"package_safety_check.py completed for sidecar JSON with {status}"
     if check_name == "handoff_verify":
         return f"verify_handoff_package.py completed with {status}"
     if check_name == "handoff_safety_scan":
-        return f"handoff_safety.py completed with {status}"
+        return f"verify_handoff_package.py safety scan completed with {status}"
     return f"{check_name}={status}"
 
 
@@ -1526,9 +1517,14 @@ def aggregate_status(statuses: Iterable[str]) -> str:
     values = tuple(statuses)
     if not values:
         return "NOT_RUN"
-    for status in ("FAIL", "BLOCKED", "NOT_RUN"):
-        if status in values:
-            return status
+    if "FAIL" in values:
+        return "FAIL"
+    if "BLOCKED" in values:
+        return "BLOCKED"
+    if "NOT_RUN" in values:
+        if "PASS" in values:
+            return "FAIL"
+        return "NOT_RUN"
     return "PASS"
 
 
@@ -1583,16 +1579,6 @@ def write_bundle(
             raise SystemExit("bundle_head_synthetic_marker")
 
 
-def package_safety_status(path: Path) -> str:
-    script = SCRIPT_PARENT / "package_safety_check.py"
-    result = subprocess.run(
-        [sys.executable, str(script), str(path)],
-        capture_output=True,
-        text=True,
-    )
-    return "PASS" if result.returncode == 0 else "FAIL"
-
-
 def assert_branch_head(repo_root: Path, branch: str, final_head: str) -> None:
     actual = git_text(repo_root, "rev-parse", branch).strip()
     if actual != final_head:
@@ -1642,69 +1628,16 @@ def stable_json(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
-def json_sanitize(payload: object) -> object:
-    return json.loads(sanitize_handoff_text(stable_json(payload)))
+def json_clean(payload: object) -> object:
+    return sanitize_public_object(payload)
 
 
 def normalize_lf(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def sanitize_handoff_text(text: str) -> str:
-    result = normalize_lf(text)
-    result = re.sub(
-        r"(?<![A-Za-z])[A-Za-z]:[\\/][^\s`'\"),\]}]*",
-        "<LOCAL_ABSOLUTE_PATH>",
-        result,
-    )
-    result = re.sub(
-        r"(?i)/(?:Users|home)/[^\s`'\"),\]}]+",
-        "<LOCAL_ABSOLUTE_PATH>",
-        result,
-    )
-    result = re.sub(
-        r"(?i)/mnt/data[^\s`'\"),\]}]*",
-        "<LOCAL_ABSOLUTE_PATH>",
-        result,
-    )
-    result = re.sub(r"(?i)quant-workspace", "<LOCAL_WORKSPACE>", result)
-    result = re.sub(r"(?i)site-packages", "<ENV_PATH_TEXT>", result)
-    result = re.sub(r"(?i)conda env path", "<ENV_PATH_TEXT>", result)
-    result = re.sub(r"\\\\Users\\\\", "WINDOWS_USER_PATH_MARKER", result)
-    result = re.sub(
-        r"(?i)\b(?:vendor_marker|vendor_payload|raw_vendor|provider_marker)\b",
-        "<VENDOR_MARKER_TEXT>",
-        result,
-    )
-    result = re.sub(
-        r"Traceback \(most recent call last\):",
-        "<TRACEBACK_MARKER_TEXT>",
-        result,
-    )
-    result = re.sub(
-        r"(?i)\b(?:runtime_payload|private_runtime_payload|"
-        r"exact_private_runtime_payload)\b",
-        "<PRIVATE_RUNTIME_PAYLOAD_TEXT>",
-        result,
-    )
-    result = re.sub(
-        r'"\\\\Users\\\\[^"\n]+',
-        '"<LOCAL_ABSOLUTE_PATH>',
-        result,
-    )
-    result = re.sub(
-        r"(?<![A-Za-z0-9.])(?:[03468]\d{5})(?:\.(?:SZ|SH|BJ))?(?![A-Za-z0-9])",
-        "<STOCK_CODE_SAMPLE>",
-        result,
-        flags=re.I,
-    )
-    result = re.sub(
-        r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
-        r"[A-Za-z0-9._~+/=-]{8,}",
-        "<CREDENTIAL_LIKE_TEXT>",
-        result,
-    )
-    return result
+def clean_handoff_text(text: str) -> str:
+    return sanitize_public_text(normalize_lf(text))
 
 
 def normalize_zip_path(value: str) -> str:

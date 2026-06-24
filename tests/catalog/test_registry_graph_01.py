@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
-from quant_research_platform.catalog.profiles import research_profile
+from quant_research_platform.profiles.research import research_profile
 from tests.helpers import frequency_ids
 
 EXPECTED_CSMAR_INTERIM_DATA_IDS = (
@@ -52,9 +52,7 @@ def test_csmar_catalog_rejects_retired_interim_data_id() -> None:
 def test_csmar_catalog_exposes_current_source_owned_data_ids() -> None:
     csmar_catalog_ids = {
         spec.data_id
-        for spec in research_profile().source_interim_catalogs[
-            "csmar"
-        ].list()
+        for spec in research_profile().source_interim_catalogs["csmar"].list()
     }
 
     assert csmar_catalog_ids == set(EXPECTED_CSMAR_INTERIM_DATA_IDS)

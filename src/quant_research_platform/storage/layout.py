@@ -36,14 +36,6 @@ class StorageLayout:
     def research_dataset_root(self, market_id: MarketId, data_id: str) -> Path:
         return self.project_root / "data/research" / str(market_id) / data_id
 
-    def private_research_report_root(self, market_id: MarketId, run_type: str) -> Path:
-        return (
-            self.project_root
-            / "reports/private_research"
-            / str(market_id)
-            / run_type
-        )
-
 
 def layout_from_processed_market_root(processed_root: Path) -> StorageLayout:
     """Resolve ``data/processed/<market>`` back to a project storage layout."""

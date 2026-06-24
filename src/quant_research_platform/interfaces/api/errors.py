@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from quant_research_platform.interfaces.api.models import ApiErrorEnvelope
-from quant_research_platform.runtime.privacy import (
+from quant_research_platform.policy.share_safety import (
     sanitize_public_object,
     sanitize_public_text,
 )

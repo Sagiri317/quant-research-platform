@@ -66,8 +66,108 @@ RETIRED_GOVERNANCE_EXACT_PATHS = (
     "docs/architecture/open-issues-register.md",
 )
 
-RETIRED_GOVERNANCE_PREFIXES = (
-    "docs/reports/clean-rewrite-0.1-",
+RETIRED_GOVERNANCE_PREFIXES = ("docs/reports/clean-rewrite-0.1-",)
+
+# Intentional retired-surface negative rules for the run-output architecture
+# migration. These legacy paths and names must not reappear outside explicit
+# governance rules or negative tests.
+RUN_OUTPUT_ARCHITECTURE_RETIRED_PATHS = (
+    "src/quant_research_platform/runtime/privacy.py",
+    "src/quant_research_platform/contracts/privacy.py",
+    "src/quant_research_platform/contracts/reports.py",
+    "src/quant_research_platform/catalog/reports.py",
+    "src/quant_research_platform/catalog/profiles.py",
+    "src/quant_research_platform/reports/catalog.py",
+    "src/quant_research_platform/reports/report_artifacts.py",
+    "src/quant_research_platform/reports/execution_metrics_artifacts.py",
+    "src/quant_research_platform/research/predictions/artifacts.py",
+    "src/quant_research_platform/workflows/verification_evidence.py",
+    (
+        "src/quant_research_platform/markets/implementations/a_share/"
+        "verification/private_aggregate.py"
+    ),
+    (
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "handoff_safety.py"
+    ),
+    (
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+        "package_safety_check.py"
+    ),
+)
+
+RUN_OUTPUT_ARCHITECTURE_RETIRED_NAME_RULES = (
+    TextRule("PrivacyLevel", r"\bPrivacyLevel\b"),
+    TextRule("ReportSpec", r"\bReportSpec\b"),
+    TextRule("ReportDefinition", r"\bReportDefinition\b"),
+    TextRule("ReportCatalog", r"\bReportCatalog\b"),
+    TextRule("report_id", r"\breport_id\b"),
+    TextRule("report_definition_id", r"\breport_definition_id\b"),
+    TextRule("private_boundary_required", r"\bprivate_boundary_required\b"),
+    TextRule("private_research_report_root", r"\bprivate_research_report_root\b"),
+    TextRule("write_report_artifacts", r"\bwrite_[a-zA-Z0-9_]*_report_artifacts\b"),
+    TextRule("report_private", r"\b[a-zA-Z0-9_]*_report_private\b"),
+    TextRule("prediction_artifacts_private", r"\bprediction_artifacts_private\b"),
+    TextRule("report_artifacts", r"\breport_artifacts\b"),
+    TextRule("private_aggregate", r"\bprivate_aggregate\b"),
+)
+
+RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = (
+    ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
+    "tests/architecture/test_no_legacy_names.py",
+)
+
+LAYER_BOUNDARY_IMPORT_RULES = (
+    {
+        "root": "policy",
+        "forbidden_prefixes": (
+            "quant_research_platform.agents",
+            "quant_research_platform.artifacts",
+            "quant_research_platform.catalog",
+            "quant_research_platform.compute",
+            "quant_research_platform.contracts",
+            "quant_research_platform.interfaces",
+            "quant_research_platform.markets",
+            "quant_research_platform.reports",
+            "quant_research_platform.research",
+            "quant_research_platform.runtime",
+            "quant_research_platform.sources",
+            "quant_research_platform.storage",
+            "quant_research_platform.workflows",
+        ),
+    },
+    {
+        "root": "catalog",
+        "forbidden_prefixes": (
+            "quant_research_platform.sources",
+            "quant_research_platform.markets.implementations",
+            "quant_research_platform.materializers",
+        ),
+    },
+    {
+        "root": "research",
+        "forbidden_prefixes": (
+            "quant_research_platform.reports",
+            "quant_research_platform.artifacts",
+        ),
+    },
+    {
+        "root": "reports",
+        "forbidden_prefixes": (
+            "quant_research_platform.research",
+            "quant_research_platform.artifacts",
+            "quant_research_platform.markets.implementations",
+            "quant_research_platform.storage.atomic",
+        ),
+    },
+    {
+        "root": "artifacts",
+        "forbidden_prefixes": (
+            "quant_research_platform.research",
+            "quant_research_platform.reports",
+            "quant_research_platform.markets.implementations",
+        ),
+    },
 )
 
 RETIRED_NAME_RULES = (
@@ -214,9 +314,7 @@ VERSION_SURFACE_POLICY = {
         "handoff-sidecar/0.1",
         "handoff-package/0.1",
     ),
-    "forbidden": (
-        "/api/v0.1",
-    ),
+    "forbidden": ("/api/v0.1",),
 }
 
 VERSION_SURFACE_FORBIDDEN_RULES = (
@@ -585,8 +683,7 @@ CODE_MAP_FORBIDDEN_TERMS = (
 )
 
 GOVERNANCE_CONTRACT_SCRIPT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/"
-    "governance_contract.py"
+    ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py"
 )
 BUILD_HANDOFF_PACKAGE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
@@ -597,20 +694,17 @@ HANDOFF_SAFETY_SCRIPT = Path(
     "handoff_safety.py"
 )
 HANDOFF_SELF_TEST_SCRIPT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-    "self_test.py"
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py"
 )
 VERIFY_HANDOFF_PACKAGE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
     "verify_handoff_package.py"
 )
 PACKAGE_SAFETY_CHECK_SCRIPT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/"
-    "package_safety_check.py"
+    ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py"
 )
 VERIFY_GOVERNANCE_SCRIPT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/"
-    "verify_governance.py"
+    ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py"
 )
 
 SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
@@ -861,18 +955,18 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
     },
     BUILD_HANDOFF_PACKAGE_SCRIPT: {
         "RESERVED_HANDOFF_EVIDENCE_STEMS",
-        "FORBIDDEN_PACKAGE_ENTRY_PARTS",
+        "BLOCKED_PACKAGE_ENTRY_PARTS",
         "TASK_CONTROL_KEYS",
         "TASK_METADATA_KEYS",
         "TASK_INPUT_KEYS",
-        "FORBIDDEN_TASK_KEYS",
-        "FORBIDDEN_VALIDATION_KEYS",
-        "FORBIDDEN_HANDOFF_EVIDENCE_KEYS",
-        "HANDOFF_EVIDENCE_FORBIDDEN_KEY_COVERAGE_CASES",
-        "source_tree_forbidden_patterns",
+        "BLOCKED_TASK_KEYS",
+        "BLOCKED_VALIDATION_KEYS",
+        "BLOCKED_HANDOFF_EVIDENCE_KEYS",
+        "HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES",
+        "source_tree_blocked_patterns",
         "source_tree_active_test_literal_patterns",
         "source_tree_governance_truth_patterns",
-        "sanitize_handoff_text",
+        "clean_handoff_text",
     },
     HANDOFF_SAFETY_SCRIPT: {
         "FORBIDDEN_PATH_SEGMENTS",
@@ -883,6 +977,8 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
     HANDOFF_SELF_TEST_SCRIPT: {"main", "_zip_and_sidecar_with_leak"},
     VERIFY_HANDOFF_PACKAGE_SCRIPT: {
         "contains_local_absolute_path_text",
+        "unsafe_text_reason",
+        "is_scanner_definition_line",
     },
     PACKAGE_SAFETY_CHECK_SCRIPT: {
         "BLOCKED_PATH_PARTS",
@@ -1051,10 +1147,7 @@ def retired_governance_path_findings(
                 found[normalize_repo_path(path.relative_to(repo))] = (
                     "retired_governance_prefix"
                 )
-    return [
-        {"path": path, "rule": rule}
-        for path, rule in sorted(found.items())
-    ]
+    return [{"path": path, "rule": rule} for path, rule in sorted(found.items())]
 
 
 def git_tracked_paths(repo: Path) -> tuple[str, ...]:
@@ -1068,9 +1161,7 @@ def git_tracked_paths(repo: Path) -> tuple[str, ...]:
     if result.returncode != 0:
         return ()
     return tuple(
-        normalize_repo_path(line)
-        for line in result.stdout.splitlines()
-        if line.strip()
+        normalize_repo_path(line) for line in result.stdout.splitlines() if line.strip()
     )
 
 
@@ -1186,8 +1277,7 @@ def source_tree_sensitive_negative_rules() -> tuple[
 
 def source_tree_sensitive_negative_patterns() -> dict[str, re.Pattern[str]]:
     return {
-        rule.name: rule.compile()
-        for rule in source_tree_sensitive_negative_rules()
+        rule.name: rule.compile() for rule in source_tree_sensitive_negative_rules()
     }
 
 
@@ -1237,23 +1327,27 @@ def is_scanner_definition_line(path: str | Path, line: str) -> bool:
     normalized = normalize_repo_path(path)
     if any(marker in line for marker in SCANNER_DEFINITION_MARKERS):
         return True
-    scanner_source = normalized.startswith(
-        ".agents/skills/quant-research-platform-maintenance/scripts/"
-    ) or normalized.startswith("run_tools/") or normalized.endswith(
-        (
-            "build_handoff_package.py",
-            "handoff_safety.py",
-            "package_safety_check.py",
-            "self_test.py",
-            "verify_handoff_package.py",
-            "verify_governance.py",
+    scanner_source = (
+        normalized.startswith(
+            ".agents/skills/quant-research-platform-maintenance/scripts/"
+        )
+        or normalized.startswith("run_tools/")
+        or normalized.endswith(
+            (
+                "build_handoff_package.py",
+                "handoff_safety.py",
+                "package_safety_check.py",
+                "self_test.py",
+                "verify_handoff_package.py",
+                "verify_governance.py",
+            )
         )
     )
     if scanner_source and any(
         marker in line for marker in SCANNER_SCRIPT_DEFINITION_MARKERS
     ):
         return True
-    return normalized.endswith(".py") and line.lstrip().startswith(("r\"", "r'"))
+    return normalized.endswith(".py") and line.lstrip().startswith(('r"', "r'"))
 
 
 def _path_literal_pattern(form: str) -> str:
@@ -1682,3 +1776,22 @@ def join_call_string_value(node: ast.Call) -> str | None:
             return None
         pieces.append(item.value)
     return node.func.value.value.join(pieces)
+
+
+def retired_run_output_architecture_paths() -> tuple[str, ...]:
+    return RUN_OUTPUT_ARCHITECTURE_RETIRED_PATHS
+
+
+def retired_run_output_architecture_name_patterns() -> dict[str, re.Pattern[str]]:
+    return {
+        rule.name: rule.compile() for rule in RUN_OUTPUT_ARCHITECTURE_RETIRED_NAME_RULES
+    }
+
+
+def is_run_output_architecture_negative_test(path: Path | str) -> bool:
+    normalized = Path(path).as_posix()
+    return normalized in RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES
+
+
+def layer_boundary_import_rules() -> tuple[dict[str, object], ...]:
+    return LAYER_BOUNDARY_IMPORT_RULES

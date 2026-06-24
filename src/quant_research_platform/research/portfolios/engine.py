@@ -28,7 +28,7 @@ from quant_research_platform.research.signals.materialization import (
 
 
 @dataclass(frozen=True)
-class PortfolioResult:
+class PortfolioComputationResult:
     spec: PortfolioSpec
     positions: pd.DataFrame
     turnover: pd.DataFrame
@@ -47,7 +47,7 @@ def construct_portfolio_positions(
     spec: PortfolioSpec,
     *,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-) -> PortfolioResult:
+) -> PortfolioComputationResult:
     """Construct portfolio diagnostics from normalized SignalSpec scores."""
 
     if (
@@ -86,7 +86,7 @@ def construct_portfolio_positions(
     exposure_summary = compute_exposure_summary(positions, portfolio_returns)
     concentration = summarize_concentration(positions)
     period_breakdown = summarize_period_breakdown(portfolio_returns)
-    return PortfolioResult(
+    return PortfolioComputationResult(
         spec=spec,
         positions=positions,
         turnover=turnover,
@@ -101,15 +101,15 @@ def construct_portfolio_positions(
     )
 
 
-def compute_portfolio_turnover(result: PortfolioResult) -> pd.DataFrame:
+def compute_portfolio_turnover(result: PortfolioComputationResult) -> pd.DataFrame:
     return result.turnover.copy()
 
 
-def compute_portfolio_costs(result: PortfolioResult) -> pd.DataFrame:
+def compute_portfolio_costs(result: PortfolioComputationResult) -> pd.DataFrame:
     return result.cost_breakdown.copy()
 
 
-def compute_portfolio_returns(result: PortfolioResult) -> pd.DataFrame:
+def compute_portfolio_returns(result: PortfolioComputationResult) -> pd.DataFrame:
     return result.portfolio_returns.copy()
 
 
@@ -284,7 +284,7 @@ def _normalize_group_key(
 
 
 __all__ = [
-    "PortfolioResult",
+    "PortfolioComputationResult",
     "construct_portfolio_positions",
     "compute_portfolio_turnover",
     "compute_portfolio_costs",

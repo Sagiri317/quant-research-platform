@@ -19,7 +19,7 @@ from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
 )
-from quant_research_platform.catalog.reports import ReportCatalog
+from quant_research_platform.catalog.run_outputs import RunOutputCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import SourceId
@@ -34,17 +34,13 @@ PROJECT_SRC = Path("src/quant_research_platform")
 
 
 def test_research_profile_is_only_public_profile_builder() -> None:
-    import quant_research_platform.catalog.profiles as profiles
+    import quant_research_platform.profiles.research as profiles
 
     all_names = set(profiles.__all__)
     assert all_names == {"ResearchProfile", "research_profile", "research_profile_id"}
     assert "research_profile_for_scenario" not in vars(profiles)
     assert "resolve_a_share_prediction_catalog" not in vars(profiles)
-    old_portfolio_resolver = (
-        "resolve_"
-        + "a_share_"
-        + "portfolio_catalog"
-    )
+    old_portfolio_resolver = "resolve_" + "a_share_" + "portfolio_catalog"
     assert old_portfolio_resolver not in vars(profiles)
     assert "default_catalogs" not in vars(profiles)
     assert "CatalogBundle" not in vars(profiles)
@@ -53,7 +49,7 @@ def test_research_profile_is_only_public_profile_builder() -> None:
 
 
 def test_research_profile_contains_active_catalogs() -> None:
-    from quant_research_platform.catalog.profiles import (
+    from quant_research_platform.profiles.research import (
         ResearchProfile,
         research_profile,
         research_profile_id,
@@ -73,7 +69,7 @@ def test_research_profile_contains_active_catalogs() -> None:
     assert isinstance(profile.labels, LabelCatalog)
     assert isinstance(profile.processed, ProcessedDataCatalog)
     assert isinstance(profile.research_datasets, ResearchDatasetCatalog)
-    assert isinstance(profile.reports, ReportCatalog)
+    assert isinstance(profile.run_outputs, RunOutputCatalog)
     assert isinstance(profile.evaluations, EvaluationCatalog)
     assert isinstance(profile.models, ModelCatalog)
     assert isinstance(profile.predictions, PredictionCatalog)
@@ -87,7 +83,7 @@ def test_research_profile_contains_active_catalogs() -> None:
 
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:
-    from quant_research_platform.catalog.profiles import research_profile
+    from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.research.models.supervised import model_algorithm_ids
 
     profile = research_profile()
@@ -96,9 +92,7 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     evaluation = profile.evaluations.get("signal_forward_return_20d")
     portfolio = research_scenarios.build_portfolio_catalog(
         execution_lag_steps=1,
-    ).get(
-        "signal_forward_return_20d_portfolio"
-    )
+    ).get("signal_forward_return_20d_portfolio")
     models = tuple(profile.models.list())
     predictions = tuple(
         research_scenarios.build_prediction_catalog(
@@ -110,14 +104,11 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
 
     assert profile.predictions.list() == ()
     assert profile.portfolios.list() == ()
-    assert sorted(model.model_algorithm for model in models) == sorted(
-        algorithms
-    )
+    assert sorted(model.model_algorithm for model in models) == sorted(algorithms)
     assert len(predictions) == len(algorithms)
     assert {prediction.model_id for prediction in predictions} == model_ids
     assert all(
-        prediction.research_dataset_id == dataset.data_id
-        for prediction in predictions
+        prediction.research_dataset_id == dataset.data_id for prediction in predictions
     )
     assert dataset.factor_columns
     assert dataset.feature_columns == ("mom_20d_zscore",)
@@ -176,15 +167,15 @@ def test_catalog_profiles_is_only_prod_module_composing_csmar_and_a_share() -> N
             composers.append(path.as_posix())
 
     assert composers == [
-        "src/quant_research_platform/catalog/profiles.py",
+        "src/quant_research_platform/profiles/research.py",
         "src/quant_research_platform/markets/implementations/a_share/processed/catalog.py",
         "src/quant_research_platform/markets/implementations/a_share/processed/materializer.py",
-        "src/quant_research_platform/markets/implementations/a_share/verification/private_aggregate.py",
+        "src/quant_research_platform/markets/implementations/a_share/verification/aggregates.py",
     ]
 
 
 def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
-    profile_source = (PROJECT_SRC / "catalog/profiles.py").read_text(encoding="utf-8")
+    profile_source = (PROJECT_SRC / "profiles/research.py").read_text(encoding="utf-8")
     scenario_source = (
         PROJECT_SRC / "markets/implementations/a_share/research_scenarios.py"
     ).read_text(encoding="utf-8")
@@ -200,21 +191,19 @@ def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
     assert all(token in scenario_source for token in forbidden)
 
 
-def test_reports_bundles_uses_report_local_catalog_not_profile_bundle() -> None:
-    source = (PROJECT_SRC / "reports/report_artifacts.py").read_text(
-        encoding="utf-8"
-    )
+def test_run_output_writer_uses_local_catalog_not_profile_bundle() -> None:
+    source = (PROJECT_SRC / "artifacts/run_outputs.py").read_text(encoding="utf-8")
 
-    assert "quant_research_platform.catalog.profiles" not in source
+    assert "quant_research_platform.profiles.research" not in source
     assert "local_a_share_csmar_catalogs" not in source
-    assert "quant_research_platform.reports.catalog" in source
-    assert "report_catalog(" in source
+    assert "quant_research_platform.artifacts.definitions" in source
+    assert "run_output_catalog(" in source
 
 
 def test_catalog_profile_private_processed_helper_forwards_typed_source_id(
     monkeypatch,
 ) -> None:
-    import quant_research_platform.catalog.profiles as profiles
+    import quant_research_platform.profiles.research as profiles
 
     captured: dict[str, object] = {}
 
@@ -261,7 +250,7 @@ def test_catalog_profile_private_processed_helper_forwards_typed_source_id(
 
 
 def test_catalog_profile_private_interim_helper_forwards_kwargs(monkeypatch) -> None:
-    import quant_research_platform.catalog.profiles as profiles
+    import quant_research_platform.profiles.research as profiles
 
     captured: dict[str, object] = {}
 
@@ -304,7 +293,7 @@ def test_catalog_profile_private_interim_helper_forwards_kwargs(monkeypatch) -> 
 def test_catalog_profile_source_interim_catalog_requires_single_source(
     monkeypatch,
 ) -> None:
-    import quant_research_platform.catalog.profiles as profiles
+    import quant_research_platform.profiles.research as profiles
 
     def fake_catalog() -> object:
         return SimpleNamespace(
@@ -321,9 +310,9 @@ def test_catalog_profile_source_interim_catalog_requires_single_source(
 
 
 def test_catalog_profile_source_id_matches_interim_catalog() -> None:
-    import quant_research_platform.catalog.profiles as profiles
+    import quant_research_platform.profiles.research as profiles
 
-    assert profiles._a_share_csmar_source_id() == SourceId("csmar")
+    assert profiles._active_source_id() == SourceId("csmar")
     assert isinstance(
         next(iter(profiles._a_share_csmar_source_interim_catalogs().values())),
         InterimDataCatalog,

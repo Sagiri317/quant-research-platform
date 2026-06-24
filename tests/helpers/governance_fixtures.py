@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
-from quant_research_platform.runtime.privacy import PRIVATE_BOUNDARY_ROOTS
+from quant_research_platform.policy.share_safety import PRIVATE_BOUNDARY_ROOTS
+
+
+def load_governance_contract() -> Any:
+    """Load the tracked governance contract module used as test fact source."""
+
+    path = (
+        Path(".agents")
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+        / "governance_contract.py"
+    )
+    spec = importlib.util.spec_from_file_location("governance_contract_for_tests", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("governance_contract_loader_missing")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def representative_name_forms(rules: Iterable[Any]) -> dict[str, str]:
@@ -80,11 +102,7 @@ def forms_matching_pattern(
 ) -> tuple[str, ...]:
     """Return contract forms matched by one contract-derived pattern."""
 
-    forms = tuple(
-        form
-        for form in rule_forms(rules, rule_name)
-        if pattern.search(form)
-    )
+    forms = tuple(form for form in rule_forms(rules, rule_name) if pattern.search(form))
     if not forms:
         raise AssertionError(f"governance_matching_form_missing: {rule_name}")
     return forms
@@ -96,10 +114,7 @@ def python_symbol_fixture(
 ) -> tuple[str, dict[str, str]]:
     """Build assignment symbols from contract-declared identifier forms."""
 
-    symbols = {
-        rule_name: identifier_form(rules, rule_name)
-        for rule_name in rule_names
-    }
+    symbols = {rule_name: identifier_form(rules, rule_name) for rule_name in rule_names}
     source = "\n".join(f"{symbol} = None" for symbol in symbols.values()) + "\n"
     return source, symbols
 
@@ -134,10 +149,7 @@ def joined_string_assignment(
     """Build a static join attack from one contract value."""
 
     split_at = max(1, len(value) // 2)
-    return (
-        f"{variable} = ''.join("
-        f"[{value[:split_at]!r}, {value[split_at:]!r}])"
-    )
+    return f"{variable} = ''.join([{value[:split_at]!r}, {value[split_at:]!r}])"
 
 
 def derived_identifier(
@@ -160,10 +172,13 @@ def structured_key_document(keys: Iterable[str]) -> str:
 def structured_value_document(values: Iterable[str]) -> str:
     """Build a JSON object with safe keys and contract-derived values."""
 
-    return json.dumps(
-        {f"allowed_{index}": value for index, value in enumerate(values)},
-        indent=2,
-    ) + "\n"
+    return (
+        json.dumps(
+            {f"allowed_{index}": value for index, value in enumerate(values)},
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def representative_private_paths() -> tuple[str, ...]:

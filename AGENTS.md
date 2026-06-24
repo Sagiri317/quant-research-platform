@@ -37,7 +37,7 @@ git branch -a
 
 ## 4. `.agents` 与 `.run`
 
-`.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、package safety、governance check 等工具必须从这里读取。
+`.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、single verifier package-safety scan、governance check 等工具必须从这里读取。
 
 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、retired governance paths、retired naming、retired path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
 
@@ -52,7 +52,7 @@ git branch -a
 - `NOT_RUN`：未运行，不得伪装为 PASS。
 - `BLOCKED`：因环境、依赖、权限、超时或边界无法运行，必须说明阻塞条件。
 
-pytest PASS、governance PASS、handoff verifier PASS、package safety PASS、source-tree scan PASS、compare PASS、sidecar PASS 不能互相替代。每个 PASS 只覆盖对应命令和对应 scope。
+pytest PASS、governance PASS、handoff verifier PASS、single verifier package-safety scan PASS、source-tree scan PASS、compare PASS、sidecar PASS 不能互相替代。每个 PASS 只覆盖对应命令和对应 scope。
 
 ## 6. 架构职责
 
@@ -60,9 +60,11 @@ pytest PASS、governance PASS、handoff verifier PASS、package safety PASS、so
 
 `markets/` 是通用市场领域层；`markets/implementations/a_share/` 承载 A 股 calendar、processed data、mask、factor/label binding 和 profile/scenario。通用 session window 的唯一 owner 是 `markets/session_windows.py`。
 
-`research/` 是通用研究算法层，不依赖具体市场实现或 sources。`compute/` 是 dataframe/tensor、portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 layout。
+`policy/` 只负责共享安全规则、ID 安全判断和 PASS/FAIL/NOT_RUN/BLOCKED 状态聚合，不 import QRP 业务层。`contracts/` 只定义结构合同、枚举、ID、时间窗口和基础校验，不保存共享安全规则事实。`catalog/` 只负责 generic registry class。
 
-`runtime/` 只提供 privacy、resources、logging、workflow records 和 execution metrics payload，不写 report artifact。`reports/` 负责 public-safe report/evidence artifact 写出，不重算研究逻辑。`workflows/` 只编排 node 和 service 调用。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`agents/` 保持 proposal-only。`.agents/` 只承载治理、handoff 和 prompt tooling。
+`profiles/` 是 API、CLI、agent 和 workflow 共用的组合根，可以组装 catalog、source、market implementation 和 materializer。`research/` 是通用研究计算层，只构建 result，不写文件，不依赖具体市场实现或 sources。`compute/` 是 dataframe/tensor、portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data/raw、data/interim、data/processed、data/research layout，不定义 run output、report 或 evidence root。
+
+`runtime/` 只提供 resources、logging、workflow records 和 execution metrics payload，不写 report artifact。`reports/` 只 build/render evidence/report 内容，不写文件，不重算研究逻辑。`artifacts/` 只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。`workflows/` 只编排 research -> reports -> artifacts，不定义 policy regex，不直接写底层文件。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`agents/` 保持 proposal-only。`.agents/` 只承载治理、handoff 和 prompt tooling。
 
 ## 7. current-contract-only
 
@@ -76,7 +78,7 @@ Retired stage naming 不得以文件名、路径名、Python function/class/fixt
 
 ## 8. private safety
 
-禁止把 private data、vendor marker、本地绝对路径、股票代码样本、raw traceback、row-level sample 写入 public-safe docs、handoff、reports、logs 或 final response。需要引用 private 验证时，只写摘要、计数、hash、schema、command status 和 public-safe evidence。
+禁止把 private data、vendor marker、本地绝对路径、股票代码样本、raw traceback、row-level sample 写入 REVIEW_SAFE docs、handoff、reports、logs 或 final response。需要引用本地验证时，只写摘要、计数、hash、schema、command status 和 REVIEW_SAFE evidence。run output 主轴是 `LOCAL_ONLY` 和 `REVIEW_SAFE`，不要把 private/public 作为 run output 架构主轴。
 
 ## 9. 修改边界
 

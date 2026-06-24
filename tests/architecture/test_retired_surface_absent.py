@@ -39,9 +39,7 @@ def test_retired_workflow_run_module_is_absent() -> None:
     )
 
     assert importlib.util.find_spec(retired_module) is None
-    assert not (
-        Path("src") / Path(retired_module.replace(".", "/") + ".py")
-    ).exists()
+    assert not (Path("src") / Path(retired_module.replace(".", "/") + ".py")).exists()
 
 
 def test_retired_public_constant_aliases_are_absent() -> None:
@@ -99,18 +97,22 @@ def test_retired_pr_body_renderer_is_absent() -> None:
         contract.RETIRED_PUBLIC_SURFACE_RULES,
         "forbidden_pr_body",
     )
-    assert not Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts"
-    ).joinpath(renderer).exists()
-    assert not Path("tests/agents/handoff").joinpath(
-        f"test_{Path(body).stem}_consistency.py"
-    ).exists()
+    assert (
+        not Path(".agents/skills/quant-research-platform-maintenance/scripts")
+        .joinpath(renderer)
+        .exists()
+    )
+    assert (
+        not Path("tests/agents/handoff")
+        .joinpath(f"test_{Path(body).stem}_consistency.py")
+        .exists()
+    )
 
 
 def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
     module = _load_handoff_builder()
 
-    patterns = module.source_tree_forbidden_patterns()
+    patterns = module.source_tree_blocked_patterns()
 
     assert "forbidden_pr_body" in patterns
     assert "forbidden_render_pr_body" in patterns

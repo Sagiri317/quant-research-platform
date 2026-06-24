@@ -13,8 +13,8 @@ from quant_research_platform.research.models.supervised import (
     model_smoke_hyperparameters,
     predict_model_frame,
 )
-from quant_research_platform.research.predictions.artifacts import (
-    validate_prediction_artifacts,
+from quant_research_platform.research.predictions.outputs import (
+    validate_prediction_outputs,
 )
 from tests.research.prediction_artifact_helpers import (
     prediction_frame_from_artifact,
@@ -104,7 +104,7 @@ def test_prediction_artifact_helpers_do_not_export_bundle_semantics() -> None:
         model_spec.input_columns,
         prediction_model=fit.prediction_model,
     )
-    validate_prediction_artifacts(prediction, spec)
+    validate_prediction_outputs(prediction, spec)
 
     assert spec.primary_key == ("timestamp", "asset_id")
     assert spec.prediction_column == "prediction_score"

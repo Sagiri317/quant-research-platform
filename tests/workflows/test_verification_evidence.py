@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.profiles import research_profile
+from quant_research_platform.artifacts.layout import (
+    LocalVerificationLayout,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -22,18 +25,16 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
 )
-from quant_research_platform.reports.verification_evidence import (
-    VerificationEvidenceLayout,
-)
+from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.datasets import read_research_dataset
 from quant_research_platform.runtime import resources as resource_module
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import verification_evidence as module
-from quant_research_platform.workflows.verification_evidence import (
-    VerificationEvidenceRunConfig,
-    run_verification_evidence,
+from quant_research_platform.workflows import local_verification as module
+from quant_research_platform.workflows.local_verification import (
+    LocalVerificationRunConfig,
+    run_local_verification,
 )
 from tests.helpers import frequency_ids
 
@@ -46,7 +47,7 @@ SMOKE_PORTFOLIO_FREQUENCY = frequency_ids.DAILY_FREQUENCY_SLUG
 SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS = 1
 
 
-def _verification_config(**overrides: object) -> VerificationEvidenceRunConfig:
+def _verification_config(**overrides: object) -> LocalVerificationRunConfig:
     payload = {
         "prediction_train_end": SMOKE_PREDICTION_TRAIN_END,
         "prediction_test_start": SMOKE_PREDICTION_TEST_START,
@@ -54,7 +55,7 @@ def _verification_config(**overrides: object) -> VerificationEvidenceRunConfig:
         "portfolio_execution_lag_steps": SMOKE_PORTFOLIO_EXECUTION_LAG_STEPS,
     }
     payload.update(overrides)
-    return VerificationEvidenceRunConfig(**payload)
+    return LocalVerificationRunConfig(**payload)
 
 
 def _smoke_prediction_specs():
@@ -90,7 +91,7 @@ def test_verification_evidence_workflow_rejects_existing_output_root(
     )
 
     with pytest.raises(ValueError, match="output_root_already_exists"):
-        run_verification_evidence(config)
+        run_local_verification(config)
 
 
 def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
@@ -102,12 +103,12 @@ def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
     )
 
     with pytest.raises(ValueError, match="start_date_after_end_date"):
-        run_verification_evidence(config)
+        run_local_verification(config)
 
 
 def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_path):
     with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
-        run_verification_evidence(
+        run_local_verification(
             _verification_config(
                 output_root=tmp_path / "verification-output" / "bad-evaluation",
                 start_date="2014-01-01",
@@ -123,7 +124,7 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
         ValueError,
         match="prediction_train_end_must_precede_test_start",
     ):
-        run_verification_evidence(
+        run_local_verification(
             _verification_config(
                 output_root=tmp_path / "verification-output" / "bad-prediction",
                 start_date="2014-01-01",
@@ -139,7 +140,7 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
         ValueError,
         match="prediction_test_end_must_not_precede_test_start",
     ):
-        run_verification_evidence(
+        run_local_verification(
             _verification_config(
                 output_root=tmp_path / "verification-output" / "bad-prediction-end",
                 start_date="2014-01-01",
@@ -203,7 +204,7 @@ def test_verification_evidence_workflow_rejects_override_windows_outside_evidenc
     for run_name, overrides, match in cases:
         output_root = tmp_path / "verification-output" / run_name
         with pytest.raises(ValueError, match=match):
-            run_verification_evidence(
+            run_local_verification(
                 _verification_config(
                     output_root=output_root,
                     start_date="2014-01-01",
@@ -230,14 +231,20 @@ def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_pa
 def test_verification_evidence_run_id_uses_shared_public_safe_contract(
     tmp_path: Path,
 ) -> None:
-    assert module.resolve_verification_run_id(
-        None,
-        tmp_path / "verification-output" / "run_202606",
-    ) == "run_202606"
-    assert module.resolve_verification_run_id(
-        "run_2026_06",
-        tmp_path / "verification-output" / "ignored",
-    ) == "run_2026_06"
+    assert (
+        module.resolve_local_verification_run_id(
+            None,
+            tmp_path / "verification-output" / "run_202606",
+        )
+        == "run_202606"
+    )
+    assert (
+        module.resolve_local_verification_run_id(
+            "run_2026_06",
+            tmp_path / "verification-output" / "ignored",
+        )
+        == "run_2026_06"
+    )
 
     invalid_cases = (
         (None, tmp_path / "verification-output" / "run_000001"),
@@ -247,66 +254,62 @@ def test_verification_evidence_run_id_uses_shared_public_safe_contract(
     )
     for run_id, output_root in invalid_cases:
         with pytest.raises(ValueError, match="invalid_run_id"):
-            module.resolve_verification_run_id(run_id, output_root)
+            module.resolve_local_verification_run_id(run_id, output_root)
 
 
-def test_verification_evidence_output_root_respects_repo_private_boundary(
+def test_verification_evidence_output_root_respects_repo_local_boundary(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    with pytest.raises(ValueError, match="unignored_private_output_root"):
-        module.validate_private_output_root(
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
+        module.validate_local_output_root(
             repo_root / "verification-output" / "s1",
             repo_root,
         )
 
-    module.validate_private_output_root(
-        repo_root / "reports" / "private_research" / "s1",
+    module.validate_local_output_root(
+        repo_root / "run_outputs" / "local" / "a_share" / "s1",
         repo_root,
     )
-    module.validate_private_output_root(
-        repo_root / ".run" / "private" / "s1",
+    module.validate_local_output_root(
+        repo_root / ".run" / "local" / "s1",
         repo_root,
     )
-    module.validate_private_output_root(
+    module.validate_local_output_root(
         repo_root / ".run" / "smoke" / "s1",
         repo_root,
     )
-    module.validate_private_output_root(
+    module.validate_local_output_root(
         repo_root / ".run" / "evidence-final" / "commit-sha" / "window-a",
         repo_root,
     )
-    module.validate_private_output_root(
-        repo_root
-        / ".run"
-        / "evidence-refreshed-baseline"
-        / "commit-sha"
-        / "window-b",
+    module.validate_local_output_root(
+        repo_root / ".run" / "evidence-refreshed-baseline" / "commit-sha" / "window-b",
         repo_root,
     )
-    module.validate_private_output_root(
+    module.validate_local_output_root(
         repo_root / ".run" / "s86",
         repo_root,
     )
-    with pytest.raises(ValueError, match="unignored_private_output_root"):
-        module.validate_private_output_root(
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
+        module.validate_local_output_root(
             repo_root / ".run" / "reviews" / "s1",
             repo_root,
         )
-    with pytest.raises(ValueError, match="unignored_private_output_root"):
-        module.validate_private_output_root(
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
+        module.validate_local_output_root(
             repo_root / "output" / "s1",
             repo_root,
         )
-    with pytest.raises(ValueError, match="unignored_private_output_root"):
-        module.validate_private_output_root(
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
+        module.validate_local_output_root(
             repo_root / "tmp-output" / "s1",
             repo_root,
         )
-    with pytest.raises(ValueError, match="unignored_private_output_root"):
-        module.validate_private_output_root(
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
+        module.validate_local_output_root(
             tmp_path / "outside" / "verification-output" / "s1",
             repo_root,
         )
@@ -319,7 +322,7 @@ def test_prepare_output_root_validates_before_creating_repo_internal_output(
     repo_root.mkdir()
     output_root = repo_root / "verification-output" / "s1"
 
-    with pytest.raises(ValueError, match="unignored_private_output_root"):
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
         module._prepare_output_root(
             output_root,
             replace_output=False,
@@ -342,7 +345,7 @@ def test_prepare_output_root_detects_repo_boundary_outside_cwd(
 
     monkeypatch.chdir(outside)
 
-    with pytest.raises(ValueError, match="unignored_private_output_root"):
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
         module._prepare_output_root(output_root, replace_output=False)
 
     assert not output_root.exists()
@@ -373,7 +376,7 @@ def test_verification_evidence_requires_prediction_window_order() -> None:
         match="prediction_train_end_must_precede_test_start",
     ):
         module._resolve_effective_windows(
-            VerificationEvidenceRunConfig(
+            LocalVerificationRunConfig(
                 output_root=Path("unused"),
                 start_date="2014-01-01",
                 end_date="2016-12-31",
@@ -434,23 +437,24 @@ def test_verification_evidence_workflow_resolves_independent_windows(
         return _persist_fake_research_root(**kwargs)
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    _stub_run_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "run_evaluation_from_research_dataset",
+        "build_evaluation_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("evaluation")
-                or captured_evaluation_windows.append(
-                    (
-                        kwargs["time_window"].start.isoformat(),
-                        kwargs["time_window"].end.isoformat(),
-                    )
+            or captured_evaluation_windows.append(
+                (
+                    kwargs["time_window"].start.isoformat(),
+                    kwargs["time_window"].end.isoformat(),
                 )
-            or Path("evaluation")
+            )
+            or _fake_evaluation_result(kwargs)
         ),
     )
     monkeypatch.setattr(
         module,
-        "run_prediction_from_research_dataset",
+        "build_prediction_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("prediction")
             or captured_prediction_inputs.append(
@@ -464,12 +468,12 @@ def test_verification_evidence_workflow_resolves_independent_windows(
                     "prediction_test_end": kwargs["prediction_test_end"],
                 }
             )
-            or Path("prediction")
+            or _fake_prediction_result(kwargs)
         ),
     )
     monkeypatch.setattr(
         module,
-        "run_portfolio_from_research_dataset",
+        "build_portfolio_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("portfolio")
             or captured_evaluation_windows.append(
@@ -478,7 +482,7 @@ def test_verification_evidence_workflow_resolves_independent_windows(
                     kwargs["time_window"].end.isoformat(),
                 )
             )
-            or Path("portfolio")
+            or _fake_portfolio_result(kwargs)
         ),
     )
 
@@ -488,10 +492,10 @@ def test_verification_evidence_workflow_resolves_independent_windows(
         tmp_path,
         monkeypatch,
         ".run",
-        "private",
+        "local",
         "s-window",
     )
-    result = run_verification_evidence(
+    result = run_local_verification(
         _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
@@ -508,7 +512,7 @@ def test_verification_evidence_workflow_resolves_independent_windows(
         (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
     )
 
-    assert result.status == "PASS"
+    assert result.status == "FAIL"
     assert calls == [
         "interim",
         "processed",
@@ -521,14 +525,18 @@ def test_verification_evidence_workflow_resolves_independent_windows(
         ("2015-01-01", "2018-12-31"),
         ("2015-01-01", "2018-12-31"),
     ]
-    assert captured_prediction_inputs == [
-        {
-            "time_window": ("2014-01-01", "2019-12-31"),
-            "prediction_train_end": "2017-12-31",
-            "prediction_test_start": "2018-01-01",
-            "prediction_test_end": "2019-12-31",
-        }
-    ] * expected_prediction_count
+    assert (
+        captured_prediction_inputs
+        == [
+            {
+                "time_window": ("2014-01-01", "2019-12-31"),
+                "prediction_train_end": "2017-12-31",
+                "prediction_test_start": "2018-01-01",
+                "prediction_test_end": "2019-12-31",
+            }
+        ]
+        * expected_prediction_count
+    )
     assert run_config["effective_windows"] == {
         "evaluation_start_date": "2015-01-01",
         "evaluation_end_date": "2018-12-31",
@@ -604,20 +612,21 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
         staticmethod(fake_from_environment),
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    _stub_run_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "run_evaluation_from_research_dataset",
-        lambda **kwargs: capture_policy() or Path("evaluation"),
+        "build_evaluation_result_from_research_dataset",
+        lambda **kwargs: capture_policy() or _fake_evaluation_result(kwargs),
     )
     monkeypatch.setattr(
         module,
-        "run_prediction_from_research_dataset",
-        lambda **kwargs: capture_policy() or Path("prediction"),
+        "build_prediction_result_from_research_dataset",
+        lambda **kwargs: capture_policy() or _fake_prediction_result(kwargs),
     )
     monkeypatch.setattr(
         module,
-        "run_portfolio_from_research_dataset",
-        lambda **kwargs: capture_policy() or Path("portfolio"),
+        "build_portfolio_result_from_research_dataset",
+        lambda **kwargs: capture_policy() or _fake_portfolio_result(kwargs),
     )
 
     profile = _profile_with_materializers(import_interim, build_processed)
@@ -626,10 +635,10 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
         tmp_path,
         monkeypatch,
         ".run",
-        "private",
+        "local",
         "s-policy",
     )
-    result = run_verification_evidence(
+    result = run_local_verification(
         _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
@@ -641,7 +650,7 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
         (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
     )
 
-    assert result.status == "PASS"
+    assert result.status == "FAIL"
     assert from_environment_calls == 1
     assert snapshots == [policy] * (5 + expected_prediction_count)
     assert run_config["runtime_resource_policy"] == policy.to_payload()
@@ -650,8 +659,7 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
     )
     execution_plan = result.summary["runtime_execution_plan"]
     assert (
-        execution_plan["storage_read"]["time_window_read_planning"]
-        == "manifest_backed"
+        execution_plan["storage_read"]["time_window_read_planning"] == "manifest_backed"
     )
     assert "_DatasetReadContext" not in json.dumps(execution_plan)
     assert execution_plan["storage_read"]["time_window_year_partition_pruning"] is True
@@ -664,12 +672,10 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
     }
     assert execution_plan["report_writing"]["prediction_parquet"] == "chunked_internal"
     assert (
-        execution_plan["report_writing"]["portfolio_row_artifacts"]
-        == "chunked_internal"
+        execution_plan["report_writing"]["portfolio_row_outputs"] == "chunked_internal"
     )
-    assert (
-        execution_plan["report_writing"]["portfolio_summary_artifacts"]
-        == "aggregate_summary"
+    assert execution_plan["report_writing"]["portfolio_summary_outputs"] == (
+        "aggregate_summary"
     )
     assert execution_plan["full_horizon_tiling"]["status"] == "NOT_LANDED"
 
@@ -747,34 +753,35 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         return artifact_root
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
+    _stub_run_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "run_evaluation_from_research_dataset",
+        "build_evaluation_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("evaluation")
             or evidence_years.append((kwargs["time_window"].start.year,))
             or evaluation_run_ids.append(kwargs["run_id"])
-            or Path("evaluation")
+            or _fake_evaluation_result(kwargs)
         ),
     )
     monkeypatch.setattr(
         module,
-        "run_prediction_from_research_dataset",
+        "build_prediction_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("prediction")
             or evidence_years.append((kwargs["time_window"].start.year,))
             or prediction_ids.append(kwargs["prediction_id"])
-            or Path("prediction")
+            or _fake_prediction_result(kwargs)
         ),
     )
     monkeypatch.setattr(
         module,
-        "run_portfolio_from_research_dataset",
+        "build_portfolio_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("portfolio")
             or evidence_years.append((kwargs["time_window"].start.year,))
             or portfolio_ids.append(kwargs["portfolio_id"])
-            or Path("portfolio")
+            or _fake_portfolio_result(kwargs)
         ),
     )
 
@@ -784,7 +791,7 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
     ]
     expected_prediction_count = len(expected_prediction_ids)
     output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s1")
-    result = run_verification_evidence(
+    result = run_local_verification(
         _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
@@ -805,14 +812,14 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
     assert evaluation_run_ids == ["signal_forward_return_20d"]
     assert prediction_ids == expected_prediction_ids
     assert portfolio_ids == ["signal_forward_return_20d_portfolio"]
-    assert result.status == "PASS"
+    assert result.status == "FAIL"
     assert result.run_id == "s1"
     assert result.output_root == "s1"
     assert (output_root / "config" / "run_config.json").is_file()
     assert (output_root / "manifests" / "run_manifest.json").is_file()
     assert (output_root / "timings" / "timings.json").is_file()
     assert (output_root / "validations" / "validation_summary.json").is_file()
-    layout = VerificationEvidenceLayout.from_output_root(output_root)
+    layout = LocalVerificationLayout.from_output_root(output_root)
     assert (layout.evidence_root / "evidence_summary.json").is_file()
     for layer in ("interim", "processed", "research", "evidence"):
         layer_root = getattr(layout, f"{layer}_root")
@@ -828,13 +835,13 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
     timings = json.loads(
         (output_root / "timings" / "timings.json").read_text(encoding="utf-8")
     )
-    timings_csv = (output_root / "timings" / "timings.csv").read_text(
-        encoding="utf-8"
-    )
-    assert summary["status"] == "PASS"
-    assert summary["status"] == validation["status"]
+    timings_csv = (output_root / "timings" / "timings.csv").read_text(encoding="utf-8")
+    assert summary["status"] == "FAIL"
+    assert validation["status"] == "PASS"
     assert summary["run_id"] == "s1"
-    assert summary["manifest_status"]["report_count"] == expected_prediction_count + 2
+    assert summary["manifest_status"]["run_output_count"] == (
+        expected_prediction_count + 2
+    )
     timing_steps = [record["step_name"] for record in timings["records"]]
     summary_timing_steps = [
         record["step_name"] for record in summary["timings"]["records"]
@@ -890,24 +897,25 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
         "assemble_research_dataset",
         _persist_fake_research_root,
     )
+    _stub_run_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "run_evaluation_from_research_dataset",
-        lambda **kwargs: Path("evaluation"),
+        "build_evaluation_result_from_research_dataset",
+        lambda **kwargs: _fake_evaluation_result(kwargs),
     )
     monkeypatch.setattr(
         module,
-        "run_prediction_from_research_dataset",
-        lambda **kwargs: Path("prediction"),
+        "build_prediction_result_from_research_dataset",
+        lambda **kwargs: _fake_prediction_result(kwargs),
     )
     monkeypatch.setattr(
         module,
-        "run_portfolio_from_research_dataset",
-        lambda **kwargs: Path("portfolio"),
+        "build_portfolio_result_from_research_dataset",
+        lambda **kwargs: _fake_portfolio_result(kwargs),
     )
 
     output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s8")
-    result = run_verification_evidence(
+    result = run_local_verification(
         _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
@@ -917,7 +925,7 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
     )
     manifest = inspect_dataset(captured_roots[0]).manifest
 
-    assert result.status == "PASS"
+    assert result.status == "FAIL"
     assert manifest == captured_manifests[0]
 
 
@@ -951,24 +959,25 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
         "assemble_research_dataset",
         _persist_fake_research_root,
     )
+    _stub_run_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
-        "run_evaluation_from_research_dataset",
-        lambda **kwargs: Path("evaluation"),
+        "build_evaluation_result_from_research_dataset",
+        lambda **kwargs: _fake_evaluation_result(kwargs),
     )
     monkeypatch.setattr(
         module,
-        "run_prediction_from_research_dataset",
-        lambda **kwargs: Path("prediction"),
+        "build_prediction_result_from_research_dataset",
+        lambda **kwargs: _fake_prediction_result(kwargs),
     )
     monkeypatch.setattr(
         module,
-        "run_portfolio_from_research_dataset",
-        lambda **kwargs: Path("portfolio"),
+        "build_portfolio_result_from_research_dataset",
+        lambda **kwargs: _fake_portfolio_result(kwargs),
     )
 
     output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s9")
-    result = run_verification_evidence(
+    result = run_local_verification(
         _verification_config(
             output_root=output_root,
             start_date="2014-01-01",
@@ -1042,10 +1051,10 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
         tmp_path,
         monkeypatch,
         ".run",
-        "private",
+        "local",
         "tiny-real-stack",
     )
-    result = run_verification_evidence(
+    result = run_local_verification(
         _verification_config(
             output_root=output_root,
             start_date="2014-01-02",
@@ -1059,17 +1068,9 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
     )
 
     summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
-    reports_root = output_root / "reports" / "private_research" / "a_share"
-    evaluation_root = (
-        reports_root
-        / "evaluation"
-        / "signal_forward_return_20d"
-    )
-    portfolio_root = (
-        reports_root
-        / "portfolio"
-        / "signal_forward_return_20d_portfolio"
-    )
+    reports_root = output_root / "run_outputs" / "local" / "a_share"
+    evaluation_root = reports_root / "evaluation" / "signal_forward_return_20d"
+    portfolio_root = reports_root / "portfolio" / "signal_forward_return_20d_portfolio"
     prediction_root = reports_root / "prediction"
     metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
     research = read_research_dataset(
@@ -1079,8 +1080,8 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
         time_window=TimeWindow("2014-01-02", "2015-01-05"),
     )
 
-    assert result.status == "PASS"
-    assert summary["manifest_status"]["report_count"] == len(prediction_ids) + 2
+    assert result.status == "FAIL"
+    assert summary["manifest_status"]["run_output_count"] == len(prediction_ids) + 2
     assert set(metrics["signal"]) == {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert "mom_20d_zscore" in research.columns
     assert sorted(path.name for path in prediction_root.iterdir()) == sorted(
@@ -1212,13 +1213,57 @@ def _profile_with_materializers(interim, processed):
     )
 
 
+def _fake_evaluation_result(kwargs):
+    return SimpleNamespace(
+        spec=kwargs["evaluation_catalog"].get(kwargs["run_id"]),
+        metrics=pd.DataFrame(),
+        grouped_label_values=pd.DataFrame(),
+        ic_summary=pd.DataFrame(),
+        group_spread_summary=pd.DataFrame(),
+        diagnostics={},
+    )
+
+
+def _fake_prediction_result(kwargs):
+    return SimpleNamespace(
+        spec=kwargs["prediction_catalog"].get(kwargs["prediction_id"]),
+        output_chunks=(),
+        model_metadata={},
+        prediction_metadata_factory=lambda: {},
+    )
+
+
+def _fake_portfolio_result(kwargs):
+    return SimpleNamespace(
+        spec=kwargs["portfolio_catalog"].get(kwargs["portfolio_id"]),
+        output_chunks=(),
+        summary_factory=lambda: {},
+    )
+
+
+def _stub_run_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        module,
+        "write_evaluation_run_outputs",
+        lambda *args, **kwargs: Path("evaluation"),
+    )
+    monkeypatch.setattr(
+        module,
+        "write_prediction_run_outputs",
+        lambda *args, **kwargs: Path("prediction"),
+    )
+    monkeypatch.setattr(
+        module,
+        "write_portfolio_run_outputs",
+        lambda *args, **kwargs: Path("portfolio"),
+    )
+
+
 def _persist_tiny_a_share_processed_inputs(
     layout,
     profile,
 ) -> dict[str, object]:
-    dataset_spec = profile.research_datasets.get(
-        "price_volume_forward_returns"
-    )
+    dataset_spec = profile.research_datasets.get("price_volume_forward_returns")
     inspections: dict[str, object] = {}
     for data_id in dataset_spec.input_data_ids:
         spec = profile.processed.get(data_id)
@@ -1234,9 +1279,7 @@ def _persist_tiny_a_share_processed_inputs(
 
 def _tiny_a_share_processed_frame(spec: ProcessedDataSpec) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    dates = pd.to_datetime(
-        ["2014-01-02", "2014-01-03", "2014-07-02", "2015-01-05"]
-    )
+    dates = pd.to_datetime(["2014-01-02", "2014-01-03", "2014-07-02", "2015-01-05"])
     for date_index, timestamp in enumerate(dates, start=1):
         for asset_index in range(1, 7):
             row: dict[str, object] = {

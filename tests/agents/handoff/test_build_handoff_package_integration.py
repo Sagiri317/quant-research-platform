@@ -14,12 +14,7 @@ import pytest
 pytestmark = pytest.mark.slow_integration
 
 REPO_ROOT = Path.cwd()
-HANDOFF_ROOT = (
-    REPO_ROOT
-    / ".agents"
-    / "skills"
-    / "quant-research-platform-maintenance"
-)
+HANDOFF_ROOT = REPO_ROOT / ".agents" / "skills" / "quant-research-platform-maintenance"
 HANDOFF_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "build_handoff_package.py"
 VERIFY_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "verify_handoff_package.py"
 TEST_BRANCH = "feature/synthetic-handoff-review"
@@ -40,6 +35,7 @@ def _load_builder_module():
     spec.loader.exec_module(module)
     BUILDER_MODULE = module
     return module
+
 
 def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> None:
     repo = tmp_path / "synthetic-repo"
@@ -126,12 +122,10 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
             archive.read("validation_evidence.json").decode("utf-8")
         )
         assert (
-            validation_evidence["handoff_package_path"]
-            == f"{run_handoffs}/{slug}.zip"
+            validation_evidence["handoff_package_path"] == f"{run_handoffs}/{slug}.zip"
         )
         assert (
-            validation_evidence["handoff_sidecar_path"]
-            == f"{run_handoffs}/{slug}.json"
+            validation_evidence["handoff_sidecar_path"] == f"{run_handoffs}/{slug}.json"
         )
         generation = json.loads(
             archive.read("handoff_evidence/generation.json").decode("utf-8")
@@ -171,9 +165,9 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     } == names
     assert "tool_source_repo_paths" in manifest
     assert sidecar["zip_sha256"] == hashlib.sha256(package.read_bytes()).hexdigest()
-    assert sidecar["artifact_manifest_sha256"] == hashlib.sha256(
-        manifest_raw
-    ).hexdigest()
+    assert (
+        sidecar["artifact_manifest_sha256"] == hashlib.sha256(manifest_raw).hexdigest()
+    )
     assert task_metadata["final_head"] == final_head
     assert task_metadata["handoff_package_path"] == f"{run_handoffs}/{slug}.zip"
     assert task_metadata["handoff_sidecar_path"] == f"{run_handoffs}/{slug}.json"
@@ -208,46 +202,24 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert source_tree_scan["scan_groups"]["retired_text"]["status"] == "PASS"
     assert source_tree_scan["scan_groups"]["retired_text"]["finding_count"] == 0
     assert (
-        source_tree_scan["scan_groups"]["retired_governance_paths"]["status"]
-        == "PASS"
+        source_tree_scan["scan_groups"]["retired_governance_paths"]["status"] == "PASS"
     )
     assert (
         source_tree_scan["scan_groups"]["retired_governance_paths"]["finding_count"]
         == 0
     )
     assert source_tree_scan["scan_groups"]["retired_path_names"]["status"] == "PASS"
-    assert (
-        source_tree_scan["scan_groups"]["retired_path_names"]["finding_count"]
-        == 0
-    )
+    assert source_tree_scan["scan_groups"]["retired_path_names"]["finding_count"] == 0
     assert source_tree_scan["scan_groups"]["python_symbols"]["status"] == "PASS"
     assert source_tree_scan["scan_groups"]["python_symbols"]["finding_count"] == 0
-    assert (
-        source_tree_scan["scan_groups"]["synthesized_strings"]["status"]
-        == "PASS"
-    )
-    assert (
-        source_tree_scan["scan_groups"]["synthesized_strings"]["finding_count"]
-        == 0
-    )
-    assert (
-        source_tree_scan["scan_groups"]["active_test_literals"]["status"]
-        == "PASS"
-    )
-    assert (
-        source_tree_scan["scan_groups"]["active_test_literals"]["finding_count"]
-        == 0
-    )
+    assert source_tree_scan["scan_groups"]["synthesized_strings"]["status"] == "PASS"
+    assert source_tree_scan["scan_groups"]["synthesized_strings"]["finding_count"] == 0
+    assert source_tree_scan["scan_groups"]["active_test_literals"]["status"] == "PASS"
+    assert source_tree_scan["scan_groups"]["active_test_literals"]["finding_count"] == 0
     assert source_tree_scan["scan_groups"]["structured_keys"]["status"] == "PASS"
-    assert (
-        source_tree_scan["scan_groups"]["structured_keys"]["finding_count"]
-        == 0
-    )
+    assert source_tree_scan["scan_groups"]["structured_keys"]["finding_count"] == 0
     assert source_tree_scan["scan_groups"]["governance_truth"]["status"] == "PASS"
-    assert (
-        source_tree_scan["scan_groups"]["governance_truth"]["finding_count"]
-        == 0
-    )
+    assert source_tree_scan["scan_groups"]["governance_truth"]["finding_count"] == 0
     assert (
         source_tree_scan["scan_groups"]["sensitive_negative_literals"]["status"]
         == "PASS"
@@ -262,15 +234,10 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         if isinstance(row, dict) and "name" in row
     }
     assert checks["handoff_verify"]["status"] == "PASS"
-    assert checks["package_safety_check_zip"] == {
-        "name": "package_safety_check_zip",
+    assert checks["handoff_safety_scan"] == {
+        "name": "handoff_safety_scan",
         "status": "PASS",
-        "evidence": "package_safety_check.py completed for final zip with PASS",
-    }
-    assert checks["package_safety_check_sidecar"] == {
-        "name": "package_safety_check_sidecar",
-        "status": "PASS",
-        "evidence": "package_safety_check.py completed for sidecar JSON with PASS",
+        "evidence": "verify_handoff_package.py safety scan completed with PASS",
     }
     assert task_path.name not in names
 
@@ -312,13 +279,6 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
             sys.executable,
             str(cloned_handoff / "verify_handoff_package.py"),
             "--zip",
-            str(package),
-            "--json",
-            str(sidecar_path),
-        ],
-        [
-            sys.executable,
-            str(cloned_handoff / "handoff_safety.py"),
             str(package),
             "--json",
             str(sidecar_path),
@@ -412,9 +372,7 @@ def test_build_handoff_package_rejects_one_forbidden_custom_evidence_key(
 
 def _init_synthetic_repo(repo: Path) -> None:
     repo.mkdir()
-    support_root = (
-        repo / ".agents" / "skills" / "quant-research-platform-maintenance"
-    )
+    support_root = repo / ".agents" / "skills" / "quant-research-platform-maintenance"
     shutil.copytree(
         HANDOFF_ROOT / "scripts" / "handoff",
         support_root / "scripts" / "handoff",
@@ -424,10 +382,6 @@ def _init_synthetic_repo(repo: Path) -> None:
         HANDOFF_ROOT / "scripts" / "governance_contract.py",
         scripts_root / "governance_contract.py",
     )
-    shutil.copyfile(
-        HANDOFF_ROOT / "scripts" / "package_safety_check.py",
-        scripts_root / "package_safety_check.py",
-    )
     shutil.copytree(
         HANDOFF_ROOT / "templates" / "handoff",
         support_root / "templates" / "handoff",
@@ -436,11 +390,15 @@ def _init_synthetic_repo(repo: Path) -> None:
         HANDOFF_ROOT / "schemas" / "handoff",
         support_root / "schemas" / "handoff",
     )
-    runtime_root = repo / "src" / "quant_research_platform" / "runtime"
-    runtime_root.mkdir(parents=True)
+    package_root = repo / "src" / "quant_research_platform"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("", encoding="utf-8")
+    policy_root = package_root / "policy"
+    policy_root.mkdir(parents=True)
+    (policy_root / "__init__.py").write_text("", encoding="utf-8")
     shutil.copyfile(
-        REPO_ROOT / "src" / "quant_research_platform" / "runtime" / "privacy.py",
-        runtime_root / "privacy.py",
+        REPO_ROOT / "src" / "quant_research_platform" / "policy" / "share_safety.py",
+        policy_root / "share_safety.py",
     )
     for relative in (
         "contracts/columns.py",
@@ -550,5 +508,6 @@ def _load_verify_module():
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module

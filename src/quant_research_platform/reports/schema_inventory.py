@@ -44,7 +44,7 @@ IMPORTANT_NULL_COUNT_COLUMNS = frozenset(
 )
 
 
-def build_schema_inventory(project_root: Path) -> list[dict[str, Any]]:
+def build_schema_inventory_payload(project_root: Path) -> list[dict[str, Any]]:
     """Build sanitized aggregate schema metadata for private dataset artifacts."""
 
     root = Path(project_root)
@@ -55,6 +55,30 @@ def build_schema_inventory(project_root: Path) -> list[dict[str, Any]]:
     if not items:
         raise ValueError("schema_inventory_no_datasets_found")
     return sorted(items, key=lambda item: item["logical_relative_root"])
+
+
+def render_schema_inventory_markdown(payload: list[dict[str, Any]]) -> str:
+    lines = [
+        "# Schema Inventory",
+        "",
+        "| Layer | Kind | Artifact | Rows | Columns |",
+        "| --- | --- | --- | ---: | ---: |",
+    ]
+    for item in payload:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(item["layer"]),
+                    str(item["kind"]),
+                    str(item["artifact_id"]),
+                    str(item["row_count"]),
+                    str(len(item["columns"])),
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
@@ -248,4 +272,4 @@ def _schema_hash(
     return hashlib.sha256(encoded).hexdigest()
 
 
-__all__ = ["build_schema_inventory"]
+__all__ = ["build_schema_inventory_payload", "render_schema_inventory_markdown"]

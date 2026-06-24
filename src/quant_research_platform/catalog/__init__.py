@@ -7,7 +7,7 @@ from quant_research_platform.catalog.fields import FieldCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
-from quant_research_platform.catalog.reports import ReportCatalog
+from quant_research_platform.catalog.run_outputs import RunOutputCatalog
 
 __all__ = [
     "EvaluationCatalog",
@@ -16,6 +16,6 @@ __all__ = [
     "ModelCatalog",
     "PortfolioCatalog",
     "PredictionCatalog",
-    "ReportCatalog",
     "ResearchDatasetCatalog",
+    "RunOutputCatalog",
 ]

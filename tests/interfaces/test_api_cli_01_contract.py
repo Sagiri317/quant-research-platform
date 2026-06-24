@@ -13,13 +13,13 @@ from typer.testing import CliRunner
 import quant_research_platform.interfaces.api.app as api_app_module
 import quant_research_platform.interfaces.cli.commands as cli_commands_module
 import quant_research_platform.interfaces.services as services_module
-from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
 from quant_research_platform.markets.implementations.a_share.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
+from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.factors.price_volume import (
     price_volume_factor_columns,
 )
@@ -108,8 +108,7 @@ def test_api_01_endpoints_respond_without_private_markers() -> None:
         client.get("/api/0.1/catalog/factors"),
         client.get("/api/0.1/catalog/labels"),
         client.get(
-            "/api/0.1/research-datasets/"
-            "price_volume_forward_returns/requirements"
+            "/api/0.1/research-datasets/price_volume_forward_returns/requirements"
         ),
     ]
 
@@ -351,8 +350,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
         (
             "describe_research_dataset_requirements",
             lambda: client.get(
-                "/api/0.1/research-datasets/"
-                "price_volume_forward_returns/requirements"
+                "/api/0.1/research-datasets/price_volume_forward_returns/requirements"
             ),
             lambda: runner.invoke(
                 app,

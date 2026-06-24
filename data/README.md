@@ -9,9 +9,9 @@
 
 数据合同见 `docs/data/README.md`。
 
-目录职责：sources 负责摄取，A 股实现层负责 processed data 与市场语义，storage 负责通用 IO、manifest 和 layout；本目录不定义运行时业务逻辑。
+目录职责：sources 负责摄取，A 股实现层负责 processed data 与市场语义，storage 负责通用 dataset IO、manifest、fingerprint、compare 和 data layout。本目录不定义运行时业务逻辑、run output root 或 evidence root。
 
-public-safe evidence 的 fast synthetic gate 和 data/parquet contract gate 分别位于：
+REVIEW_SAFE evidence 的 fast synthetic gate 和 data/parquet contract gate 分别位于：
 
 ```text
 tests/architecture/test_public_safe_evidence.py

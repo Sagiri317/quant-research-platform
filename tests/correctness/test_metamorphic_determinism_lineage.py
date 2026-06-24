@@ -3,9 +3,9 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.profiles import research_profile
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.factors.price_volume import (
     calculate_price_volume_factors,
 )
@@ -137,9 +137,7 @@ def test_invalid_time_window_fails_closed() -> None:
 def test_column_lineage_and_roles_stay_in_data_layer_boundaries() -> None:
     catalogs = research_profile()
     processed = catalogs.processed
-    research_spec = catalogs.research_datasets.get(
-        "price_volume_forward_returns"
-    )
+    research_spec = catalogs.research_datasets.get("price_volume_forward_returns")
     panel = processed.get(frequency_ids.MARKET_PANEL_DATA_ID)
     execution = processed.get("execution")
     factors = processed.get("price_volume")

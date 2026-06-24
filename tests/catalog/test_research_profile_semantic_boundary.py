@@ -6,8 +6,8 @@ from pathlib import Path
 from tests.helpers import frequency_ids
 
 
-def test_catalog_profiles_does_not_own_a_share_scenario_parameters() -> None:
-    path = Path("src/quant_research_platform/catalog/profiles.py")
+def test_research_profile_does_not_own_a_share_scenario_parameters() -> None:
+    path = Path("src/quant_research_platform/profiles/research.py")
     source = path.read_text(encoding="utf-8")
 
     forbidden_patterns = (
@@ -26,8 +26,6 @@ def test_catalog_profiles_does_not_own_a_share_scenario_parameters() -> None:
                 hits.append(f"{path}:{line_number}: {line.strip()}")
 
     assert hits == []
-    assert "build_prediction_catalog" not in source
-    assert "build_portfolio_catalog" not in source
     assert "predictions=PredictionCatalog()" in source
     assert "portfolios=PortfolioCatalog()" in source
 

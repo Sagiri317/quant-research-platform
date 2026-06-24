@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from quant_research_platform.reports.verification_evidence import (
-    VerificationEvidenceLayout,
+from quant_research_platform.artifacts.layout import (
+    LocalVerificationLayout,
 )
 
 
 def test_verification_evidence_layout_uses_normal_internal_directory_names() -> None:
     output_root = Path("verification-output") / "s1"
-    layout = VerificationEvidenceLayout.from_output_root(output_root)
+    layout = LocalVerificationLayout.from_output_root(output_root)
 
     assert layout.output_root == output_root
     assert layout.config_root == output_root / "config"

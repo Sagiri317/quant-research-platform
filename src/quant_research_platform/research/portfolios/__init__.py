@@ -1,7 +1,7 @@
 """Portfolio construction helpers."""
 
 from quant_research_platform.research.portfolios.engine import (
-    PortfolioResult,
+    PortfolioComputationResult,
     compute_cumulative_returns,
     compute_drawdowns,
     compute_exposure_summary,
@@ -14,10 +14,12 @@ from quant_research_platform.research.portfolios.engine import (
     summarize_period_breakdown,
 )
 from quant_research_platform.research.portfolios.runner import (
-    run_portfolio_from_research_dataset,
+    PortfolioResult,
+    build_portfolio_result_from_research_dataset,
 )
 
 __all__ = [
+    "PortfolioComputationResult",
     "PortfolioResult",
     "construct_portfolio_positions",
     "compute_portfolio_turnover",
@@ -29,5 +31,5 @@ __all__ = [
     "compute_exposure_summary",
     "summarize_concentration",
     "summarize_period_breakdown",
-    "run_portfolio_from_research_dataset",
+    "build_portfolio_result_from_research_dataset",
 ]

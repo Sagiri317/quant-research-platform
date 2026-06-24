@@ -39,7 +39,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 ## 治理规则事实源
 
-`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、handoff source-tree scan、handoff safety、package safety 和相关 tests 只能从这里读取或派生 active docs、retired paths、retired naming、path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。
+`.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源。`verify_governance.py`、handoff source-tree scan、handoff verifier safety scan、single verifier package-safety scan 和相关 tests 只能从这里读取或派生 active docs、retired paths、retired naming、path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。
 
 Retired governance paths 不能复活；路径本身存在即 `FAIL`，不依赖文案关键词。
 

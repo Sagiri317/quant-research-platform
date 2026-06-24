@@ -27,46 +27,42 @@ FORBIDDEN_RESEARCH_IMPORT_PREFIXES = (
     "quant_research_platform.markets.implementations",
     "quant_research_platform.sources",
 )
-FORBIDDEN_RUNTIME_IMPORT_PREFIXES = (
-    "quant_research_platform.reports",
-)
+FORBIDDEN_RUNTIME_IMPORT_PREFIXES = ("quant_research_platform.reports",)
 
 PROFILE_A_SHARE_ROOT = (
-    "src/quant_research_platform/catalog/profiles.py",
+    "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.markets.implementations.a_share",
 )
 PROFILE_A_SHARE_FACTORS = (
-    "src/quant_research_platform/catalog/profiles.py",
+    "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.markets.implementations.a_share.factors",
 )
 PROFILE_A_SHARE_LABELS = (
-    "src/quant_research_platform/catalog/profiles.py",
+    "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.markets.implementations.a_share.labels",
 )
 PROFILE_A_SHARE_PROCESSED = (
-    "src/quant_research_platform/catalog/profiles.py",
+    "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.markets.implementations.a_share.processed",
 )
 PROFILE_CSMAR_CATALOG = (
-    "src/quant_research_platform/catalog/profiles.py",
+    "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.sources.csmar.catalog",
 )
 PROFILE_CSMAR_INTERIM = (
-    "src/quant_research_platform/catalog/profiles.py",
+    "src/quant_research_platform/profiles/research.py",
     "quant_research_platform.sources.csmar.interim",
 )
 PROFILE_REPORT_CATALOG = (
-    "src/quant_research_platform/catalog/profiles.py",
-    "quant_research_platform.reports.catalog",
+    "src/quant_research_platform/profiles/research.py",
+    "quant_research_platform.artifacts.definitions",
 )
 KNOWN_IMPORT_BOUNDARY_ALLOWLIST_REASONS = {
     PROFILE_A_SHARE_ROOT: "profiles.py composes A-share research profile owners.",
     PROFILE_A_SHARE_FACTORS: (
         "profiles.py composes the active A-share factor catalog."
     ),
-    PROFILE_A_SHARE_LABELS: (
-        "profiles.py composes the active A-share label catalog."
-    ),
+    PROFILE_A_SHARE_LABELS: ("profiles.py composes the active A-share label catalog."),
     PROFILE_A_SHARE_PROCESSED: (
         "profiles.py composes the active A-share processed catalog."
     ),
@@ -128,9 +124,7 @@ def test_runtime_tests_do_not_import_reports() -> None:
         if module.startswith(FORBIDDEN_RUNTIME_IMPORT_PREFIXES)
     ]
 
-    assert not hits, "runtime_test_report_import_boundary_violation: " + "; ".join(
-        hits
-    )
+    assert not hits, "runtime_test_report_import_boundary_violation: " + "; ".join(hits)
 
 
 def test_runtime_recorders_do_not_expose_artifact_writers() -> None:
@@ -190,14 +184,13 @@ def test_known_cross_layer_import_allowlist_entries_have_reasons() -> None:
     )
 
 
-def test_catalog_profiles_is_the_only_interface_composition_root() -> None:
-    profiles_path = PROJECT_SRC / "catalog" / "profiles.py"
+def test_profiles_research_is_the_only_interface_composition_root() -> None:
+    profiles_path = PROJECT_SRC / "profiles" / "research.py"
     services_path = PROJECT_SRC / "interfaces" / "services.py"
 
     assert profiles_path.exists(), "catalog_profiles_missing"
     assert {
-        module
-        for _path, _lineno, module in _iter_imports(profiles_path)
+        module for _path, _lineno, module in _iter_imports(profiles_path)
     }.issuperset(
         {
             "quant_research_platform.markets.implementations.a_share.processed",
@@ -243,6 +236,14 @@ def _is_selected_boundary(path: Path, module: str) -> bool:
             (
                 "quant_research_platform.markets.implementations",
                 "quant_research_platform.reports",
+                "quant_research_platform.sources",
+            )
+        )
+    if path_text.startswith("src/quant_research_platform/profiles/"):
+        return module.startswith(
+            (
+                "quant_research_platform.artifacts.definitions",
+                "quant_research_platform.markets.implementations",
                 "quant_research_platform.sources",
             )
         )

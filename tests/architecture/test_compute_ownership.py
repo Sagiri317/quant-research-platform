@@ -9,9 +9,7 @@ PROJECT_SRC = Path("src/quant_research_platform")
 SCAN_ROOTS = (Path("src"), Path("tests"))
 OLD_PANEL_NAME = "Panel" + "Spec"
 OLD_VALIDATE_NAME = "validate" + "_panel"
-OLD_PROTOCOL_MODULE = ".".join(
-    ("quant_research_platform", "compute", "protocols")
-)
+OLD_PROTOCOL_MODULE = ".".join(("quant_research_platform", "compute", "protocols"))
 OLD_STORAGE_PROTOCOL = "Data" + "Spec" + "Catalog"
 
 
@@ -139,7 +137,7 @@ def test_evaluation_group_artifact_names_are_label_value_neutral() -> None:
 
 def test_evaluation_result_and_report_writer_do_not_use_generic_metadata() -> None:
     engine_path = PROJECT_SRC / "research/evaluations/engine.py"
-    report_path = PROJECT_SRC / "reports/report_artifacts.py"
+    report_path = PROJECT_SRC / "artifacts/run_outputs.py"
     engine_tree = _parse(engine_path)
     report_text = report_path.read_text(encoding="utf-8")
     result_class = next(
@@ -160,17 +158,15 @@ def test_evaluation_result_and_report_writer_do_not_use_generic_metadata() -> No
     assert "metrics.attrs" not in report_text
 
 
-def test_prediction_artifacts_report_writer_use_specific_metadata_attrs() -> None:
-    artifacts_text = (
-        PROJECT_SRC / "research/predictions/artifacts.py"
-    ).read_text(encoding="utf-8")
-    report_text = (PROJECT_SRC / "reports/report_artifacts.py").read_text(
+def test_prediction_outputs_report_writer_use_specific_metadata_attrs() -> None:
+    outputs_text = (PROJECT_SRC / "research/predictions/outputs.py").read_text(
         encoding="utf-8"
     )
+    report_text = (PROJECT_SRC / "artifacts/run_outputs.py").read_text(encoding="utf-8")
 
-    assert 'attrs["metadata"]' not in artifacts_text
+    assert 'attrs["metadata"]' not in outputs_text
     assert 'attrs.get("metadata"' not in report_text
-    assert 'attrs["prediction_metadata"]' in artifacts_text
+    assert "prediction_metadata_factory" in outputs_text
     assert '"prediction_metadata"' in report_text
 
 

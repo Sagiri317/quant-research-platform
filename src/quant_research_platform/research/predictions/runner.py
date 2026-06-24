@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
-from pathlib import Path
 
 import pandas as pd
 
@@ -12,20 +11,20 @@ from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.reports import ReportSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import validate_prediction_input
 from quant_research_platform.research.datasets.io import _iter_research_dataset_chunks
 from quant_research_platform.research.models.supervised import (
     _fit_model_result_from_frames,
 )
-from quant_research_platform.research.predictions.artifacts import (
-    _write_prediction_artifacts_from_frames,
+from quant_research_platform.research.predictions.outputs import (
+    PredictionResult,
+    build_prediction_result_from_frames,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def run_prediction_from_research_dataset(
+def build_prediction_result_from_research_dataset(
     *,
     layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
@@ -36,7 +35,7 @@ def run_prediction_from_research_dataset(
     prediction_train_end: str | None = None,
     prediction_test_start: str | None = None,
     prediction_test_end: str | None = None,
-) -> Path:
+) -> PredictionResult:
     prediction_spec = prediction_catalog.get(prediction_id)
     if (
         prediction_train_end is not None
@@ -102,26 +101,17 @@ def run_prediction_from_research_dataset(
         if str(exc) == "model_training_sample_empty":
             raise ValueError("empty_training_window") from exc
         raise
-    report_spec = ReportSpec(
-        report_id="prediction_artifacts",
-        report_definition_id="prediction_artifacts_private",
-        run_id=prediction_spec.prediction_id,
-        market_id=dataset_spec.market_id,
-        run_type=prediction_spec.run_type,
-    )
-    return _write_prediction_artifacts_from_frames(
+    return build_prediction_result_from_frames(
         _chunks(prediction_read_columns),
         prediction_spec,
         model_result.coefficients,
         model_spec.input_columns,
         prediction_model=model_result.prediction_model,
         model_metadata=model_result.metadata,
-        report_spec=report_spec,
-        layout=layout,
     )
 
 
-def run_predictions_from_research_dataset(
+def build_prediction_results_from_research_dataset(
     *,
     layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
@@ -132,9 +122,9 @@ def run_predictions_from_research_dataset(
     prediction_train_end: str | None = None,
     prediction_test_start: str | None = None,
     prediction_test_end: str | None = None,
-) -> tuple[Path, ...]:
+) -> tuple[PredictionResult, ...]:
     return tuple(
-        run_prediction_from_research_dataset(
+        build_prediction_result_from_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
             model_catalog=model_catalog,
@@ -196,6 +186,6 @@ def _prediction_timestamps(chunk: pd.DataFrame) -> pd.Series:
 
 
 __all__ = [
-    "run_prediction_from_research_dataset",
-    "run_predictions_from_research_dataset",
+    "build_prediction_result_from_research_dataset",
+    "build_prediction_results_from_research_dataset",
 ]

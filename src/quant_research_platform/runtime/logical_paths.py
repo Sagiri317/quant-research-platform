@@ -7,12 +7,21 @@ from pathlib import Path, PurePosixPath
 
 DEFAULT_GENERATED_MARKERS: tuple[str, ...] = (
     "data",
-    "reports",
+    "run_outputs",
     "manifests",
     "validations",
     "timings",
     "config",
     "logs",
+    "handoff_evidence",
+)
+EVIDENCE_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
+    "data",
+    "manifests",
+    "validations",
+    "timings",
+    "run_outputs",
+    "handoff_evidence",
 )
 
 
@@ -66,4 +75,9 @@ def _posix_parts(path: Path) -> tuple[str, ...]:
     return tuple(part for part in PurePosixPath(text).parts if part not in {"", "/"})
 
 
-__all__ = ["DEFAULT_GENERATED_MARKERS", "dataset_layer_from_path", "logical_path"]
+__all__ = [
+    "DEFAULT_GENERATED_MARKERS",
+    "EVIDENCE_LOGICAL_PATH_MARKERS",
+    "dataset_layer_from_path",
+    "logical_path",
+]

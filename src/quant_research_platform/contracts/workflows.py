@@ -7,6 +7,7 @@ from enum import StrEnum
 
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.contracts.run_outputs import OutputScope
 
 
 class WorkflowRunPolicy(StrEnum):
@@ -57,7 +58,7 @@ class WorkflowSpec:
     input_spec_ids: tuple[str, ...] = field(default_factory=tuple)
     output_spec_ids: tuple[str, ...] = field(default_factory=tuple)
     run_type: str = "workflow"
-    requires_private_boundary: bool = True
+    scope: OutputScope = OutputScope.LOCAL_ONLY
     artifact_writer_policy: WorkflowArtifactWriterPolicy = (
         WorkflowArtifactWriterPolicy.NONE
     )
@@ -108,7 +109,7 @@ class WorkflowRunSummary:
     output_spec_ids: tuple[str, ...]
     node_count: int
     completed_nodes: tuple[str, ...]
-    private_boundary_required: bool
+    scope: OutputScope
     artifact_writer_policy: str
     failure_code: str | None = None
 
@@ -128,7 +129,7 @@ class WorkflowRunSummary:
             "output_spec_ids": list(self.output_spec_ids),
             "node_count": self.node_count,
             "completed_nodes": list(self.completed_nodes),
-            "private_boundary_required": self.private_boundary_required,
+            "scope": self.scope.value,
             "artifact_writer_policy": self.artifact_writer_policy,
         }
         if self.failure_code is not None:

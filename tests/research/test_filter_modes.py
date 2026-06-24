@@ -43,16 +43,17 @@ from quant_research_platform.research.models.supervised import (
     model_smoke_hyperparameters,
 )
 from quant_research_platform.research.predictions import (
-    artifacts as prediction_artifacts,
+    build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.research.predictions import (
-    run_prediction_from_research_dataset,
+    outputs as prediction_outputs,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.research.prediction_artifact_helpers import (
     prediction_frame_from_artifact,
     prediction_frame_from_artifact_frames,
+    write_prediction_result,
 )
 
 
@@ -264,9 +265,9 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         [0.015, 0.045]
     )
     assert tradable.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert tradable.grouped_label_values[
-        "mean_label_value"
-    ].tolist() == pytest.approx([0.01, 0.02])
+    assert tradable.grouped_label_values["mean_label_value"].tolist() == pytest.approx(
+        [0.01, 0.02]
+    )
     assert unfiltered.metrics.loc[0, "ic"] == pytest.approx(1.0)
     assert unfiltered.grouped_label_values[
         "mean_label_value"
@@ -305,10 +306,13 @@ def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None
     assert result.metrics.loc[0, "ic"] == pytest.approx(1.0)
     assert result.metrics.loc[0, "rankic"] == pytest.approx(1.0)
     assert set(result.grouped_label_values["signal"]) == {"risk_signal"}
-    assert result.group_spread_summary.loc[
-        0,
-        "top_bottom_label_value_spread_mean",
-    ] > 0
+    assert (
+        result.group_spread_summary.loc[
+            0,
+            "top_bottom_label_value_spread_mean",
+        ]
+        > 0
+    )
 
 
 def test_evaluation_computes_multiple_signals_in_one_run() -> None:
@@ -502,9 +506,7 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
     )
 
     assert filtered_chunk_rows == [len(frame)]
-    assert result.coefficients.tolist() == pytest.approx(
-        expected.coefficients.tolist()
-    )
+    assert result.coefficients.tolist() == pytest.approx(expected.coefficients.tolist())
     result_metadata = dict(result.metadata)
     expected_metadata = dict(expected.metadata)
     assert result_metadata.pop("feature_importance") == pytest.approx(
@@ -516,7 +518,7 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
 def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import quant_research_platform.research.predictions.artifacts as artifacts_module
+    import quant_research_platform.research.predictions.outputs as artifacts_module
 
     frame = _filter_frame().drop(columns=["label"])
     spec = PredictionSpec(
@@ -806,17 +808,21 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
     eligible = fit_model_result(frame, eligible_spec)
     unfiltered = fit_model_result(frame, unfiltered_spec)
 
-    assert eligible.metadata | {
-        key: eligible.metadata[key]
-        for key in (
-            "dependency_status",
-            "feature_importance",
-            "hyperparameters",
-            "max_train_rows",
-            "purge_gap_steps",
-            "random_seed",
-        )
-    } == eligible.metadata
+    assert (
+        eligible.metadata
+        | {
+            key: eligible.metadata[key]
+            for key in (
+                "dependency_status",
+                "feature_importance",
+                "hyperparameters",
+                "max_train_rows",
+                "purge_gap_steps",
+                "random_seed",
+            )
+        }
+        == eligible.metadata
+    )
     assert {
         key: eligible.metadata[key]
         for key in (
@@ -933,9 +939,7 @@ def test_model_training_controls_apply_to_linear_and_estimators(
 ) -> None:
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(
-                ["2024-01-01", "2024-01-02", "2024-01-03"]
-            ),
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
             "asset_id": ["asset_a", "asset_a", "asset_a"],
             "factor": [1.0, 2.0, 3.0],
             "label": [1.0, 2.0, 3.0],
@@ -1093,7 +1097,7 @@ def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
     "model_algorithm",
     ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],
 )
-def test_rank_ensemble_prediction_artifacts_are_chunk_boundary_invariant(
+def test_rank_ensemble_prediction_outputs_are_chunk_boundary_invariant(
     model_algorithm: str,
 ) -> None:
     frame = pd.DataFrame(
@@ -1138,9 +1142,7 @@ def test_rank_ensemble_prediction_artifacts_are_chunk_boundary_invariant(
         result=result,
     )
 
-    assert one_chunk["prediction_score"].tolist() == pytest.approx(
-        [0.5, 1.0, 0.5, 1.0]
-    )
+    assert one_chunk["prediction_score"].tolist() == pytest.approx([0.5, 1.0, 0.5, 1.0])
     assert split_chunks["prediction_score"].tolist() == pytest.approx(
         one_chunk["prediction_score"].tolist()
     )
@@ -1153,14 +1155,14 @@ def _prediction_artifact_scores(
     model_spec: ModelSpec,
     result,
 ) -> pd.DataFrame:
-    build_state = prediction_artifacts._PredictionBuildState()
+    build_state = prediction_outputs._PredictionBuildState()
     output = list(
-        prediction_artifacts._iter_prediction_output_frames(
+        prediction_outputs._iter_prediction_output_frames(
             iter(frames),
             spec=prediction_spec,
             coefficients=result.coefficients,
             input_columns=model_spec.input_columns,
-            predictor=prediction_artifacts._prediction_callable(
+            predictor=prediction_outputs._prediction_callable(
                 result.coefficients,
                 model_spec.input_columns,
                 result.prediction_model,
@@ -1225,9 +1227,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
 
     assert len(filtered_chunk_rows) > 1
     assert max(filtered_chunk_rows) < len(frame)
-    assert result.coefficients.tolist() == pytest.approx(
-        expected.coefficients.tolist()
-    )
+    assert result.coefficients.tolist() == pytest.approx(expected.coefficients.tolist())
     result_metadata = dict(result.metadata)
     expected_metadata = dict(expected.metadata)
     assert result_metadata.pop("feature_importance") == pytest.approx(
@@ -1418,13 +1418,14 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     prediction_catalog = PredictionCatalog()
     prediction_catalog.register(spec)
 
-    run_root = run_prediction_from_research_dataset(
+    result = build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_eligible",
     )
+    run_root = write_prediction_result(layout, result)
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["model_metadata"]["contract_version"] == "0.1"
     assert manifest["model_metadata"]["input_count"] == 1
@@ -1485,13 +1486,14 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
         )
     )
 
-    run_root = run_prediction_from_research_dataset(
+    result = build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_open_ended",
     )
+    run_root = write_prediction_result(layout, result)
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
 
     assert manifest["prediction_metadata"]["requested_test_end"] is None
@@ -1502,7 +1504,7 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
 def test_prediction_forced_tiny_resource_chunks_match_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import quant_research_platform.research.predictions.artifacts as artifacts_module
+    import quant_research_platform.research.predictions.outputs as artifacts_module
 
     frame = pd.concat(
         [
@@ -1595,7 +1597,7 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
         )
     )
 
-    run_root = run_prediction_from_research_dataset(
+    result = build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
@@ -1605,6 +1607,7 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
         prediction_test_start="2024-01-03",
         prediction_test_end="2024-01-03",
     )
+    run_root = write_prediction_result(layout, result)
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
 
     assert manifest["train_end"] == "2024-01-02"
@@ -1666,13 +1669,14 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
         )
     )
 
-    run_root = run_prediction_from_research_dataset(
+    result = build_prediction_result_from_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         model_catalog=model_catalog,
         prediction_catalog=prediction_catalog,
         prediction_id="pred_no_leakage",
     )
+    run_root = write_prediction_result(layout, result)
     prediction = pd.read_parquet(run_root / "prediction.parquet").sort_values(
         "asset_id",
         kind="mergesort",
@@ -1740,7 +1744,7 @@ def test_prediction_unfiltered_mode_and_tradable_rejection() -> None:
         )
 
 
-def test_prediction_artifacts_fail_closed_errors_are_specific() -> None:
+def test_prediction_outputs_fail_closed_errors_are_specific() -> None:
     with pytest.raises(
         ValueError,
         match="prediction_train_end_must_precede_test_start",
@@ -1829,7 +1833,7 @@ def test_prediction_handoff_empty_training_window_fails_closed(
     )
 
     with pytest.raises(ValueError, match="empty_training_window"):
-        run_prediction_from_research_dataset(
+        build_prediction_result_from_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
             model_catalog=model_catalog,
@@ -1838,7 +1842,7 @@ def test_prediction_handoff_empty_training_window_fails_closed(
         )
 
 
-def test_prediction_artifacts_rejects_filter_columns_as_direct_features() -> None:
+def test_prediction_outputs_rejects_filter_columns_as_direct_features() -> None:
     spec = PredictionSpec(
         prediction_id="pred_bad_feature",
         model_id="linear_unfiltered",

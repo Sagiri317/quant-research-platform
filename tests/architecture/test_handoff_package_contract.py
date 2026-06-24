@@ -91,10 +91,7 @@ def test_source_tree_scan_synthesizes_static_string_fragments(tmp_path: Path) ->
         },
     )
 
-    observed = {
-        (finding["rule"], finding["scan_mode"])
-        for finding in findings
-    }
+    observed = {(finding["rule"], finding["scan_mode"]) for finding in findings}
     assert ("synthetic_alpha", "ast_static_string") in observed
     assert ("synthetic_alpha", "token_static_string") in observed
     assert ("synthetic_beta", "token_static_string") in observed
@@ -299,11 +296,14 @@ def test_handoff_source_tree_rules_import_governance_contract() -> None:
     builder = _load_handoff_builder()
     contract = _load_governance_contract()
 
-    assert tuple(
-        path.as_posix() + ("/" if path.is_dir() else "")
-        for path in builder.SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS
-    ) == contract.ACTIVE_GOVERNANCE_DOC_ROOTS
-    assert builder.source_tree_forbidden_patterns().keys() == (
+    assert (
+        tuple(
+            path.as_posix() + ("/" if path.is_dir() else "")
+            for path in builder.SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS
+        )
+        == contract.ACTIVE_GOVERNANCE_DOC_ROOTS
+    )
+    assert builder.source_tree_blocked_patterns().keys() == (
         contract.source_tree_forbidden_patterns().keys()
     )
     assert builder.source_tree_sensitive_negative_patterns().keys() == (
@@ -332,18 +332,20 @@ def test_handoff_builder_does_not_own_sensitive_negative_rules() -> None:
     assert "from governance_contract import" in source
 
 
-def test_public_safe_text_checks_use_runtime_privacy_single_source() -> None:
+def test_public_safe_text_checks_use_policy_share_safety_single_source() -> None:
     agent_safety = Path("src/quant_research_platform/agents/safety.py").read_text(
         encoding="utf-8"
     )
-    handoff_safety = (HANDOFF_ROOT / "handoff_safety.py").read_text(encoding="utf-8")
+    handoff_safety = (HANDOFF_ROOT / "verify_handoff_package.py").read_text(
+        encoding="utf-8"
+    )
     report_safety = Path(
         "src/quant_research_platform/reports/verification_evidence.py"
     ).read_text(encoding="utf-8")
 
     assert "public_text_unsafe_reason" in agent_safety
     assert "public_text_unsafe_reason" in handoff_safety
-    assert "public_text_unsafe_reason" in report_safety
+    assert "evidence_text_unsafe_reason" in report_safety
     forbidden_local_fact_sources = {
         "_UNSAFE_TEXT_PATTERNS",
         "DRIVE_ABSOLUTE_RE",
@@ -366,6 +368,7 @@ def _load_handoff_builder():
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -379,6 +382,7 @@ def _load_handoff_verifier():
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 

@@ -8,13 +8,15 @@ from typing import Annotated
 
 import typer
 
-from quant_research_platform.catalog.profiles import research_profile
-from quant_research_platform.reports.schema_inventory import build_schema_inventory
-from quant_research_platform.runtime.privacy import sanitize_public_text
+from quant_research_platform.policy.share_safety import sanitize_public_text
+from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.reports.schema_inventory import (
+    build_schema_inventory_payload,
+)
 from quant_research_platform.storage.atomic import atomic_write_text
-from quant_research_platform.workflows.verification_evidence import (
-    VerificationEvidenceRunConfig,
-    run_verification_evidence,
+from quant_research_platform.workflows.local_verification import (
+    LocalVerificationRunConfig,
+    run_local_verification,
 )
 
 app = typer.Typer(
@@ -61,7 +63,7 @@ def schema_inventory(
         typer.echo("output_already_exists", err=True)
         raise typer.Exit(code=2)
     try:
-        inventory = build_schema_inventory(project_root)
+        inventory = build_schema_inventory_payload(project_root)
     except Exception as exc:
         typer.echo(sanitize_public_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
@@ -146,8 +148,8 @@ def evidence_run(
     """Run the private local verification harness."""
 
     try:
-        result = run_verification_evidence(
-            VerificationEvidenceRunConfig(
+        result = run_local_verification(
+            LocalVerificationRunConfig(
                 output_root=output_root,
                 start_date=start_date,
                 end_date=end_date,

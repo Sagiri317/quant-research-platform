@@ -1,10 +1,9 @@
-"""Prediction artifact helpers for private report outputs."""
+"""Prediction output builders."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,21 +13,23 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.reports import ReportSpec
-from quant_research_platform.reports.report_artifacts import (
-    _write_prediction_report_artifacts_from_chunks,
-    write_prediction_report_artifacts,
-)
 from quant_research_platform.research._memory import iter_complete_time_sized_frames
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.supervised import (
     _prediction_model_input_frame,
 )
 from quant_research_platform.runtime.resources import ChunkAxis
-from quant_research_platform.storage.layout import StorageLayout
 
 
-def _write_prediction_artifacts_from_frames(
+@dataclass(frozen=True)
+class PredictionResult:
+    spec: PredictionSpec
+    output_chunks: Iterable[pd.DataFrame]
+    model_metadata: dict[str, object]
+    prediction_metadata_factory: Callable[[], dict[str, object]]
+
+
+def build_prediction_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: PredictionSpec,
     coefficients: np.ndarray,
@@ -36,9 +37,7 @@ def _write_prediction_artifacts_from_frames(
     *,
     prediction_model: object | None = None,
     model_metadata: dict[str, object],
-    report_spec: ReportSpec,
-    layout: StorageLayout,
-) -> Path:
+) -> PredictionResult:
     reject_filter_input_columns(input_columns)
     required = set((*spec.primary_key, *input_columns))
     _validate_oos_split(spec)
@@ -64,11 +63,9 @@ def _write_prediction_artifacts_from_frames(
         predictor=_prediction_callable(coefficients, input_columns, prediction_model),
         build_state=build_state,
     )
-    return _write_prediction_report_artifacts_from_chunks(
-        output_frames,
+    return PredictionResult(
         spec=spec,
-        report_spec=report_spec,
-        layout=layout,
+        output_chunks=output_frames,
         model_metadata=_prediction_static_window_model_metadata(model_metadata, spec),
         prediction_metadata_factory=lambda: build_state.prediction_metadata(
             spec=spec,
@@ -194,6 +191,7 @@ def _prediction_callable(
     prediction_model: object | None,
 ) -> Callable[[pd.DataFrame], np.ndarray]:
     if prediction_model is not None:
+
         def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
             predicted = prediction_model.predict(
                 _prediction_model_input_frame(
@@ -240,55 +238,29 @@ def _iter_prediction_work_frames(
         yield frame.loc[:, selected]
 
 
-def validate_prediction_artifacts(frame: pd.DataFrame, spec: PredictionSpec) -> None:
+def validate_prediction_outputs(frame: pd.DataFrame, spec: PredictionSpec) -> None:
     expected = tuple(dict.fromkeys((*spec.primary_key, spec.prediction_column)))
     missing = [column for column in expected if column not in frame.columns]
     if missing:
-        raise ValueError(
-            "missing_prediction_artifact_columns: " + ", ".join(missing)
-        )
+        raise ValueError("missing_prediction_output_columns: " + ", ".join(missing))
     extra = sorted(set(frame.columns).difference(expected))
     if extra:
-        raise ValueError(
-            "unregistered_prediction_artifact_columns: " + ", ".join(extra)
-        )
+        raise ValueError("unregistered_prediction_output_columns: " + ", ".join(extra))
     if frame.empty:
         raise ValueError("empty_prediction_window")
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
     if bool(timestamps.isna().any()):
         raise ValueError("invalid_prediction_timestamp_values")
     if bool((timestamps < pd.Timestamp(spec.test_start)).any()):
-        raise ValueError("prediction_artifact_before_test_start")
+        raise ValueError("prediction_output_before_test_start")
     if spec.test_end is not None and bool(
         (timestamps > pd.Timestamp(spec.test_end)).any()
     ):
-        raise ValueError("prediction_artifact_after_test_end")
-
-
-def write_prediction_artifacts(
-    frame: pd.DataFrame,
-    spec: PredictionSpec,
-    *,
-    report_spec: ReportSpec,
-    layout: StorageLayout,
-) -> Path:
-    output = frame.copy()
-    if "model_metadata" in output.attrs:
-        output.attrs["model_metadata"] = _prediction_static_window_model_metadata(
-            output.attrs["model_metadata"],
-            spec,
-        )
-    if "prediction_metadata" in output.attrs:
-        output.attrs["prediction_metadata"] = dict(output.attrs["prediction_metadata"])
-    return write_prediction_report_artifacts(
-        output,
-        spec=spec,
-        report_spec=report_spec,
-        layout=layout,
-    )
+        raise ValueError("prediction_output_after_test_end")
 
 
 __all__ = [
-    "validate_prediction_artifacts",
-    "write_prediction_artifacts",
+    "PredictionResult",
+    "build_prediction_result_from_frames",
+    "validate_prediction_outputs",
 ]

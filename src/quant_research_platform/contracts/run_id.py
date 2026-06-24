@@ -1,35 +1,8 @@
-"""Shared public-safe run id contract."""
+"""Shared run id contract."""
 
 from __future__ import annotations
 
-import re
-
-_RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
-_EXCHANGE_QUALIFIED_ASSET_SAMPLE_RE = re.compile(
-    r"(?<!\d)\d{6}\.(?:sh|sz|bj)\b"
-)
-_BARE_A_SHARE_CODE_RE = re.compile(
-    r"(?:(?<=^)|(?<=[._-]))"
-    r"(?:000|001|002|003|300|301|600|601|603|605|688|689)\d{3}"
-    r"(?=$|[._-])"
-)
-_FORBIDDEN_FRAGMENTS = (
-    "csmar",
-    "provider_id",
-    "source_id",
-    "implementation_package",
-    "data/raw",
-    "data\\raw",
-    "data/interim",
-    "data\\interim",
-    "data/processed",
-    "data\\processed",
-    "data/research",
-    "data\\research",
-    "reports/private_research",
-    "reports\\private_research",
-)
-_FORBIDDEN_TOKENS = ("provider", "source")
+from quant_research_platform.policy.identifiers import validate_run_identifier
 
 
 class RunIdValidationError(ValueError):
@@ -39,21 +12,10 @@ class RunIdValidationError(ValueError):
 def validate_run_id(value: str) -> str:
     """Return a validated run id or raise ``RunIdValidationError``."""
 
-    if not isinstance(value, str):
-        raise RunIdValidationError("invalid_run_id")
-    if not _RUN_ID_RE.fullmatch(value):
-        raise RunIdValidationError("invalid_run_id")
-    lowered = value.lower()
-    if any(fragment in lowered for fragment in _FORBIDDEN_FRAGMENTS):
-        raise RunIdValidationError("invalid_run_id")
-    tokens = tuple(token for token in re.split(r"[._-]+", lowered) if token)
-    if any(token in _FORBIDDEN_TOKENS for token in tokens):
-        raise RunIdValidationError("invalid_run_id")
-    if _EXCHANGE_QUALIFIED_ASSET_SAMPLE_RE.search(lowered):
-        raise RunIdValidationError("invalid_run_id")
-    if _BARE_A_SHARE_CODE_RE.search(lowered):
-        raise RunIdValidationError("invalid_run_id")
-    return value
+    try:
+        return validate_run_identifier(value)
+    except ValueError as exc:
+        raise RunIdValidationError("invalid_run_id") from exc
 
 
 __all__ = ["RunIdValidationError", "validate_run_id"]

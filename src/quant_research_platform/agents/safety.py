@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 from typing import Any
 
-from quant_research_platform.runtime.privacy import public_text_unsafe_reason
+from quant_research_platform.policy.share_safety import public_text_unsafe_reason
 
 
 class ProposalSafetyError(ValueError):

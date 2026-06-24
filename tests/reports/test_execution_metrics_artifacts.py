@@ -4,7 +4,7 @@ import json
 
 import pandas as pd
 
-from quant_research_platform.reports.execution_metrics_artifacts import (
+from quant_research_platform.artifacts.execution_metrics import (
     write_execution_metrics_csv,
     write_execution_metrics_json,
 )

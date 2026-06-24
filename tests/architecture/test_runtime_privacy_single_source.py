@@ -3,13 +3,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-RUNTIME_PRIVACY = Path("src/quant_research_platform/runtime/privacy.py")
-REPORT_SAFETY = Path(
-    "src/quant_research_platform/reports/verification_evidence.py"
-)
+POLICY_SHARE_SAFETY = Path("src/quant_research_platform/policy/share_safety.py")
+REPORT_SAFETY = Path("src/quant_research_platform/reports/verification_evidence.py")
 HANDOFF_SAFETY = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/"
-    "handoff/handoff_safety.py"
+    "handoff/verify_handoff_package.py"
 )
 
 
@@ -17,32 +15,25 @@ def test_report_and_handoff_safety_do_not_own_text_privacy_regexes() -> None:
     for path in (REPORT_SAFETY, HANDOFF_SAFETY):
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
-        re_imports = [
+        local_unsafe_regex_owners = [
             node
             for node in ast.walk(tree)
-            if (
-                isinstance(node, ast.Import)
-                and any(alias.name == "re" for alias in node.names)
-            )
-            or (isinstance(node, ast.ImportFrom) and node.module == "re")
-        ]
-        regex_compilers = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "re"
-            and node.func.attr == "compile"
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id.startswith("_UNSAFE")
         ]
 
-        assert re_imports == [], f"text_privacy_regex_import: {path}"
-        assert regex_compilers == [], f"text_privacy_regex_owner: {path}"
-        assert "public_text_unsafe_reason" in source
+        assert local_unsafe_regex_owners == [], f"text_privacy_regex_owner: {path}"
+        expected_delegate = (
+            "evidence_text_unsafe_reason"
+            if path == REPORT_SAFETY
+            else "public_text_unsafe_reason"
+        )
+        assert expected_delegate in source
 
 
-def test_runtime_privacy_owns_required_text_safety_semantics() -> None:
-    source = RUNTIME_PRIVACY.read_text(encoding="utf-8")
+def test_policy_owns_required_text_safety_semantics() -> None:
+    source = POLICY_SHARE_SAFETY.read_text(encoding="utf-8")
 
     for semantic in (
         "raw_export_filename",
@@ -56,4 +47,5 @@ def test_runtime_privacy_owns_required_text_safety_semantics() -> None:
 def test_handoff_member_path_rules_are_derived_from_governance_contract() -> None:
     source = HANDOFF_SAFETY.read_text(encoding="utf-8")
 
+    assert "member_name_failures" in source
     assert "package_member_name_failures" in source

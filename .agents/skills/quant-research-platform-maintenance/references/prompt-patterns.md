@@ -37,7 +37,7 @@ checked_files 为空不能 PASS。
 ```text
 使用 .agents/skills/quant-research-platform-maintenance/scripts/handoff/ 下 tracked scripts 生成 handoff。
 .run 仅作为 output/evidence layer。
-报告 builder、verifier、source-tree scan、package safety 和 handoff gate 的独立结果。
+报告 builder、verifier、source-tree scan、single verifier package-safety scan 和 handoff gate 的独立结果。
 ```
 
 ## 5. Audit-only
