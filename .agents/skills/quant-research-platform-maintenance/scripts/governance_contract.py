@@ -28,6 +28,19 @@ class TextRule:
 
 
 @dataclass(frozen=True)
+class SourceTreeSensitiveNegativeRule:
+    name: str
+    category: str
+    scan_group: str
+    pattern: str
+    flags: int = 0
+    allowed_sources: tuple[Path, ...] = ()
+
+    def compile(self) -> re.Pattern[str]:
+        return re.compile(self.pattern, self.flags)
+
+
+@dataclass(frozen=True)
 class NameRule:
     name: str
     forms: tuple[str, ...]
@@ -735,6 +748,80 @@ SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
     },
 }
 
+SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
+    SourceTreeSensitiveNegativeRule(
+        name="sensitive_local_private_path",
+        category="private_path_text",
+        scan_group="sensitive_negative_literals",
+        pattern=(
+            r"(?i)(?:[A-Za-z]:[\\/][^\n]*(?:"
+            r"data[\\/](?:raw|interim|processed|research)"
+            r"|reports[\\/]private_research"
+            r")"
+            r"|/(?:Users|home|workspace|workspaces|mnt/data)[^\n]*(?:"
+            r"data/(?:raw|interim|processed|research)"
+            r"|reports/private_research"
+            r")"
+            r"|[A-Za-z]:[\\/][^\n]*(?:private|Users)"
+            r"|/(?:Users|home)[^\n]*(?:private|data)"
+            r"|\\\\[^\n]*(?:server|share|private))"
+        ),
+        allowed_sources=(
+            GOVERNANCE_CONTRACT_SCRIPT,
+            BUILD_HANDOFF_PACKAGE_SCRIPT,
+            VERIFY_GOVERNANCE_SCRIPT,
+            PACKAGE_SAFETY_CHECK_SCRIPT,
+            HANDOFF_SAFETY_SCRIPT,
+            VERIFY_HANDOFF_PACKAGE_SCRIPT,
+            HANDOFF_SELF_TEST_SCRIPT,
+        ),
+    ),
+    SourceTreeSensitiveNegativeRule(
+        name="sensitive_secret",
+        category="secret_like_assignment",
+        scan_group="sensitive_negative_literals",
+        pattern=(
+            r"(?i)(?:api[_-]?key|secret|token|password|cookie)"
+            r"\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
+        ),
+        allowed_sources=(
+            GOVERNANCE_CONTRACT_SCRIPT,
+            BUILD_HANDOFF_PACKAGE_SCRIPT,
+            VERIFY_GOVERNANCE_SCRIPT,
+            PACKAGE_SAFETY_CHECK_SCRIPT,
+            HANDOFF_SAFETY_SCRIPT,
+            VERIFY_HANDOFF_PACKAGE_SCRIPT,
+            HANDOFF_SELF_TEST_SCRIPT,
+        ),
+    ),
+    SourceTreeSensitiveNegativeRule(
+        name="sensitive_provider_marker",
+        category="provider_marker_text",
+        scan_group="sensitive_negative_literals",
+        pattern=(
+            r"(?i)\b(?:vendor_marker|vendor_payload|raw_vendor|provider_marker"
+            r"|provider_name=raw-provider|source_name=raw-source"
+            r"|data_provider=raw-provider|vendor_name=raw-provider)\b"
+        ),
+        allowed_sources=(
+            GOVERNANCE_CONTRACT_SCRIPT,
+            BUILD_HANDOFF_PACKAGE_SCRIPT,
+            VERIFY_GOVERNANCE_SCRIPT,
+            PACKAGE_SAFETY_CHECK_SCRIPT,
+            HANDOFF_SAFETY_SCRIPT,
+            VERIFY_HANDOFF_PACKAGE_SCRIPT,
+            HANDOFF_SELF_TEST_SCRIPT,
+        ),
+    ),
+    SourceTreeSensitiveNegativeRule(
+        name="sensitive_stock_code_sample",
+        category="stock_code_sample_text",
+        scan_group="sensitive_negative_literals",
+        pattern=r"\b[03468]\d{5}\.(?:SZ|SH|BJ)\b",
+        allowed_sources=(GOVERNANCE_CONTRACT_SCRIPT,),
+    ),
+)
+
 SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
     GOVERNANCE_CONTRACT_SCRIPT: {
         "RETIRED_NAME_RULES",
@@ -756,12 +843,15 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST",
         "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
         "SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST",
+        "SOURCE_TREE_SENSITIVE_NEGATIVE_RULES",
         "active_doc_forbidden_patterns",
         "path_name_forbidden_patterns",
         "python_symbol_forbidden_patterns",
         "structured_key_forbidden_patterns",
         "synthesized_string_forbidden_patterns",
         "source_tree_forbidden_patterns",
+        "source_tree_sensitive_negative_rules",
+        "source_tree_sensitive_negative_patterns",
         "stale_fixture_markers",
         "is_allowed_stale_or_retired_fixture",
         "is_allowed_rule_definition",
@@ -782,7 +872,6 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "source_tree_forbidden_patterns",
         "source_tree_active_test_literal_patterns",
         "source_tree_governance_truth_patterns",
-        "source_tree_sensitive_negative_patterns",
         "sanitize_handoff_text",
     },
     HANDOFF_SAFETY_SCRIPT: {
@@ -1086,6 +1175,20 @@ def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     patterns.update(retired_public_surface_patterns())
     patterns.update(version_surface_forbidden_patterns())
     return patterns
+
+
+def source_tree_sensitive_negative_rules() -> tuple[
+    SourceTreeSensitiveNegativeRule,
+    ...,
+]:
+    return SOURCE_TREE_SENSITIVE_NEGATIVE_RULES
+
+
+def source_tree_sensitive_negative_patterns() -> dict[str, re.Pattern[str]]:
+    return {
+        rule.name: rule.compile()
+        for rule in source_tree_sensitive_negative_rules()
+    }
 
 
 def path_name_forbidden_rule_ids() -> tuple[str, ...]:

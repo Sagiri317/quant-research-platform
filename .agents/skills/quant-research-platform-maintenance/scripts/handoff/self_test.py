@@ -19,6 +19,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from build_handoff_package import sanitize_handoff_text  # noqa: E402
 from handoff_safety import scan_handoff_zip, unsafe_text_reason  # noqa: E402
+from verify_handoff_package import verify_smoke_compare_status  # noqa: E402
 
 
 def main() -> int:
@@ -63,6 +64,17 @@ def main() -> int:
     )
     if task_template.get("schema_version") != "handoff-task-metadata/0.1":
         return fail("task_metadata_template_schema_version_invalid")
+    smoke_compare_status = task_template.get("handoff_evidence", {}).get(
+        "smoke-compare-status"
+    )
+    if not isinstance(smoke_compare_status, dict):
+        return fail("task_metadata_template_smoke_compare_status_missing")
+    smoke_compare_failures = verify_smoke_compare_status(smoke_compare_status)
+    if smoke_compare_failures:
+        return fail(
+            "task_metadata_template_smoke_compare_status_invalid="
+            + ",".join(smoke_compare_failures)
+        )
     sidecar_schema = json.loads(
         support_path(
             "schemas/sidecar.schema.json",

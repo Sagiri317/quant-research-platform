@@ -44,6 +44,7 @@ GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 BASELINE_FINAL_COMPARE_EVIDENCE = "handoff_evidence/baseline-final-compare.json"
+SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
 EXPECTED_FAILURE_REASON = "stale_rank_ensemble_prediction_baseline"
 RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
     "equal_weight_rank_ensemble",
@@ -477,6 +478,8 @@ def verify_handoff_evidence_json(
             failures.extend(verify_generation_evidence(payload, sidecar, archive))
         if name == SOURCE_TREE_SCAN_EVIDENCE:
             failures.extend(verify_source_tree_scan_evidence(payload, sidecar))
+        if name == SMOKE_COMPARE_STATUS_EVIDENCE:
+            failures.extend(verify_smoke_compare_status(payload))
         if name.endswith("verification-matrix.json"):
             failures.extend(verify_verification_matrix(payload))
     if VERIFICATION_MATRIX_EVIDENCE not in archive.namelist():
@@ -716,6 +719,45 @@ def artifact_matches_family(artifact_id: str, expected_family: str) -> bool:
             artifact_id,
         )
     )
+
+
+def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(payload, dict):
+        return ["smoke_compare_status_must_be_object"]
+    if payload.get("schema_version") != "handoff-smoke-compare-status/0.1":
+        failures.append("smoke_compare_status_schema_version_mismatch")
+    if "status" in payload:
+        failures.append("smoke_compare_status_top_level_status_present")
+    if "record_status" not in payload:
+        failures.append("smoke_compare_status_record_status_missing")
+    elif payload.get("record_status") != "PASS":
+        failures.append("smoke_compare_status_record_status_invalid")
+    if "overall_smoke_compare_status" not in payload:
+        failures.append("smoke_compare_status_overall_missing")
+    elif payload.get("overall_smoke_compare_status") not in VALID_STATUSES:
+        failures.append("smoke_compare_status_overall_invalid")
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        failures.append("smoke_compare_status_results_missing")
+        return failures
+    result_statuses: list[str] = []
+    for index, row in enumerate(results):
+        if not isinstance(row, dict):
+            failures.append(f"smoke_compare_status_result_not_object: {index}")
+            continue
+        status = row.get("status")
+        if status not in VALID_STATUSES:
+            failures.append(f"smoke_compare_status_result_status_invalid: {index}")
+            continue
+        result_statuses.append(str(status))
+        for key in ("name", "reason"):
+            if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
+                failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
+    expected_overall = aggregate_status(result_statuses)
+    if payload.get("overall_smoke_compare_status") != expected_overall:
+        failures.append(f"smoke_compare_status_overall_mismatch: {expected_overall}")
+    return failures
 
 
 def verify_source_tree_scan_evidence(

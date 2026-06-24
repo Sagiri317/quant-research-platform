@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 import subprocess
@@ -305,6 +306,30 @@ def test_handoff_source_tree_rules_import_governance_contract() -> None:
     assert builder.source_tree_forbidden_patterns().keys() == (
         contract.source_tree_forbidden_patterns().keys()
     )
+    assert builder.source_tree_sensitive_negative_patterns().keys() == (
+        contract.source_tree_sensitive_negative_patterns().keys()
+    )
+
+
+def test_handoff_builder_does_not_own_sensitive_negative_rules() -> None:
+    builder_path = HANDOFF_ROOT / "build_handoff_package.py"
+    source = builder_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(builder_path))
+    local_owners: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "source_tree_sensitive_negative_patterns":
+                local_owners.append(node.name)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.startswith(
+                    "SOURCE_TREE_SENSITIVE_NEGATIVE"
+                ):
+                    local_owners.append(target.id)
+
+    assert local_owners == []
+    assert "source_tree_sensitive_negative_patterns" in source
+    assert "from governance_contract import" in source
 
 
 def test_public_safe_text_checks_use_runtime_privacy_single_source() -> None:

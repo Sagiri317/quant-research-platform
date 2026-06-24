@@ -120,6 +120,54 @@
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_.-]+$"
       },
+      "properties": {
+        "smoke-compare-status": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "record_status",
+            "overall_smoke_compare_status",
+            "results"
+          ],
+          "not": {
+            "required": ["status"]
+          },
+          "properties": {
+            "schema_version": {
+              "const": "handoff-smoke-compare-status/0.1"
+            },
+            "record_status": {
+              "const": "PASS"
+            },
+            "overall_smoke_compare_status": {
+              "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+            },
+            "results": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "status", "reason"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "status": {
+                    "enum": ["PASS", "FAIL", "NOT_RUN", "BLOCKED"]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,

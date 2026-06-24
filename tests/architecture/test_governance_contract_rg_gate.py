@@ -10,6 +10,7 @@ from pathlib import Path
 from tests.helpers import frequency_ids
 from tests.helpers.governance_fixtures import (
     representative_name_forms,
+    source_tree_sensitive_rule_summary,
     text_rule_example,
 )
 
@@ -212,6 +213,26 @@ def test_governance_negative_fixtures_do_not_hardcode_rule_inventory() -> None:
                 hits.append(f"{path}:{node.lineno}: {','.join(matched)}")
 
     assert hits == [], "hardcoded_governance_fixture: " + "; ".join(hits)
+
+
+def test_source_tree_sensitive_negative_rules_are_contract_owned() -> None:
+    from governance_contract import (
+        SOURCE_TREE_SENSITIVE_NEGATIVE_RULES,
+        source_tree_sensitive_negative_patterns,
+        source_tree_sensitive_negative_rules,
+    )
+
+    rules = source_tree_sensitive_negative_rules()
+    patterns = source_tree_sensitive_negative_patterns()
+    summary = source_tree_sensitive_rule_summary(rules)
+
+    assert rules == SOURCE_TREE_SENSITIVE_NEGATIVE_RULES
+    assert rules
+    assert set(patterns) == {rule.name for rule in rules}
+    assert {item[0] for item in summary} == set(patterns)
+    assert {rule.scan_group for rule in rules} == {"sensitive_negative_literals"}
+    assert all(rule.category for rule in rules)
+    assert all(rule.allowed_sources for rule in rules)
 
 
 def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:

@@ -14,5 +14,28 @@
     "schema_version": "handoff-validation-evidence/0.1",
     "checks": []
   },
-  "handoff_evidence": {}
+  "handoff_evidence": {
+    "smoke-compare-status": {
+      "schema_version": "handoff-smoke-compare-status/0.1",
+      "record_status": "PASS",
+      "overall_smoke_compare_status": "NOT_RUN",
+      "results": [
+        {
+          "name": "3-year smoke",
+          "status": "NOT_RUN",
+          "reason": "This follow-up changes only governance/safety tooling, handoff evidence schema, tests, and docs. It does not touch research numeric output paths, dataset assembly, factor/model/portfolio calculations, or smoke execution logic."
+        },
+        {
+          "name": "6-year smoke",
+          "status": "NOT_RUN",
+          "reason": "This follow-up changes only governance/safety tooling, handoff evidence schema, tests, and docs. It does not touch research numeric output paths, dataset assembly, factor/model/portfolio calculations, or smoke execution logic."
+        },
+        {
+          "name": "baseline-final compare",
+          "status": "NOT_RUN",
+          "reason": "This follow-up changes only governance/safety tooling, handoff evidence schema, tests, and docs. It does not touch research numeric output paths, dataset assembly, factor/model/portfolio calculations, or smoke execution logic."
+        }
+      ]
+    }
+  }
 }

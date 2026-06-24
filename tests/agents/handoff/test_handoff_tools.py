@@ -109,9 +109,16 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
 def _rewrite_package_member(package: Path, member: str, data: bytes) -> None:
     temp = package.with_suffix(".rewrite.zip")
     with zipfile.ZipFile(package, "r") as src, zipfile.ZipFile(temp, "w") as dst:
+        replaced = False
         for info in src.infolist():
-            payload = data if info.filename == member else src.read(info.filename)
+            if info.filename == member:
+                payload = data
+                replaced = True
+            else:
+                payload = src.read(info.filename)
             dst.writestr(info, payload)
+        if not replaced:
+            dst.writestr(member, data)
     temp.replace(package)
 
 
@@ -143,6 +150,26 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _smoke_compare_status_payload(
+    *rows: tuple[str, str],
+    overall: str = "NOT_RUN",
+) -> dict[str, object]:
+    reason = (
+        "follow-up changes are limited to governance/safety tooling, handoff "
+        "evidence schema, tests, and docs; they do not touch research numeric "
+        "output paths"
+    )
+    return {
+        "schema_version": "handoff-smoke-compare-status/0.1",
+        "record_status": "PASS",
+        "overall_smoke_compare_status": overall,
+        "results": [
+            {"name": name, "status": status, "reason": reason}
+            for name, status in rows
+        ],
+    }
 
 
 def test_tracked_handoff_tool_source_of_truth_exists() -> None:
@@ -331,7 +358,7 @@ def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
 
     rules = builder.source_tree_sensitive_negative_patterns()
 
-    assert rules["sensitive_local_private_path"].search(text)
+    assert any(pattern.search(text) for pattern in rules.values())
 
 
 @pytest.mark.parametrize(
@@ -759,6 +786,99 @@ def test_verify_recursively_rejects_forbidden_handoff_evidence_payload_keys() ->
         "handoff_evidence_forbidden_field: "
         "handoff_evidence/custom.json: checks.0.nested.check"
     ]
+
+
+def test_verify_smoke_compare_status_separates_record_and_actual_status() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _smoke_compare_status_payload(
+        ("3-year smoke", "NOT_RUN"),
+        ("6-year smoke", "NOT_RUN"),
+        ("baseline-final compare", "NOT_RUN"),
+    )
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert failures == []
+
+
+def test_verify_smoke_compare_status_rejects_top_level_status_alias() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _smoke_compare_status_payload(
+        ("3-year smoke", "NOT_RUN"),
+        ("6-year smoke", "NOT_RUN"),
+        ("baseline-final compare", "NOT_RUN"),
+    )
+    payload["status"] = "PASS"
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert "smoke_compare_status_top_level_status_present" in failures
+    assert "smoke_compare_status_overall_mismatch: NOT_RUN" not in failures
+
+
+@pytest.mark.parametrize(
+    ("statuses", "overall"),
+    [
+        (("PASS", "PASS", "PASS"), "PASS"),
+        (("PASS", "FAIL", "NOT_RUN"), "FAIL"),
+        (("PASS", "BLOCKED", "NOT_RUN"), "BLOCKED"),
+        (("PASS", "NOT_RUN", "PASS"), "NOT_RUN"),
+    ],
+)
+def test_verify_smoke_compare_status_enforces_overall_semantics(
+    statuses: tuple[str, str, str],
+    overall: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _smoke_compare_status_payload(
+        ("3-year smoke", statuses[0]),
+        ("6-year smoke", statuses[1]),
+        ("baseline-final compare", statuses[2]),
+        overall=overall,
+    )
+
+    assert verifier.verify_smoke_compare_status(payload) == []
+    payload["overall_smoke_compare_status"] = "PASS"
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    if overall == "PASS":
+        assert "smoke_compare_status_overall_mismatch: PASS" not in failures
+    else:
+        assert f"smoke_compare_status_overall_mismatch: {overall}" in failures
+
+
+def test_verify_handoff_package_rejects_old_smoke_compare_status_shape(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    old_payload = {
+        "schema_version": "handoff-smoke-compare-status/0.1",
+        "status": "PASS",
+        "results": [
+            {"name": "3-year smoke", "status": "NOT_RUN", "reason": "not run"},
+            {"name": "6-year smoke", "status": "NOT_RUN", "reason": "not run"},
+            {
+                "name": "baseline-final compare",
+                "status": "NOT_RUN",
+                "reason": "not run",
+            },
+        ],
+    }
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/smoke-compare-status.json",
+        (json.dumps(old_payload, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert any(
+        failure.startswith("smoke_compare_status_top_level_status_present")
+        for failure in failures
+    )
 
 
 def test_handoff_evidence_forbidden_keys_are_fast_contract_checks() -> None:

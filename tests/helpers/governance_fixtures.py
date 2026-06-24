@@ -170,3 +170,18 @@ def representative_private_paths() -> tuple[str, ...]:
     """Derive public-unsafe path fixtures from runtime privacy roots."""
 
     return tuple(f"{root}/negative-fixture" for root in PRIVATE_BOUNDARY_ROOTS)
+
+
+def source_tree_sensitive_rule_summary(
+    rules: Iterable[Any],
+) -> tuple[tuple[str, str, str], ...]:
+    """Summarize source-tree sensitive rules without copying rule inventory."""
+
+    return tuple(
+        (
+            str(rule.name),
+            str(rule.category),
+            str(rule.scan_group),
+        )
+        for rule in rules
+    )

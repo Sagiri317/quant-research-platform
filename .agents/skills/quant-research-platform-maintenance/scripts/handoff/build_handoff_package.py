@@ -42,6 +42,7 @@ from governance_contract import (  # noqa: E402
     iter_structured_key_findings,
     iter_synthesized_string_findings,
     retired_governance_path_findings,
+    source_tree_sensitive_negative_patterns,
 )
 from governance_contract import (  # noqa: E402
     source_tree_forbidden_patterns as governance_source_tree_forbidden_patterns,
@@ -1248,36 +1249,6 @@ def source_tree_path_allowed(
 
 def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     return governance_source_tree_forbidden_patterns()
-
-
-def source_tree_sensitive_negative_patterns() -> dict[str, re.Pattern[str]]:
-    return {
-        "sensitive_local_private_path": re.compile(
-            r"(?i)(?:[A-Za-z]:[\\/][^\n]*(?:"
-            r"data[\\/](?:raw|interim|processed|research)"
-            r"|reports[\\/]private_research"
-            r")"
-            r"|/(?:Users|home|workspace|workspaces|mnt/data)[^\n]*(?:"
-            r"data/(?:raw|interim|processed|research)"
-            r"|reports/private_research"
-            r")"
-            r"|[A-Za-z]:[\\/][^\n]*(?:private|Users)"
-            r"|/(?:Users|home)[^\n]*(?:private|data)"
-            r"|\\\\[^\n]*(?:server|share|private))"
-        ),
-        "sensitive_secret": re.compile(
-            r"(?i)(?:api[_-]?key|secret|token|password|cookie)"
-            r"\s*[:=]\s*['\"]?[A-Za-z0-9._~+/=-]{8,}"
-        ),
-        "sensitive_provider_marker": re.compile(
-            r"(?i)\b(?:vendor_marker|vendor_payload|raw_vendor|provider_marker"
-            r"|provider_name=raw-provider|source_name=raw-source"
-            r"|data_provider=raw-provider|vendor_name=raw-provider)\b"
-        ),
-        "sensitive_stock_code_sample": re.compile(
-            r"\b[03468]\d{5}\.(?:SZ|SH|BJ)\b"
-        ),
-    }
 
 
 def is_reserved_handoff_evidence_path(name: str) -> bool:
