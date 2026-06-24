@@ -181,8 +181,8 @@ def main() -> int:
     clone_command = "git clone --branch <branch-from-sidecar> final-branch.bundle repo"
     if clone_command not in readme:
         return fail("readme_missing_branch_clone_command")
-    if "not handoff contract requirements" not in readme:
-        return fail("readme_missing_legacy_tools_not_required_note")
+    if "handoff 合同只由本目录" not in readme:
+        return fail("readme_missing_current_contract_source")
     print("self_test_status=PASS")
     return 0
 

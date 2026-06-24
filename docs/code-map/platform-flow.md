@@ -23,8 +23,7 @@ data -> feature -> signal/model -> evaluate -> evidence
 ```
 
 该链路受 `current contract` 和 `current-contract-only` 约束：文档、脚本、
-tests 和 handoff evidence 只保护当前合同，不把历史阶段、旧路径或旧字段当成
-当前事实。
+tests 和 handoff evidence 只保护当前合同。
 
 ## 关键目录
 
@@ -68,7 +67,7 @@ runtime 提供 privacy、resources、logging、workflow records 和 execution me
 
 ## reports
 
-reports 层只生成 public-safe evidence 和 report artifacts，不保存历史状态事实。
+reports 层只生成 public-safe evidence 和 report artifacts。
 `private data safety` 是 reports 和 handoff 的硬边界。
 
 ## interfaces

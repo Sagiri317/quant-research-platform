@@ -64,4 +64,4 @@ templates/handoff/
 
 ## 读取规则
 
-先用 live git baseline 确认现场，再按任务选择最小文件集合。不要为了找当前状态而读取历史 reports、旧 handoff 或 `.run/` 产物。
+先用 live git baseline 确认现场，再按任务选择最小文件集合。`.run/` 产物不定义当前合同。

@@ -5,7 +5,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.helpers.governance_fixtures import representative_name_forms
+from tests.helpers.governance_fixtures import (
+    forms_matching_pattern,
+    python_symbol_fixture,
+    representative_name_forms,
+    rule_form,
+    rule_forms,
+    structured_key_document,
+    structured_value_document,
+    synthesized_string_assignment,
+    text_rule_example,
+)
 
 REPO_ROOT = Path.cwd()
 VERIFY_GOVERNANCE = (
@@ -79,13 +89,13 @@ def test_governance_allows_sanitization_negative_fixtures_only() -> None:
 
 def test_active_doc_scan_collects_non_empty_clean_tree_file_set() -> None:
     module = _load_governance_module()
+    contract = _load_contract_module()
 
     paths = module.active_doc_files(Path("."))
 
     assert "AGENTS.md" in paths
     assert "README.md" in paths
-    assert "PROJECT_STATUS.md" not in paths
-    assert ".agents/briefs/current-qrp-status.md" not in paths
+    assert set(contract.RETIRED_GOVERNANCE_EXACT_PATHS).isdisjoint(paths)
     assert any(path.startswith(".agents/") for path in paths)
     assert (
         ".agents/skills/quant-research-platform-maintenance/scripts/handoff/README.md"
@@ -193,7 +203,9 @@ def test_retired_governance_prefix_existing_in_worktree_fails(
     tmp_path: Path,
 ) -> None:
     contract = _load_contract_module()
-    retired = tmp_path / "docs" / "reports" / "clean-rewrite-0.1-test.md"
+    prefix = contract.RETIRED_GOVERNANCE_PREFIXES[0]
+    relative = prefix + "test.md"
+    retired = tmp_path / relative
     retired.parent.mkdir(parents=True)
     retired.write_text("retired report resurrected\n", encoding="utf-8")
 
@@ -201,7 +213,7 @@ def test_retired_governance_prefix_existing_in_worktree_fails(
 
     assert findings == [
         {
-            "path": "docs/reports/clean-rewrite-0.1-test.md",
+            "path": relative,
             "rule": "retired_governance_prefix",
         }
     ]
@@ -209,11 +221,14 @@ def test_retired_governance_prefix_existing_in_worktree_fails(
 
 def test_active_doc_scan_fails_stale_current_truth(tmp_path: Path) -> None:
     module = _load_governance_module()
+    contract = _load_contract_module()
     stale_cases = (
-        "当前状态来自 feature/qrp-clean-rewrite。",
-        "clean rewrite 是 current state。",
-        "The draft PR is current truth.",
-        "." + "run official tool source",
+        *(
+            text_rule_example(contract.STALE_GOVERNANCE_TRUTH_RULES, rule.name)
+            for rule in contract.STALE_GOVERNANCE_TRUTH_RULES
+        ),
+        f"{rule_form(contract.RETIRED_NAME_RULES, 'clean_rewrite')} is current.",
+        f"{rule_form(contract.RETIRED_NAME_RULES, 'draft_pr')} is current.",
     )
 
     for index, text in enumerate(stale_cases):
@@ -245,54 +260,29 @@ def test_active_doc_forbidden_patterns_include_retired_public_surface() -> None:
     contract = _load_contract_module()
 
     patterns = contract.active_doc_forbidden_patterns()
+    cases = representative_name_forms(contract.RETIRED_PUBLIC_SURFACE_RULES)
 
-    assert patterns["retired_execution_mode"].search("ExecutionMode")
-    assert patterns["retired_daily_panel"].search("daily-panel")
-    assert patterns["retired_model_family"].search("model_family")
+    for rule, form in cases.items():
+        assert patterns[rule].search(form)
 
 
 def test_retired_naming_rules_cover_required_derived_forms() -> None:
     contract = _load_contract_module()
-    examples = {
-        "project_status": [
-            "PROJECT_STATUS.md",
-            "project_status",
-            "PROJECT_STATUS",
-            "ProjectStatus",
-            "project-status",
-        ],
-        "current_qrp_status": [
-            "current-qrp-status",
-            "current_qrp_status",
-            "CurrentQrpStatus",
-            "currentQrpStatus",
-        ],
-        "clean_rewrite": [
-            "clean-rewrite",
-            "clean_rewrite",
-            "clean rewrite",
-            "CleanRewrite",
-            "cleanRewrite",
-            "CLEAN_REWRITE",
-            "Clean Rewrite",
-            "Clean-Rewrite",
-            "QRP Clean Rewrite",
-            "QrpCleanRewrite",
-            "QRPCleanRewrite",
-            "qrp-clean-rewrite",
-            "qrp_clean_rewrite",
-        ],
-        "retired_execution_mode": [
-            "ExecutionMode",
-            "execution_mode",
-            "execution-mode",
-            "--execution-mode",
-        ],
-    }
+    selected_rules = (
+        "project_status",
+        "current_qrp_status",
+        "clean_rewrite",
+        "retired_execution_mode",
+    )
+    all_rules = (
+        *contract.RETIRED_NAME_RULES,
+        *contract.RETIRED_PUBLIC_SURFACE_RULES,
+    )
 
     patterns = contract.retired_name_patterns()
 
-    for rule, forms in examples.items():
+    for rule in selected_rules:
+        forms = rule_forms(all_rules, rule)
         assert rule in patterns
         for form in forms:
             assert patterns[rule].search(form), (rule, form)
@@ -378,25 +368,22 @@ def test_changed_files_with_base_ref_includes_untracked_files(tmp_path: Path) ->
 def test_retired_status_documents_are_not_required_active_docs() -> None:
     contract = _load_contract_module()
 
-    assert "PROJECT_STATUS.md" not in contract.ACTIVE_GOVERNANCE_DOC_ROOTS
+    active_roots = set(contract.ACTIVE_GOVERNANCE_DOC_ROOTS)
+    assert set(contract.RETIRED_GOVERNANCE_EXACT_PATHS).isdisjoint(active_roots)
     assert all(
-        "current-qrp-status.md" not in prefix
-        for prefix in contract.ACTIVE_GOVERNANCE_DOC_ROOTS
-    )
-    assert all(
-        "clean-rewrite-0.1" not in prefix
-        for prefix in contract.ACTIVE_GOVERNANCE_DOC_ROOTS
+        not any(root.startswith(prefix) for root in active_roots)
+        for prefix in contract.RETIRED_GOVERNANCE_PREFIXES
     )
 
 
 def test_path_name_gate_fails_retired_stage_paths(tmp_path: Path) -> None:
     module = _load_governance_module()
+    contract = _load_contract_module()
+    retired_component = rule_form(contract.RETIRED_NAME_RULES, "clean_rewrite")
     cases = (
-        "tests/architecture/test_CLEAN_REWRITE_fake.py",
-        "tests/contracts/test_clean_rewrite_fake.py",
-        "docs/clean-rewrite-guide.md",
-        "docs/reports/clean-rewrite-0.1-test.md",
-        ".agents/briefs/current-qrp-status.md",
+        f"tests/architecture/test_{retired_component}_fixture.py",
+        contract.RETIRED_GOVERNANCE_EXACT_PATHS[1],
+        contract.RETIRED_GOVERNANCE_PREFIXES[0] + "fixture.md",
     )
     for relative in cases:
         path = tmp_path / relative
@@ -418,42 +405,9 @@ def test_python_symbol_gate_fails_retired_stage_and_surface_names(
     tmp_path: Path,
 ) -> None:
     module = _load_governance_module()
+    contract = _load_contract_module()
     path = tmp_path / "tests" / "sample_symbols.py"
     path.parent.mkdir(parents=True)
-    path.write_text(
-        "\n".join(
-            [
-                "import pytest",
-                "class CleanRewriteFixture:",
-                "    pass",
-                "class QRPCleanRewriteHelper:",
-                "    pass",
-                "class QrpCleanRewriteHelper:",
-                "    pass",
-                "class ExecutionMode:",
-                "    pass",
-                "def test_current_qrp_status():",
-                "    pass",
-                "def test_CLEAN_REWRITE_fake_symbol():",
-                "    pass",
-                "@pytest.fixture",
-                "def daily_panel():",
-                "    return None",
-                "def clean_rewrite_fixture():",
-                "    return None",
-                "clean_rewrite_fixture_value = None",
-                "CLEAN_REWRITE_FLAG = False",
-                "MODEL_ALGORITHMS = ()",
-                "model_family = 'linear'",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    result = module.Result()
-
-    module.check_python_symbol_names(result, tmp_path, ["tests/sample_symbols.py"])
-
     expected_rules = (
         "clean_rewrite",
         "current_qrp_status",
@@ -462,6 +416,15 @@ def test_python_symbol_gate_fails_retired_stage_and_surface_names(
         "retired_model_algorithm_collection",
         "retired_model_family",
     )
+    source, _symbols = python_symbol_fixture(
+        (*contract.RETIRED_NAME_RULES, *contract.RETIRED_PUBLIC_SURFACE_RULES),
+        expected_rules,
+    )
+    path.write_text(source, encoding="utf-8")
+    result = module.Result()
+
+    module.check_python_symbol_names(result, tmp_path, ["tests/sample_symbols.py"])
+
     for rule in expected_rules:
         assert any(rule in error for error in result.errors), (rule, result.errors)
 
@@ -490,20 +453,31 @@ def test_python_symbol_gate_allows_declared_current_runtime_symbols(
 
 def test_synthesized_string_gate_fails_retired_stage_names(tmp_path: Path) -> None:
     module = _load_governance_module()
+    contract = _load_contract_module()
     path = tmp_path / "tests" / "sample_split_strings.py"
     path.parent.mkdir(parents=True)
+    cases = {
+        "clean_rewrite": rule_form(
+            contract.RETIRED_NAME_RULES,
+            "clean_rewrite",
+        ),
+        "old_feature_branch_current_truth": text_rule_example(
+            contract.STALE_GOVERNANCE_TRUTH_RULES,
+            "old_feature_branch_current_truth",
+        ),
+        "current_qrp_status": rule_form(
+            contract.RETIRED_NAME_RULES,
+            "current_qrp_status",
+        ),
+        "open_issues_register": rule_form(
+            contract.RETIRED_NAME_RULES,
+            "open_issues_register",
+        ),
+    }
     path.write_text(
         "\n".join(
-            [
-                'stage = "clean" "-rewrite"',
-                'display = "QRP " "Clean Rewrite"',
-                'flag = "CLEAN" "_REWRITE"',
-                'title = "Clean" "-Rewrite"',
-                'branch = "feature/" + "qrp-clean-rewrite"',
-                'status_doc = "-".join(["current", "qrp", "status"])',
-                'register = "-".join(["open", "issues", "register"])',
-                'snake = "_".join(["clean", "rewrite"])',
-            ]
+            synthesized_string_assignment(value, variable=f"value_{index}")
+            for index, value in enumerate(cases.values())
         )
         + "\n",
         encoding="utf-8",
@@ -516,13 +490,7 @@ def test_synthesized_string_gate_fails_retired_stage_names(tmp_path: Path) -> No
         ["tests/sample_split_strings.py"],
     )
 
-    expected_rules = (
-        "clean_rewrite",
-        "old_feature_branch_current_truth",
-        "current_qrp_status",
-        "open_issues_register",
-    )
-    for rule in expected_rules:
+    for rule in cases:
         assert any(rule in error for error in result.errors), (rule, result.errors)
 
 
@@ -558,43 +526,25 @@ def test_structured_key_gate_fails_retired_keys_and_allows_values(
     tmp_path: Path,
 ) -> None:
     module = _load_governance_module()
+    contract = _load_contract_module()
+    retired_keys = forms_matching_pattern(
+        contract.RETIRED_NAME_RULES,
+        "clean_rewrite",
+        contract.structured_key_forbidden_patterns()["clean_rewrite"],
+    )
     bad = tmp_path / "config.json"
-    bad.write_text(
-        (
-            "{\n"
-            '  "clean_rewrite": true,\n'
-            '  "CleanRewrite": true,\n'
-            '  "CLEAN_REWRITE_FLAG": true\n'
-            "}\n"
-        ),
-        encoding="utf-8",
-    )
+    bad.write_text(structured_key_document(retired_keys), encoding="utf-8")
     good = tmp_path / "allowed.json"
-    good.write_text(
-        (
-            "{\n"
-            '  "retired_name": "clean-rewrite",\n'
-            '  "retired_branch": "feature/qrp-clean-rewrite"\n'
-            "}\n"
-        ),
-        encoding="utf-8",
-    )
+    good.write_text(structured_value_document(retired_keys), encoding="utf-8")
     result = module.Result()
 
     module.check_structured_key_names(result, tmp_path, ["config.json", "allowed.json"])
 
-    assert any(
-        "config.json" in error and "clean_rewrite" in error
-        for error in result.errors
-    )
-    assert any(
-        "config.json" in error and "CleanRewrite" in error
-        for error in result.errors
-    )
-    assert any(
-        "config.json" in error and "CLEAN_REWRITE_FLAG" in error
-        for error in result.errors
-    )
+    for retired_key in retired_keys:
+        assert any(
+            "config.json" in error and retired_key in error
+            for error in result.errors
+        )
     assert not any("allowed.json" in error for error in result.errors)
 
 

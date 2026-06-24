@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import zipfile
 from dataclasses import dataclass, field
@@ -29,28 +28,14 @@ if str(SCRIPT_DIR) not in sys.path:
 from governance_contract import (  # noqa: E402
     PACKAGE_FORBIDDEN_PATH_PARTS,
     is_scanner_definition_line,
+    package_member_name_failures,
 )
 from quant_research_platform.runtime.privacy import public_text_unsafe_reason  # noqa: E402
-
-BLOCKED_EXTENSIONS = {
-    ".parquet",
-    ".csv",
-    ".pkl",
-    ".pickle",
-    ".feather",
-    ".arrow",
-    ".orc",
-    ".db",
-    ".sqlite",
-    ".sqlite3",
-}
-
-BLOCKED_PATH_PARTS = PACKAGE_FORBIDDEN_PATH_PARTS
 
 PACKAGE_EXTENSIONS = {".zip", ".bundle"}
 TEXT_EXTENSIONS = {".md", ".patch", ".txt", ".json", ".yaml", ".yml", ".toml", ".py"}
 MAX_TEXT_SCAN_BYTES = 2_000_000
-PRIVATE_RUN_PATH_ROOTS = (".run/private", ".run/smoke")
+BLOCKED_PATH_PARTS = PACKAGE_FORBIDDEN_PATH_PARTS
 
 
 @dataclass
@@ -74,35 +59,28 @@ def check_entry_path(
     name: str,
     allow_nested_packages: bool,
 ) -> None:
-    if name.startswith("/") or re.match(r"(?i)^[a-z]:[\\/]", name):
-        result.errors.append(f"absolute path entry: {name}")
     norm = normalize_entry(name)
     if not norm or norm.endswith("/"):
         return
-    if ".." in PurePosixPath(norm).parts:
-        result.errors.append(f"path traversal entry: {name}")
-    if "\\" in name:
-        result.errors.append(f"Windows backslash entry: {name}")
     lower = norm.lower()
     suffix = PurePosixPath(lower).suffix
-    parts = PurePosixPath(lower).parts
-    if suffix in BLOCKED_EXTENSIONS:
-        result.errors.append(f"blocked extension: {norm}")
+    for failure in package_member_name_failures(name):
+        if failure == "absolute_zip_path":
+            result.errors.append(f"absolute path entry: {name}")
+        elif failure == "path_traversal_zip_path":
+            result.errors.append(f"path traversal entry: {name}")
+        elif failure == "windows_backslash_zip_path":
+            result.errors.append(f"Windows backslash entry: {name}")
+        elif failure == "forbidden_suffix":
+            result.errors.append(f"blocked extension: {norm}")
+        elif failure == "forbidden_path_segment":
+            result.errors.append(f"blocked private/sensitive path: {norm}")
     if (
         suffix in PACKAGE_EXTENSIONS
         and not allow_nested_packages
         and norm != "final-branch.bundle"
     ):
         result.errors.append(f"nested package/bundle not allowed by default: {norm}")
-    for part in BLOCKED_PATH_PARTS:
-        if lower == part or lower.startswith(part + "/") or f"/{part}/" in lower:
-            result.errors.append(f"blocked private/sensitive path: {norm}")
-    if len(parts) >= 2 and parts[0] == ".run":
-        run_root = parts[1]
-        if run_root in {"private", "smoke"} or (
-            run_root.startswith("s") and run_root[1:].isdigit()
-        ):
-            result.errors.append(f"blocked private/sensitive path: {norm}")
 
 
 def _is_scanner_source(name: str) -> bool:
@@ -124,31 +102,6 @@ def _skip_pattern_line(line: str, name: str) -> bool:
     return is_scanner_definition_line(name, line)
 
 
-def contains_private_run_path_text(text: str) -> bool:
-    normalized = text.replace("\\", "/").lower()
-    while "//" in normalized:
-        normalized = normalized.replace("//", "/")
-    if any(root in normalized for root in PRIVATE_RUN_PATH_ROOTS):
-        return True
-    marker = ".run/s"
-    start = 0
-    while True:
-        index = normalized.find(marker, start)
-        if index < 0:
-            return False
-        suffix = normalized[index + len(marker) :]
-        digits = 0
-        for char in suffix:
-            if not char.isdigit():
-                break
-            digits += 1
-        if digits > 0:
-            tail = suffix[digits : digits + 1]
-            if not tail or tail in {"/", " ", "\t", "\r", "\n", '"', "'", ",", "}"}:
-                return True
-        start = index + 1
-
-
 def check_text(result: SafetyResult, name: str, data: bytes) -> None:
     if len(data) > MAX_TEXT_SCAN_BYTES:
         result.errors.append(f"text scan exceeded maximum size: {name}")
@@ -162,8 +115,6 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
     for line_number, line in enumerate(text.splitlines(), start=1):
         if _skip_pattern_line(line, name):
             continue
-        if contains_private_run_path_text(line):
-            result.errors.append(f"private run path in {name}:{line_number}")
         shared_reason = public_text_unsafe_reason(line)
         if shared_reason == "local_path":
             result.errors.append(f"local absolute path in {name}:{line_number}")
@@ -173,6 +124,14 @@ def check_text(result: SafetyResult, name: str, data: bytes) -> None:
             result.errors.append(f"private path in {name}:{line_number}")
         if shared_reason == "row_sample":
             result.errors.append(f"row sample in {name}:{line_number}")
+        if shared_reason == "raw_export_filename":
+            result.errors.append(f"raw export filename in {name}:{line_number}")
+        if shared_reason == "source_local_key":
+            result.errors.append(f"source-local key in {name}:{line_number}")
+        if shared_reason == "private_runtime_payload":
+            result.errors.append(f"private runtime payload in {name}:{line_number}")
+        if shared_reason == "private_run_path":
+            result.errors.append(f"private run path in {name}:{line_number}")
         if shared_reason == "credential":
             result.errors.append(f"credential text in {name}:{line_number}")
         if shared_reason == "stock_code_sample":

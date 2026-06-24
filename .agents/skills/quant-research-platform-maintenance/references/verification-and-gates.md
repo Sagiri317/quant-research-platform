@@ -66,7 +66,7 @@ active doc roots、retired governance paths、retired naming、retired path/name
 python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_map_flow.py --repo-root .
 ```
 
-该 gate 应验证当前代码地图和长期合同，不应要求历史阶段锚点。
+该 gate 验证当前代码地图和长期合同。
 
 ### Agent and architecture tests
 
@@ -80,7 +80,7 @@ python -m pytest tests/agents tests/architecture -q
 
 active docs 的唯一可执行路径清单是 `governance_contract.ACTIVE_GOVERNANCE_DOC_ROOTS`，其中包含 handoff tooling README。其他脚本和测试只读取或验证该常量，不维护平行清单。
 
-active docs 不得把历史 branch、历史阶段、历史 PR、历史 reports 当当前事实。
+active docs 只描述当前规则、职责、路径和命名。
 
 Retired governance paths 存在即 `FAIL`；完整路径规则只由 `governance_contract.py` 定义。
 
@@ -103,7 +103,7 @@ active docs current-truth wording
 
 ## 5. Retired surface
 
-旧字段、旧路径、旧 artifact key、旧 execution mode 只允许在 retired-surface negative tests 或明确 allowlist 中出现。allowlist 必须说明目的和移除条件。
+retired 字段、路径、artifact key 和 execution mode 只允许在 retired-surface negative tests 或明确 allowlist 中出现。allowlist 必须说明目的和移除条件。
 
 关键测试入口：
 

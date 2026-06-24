@@ -4,7 +4,7 @@
 
 ## 当前原则
 
-API 文档只描述当前公开边界，不记录历史阶段或未来承诺。新增 API、CLI、registry、store 或 facade 前必须得到用户明确批准，并同步 contracts、tests 和 docs。
+API 文档只描述当前公开边界。新增 API、CLI、registry、store 或 facade 前必须得到用户明确批准，并同步 contracts、tests 和 docs。
 
 ## 接口边界
 

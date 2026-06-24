@@ -121,6 +121,18 @@ def test_runtime_does_not_import_reports() -> None:
     assert not hits, "runtime_report_import_boundary_violation: " + "; ".join(hits)
 
 
+def test_runtime_tests_do_not_import_reports() -> None:
+    hits = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(Path("tests/runtime"))
+        if module.startswith(FORBIDDEN_RUNTIME_IMPORT_PREFIXES)
+    ]
+
+    assert not hits, "runtime_test_report_import_boundary_violation: " + "; ".join(
+        hits
+    )
+
+
 def test_runtime_recorders_do_not_expose_artifact_writers() -> None:
     from quant_research_platform.runtime.execution_metrics import (
         ExecutionMetricsRecorder,

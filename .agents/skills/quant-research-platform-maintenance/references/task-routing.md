@@ -47,7 +47,7 @@ business-runtime    src 中 factor/model/evaluate/portfolio/storage 等业务逻
 
 ## 4. Token 规则
 
-不要把所有 docs 读入上下文。启动文档短，细节按需读取。历史 reports、旧 handoff、`.run` 产物默认不读。
+不要把所有 docs 读入上下文。启动文档短，细节按需读取；`.run` 产物不定义工具合同。
 
 ## 5. Stop Rules
 

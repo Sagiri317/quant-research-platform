@@ -622,6 +622,28 @@ def test_handoff_safety_allows_public_aggregate_evidence_counts() -> None:
     assert safety.unsafe_text_reason(text, name="handoff_evidence/summary.md") is None
 
 
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        (
+            "daily__market_bars__export-20240101.csv",
+            "vendor_filename",
+        ),
+        ("row_samples=[aggregate]", "row_sample"),
+        ("runtime_payload=private-aggregate", "private_runtime_payload"),
+        ("source_asset_id", "source_local_key"),
+        (".run/private/s1/summary.json", "private_run_path"),
+    ],
+)
+def test_handoff_safety_delegates_text_privacy_semantics(
+    text: str,
+    reason: str,
+) -> None:
+    safety = _load_handoff_module("handoff_safety")
+
+    assert safety.unsafe_text_reason(text, name="handoff_evidence/leak.md") == reason
+
+
 def test_verify_fails_when_sidecar_safety_fails(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     run_handoffs = ".run/handoffs"

@@ -8,7 +8,10 @@ import sys
 from pathlib import Path
 
 from tests.helpers import frequency_ids
-from tests.helpers.governance_fixtures import representative_name_forms
+from tests.helpers.governance_fixtures import (
+    representative_name_forms,
+    text_rule_example,
+)
 
 GOVERNANCE_SCRIPT_DIR = (
     Path(__file__).resolve().parents[2]
@@ -24,6 +27,7 @@ from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS as CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS,
 )
 from governance_contract import (  # noqa: E402
+    PRIVACY_NEGATIVE_TEST_PATHS,
     RETIRED_NAME_RULES,
     active_doc_forbidden_patterns,
     is_retired_path_policy_line,
@@ -48,10 +52,20 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/architecture/test_handoff_package_contract.py"),
     Path("tests/workflows/test_verification_evidence.py"),
     Path("tests/workflows/test_verification_evidence_contract.py"),
+} | {Path(path) for path in PRIVACY_NEGATIVE_TEST_PATHS}
+RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS = {
+    Path("src/quant_research_platform/workflows/verification_evidence.py"): (
+        "Owner: workflows. Rationale: verification output layout. "
+        "Lifecycle: current workflow contract. Test coverage: workflow evidence tests."
+    ),
+    Path("src/quant_research_platform/runtime/privacy.py"): (
+        "Owner: runtime privacy. Rationale: detect private run paths in public text. "
+        "Lifecycle: permanent privacy contract. Test coverage: runtime privacy tests."
+    ),
 }
-RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = {
-    Path("src/quant_research_platform/workflows/verification_evidence.py"),
-}
+RUNTIME_WORKSPACE_SOURCE_ALLOWLIST = set(
+    RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS
+)
 ACTIVE_GOVERNANCE_DOC_ROOTS = (
     Path(root.rstrip("/")) for root in CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS
 )
@@ -59,6 +73,13 @@ ACTIVE_DOC_FORBIDDEN_PATTERNS = active_doc_forbidden_patterns()
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_ARTIFACTS = Path("src/quant_research_platform/reports/report_artifacts.py")
 RUNTIME_PROFILING = Path("src/quant_research_platform/runtime/profiling.py")
+GOVERNANCE_NEGATIVE_FIXTURE_FILES = (
+    Path("tests/agents/test_verify_governance.py"),
+    Path("tests/architecture/test_handoff_package_contract.py"),
+    Path("tests/architecture/test_retired_surface_absent.py"),
+    Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    Path("tests/helpers/governance_fixtures.py"),
+)
 
 
 def test_formal_scan_roots_are_clean_checkout_stable_roots() -> None:
@@ -129,17 +150,68 @@ def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:
 
 
 def test_active_doc_forbidden_patterns_cover_required_examples() -> None:
+    from governance_contract import (
+        RETIRED_PUBLIC_SURFACE_RULES,
+        STALE_GOVERNANCE_TRUTH_RULES,
+    )
+
     examples = {
-        "old_feature_branch_current_truth": "当前分支是 feature/qrp-clean-rewrite",
-        "run_official_tool_source": ".run official tool source",
-        "retired_execution_mode": "ExecutionMode 是当前公开模式",
-        "retired_daily_panel": "daily-panel 是当前数据产物",
-        "retired_model_family": "model_family 是当前模型选择字段",
-        **representative_name_forms(RETIRED_NAME_RULES),
+        rule.name: text_rule_example(
+            STALE_GOVERNANCE_TRUTH_RULES,
+            rule.name,
+        )
+        for rule in STALE_GOVERNANCE_TRUTH_RULES
     }
+    examples.update(representative_name_forms(RETIRED_NAME_RULES))
+    examples.update(representative_name_forms(RETIRED_PUBLIC_SURFACE_RULES))
 
     for name, text in examples.items():
         assert ACTIVE_DOC_FORBIDDEN_PATTERNS[name].search(text)
+
+
+def test_active_doc_contract_covers_historical_narrative_examples() -> None:
+    from governance_contract import ACTIVE_DOC_HISTORY_NARRATIVE_RULES
+
+    assert ACTIVE_DOC_HISTORY_NARRATIVE_RULES
+    for rule in ACTIVE_DOC_HISTORY_NARRATIVE_RULES:
+        assert rule.example
+        assert rule.compile().search(rule.example)
+
+
+def test_governance_negative_fixtures_do_not_hardcode_rule_inventory() -> None:
+    from governance_contract import (
+        RETIRED_PUBLIC_SURFACE_RULES,
+        STALE_GOVERNANCE_TRUTH_RULES,
+        retired_name_patterns,
+        stale_governance_truth_patterns,
+    )
+
+    rule_names = {
+        rule.name
+        for rule in (*RETIRED_NAME_RULES, *RETIRED_PUBLIC_SURFACE_RULES)
+    } | {rule.name for rule in STALE_GOVERNANCE_TRUTH_RULES}
+    patterns = {
+        **retired_name_patterns(),
+        **stale_governance_truth_patterns(),
+    }
+    hits: list[str] = []
+    for path in GOVERNANCE_NEGATIVE_FIXTURE_FILES:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            value = node.value
+            if value in rule_names:
+                continue
+            matched = sorted(
+                rule_name
+                for rule_name, pattern in patterns.items()
+                if pattern.search(value)
+            )
+            if matched:
+                hits.append(f"{path}:{node.lineno}: {','.join(matched)}")
+
+    assert hits == [], "hardcoded_governance_fixture: " + "; ".join(hits)
 
 
 def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> None:

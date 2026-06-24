@@ -4,57 +4,44 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
-from tests.helpers.governance_fixtures import rule_form
+from tests.helpers.governance_fixtures import rule_form, text_rule_example
 
 
 def test_retired_owner_local_function_names_are_absent() -> None:
-    modules = {
-        "quant_research_platform.markets.implementations.a_share.definition": (
-            "a_share_market_definition",
-        ),
-        "quant_research_platform.markets.implementations.a_share.fields": (
-            "a_share_field_catalog",
-        ),
-        "quant_research_platform.markets.implementations.a_share.processed.catalog": (
-            "a_share_processed_catalog",
-        ),
-        "quant_research_platform.markets.implementations.a_share.factors.definitions": (
-            "a_share_factor_definitions",
-            "a_share_factor_catalog",
-        ),
-        "quant_research_platform.markets.implementations.a_share.labels.definitions": (
-            "a_share_label_definitions",
-            "a_share_label_catalog",
-        ),
-        "quant_research_platform.markets.implementations.a_share.research_profiles": (
-            "build_a_share_research_dataset_catalog",
-            "build_a_share_research_dataset_specs",
-        ),
-        "quant_research_platform.markets.implementations.a_share.research_scenarios": (
-            "build_a_share_model_catalog",
-            "build_a_share_model_specs",
-            "build_a_share_prediction_catalog",
-            "build_a_share_prediction_specs",
-            "build_a_share_portfolio_catalog",
-            "build_a_share_portfolio_specs",
-            "default_a_share_prediction_smoke_id",
-            "default_a_share_prediction_oos_period",
-        ),
-    }
+    contract = _load_governance_contract()
+    patterns = contract.python_symbol_forbidden_patterns()
+    modules = (
+        "quant_research_platform.markets.implementations.a_share.definition",
+        "quant_research_platform.markets.implementations.a_share.fields",
+        "quant_research_platform.markets.implementations.a_share.processed.catalog",
+        "quant_research_platform.markets.implementations.a_share.factors.definitions",
+        "quant_research_platform.markets.implementations.a_share.labels.definitions",
+        "quant_research_platform.markets.implementations.a_share.research_profiles",
+        "quant_research_platform.markets.implementations.a_share.research_scenarios",
+    )
 
-    for module_name, retired_names in modules.items():
+    for module_name in modules:
         module = __import__(module_name, fromlist=["*"])
-        assert [name for name in retired_names if hasattr(module, name)] == []
+        hits = [
+            (name, rule)
+            for name in vars(module)
+            for rule, pattern in patterns.items()
+            if pattern.search(name)
+        ]
+        assert hits == []
 
 
 def test_retired_workflow_run_module_is_absent() -> None:
-    assert (
-        importlib.util.find_spec("quant_research_platform.contracts.workflow_run")
-        is None
+    contract = _load_governance_contract()
+    retired_module = "quant_research_platform." + text_rule_example(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "retired_workflow_module",
     )
-    assert not Path("src/quant_research_platform/contracts/workflow_run.py").exists()
+
+    assert importlib.util.find_spec(retired_module) is None
+    assert not (
+        Path("src") / Path(retired_module.replace(".", "/") + ".py")
+    ).exists()
 
 
 def test_retired_public_constant_aliases_are_absent() -> None:
@@ -64,9 +51,21 @@ def test_retired_public_constant_aliases_are_absent() -> None:
     )
     from quant_research_platform.sources.csmar import ids as source_ids
 
-    assert not hasattr(contracts_models, "MODEL_ALGORITHMS")
-    assert not hasattr(source_ids, "CSMAR_SOURCE_ID")
-    assert not hasattr(market_ids, "A_SHARE_MARKET_ID")
+    contract = _load_governance_contract()
+    cases = (
+        (
+            contracts_models,
+            "retired_model_algorithm_collection",
+        ),
+        (source_ids, "retired_csmar_source_alias"),
+        (market_ids, "retired_a_share_market_alias"),
+    )
+
+    for module, rule_name in cases:
+        assert not hasattr(
+            module,
+            rule_form(contract.RETIRED_PUBLIC_SURFACE_RULES, rule_name),
+        )
 
 
 def test_retired_constant_fixtures_are_derived_from_governance_contract() -> None:
@@ -91,10 +90,21 @@ def test_retired_handoff_evidence_names_are_absent() -> None:
 
 
 def test_retired_pr_body_renderer_is_absent() -> None:
+    contract = _load_governance_contract()
+    renderer = text_rule_example(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_render_pr_body",
+    )
+    body = text_rule_example(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_pr_body",
+    )
     assert not Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/render_pr_body_from_validation_evidence.py"
+        ".agents/skills/quant-research-platform-maintenance/scripts"
+    ).joinpath(renderer).exists()
+    assert not Path("tests/agents/handoff").joinpath(
+        f"test_{Path(body).stem}_consistency.py"
     ).exists()
-    assert not Path("tests/agents/handoff/test_pr_body_consistency.py").exists()
 
 
 def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
@@ -106,28 +116,35 @@ def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
     assert "forbidden_render_pr_body" in patterns
 
 
-@pytest.mark.parametrize("forbidden_key", ("check", "pr_body_path"))
 def test_retired_handoff_evidence_input_fields_fail_fast(
     tmp_path: Path,
-    forbidden_key: str,
 ) -> None:
     module = _load_handoff_builder_integration_tests()
-
-    result, out_dir = module._run_builder_with_handoff_evidence(
-        tmp_path,
-        {
-            "custom-note": {
-                "schema_version": "custom-note/0.1",
-                "status": "PASS",
-                forbidden_key: "old input",
-            }
-        },
+    contract = _load_governance_contract()
+    body = text_rule_example(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_pr_body",
     )
+    forbidden_keys = ("check", f"{Path(body).stem}_path")
 
-    assert result.returncode != 0
-    assert "handoff_evidence_forbidden_field" in result.stderr
-    assert not (out_dir / "synthetic-handoff-negative.zip").exists()
-    assert not (out_dir / "synthetic-handoff-negative.json").exists()
+    for forbidden_key in forbidden_keys:
+        case_root = tmp_path / forbidden_key
+        case_root.mkdir()
+        result, out_dir = module._run_builder_with_handoff_evidence(
+            case_root,
+            {
+                "custom-note": {
+                    "schema_version": "custom-note/0.1",
+                    "status": "PASS",
+                    forbidden_key: "old input",
+                }
+            },
+        )
+
+        assert result.returncode != 0
+        assert "handoff_evidence_forbidden_field" in result.stderr
+        assert not (out_dir / "synthetic-handoff-negative.zip").exists()
+        assert not (out_dir / "synthetic-handoff-negative.json").exists()
 
 
 def _load_handoff_builder():

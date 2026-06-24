@@ -31,7 +31,7 @@ signal 可以不经过 model，直接来自规则或 factor。model 输入应通
 
 ## Evidence 流
 
-runtime output 和 handoff output 写到 `.run/` 或用户指定输出目录。tracked docs 不保存历史 evidence。
+runtime output 和 handoff output 写到 `.run/` 或用户指定输出目录。
 
 `research/` 可以使用 contracts、storage、runtime resources 和 `markets.session_windows`，但不得 import 具体市场实现或 sources。`runtime/` 不 import reports，也不写 report/storage artifact。`reports/` 只负责 artifact 写出，不重算 research、evaluation 或 portfolio 逻辑。
 

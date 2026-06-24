@@ -1,6 +1,6 @@
 # Open Issues
 
-本文只记录当前仍需处理或已确认 deferred 的问题，不保存 done、resolved、historical notes 或路线图。已关闭事项通过 git history 追溯。
+本文只记录当前仍需处理或已确认 deferred 的问题。
 
 ## 读取规则
 

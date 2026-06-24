@@ -30,7 +30,7 @@ templates/     机器输入模板
 
 ## Open issues
 
-`open-issues.md` 只保存 current open 和 deferred 问题，不保存 done/history。历史用 git history 追溯。
+`open-issues.md` 只保存 current open 和 deferred 问题。
 
 ## Gate 分层
 

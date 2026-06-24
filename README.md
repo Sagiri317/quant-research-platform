@@ -56,13 +56,12 @@ qrp research-datasets requirements <dataset_id>
 
 coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/quant-research-platform-maintenance/SKILL.md`。需要深入执行时，再按需读取 `.agents/skills/quant-research-platform-maintenance/references/**`。
 
-`AGENTS.md` 不是状态板。仓库不再保存单独的状态文档或状态简报。需要当前事实时，必须使用 live git baseline。
+`AGENTS.md` 不是状态板。需要当前事实时，必须使用 live git baseline。
 
 ## 文档原则
 
-- 文档保存当前合同，不保存历史叙事。
+- 文档只保存当前合同。
 - open issues 只保存当前 open 或 deferred 问题。
-- 历史 evidence 不进入 `docs/` 作为长期事实源。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
 - `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、package safety 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生；路径名、Python symbol、JSON/YAML/TOML key 和静态字符串合成都由同一规则派生。

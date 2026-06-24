@@ -251,6 +251,29 @@ def test_package_safety_rejects_private_run_paths_in_handoff_evidence(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
+        "daily__market_bars__export-20240101.csv",
+        "row_samples=[aggregate]",
+        "runtime_payload=private-aggregate",
+        "source_asset_id",
+    ],
+)
+def test_package_safety_uses_runtime_privacy_for_text_markers(
+    tmp_path: Path,
+    text: str,
+) -> None:
+    module = _load_package_safety_module()
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("handoff_evidence/leak.md", text)
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "source_id=raw-source",
         "provider_id=raw-provider",
         "provider_name=raw-provider",

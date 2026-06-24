@@ -31,3 +31,10 @@ def test_execution_metrics_artifact_writers_emit_json_and_csv(tmp_path) -> None:
     assert payload["run_id"] == "run_demo"
     assert payload["summary"]["step_count"] == 1
     assert frame["step_name"].tolist() == ["build_panel"]
+    assert json_path.name == "timings.json"
+    assert csv_path.name == "timings.csv"
+    assert "rss_start_end_max_mb" in frame.columns
+    assert "rss_sampled_max_mb" in frame.columns
+    assert "rss_sample_interval_seconds" in frame.columns
+    assert "rss_sample_count" in frame.columns
+    assert "rss_sampler_unavailable" in frame.columns

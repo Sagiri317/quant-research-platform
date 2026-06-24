@@ -30,8 +30,7 @@ handoff package 内的 `final-branch.bundle` 应可用以下形式重建分支�
 git clone --branch <branch-from-sidecar> final-branch.bundle repo
 ```
 
-旧的临时 run tools are not handoff contract requirements；当前合同只以本目录
-tracked scripts、schemas 和 templates 为准。
+handoff 合同只由本目录 tracked scripts、schemas 和 templates 定义。
 
 ## 运行纪律
 

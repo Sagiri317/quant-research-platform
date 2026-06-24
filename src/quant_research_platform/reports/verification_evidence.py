@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,15 +17,7 @@ from quant_research_platform.storage.atomic import atomic_write_json, atomic_wri
 from quant_research_platform.storage.datasets import inspect_dataset
 from quant_research_platform.storage.manifests import read_manifest
 
-_RAW_EXPORT_FILENAME_RE = re.compile(
-    r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
-)
-_LOGICAL_PRIVATE_PATH_RE = re.compile(
-    r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"|reports[/\\]private_research)(?:[/\\][^\s,;\"'<>|]+)?"
-)
 _SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
-_SOURCE_LOCAL_RE = re.compile(r"\b(?:source_asset_id|source_market_id)\b")
 _LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
 _SMOKE_STATUSES = frozenset({"NOT_RUN", "PASS", "FAIL"})
 _COMPARE_STATUSES = frozenset({"NOT_APPLICABLE", "PASS", "FAIL"})
@@ -563,15 +554,14 @@ def _require_evidence_fields(
         raise ValueError(error_name)
 
 
-def _unsafe_text_reason(text: str) -> str | None:
-    if _RAW_EXPORT_FILENAME_RE.search(text):
-        return "vendor_filename"
-    if _SOURCE_LOCAL_RE.search(text):
-        return "source_local_key"
-    if _LOGICAL_PRIVATE_PATH_RE.search(text):
-        return "absolute_path"
+def _unsafe_text_reason(
+    text: str,
+    *,
+    allow_logical_private_path: bool = False,
+) -> str | None:
     shared_reason = public_text_unsafe_reason(
-        _LOGICAL_PRIVATE_PATH_RE.sub("[logical-private-path]", text)
+        text,
+        allow_logical_private_path=allow_logical_private_path,
     )
     if shared_reason in {"private_path", "local_path"}:
         return "absolute_path"
@@ -585,6 +575,14 @@ def _unsafe_text_reason(text: str) -> str | None:
         return "vendor_marker"
     if shared_reason == "traceback":
         return "traceback"
+    if shared_reason == "raw_export_filename":
+        return "vendor_filename"
+    if shared_reason == "source_local_key":
+        return "source_local_key"
+    if shared_reason == "private_runtime_payload":
+        return "private_runtime_payload"
+    if shared_reason == "private_run_path":
+        return "absolute_path"
     return None
 
 
@@ -625,9 +623,10 @@ def _unsafe_json_value_reason(value: object, *, key: str | None = None) -> str |
                 return reason
         return None
     if isinstance(value, str):
-        if key in _JSON_LOGICAL_PATH_VALUE_KEYS:
-            value = _LOGICAL_PRIVATE_PATH_RE.sub("[logical-private-path]", value)
-        return _unsafe_text_reason(value)
+        return _unsafe_text_reason(
+            value,
+            allow_logical_private_path=key in _JSON_LOGICAL_PATH_VALUE_KEYS,
+        )
     return None
 
 

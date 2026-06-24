@@ -37,6 +37,16 @@ def test_verification_evidence_unsafe_reason_variants() -> None:
         verification_evidence._unsafe_text_reason("daily__vendor__export-20240101.csv")
         == "vendor_filename"
     )
+    assert (
+        verification_evidence._unsafe_text_reason("source_market_id")
+        == "source_local_key"
+    )
+    assert (
+        verification_evidence._unsafe_text_reason(
+            "runtime_payload=private-aggregate"
+        )
+        == "private_runtime_payload"
+    )
     assert verification_evidence._unsafe_json_reason("{bad") == "invalid_json"
     assert verification_evidence._unsafe_json_reason('{"safe": ["aggregate"]}') is None
 

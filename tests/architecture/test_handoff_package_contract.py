@@ -6,7 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.helpers.governance_fixtures import rule_form
+from tests.helpers.governance_fixtures import (
+    adjacent_string_assignment,
+    derived_identifier,
+    forms_matching_pattern,
+    joined_string_assignment,
+    rule_form,
+    structured_key_document,
+)
 
 HANDOFF_ROOT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff"
@@ -122,12 +129,14 @@ def test_source_tree_scan_rejects_retired_governance_path_resurrection(
     tmp_path: Path,
 ) -> None:
     builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
     _git(repo, "config", "user.email", "governance-contract@example.invalid")
     _git(repo, "config", "user.name", "Governance Contract Test")
-    (repo / "PROJECT_STATUS.md").write_text("retired status\n", encoding="utf-8")
+    retired_path = contract.RETIRED_GOVERNANCE_EXACT_PATHS[0]
+    (repo / retired_path).write_text("retired status\n", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add retired governance path")
 
@@ -135,18 +144,21 @@ def test_source_tree_scan_rejects_retired_governance_path_resurrection(
 
     assert groups["retired_governance_paths"]["status"] == "FAIL"
     assert groups["retired_governance_paths"]["findings"] == [
-        {"path": "PROJECT_STATUS.md", "rule": "retired_governance_exact_path"}
+        {"path": retired_path, "rule": "retired_governance_exact_path"}
     ]
 
 
 def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> None:
     builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
     _git(repo, "config", "user.email", "governance-contract@example.invalid")
     _git(repo, "config", "user.name", "Governance Contract Test")
-    path = repo / "tests" / "architecture" / "test_CLEAN_REWRITE_fake.py"
+    retired_component = rule_form(contract.RETIRED_NAME_RULES, "clean_rewrite")
+    relative = f"tests/architecture/test_{retired_component}_fixture.py"
+    path = repo / relative
     path.parent.mkdir(parents=True)
     path.write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
     _git(repo, "add", ".")
@@ -157,7 +169,7 @@ def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> No
     assert groups["retired_path_names"]["status"] == "FAIL"
     assert groups["retired_path_names"]["findings"] == [
         {
-            "path": "tests/architecture/test_CLEAN_REWRITE_fake.py",
+            "path": relative,
             "rule": "clean_rewrite",
         }
     ]
@@ -165,6 +177,7 @@ def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> No
 
 def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> None:
     builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -172,7 +185,12 @@ def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> Non
     _git(repo, "config", "user.name", "Governance Contract Test")
     path = repo / "docs" / "metadata.json"
     path.parent.mkdir(parents=True)
-    path.write_text('{"CLEAN_REWRITE_FLAG": true}\n', encoding="utf-8")
+    retired_key = forms_matching_pattern(
+        contract.RETIRED_NAME_RULES,
+        "clean_rewrite",
+        contract.structured_key_forbidden_patterns()["clean_rewrite"],
+    )[0]
+    path.write_text(structured_key_document((retired_key,)), encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add retired structured key")
 
@@ -183,8 +201,8 @@ def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> Non
         {
             "path": "docs/metadata.json",
             "line": 0,
-            "key_path": "CLEAN_REWRITE_FLAG",
-            "key": "CLEAN_REWRITE_FLAG",
+            "key_path": retired_key,
+            "key": retired_key,
             "rule": "clean_rewrite",
         }
     ]
@@ -194,6 +212,7 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     tmp_path: Path,
 ) -> None:
     builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -201,11 +220,12 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     _git(repo, "config", "user.name", "Governance Contract Test")
     path = repo / "tools" / "hack_synthesized.py"
     path.parent.mkdir(parents=True)
+    retired_value = rule_form(contract.RETIRED_NAME_RULES, "clean_rewrite")
     path.write_text(
         "\n".join(
             [
-                'adjacent = "QRP " "Clean Rewrite"',
-                'joined = "".join(["clean", "-rewrite"])',
+                adjacent_string_assignment(retired_value, variable="adjacent"),
+                joined_string_assignment(retired_value, variable="joined"),
                 "",
             ]
         ),
@@ -239,6 +259,7 @@ def test_source_tree_scan_independently_rejects_python_symbols(
     tmp_path: Path,
 ) -> None:
     builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -246,11 +267,15 @@ def test_source_tree_scan_independently_rejects_python_symbols(
     _git(repo, "config", "user.name", "Governance Contract Test")
     path = repo / "tools" / "hack_symbol.py"
     path.parent.mkdir(parents=True)
+    symbol = derived_identifier(
+        contract.RETIRED_NAME_RULES,
+        "clean_rewrite",
+        suffix="_fixture",
+    )
     path.write_text(
         "\n".join(
             [
-                "class QRPCleanRewriteHelper:",
-                "    pass",
+                f"{symbol} = None",
                 "",
             ]
         ),
@@ -266,7 +291,7 @@ def test_source_tree_scan_independently_rejects_python_symbols(
     assert {
         (finding["path"], finding["symbol"], finding["rule"])
         for finding in groups["python_symbols"]["findings"]
-    } == {("tools/hack_symbol.py", "QRPCleanRewriteHelper", "clean_rewrite")}
+    } == {("tools/hack_symbol.py", symbol, "clean_rewrite")}
 
 
 def test_handoff_source_tree_rules_import_governance_contract() -> None:

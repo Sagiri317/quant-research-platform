@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import csv
-import json
 import time
 
 import pytest
 
 import quant_research_platform.runtime.execution_metrics as execution_metrics
-from quant_research_platform.reports.execution_metrics_artifacts import (
-    write_execution_metrics_csv,
-    write_execution_metrics_json,
-)
 from quant_research_platform.runtime.execution_metrics import (
     ExecutionMetricsRecorder,
     ProcessMemorySampler,
@@ -19,7 +13,7 @@ from quant_research_platform.runtime.execution_metrics import (
 LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
 
 
-def test_execution_metrics_recorder_writes_timings_json_and_csv(tmp_path) -> None:
+def test_execution_metrics_recorder_exposes_payload_and_frame() -> None:
     recorder = ExecutionMetricsRecorder(memory_sampler=ProcessMemorySampler.disabled())
 
     with recorder.record("build_processed", logical_layer="processed") as record:
@@ -27,15 +21,8 @@ def test_execution_metrics_recorder_writes_timings_json_and_csv(tmp_path) -> Non
         record.file_count = 1
         record.file_size_bytes = 123
 
-    json_path = write_execution_metrics_json(
-        tmp_path / "timings.json",
-        recorder,
-        run_id="s8",
-    )
-    csv_path = write_execution_metrics_csv(tmp_path / "timings.csv", recorder)
-
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-    rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8").splitlines()))
+    payload = recorder.payload(run_id="s8")
+    runtime_record = recorder.records[0]
 
     assert payload["run_id"] == "s8"
     assert payload["summary"]["memory_sampler_unavailable"] is True
@@ -49,17 +36,17 @@ def test_execution_metrics_recorder_writes_timings_json_and_csv(tmp_path) -> Non
     assert payload["records"][0]["rss_start_end_max_mb"] is None
     assert LEGACY_RSS_PEAK_FIELD not in payload["records"][0]
     assert payload["records"][0]["rows_per_second"] is not None
-    assert rows[0]["step_name"] == "build_processed"
-    assert rows[0]["status"] == "success"
-    assert "rss_start_end_max_mb" in rows[0]
-    assert "rss_sampled_max_mb" in rows[0]
-    assert "rss_sample_interval_seconds" in rows[0]
-    assert "rss_sample_count" in rows[0]
-    assert "rss_sampler_unavailable" in rows[0]
-    assert LEGACY_RSS_PEAK_FIELD not in rows[0]
+    assert runtime_record.step_name == "build_processed"
+    assert runtime_record.status == "success"
+    assert runtime_record.rss_start_end_max_mb is None
+    assert runtime_record.rss_sampled_max_mb is None
+    assert runtime_record.rss_sample_interval_seconds is None
+    assert runtime_record.rss_sample_count == 0
+    assert runtime_record.rss_sampler_unavailable is True
+    assert not hasattr(runtime_record, LEGACY_RSS_PEAK_FIELD)
 
 
-def test_execution_metrics_records_sampled_rss_fields(monkeypatch, tmp_path) -> None:
+def test_execution_metrics_records_sampled_rss_fields(monkeypatch) -> None:
     values = iter([100.0, 110.0, 120.0, 130.0, 140.0])
     sampler = ProcessMemorySampler.from_callable(lambda: next(values, 140.0))
     monkeypatch.setenv("QRP_RSS_SAMPLE_INTERVAL_SECONDS", "0.001")
@@ -69,14 +56,7 @@ def test_execution_metrics_records_sampled_rss_fields(monkeypatch, tmp_path) -> 
         record.input_rows = 2
         time.sleep(0.01)
 
-    json_path = write_execution_metrics_json(
-        tmp_path / "timings.json",
-        recorder,
-        run_id="s9",
-    )
-    csv_path = write_execution_metrics_csv(tmp_path / "timings.csv", recorder)
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-    rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8").splitlines()))
+    payload = recorder.payload(run_id="s9")
 
     record = payload["records"][0]
     assert payload["summary"]["memory_sampler_unavailable"] is False
@@ -85,11 +65,12 @@ def test_execution_metrics_records_sampled_rss_fields(monkeypatch, tmp_path) -> 
     assert record["rss_sample_count"] >= 2
     assert record["rss_sampler_unavailable"] is False
     assert "rss_samples_mb" not in record
-    assert rows[0]["rss_sampled_max_mb"]
-    assert rows[0]["rss_sample_interval_seconds"] == "0.001"
-    assert int(rows[0]["rss_sample_count"]) >= 2
-    assert rows[0]["rss_sampler_unavailable"] == "False"
-    assert "rss_samples_mb" not in rows[0]
+    runtime_record = recorder.records[0]
+    assert runtime_record.rss_sampled_max_mb
+    assert runtime_record.rss_sample_interval_seconds == 0.001
+    assert runtime_record.rss_sample_count >= 2
+    assert runtime_record.rss_sampler_unavailable is False
+    assert not hasattr(runtime_record, "rss_samples_mb")
 
 
 def test_execution_metrics_keeps_start_end_rss_fields() -> None:
@@ -106,22 +87,6 @@ def test_execution_metrics_keeps_start_end_rss_fields() -> None:
     assert payload["records"][0]["rss_end_mb"] == 128.0
     assert payload["records"][0]["rss_start_end_max_mb"] == 128.0
     assert LEGACY_RSS_PEAK_FIELD not in payload["records"][0]
-
-
-def test_execution_metrics_writer_functions_keep_timings_output_names(tmp_path) -> None:
-    recorder = ExecutionMetricsRecorder(memory_sampler=ProcessMemorySampler.disabled())
-    with recorder.record("validation_summary"):
-        pass
-
-    json_path = write_execution_metrics_json(
-        tmp_path / "timings.json",
-        recorder,
-        run_id="s10",
-    )
-    csv_path = write_execution_metrics_csv(tmp_path / "timings.csv", recorder)
-
-    assert json_path.name == "timings.json"
-    assert csv_path.name == "timings.csv"
 
 
 def test_execution_metrics_records_failure_status_and_error_code() -> None:

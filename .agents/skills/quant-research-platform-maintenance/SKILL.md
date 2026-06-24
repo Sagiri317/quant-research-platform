@@ -27,7 +27,7 @@ git log -1 --date=iso-strict --format="%H%n%cd%n%s"
 git branch -a
 ```
 
-不得使用历史分支名、旧 commit、旧 PR 状态或旧 handoff 作为当前事实。
+当前事实只来自本轮用户指令、live git baseline 和当前仓库文件。
 
 ## 2. 读取顺序
 

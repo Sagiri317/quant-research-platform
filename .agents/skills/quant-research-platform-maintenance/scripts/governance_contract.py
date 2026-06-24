@@ -13,7 +13,7 @@ import subprocess
 import tokenize
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class TextRule:
     name: str
     pattern: str
     flags: int = 0
+    example: str = ""
 
     def compile(self) -> re.Pattern[str]:
         return re.compile(self.pattern, self.flags)
@@ -139,15 +140,51 @@ STALE_GOVERNANCE_TRUTH_RULES = (
     TextRule(
         "old_feature_branch_current_truth",
         r"feature/(?:qrp-clean-rewrite|agent-governance-redesign)",
+        example="feature/qrp-clean-rewrite",
     ),
     TextRule(
         "run_official_tool_source",
         r"(?:\.run\s+official|official\s+\.run)",
         re.IGNORECASE,
+        ".run official",
     ),
     TextRule(
         "retired_status_source",
         r"(?:PROJECT_STATUS\.md|current-qrp-status\.md)",
+        example="PROJECT_STATUS.md",
+    ),
+)
+
+ACTIVE_DOC_HISTORY_NARRATIVE_RULES = (
+    TextRule(
+        "historical_temporary_tool_narrative",
+        r"(?:旧的临时\s+run tools?|old temporary\s+run tools?)",
+        re.IGNORECASE,
+        "旧的临时 run tools",
+    ),
+    TextRule(
+        "historical_evidence_narrative",
+        r"(?:历史(?:阶段)?\s*evidence|historical\s+evidence)",
+        re.IGNORECASE,
+        "历史 evidence",
+    ),
+    TextRule(
+        "retired_handoff_artifact_narrative",
+        r"(?:旧\s*(?:handoff|package|sidecar|交接产物)|old\s+handoff artifacts?)",
+        re.IGNORECASE,
+        "旧 handoff artifacts",
+    ),
+    TextRule(
+        "historical_rename_narrative",
+        r"(?:历史上(?:曾经)?(?:叫|称为)|historically\s+(?:called|named))",
+        re.IGNORECASE,
+        "历史上叫",
+    ),
+    TextRule(
+        "historical_report_narrative",
+        r"(?:历史\s*reports?|旧\s*reports?)",
+        re.IGNORECASE,
+        "历史 reports",
     ),
 )
 
@@ -226,9 +263,21 @@ RETIRED_PUBLIC_SURFACE_RULES = (
     NameRule("retired_a_share_processed_catalog", ("a_share_processed_catalog",)),
     NameRule("retired_a_share_factor_catalog", ("a_share_factor_catalog",)),
     NameRule("retired_a_share_label_catalog", ("a_share_label_catalog",)),
-    TextRule("retired_build_a_share", r"\bbuild_a_share_[A-Za-z0-9_]+\b"),
-    TextRule("retired_default_a_share", r"\bdefault_a_share_[A-Za-z0-9_]+\b"),
-    TextRule("retired_workflow_module", r"\bcontracts\.workflow_run\b"),
+    TextRule(
+        "retired_build_a_share",
+        r"\bbuild_a_share_[A-Za-z0-9_]+\b",
+        example="build_a_share_example",
+    ),
+    TextRule(
+        "retired_default_a_share",
+        r"\bdefault_a_share_[A-Za-z0-9_]+\b",
+        example="default_a_share_example",
+    ),
+    TextRule(
+        "retired_workflow_module",
+        r"\bcontracts\.workflow_run\b",
+        example="contracts.workflow_run",
+    ),
     NameRule("retired_a_share_daily_bar_interim", ("a_share_daily_bar_interim",)),
     NameRule("retired_daily_backtest", ("daily_backtest", "daily-backtest")),
     NameRule("retired_daily_rebalance", ("daily_rebalance", "daily-rebalance")),
@@ -241,28 +290,61 @@ RETIRED_PUBLIC_SURFACE_RULES = (
     NameRule("forbidden_review_package", ("review_package",)),
     NameRule("forbidden_review_zip", ("review_zip",)),
     NameRule("forbidden_review_sidecar", ("review_sidecar",)),
-    TextRule("forbidden_review_bundle_text", r"\breview bundle\b", re.IGNORECASE),
-    TextRule("forbidden_review_package_text", r"\breview package\b", re.IGNORECASE),
-    TextRule("forbidden_review_zip_text", r"\breview zip\b", re.IGNORECASE),
-    TextRule("forbidden_review_sidecar_text", r"\breview sidecar\b", re.IGNORECASE),
+    TextRule(
+        "forbidden_review_bundle_text",
+        r"\breview bundle\b",
+        re.IGNORECASE,
+        "review bundle",
+    ),
+    TextRule(
+        "forbidden_review_package_text",
+        r"\breview package\b",
+        re.IGNORECASE,
+        "review package",
+    ),
+    TextRule(
+        "forbidden_review_zip_text",
+        r"\breview zip\b",
+        re.IGNORECASE,
+        "review zip",
+    ),
+    TextRule(
+        "forbidden_review_sidecar_text",
+        r"\breview sidecar\b",
+        re.IGNORECASE,
+        "review sidecar",
+    ),
     NameRule("forbidden_review_zip_path", ("review_zip_path",)),
     NameRule("forbidden_external_evidence_json_path", ("external_evidence_json_path",)),
     NameRule("forbidden_final_sha", ("final_sha",)),
     NameRule("forbidden_final_head_full", ("final_head_full",)),
     NameRule("forbidden_validation_table", ("validation_table",)),
     NameRule("forbidden_review_threads", ("review_threads",)),
-    TextRule("forbidden_review_threads_json", r"\breview_threads\.json\b"),
+    TextRule(
+        "forbidden_review_threads_json",
+        r"\breview_threads\.json\b",
+        example="review_threads.json",
+    ),
     NameRule("forbidden_task_review_threads", ("task_review_threads",)),
     NameRule(
         "forbidden_verify_review_thread_closure",
         ("verify_review_thread_closure",),
     ),
-    TextRule("forbidden_diff_patch", r"\bdiff\.patch\b"),
-    TextRule("forbidden_pr_body", r"\bpr_body(?:\.md)?\b"),
+    TextRule(
+        "forbidden_diff_patch",
+        r"\bdiff\.patch\b",
+        example="diff.patch",
+    ),
+    TextRule(
+        "forbidden_pr_body",
+        r"\bpr_body(?:\.md)?\b",
+        example="pr_body.md",
+    ),
     NameRule("forbidden_goal_status", ("goal_status",)),
     TextRule(
         "forbidden_render_pr_body",
         r"\brender_pr_body(?:_from_validation_evidence)?(?:\.py)?\b",
+        example="render_pr_body_from_validation_evidence.py",
     ),
 )
 
@@ -329,6 +411,19 @@ PACKAGE_FORBIDDEN_PATH_PARTS = (
     "auth.json",
     ".codex",
     "vendor raw",
+)
+
+PACKAGE_FORBIDDEN_SUFFIXES = (
+    ".arrow",
+    ".csv",
+    ".db",
+    ".feather",
+    ".orc",
+    ".parquet",
+    ".pickle",
+    ".pkl",
+    ".sqlite",
+    ".sqlite3",
 )
 
 VALID_STATUS_TOKENS = ("PASS", "FAIL", "NOT_RUN", "BLOCKED")
@@ -782,6 +877,50 @@ def normalize_repo_path(path: str | Path) -> str:
     return normalized
 
 
+def package_member_name_failures(name: str) -> tuple[str, ...]:
+    """Return package member path policy failures from the governance contract."""
+
+    failures: list[str] = []
+    if "\\" in name:
+        failures.append("windows_backslash_zip_path")
+    if name.startswith("/") or (
+        len(name) >= 3
+        and name[0].isalpha()
+        and name[1] == ":"
+        and name[2] in {"/", "\\"}
+    ):
+        failures.append("absolute_zip_path")
+    normalized = name.replace("\\", "/").lower()
+    parts = tuple(part for part in PurePosixPath(normalized).parts if part)
+    if ".." in parts:
+        failures.append("path_traversal_zip_path")
+    if PurePosixPath(normalized).suffix in PACKAGE_FORBIDDEN_SUFFIXES:
+        failures.append("forbidden_suffix")
+    if any(
+        _contains_package_path_part(normalized, part)
+        for part in PACKAGE_FORBIDDEN_PATH_PARTS
+    ):
+        failures.append("forbidden_path_segment")
+    if len(parts) >= 2 and parts[0] == ".run":
+        run_root = parts[1]
+        if run_root in {"private", "smoke"} or (
+            run_root.startswith("s") and run_root[1:].isdigit()
+        ):
+            failures.append("forbidden_path_segment")
+    return tuple(dict.fromkeys(failures))
+
+
+def _contains_package_path_part(path: str, part: str) -> bool:
+    parts = tuple(item for item in path.split("/") if item)
+    needle = tuple(item for item in part.lower().split("/") if item)
+    if len(needle) > len(parts):
+        return False
+    return any(
+        parts[index : index + len(needle)] == needle
+        for index in range(len(parts) - len(needle) + 1)
+    )
+
+
 def has_path_prefix(path: str, prefix: str) -> bool:
     path = normalize_repo_path(path)
     prefix = normalize_repo_path(prefix)
@@ -913,6 +1052,7 @@ def active_doc_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     patterns = stale_governance_truth_patterns()
     patterns.update(retired_public_surface_patterns())
     patterns.update(version_surface_forbidden_patterns())
+    patterns.update(compile_text_rules(ACTIVE_DOC_HISTORY_NARRATIVE_RULES))
     return patterns
 
 

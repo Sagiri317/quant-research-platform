@@ -92,6 +92,22 @@ _TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
 _RAW_EXPORT_FILENAME_RE = re.compile(
     r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
 )
+_SOURCE_LOCAL_KEY_RE = re.compile(
+    r"(?i)\b(?:source_asset_id|source_market_id)\b"
+)
+_PRIVATE_RUNTIME_PAYLOAD_RE = re.compile(
+    r"(?i)\b(?:runtime_payload|private_runtime_payload|"
+    r"exact_private_runtime_payload)\b"
+)
+_PRIVATE_RUN_PATH_RE = re.compile(
+    r"(?i)(?:^|[\s`'\"])\.run[\\/]+(?:private|smoke|s[0-9]+)"
+    r"(?:[\\/]+|[\s`'\"]|$)"
+)
+_ENVIRONMENT_PATH_RE = re.compile(
+    r"(?i)(?:\bquant-workspace\b|\\\\quant-workspace\\\\|"
+    r"\bsite-packages\b|\bconda env path\b|"
+    r"(?:anaconda3|miniconda3)[\\/](?:envs|lib[\\/]site-packages))"
+)
 _ROW_SAMPLE_KEYS = {
     "row",
     "rows",
@@ -124,25 +140,39 @@ def is_private_boundary_path(path: Path) -> bool:
     )
 
 
-def public_text_unsafe_reason(text: object) -> str | None:
+def public_text_unsafe_reason(
+    text: object,
+    *,
+    allow_logical_private_path: bool = False,
+) -> str | None:
     value = str(text)
     if _TRACEBACK_RE.search(value):
         return "traceback"
     if _CREDENTIAL_RE.search(value):
         return "credential"
-    if (
-        _ABSOLUTE_REPO_PRIVATE_PATH_RE.search(value)
-        or _REPO_PRIVATE_PATH_RE.search(value)
-    ):
+    if _PRIVATE_RUN_PATH_RE.search(value):
+        return "private_run_path"
+    if _ABSOLUTE_REPO_PRIVATE_PATH_RE.search(value):
+        return "private_path"
+    if allow_logical_private_path:
+        value = _REPO_PRIVATE_PATH_RE.sub("[logical-private-path]", value)
+    elif _REPO_PRIVATE_PATH_RE.search(value):
         return "private_path"
     if (
         _WINDOWS_DRIVE_PATH_RE.search(value)
         or _UNC_PATH_RE.search(value)
         or _POSIX_PRIVATE_PATH_RE.search(value)
+        or _ENVIRONMENT_PATH_RE.search(value)
     ):
         return "local_path"
     if _ROW_SAMPLE_RE.search(value) or _ROW_SAMPLE_MARKER_RE.search(value):
         return "row_sample"
+    if _RAW_EXPORT_FILENAME_RE.search(value):
+        return "raw_export_filename"
+    if _SOURCE_LOCAL_KEY_RE.search(value):
+        return "source_local_key"
+    if _PRIVATE_RUNTIME_PAYLOAD_RE.search(value):
+        return "private_runtime_payload"
     if _PROVIDER_SOURCE_FIELD_RE.search(value):
         return "private_marker"
     if _PRIVATE_MARKER_RE.search(value):
@@ -158,13 +188,18 @@ def sanitize_public_text(text: object) -> str:
     result = str(text)
     result = _TRACEBACK_RE.sub("[traceback]", result)
     result = _CREDENTIAL_RE.sub("[credential]", result)
+    result = _PRIVATE_RUN_PATH_RE.sub("[private-run-path]", result)
     result = _ABSOLUTE_REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _WINDOWS_DRIVE_PATH_RE.sub("[local-path]", result)
     result = _UNC_PATH_RE.sub("[local-path]", result)
     result = _POSIX_PRIVATE_PATH_RE.sub("[local-path]", result)
+    result = _ENVIRONMENT_PATH_RE.sub("[local-path]", result)
     result = _REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _ROW_SAMPLE_RE.sub("[row-sample]", result)
     result = _ROW_SAMPLE_MARKER_RE.sub("[row-sample]", result)
+    result = _RAW_EXPORT_FILENAME_RE.sub("[raw-export]", result)
+    result = _SOURCE_LOCAL_KEY_RE.sub("[source-local-key]", result)
+    result = _PRIVATE_RUNTIME_PAYLOAD_RE.sub("[private-runtime-payload]", result)
     result = _PROVIDER_SOURCE_FIELD_RE.sub("[private]", result)
     result = _PRIVATE_MARKER_RE.sub("[private]", result)
     result = _STOCK_CODE_RE.sub("[asset-id]", result)

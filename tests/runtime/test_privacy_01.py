@@ -183,6 +183,54 @@ def test_embedded_stock_code_run_token_is_rejected_but_date_id_is_allowed() -> N
 
 
 @pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        (
+            "daily__market_bars__export-20240101.csv",
+            "raw_export_filename",
+        ),
+        ("source_asset_id", "source_local_key"),
+        ("source_market_id", "source_local_key"),
+        ("runtime_payload=private-aggregate", "private_runtime_payload"),
+        ("exact_private_runtime_payload", "private_runtime_payload"),
+        (".run/private/s1/summary.json", "private_run_path"),
+    ],
+)
+def test_runtime_privacy_owns_report_and_handoff_text_markers(
+    text: str,
+    reason: str,
+) -> None:
+    assert public_text_unsafe_reason(text) == reason
+    assert text not in sanitize_public_text(text)
+
+
+def test_logical_private_path_allowance_masks_only_the_path_value() -> None:
+    logical_path = "data/interim/csmar/example_dataset/_manifest/manifest.json"
+
+    assert (
+        public_text_unsafe_reason(
+            logical_path,
+            allow_logical_private_path=True,
+        )
+        is None
+    )
+    assert (
+        public_text_unsafe_reason(
+            f"/workspace/qrp/{logical_path}",
+            allow_logical_private_path=True,
+        )
+        == "private_path"
+    )
+    assert (
+        public_text_unsafe_reason(
+            f"source_id=csmar path={logical_path}",
+            allow_logical_private_path=True,
+        )
+        == "private_marker"
+    )
+
+
+@pytest.mark.parametrize(
     ("payload", "reason"),
     [
         ({"path": "data/research/a_share/demo"}, "private_path"),

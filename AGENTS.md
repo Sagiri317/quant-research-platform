@@ -18,7 +18,7 @@ git log -1 --date=iso-strict --format="%H%n%cd%n%s"
 git branch -a
 ```
 
-如果任务涉及远端分支或 merge，还必须检查 upstream、divergence 和目标分支。不得继承旧对话、旧 handoff、旧 sidecar、旧 PR body、旧 branch 名称或旧 commit 作为当前事实。
+如果任务涉及远端分支或 merge，还必须检查 upstream、divergence 和目标分支。当前事实只来自本轮用户指令、live git baseline 和当前仓库文件。
 
 仓库文档不得声明当前分支、当前阶段、当前 PR 状态或当前 merge gate。需要当前事实时，使用 live git baseline 和当前用户指令。
 
@@ -33,8 +33,6 @@ git branch -a
 5. `.agents/briefs/repo-map.md` 和 `.agents/briefs/user-principles.md`
 6. `.agents/skills/quant-research-platform-maintenance/references/**`
 7. `docs/**` 的当前合同文档
-8. 旧 handoff、旧 logs、旧 reports、旧对话摘要
-
 如果文档和代码、tests、contracts、schemas、runtime behavior 冲突，以可执行合同和当前仓库状态为准；停止并报告冲突，不要用叙事文档覆盖现场事实。
 
 ## 4. `.agents` 与 `.run`
@@ -68,7 +66,7 @@ pytest PASS、governance PASS、handoff verifier PASS、package safety PASS、so
 
 ## 7. current-contract-only
 
-QRP 采用 current-contract-only。普通 tests 只保护当前合同。旧字段、旧路径、旧 artifact 字段、旧执行模式、旧命名和兼容 alias 只能出现在 retired-surface negative tests 或明确 allowlist 中。除非用户批准兼容期，禁止 fallback read、silent drop、compatibility field 和 alias field。
+QRP 采用 current-contract-only。普通 tests 只保护当前合同。retired 字段、路径、artifact 字段、执行模式、命名和兼容 alias 只能出现在 retired-surface negative tests 或明确 allowlist 中。除非用户批准兼容期，禁止 fallback read、silent drop、compatibility field 和 alias field。
 
 新实现应替代旧实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
 
@@ -84,7 +82,7 @@ Retired stage naming 不得以文件名、路径名、Python function/class/fixt
 
 默认允许修改与任务直接相关的最小文件集合。修改 docs、governance scripts、handoff scripts、tests 时，必须同步更新相关验证。修改业务逻辑时，必须有用户明确授权。
 
-禁止为了让测试通过而恢复过期文档事实。遇到脚本仍引用已删除的历史状态文档时，应修脚本和测试，而不是恢复旧文档。
+禁止为了让测试通过而恢复过期文档事实。遇到脚本引用 retired governance path 时，应修脚本和测试。
 
 ## 10. 推荐验证命令
 

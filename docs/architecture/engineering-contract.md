@@ -31,11 +31,11 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 - 同步测试。
 - 删除旧实现优先于并行保留。
 - 不新增 public surface，除非用户批准。
-- 不为旧 artifact 字段提供隐式兼容。
+- 不为 retired artifact 字段提供隐式兼容。
 
 ## 测试职责
 
-普通 tests 保护当前合同。retired-surface negative tests 保护旧表面不复活。不要让普通 tests 保护历史结构。
+普通 tests 保护当前合同。retired-surface negative tests 阻止禁用表面复活。
 
 ## 治理规则事实源
 

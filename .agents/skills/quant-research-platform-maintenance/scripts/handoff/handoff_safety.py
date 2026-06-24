@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 import tempfile
@@ -25,6 +24,7 @@ if str(SCRIPT_PARENT) not in sys.path:
 from governance_contract import (  # noqa: E402
     PACKAGE_FORBIDDEN_PATH_PARTS,
     is_scanner_definition_line as is_shared_scanner_definition_line,
+    package_member_name_failures as shared_package_member_name_failures,
 )
 from quant_research_platform.runtime.privacy import public_text_unsafe_reason
 
@@ -53,34 +53,7 @@ BUNDLE_CONTENT_SCAN_EXEMPT_FILES = {
     "environment.yml",
     "pyproject.toml",
 }
-FORBIDDEN_SUFFIXES = {
-    ".arrow",
-    ".csv",
-    ".feather",
-    ".parquet",
-    ".pickle",
-    ".pkl",
-}
 FORBIDDEN_PATH_SEGMENTS = PACKAGE_FORBIDDEN_PATH_PARTS
-ENVIRONMENT_PATH_RE = re.compile(
-    r"(?i)(?:\bquant-workspace\b|\\\\quant-workspace\\\\|"
-    r"\bsite-packages\b|\bconda env path\b|"
-    r"(?:anaconda3|miniconda3)[\\/](?:envs|lib[\\/]site-packages))"
-)
-RAW_EXPORT_FILENAME_RE = re.compile(
-    r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
-)
-ROW_SAMPLE_KEY_RE = re.compile(
-    r"(?i)(?:[\"']?row_samples?[\"']?\s*[:=]|row_samples?\s*=)"
-)
-PRIVATE_RUNTIME_PAYLOAD_RE = re.compile(
-    r"(?i)\b(?:runtime_payload|private_runtime_payload|"
-    r"exact_private_runtime_payload)\b"
-)
-PRIVATE_RUN_PATH_RE = re.compile(
-    r"(?i)(?:^|[\s`'\"])\.run[\\/]+(?:private|smoke|s[0-9]+)"
-    r"(?:[\\/]+|[\s`'\"]|$)"
-)
 STALE_MARKERS: tuple[str, ...] = ()
 BUNDLE_TEXT_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
@@ -372,27 +345,10 @@ def batch_blob_contents(
 
 
 def member_name_failures(name: str) -> list[str]:
-    failures: list[str] = []
-    if "\\" in name:
-        failures.append(f"windows_backslash_zip_path: {name}")
-    if name.startswith("/") or re.match(r"(?i)^[a-z]:/", name):
-        failures.append(f"absolute_zip_path: {name}")
-    normalized = name.replace("\\", "/").lower()
-    suffix = Path(normalized).suffix.lower()
-    parts = tuple(part for part in normalized.split("/") if part)
-    if ".." in parts:
-        failures.append(f"path_traversal_zip_path: {name}")
-    if suffix in FORBIDDEN_SUFFIXES:
-        failures.append(f"forbidden_suffix: {name}")
-    for segment in FORBIDDEN_PATH_SEGMENTS:
-        if contains_path_segment(normalized, segment):
-            failures.append(f"forbidden_path_segment: {name}")
-            break
-    if len(parts) >= 2 and parts[0] == ".run":
-        run_root = parts[1]
-        if run_root in {"private", "smoke"} or re.fullmatch(r"s[0-9]+", run_root):
-            failures.append(f"forbidden_path_segment: {name}")
-    return failures
+    return [
+        f"{failure}: {name}"
+        for failure in shared_package_member_name_failures(name)
+    ]
 
 
 def is_bundle_content_scan_exempt(name: str) -> bool:
@@ -405,29 +361,14 @@ def is_bundle_content_scan_exempt(name: str) -> bool:
     )
 
 
-def contains_path_segment(path: str, segment: str) -> bool:
-    parts = tuple(part for part in path.split("/") if part)
-    needle = tuple(part for part in segment.lower().split("/") if part)
-    if len(needle) > len(parts):
-        return False
-    return any(
-        parts[index : index + len(needle)] == needle
-        for index in range(len(parts) - len(needle) + 1)
-    )
-
-
 def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
     scan_text = "\n".join(
         line
         for line in text.splitlines()
         if not is_scanner_definition_line(line, name=name)
     )
-    if PRIVATE_RUN_PATH_RE.search(scan_text):
-        return "private_run_path"
     shared_reason = public_text_unsafe_reason(scan_text)
     if shared_reason in {"private_path", "local_path"}:
-        return "local_absolute_path"
-    if ENVIRONMENT_PATH_RE.search(scan_text):
         return "local_absolute_path"
     if shared_reason == "credential":
         return "credential"
@@ -439,12 +380,14 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
         return "raw_traceback"
     if shared_reason == "row_sample":
         return "row_sample"
-    if RAW_EXPORT_FILENAME_RE.search(scan_text):
+    if shared_reason == "raw_export_filename":
         return "vendor_filename"
-    if ROW_SAMPLE_KEY_RE.search(scan_text):
-        return "row_sample"
-    if PRIVATE_RUNTIME_PAYLOAD_RE.search(scan_text):
+    if shared_reason == "source_local_key":
+        return "source_local_key"
+    if shared_reason == "private_runtime_payload":
         return "private_runtime_payload"
+    if shared_reason == "private_run_path":
+        return "private_run_path"
     if stale_marker(scan_text) is not None:
         return "stale_marker"
     return None
