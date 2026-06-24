@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.helpers.governance_fixtures import rule_form
+
 HANDOFF_ROOT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff"
 )
@@ -50,6 +52,15 @@ def test_pr_closure_only_entries_are_not_required_for_evidence_mode() -> None:
 
     assert verifier.REQUIRED_ZIP_ENTRIES.isdisjoint(
         builder.RESERVED_HANDOFF_EVIDENCE_STEMS
+    )
+
+
+def test_handoff_negative_token_is_derived_from_governance_contract() -> None:
+    contract = _load_governance_contract()
+
+    assert rule_form(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_review_bundle",
     )
 
 

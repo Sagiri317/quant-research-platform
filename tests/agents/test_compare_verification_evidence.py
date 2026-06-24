@@ -1011,3 +1011,22 @@ def _write_reports(
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def test_compare_contract_accepts_direct_pairs_without_window_names() -> None:
+    module = _load_compare_module()
+
+    failures = module.compare_contract_failures(
+        {
+            "primary_compare": {
+                "comparison_group": "baseline_final",
+                "status": "PASS",
+            },
+            "secondary_compare": {
+                "comparison_group": "baseline_final",
+                "status": "PASS",
+            },
+        }
+    )
+
+    assert failures == []

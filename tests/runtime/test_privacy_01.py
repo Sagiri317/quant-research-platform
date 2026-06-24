@@ -7,6 +7,7 @@ from quant_research_platform.agents.safety import (
     assert_public_safe_text,
 )
 from quant_research_platform.runtime.privacy import (
+    assert_internal_artifact_metadata_safe,
     public_text_unsafe_reason,
     sanitize_public_object,
     sanitize_public_text,
@@ -149,3 +150,53 @@ def test_public_text_unsafe_reason_covers_public_safety_markers(
     reason: str,
 ) -> None:
     assert public_text_unsafe_reason(text) == reason
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "source_id=csmar",
+        "provider_id=choice",
+        '{"source_id": "csmar"}',
+        '{"provider_id": "choice"}',
+    ],
+)
+def test_provider_source_fields_are_fully_sanitized_and_rejected(text: str) -> None:
+    assert public_text_unsafe_reason(text) == "private_marker"
+    sanitized = sanitize_public_text(text)
+    assert "csmar" not in sanitized.lower()
+    assert "choice" not in sanitized.lower()
+
+
+def test_row_sample_payload_is_fully_sanitized_and_rejected() -> None:
+    text = 'row_samples=[{"asset_id":"000001","value":1.2}]'
+
+    assert public_text_unsafe_reason(text) == "row_sample"
+    sanitized = sanitize_public_text(text)
+    assert "000001" not in sanitized
+    assert "1.2" not in sanitized
+
+
+def test_embedded_stock_code_run_token_is_rejected_but_date_id_is_allowed() -> None:
+    assert public_text_unsafe_reason("run_000001") == "stock_code_sample"
+    assert public_text_unsafe_reason("run_202606") is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ({"path": "data/research/a_share/demo"}, "private_path"),
+        ({"path": "/workspace/qrp/data/research/a_share/demo"}, "private_path"),
+        ({"row_samples": [{"value": 1}]}, "row_sample"),
+        ({"credential": "token=abcdef123456"}, "credential"),
+    ],
+)
+def test_internal_artifact_metadata_safety_is_owned_by_runtime(
+    payload: dict[str, object],
+    reason: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=f"unsafe_internal_artifact_metadata: {reason}",
+    ):
+        assert_internal_artifact_metadata_safe(payload)

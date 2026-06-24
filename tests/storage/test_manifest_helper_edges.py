@@ -26,7 +26,9 @@ def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
-        ({"path": "data/raw/vendor/file.csv"}, "raw_path"),
+        ({"path": "data/raw/vendor/file.csv"}, "private_path"),
+        ({"path": "data/research/a_share/demo"}, "private_path"),
+        ({"path": "/workspace/qrp/data/research/a_share/demo"}, "private_path"),
         ({"file": "daily__vendor__export-20240101.csv"}, "raw_export_filename"),
         ({"row_sample": [{"a": 1}]}, "row_sample"),
     ],

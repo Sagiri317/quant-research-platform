@@ -271,7 +271,7 @@ _MODEL_ALGORITHM_FACTS = {
 }
 
 
-def model_algorithm_names() -> tuple[str, ...]:
+def model_algorithm_ids() -> tuple[str, ...]:
     return tuple(sorted(_MODEL_ALGORITHM_FACTS))
 
 

@@ -15,6 +15,8 @@
 
 本地数据应放在用户本地 workspace 或 `.run/` 下的运行产物目录中。tracked repo 只保存代码、contracts、schemas、docs、tests 和 public-safe templates。`.run/` 只是 output/evidence/input artifact layer，不是 tracked tool source。
 
+`sources/` 负责摄取与 raw/interim 转换；`markets/implementations/a_share/` 负责 A 股 processed data 和市场语义；`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 layout。privacy 检测规则由 `runtime/privacy.py` 统一提供，storage 不维护平行正则。
+
 ## Public-safe evidence
 
 允许写入 public-safe evidence 的内容：

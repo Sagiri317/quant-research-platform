@@ -4,7 +4,16 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.calendars import SessionWindowPlanner
+from quant_research_platform.markets.session_windows import (
+    SessionWindowPlanner,
+    normalize_session_dates,
+)
+
+
+def test_normalize_session_dates_returns_sorted_unique_daily_timestamps() -> None:
+    assert normalize_session_dates(
+        ["2014-01-03 12:00", "2014-01-02", "2014-01-03"]
+    ) == (pd.Timestamp("2014-01-02"), pd.Timestamp("2014-01-03"))
 
 
 def test_session_window_planner_maps_non_trading_bounds_inside_closed_window() -> None:

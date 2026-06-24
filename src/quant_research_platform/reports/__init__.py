@@ -1,1 +1,1 @@
-"""Report artifact helpers."""
+"""Public-safe report and evidence artifact writers."""

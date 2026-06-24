@@ -8,8 +8,8 @@ import pytest
 
 pytestmark = pytest.mark.data_dependency
 from tests.architecture.test_public_safe_evidence import (  # noqa: E402
-    HASH_RE,
     DOC_FULL_HISTORICAL_MARKET_PANEL_STATUS_AREA,
+    HASH_RE,
     _synthetic_private_verification_summary_payload,
     _synthetic_public_safe_evidence_payload,
 )

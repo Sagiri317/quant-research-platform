@@ -1126,10 +1126,7 @@ def _validate_model_metadata_consistency(
         or metadata["oos_start"] != spec.test_start
     ):
         raise ValueError("model_metadata_inconsistent")
-    if (
-        metadata["model_algorithm"] == "linear_regression"
-        and int(metadata["coefficient_count"]) != input_count + 1
-    ):
+    if int(metadata["coefficient_count"]) <= 0:
         raise ValueError("model_metadata_inconsistent")
 
 

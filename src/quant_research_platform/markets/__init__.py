@@ -1,1 +1,1 @@
-"""定义 Quant Research Platform 的 market modules。"""
+"""Generic market domain abstractions and session-window utilities."""

@@ -1,1 +1,1 @@
-"""A-share market implementation for source-normalized processed datasets."""
+"""A-share calendar, processed data, masks, bindings, and scenarios."""

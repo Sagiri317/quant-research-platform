@@ -39,7 +39,7 @@ business-runtime    src 中 factor/model/evaluate/portfolio/storage 等业务逻
 
 ### handoff-package
 
-生成 review/handoff bundle。必须使用 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/` 下 tracked scripts。
+生成 handoff package。必须使用 `.agents/skills/quant-research-platform-maintenance/scripts/handoff/` 下 tracked scripts。
 
 ### business-change
 

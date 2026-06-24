@@ -38,3 +38,5 @@ review-fix loop 应小步执行：scan → classify → patch → validate → r
 ## 5. 禁止配置扩张
 
 未经用户批准，禁止新增 repo-local `.codex/`、global `.codex/`、hooks、MCP config、plugin runtime config、custom subagent runtime config。文档可以说明未来方向，但不能让当前任务默认启用这些机制。
+
+`.agents/` 只承载治理、handoff 和 prompt tooling，不得承载 runtime 业务逻辑。

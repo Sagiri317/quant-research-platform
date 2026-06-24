@@ -24,7 +24,7 @@ self_test.py
 
 handoff 输出应写到 `.run/` 或用户指定目录。`.run/` 是 output layer，不是工具事实源。
 
-review bundle 内的 `final-branch.bundle` 应可用以下形式重建分支：
+handoff package 内的 `final-branch.bundle` 应可用以下形式重建分支：
 
 ```text
 git clone --branch <branch-from-sidecar> final-branch.bundle repo

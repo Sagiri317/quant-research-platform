@@ -191,9 +191,9 @@ def test_prediction_report_artifacts_reject_inconsistent_metadata(
     bad_model = _prediction_frame(with_metadata=True)
     bad_model.attrs["model_metadata"] = {
         **_model_metadata(),
-        "coefficient_count": 1,
+        "coefficient_count": 0,
     }
-    with pytest.raises(ValueError, match="model_metadata_inconsistent"):
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
         report_artifacts.write_prediction_report_artifacts(
             bad_model,
             spec=spec,

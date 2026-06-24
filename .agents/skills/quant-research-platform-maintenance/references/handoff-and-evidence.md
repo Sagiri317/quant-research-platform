@@ -23,6 +23,8 @@ handoff 至少分为四层：
 
 四层结果不能互相替代。builder 应 fail fast，不能先写出非法 artifact 再依赖 verifier 补救。
 
+handoff gate 只依据本轮实际运行的独立检查，不继承旧 package 或 sidecar 状态。
+
 ## 3. Evidence 规则
 
 public-safe evidence 可以包含：
@@ -50,7 +52,7 @@ sidecar 是机器可读 evidence summary，不是业务结论本身。sidecar PA
 
 ## 5. Git bundle
 
-review bundle 和 git bundle 是不同概念。review bundle 可以包含 reports、logs、manifest 和 evidence；git bundle 应能重建当前分支仓库状态。生成和验证时应记录 bundle hash、list-heads 和推荐 clone command。
+handoff package 和 git bundle 是不同概念。handoff package 可以包含 reports、logs、manifest 和 evidence；git bundle 应能重建当前分支仓库状态。生成和验证时应记录 bundle hash、list-heads 和推荐 clone command。
 
 ## 6. 历史 evidence
 

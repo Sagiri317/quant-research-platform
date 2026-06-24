@@ -10,8 +10,8 @@ import io
 import json
 import re
 import subprocess
-import tomllib
 import tokenize
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +38,7 @@ ACTIVE_GOVERNANCE_DOC_ROOTS = (
     ".agents/briefs/",
     ".agents/skills/quant-research-platform-maintenance/SKILL.md",
     ".agents/skills/quant-research-platform-maintenance/references/",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/README.md",
     "docs/architecture/",
     "docs/code-map/",
     "docs/api/",
@@ -240,6 +241,10 @@ RETIRED_PUBLIC_SURFACE_RULES = (
     NameRule("forbidden_review_package", ("review_package",)),
     NameRule("forbidden_review_zip", ("review_zip",)),
     NameRule("forbidden_review_sidecar", ("review_sidecar",)),
+    TextRule("forbidden_review_bundle_text", r"\breview bundle\b", re.IGNORECASE),
+    TextRule("forbidden_review_package_text", r"\breview package\b", re.IGNORECASE),
+    TextRule("forbidden_review_zip_text", r"\breview zip\b", re.IGNORECASE),
+    TextRule("forbidden_review_sidecar_text", r"\breview sidecar\b", re.IGNORECASE),
     NameRule("forbidden_review_zip_path", ("review_zip_path",)),
     NameRule("forbidden_external_evidence_json_path", ("external_evidence_json_path",)),
     NameRule("forbidden_final_sha", ("final_sha",)),
@@ -248,7 +253,10 @@ RETIRED_PUBLIC_SURFACE_RULES = (
     NameRule("forbidden_review_threads", ("review_threads",)),
     TextRule("forbidden_review_threads_json", r"\breview_threads\.json\b"),
     NameRule("forbidden_task_review_threads", ("task_review_threads",)),
-    NameRule("forbidden_verify_review_thread_closure", ("verify_review_thread_closure",)),
+    NameRule(
+        "forbidden_verify_review_thread_closure",
+        ("verify_review_thread_closure",),
+    ),
     TextRule("forbidden_diff_patch", r"\bdiff\.patch\b"),
     TextRule("forbidden_pr_body", r"\bpr_body(?:\.md)?\b"),
     NameRule("forbidden_goal_status", ("goal_status",)),
@@ -275,36 +283,6 @@ RETIRED_PUBLIC_SYMBOL_RULE_NAMES = {
 LEGITIMATE_RUNTIME_SYMBOL_ALLOWLIST = {
     Path("src/quant_research_platform/catalog/profiles.py"): {
         "retired_csmar_source_alias": {"_a_share_csmar_source_id"},
-    },
-    Path(
-        "src/quant_research_platform/markets/implementations/a_share/"
-        "research_scenarios.py"
-    ): {
-        "retired_model_algorithm_collection": {"model_algorithms"},
-    },
-    Path("tests/architecture/test_model_algorithm_single_source.py"): {
-        "retired_model_algorithm_collection": {
-            "test_model_algorithms_live_only_in_supervised_model_facts",
-        },
-    },
-    Path("tests/research/test_filter_modes.py"): {
-        "retired_model_algorithm_collection": {
-            "test_required_model_algorithms_fit_and_predict",
-        },
-    },
-    Path("tests/research/test_model_prediction_semantic_names.py"): {
-        "retired_model_algorithm_collection": {
-            "test_all_model_algorithms_fit_and_predict_synthetic_data",
-        },
-    },
-    Path("src/quant_research_platform/reports/verification_evidence.py"): {
-        "merge_ready": {"merge_ready"},
-    },
-    Path(
-        "src/quant_research_platform/markets/implementations/a_share/verification/"
-        "private_aggregate.py"
-    ): {
-        "merge_ready": {"merge_ready"},
     },
 }
 
@@ -353,7 +331,7 @@ PACKAGE_FORBIDDEN_PATH_PARTS = (
     "vendor raw",
 )
 
-VALID_STATUS_TOKENS = ("PASS", "FAIL", "NOT_RUN", "BLOCKED", "TIMEOUT")
+VALID_STATUS_TOKENS = ("PASS", "FAIL", "NOT_RUN", "BLOCKED")
 
 RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
     "docs/reports/clean-rewrite",

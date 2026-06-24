@@ -1,1 +1,1 @@
-"""可运行市场实现集合。"""
+"""Concrete market implementations built on the generic market domain."""

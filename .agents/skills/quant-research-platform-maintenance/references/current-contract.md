@@ -12,7 +12,7 @@
 - 当前 open issues
 - 实际命令输出
 
-禁止把旧 handoff、旧 sidecar、旧 review bundle、旧 PR body、旧 conversation memory 或旧 reports 当当前事实。
+禁止把旧交接产物、旧 PR 内容、旧对话摘要或旧 reports 当当前事实。
 
 ## 2. 项目身份
 
@@ -43,3 +43,7 @@ QRP 是本地量化研究平台。它支持 research workflow，不支持 live e
 ## 6. 文档合同
 
 文档只保存长期合同和当前 open/deferred 问题，不保存历史阶段或完成记录。历史追溯使用 git history。
+
+## 7. 架构职责
+
+sources 负责摄取与 raw/interim 转换；markets 负责通用市场领域，A 股语义位于 `markets/implementations/a_share/`；research 保持通用算法；compute 负责数值核心；runtime 提供横切运行时能力；reports 负责 report/evidence artifact；`.agents` 只提供治理和 handoff tooling。

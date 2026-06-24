@@ -1,4 +1,4 @@
-"""提供 evaluation 阶段的轻量运行时 profile 工具。"""
+"""Runtime stage profiling primitives."""
 
 from __future__ import annotations
 
@@ -12,24 +12,19 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts.reports import ReportSpec
-from quant_research_platform.storage.layout import StorageLayout
-
 
 @dataclass(frozen=True)
 class ProfileConfig:
-    """可选阶段 profile 的运行时开关。"""
+    """Runtime-only switches for stage profiling."""
 
     enabled: bool = False
-    write_artifacts: bool = False
     sample_memory: bool = True
 
     def __post_init__(self) -> None:
-        """校验 profile 开关是否为布尔值。"""
+        """Validate that profiling switches are boolean values."""
 
         for name, value in (
             ("enabled", self.enabled),
-            ("write_artifacts", self.write_artifacts),
             ("sample_memory", self.sample_memory),
         ):
             if not isinstance(value, bool):
@@ -38,7 +33,7 @@ class ProfileConfig:
 
 @dataclass
 class StageRecord:
-    """记录一个 category/stage 组合的耗时和内存汇总。"""
+    """Aggregate timing and memory observations for one stage."""
 
     category: str
     stage: str
@@ -56,7 +51,7 @@ class StageRecord:
         rss_before_mb: float | None,
         rss_after_mb: float | None,
     ) -> None:
-        """累加一次阶段调用的耗时和 RSS 观测值。"""
+        """Accumulate one stage call."""
 
         self.seconds += float(seconds)
         self.n_calls += 1
@@ -69,7 +64,7 @@ class StageRecord:
 
 
 class StageProfiler:
-    """在不改变 evaluation 逻辑的前提下收集阶段记录。"""
+    """Collect stage records without writing artifacts."""
 
     def __init__(
         self,
@@ -78,7 +73,7 @@ class StageProfiler:
         clock: Callable[[], float] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """初始化一次请求级阶段 profiler。"""
+        """Initialize one request-scoped profiler."""
 
         self.config = ProfileConfig() if config is None else config
         self._clock = time.perf_counter if clock is None else clock
@@ -89,7 +84,7 @@ class StageProfiler:
         )
 
     def __enter__(self) -> StageProfiler:
-        """把当前 profiler 绑定为上下文局部 active profiler。"""
+        """Bind this profiler as the context-local active profiler."""
 
         self._context_reset_handle = _ACTIVE_STAGE_PROFILER.set(self)
         return self
@@ -100,7 +95,7 @@ class StageProfiler:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        """退出 profile 上下文并恢复前一个 profiler。"""
+        """Exit the profiling context and restore the previous profiler."""
 
         if self._context_reset_handle is not None:
             _ACTIVE_STAGE_PROFILER.reset(self._context_reset_handle)
@@ -114,7 +109,7 @@ class StageProfiler:
         *,
         sample_memory: bool | None = None,
     ) -> Iterator[None]:
-        """在启用 profile 时记录一个阶段。"""
+        """Record one stage while profiling is enabled."""
 
         _validate_name(category, "category")
         _validate_name(stage, "stage")
@@ -146,7 +141,7 @@ class StageProfiler:
             )
 
     def to_frame(self) -> pd.DataFrame:
-        """以稳定 DataFrame 形式返回汇总后的 profile 记录。"""
+        """Return aggregated profiling records as a stable DataFrame."""
 
         rows: list[dict[str, Any]] = []
         for record in sorted(
@@ -166,26 +161,6 @@ class StageProfiler:
             rows.append(row)
         return pd.DataFrame.from_records(rows)
 
-    def write_artifacts(
-        self,
-        *,
-        spec: ReportSpec,
-        layout: StorageLayout,
-    ) -> dict[str, object]:
-        """写出 stage profile 的 CSV、JSON 和 Markdown artifacts。"""
-
-        from quant_research_platform.reports.report_artifacts import (
-            write_stage_profile_report_artifacts,
-        )
-
-        frame = self.to_frame()
-        return write_stage_profile_report_artifacts(
-            frame,
-            spec=spec,
-            layout=layout,
-            report_text=_render_stage_profile_report(frame),
-        )
-
 
 _ACTIVE_STAGE_PROFILER: contextvars.ContextVar[StageProfiler | None] = (
     contextvars.ContextVar("stage_profiler", default=None)
@@ -193,7 +168,7 @@ _ACTIVE_STAGE_PROFILER: contextvars.ContextVar[StageProfiler | None] = (
 
 
 def active_stage_profiler() -> StageProfiler | None:
-    """返回请求局部的 active profiler。"""
+    """Return the context-local active profiler."""
 
     return _ACTIVE_STAGE_PROFILER.get()
 
@@ -205,51 +180,13 @@ def measure_stage(
     *,
     sample_memory: bool | None = None,
 ) -> object:
-    """执行 operation，并在 profiler active 时记录阶段耗时。"""
+    """Run an operation and record its stage when a profiler is active."""
 
     profiler = active_stage_profiler()
     if profiler is None:
         return operation()
     with profiler.stage(category, stage, sample_memory=sample_memory):
         return operation()
-
-
-def _render_stage_profile_report(frame: pd.DataFrame) -> str:
-    lines = [
-        "# Stage Profile Report",
-        "",
-        "This report records stage-level timing and optional RSS observations "
-        "from quant-research-platform evaluation runs.",
-        "",
-        "## Stage Summary",
-        "",
-    ]
-    if frame.empty:
-        lines.append(
-            "- No stages were recorded; ProfileConfig.enabled is likely false."
-        )
-    else:
-        for row in frame.to_dict(orient="records"):
-            lines.append(
-                "- "
-                f"{row['category']}.{row['stage']}: "
-                f"{float(row['seconds']):.6f}s, "
-                f"{int(row['n_calls'])} calls, "
-                f"peak_rss={_format_optional_mb(row.get('peak_rss_mb'))}"
-            )
-    lines.extend(
-        [
-            "",
-            "## Boundary",
-            "",
-            "Profiling records local runtime observations only. It does not "
-            "download data, connect to vendor APIs, use credentials, or imply "
-            "simulated order execution, real-money order execution, or "
-            "investment advice.",
-            "",
-        ]
-    )
-    return "\n".join(lines)
 
 
 def _validate_name(value: str, name: str) -> None:
@@ -279,9 +216,3 @@ def _max_optional(left: float | None, right: float | None) -> float | None:
     if right is None:
         return left
     return max(left, right)
-
-
-def _format_optional_mb(value: object) -> str:
-    if value is None or pd.isna(value):
-        return "unavailable"
-    return f"{float(value):.3f} MB"

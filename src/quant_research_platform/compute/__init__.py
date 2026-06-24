@@ -1,1 +1,1 @@
-"""Compute kernels for signal evaluation and portfolio simulation."""
+"""Dataframe, tensor, portfolio-math, and performance compute kernels."""

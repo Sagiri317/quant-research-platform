@@ -3,10 +3,10 @@ from __future__ import annotations
 import inspect
 
 
-def test_model_algorithms_live_only_in_supervised_model_facts() -> None:
+def test_model_algorithm_ids_live_only_in_supervised_model_facts() -> None:
     import quant_research_platform.research.models.supervised as supervised
 
-    names = supervised.model_algorithm_names()
+    names = supervised.model_algorithm_ids()
     assert names
     assert names == tuple(sorted(names))
     assert len(names) == len(set(names))
@@ -46,6 +46,24 @@ def test_model_estimator_dispatch_uses_algorithm_facts_only() -> None:
     assert "_ICWeightedRankEnsembleFactory" not in inspect.getsource(
         supervised._fit_predictor
     )
+
+
+def test_model_algorithm_ids_is_the_only_collection_helper() -> None:
+    import quant_research_platform.contracts.models as contracts_models
+    import quant_research_platform.research.models.supervised as supervised
+
+    assert not hasattr(contracts_models, "MODEL_ALGORITHMS")
+    assert not hasattr(supervised, "MODEL_ALGORITHMS")
+    assert not hasattr(supervised, "model_algorithm_names")
+    assert supervised.model_algorithm_ids()
+
+
+def test_reports_do_not_branch_on_one_model_algorithm() -> None:
+    from quant_research_platform.reports import report_artifacts
+
+    source = inspect.getsource(report_artifacts)
+    assert 'model_algorithm"] == "linear_regression"' not in source
+    assert "model_algorithm == \"linear_regression\"" not in source
 
 
 def test_a_share_model_scenario_inputs_use_algorithm_facts_only() -> None:

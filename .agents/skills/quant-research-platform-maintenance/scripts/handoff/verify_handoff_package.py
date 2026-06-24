@@ -19,7 +19,6 @@ if str(SCRIPT_DIR) not in sys.path:
 if str(SCRIPT_PARENT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_PARENT))
 
-from governance_contract import VALID_STATUS_TOKENS  # noqa: E402
 from build_handoff_package import (  # noqa: E402
     FORBIDDEN_PACKAGE_ENTRY_PARTS,
     FORBIDDEN_TASK_KEYS,
@@ -29,6 +28,7 @@ from build_handoff_package import (  # noqa: E402
     is_reserved_handoff_evidence_path,
     source_tree_scan_from_clone,
 )
+from governance_contract import VALID_STATUS_TOKENS  # noqa: E402
 from handoff_safety import scan_handoff_zip  # noqa: E402
 
 VALID_STATUSES = set(VALID_STATUS_TOKENS)
@@ -51,9 +51,11 @@ RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
 )
 OLD_BASELINE_GROUP = "old_baseline"
 REFRESHED_PREDICTION_BASELINE_GROUP = "refreshed_prediction_baseline"
+DIRECT_BASELINE_FINAL_GROUP = "baseline_final"
 BASELINE_FINAL_COMPARE_GROUPS = (
     OLD_BASELINE_GROUP,
     REFRESHED_PREDICTION_BASELINE_GROUP,
+    DIRECT_BASELINE_FINAL_GROUP,
 )
 FORBIDDEN_DUPLICATE_SOURCE_ROOTS = (
     ".agents/",
@@ -114,6 +116,10 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
         with ZipFile(zip_path) as archive:
             names = archive.namelist()
             name_set = set(names)
+            duplicates = sorted(name for name in name_set if names.count(name) > 1)
+            failures.extend(
+                f"duplicate_zip_member: {name}" for name in duplicates
+            )
             if any("\\" in name for name in names):
                 failures.append("zip_paths_not_posix")
             if json_path.name in name_set:
@@ -588,12 +594,24 @@ def verify_baseline_final_compare(
     if not isinstance(comparison_groups, dict):
         failures.append("baseline_final_compare_groups_missing")
         comparison_groups = {}
-    old_group = comparison_groups.get(OLD_BASELINE_GROUP)
-    if not isinstance(old_group, dict) or old_group.get("status") != "FAIL_EXPECTED":
-        failures.append("baseline_final_compare_old_status_mismatch")
-    refreshed_group = comparison_groups.get(REFRESHED_PREDICTION_BASELINE_GROUP)
-    if not isinstance(refreshed_group, dict) or refreshed_group.get("status") != "PASS":
-        failures.append("baseline_final_compare_refreshed_status_mismatch")
+    direct_group = comparison_groups.get(DIRECT_BASELINE_FINAL_GROUP)
+    direct_mode = isinstance(direct_group, dict)
+    if direct_mode:
+        if direct_group.get("status") != "PASS":
+            failures.append("baseline_final_compare_direct_status_mismatch")
+    else:
+        old_group = comparison_groups.get(OLD_BASELINE_GROUP)
+        if (
+            not isinstance(old_group, dict)
+            or old_group.get("status") != "FAIL_EXPECTED"
+        ):
+            failures.append("baseline_final_compare_old_status_mismatch")
+        refreshed_group = comparison_groups.get(REFRESHED_PREDICTION_BASELINE_GROUP)
+        if (
+            not isinstance(refreshed_group, dict)
+            or refreshed_group.get("status") != "PASS"
+        ):
+            failures.append("baseline_final_compare_refreshed_status_mismatch")
     if payload.get("contract_failures"):
         failures.append("baseline_final_compare_contract_failures_present")
     if not is_full_sha(payload.get("baseline_commit_full")):
@@ -616,7 +634,16 @@ def verify_baseline_final_compare(
     if not isinstance(comparisons, dict):
         return [*failures, "baseline_final_compare_comparisons_missing"]
     grouped = comparisons_by_group(comparisons)
-    for group in BASELINE_FINAL_COMPARE_GROUPS:
+    if direct_mode:
+        if not grouped[DIRECT_BASELINE_FINAL_GROUP]:
+            failures.append("baseline_final_compare_direct_comparisons_missing")
+        for label, comparison in grouped[DIRECT_BASELINE_FINAL_GROUP].items():
+            if comparison.get("status") != "PASS":
+                failures.append(
+                    f"baseline_final_compare_direct_status_not_pass: {label}"
+                )
+        return failures
+    for group in (OLD_BASELINE_GROUP, REFRESHED_PREDICTION_BASELINE_GROUP):
         if not grouped[group]:
             failures.append(f"baseline_final_compare_missing_required_group: {group}")
     for label, comparison in grouped[OLD_BASELINE_GROUP].items():

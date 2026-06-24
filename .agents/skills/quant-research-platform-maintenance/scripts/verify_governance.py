@@ -21,7 +21,6 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS,
-    PACKAGE_FORBIDDEN_PATH_PARTS,
     PRIVACY_NEGATIVE_TEST_PATHS,
     RETIRED_GOVERNANCE_EXACT_PATHS,
     RETIRED_GOVERNANCE_PREFIXES,
@@ -368,7 +367,9 @@ def check_python_symbol_names(
         try:
             source = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            result.warnings.append(f"cannot decode python for symbol scan: {rel}: {exc}")
+            result.warnings.append(
+                f"cannot decode python for symbol scan: {rel}: {exc}"
+            )
             continue
         for finding in iter_python_symbol_findings(rel, source):
             result.errors.append(

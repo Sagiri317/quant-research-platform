@@ -7,11 +7,13 @@ import time
 import pytest
 
 import quant_research_platform.runtime.execution_metrics as execution_metrics
+from quant_research_platform.reports.execution_metrics_artifacts import (
+    write_execution_metrics_csv,
+    write_execution_metrics_json,
+)
 from quant_research_platform.runtime.execution_metrics import (
     ExecutionMetricsRecorder,
     ProcessMemorySampler,
-    write_execution_metrics_csv,
-    write_execution_metrics_json,
 )
 
 LEGACY_RSS_PEAK_FIELD = "rss_" + "peak_mb"
@@ -25,8 +27,12 @@ def test_execution_metrics_recorder_writes_timings_json_and_csv(tmp_path) -> Non
         record.file_count = 1
         record.file_size_bytes = 123
 
-    json_path = recorder.write_json(tmp_path / "timings.json", run_id="s8")
-    csv_path = recorder.write_csv(tmp_path / "timings.csv")
+    json_path = write_execution_metrics_json(
+        tmp_path / "timings.json",
+        recorder,
+        run_id="s8",
+    )
+    csv_path = write_execution_metrics_csv(tmp_path / "timings.csv", recorder)
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8").splitlines()))
@@ -63,8 +69,12 @@ def test_execution_metrics_records_sampled_rss_fields(monkeypatch, tmp_path) -> 
         record.input_rows = 2
         time.sleep(0.01)
 
-    json_path = recorder.write_json(tmp_path / "timings.json", run_id="s9")
-    csv_path = recorder.write_csv(tmp_path / "timings.csv")
+    json_path = write_execution_metrics_json(
+        tmp_path / "timings.json",
+        recorder,
+        run_id="s9",
+    )
+    csv_path = write_execution_metrics_csv(tmp_path / "timings.csv", recorder)
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8").splitlines()))
 
@@ -105,11 +115,10 @@ def test_execution_metrics_writer_functions_keep_timings_output_names(tmp_path) 
 
     json_path = write_execution_metrics_json(
         tmp_path / "timings.json",
-        recorder.records,
+        recorder,
         run_id="s10",
-        memory_sampler_unavailable=True,
     )
-    csv_path = write_execution_metrics_csv(tmp_path / "timings.csv", recorder.records)
+    csv_path = write_execution_metrics_csv(tmp_path / "timings.csv", recorder)
 
     assert json_path.name == "timings.json"
     assert csv_path.name == "timings.csv"

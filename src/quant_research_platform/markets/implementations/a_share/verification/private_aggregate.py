@@ -16,10 +16,6 @@ import pandas as pd
 
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.calendars import (
-    SessionWindowPlanner,
-    session_dates,
-)
 from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
@@ -31,6 +27,10 @@ from quant_research_platform.markets.implementations.a_share.research_scenarios 
     default_evaluation_run_id,
     default_prediction_oos_period,
     default_prediction_smoke_id,
+)
+from quant_research_platform.markets.session_windows import (
+    SessionWindowPlanner,
+    normalize_session_dates,
 )
 from quant_research_platform.reports.verification_evidence import (
     render_private_verification_summary_markdown,
@@ -204,8 +204,8 @@ def generate_private_verification_summary(
         if not item["covered_by_evidence_area"]
     ]
     allowed_unverified_roots: list[dict[str, str]] = []
-    merge_ready = (
-        bool(evidence_payload.get("merge_ready"))
+    handoff_ready = (
+        bool(evidence_payload.get("handoff_ready"))
         and not uncovered_roots
         and not allowed_unverified_roots
     )
@@ -224,7 +224,7 @@ def generate_private_verification_summary(
         "covered_roots": covered_roots,
         "uncovered_roots": uncovered_roots,
         "allowed_unverified_roots": allowed_unverified_roots,
-        "merge_ready": merge_ready,
+        "handoff_ready": handoff_ready,
     }
 
 
@@ -263,10 +263,10 @@ def _generate_public_safe_aggregate_evidence_with_cache(
         _area_record(area_input, summary_cache=summary_cache)
         for area_input in _area_inputs(root)
     ]
-    merge_ready = not any(area["human_approval_required"] for area in areas)
+    handoff_ready = not any(area["human_approval_required"] for area in areas)
     status = (
         "private real-data aggregate verification completed"
-        if merge_ready
+        if handoff_ready
         else (
             "private real-data aggregate verification completed with "
             "human approval required"
@@ -279,7 +279,7 @@ def _generate_public_safe_aggregate_evidence_with_cache(
         "artifact_id": ARTIFACT_ID,
         "market_id": MARKET_ID,
         "status": status,
-        "merge_ready": merge_ready,
+        "handoff_ready": handoff_ready,
         "generated_at": generated_at.replace(microsecond=0).isoformat().replace(
             "+00:00",
             "Z",
@@ -313,8 +313,8 @@ def _generate_private_verification_summary_with_cache(
         if not item["covered_by_evidence_area"]
     ]
     allowed_unverified_roots: list[dict[str, str]] = []
-    merge_ready = (
-        bool(evidence_payload.get("merge_ready"))
+    handoff_ready = (
+        bool(evidence_payload.get("handoff_ready"))
         and not uncovered_roots
         and not allowed_unverified_roots
     )
@@ -333,7 +333,7 @@ def _generate_private_verification_summary_with_cache(
         "covered_roots": covered_roots,
         "uncovered_roots": uncovered_roots,
         "allowed_unverified_roots": allowed_unverified_roots,
-        "merge_ready": merge_ready,
+        "handoff_ready": handoff_ready,
     }
 
 
@@ -755,7 +755,7 @@ def _trading_sessions_from_calendar(
     if "timestamp" not in trading_calendar or "is_trading_day" not in trading_calendar:
         raise ValueError("trading_calendar_columns_missing")
     mask = trading_calendar["is_trading_day"].astype(bool)
-    return session_dates(trading_calendar.loc[mask, "timestamp"])
+    return normalize_session_dates(trading_calendar.loc[mask, "timestamp"])
 
 
 def _filter_output_sessions(

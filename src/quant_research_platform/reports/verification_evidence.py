@@ -383,14 +383,14 @@ def render_public_safe_evidence_markdown(payload: dict[str, Any]) -> str:
             f"- `evidence_generation_mode | {payload['evidence_generation_mode']}`",
             f"- `source_data_visibility | {payload['source_data_visibility']}`",
             "- `row_level_output_committed | false`",
-            f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+            f"- `handoff_ready | {str(payload['handoff_ready']).lower()}`",
             (
                 "- private local aggregate run completed without committed "
                 "row-level artifacts"
             ),
         ]
     )
-    if not payload["merge_ready"]:
+    if not payload["handoff_ready"]:
         lines.append("- human approval required before final review status")
     return "\n".join(lines) + "\n"
 
@@ -444,7 +444,7 @@ def render_private_verification_summary_markdown(payload: dict[str, Any]) -> str
                 "- `allowed_unverified_roots | "
                 f"{len(payload['allowed_unverified_roots'])}`"
             ),
-            f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+            f"- `handoff_ready | {str(payload['handoff_ready']).lower()}`",
         ]
     )
     if payload["uncovered_roots"]:

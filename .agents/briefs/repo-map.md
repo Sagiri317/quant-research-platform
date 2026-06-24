@@ -22,14 +22,16 @@ tests/
 ## 源码分层
 
 ```text
-contracts/       字段、schema、ID、time、privacy、run id、workflow 合同
+contracts/       结构合同、枚举、ID、TimeWindow 和基础校验
 catalog/         dataset、factor、label、model、report 等注册描述
-sources/         A-share 内部 provider source 层和 raw/interim 映射
+sources/         provider/source 摄取、raw schema、字段映射和 raw/interim 转换
+markets/         通用市场领域、session window 和市场实现容器
+markets/implementations/a_share/  A 股 calendar、processed、mask 和研究绑定
 storage/         dataset 读写、manifest、fingerprint、compare、layout
-research/        factors、features、labels、models、predictions、evaluations、portfolios、signals
-compute/         dataframe/tensor 计算工具和 portfolio math
-runtime/         logging、privacy、resources、execution metrics
-reports/         public-safe evidence 与 report artifact
+research/        通用研究算法，不依赖具体市场实现或 sources
+compute/         dataframe/tensor 数值核心、portfolio math、performance
+runtime/         privacy、resources、logging、workflow records、metrics payload
+reports/         public-safe report/evidence artifact 写出
 interfaces/      API、CLI、service facade
 agents/          workflow planning 和 proposal 组件
 ```

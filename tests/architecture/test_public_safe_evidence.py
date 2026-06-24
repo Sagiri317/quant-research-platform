@@ -97,7 +97,7 @@ SUMMARY_TOP_LEVEL_FIELDS = {
     "covered_roots",
     "uncovered_roots",
     "allowed_unverified_roots",
-    "merge_ready",
+    "handoff_ready",
 }
 INVENTORY_FIELDS = {
     "kind",
@@ -174,7 +174,7 @@ def _synthetic_public_safe_evidence_payload() -> dict[str, object]:
         "evidence_generation_mode": "local_private_research_public_safe_aggregate",
         "source_data_visibility": "private_local_only",
         "row_level_output_committed": False,
-        "merge_ready": False,
+        "handoff_ready": False,
         "status": "PASS",
         "areas": [
             _synthetic_area(area, index)
@@ -214,7 +214,7 @@ def _synthetic_private_verification_summary_payload() -> dict[str, object]:
         "covered_roots": [item["logical_root"] for item in inventory],
         "uncovered_roots": [],
         "allowed_unverified_roots": [],
-        "merge_ready": False,
+        "handoff_ready": False,
         "status": "PASS",
     }
 
@@ -262,7 +262,7 @@ def _synthetic_public_safe_evidence_markdown(payload: dict[str, object]) -> str:
         f"- `contract_version | {payload['contract_version']}`",
         f"- `privacy_level | {payload['privacy_level']}`",
         f"- `status | {payload['status']}`",
-        f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+        f"- `handoff_ready | {str(payload['handoff_ready']).lower()}`",
         "",
         "| area | status | period |",
         "| --- | --- | --- |",
@@ -284,7 +284,7 @@ def _synthetic_private_verification_summary_markdown(
         f"- `contract_version | {payload['contract_version']}`",
         f"- `privacy_level | {payload['privacy_level']}`",
         f"- `status | {payload['status']}`",
-        f"- `merge_ready | {str(payload['merge_ready']).lower()}`",
+        f"- `handoff_ready | {str(payload['handoff_ready']).lower()}`",
         "",
         "| logical_root | covered_by_evidence_area | period |",
         "| --- | --- | --- |",
@@ -404,7 +404,7 @@ def test_current_public_safe_parity_evidence_is_aggregate_status_payload() -> No
     )
     assert payload["row_level_output_committed"] is False
     assert payload["status"] in STATUS_TOKENS
-    assert payload["merge_ready"] is False
+    assert payload["handoff_ready"] is False
 
 
 def test_full_historical_market_panel_daily_covers_full_2014_2025_period() -> None:
@@ -418,7 +418,7 @@ def test_full_historical_market_panel_daily_covers_full_2014_2025_period() -> No
     assert area["period"] == "2014-01-01 through 2025-12-31"
     assert area["human_approval_required"] is False
     assert area["accepted_explained_delta"] is False
-    assert payload["merge_ready"] is False
+    assert payload["handoff_ready"] is False
     assert payload["status"] in STATUS_TOKENS
 
 
@@ -454,7 +454,7 @@ def test_private_verification_summary_json_schema_and_coverage() -> None:
     assert payload["source_data_visibility"] == "private_local_only"
     assert payload["row_level_output_committed"] is False
     assert payload["status"] in STATUS_TOKENS
-    assert payload["merge_ready"] is False
+    assert payload["handoff_ready"] is False
     assert payload["uncovered_roots"] == []
     assert payload["allowed_unverified_roots"] == []
     assert payload["covered_roots"] == [

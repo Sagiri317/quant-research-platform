@@ -62,7 +62,7 @@ references/prompt-patterns.md
 
 所有报告只用：`PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。
 
-`PASS` 必须绑定实际命令或 artifact。完整测试超时写 `TIMEOUT`，不能写 PASS。分段测试通过只能覆盖对应分段。
+`PASS` 必须绑定实际命令或 artifact。完整测试超时写 `BLOCKED` 并说明超时，不能写 PASS。分段测试通过只能覆盖对应分段。
 
 内部治理规则事实源是：
 
@@ -99,6 +99,8 @@ handoff scripts 位于：
 ```
 
 builder、verifier、source-tree scan、package safety 是不同 gate，不能互相替代。handoff artifact 输出到 `.run/` 或用户指定输出目录，不得把 `.run/` 中的历史产物当当前合同。
+
+`.agents/` 只承载 governance、handoff 和 prompt tooling；runtime 业务逻辑必须留在 `src/quant_research_platform/` 的 owner layer。
 
 ## 6. 修改边界
 

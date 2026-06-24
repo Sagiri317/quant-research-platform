@@ -30,7 +30,7 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from quant_research_platform.research.models.supervised import (
     model_algorithm_definition,
-    model_algorithm_names,
+    model_algorithm_ids,
     model_smoke_hyperparameters,
 )
 
@@ -110,7 +110,7 @@ def build_signal_specs() -> tuple[SignalSpec, ...]:
 
 def build_model_specs(
     *,
-    model_algorithms: Iterable[str] = model_algorithm_names(),
+    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
@@ -130,7 +130,7 @@ def build_model_specs(
             random_seed=random_seed,
             max_train_rows=max_train_rows,
         )
-        for model_algorithm in sorted(model_algorithms)
+        for model_algorithm in sorted(model_algorithm_ids)
     )
 
 
@@ -138,7 +138,7 @@ def build_prediction_specs(
     *,
     train_end: str,
     test_start: str,
-    model_algorithms: Iterable[str] = model_algorithm_names(),
+    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> tuple[PredictionSpec, ...]:
@@ -151,7 +151,7 @@ def build_prediction_specs(
             test_start=test_start,
             test_end=test_end,
         )
-        for model_algorithm in sorted(model_algorithms)
+        for model_algorithm in sorted(model_algorithm_ids)
     )
 
 
@@ -195,7 +195,7 @@ def build_portfolio_specs(
 
 def build_model_catalog(
     *,
-    model_algorithms: Iterable[str] = model_algorithm_names(),
+    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
@@ -203,7 +203,7 @@ def build_model_catalog(
 ) -> ModelCatalog:
     catalog = ModelCatalog()
     for spec in build_model_specs(
-        model_algorithms=model_algorithms,
+        model_algorithm_ids=model_algorithm_ids,
         return_source_column=return_source_column,
         max_train_rows=max_train_rows,
         random_seed=random_seed,
@@ -217,13 +217,13 @@ def build_prediction_catalog(
     *,
     train_end: str,
     test_start: str,
-    model_algorithms: Iterable[str] = model_algorithm_names(),
+    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> PredictionCatalog:
     catalog = PredictionCatalog()
     for spec in build_prediction_specs(
-        model_algorithms=model_algorithms,
+        model_algorithm_ids=model_algorithm_ids,
         return_source_column=return_source_column,
         train_end=train_end,
         test_start=test_start,
@@ -289,7 +289,7 @@ def default_prediction_oos_period(
     test_end: str | None = DEFAULT_TEST_END,
 ) -> str:
     spec = build_prediction_specs(
-        model_algorithms=(model_algorithm,),
+        model_algorithm_ids=(model_algorithm,),
         train_end=train_end,
         test_start=test_start,
         test_end=test_end,

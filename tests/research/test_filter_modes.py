@@ -39,7 +39,7 @@ from quant_research_platform.research.models import (
     predict_model_frame,
 )
 from quant_research_platform.research.models.supervised import (
-    model_algorithm_names,
+    model_algorithm_ids,
     model_smoke_hyperparameters,
 )
 from quant_research_platform.research.predictions import (
@@ -873,9 +873,9 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
 
 @pytest.mark.parametrize(
     "model_algorithm",
-    model_algorithm_names(),
+    model_algorithm_ids(),
 )
-def test_required_model_algorithms_fit_and_predict(model_algorithm: str) -> None:
+def test_required_model_algorithm_ids_fit_and_predict(model_algorithm: str) -> None:
     train = pd.DataFrame(
         {
             "market_id": ["a_share"] * 8,

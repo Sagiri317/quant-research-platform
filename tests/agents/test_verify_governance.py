@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.helpers.governance_fixtures import representative_name_forms
+
 REPO_ROOT = Path.cwd()
 VERIFY_GOVERNANCE = (
     REPO_ROOT
@@ -85,6 +87,10 @@ def test_active_doc_scan_collects_non_empty_clean_tree_file_set() -> None:
     assert "PROJECT_STATUS.md" not in paths
     assert ".agents/briefs/current-qrp-status.md" not in paths
     assert any(path.startswith(".agents/") for path in paths)
+    assert (
+        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/README.md"
+        in paths
+    )
     assert any(path.startswith("docs/architecture/") for path in paths)
     assert any(path.startswith("docs/code-map/") for path in paths)
     assert any(path.startswith("docs/api/") for path in paths)
@@ -222,21 +228,12 @@ def test_active_doc_scan_fails_stale_current_truth(tmp_path: Path) -> None:
 
 def test_active_doc_scan_fails_retired_public_surface_terms(tmp_path: Path) -> None:
     module = _load_governance_module()
-    cases = {
-        "retired_execution_mode": "ExecutionMode is the current public mode.",
-        "retired_daily_panel": "daily-panel is the current dataset.",
-        "retired_model_family": "model_family is the current model selector.",
-        "retired_backtest_spec": "BacktestSpec is the active backtest contract.",
-        "retired_prediction_bundle": "prediction_bundle is the active artifact.",
-        "retired_csmar_source_alias": "CSMAR_SOURCE_ID is the active source alias.",
-        "retired_model_algorithm_collection": (
-            "MODEL_ALGORITHMS is the active algorithm list."
-        ),
-    }
+    contract = _load_contract_module()
+    cases = representative_name_forms(contract.RETIRED_PUBLIC_SURFACE_RULES)
 
-    for rule, text in cases.items():
+    for rule, form in cases.items():
         doc = tmp_path / f"{rule}.md"
-        doc.write_text(text, encoding="utf-8")
+        doc.write_text(f"{form} is active.", encoding="utf-8")
         result = module.Result()
 
         module.check_text_safety(result, tmp_path, [doc.name])
@@ -469,19 +466,14 @@ def test_python_symbol_gate_fails_retired_stage_and_surface_names(
         assert any(rule in error for error in result.errors), (rule, result.errors)
 
 
-def test_python_symbol_gate_allows_current_runtime_symbols(tmp_path: Path) -> None:
+def test_python_symbol_gate_allows_declared_current_runtime_symbols(
+    tmp_path: Path,
+) -> None:
     module = _load_governance_module()
     cases = {
         "src/quant_research_platform/catalog/profiles.py": (
             "_a_share_csmar_source_id = 'source'\n"
         ),
-        "src/quant_research_platform/markets/implementations/a_share/"
-        "research_scenarios.py": "model_algorithms = ()\n",
-        "src/quant_research_platform/reports/verification_evidence.py": (
-            "merge_ready = False\n"
-        ),
-        "src/quant_research_platform/markets/implementations/a_share/"
-        "verification/private_aggregate.py": "merge_ready = False\n",
     }
 
     for relative, text in cases.items():
@@ -518,7 +510,11 @@ def test_synthesized_string_gate_fails_retired_stage_names(tmp_path: Path) -> No
     )
     result = module.Result()
 
-    module.check_synthesized_strings(result, tmp_path, ["tests/sample_split_strings.py"])
+    module.check_synthesized_strings(
+        result,
+        tmp_path,
+        ["tests/sample_split_strings.py"],
+    )
 
     expected_rules = (
         "clean_rewrite",
@@ -549,7 +545,11 @@ def test_synthesized_string_gate_allows_current_version_surface(
     )
     result = module.Result()
 
-    module.check_synthesized_strings(result, tmp_path, ["tests/sample_version_strings.py"])
+    module.check_synthesized_strings(
+        result,
+        tmp_path,
+        ["tests/sample_version_strings.py"],
+    )
 
     assert result.errors == []
 
@@ -583,9 +583,18 @@ def test_structured_key_gate_fails_retired_keys_and_allows_values(
 
     module.check_structured_key_names(result, tmp_path, ["config.json", "allowed.json"])
 
-    assert any("config.json" in error and "clean_rewrite" in error for error in result.errors)
-    assert any("config.json" in error and "CleanRewrite" in error for error in result.errors)
-    assert any("config.json" in error and "CLEAN_REWRITE_FLAG" in error for error in result.errors)
+    assert any(
+        "config.json" in error and "clean_rewrite" in error
+        for error in result.errors
+    )
+    assert any(
+        "config.json" in error and "CleanRewrite" in error
+        for error in result.errors
+    )
+    assert any(
+        "config.json" in error and "CLEAN_REWRITE_FLAG" in error
+        for error in result.errors
+    )
     assert not any("allowed.json" in error for error in result.errors)
 
 

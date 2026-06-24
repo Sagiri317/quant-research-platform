@@ -22,7 +22,6 @@ from quant_research_platform.contracts.factors import FactorDefinition, FactorSe
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.calendars import SessionWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
     AS_OF_MASK_ID,
     DEFAULT_UNIVERSE_ID,
@@ -39,6 +38,7 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer,
 )
+from quant_research_platform.markets.session_windows import SessionWindow
 from quant_research_platform.research.factors.price_volume import (
     price_volume_window_column,
 )

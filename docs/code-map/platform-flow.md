@@ -7,7 +7,7 @@
 ## 总体链路
 
 ```text
-sources -> storage -> contracts -> research -> compute -> reports -> interfaces
+sources -> markets implementation -> storage -> research -> compute -> reports
 ```
 
 研究链路：
@@ -30,6 +30,8 @@ tests 和 handoff evidence 只保护当前合同，不把历史阶段、旧路�
 
 ```text
 src/quant_research_platform/sources
+src/quant_research_platform/markets
+src/quant_research_platform/markets/implementations/a_share
 src/quant_research_platform/storage
 src/quant_research_platform/contracts
 src/quant_research_platform/research
@@ -42,7 +44,11 @@ src/quant_research_platform/agents
 
 ## contracts
 
-contracts 层定义字段、ID、时间、privacy、data、factor、feature、label、model、prediction、signal、evaluation、portfolio、report 和 workflow 的当前语义。
+contracts 层定义结构合同、枚举、ID、TimeWindow 和基础校验，不放 pandas 算法、source/market 具体实现或模型算法事实源。
+
+## sources 与 markets
+
+sources 层只负责 provider/source ingestion、raw schema、字段映射和 raw/interim 转换。markets 是通用市场领域层，`markets/session_windows.py` 持有通用 session window；A 股 calendar、processed、mask 和研究绑定位于 `markets/implementations/a_share/`。
 
 ## storage
 
@@ -50,11 +56,15 @@ storage 层处理 dataset layout、atomic write、checksums、dataset read/write
 
 ## research
 
-research 层实现因子、特征、标签、模型、预测、评估、组合和 signal materialization。
+research 层实现通用因子、特征、标签、模型、预测、评估、组合和 signal materialization，不 import 具体市场实现或 sources。
 
 ## compute
 
-compute 层提供 dataframe/tensor 公共计算能力。重复逻辑应收敛，不应在业务层复制。
+compute 层提供 dataframe/tensor、portfolio math 和 performance 数值核心，不持有 market session domain 工具。
+
+## runtime 与 workflows
+
+runtime 提供 privacy、resources、logging、workflow records 和 execution metrics payload，不写 report artifact。workflows 只编排 workflow node 和 service 调用，不成为算法事实源。
 
 ## reports
 
@@ -84,5 +94,5 @@ qrp research-datasets requirements <dataset_id>
 ## agents
 
 agents 层提供 proposal 和 workflow planning，不得绕过 contracts 或 private safety。
-`.agents tooling` 是 tracked governance tooling source；`.run output/evidence`
+`.agents tooling` 只承载 governance、handoff 和 prompt tooling；`.run output/evidence`
 只是运行输出和 evidence layer，不定义架构、工具入口或当前状态。

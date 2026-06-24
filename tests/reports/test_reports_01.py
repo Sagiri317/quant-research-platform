@@ -32,9 +32,11 @@ def test_stage_profile_report_artifacts_write_only_inside_private_report_boundar
         with profiler.stage("evaluation", "ic", sample_memory=False):
             pass
 
-    output_dir = profiler.write_artifacts(
+    output_dir = write_stage_profile_report_artifacts(
+        profiler.to_frame(),
         spec=_stage_profile_report_spec(),
         layout=StorageLayout(project_root=tmp_path),
+        report_text="Stage profile report.",
     )
 
     assert output_dir["csv"].is_file()
@@ -51,14 +53,10 @@ def test_stage_profile_report_artifacts_write_only_inside_private_report_boundar
     ).is_file()
 
 
-def test_stage_profiler_write_artifacts_does_not_accept_output_dir(tmp_path):
-    profiler = StageProfiler(ProfileConfig(enabled=True))
-
+def test_stage_profiler_does_not_expose_artifact_writer() -> None:
     assert "output_dir" not in ProfileConfig.__dataclass_fields__
-    signature = inspect.signature(StageProfiler.write_artifacts)
-    assert "output_dir" not in signature.parameters
-    with pytest.raises(TypeError):
-        profiler.write_artifacts(tmp_path / "public")
+    assert "write_artifacts" not in ProfileConfig.__dataclass_fields__
+    assert not hasattr(StageProfiler, "write_artifacts")
 
 
 def test_stage_profile_report_artifacts_require_approved_report_spec(tmp_path):

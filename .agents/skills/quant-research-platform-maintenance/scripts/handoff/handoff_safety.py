@@ -375,9 +375,13 @@ def member_name_failures(name: str) -> list[str]:
     failures: list[str] = []
     if "\\" in name:
         failures.append(f"windows_backslash_zip_path: {name}")
+    if name.startswith("/") or re.match(r"(?i)^[a-z]:/", name):
+        failures.append(f"absolute_zip_path: {name}")
     normalized = name.replace("\\", "/").lower()
     suffix = Path(normalized).suffix.lower()
     parts = tuple(part for part in normalized.split("/") if part)
+    if ".." in parts:
+        failures.append(f"path_traversal_zip_path: {name}")
     if suffix in FORBIDDEN_SUFFIXES:
         failures.append(f"forbidden_suffix: {name}")
     for segment in FORBIDDEN_PATH_SEGMENTS:

@@ -53,11 +53,20 @@ git branch -a
 - `FAIL`：实际运行并失败，必须说明失败范围和下一步。
 - `NOT_RUN`：未运行，不得伪装为 PASS。
 - `BLOCKED`：因环境、依赖、权限、超时或边界无法运行，必须说明阻塞条件。
-- `TIMEOUT`：命令实际超时，不能写成 `PASS`。
 
 pytest PASS、governance PASS、handoff verifier PASS、package safety PASS、source-tree scan PASS、compare PASS、sidecar PASS 不能互相替代。每个 PASS 只覆盖对应命令和对应 scope。
 
-## 6. current-contract-only
+## 6. 架构职责
+
+`contracts/` 只定义结构合同、枚举、ID、时间窗口和基础校验。`catalog/` 只负责注册描述与组合入口。`sources/` 负责数据源摄取、raw schema、字段映射和 raw/interim 转换，不承载市场语义。
+
+`markets/` 是通用市场领域层；`markets/implementations/a_share/` 承载 A 股 calendar、processed data、mask、factor/label binding 和 profile/scenario。通用 session window 的唯一 owner 是 `markets/session_windows.py`。
+
+`research/` 是通用研究算法层，不依赖具体市场实现或 sources。`compute/` 是 dataframe/tensor、portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 layout。
+
+`runtime/` 只提供 privacy、resources、logging、workflow records 和 execution metrics payload，不写 report artifact。`reports/` 负责 public-safe report/evidence artifact 写出，不重算研究逻辑。`workflows/` 只编排 node 和 service 调用。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`agents/` 保持 proposal-only。`.agents/` 只承载治理、handoff 和 prompt tooling。
+
+## 7. current-contract-only
 
 QRP 采用 current-contract-only。普通 tests 只保护当前合同。旧字段、旧路径、旧 artifact 字段、旧执行模式、旧命名和兼容 alias 只能出现在 retired-surface negative tests 或明确 allowlist 中。除非用户批准兼容期，禁止 fallback read、silent drop、compatibility field 和 alias field。
 
@@ -67,17 +76,17 @@ Retired governance paths 不得复活。`PROJECT_STATUS.md`、`.agents/briefs/cu
 
 Retired stage naming 不得以文件名、路径名、Python function/class/fixture/常量名、JSON/YAML/TOML key 或静态字符串拼接形式复活。合法版本面包括 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`contract_version="0.1"`、`schema_version="0.1"`、`definition_version`、`workflow_version` 和 handoff `0.1` schema；带 `v` 前缀的 `0.1` API 版本路径不是当前 API 形式，只能出现在规则定义或 negative tests 中。
 
-## 7. private safety
+## 8. private safety
 
 禁止把 private data、vendor marker、本地绝对路径、股票代码样本、raw traceback、row-level sample 写入 public-safe docs、handoff、reports、logs 或 final response。需要引用 private 验证时，只写摘要、计数、hash、schema、command status 和 public-safe evidence。
 
-## 8. 修改边界
+## 9. 修改边界
 
 默认允许修改与任务直接相关的最小文件集合。修改 docs、governance scripts、handoff scripts、tests 时，必须同步更新相关验证。修改业务逻辑时，必须有用户明确授权。
 
 禁止为了让测试通过而恢复过期文档事实。遇到脚本仍引用已删除的历史状态文档时，应修脚本和测试，而不是恢复旧文档。
 
-## 9. 推荐验证命令
+## 10. 推荐验证命令
 
 按任务范围选择最小充分命令，不要把未运行项写成 PASS：
 
@@ -90,6 +99,6 @@ python -m pytest tests/agents tests/architecture -q
 
 如果完整测试因环境或超时不可行，必须分段运行并明确写 `BLOCKED` 或 `NOT_RUN`。
 
-## 10. 提交流程
+## 11. 提交流程
 
 commit 前必须运行 `git status --short --branch` 并检查 diff。禁止 force push、main push、未经批准的 rebase、amend、squash、merge main。最终报告必须列出 branch、HEAD、changed files、validation results、remaining issues 和 working tree status。

@@ -3,6 +3,10 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from quant_research_platform.reports.execution_metrics_artifacts import (
+    format_optional_mb,
+    render_stage_profile_report,
+)
 from quant_research_platform.reports.verification_evidence import (
     render_private_verification_summary_markdown,
     render_public_safe_evidence_markdown,
@@ -10,8 +14,6 @@ from quant_research_platform.reports.verification_evidence import (
 from quant_research_platform.runtime.profiling import (
     ProfileConfig,
     StageProfiler,
-    _format_optional_mb,
-    _render_stage_profile_report,
     active_stage_profiler,
     measure_stage,
 )
@@ -26,7 +28,7 @@ def test_public_safe_evidence_markdown_renders_status_rows() -> None:
         "verification_scope": "aggregate_public_safe_parity",
         "evidence_generation_mode": "local_private_research_public_safe_aggregate",
         "source_data_visibility": "private_local_only",
-        "merge_ready": False,
+        "handoff_ready": False,
         "areas": [
             {
                 "area": "factor_value_parity",
@@ -49,7 +51,7 @@ def test_public_safe_evidence_markdown_renders_status_rows() -> None:
 
     assert "factor value parity" in markdown
     assert "human approval required before final review status" in markdown
-    assert "`merge_ready | false`" in markdown
+    assert "`handoff_ready | false`" in markdown
 
 
 def test_private_verification_summary_markdown_renders_inventory() -> None:
@@ -77,7 +79,7 @@ def test_private_verification_summary_markdown_renders_inventory() -> None:
         "covered_roots": [frequency_ids.market_panel_logical_root()],
         "uncovered_roots": ["processed/a_share/other/demo"],
         "allowed_unverified_roots": [],
-        "merge_ready": False,
+        "handoff_ready": False,
     }
 
     markdown = render_private_verification_summary_markdown(payload)
@@ -104,10 +106,10 @@ def test_stage_profiler_records_and_renders() -> None:
     frame = profiler.to_frame()
     assert frame["n_calls"].tolist() == [1, 1]
     assert frame["run_id"].tolist() == ["synthetic", "synthetic"]
-    report = _render_stage_profile_report(frame)
+    report = render_stage_profile_report(frame)
     assert "metric.one" in report
-    assert _format_optional_mb(None) == "unavailable"
-    assert _format_optional_mb(1.23456) == "1.235 MB"
+    assert format_optional_mb(None) == "unavailable"
+    assert format_optional_mb(1.23456) == "1.235 MB"
 
 
 def test_stage_profiler_disabled_and_invalid_config_paths() -> None:
@@ -122,5 +124,5 @@ def test_stage_profiler_disabled_and_invalid_config_paths() -> None:
         with profiler.stage("", "bad"):
             pass
 
-    empty_report = _render_stage_profile_report(pd.DataFrame())
+    empty_report = render_stage_profile_report(pd.DataFrame())
     assert "No stages were recorded" in empty_report

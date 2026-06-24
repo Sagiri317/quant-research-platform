@@ -8,9 +8,8 @@
 - `FAIL`：实际运行并失败，必须有失败范围和修复建议。
 - `NOT_RUN`：未运行。
 - `BLOCKED`：环境、依赖、权限、超时或边界阻塞。
-- `TIMEOUT`：命令实际超时。
 
-任何报告不得把 `NOT_RUN`、`BLOCKED` 或 `TIMEOUT` 写成 `PASS`。
+任何报告不得把 `NOT_RUN` 或 `BLOCKED` 写成 `PASS`。
 
 ## 2. PASS 不可替代
 
@@ -75,35 +74,15 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 python -m pytest tests/agents tests/architecture -q
 ```
 
-如果完整运行超时，必须写 `BLOCKED/TIMEOUT`，可以补充分段运行结果。
+如果完整运行超时，必须写 `BLOCKED` 并记录超时，可以补充分段运行结果。
 
 ## 4. Active-doc scan
 
-active docs 至少包括：
-
-```text
-AGENTS.md
-README.md
-.agents/briefs/**
-.agents/skills/quant-research-platform-maintenance/SKILL.md
-.agents/skills/quant-research-platform-maintenance/references/**
-docs/architecture/**
-docs/code-map/**
-docs/api/**
-docs/data/**
-data/README.md
-```
+active docs 的唯一可执行路径清单是 `governance_contract.ACTIVE_GOVERNANCE_DOC_ROOTS`，其中包含 handoff tooling README。其他脚本和测试只读取或验证该常量，不维护平行清单。
 
 active docs 不得把历史 branch、历史阶段、历史 PR、历史 reports 当当前事实。
 
-Retired governance paths 存在即 `FAIL`。至少包括：
-
-```text
-PROJECT_STATUS.md
-.agents/briefs/current-qrp-status.md
-docs/architecture/open-issues-register.md
-docs/reports/clean-rewrite-0.1-*
-```
+Retired governance paths 存在即 `FAIL`；完整路径规则只由 `governance_contract.py` 定义。
 
 Retired stage naming 不能通过以下表面复活：
 

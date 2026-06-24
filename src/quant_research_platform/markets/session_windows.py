@@ -1,4 +1,4 @@
-"""Market calendar helpers based on explicit trading sessions."""
+"""Generic market session-window planning based on explicit sessions."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pandas as pd
 from quant_research_platform.contracts.time import TimeWindow
 
 
-def session_dates(values: Iterable[object]) -> tuple[pd.Timestamp, ...]:
+def normalize_session_dates(values: Iterable[object]) -> tuple[pd.Timestamp, ...]:
     """Normalize provided session dates to sorted unique daily timestamps."""
 
     normalized = {pd.Timestamp(value).normalize() for value in values}
@@ -42,7 +42,11 @@ class SessionWindowPlanner:
             raise ValueError("invalid_warmup_sessions")
         if self.lookahead_sessions < 0:
             raise ValueError("invalid_lookahead_sessions")
-        object.__setattr__(self, "sessions", session_dates(self.sessions))
+        object.__setattr__(
+            self,
+            "sessions",
+            normalize_session_dates(self.sessions),
+        )
 
     @classmethod
     def from_sessions(
@@ -54,7 +58,7 @@ class SessionWindowPlanner:
         lookahead_sessions: int = 0,
     ) -> SessionWindowPlanner:
         return cls(
-            sessions=session_dates(sessions),
+            sessions=normalize_session_dates(sessions),
             target_core_session_count=target_core_session_count,
             warmup_sessions=warmup_sessions,
             lookahead_sessions=lookahead_sessions,
@@ -106,4 +110,8 @@ class SessionWindowPlanner:
         return tuple(result)
 
 
-__all__ = ["SessionWindow", "SessionWindowPlanner", "session_dates"]
+__all__ = [
+    "SessionWindow",
+    "SessionWindowPlanner",
+    "normalize_session_dates",
+]

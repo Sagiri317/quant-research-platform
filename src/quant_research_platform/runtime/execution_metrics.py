@@ -8,11 +8,6 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
-
-import pandas as pd
-
-from quant_research_platform.storage.atomic import atomic_write_csv, atomic_write_json
 
 
 @dataclass
@@ -271,40 +266,6 @@ class ExecutionMetricsRecorder:
             memory_sampler_unavailable=self.memory_sampler.unavailable,
         )
 
-    def write_json(self, path: Path, *, run_id: str | None = None) -> Path:
-        return write_execution_metrics_json(
-            path,
-            self.records,
-            run_id=run_id,
-            memory_sampler_unavailable=self.memory_sampler.unavailable,
-        )
-
-    def write_csv(self, path: Path) -> Path:
-        return write_execution_metrics_csv(path, self.records)
-
-
-def write_execution_metrics_json(
-    path: Path,
-    records: list[ExecutionStepMetric],
-    *,
-    run_id: str | None = None,
-    memory_sampler_unavailable: bool = False,
-) -> Path:
-    return atomic_write_json(
-        path,
-        _payload(
-            records,
-            run_id=run_id,
-            memory_sampler_unavailable=memory_sampler_unavailable,
-        ),
-    )
-
-
-def write_execution_metrics_csv(path: Path, records: list[ExecutionStepMetric]) -> Path:
-    frame = pd.DataFrame([record.to_payload() for record in records])
-    return atomic_write_csv(frame, path, index=False)
-
-
 def _payload(
     records: list[ExecutionStepMetric],
     *,
@@ -365,6 +326,4 @@ __all__ = [
     "ExecutionMetricsRecorder",
     "ExecutionStepMetric",
     "ProcessMemorySampler",
-    "write_execution_metrics_csv",
-    "write_execution_metrics_json",
 ]

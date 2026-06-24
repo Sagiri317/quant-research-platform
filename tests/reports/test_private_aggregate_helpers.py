@@ -134,7 +134,7 @@ def test_public_safe_aggregate_evidence_orchestrates_area_inputs(
 
     payload = private_aggregate.generate_public_safe_aggregate_evidence(tmp_path)
 
-    assert payload["merge_ready"] is True
+    assert payload["handoff_ready"] is True
     assert payload["verification_periods"] == [summary.period]
     assert payload["areas"][0]["area"] == "factor_value_parity"
 
@@ -161,7 +161,7 @@ def test_private_aggregate_area_inputs_and_inventory_helpers(
     prediction_spec = build_prediction_specs(
         train_end="2014-06-30",
         test_start="2014-07-01",
-        model_algorithms=("linear_regression",),
+        model_algorithm_ids=("linear_regression",),
     )[0]
     assert prediction_spec.prediction_id == default_prediction_smoke_id(
         test_start="2014-07-01"
@@ -288,7 +288,7 @@ def test_private_verification_summary_uses_inventory(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    evidence = {"merge_ready": True}
+    evidence = {"handoff_ready": True}
     monkeypatch.setattr(
         private_aggregate,
         "_dataset_inventory",
@@ -309,6 +309,6 @@ def test_private_verification_summary_uses_inventory(
         evidence_payload=evidence,
     )
 
-    assert summary["merge_ready"] is False
+    assert summary["handoff_ready"] is False
     assert summary["covered_roots"] == [frequency_ids.market_panel_logical_root()]
     assert summary["uncovered_roots"] == ["processed/a_share/other/demo"]

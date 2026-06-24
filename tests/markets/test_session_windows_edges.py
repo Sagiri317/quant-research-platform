@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.calendars import SessionWindowPlanner
+from quant_research_platform.markets.session_windows import SessionWindowPlanner
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
     ResourceChunkPlanner,

@@ -197,6 +197,18 @@ def test_verifier_rejects_duplicate_tracked_tools_in_zip(tmp_path: Path) -> None
     assert "duplicate_tracked_source_in_zip: run_tools/self_test.py" in failures
 
 
+def test_verifier_rejects_duplicate_required_zip_member(tmp_path: Path) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(package, "a") as archive:
+            archive.writestr("task_metadata.json", "{}\n")
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "duplicate_zip_member: task_metadata.json" in failures
+
+
 def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
@@ -320,6 +332,20 @@ def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
     rules = builder.source_tree_sensitive_negative_patterns()
 
     assert rules["sensitive_local_private_path"].search(text)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "../handoff_evidence/leak.md",
+        "/handoff_evidence/leak.md",
+        "C:/handoff_evidence/leak.md",
+    ],
+)
+def test_handoff_safety_rejects_tampered_zip_member_paths(member: str) -> None:
+    safety = _load_handoff_module("handoff_safety")
+
+    assert safety.member_name_failures(member)
 
 
 def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
@@ -905,3 +931,31 @@ def _baseline_final_compare_payload(
         "contract_failures": [],
         "comparisons": comparisons,
     }
+
+
+def test_handoff_verifier_accepts_direct_baseline_final_compare() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    comparisons = {
+        "candidate_window_a": {
+            "comparison_group": "baseline_final",
+            "status": "PASS",
+        },
+        "candidate_window_b": {
+            "comparison_group": "baseline_final",
+            "status": "PASS",
+        },
+    }
+    payload = _baseline_final_compare_payload(comparisons)
+    payload["status"] = {
+        "raw": "PASS",
+        "policy_adjusted": "PASS",
+        "validation_decision": "PASS",
+    }
+    payload["comparison_groups"] = {"baseline_final": {"status": "PASS"}}
+
+    failures = verifier.verify_baseline_final_compare(
+        payload,
+        sidecar={"final_head": "1" * 40},
+    )
+
+    assert failures == []

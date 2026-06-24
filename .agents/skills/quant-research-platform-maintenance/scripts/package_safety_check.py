@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import zipfile
 from dataclasses import dataclass, field
@@ -73,6 +74,8 @@ def check_entry_path(
     name: str,
     allow_nested_packages: bool,
 ) -> None:
+    if name.startswith("/") or re.match(r"(?i)^[a-z]:[\\/]", name):
+        result.errors.append(f"absolute path entry: {name}")
     norm = normalize_entry(name)
     if not norm or norm.endswith("/"):
         return

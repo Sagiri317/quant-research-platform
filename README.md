@@ -24,6 +24,16 @@ data/        本地数据占位说明，不提交私有数据
 .run/        本地运行输出和 evidence，不作为 tracked tooling source
 ```
 
+核心 owner 边界：
+
+- `sources/`：数据源摄取、raw schema、字段映射和 raw/interim 转换。
+- `markets/`：通用市场领域与 session window；A 股实现位于 `markets/implementations/a_share/`。
+- `research/`：通用研究算法，不依赖具体市场实现或 sources。
+- `compute/`：dataframe/tensor、portfolio math 和 performance 数值核心。
+- `runtime/`：privacy、resources、logging 和结构化运行指标，不写 report artifact。
+- `reports/`：public-safe report 和 evidence artifact 写出。
+- `.agents/`：治理、handoff 和 prompt tooling，不承载 runtime 业务逻辑。
+
 ## 当前 public surface
 
 当前 public API 只有：
@@ -61,7 +71,7 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 
 ## 验证原则
 
-所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`、`TIMEOUT`。`PASS` 必须对应实际命令或可检查 artifact。未运行、阻塞或超时的检查不能写成 PASS。
+所有验证结果必须使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。`PASS` 必须对应实际命令或可检查 artifact。未运行、阻塞或超时的检查不能写成 PASS。
 
 常用治理验证：
 

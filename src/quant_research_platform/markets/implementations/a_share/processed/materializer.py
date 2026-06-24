@@ -21,11 +21,6 @@ from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.calendars import (
-    SessionWindow,
-    SessionWindowPlanner,
-    session_dates,
-)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
 )
@@ -50,6 +45,11 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     catalog as processed_catalog_module,
+)
+from quant_research_platform.markets.session_windows import (
+    SessionWindow,
+    SessionWindowPlanner,
+    normalize_session_dates,
 )
 from quant_research_platform.runtime.resources import (
     ChunkAxis,
@@ -667,7 +667,7 @@ def _available_trading_sessions(
         calendar["is_trading_day"].astype(bool)
         & source_market_type.isin(CURRENT_MARKET_TYPES)
     )
-    return session_dates(calendar.loc[mask, "timestamp"])
+    return normalize_session_dates(calendar.loc[mask, "timestamp"])
 
 
 def _target_sessions(

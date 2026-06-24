@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.governance_fixtures import rule_form
+
 
 def test_retired_owner_local_function_names_are_absent() -> None:
     modules = {
@@ -65,6 +67,19 @@ def test_retired_public_constant_aliases_are_absent() -> None:
     assert not hasattr(contracts_models, "MODEL_ALGORITHMS")
     assert not hasattr(source_ids, "CSMAR_SOURCE_ID")
     assert not hasattr(market_ids, "A_SHARE_MARKET_ID")
+
+
+def test_retired_constant_fixtures_are_derived_from_governance_contract() -> None:
+    contract = _load_governance_contract()
+
+    assert rule_form(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "retired_model_algorithm_collection",
+    )
+    assert rule_form(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "retired_csmar_source_alias",
+    )
 
 
 def test_retired_handoff_evidence_names_are_absent() -> None:
@@ -139,6 +154,23 @@ def _load_handoff_builder_integration_tests():
         "test_build_handoff_package_integration",
         script,
     )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_governance_contract():
+    script = (
+        Path(".agents")
+        / "skills"
+        / "quant-research-platform-maintenance"
+        / "scripts"
+        / "governance_contract.py"
+    )
+    spec = importlib.util.spec_from_file_location("governance_contract", script)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)

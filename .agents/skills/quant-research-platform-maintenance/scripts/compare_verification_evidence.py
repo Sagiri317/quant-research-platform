@@ -32,9 +32,11 @@ RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
 )
 OLD_BASELINE_GROUP = "old_baseline"
 REFRESHED_PREDICTION_BASELINE_GROUP = "refreshed_prediction_baseline"
+DIRECT_BASELINE_FINAL_GROUP = "baseline_final"
 BASELINE_FINAL_COMPARE_GROUPS = (
     OLD_BASELINE_GROUP,
     REFRESHED_PREDICTION_BASELINE_GROUP,
+    DIRECT_BASELINE_FINAL_GROUP,
 )
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -224,12 +226,13 @@ def main() -> None:
     raw_overall_status = _overall_status(actual_statuses.values())
     overall_status = _overall_status(statuses.values(), contract_failures)
     grouped = comparisons_by_group(comparisons)
-    old_baseline_compare_status = _group_status(
-        statuses[label] for label in grouped[OLD_BASELINE_GROUP]
-    )
-    refreshed_prediction_baseline_compare_status = _group_status(
-        statuses[label] for label in grouped[REFRESHED_PREDICTION_BASELINE_GROUP]
-    )
+    comparison_groups = {
+        group: {
+            "status": _group_status(statuses[label] for label in group_comparisons)
+        }
+        for group, group_comparisons in grouped.items()
+        if group_comparisons
+    }
 
     payload = {
         "schema_version": "qrp-baseline-final-compare-summary/0.1",
@@ -248,12 +251,7 @@ def main() -> None:
         "final_smoke_commit": smoke_evidence["final_smoke_commit"],
         "git_status_before_smoke": smoke_evidence["git_status_before_smoke"],
         "git_status_after_smoke": smoke_evidence["git_status_after_smoke"],
-        "comparison_groups": {
-            OLD_BASELINE_GROUP: {"status": old_baseline_compare_status},
-            REFRESHED_PREDICTION_BASELINE_GROUP: {
-                "status": refreshed_prediction_baseline_compare_status,
-            },
-        },
+        "comparison_groups": comparison_groups,
         "status_counts": {
             status: sum(1 for item in statuses.values() if item == status)
             for status in sorted(set(statuses.values()))
@@ -386,7 +384,15 @@ def expected_failure_matches(
 def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[str]:
     failures: list[str] = []
     grouped = comparisons_by_group(comparisons)
+    direct = grouped[DIRECT_BASELINE_FINAL_GROUP]
+    if direct:
+        for label, comparison in direct.items():
+            if comparison.get("status") != "PASS":
+                failures.append(f"direct_baseline_status_not_pass: {label}")
+        return failures
     for group in BASELINE_FINAL_COMPARE_GROUPS:
+        if group == DIRECT_BASELINE_FINAL_GROUP:
+            continue
         if not grouped[group]:
             failures.append(f"missing_required_comparison_group: {group}")
     for label, comparison in grouped[OLD_BASELINE_GROUP].items():

@@ -10,7 +10,11 @@ internal-provider raw exports -> source contracts -> interim normalization -> da
 
 ## sources 层
 
-sources 层负责内部供应商字段映射、raw schema、raw export 描述、interim 转换和 source catalog。它不应把 private row-level sample 写入 tracked docs 或 public evidence。
+sources 层负责内部供应商 raw schema、字段映射、raw/interim 转换和 source-local ID。它不承载 A 股市场语义、研究算法或对外 provider selector。
+
+## markets 层
+
+`markets/` 是通用市场领域层，不绑定 A 股。通用 session window 位于 `markets/session_windows.py`。`markets/implementations/a_share/` 负责 A 股 calendar、processed data、mask、factor/label binding、profile 和 scenario。
 
 ## storage 层
 
@@ -18,7 +22,7 @@ storage 层负责 dataset artifact 的读写、manifest、schema、partition、f
 
 ## research 层
 
-research 层使用 dataset contract 构造 factor、feature、label 和 evaluation 输入。涨跌停、ST、停牌、市场日历等 A-share 边界应通过 contracts 和 research pipeline 明确，不应散落在文档叙事中。
+research 层只实现通用研究算法。涨跌停、ST、停牌、A 股日历等市场语义由 A 股实现层绑定，research 不直接 import sources 或具体市场实现。
 
 ## public-safe evidence
 

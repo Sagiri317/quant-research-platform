@@ -15,9 +15,9 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.calendars import (
+from quant_research_platform.markets.session_windows import (
     SessionWindowPlanner,
-    session_dates,
+    normalize_session_dates,
 )
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
@@ -196,7 +196,7 @@ def _sessions_from_base_input(
     timestamps: list[pd.Timestamp] = []
     for chunk in chunks:
         timestamps.extend(chunk["timestamp"].dropna().unique())
-    return session_dates(timestamps)
+    return normalize_session_dates(timestamps)
 
 
 def _base_input_data_id(dataset_spec: ResearchDatasetSpec) -> str:

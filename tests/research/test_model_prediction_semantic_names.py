@@ -9,7 +9,7 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
     fit_model_result,
-    model_algorithm_names,
+    model_algorithm_ids,
     model_smoke_hyperparameters,
     predict_model_frame,
 )
@@ -43,8 +43,10 @@ def _model_frame() -> pd.DataFrame:
     )
 
 
-@pytest.mark.parametrize("algorithm", sorted(model_algorithm_names()))
-def test_all_model_algorithms_fit_and_predict_synthetic_data(algorithm: str) -> None:
+@pytest.mark.parametrize("algorithm", sorted(model_algorithm_ids()))
+def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
+    algorithm: str,
+) -> None:
     frame = _model_frame()
     spec = ModelSpec(
         model_id=f"{algorithm}_demo",

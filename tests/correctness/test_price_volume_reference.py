@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.calendars import SessionWindow
 from quant_research_platform.markets.implementations.a_share.factors import (
     calculations as factor_calculations,
 )
@@ -20,6 +19,7 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
+from quant_research_platform.markets.session_windows import SessionWindow
 from quant_research_platform.research.factors import price_volume as price_volume_module
 from quant_research_platform.research.factors.price_volume import (
     _rolling_aggregate,

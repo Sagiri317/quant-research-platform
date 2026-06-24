@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 
 PROJECT_SRC = Path("src/quant_research_platform")
@@ -21,6 +22,13 @@ FORBIDDEN_REPORT_IMPORT_PREFIXES = (
     "quant_research_platform.research",
     "quant_research_platform.workflows",
     "quant_research_platform.interfaces",
+)
+FORBIDDEN_RESEARCH_IMPORT_PREFIXES = (
+    "quant_research_platform.markets.implementations",
+    "quant_research_platform.sources",
+)
+FORBIDDEN_RUNTIME_IMPORT_PREFIXES = (
+    "quant_research_platform.reports",
 )
 
 PROFILE_A_SHARE_ROOT = (
@@ -91,6 +99,58 @@ def test_reports_do_not_import_compute_research_workflows_or_interfaces() -> Non
     ]
 
     assert not hits, "reports_import_boundary_violation: " + "; ".join(hits)
+
+
+def test_research_only_imports_generic_market_session_windows() -> None:
+    hits = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(PROJECT_SRC / "research")
+        if module.startswith(FORBIDDEN_RESEARCH_IMPORT_PREFIXES)
+    ]
+
+    assert not hits, "research_import_boundary_violation: " + "; ".join(hits)
+
+
+def test_runtime_does_not_import_reports() -> None:
+    hits = [
+        f"{path}:{lineno} imports {module}"
+        for path, lineno, module in _iter_imports(PROJECT_SRC / "runtime")
+        if module.startswith(FORBIDDEN_RUNTIME_IMPORT_PREFIXES)
+    ]
+
+    assert not hits, "runtime_report_import_boundary_violation: " + "; ".join(hits)
+
+
+def test_runtime_recorders_do_not_expose_artifact_writers() -> None:
+    from quant_research_platform.runtime.execution_metrics import (
+        ExecutionMetricsRecorder,
+    )
+    from quant_research_platform.runtime.profiling import StageProfiler
+
+    assert not hasattr(StageProfiler, "write_artifacts")
+    assert not hasattr(ExecutionMetricsRecorder, "write_json")
+    assert not hasattr(ExecutionMetricsRecorder, "write_csv")
+    source = inspect.getsource(
+        __import__(
+            "quant_research_platform.runtime.execution_metrics",
+            fromlist=["unused"],
+        )
+    )
+    assert "quant_research_platform.storage.atomic" not in source
+
+
+def test_session_window_owner_is_unique() -> None:
+    owner = PROJECT_SRC / "markets" / "session_windows.py"
+    retired = PROJECT_SRC / "markets" / "calendars.py"
+
+    assert owner.is_file()
+    assert not retired.exists()
+    imports = [
+        f"{path}:{lineno}"
+        for path, lineno, module in _iter_imports(PROJECT_SRC)
+        if module == "quant_research_platform.markets.calendars"
+    ]
+    assert not imports, "retired_markets_calendars_import: " + "; ".join(imports)
 
 
 def test_known_cross_layer_imports_are_explicitly_allowlisted() -> None:

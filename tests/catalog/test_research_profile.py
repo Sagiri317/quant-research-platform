@@ -88,10 +88,10 @@ def test_research_profile_contains_active_catalogs() -> None:
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:
     from quant_research_platform.catalog.profiles import research_profile
-    from quant_research_platform.research.models.supervised import model_algorithm_names
+    from quant_research_platform.research.models.supervised import model_algorithm_ids
 
     profile = research_profile()
-    algorithms = tuple(model_algorithm_names())
+    algorithms = tuple(model_algorithm_ids())
     dataset = profile.research_datasets.get("price_volume_forward_returns")
     evaluation = profile.evaluations.get("signal_forward_return_20d")
     portfolio = research_scenarios.build_portfolio_catalog(

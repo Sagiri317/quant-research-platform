@@ -62,6 +62,28 @@ def test_package_safety_allows_handoff_final_branch_bundle_by_default(tmp_path):
     assert result.ok
 
 
+@pytest.mark.parametrize(
+    "member",
+    [
+        "../handoff_evidence/leak.md",
+        "/handoff_evidence/leak.md",
+        "C:/handoff_evidence/leak.md",
+    ],
+)
+def test_package_safety_rejects_tampered_zip_member_paths(
+    tmp_path: Path,
+    member: str,
+) -> None:
+    module = _load_package_safety_module()
+    package = tmp_path / "tampered.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, "{}\n")
+
+    result = module.scan_zip(package, allow_nested_packages=False)
+
+    assert not result.ok
+
+
 def test_package_safety_still_rejects_other_nested_packages_by_default(tmp_path):
     module = _load_package_safety_module()
     package = tmp_path / "handoff.zip"

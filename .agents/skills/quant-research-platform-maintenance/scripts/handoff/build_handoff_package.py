@@ -32,6 +32,8 @@ from governance_contract import (  # noqa: E402
     SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST,
     SOURCE_TREE_RETIRED_TERM_ROOTS,
     SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST,
+    VALID_STATUS_TOKENS,
+    active_doc_forbidden_patterns,
     is_allowed_runtime_symbol,
     is_negative_test_allowlisted,
     is_retired_path_policy_line,
@@ -39,10 +41,10 @@ from governance_contract import (  # noqa: E402
     iter_python_symbol_findings,
     iter_structured_key_findings,
     iter_synthesized_string_findings,
-    VALID_STATUS_TOKENS,
     retired_governance_path_findings,
+)
+from governance_contract import (  # noqa: E402
     source_tree_forbidden_patterns as governance_source_tree_forbidden_patterns,
-    active_doc_forbidden_patterns,
 )
 from handoff_safety import scan_handoff_zip  # noqa: E402
 

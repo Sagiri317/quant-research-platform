@@ -51,14 +51,31 @@ _REPO_PRIVATE_PATH_RE = re.compile(
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
 )
 _STOCK_CODE_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:[03468]\d{5})"
+    r"(?<![A-Za-z0-9.-])(?:[03468]\d{5})"
     r"(?:\.(?:SZ|SH|BJ))?(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _ROW_SAMPLE_RE = re.compile(
-    r"(?i)\brow[-_ ]?samples?\b|"
+    r"(?is)[\"']?\brow[-_ ]?samples?\b[\"']?\s*[:=]\s*"
+    r"(?:\[[^\]]*\]|\{[^}]*\}|[^\r\n;]+)|"
     r"\bmarket_id\s*=\s*[^\s,;]+.*\basset_id\s*=\s*[^\s,;]+|"
     r"\basset_id\s*=\s*[^\s,;]+.*\btimestamp\s*="
+)
+_ROW_SAMPLE_MARKER_RE = re.compile(r"(?i)\brow[-_ ]?samples?\b")
+_PROVIDER_SOURCE_FIELD_RE = re.compile(
+    r"""(?ix)
+    ["']?
+    (?:source_id|provider_id|source[-_ ]?name|provider[-_ ]?name|
+       data[-_ ]?provider|vendor[-_ ]?name|provider[-_ ]?marker|
+       source[-_ ]?marker|vendor[-_ ]?marker)
+    ["']?
+    \s*[:=]\s*
+    (?:
+        ["'][^"']*["']
+        |
+        [^\s,;}\]]+
+    )
+    """
 )
 _PRIVATE_MARKER_RE = re.compile(
     r"(?i)\b(?:csmar|source_id|provider_id|implementation_package|"
@@ -72,6 +89,17 @@ _CREDENTIAL_RE = re.compile(
     r"[A-Za-z0-9._~+/=-]{8,}"
 )
 _TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
+_RAW_EXPORT_FILENAME_RE = re.compile(
+    r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
+)
+_ROW_SAMPLE_KEYS = {
+    "row",
+    "rows",
+    "sample",
+    "samples",
+    "row_sample",
+    "row_samples",
+}
 
 
 def _parts(path: Path) -> tuple[str, ...]:
@@ -113,8 +141,10 @@ def public_text_unsafe_reason(text: object) -> str | None:
         or _POSIX_PRIVATE_PATH_RE.search(value)
     ):
         return "local_path"
-    if _ROW_SAMPLE_RE.search(value):
+    if _ROW_SAMPLE_RE.search(value) or _ROW_SAMPLE_MARKER_RE.search(value):
         return "row_sample"
+    if _PROVIDER_SOURCE_FIELD_RE.search(value):
+        return "private_marker"
     if _PRIVATE_MARKER_RE.search(value):
         return "private_marker"
     if _STOCK_CODE_RE.search(value):
@@ -134,6 +164,8 @@ def sanitize_public_text(text: object) -> str:
     result = _POSIX_PRIVATE_PATH_RE.sub("[local-path]", result)
     result = _REPO_PRIVATE_PATH_RE.sub("[private-path]", result)
     result = _ROW_SAMPLE_RE.sub("[row-sample]", result)
+    result = _ROW_SAMPLE_MARKER_RE.sub("[row-sample]", result)
+    result = _PROVIDER_SOURCE_FIELD_RE.sub("[private]", result)
     result = _PRIVATE_MARKER_RE.sub("[private]", result)
     result = _STOCK_CODE_RE.sub("[asset-id]", result)
     return result
@@ -143,10 +175,16 @@ def sanitize_public_object(value: Any) -> Any:
     """Recursively sanitize mapping/list scalar values for public-safe metadata."""
 
     if isinstance(value, Mapping):
-        return {
-            sanitize_public_text(key): sanitize_public_object(item)
-            for key, item in value.items()
-        }
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            safe_key = sanitize_public_text(key_text)
+            sanitized[safe_key] = (
+                "[row-sample]"
+                if key_text.lower() in _ROW_SAMPLE_KEYS and item
+                else sanitize_public_object(item)
+            )
+        return sanitized
     if isinstance(value, list):
         return [sanitize_public_object(item) for item in value]
     if isinstance(value, tuple):
@@ -157,10 +195,71 @@ def sanitize_public_object(value: Any) -> Any:
         return sanitize_public_text(value)
     return value
 
+
+def assert_internal_artifact_metadata_safe(value: Any) -> None:
+    """Reject path, credential, row-level, or asset-like internal metadata."""
+
+    unsafe = internal_artifact_metadata_unsafe_reason(value)
+    if unsafe is not None:
+        raise ValueError(f"unsafe_internal_artifact_metadata: {unsafe}")
+
+
+def internal_artifact_metadata_unsafe_reason(
+    value: Any,
+    *,
+    key: str | None = None,
+) -> str | None:
+    """Return why internal artifact metadata is unsafe, if applicable."""
+
+    if key is not None and key.lower() in _ROW_SAMPLE_KEYS and value:
+        return "row_sample"
+    if isinstance(value, Mapping):
+        for item_key, item in value.items():
+            reason = internal_artifact_metadata_unsafe_reason(
+                item,
+                key=str(item_key),
+            )
+            if reason is not None:
+                return reason
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            reason = internal_artifact_metadata_unsafe_reason(item, key=key)
+            if reason is not None:
+                return reason
+        return None
+    text = str(value) if isinstance(value, (str, Path)) else None
+    if text is None:
+        return None
+    logical_path_key = key in {
+        "manifest_path",
+        "missing_dataset_manifests",
+        "output_root",
+    }
+    if _ABSOLUTE_REPO_PRIVATE_PATH_RE.search(text):
+        return "private_path"
+    if not logical_path_key and _REPO_PRIVATE_PATH_RE.search(text):
+        return "private_path"
+    if (
+        _WINDOWS_DRIVE_PATH_RE.search(text)
+        or _UNC_PATH_RE.search(text)
+        or _POSIX_PRIVATE_PATH_RE.search(text)
+    ):
+        return "absolute_path"
+    if _RAW_EXPORT_FILENAME_RE.search(text):
+        return "raw_export_filename"
+    if _CREDENTIAL_RE.search(text):
+        return "credential"
+    if _STOCK_CODE_RE.search(text):
+        return "stock_code_sample"
+    return None
+
 __all__ = [
     "PRIVATE_DATA_LAYERS",
     "PRIVATE_BOUNDARY_ROOTS",
     "PRIVATE_REPORT_PATH_NAMES",
+    "assert_internal_artifact_metadata_safe",
+    "internal_artifact_metadata_unsafe_reason",
     "is_private_boundary_path",
     "public_text_unsafe_reason",
     "sanitize_public_object",

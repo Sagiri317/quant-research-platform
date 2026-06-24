@@ -9,6 +9,8 @@
 
 数据合同见 `docs/data/README.md`。
 
+目录职责：sources 负责摄取，A 股实现层负责 processed data 与市场语义，storage 负责通用 IO、manifest 和 layout；本目录不定义运行时业务逻辑。
+
 public-safe evidence 的 fast synthetic gate 和 data/parquet contract gate 分别位于：
 
 ```text

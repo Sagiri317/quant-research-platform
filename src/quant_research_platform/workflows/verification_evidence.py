@@ -18,6 +18,10 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as scenarios,
 )
+from quant_research_platform.reports.execution_metrics_artifacts import (
+    write_execution_metrics_csv,
+    write_execution_metrics_json,
+)
 from quant_research_platform.reports.verification_evidence import (
     VerificationEvidenceLayout,
     build_validation_summary,
@@ -40,11 +44,7 @@ from quant_research_platform.research.portfolios.runner import (
 from quant_research_platform.research.predictions.runner import (
     run_prediction_from_research_dataset,
 )
-from quant_research_platform.runtime.execution_metrics import (
-    ExecutionMetricsRecorder,
-    write_execution_metrics_csv,
-    write_execution_metrics_json,
-)
+from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
 from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -308,11 +308,10 @@ def _run_verification_evidence_with_policy(
     )
     timings_json = write_execution_metrics_json(
         timings_json,
-        recorder.records,
+        recorder,
         run_id=run_id,
-        memory_sampler_unavailable=recorder.memory_sampler.unavailable,
     )
-    write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder.records)
+    write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder)
     timings_payload = read_manifest(timings_json)
     evidence_summary = build_verification_evidence_summary(
         run_id=run_id,

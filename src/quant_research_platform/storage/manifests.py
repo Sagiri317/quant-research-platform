@@ -4,30 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from quant_research_platform.runtime.logical_paths import logical_path
-from quant_research_platform.runtime.privacy import sanitize_public_object
+from quant_research_platform.runtime.privacy import (
+    assert_internal_artifact_metadata_safe,
+    sanitize_public_object,
+)
 from quant_research_platform.storage.atomic import atomic_write_text
 
-_WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
-_UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
-_POSIX_PRIVATE_PATH_RE = re.compile(
-    r"(?i)(?<!\w)/(?:mnt|home|Users|tmp|var/tmp|private/tmp)/[^\r\n\t\"'<>|]+"
-)
-_RAW_DATA_PATH_RE = re.compile(r"(?i)\bdata[\\/]raw[\\/][^\r\n\t\"'<>|]+")
-_RAW_EXPORT_FILENAME_RE = re.compile(
-    r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
-)
-_CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
-    r"[A-Za-z0-9._~+/=-]{8,}"
-)
-_ROW_SAMPLE_KEYS = {"row", "rows", "sample", "samples", "row_sample", "row_samples"}
 _LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
 
 
@@ -51,7 +39,7 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     and row-sample payloads that do not belong in schema metadata.
     """
 
-    _assert_internal_artifact_metadata_safe(payload)
+    assert_internal_artifact_metadata_safe(payload)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
 
@@ -59,7 +47,7 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
 def replace_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
     """Atomically replace an existing private artifact manifest."""
 
-    _assert_internal_artifact_metadata_safe(payload)
+    assert_internal_artifact_metadata_safe(payload)
     final_path = Path(path)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,50 +158,6 @@ def write_run_manifest(
         Path(manifests_root) / "run_manifest.json",
         payload,
     )
-
-
-def _assert_internal_artifact_metadata_safe(value: Any) -> None:
-    unsafe = _unsafe_internal_artifact_reason(value)
-    if unsafe is not None:
-        raise ValueError(f"unsafe_internal_artifact_metadata: {unsafe}")
-
-
-def _unsafe_internal_artifact_reason(
-    value: Any,
-    *,
-    key: str | None = None,
-) -> str | None:
-    if key is not None and key.lower() in _ROW_SAMPLE_KEYS and value:
-        return "row_sample"
-    if isinstance(value, dict):
-        for item_key, item in value.items():
-            reason = _unsafe_internal_artifact_reason(str(item_key))
-            if reason is not None:
-                return reason
-            reason = _unsafe_internal_artifact_reason(item, key=str(item_key))
-            if reason is not None:
-                return reason
-        return None
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            reason = _unsafe_internal_artifact_reason(item)
-            if reason is not None:
-                return reason
-        return None
-    if isinstance(value, Path):
-        value = str(value)
-    if isinstance(value, str):
-        if _WINDOWS_DRIVE_PATH_RE.search(value) or _UNC_PATH_RE.search(value):
-            return "absolute_path"
-        if _POSIX_PRIVATE_PATH_RE.search(value):
-            return "absolute_path"
-        if _RAW_DATA_PATH_RE.search(value):
-            return "raw_path"
-        if _RAW_EXPORT_FILENAME_RE.search(value):
-            return "raw_export_filename"
-        if _CREDENTIAL_RE.search(value):
-            return "credential"
-    return None
 
 
 def _data_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:

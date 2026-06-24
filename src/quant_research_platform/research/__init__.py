@@ -1,1 +1,1 @@
-"""研究层入口。"""
+"""Generic research algorithms independent of concrete markets and sources."""

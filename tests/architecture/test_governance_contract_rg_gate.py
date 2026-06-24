@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from tests.helpers import frequency_ids
+from tests.helpers.governance_fixtures import representative_name_forms
 
 GOVERNANCE_SCRIPT_DIR = (
     Path(__file__).resolve().parents[2]
@@ -21,6 +22,9 @@ if str(GOVERNANCE_SCRIPT_DIR) not in sys.path:
 
 from governance_contract import (  # noqa: E402
     ACTIVE_GOVERNANCE_DOC_ROOTS as CONTRACT_ACTIVE_GOVERNANCE_DOC_ROOTS,
+)
+from governance_contract import (  # noqa: E402
+    RETIRED_NAME_RULES,
     active_doc_forbidden_patterns,
     is_retired_path_policy_line,
 )
@@ -127,11 +131,11 @@ def test_active_governance_docs_do_not_publish_retired_state_truth() -> None:
 def test_active_doc_forbidden_patterns_cover_required_examples() -> None:
     examples = {
         "old_feature_branch_current_truth": "当前分支是 feature/qrp-clean-rewrite",
-        "clean_rewrite": "clean rewrite 是当前状态",
         "run_official_tool_source": ".run official tool source",
         "retired_execution_mode": "ExecutionMode 是当前公开模式",
         "retired_daily_panel": "daily-panel 是当前数据产物",
         "retired_model_family": "model_family 是当前模型选择字段",
+        **representative_name_forms(RETIRED_NAME_RULES),
     }
 
     for name, text in examples.items():
@@ -1129,7 +1133,6 @@ def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> No
         _function_arg_names(REPORT_ARTIFACTS, "write_stage_profile_report_artifacts"),
         _function_arg_names(REPORT_ARTIFACTS, "write_prediction_report_artifacts"),
         _function_arg_names(REPORT_ARTIFACTS, "write_evaluation_report_artifacts"),
-        _class_method_arg_names(RUNTIME_PROFILING, "StageProfiler", "write_artifacts"),
     )
 
     assert "output_dir" not in _class_field_names(RUNTIME_PROFILING, "ProfileConfig")
