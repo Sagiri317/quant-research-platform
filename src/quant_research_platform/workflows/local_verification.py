@@ -12,31 +12,26 @@ import pandas as pd
 
 from quant_research_platform.artifacts.evidence import (
     write_json_evidence,
-    write_run_summary_json,
     write_run_summary_markdown,
-    write_validation_summary,
-    write_verification_evidence_json,
-    write_verification_evidence_markdown,
 )
-from quant_research_platform.artifacts.execution_metrics import (
-    write_execution_metrics_csv,
-    write_execution_metrics_json,
-)
-from quant_research_platform.artifacts.run_outputs import (
-    write_evaluation_run_outputs,
-    write_portfolio_run_outputs,
-    write_prediction_run_outputs,
+from quant_research_platform.artifacts.outputs import (
+    write_evaluation_outputs,
+    write_portfolio_outputs,
+    write_prediction_outputs,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.policy.share_safety import local_output_root_reason
+from quant_research_platform.policy.check_status import (
+    overall_verification_status,
+    validate_verification_statuses,
+)
+from quant_research_platform.policy.share_safety import local_run_root_reason
 from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.reports.verification_evidence import (
     build_validation_summary,
-    build_verification_evidence_payload,
-    render_verification_evidence_markdown,
+    render_run_summary_markdown,
 )
 from quant_research_platform.research.datasets import (
     assemble_research_dataset,
@@ -62,9 +57,10 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
-    read_manifest,
-    write_layer_manifest,
-    write_run_manifest,
+    build_layer_summary,
+    build_run_data_summary,
+    read_qrp_json,
+    replace_qrp_json,
 )
 from quant_research_platform.workflows.local_verification_layout import (
     LocalVerificationLayout,
@@ -73,7 +69,7 @@ from quant_research_platform.workflows.local_verification_layout import (
 
 @dataclass(frozen=True)
 class LocalVerificationRunConfig:
-    output_root: Path
+    run_root: Path
     start_date: str
     end_date: str
     profile: ResearchProfile
@@ -92,13 +88,12 @@ class LocalVerificationRunConfig:
 class LocalVerificationRunResult:
     status: str
     run_id: str
-    output_root: str
+    run_root: str
     summary: dict[str, Any]
 
 
-_OWNERSHIP_MARKER_FILENAME = ".qrp-local-verification.json"
-_OWNERSHIP_MARKER = "qrp_local_verification_workflow"
-_OWNERSHIP_CONTRACT_VERSION = "0.1"
+_RUN_SCHEMA_ID = "qrp-run"
+_WORKFLOW_ID = "local_verification"
 
 
 def run_local_verification(
@@ -109,43 +104,22 @@ def run_local_verification(
     if start > end:
         raise ValueError("start_date_after_end_date")
     effective_windows = _resolve_effective_windows(config)
-    output_root = Path(config.output_root).resolve(strict=False)
-    run_id = resolve_local_verification_run_id(config.run_id, output_root)
-    _prepare_output_root(output_root, replace_output=config.replace_output)
-    layout = LocalVerificationLayout.from_output_root(output_root)
+    run_root = Path(config.run_root).resolve(strict=False)
+    run_id = resolve_local_verification_run_id(config.run_id, run_root)
+    _prepare_run_root(
+        run_root,
+        run_id=run_id,
+        replace_output=config.replace_output,
+    )
+    layout = LocalVerificationLayout.from_run_root(run_root)
     _create_layout_directories(layout)
     resource_policy = RuntimeResourcePolicy.from_environment()
-    write_json_evidence(
-        layout.config_root / "run_config.json",
-        {
-            "run_id": run_id,
-            "start_date": config.start_date,
-            "end_date": config.end_date,
-            "requested_windows": {
-                "evaluation_start_date": config.evaluation_start_date,
-                "evaluation_end_date": config.evaluation_end_date,
-                "prediction_train_end": config.prediction_train_end,
-                "prediction_test_start": config.prediction_test_start,
-                "prediction_test_end": config.prediction_test_end,
-            },
-            "effective_windows": effective_windows,
-            "output_root": logical_path(
-                output_root,
-                markers=EVIDENCE_LOGICAL_PATH_MARKERS,
-            ),
-            "replace_output": config.replace_output,
-            "runtime_resource_policy": resource_policy.to_payload(),
-            "workflow_id": _OWNERSHIP_MARKER,
-            "contract_version": _OWNERSHIP_CONTRACT_VERSION,
-            "created_at": _utc_now(),
-        },
-    )
 
     with runtime_resource_policy_scope(resource_policy):
         return _run_local_verification_with_policy(
             config=config,
             effective_windows=effective_windows,
-            output_root=output_root,
+            run_root=run_root,
             run_id=run_id,
             layout=layout,
             resource_policy=resource_policy,
@@ -156,13 +130,13 @@ def _run_local_verification_with_policy(
     *,
     config: LocalVerificationRunConfig,
     effective_windows: dict[str, str | None],
-    output_root: Path,
+    run_root: Path,
     run_id: str,
     layout: LocalVerificationLayout,
     resource_policy: RuntimeResourcePolicy,
 ) -> LocalVerificationRunResult:
     recorder = ExecutionMetricsRecorder()
-    storage_layout = StorageLayout(project_root=output_root)
+    storage_layout = StorageLayout(project_root=run_root)
     time_window = TimeWindow(config.start_date, config.end_date)
     evaluation_time_window = TimeWindow(
         effective_windows["evaluation_start_date"],
@@ -217,16 +191,17 @@ def _run_local_verification_with_policy(
             run_id="signal_forward_return_20d",
             time_window=evaluation_time_window,
         )
-        evaluation_root = write_evaluation_run_outputs(
+        evaluation_root = write_evaluation_outputs(
             evaluation_result.metrics,
             evaluation_result.grouped_label_values,
             ic_summary=evaluation_result.ic_summary,
             group_spread_summary=evaluation_result.group_spread_summary,
             evaluation_diagnostics=evaluation_result.diagnostics,
             spec=evaluation_result.spec,
-            output_spec=_run_output_spec(
+            output_spec=_output_spec(
+                output_id=evaluation_result.spec.run_id,
                 output_definition_id="evaluation_outputs",
-                run_id=evaluation_result.spec.run_id,
+                run_id=run_id,
                 market_id=evaluation_result.spec.market_id,
                 run_type=evaluation_result.spec.run_type,
             ),
@@ -247,6 +222,7 @@ def _run_local_verification_with_policy(
                     prediction_test_end=effective_windows["prediction_test_end"],
                 ),
                 layout=storage_layout,
+                run_id=run_id,
             )
             for prediction_spec in prediction_catalog.list()
         )
@@ -258,13 +234,14 @@ def _run_local_verification_with_policy(
             portfolio_id="signal_forward_return_20d_portfolio",
             time_window=evaluation_time_window,
         )
-        portfolio_root = write_portfolio_run_outputs(
+        portfolio_root = write_portfolio_outputs(
             output_chunks=portfolio_result.output_chunks,
             summary_factory=portfolio_result.summary_factory,
             spec=portfolio_result.spec,
-            output_spec=_run_output_spec(
+            output_spec=_output_spec(
+                output_id=portfolio_result.spec.portfolio_id,
                 output_definition_id="portfolio_outputs",
-                run_id=portfolio_result.spec.portfolio_id,
+                run_id=run_id,
                 market_id=portfolio_result.spec.market_id,
                 run_type=portfolio_result.spec.run_type,
             ),
@@ -277,131 +254,87 @@ def _run_local_verification_with_policy(
         processed_roots=tuple(item.root for item in processed_result.values()),
         research_roots=(Path(research_root),),
     )
-    run_output_roots = (
+    output_roots = (
         Path(evaluation_root),
         *(Path(prediction_root) for prediction_root in prediction_roots),
         Path(portfolio_root),
     )
-    layer_manifest_paths = (
-        write_layer_manifest(
-            layer_root=layout.interim_root,
-            logical_layer="interim",
-            run_id=run_id,
-            dataset_roots=tuple(
-                root
-                for root in dataset_roots
-                if _layer_for_root(root, layout) == "interim"
-            ),
-        ),
-        write_layer_manifest(
-            layer_root=layout.processed_root,
-            logical_layer="processed",
-            run_id=run_id,
-            dataset_roots=tuple(
-                root
-                for root in dataset_roots
-                if _layer_for_root(root, layout) == "processed"
-            ),
-        ),
-        write_layer_manifest(
-            layer_root=layout.research_root,
-            logical_layer="research",
-            run_id=run_id,
-            dataset_roots=tuple(
-                root
-                for root in dataset_roots
-                if _layer_for_root(root, layout) == "research"
-            ),
-        ),
-        write_layer_manifest(
-            layer_root=layout.evidence_root,
-            logical_layer="evidence",
-            run_id=run_id,
-            dataset_roots=(),
-        ),
-    )
-    with recorder.record("manifest_generation") as record:
-        run_manifest_path = write_run_manifest(
-            manifests_root=layout.manifests_root,
-            run_id=run_id,
-            output_root=output_root,
-            layer_manifest_paths=layer_manifest_paths,
-        )
-        record.file_count = 1
-    run_manifest = read_manifest(run_manifest_path)
-    timings_json = layout.timings_root / "timings.json"
-    generated_paths = (
-        layout.config_root / "run_config.json",
-        run_manifest_path,
-        *layer_manifest_paths,
-        timings_json,
+    layer_summaries = _build_layer_summaries(
+        layout=layout,
+        dataset_roots=dataset_roots,
     )
     with recorder.record("validation_summary"):
         validation_summary = build_validation_summary(
             run_id=run_id,
-            output_root=output_root,
             dataset_roots=dataset_roots,
-            layer_manifest_paths=layer_manifest_paths,
-            generated_text_paths=generated_paths,
+            layer_summaries=layer_summaries,
+            generated_text_paths=(),
         )
-    write_validation_summary(
-        layout.validations_root / "validation_summary.json",
-        validation_summary,
-    )
-    timings_json = write_execution_metrics_json(
-        timings_json,
-        recorder,
-        run_id=run_id,
-    )
-    write_execution_metrics_csv(layout.timings_root / "timings.csv", recorder)
-    timings_payload = read_manifest(timings_json)
-    evidence_summary = build_verification_evidence_payload(
-        run_id=run_id,
-        date_range={"start_date": config.start_date, "end_date": config.end_date},
-        manifests={
-            "dataset_count": len(dataset_roots),
-            "layer_count": len(layer_manifest_paths),
-            "run_validation_status": run_manifest["run_validation_status"],
-            "run_output_count": len(run_output_roots),
-        },
-        timings=timings_payload,
-        validation_summary=validation_summary,
-        output_root=output_root,
+    statuses = validate_verification_statuses(
         smoke_status=str(validation_summary.get("status", "FAIL")),
-        runtime_resource_policy=resource_policy.to_public_summary_payload(),
-        runtime_execution_plan=_runtime_execution_plan_payload(),
+        compare_status="NOT_RUN",
+        full_horizon_status="NOT_RUN",
+        compare_evidence=None,
+        full_horizon_evidence=None,
     )
-    evidence_markdown = render_verification_evidence_markdown(evidence_summary)
-    write_verification_evidence_json(
-        layout.evidence_root / "evidence_summary.json",
-        evidence_summary,
-    )
-    write_verification_evidence_markdown(
-        layout.evidence_root / "evidence_summary.md",
-        evidence_markdown,
-    )
-    summary = {
-        **evidence_summary,
-        "validation_summary_path": logical_path(
-            layout.validations_root / "validation_summary.json",
-            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
+    status_payload = {
+        "overall": overall_verification_status(
+            validation_summary.get("status", "FAIL"),
+            statuses,
         ),
-        "run_manifest_path": logical_path(
-            run_manifest_path,
-            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
+        "validation": str(validation_summary.get("status", "FAIL")),
+        "smoke": statuses["smoke_status"],
+        "compare": statuses["compare_status"],
+        "share_safety": str(
+            validation_summary.get("share_safety_scan", {}).get("status", "FAIL")
         ),
+        "full_horizon": statuses["full_horizon_status"],
+        "validation_matrix": statuses["validation_matrix_status"],
     }
-    summary_markdown = render_verification_evidence_markdown(summary)
-    write_run_summary_json(layout.summary_json_path, summary)
+    seed_payload = _read_run_json(run_root)
+    run_payload = {
+        **seed_payload,
+        "completed_at": _utc_now(),
+        "status": status_payload,
+        "code": {},
+        "config": {
+            "start_date": config.start_date,
+            "end_date": config.end_date,
+            "requested_windows": {
+                "evaluation_start_date": config.evaluation_start_date,
+                "evaluation_end_date": config.evaluation_end_date,
+                "prediction_train_end": config.prediction_train_end,
+                "prediction_test_start": config.prediction_test_start,
+                "prediction_test_end": config.prediction_test_end,
+            },
+            "effective_windows": effective_windows,
+            "replace_output": config.replace_output,
+            "runtime_resource_policy": resource_policy.to_payload(),
+        },
+        "inputs": {
+            "date_range": {
+                "start_date": config.start_date,
+                "end_date": config.end_date,
+            }
+        },
+        "data": build_run_data_summary(layer_summaries=layer_summaries),
+        "outputs": [_output_index(root, run_root) for root in output_roots],
+        "checks": {"validation": validation_summary},
+        "execution_metrics": recorder.payload(run_id=run_id),
+        "logs": {},
+        "summary": {"markdown_path": "summary.md"},
+    }
+    summary_markdown = render_run_summary_markdown(run_payload)
+    replace_qrp_json(layout.run_json_path, run_payload)
     write_run_summary_markdown(layout.summary_md_path, summary_markdown)
     return LocalVerificationRunResult(
-        status=str(evidence_summary["status"]),
+        status=status_payload["overall"],
         run_id=run_id,
-        output_root=logical_path(
-            output_root,
+        run_root=logical_path(
+            run_root,
             markers=EVIDENCE_LOGICAL_PATH_MARKERS,
         ),
-        summary=summary,
+        summary=run_payload,
     )
 
 
@@ -409,12 +342,14 @@ def _write_prediction_result(
     result: PredictionResult,
     *,
     layout: StorageLayout,
+    run_id: str,
 ) -> Path:
-    return write_prediction_run_outputs(
+    return write_prediction_outputs(
         spec=result.spec,
-        output_spec=_run_output_spec(
+        output_spec=_output_spec(
+            output_id=result.spec.prediction_id,
             output_definition_id="prediction_outputs",
-            run_id=result.spec.prediction_id,
+            run_id=run_id,
             run_type=result.spec.run_type,
         ),
         layout=layout,
@@ -424,15 +359,16 @@ def _write_prediction_result(
     )
 
 
-def _run_output_spec(
+def _output_spec(
     *,
+    output_id: str,
     output_definition_id: str,
     run_id: str,
     run_type: str,
     market_id: str = "a_share",
-) -> RunOutputSpec:
-    return RunOutputSpec(
-        output_id=output_definition_id,
+) -> OutputSpec:
+    return OutputSpec(
+        output_id=output_id,
         output_definition_id=output_definition_id,
         run_id=run_id,
         market_id=market_id,
@@ -443,14 +379,14 @@ def _run_output_spec(
 
 def resolve_local_verification_run_id(
     config_run_id: str | None,
-    output_root: Path,
+    run_root: Path,
 ) -> str:
-    run_id = config_run_id if config_run_id is not None else Path(output_root).name
+    run_id = config_run_id if config_run_id is not None else Path(run_root).name
     return validate_run_id(run_id)
 
 
 def _resolve_local_output_repo_root(
-    output_root: Path,
+    run_root: Path,
     explicit_repo_root: Path | None,
 ) -> Path:
     if explicit_repo_root is not None:
@@ -472,26 +408,31 @@ def _find_git_root(path: Path) -> Path | None:
     return None
 
 
-def _prepare_output_root(
+def _prepare_run_root(
     path: Path,
     *,
+    run_id: str,
     replace_output: bool,
     repo_root: Path | None = None,
 ) -> None:
-    output_root = Path(path)
-    reason = local_output_root_reason(
-        output_root,
-        _resolve_local_output_repo_root(output_root, repo_root),
+    run_root = Path(path)
+    reason = local_run_root_reason(
+        run_root,
+        _resolve_local_output_repo_root(run_root, repo_root),
     )
     if reason is not None:
         raise ValueError(reason)
-    if output_root.exists() and not replace_output:
-        raise ValueError("output_root_already_exists")
-    if output_root.exists() and replace_output:
-        _assert_owned_local_verification_output(output_root)
-        shutil.rmtree(output_root)
-    output_root.mkdir(parents=True, exist_ok=False)
-    _write_ownership_marker(output_root)
+    if run_root.exists():
+        entries = tuple(run_root.iterdir())
+        if entries and not replace_output:
+            raise ValueError("run_root_already_exists")
+        if entries:
+            _assert_owned_local_verification_run_root(run_root)
+            shutil.rmtree(run_root)
+            run_root.mkdir(parents=True, exist_ok=False)
+    else:
+        run_root.mkdir(parents=True, exist_ok=False)
+    _write_seed_run_json(run_root, run_id=run_id)
 
 
 def _resolve_effective_windows(
@@ -537,70 +478,64 @@ def _resolve_effective_windows(
     }
 
 
-def _runtime_execution_plan_payload() -> dict[str, object]:
-    return {
-        "storage_read": {
-            "time_window_read_planning": "manifest_backed",
-            "time_window_year_partition_pruning": True,
-            "chunked_read_granularity": "parquet_file",
-            "row_group_streaming": "NOT_LANDED",
-        },
-        "timestamp_sessions": {
-            "evaluation": "complete_timestamp_sessions",
-            "model": "complete_timestamp_sessions",
-            "prediction": "complete_timestamp_sessions",
-            "portfolio": "complete_timestamp_sessions",
-        },
-        "report_writing": {
-            "prediction_parquet": "chunked_internal",
-            "evaluation_parquet": "materialized",
-            "portfolio_row_outputs": "chunked_internal",
-            "portfolio_summary_outputs": "aggregate_summary",
-        },
-        "full_horizon_tiling": {
-            "status": "NOT_LANDED",
-            "reason": "no_external_time_parameters_added",
-        },
-    }
+def _run_json_path(run_root: Path) -> Path:
+    return Path(run_root) / "run.json"
 
 
-def _ownership_marker_path(output_root: Path) -> Path:
-    return Path(output_root) / _OWNERSHIP_MARKER_FILENAME
-
-
-def _write_ownership_marker(output_root: Path) -> Path:
+def _write_seed_run_json(run_root: Path, *, run_id: str) -> Path:
+    created_at = _utc_now()
     return write_json_evidence(
-        _ownership_marker_path(output_root),
+        _run_json_path(run_root),
         {
-            "workflow_id": _OWNERSHIP_MARKER,
-            "contract_version": _OWNERSHIP_CONTRACT_VERSION,
-            "created_at": _utc_now(),
+            "schema_id": _RUN_SCHEMA_ID,
+            "workflow_id": _WORKFLOW_ID,
+            "run_id": run_id,
+            "created_at": created_at,
+            "root_ownership": {
+                "owner": _WORKFLOW_ID,
+                "workflow_id": _WORKFLOW_ID,
+                "created_by": "quant_research_platform",
+                "created_at": created_at,
+                "replace_safe": True,
+            },
         },
     )
 
 
-def _assert_owned_local_verification_output(output_root: Path) -> None:
-    marker_path = _ownership_marker_path(output_root)
-    if not marker_path.is_file():
-        raise ValueError("output_root_not_owned_by_local_verification_workflow")
-    marker = read_manifest(marker_path)
+def _read_run_json(run_root: Path) -> dict[str, Any]:
+    path = _run_json_path(run_root)
+    if not path.is_file():
+        raise ValueError("run_root_not_owned_by_local_verification_workflow")
+    try:
+        payload = read_qrp_json(
+            path,
+            expected_schema_id=_RUN_SCHEMA_ID,
+            error="run_root_not_owned_by_local_verification_workflow",
+        )
+    except ValueError:
+        raise ValueError("run_root_not_owned_by_local_verification_workflow") from None
+    return payload
+
+
+def _assert_owned_local_verification_run_root(run_root: Path) -> None:
+    payload = _read_run_json(run_root)
+    ownership = payload.get("root_ownership")
     if (
-        marker.get("workflow_id") != _OWNERSHIP_MARKER
-        or marker.get("contract_version") != _OWNERSHIP_CONTRACT_VERSION
+        payload.get("schema_id") != _RUN_SCHEMA_ID
+        or not isinstance(ownership, dict)
+        or ownership.get("owner") != _WORKFLOW_ID
+        or ownership.get("workflow_id") != _WORKFLOW_ID
+        or ownership.get("replace_safe") is not True
     ):
-        raise ValueError("output_root_not_owned_by_local_verification_workflow")
+        raise ValueError("run_root_not_owned_by_local_verification_workflow")
 
 
 def _create_layout_directories(layout: LocalVerificationLayout) -> None:
     for root in (
-        layout.config_root,
         layout.interim_root,
         layout.processed_root,
         layout.research_root,
-        layout.evidence_root,
-        layout.manifests_root,
-        layout.validations_root,
-        layout.timings_root,
+        layout.outputs_root,
         layout.logs_root,
     ):
         root.mkdir(parents=True, exist_ok=True)
@@ -622,19 +557,48 @@ def _dataset_roots(
     return tuple(sorted(roots, key=lambda item: item.as_posix()))
 
 
-def _logical_layer(dataset_root: Path, output_root: Path) -> str:
-    relative = logical_path(dataset_root, output_root=output_root)
+def _logical_layer(dataset_root: Path, run_root: Path) -> str:
+    relative = logical_path(dataset_root, run_root=run_root)
     if relative.startswith("data/interim/"):
         return "interim"
     if relative.startswith("data/research/"):
         return "research"
-    if relative.startswith("run_outputs/") or relative.startswith("handoff_evidence/"):
-        return "evidence"
     return "processed"
 
 
 def _layer_for_root(dataset_root: Path, layout: LocalVerificationLayout) -> str:
-    return _logical_layer(dataset_root, layout.output_root)
+    return _logical_layer(dataset_root, layout.run_root)
+
+
+def _build_layer_summaries(
+    *,
+    layout: LocalVerificationLayout,
+    dataset_roots: tuple[Path, ...],
+) -> tuple[dict[str, Any], ...]:
+    grouped: dict[str, list[Path]] = {}
+    for root in dataset_roots:
+        grouped.setdefault(_layer_for_root(root, layout), []).append(root)
+    return tuple(
+        build_layer_summary(
+            layer_root=layout.data_root / logical_layer,
+            logical_layer=logical_layer,
+            dataset_roots=tuple(sorted(roots, key=lambda item: item.as_posix())),
+        )
+        for logical_layer, roots in sorted(grouped.items())
+    )
+
+
+def _output_index(output_bundle: Path, run_root: Path) -> dict[str, Any]:
+    manifest_path = Path(output_bundle) / "manifest.json"
+    payload = read_qrp_json(
+        manifest_path,
+        expected_schema_id="qrp-output-manifest",
+        error="output_manifest_schema_id_invalid",
+    )
+    return {
+        **payload,
+        "manifest_path": manifest_path.relative_to(run_root).as_posix(),
+    }
 
 
 def _dataset_id(dataset_root: Path) -> str:

@@ -8,19 +8,19 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class LocalVerificationLayout:
-    output_root: Path
+    run_root: Path
 
     @classmethod
-    def from_output_root(cls, output_root: Path) -> LocalVerificationLayout:
-        return cls(output_root=Path(output_root))
+    def from_run_root(cls, run_root: Path) -> LocalVerificationLayout:
+        return cls(run_root=Path(run_root))
 
     @property
-    def config_root(self) -> Path:
-        return self.output_root / "config"
+    def run_json_path(self) -> Path:
+        return self.run_root / "run.json"
 
     @property
     def data_root(self) -> Path:
-        return self.output_root / "data"
+        return self.run_root / "data"
 
     @property
     def interim_root(self) -> Path:
@@ -35,32 +35,16 @@ class LocalVerificationLayout:
         return self.data_root / "research"
 
     @property
-    def evidence_root(self) -> Path:
-        return self.data_root / "evidence"
-
-    @property
-    def manifests_root(self) -> Path:
-        return self.output_root / "manifests"
-
-    @property
-    def validations_root(self) -> Path:
-        return self.output_root / "validations"
-
-    @property
-    def timings_root(self) -> Path:
-        return self.output_root / "timings"
+    def outputs_root(self) -> Path:
+        return self.run_root / "outputs"
 
     @property
     def logs_root(self) -> Path:
-        return self.output_root / "logs"
-
-    @property
-    def summary_json_path(self) -> Path:
-        return self.output_root / "summary.json"
+        return self.run_root / "logs"
 
     @property
     def summary_md_path(self) -> Path:
-        return self.output_root / "summary.md"
+        return self.run_root / "summary.md"
 
 
 __all__ = ["LocalVerificationLayout"]

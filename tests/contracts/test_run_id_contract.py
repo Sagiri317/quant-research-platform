@@ -5,8 +5,8 @@ import pytest
 import quant_research_platform.contracts.evaluations as evaluations_contracts
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.workflows import (
     WorkflowRunPolicy,
@@ -15,7 +15,7 @@ from quant_research_platform.contracts.workflows import (
 
 
 def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
-    report = RunOutputSpec(
+    report = OutputSpec(
         output_id="stage_profile",
         output_definition_id="stage_profile_local_diagnostic",
         run_id="run-01.alpha_beta",
@@ -26,7 +26,7 @@ def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
 
     assert report.run_id == "run-01.alpha_beta"
     assert (
-        RunOutputSpec(
+        OutputSpec(
             output_id="date_profile",
             output_definition_id="stage_profile_local_diagnostic",
             run_id="run_202606",
@@ -37,7 +37,7 @@ def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
         == "run_202606"
     )
     assert (
-        RunOutputSpec(
+        OutputSpec(
             output_id="date_parts_profile",
             output_definition_id="stage_profile_local_diagnostic",
             run_id="run_2026_06",
@@ -69,7 +69,7 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
         "data/processed/run",
         "data/research/run",
         r"data\research\run",
-        "run_outputs/local/run",
+        "outputs/prediction_daily/run",
         "600000.sh",
         "000001.sz",
         "000001",
@@ -81,9 +81,9 @@ def test_signal_spec_is_not_reexported_from_evaluation_contracts() -> None:
         "a" * 129,
     ],
 )
-def test_run_output_spec_rejects_invalid_run_ids(run_id: str) -> None:
+def test_output_spec_rejects_invalid_run_ids(run_id: str) -> None:
     with pytest.raises(ValueError, match="invalid_run_id"):
-        RunOutputSpec(
+        OutputSpec(
             output_id="stage_profile",
             output_definition_id="stage_profile_local_diagnostic",
             run_id=run_id,

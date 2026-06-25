@@ -56,7 +56,8 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     _write_inventory_fixture(tmp_path)
 
     inventory = build_schema_inventory_payload(tmp_path)
-    roots = {item["logical_relative_root"] for item in inventory}
+    items = inventory["datasets"]
+    roots = {item["logical_relative_root"] for item in items}
     combined = json.dumps(inventory, ensure_ascii=False)
 
     assert roots == {
@@ -66,7 +67,8 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
         "data/processed/a_share/annotation/default",
         "data/research/a_share/demo_research_dataset",
     }
-    assert all(set(item) == ALLOWED_INVENTORY_FIELDS for item in inventory)
+    assert inventory["schema_id"] == "qrp-schema-inventory"
+    assert all(set(item) == ALLOWED_INVENTORY_FIELDS for item in items)
     market_bars_daily = _inventory_item(
         inventory,
         f"data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}",
@@ -105,7 +107,7 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     assert annotation["selected_important_column_null_counts"] == {"eligible": 1}
     assert research["row_count_by_year"] == {"2024": 2}
     assert "data/raw" not in combined
-    assert "run_outputs/local" not in combined
+    assert "outputs/local" not in combined
     assert str(tmp_path) not in combined
     assert "asset_a" not in combined
     assert "source_asset_a" not in combined
@@ -172,8 +174,9 @@ def test_qrp_private_schema_inventory_requires_output_and_refuses_overwrite(
     assert missing_output.exit_code != 0
     assert created.exit_code == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
-    assert isinstance(payload, list)
-    assert len(payload) == 5
+    assert payload["schema_id"] == "qrp-schema-inventory"
+    assert isinstance(payload["datasets"], list)
+    assert len(payload["datasets"]) == 5
     assert overwrite.exit_code == 2
     assert "output_already_exists" in overwrite.output
 
@@ -261,7 +264,8 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     assert "--overwrite" not in schema_inventory_help.output
     assert evidence_run_help.exit_code == 0
     assert "private local verification harness" in evidence_run_help.output
-    assert "--output-root" in evidence_run_help.output
+    assert "--run-root" in evidence_run_help.output
+    assert "--output-root" not in evidence_run_help.output
     assert "--start-date" in evidence_run_help.output
     assert "--end-date" in evidence_run_help.output
 
@@ -277,8 +281,8 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
             {
                 "status": "PASS",
                 "run_id": "s1",
-                "output_root": "verification-output/s1",
-                "summary": {"status": "PASS", "output_root": "verification-output/s1"},
+                "run_root": "verification-output/s1",
+                "summary": {"status": "PASS", "run_root": "verification-output/s1"},
             },
         )()
 
@@ -293,7 +297,7 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
         [
             "evidence",
             "run",
-            "--output-root",
+            "--run-root",
             "verification-output/s1",
             "--start-date",
             "2014-01-01",
@@ -311,7 +315,7 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
     )
 
     assert result.exit_code == 0
-    assert calls[0].output_root == Path("verification-output/s1")
+    assert calls[0].run_root == Path("verification-output/s1")
     assert calls[0].start_date == "2014-01-01"
     assert calls[0].end_date == "2016-12-31"
     assert calls[0].prediction_train_end == "2014-06-30"
@@ -335,8 +339,8 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
             {
                 "status": "PASS",
                 "run_id": "s2",
-                "output_root": "verification-output/s2",
-                "summary": {"status": "PASS", "output_root": "verification-output/s2"},
+                "run_root": "verification-output/s2",
+                "summary": {"status": "PASS", "run_root": "verification-output/s2"},
             },
         )()
 
@@ -351,7 +355,7 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
         [
             "evidence",
             "run",
-            "--output-root",
+            "--run-root",
             "verification-output/s2",
             "--start-date",
             "2014-01-01",
@@ -392,7 +396,8 @@ def test_qrp_verification_evidence_run_rejects_missing_required_options() -> Non
 
     assert result.exit_code != 0
     assert help_result.exit_code == 0
-    assert "--output-root" in help_result.output
+    assert "--run-root" in help_result.output
+    assert "--output-root" not in help_result.output
     assert "--start-date" in help_result.output
     assert "--end-date" in help_result.output
     assert "--evaluation-start-date" in help_result.output
@@ -417,9 +422,7 @@ def _write_inventory_fixture(project_root: Path) -> None:
         project_root / "data" / "research" / "a_share" / "demo_research_dataset"
     )
     raw_root = project_root / "data" / "raw" / "vendor" / "ignored"
-    report_root = (
-        project_root / "run_outputs" / "local" / "a_share" / "evaluation" / "run"
-    )
+    report_root = project_root / "outputs" / "local" / "a_share" / "evaluation" / "run"
 
     write_low_level_parquet_artifact(
         interim_root,
@@ -512,9 +515,11 @@ def _write_inventory_fixture(project_root: Path) -> None:
 
 
 def _inventory_item(
-    inventory: list[dict[str, object]],
+    inventory: dict[str, object],
     logical_root: str,
 ) -> dict[str, object]:
     return next(
-        item for item in inventory if item["logical_relative_root"] == logical_root
+        item
+        for item in inventory["datasets"]
+        if item["logical_relative_root"] == logical_root
     )

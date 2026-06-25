@@ -22,7 +22,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
 )
-from quant_research_platform.policy.share_safety import local_output_root_reason
+from quant_research_platform.policy.share_safety import local_run_root_reason
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.datasets import read_research_dataset
 from quant_research_platform.runtime import resources as resource_module
@@ -66,7 +66,7 @@ def _smoke_prediction_specs():
     ).list()
 
 
-def _repo_output_root(
+def _repo_run_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *parts: str,
@@ -78,27 +78,28 @@ def _repo_output_root(
     return repo_root.joinpath(*parts)
 
 
-def test_local_verification_workflow_rejects_existing_output_root(
+def test_local_verification_workflow_rejects_existing_run_root(
     tmp_path,
     monkeypatch,
 ):
-    _repo_output_root(tmp_path, monkeypatch, ".run", "s1")
-    output_root = Path(".run") / "s1"
-    output_root.mkdir(parents=True)
+    _repo_run_root(tmp_path, monkeypatch, ".run", "s1")
+    run_root = Path(".run") / "s1"
+    run_root.mkdir(parents=True)
+    (run_root / "unowned.txt").write_text("keep\n", encoding="utf-8")
     config = _verification_config(
-        output_root=output_root,
+        run_root=run_root,
         start_date="2014-01-01",
         end_date="2016-12-31",
         profile=research_profile(),
     )
 
-    with pytest.raises(ValueError, match="output_root_already_exists"):
+    with pytest.raises(ValueError, match="run_root_already_exists"):
         run_local_verification(config)
 
 
 def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
     config = _verification_config(
-        output_root=tmp_path / "verification-output" / "s1",
+        run_root=tmp_path / "verification-output" / "s1",
         start_date="2016-12-31",
         end_date="2014-01-01",
         profile=research_profile(),
@@ -112,7 +113,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
         run_local_verification(
             _verification_config(
-                output_root=tmp_path / "verification-output" / "bad-evaluation",
+                run_root=tmp_path / "verification-output" / "bad-evaluation",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
                 evaluation_start_date="2016-12-31",
@@ -128,7 +129,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     ):
         run_local_verification(
             _verification_config(
-                output_root=tmp_path / "verification-output" / "bad-prediction",
+                run_root=tmp_path / "verification-output" / "bad-prediction",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
                 prediction_train_end="2015-01-02",
@@ -144,7 +145,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     ):
         run_local_verification(
             _verification_config(
-                output_root=tmp_path / "verification-output" / "bad-prediction-end",
+                run_root=tmp_path / "verification-output" / "bad-prediction-end",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
                 prediction_train_end="2015-01-01",
@@ -204,23 +205,23 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
     ]
 
     for run_name, overrides, match in cases:
-        output_root = tmp_path / "verification-output" / run_name
+        run_root = tmp_path / "verification-output" / run_name
         with pytest.raises(ValueError, match=match):
             run_local_verification(
                 _verification_config(
-                    output_root=output_root,
+                    run_root=run_root,
                     start_date="2014-01-01",
                     end_date="2016-12-31",
                     profile=research_profile(),
                     **overrides,
                 )
             )
-        assert not output_root.exists()
+        assert not run_root.exists()
 
 
 def test_local_verification_run_id_can_be_explicit_long_semantic_value(tmp_path):
     config = _verification_config(
-        output_root=tmp_path / "verification-output" / "s1",
+        run_root=tmp_path / "verification-output" / "s1",
         start_date="2014-01-01",
         end_date="2016-12-31",
         run_id="verification-evidence-smoke-a-share-2014-2016",
@@ -254,89 +255,55 @@ def test_local_verification_run_id_uses_shared_share_safe_contract(
         ("csmar_run", tmp_path / "verification-output" / "safe"),
         ("source_run", tmp_path / "verification-output" / "safe"),
     )
-    for run_id, output_root in invalid_cases:
+    for run_id, run_root in invalid_cases:
         with pytest.raises(ValueError, match="invalid_run_id"):
-            module.resolve_local_verification_run_id(run_id, output_root)
+            module.resolve_local_verification_run_id(run_id, run_root)
 
 
-def test_local_verification_output_root_respects_repo_local_boundary(
+def test_local_verification_run_root_accepts_explicit_locations(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    def validate_local_output_root(output_root: Path, root: Path) -> None:
-        reason = local_output_root_reason(output_root, root)
+    def validate_local_run_root(run_root: Path, root: Path) -> None:
+        reason = local_run_root_reason(run_root, root)
         if reason is not None:
             raise ValueError(reason)
 
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        validate_local_output_root(repo_root / "verification-output" / "s1", repo_root)
-
-    validate_local_output_root(
-        repo_root / "run_outputs" / "local" / "a_share" / "s1",
-        repo_root,
-    )
-    validate_local_output_root(
-        repo_root / ".run" / "local" / "s1",
-        repo_root,
-    )
-    validate_local_output_root(
+    for run_root in (
+        repo_root / "verification-output" / "s1",
+        repo_root / "outputs" / "local" / "a_share" / "s1",
         repo_root / ".run" / "smoke" / "s1",
-        repo_root,
-    )
-    validate_local_output_root(
-        repo_root / ".run" / "evidence-final" / "commit-sha" / "window-a",
-        repo_root,
-    )
-    validate_local_output_root(
-        repo_root / ".run" / "evidence-refreshed-baseline" / "commit-sha" / "window-b",
-        repo_root,
-    )
-    validate_local_output_root(
-        repo_root / ".run" / "s86",
-        repo_root,
-    )
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        validate_local_output_root(
-            repo_root / ".run" / "reviews" / "s1",
-            repo_root,
-        )
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        validate_local_output_root(
-            repo_root / "output" / "s1",
-            repo_root,
-        )
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        validate_local_output_root(
-            repo_root / "tmp-output" / "s1",
-            repo_root,
-        )
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        validate_local_output_root(
-            tmp_path / "outside" / "verification-output" / "s1",
-            repo_root,
-        )
+        repo_root / ".run" / "reviews" / "s1",
+        tmp_path / "outside" / "verification-output" / "s1",
+    ):
+        validate_local_run_root(run_root, repo_root)
+
+    with pytest.raises(ValueError, match="run_root_must_not_be_repo_root"):
+        validate_local_run_root(repo_root, repo_root)
 
 
-def test_prepare_output_root_validates_before_creating_repo_internal_output(
+def test_prepare_run_root_creates_explicit_repo_internal_output(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    output_root = repo_root / "verification-output" / "s1"
+    run_root = repo_root / "verification-output" / "s1"
 
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        module._prepare_output_root(
-            output_root,
-            replace_output=False,
-            repo_root=repo_root,
-        )
+    module._prepare_run_root(
+        run_root,
+        run_id="s1",
+        replace_output=False,
+        repo_root=repo_root,
+    )
 
-    assert not output_root.exists()
+    payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    assert payload["schema_id"] == "qrp-run"
+    assert payload["run_id"] == "s1"
 
 
-def test_prepare_output_root_detects_repo_boundary_outside_cwd(
+def test_prepare_run_root_uses_git_boundary_outside_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -345,20 +312,23 @@ def test_prepare_output_root_detects_repo_boundary_outside_cwd(
     (repo_root / ".git").write_text("gitdir: ../repo.git\n", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
-    output_root = repo_root / "verification-output" / "s1"
+    run_root = repo_root / "verification-output" / "s1"
 
     monkeypatch.chdir(outside)
 
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        module._prepare_output_root(output_root, replace_output=False)
+    module._prepare_run_root(
+        run_root,
+        run_id="s1",
+        replace_output=False,
+    )
 
-    assert not output_root.exists()
+    assert (run_root / "run.json").is_file()
 
 
 def test_local_verification_uses_explicit_prediction_windows() -> None:
     windows = module._resolve_effective_windows(
         _verification_config(
-            output_root=Path("unused"),
+            run_root=Path("unused"),
             start_date="2014-01-01",
             end_date="2016-12-31",
             profile=research_profile(),
@@ -381,7 +351,7 @@ def test_local_verification_requires_prediction_window_order() -> None:
     ):
         module._resolve_effective_windows(
             LocalVerificationRunConfig(
-                output_root=Path("unused"),
+                run_root=Path("unused"),
                 start_date="2014-01-01",
                 end_date="2016-12-31",
                 profile=research_profile(),
@@ -441,7 +411,7 @@ def test_local_verification_workflow_resolves_independent_windows(
         return _persist_fake_research_root(**kwargs)
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    _stub_run_output_writers(monkeypatch)
+    _stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
@@ -492,7 +462,7 @@ def test_local_verification_workflow_resolves_independent_windows(
 
     profile = _profile_with_materializers(import_interim, build_processed)
     expected_prediction_count = len(tuple(_smoke_prediction_specs()))
-    output_root = _repo_output_root(
+    run_root = _repo_run_root(
         tmp_path,
         monkeypatch,
         ".run",
@@ -501,7 +471,7 @@ def test_local_verification_workflow_resolves_independent_windows(
     )
     result = run_local_verification(
         _verification_config(
-            output_root=output_root,
+            run_root=run_root,
             start_date="2014-01-01",
             end_date="2019-12-31",
             evaluation_start_date="2015-01-01",
@@ -512,9 +482,9 @@ def test_local_verification_workflow_resolves_independent_windows(
             profile=profile,
         )
     )
-    run_config = json.loads(
-        (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
-    )
+    run_config = json.loads((run_root / "run.json").read_text(encoding="utf-8"))[
+        "config"
+    ]
 
     assert result.status == "NOT_RUN"
     assert calls == [
@@ -616,7 +586,7 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         staticmethod(fake_from_environment),
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    _stub_run_output_writers(monkeypatch)
+    _stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
@@ -635,7 +605,7 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
 
     profile = _profile_with_materializers(import_interim, build_processed)
     expected_prediction_count = len(tuple(_smoke_prediction_specs()))
-    output_root = _repo_output_root(
+    run_root = _repo_run_root(
         tmp_path,
         monkeypatch,
         ".run",
@@ -644,44 +614,20 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     )
     result = run_local_verification(
         _verification_config(
-            output_root=output_root,
+            run_root=run_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
             profile=profile,
         )
     )
-    run_config = json.loads(
-        (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
-    )
+    run_config = json.loads((run_root / "run.json").read_text(encoding="utf-8"))[
+        "config"
+    ]
 
     assert result.status == "NOT_RUN"
     assert from_environment_calls == 1
     assert snapshots == [policy] * (5 + expected_prediction_count)
     assert run_config["runtime_resource_policy"] == policy.to_payload()
-    assert result.summary["runtime_resource_policy"] == (
-        policy.to_public_summary_payload()
-    )
-    execution_plan = result.summary["runtime_execution_plan"]
-    assert (
-        execution_plan["storage_read"]["time_window_read_planning"] == "manifest_backed"
-    )
-    assert "_DatasetReadContext" not in json.dumps(execution_plan)
-    assert execution_plan["storage_read"]["time_window_year_partition_pruning"] is True
-    assert execution_plan["storage_read"]["row_group_streaming"] == "NOT_LANDED"
-    assert execution_plan["timestamp_sessions"] == {
-        "evaluation": "complete_timestamp_sessions",
-        "model": "complete_timestamp_sessions",
-        "prediction": "complete_timestamp_sessions",
-        "portfolio": "complete_timestamp_sessions",
-    }
-    assert execution_plan["report_writing"]["prediction_parquet"] == "chunked_internal"
-    assert (
-        execution_plan["report_writing"]["portfolio_row_outputs"] == "chunked_internal"
-    )
-    assert execution_plan["report_writing"]["portfolio_summary_outputs"] == (
-        "aggregate_summary"
-    )
-    assert execution_plan["full_horizon_tiling"]["status"] == "NOT_LANDED"
 
 
 def test_local_verification_workflow_runs_injected_generation_and_writes_artifacts(
@@ -757,7 +703,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         return artifact_root
 
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    _stub_run_output_writers(monkeypatch)
+    _stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
@@ -794,10 +740,10 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         prediction_spec.prediction_id for prediction_spec in _smoke_prediction_specs()
     ]
     expected_prediction_count = len(expected_prediction_ids)
-    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s1")
+    run_root = _repo_run_root(tmp_path, monkeypatch, ".run", "s1")
     result = run_local_verification(
         _verification_config(
-            output_root=output_root,
+            run_root=run_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
             profile=profile,
@@ -818,60 +764,60 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     assert portfolio_ids == ["signal_forward_return_20d_portfolio"]
     assert result.status == "NOT_RUN"
     assert result.run_id == "s1"
-    assert result.output_root == "s1"
-    assert (output_root / "config" / "run_config.json").is_file()
-    assert (output_root / "manifests" / "run_manifest.json").is_file()
-    assert (output_root / "timings" / "timings.json").is_file()
-    assert (output_root / "validations" / "validation_summary.json").is_file()
-    layout = LocalVerificationLayout.from_output_root(output_root)
-    assert (layout.evidence_root / "evidence_summary.json").is_file()
-    for layer in ("interim", "processed", "research", "evidence"):
-        layer_root = getattr(layout, f"{layer}_root")
-        layer_manifest = layer_root / "_manifests" / "layer_manifest.json"
-        assert layer_manifest.is_file()
-        assert list(layer_root.rglob("layer_manifest.json")) == [layer_manifest]
-    summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
-    run_config = json.loads(
-        (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
+    assert result.run_root == "s1"
+    layout = LocalVerificationLayout.from_run_root(run_root)
+    run_payload = json.loads(layout.run_json_path.read_text(encoding="utf-8"))
+    assert layout.summary_md_path.is_file()
+    assert run_payload["schema_id"] == "qrp-run"
+    assert run_payload["status"] == {
+        "overall": "NOT_RUN",
+        "validation": "PASS",
+        "smoke": "PASS",
+        "compare": "NOT_RUN",
+        "share_safety": "PASS",
+        "full_horizon": "NOT_RUN",
+        "validation_matrix": "NOT_RUN",
+    }
+    assert run_payload["run_id"] == "s1"
+    assert run_payload["root_ownership"]["replace_safe"] is True
+    assert len(run_payload["data"]["layers"]) == 3
+    assert {layer["logical_layer"] for layer in run_payload["data"]["layers"]} == {
+        "interim",
+        "processed",
+        "research",
+    }
+    assert len(run_payload["outputs"]) == expected_prediction_count + 2
+    assert all(
+        output["schema_id"] == "qrp-output-manifest"
+        for output in run_payload["outputs"]
     )
-    run_manifest = json.loads(
-        (output_root / "manifests" / "run_manifest.json").read_text(encoding="utf-8")
-    )
-    validation = json.loads(
-        (output_root / "validations" / "validation_summary.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    timings = json.loads(
-        (output_root / "timings" / "timings.json").read_text(encoding="utf-8")
-    )
-    timings_csv = (output_root / "timings" / "timings.csv").read_text(encoding="utf-8")
-    assert summary["status"] == "NOT_RUN"
-    assert summary["smoke_status"] == "PASS"
-    assert summary["compare_status"] == "NOT_RUN"
-    assert summary["full_horizon_status"] == "NOT_RUN"
-    assert summary["validation_matrix_status"] == "NOT_RUN"
-    assert validation["status"] == "PASS"
-    assert summary["run_id"] == "s1"
-    assert run_config["output_root"] == "s1"
-    assert run_manifest["output_root"] == "s1"
-    assert summary["manifest_status"]["run_output_count"] == (
-        expected_prediction_count + 2
-    )
-    timing_steps = [record["step_name"] for record in timings["records"]]
-    summary_timing_steps = [
-        record["step_name"] for record in summary["timings"]["records"]
+    timing_steps = [
+        record["step_name"] for record in run_payload["execution_metrics"]["records"]
     ]
     validation_record = next(
         record
-        for record in timings["records"]
+        for record in run_payload["execution_metrics"]["records"]
         if record["step_name"] == "validation_summary"
     )
     assert "validation_summary" in timing_steps
-    assert "validation_summary" in summary_timing_steps
-    assert "validation_summary" in timings_csv
     assert "rss_start_end_max_mb" in validation_record
     assert LEGACY_RSS_PEAK_FIELD not in validation_record
+    retired_paths = (
+        ".qrp-local-verification.json",
+        "config",
+        "manifests",
+        "validations",
+        "timings",
+        "data/evidence",
+        "summary.json",
+        "timings.csv",
+        "run_outputs",
+        "data/index.json",
+        "outputs/index.json",
+    )
+    for relative in retired_paths:
+        assert not (run_root / relative).exists()
+    assert not list(run_root.rglob("layer_manifest.json"))
 
 
 def test_local_verification_workflow_preserves_dataset_manifests(
@@ -913,7 +859,7 @@ def test_local_verification_workflow_preserves_dataset_manifests(
         "assemble_research_dataset",
         _persist_fake_research_root,
     )
-    _stub_run_output_writers(monkeypatch)
+    _stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
@@ -930,10 +876,10 @@ def test_local_verification_workflow_preserves_dataset_manifests(
         lambda **kwargs: _fake_portfolio_result(kwargs),
     )
 
-    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s8")
+    run_root = _repo_run_root(tmp_path, monkeypatch, ".run", "s8")
     result = run_local_verification(
         _verification_config(
-            output_root=output_root,
+            run_root=run_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
             profile=_profile_with_materializers(import_interim, _empty_processed),
@@ -975,7 +921,7 @@ def test_local_verification_workflow_fails_when_dataset_manifest_is_missing(
         "assemble_research_dataset",
         _persist_fake_research_root,
     )
-    _stub_run_output_writers(monkeypatch)
+    _stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
         "build_evaluation_result_from_research_dataset",
@@ -992,32 +938,27 @@ def test_local_verification_workflow_fails_when_dataset_manifest_is_missing(
         lambda **kwargs: _fake_portfolio_result(kwargs),
     )
 
-    output_root = _repo_output_root(tmp_path, monkeypatch, ".run", "s9")
+    run_root = _repo_run_root(tmp_path, monkeypatch, ".run", "s9")
     result = run_local_verification(
         _verification_config(
-            output_root=output_root,
+            run_root=run_root,
             start_date="2014-01-01",
             end_date="2016-12-31",
             profile=_profile_with_materializers(import_interim, _empty_processed),
         )
     )
-    validation = json.loads(
-        (output_root / "validations" / "validation_summary.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
+    run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    validation = run_payload["checks"]["validation"]
 
     assert result.status == "FAIL"
     assert "dataset_manifest_missing" in validation["failure_codes"]
     assert validation["dataset_manifest_completeness"]["missing"] == [
         f"data/interim/csmar/{frequency_ids.MARKET_BARS_DATA_ID}"
     ]
-    assert summary["status"] == validation["status"] == "FAIL"
-    summary_md = (output_root / "summary.md").read_text(encoding="utf-8")
-    assert "- status: `FAIL`" in summary_md
-    assert "- validation_status: `FAIL`" in summary_md
-    assert "`PASS`" not in summary_md
+    assert run_payload["status"]["overall"] == validation["status"] == "FAIL"
+    summary_md = (run_root / "summary.md").read_text(encoding="utf-8")
+    assert "- overall: `FAIL`" in summary_md
+    assert "- validation: `FAIL`" in summary_md
 
 
 def test_local_verification_workflow_runs_real_tiny_research_stack(
@@ -1063,7 +1004,7 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
         )
         return _persist_tiny_a_share_processed_inputs(layout, base_profile)
 
-    output_root = _repo_output_root(
+    run_root = _repo_run_root(
         tmp_path,
         monkeypatch,
         ".run",
@@ -1072,7 +1013,7 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     )
     result = run_local_verification(
         _verification_config(
-            output_root=output_root,
+            run_root=run_root,
             start_date="2014-01-02",
             end_date="2015-01-05",
             profile=replace(
@@ -1083,29 +1024,28 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
         )
     )
 
-    summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
-    reports_root = output_root / "run_outputs" / "local" / "a_share"
-    evaluation_root = reports_root / "evaluation" / "signal_forward_return_20d"
-    portfolio_root = reports_root / "portfolio" / "signal_forward_return_20d_portfolio"
-    prediction_root = reports_root / "prediction"
+    run_payload = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    reports_root = run_root / "outputs"
+    evaluation_root = reports_root / "signal_forward_return_20d"
+    portfolio_root = reports_root / "signal_forward_return_20d_portfolio"
     metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
     research = read_research_dataset(
-        StorageLayout(project_root=output_root),
+        StorageLayout(project_root=run_root),
         market_id=MarketId("a_share"),
         dataset_id="price_volume_forward_returns",
         time_window=TimeWindow("2014-01-02", "2015-01-05"),
     )
 
     assert result.status == "NOT_RUN"
-    assert summary["smoke_status"] == "PASS"
-    assert summary["compare_status"] == "NOT_RUN"
-    assert summary["full_horizon_status"] == "NOT_RUN"
-    assert summary["validation_matrix_status"] == "NOT_RUN"
-    assert summary["manifest_status"]["run_output_count"] == len(prediction_ids) + 2
+    assert run_payload["status"]["smoke"] == "PASS"
+    assert run_payload["status"]["compare"] == "NOT_RUN"
+    assert run_payload["status"]["full_horizon"] == "NOT_RUN"
+    assert run_payload["status"]["validation_matrix"] == "NOT_RUN"
+    assert len(run_payload["outputs"]) == len(prediction_ids) + 2
     assert set(metrics["signal"]) == {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert "mom_20d_zscore" in research.columns
-    assert sorted(path.name for path in prediction_root.iterdir()) == sorted(
-        prediction_ids
+    assert all(
+        (reports_root / prediction_id).is_dir() for prediction_id in prediction_ids
     )
     for prediction_id in prediction_ids:
         prediction_spec = prediction_specs[prediction_id]
@@ -1115,31 +1055,33 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
             *model_spec.input_feature_columns,
         ]
         manifest = json.loads(
-            (prediction_root / prediction_id / "manifest.json").read_text(
-                encoding="utf-8"
-            )
+            (reports_root / prediction_id / "manifest.json").read_text(encoding="utf-8")
         )
         prediction = pd.read_parquet(
-            prediction_root / prediction_id / "prediction.parquet"
+            reports_root / prediction_id / "prediction.parquet"
         )
         prediction_scores = pd.to_numeric(
             prediction["prediction_score"],
             errors="coerce",
         )
 
-        assert manifest["prediction_id"] == prediction_id
-        assert manifest["model_metadata"]["model_algorithm"] == (
+        metadata = manifest["metadata"]
+        assert manifest["schema_id"] == "qrp-output-manifest"
+        assert manifest["output_id"] == prediction_id
+        assert manifest["run_id"] == "tiny-real-stack"
+        assert metadata["prediction_id"] == prediction_id
+        assert metadata["model_metadata"]["model_algorithm"] == (
             model_spec.model_algorithm
         )
-        assert manifest["model_metadata"]["input_columns"] == expected_input_columns
-        assert manifest["prediction_metadata"]["input_columns"] == (
+        assert metadata["model_metadata"]["input_columns"] == expected_input_columns
+        assert metadata["prediction_metadata"]["input_columns"] == (
             expected_input_columns
         )
-        assert manifest["train_end"] == prediction_spec.train_end
-        assert manifest["test_start"] == prediction_spec.test_start
-        assert manifest["test_end"] == prediction_spec.test_end
-        assert manifest["is_oos"] is True
-        assert manifest["prediction_metadata"]["prediction_column"] == (
+        assert metadata["train_end"] == prediction_spec.train_end
+        assert metadata["test_start"] == prediction_spec.test_start
+        assert metadata["test_end"] == prediction_spec.test_end
+        assert metadata["is_oos"] is True
+        assert metadata["prediction_metadata"]["prediction_column"] == (
             "prediction_score"
         )
         assert not prediction.empty
@@ -1171,7 +1113,7 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     portfolio_returns = pd.read_parquet(portfolio_root / "portfolio_returns.parquet")
     expected_signals = {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert {
-        signal["signal_id"] for signal in portfolio_manifest["signals"]
+        signal["signal_id"] for signal in portfolio_manifest["metadata"]["signals"]
     } == expected_signals
     assert set(portfolio_returns["signal"]) == expected_signals
 
@@ -1261,21 +1203,41 @@ def _fake_portfolio_result(kwargs):
     )
 
 
-def _stub_run_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+def _stub_output_writers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def write_stub(*args, **kwargs):
+        del args
+        output_spec = kwargs["output_spec"]
+        root = kwargs["layout"].project_root / "outputs" / output_spec.output_id
+        root.mkdir(parents=True)
+        (root / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_id": "qrp-output-manifest",
+                    "output_id": output_spec.output_id,
+                    "output_definition_id": output_spec.output_definition_id,
+                    "run_id": output_spec.run_id,
+                    "metadata": {},
+                    "files": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root
+
     monkeypatch.setattr(
         module,
-        "write_evaluation_run_outputs",
-        lambda *args, **kwargs: Path("evaluation"),
+        "write_evaluation_outputs",
+        write_stub,
     )
     monkeypatch.setattr(
         module,
-        "write_prediction_run_outputs",
-        lambda *args, **kwargs: Path("prediction"),
+        "write_prediction_outputs",
+        write_stub,
     )
     monkeypatch.setattr(
         module,
-        "write_portfolio_run_outputs",
-        lambda *args, **kwargs: Path("portfolio"),
+        "write_portfolio_outputs",
+        write_stub,
     )
 
 

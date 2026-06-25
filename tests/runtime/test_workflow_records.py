@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.contracts.run_outputs import OutputScope
+from quant_research_platform.contracts.outputs import OutputScope
 from quant_research_platform.contracts.workflows import (
     WorkflowRunPolicy,
     WorkflowRunSummary,

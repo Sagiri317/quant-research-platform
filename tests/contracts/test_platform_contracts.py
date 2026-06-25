@@ -212,12 +212,10 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
         "data/interim",
         "data/processed",
         "data/research",
-        "run_outputs/local",
+        "outputs",
     )
     assert is_local_only_path(Path("/repo/data/raw/csmar/export.csv"))
-    assert is_local_only_path(
-        Path("/repo/run_outputs/local/a_share/run")
-    )
+    assert is_local_only_path(Path("/repo/outputs/prediction_daily/run"))
     assert not is_local_only_path(Path("/repo/docs/data/README.md"))
 
 

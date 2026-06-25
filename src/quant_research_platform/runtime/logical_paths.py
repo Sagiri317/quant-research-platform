@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 
 DEFAULT_GENERATED_MARKERS: tuple[str, ...] = (
     "data",
-    "run_outputs",
+    "outputs",
     "manifests",
     "validations",
     "timings",
@@ -20,7 +20,7 @@ EVIDENCE_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
     "manifests",
     "validations",
     "timings",
-    "run_outputs",
+    "outputs",
     "handoff_evidence",
 )
 
@@ -28,15 +28,15 @@ EVIDENCE_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
 def logical_path(
     path: str | Path,
     *,
-    output_root: str | Path | None = None,
+    run_root: str | Path | None = None,
     markers: Iterable[str] = DEFAULT_GENERATED_MARKERS,
 ) -> str:
     """Return a share-safe path relative to a generated root when possible."""
 
     item = Path(path)
-    if output_root is not None:
+    if run_root is not None:
         try:
-            return item.relative_to(Path(output_root)).as_posix()
+            return item.relative_to(Path(run_root)).as_posix()
         except ValueError:
             pass
     parts = _posix_parts(item)

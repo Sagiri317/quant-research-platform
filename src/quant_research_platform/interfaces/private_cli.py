@@ -76,9 +76,9 @@ def schema_inventory(
 
 @evidence_app.command("run")
 def evidence_run(
-    output_root: Annotated[
+    run_root: Annotated[
         Path,
-        typer.Option("--output-root", help="Explicit verification output root."),
+        typer.Option("--run-root", help="Explicit verification run root."),
     ] = ...,
     start_date: Annotated[
         str,
@@ -150,7 +150,7 @@ def evidence_run(
     try:
         result = run_local_verification(
             LocalVerificationRunConfig(
-                output_root=output_root,
+                run_root=run_root,
                 start_date=start_date,
                 end_date=end_date,
                 evaluation_start_date=evaluation_start_date,
@@ -169,8 +169,7 @@ def evidence_run(
         raise typer.Exit(code=2) from exc
     typer.echo(
         sanitize_shared_text(
-            f"status={result.status} output_root={result.output_root} "
-            f"run_id={result.run_id}"
+            f"status={result.status} run_root={result.run_root} run_id={result.run_id}"
         )
     )
 
