@@ -137,7 +137,7 @@ def test_evaluation_group_artifact_names_are_label_value_neutral() -> None:
 
 def test_evaluation_result_and_report_writer_do_not_use_generic_metadata() -> None:
     engine_path = PROJECT_SRC / "research/evaluations/engine.py"
-    report_path = PROJECT_SRC / "artifacts/run_outputs.py"
+    report_path = PROJECT_SRC / "artifacts/outputs.py"
     engine_tree = _parse(engine_path)
     report_text = report_path.read_text(encoding="utf-8")
     result_class = next(
@@ -162,7 +162,7 @@ def test_prediction_outputs_report_writer_use_specific_metadata_attrs() -> None:
     outputs_text = (PROJECT_SRC / "research/predictions/outputs.py").read_text(
         encoding="utf-8"
     )
-    report_text = (PROJECT_SRC / "artifacts/run_outputs.py").read_text(encoding="utf-8")
+    report_text = (PROJECT_SRC / "artifacts/outputs.py").read_text(encoding="utf-8")
 
     assert 'attrs["metadata"]' not in outputs_text
     assert 'attrs.get("metadata"' not in report_text

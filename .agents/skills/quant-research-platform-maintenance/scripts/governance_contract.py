@@ -6,7 +6,7 @@ This module is an internal tooling fact source. It is not a public API.
 from __future__ import annotations
 
 import ast
-import importlib
+import importlib.util
 import io
 import json
 import re
@@ -15,15 +15,18 @@ import sys
 import tempfile
 import tokenize
 import tomllib
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 try:
-    from quant_research_platform.policy.check_status import VALID_STATUS_TOKENS
+    from quant_research_platform.policy.check_status import (
+        VALID_STATUS_TOKENS,
+        aggregate_component_status,
+    )
 except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
     _policy_path = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[4]
         / "src"
         / "quant_research_platform"
         / "policy"
@@ -39,8 +42,9 @@ except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit 
         _policy_module = importlib.util.module_from_spec(_policy_spec)
         _policy_spec.loader.exec_module(_policy_module)
         VALID_STATUS_TOKENS = _policy_module.VALID_STATUS_TOKENS
+        aggregate_component_status = _policy_module.aggregate_component_status
     else:
-        VALID_STATUS_TOKENS = ("PASS", "FAIL", "NOT_RUN", "BLOCKED")
+        raise
 
 
 @dataclass(frozen=True)
@@ -138,6 +142,52 @@ RUN_OUTPUT_ARCHITECTURE_RETIRED_NAME_RULES = (
     TextRule("report_artifacts", r"\breport_artifacts\b"),
     TextRule("private_aggregate", r"\bprivate_aggregate\b"),
 )
+
+RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
+    TextRule("retired_result_run_outputs", r"\brun_outputs\b", re.IGNORECASE),
+    TextRule(
+        "retired_result_outputs_local_layout",
+        r"\boutputs[/\\]local\b",
+        re.IGNORECASE,
+    ),
+    TextRule("retired_result_run_output_type", r"\bRunOutput[A-Za-z0-9_]*\b"),
+    TextRule(
+        "retired_result_review_evidence_root",
+        r"\breview_evidence_root\b",
+    ),
+    TextRule(
+        "retired_result_local_output_root",
+        r"(?:LocalVerificationRunConfig\.output_root|_prepare_output_root|--output-root)",
+    ),
+    TextRule(
+        "retired_result_compare_specialization",
+        r"\bbaseline[-_]final(?:[-_][A-Za-z0-9_]+)?\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_result_run_level_path",
+        (
+            r"(?:run_config\.json|run_manifest\.json|validation_summary\.json|"
+            r"evidence_summary\.json|timings\.json|timings\.csv|summary\.json|"
+            r"data/evidence|layer_manifest\.json)"
+        ),
+        re.IGNORECASE,
+    ),
+)
+
+RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
+    Path("tests/agents/test_compare_verification_evidence.py"),
+    Path("tests/agents/test_verify_governance.py"),
+    Path("tests/agents/handoff/test_handoff_package_verifier.py"),
+    Path("tests/agents/handoff/test_handoff_tools.py"),
+    Path("tests/architecture/test_governance_contract_rg_gate.py"),
+    Path("tests/architecture/test_handoff_package_contract.py"),
+    Path("tests/interfaces/test_private_cli_01.py"),
+    Path("tests/policy/test_share_safety_runtime_edges.py"),
+    Path("tests/storage/test_storage_01.py"),
+    Path("tests/workflows/test_local_verification.py"),
+    Path("tests/workflows/test_local_verification_contract.py"),
+}
 
 RUN_OUTPUT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = (
     ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
@@ -334,11 +384,9 @@ VERSION_SURFACE_POLICY = {
         "0.1",
         "0.1.0",
         "/api/0.1",
-        'contract_version="0.1"',
-        'schema_version="0.1"',
         "definition_version",
         "workflow_version",
-        "handoff-sidecar/0.1",
+        "qrp-handoff-sidecar",
         "handoff-package/0.1",
     ),
     "forbidden": ("/api/v0.1",),
@@ -815,6 +863,9 @@ SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
 }
 
 SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
+    GOVERNANCE_CONTRACT_SCRIPT: {
+        rule.name for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
+    },
     Path("tests/architecture/test_retired_surface_absent.py"): {
         "retired_csmar_source_alias",
         "retired_a_share_market_alias",
@@ -891,6 +942,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
 SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
     GOVERNANCE_CONTRACT_SCRIPT: {
         "RETIRED_NAME_RULES",
+        "RESULT_ARCHITECTURE_RETIRED_TEXT_RULES",
         "STALE_GOVERNANCE_TRUTH_RULES",
         "VERSION_SURFACE_POLICY",
         "VERSION_SURFACE_FORBIDDEN_RULES",
@@ -1169,6 +1221,7 @@ def active_doc_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     patterns.update(retired_public_surface_patterns())
     patterns.update(version_surface_forbidden_patterns())
     patterns.update(compile_text_rules(ACTIVE_DOC_HISTORY_NARRATIVE_RULES))
+    patterns.update(compile_text_rules(RESULT_ARCHITECTURE_RETIRED_TEXT_RULES))
     return patterns
 
 
@@ -1194,13 +1247,21 @@ def synthesized_string_forbidden_patterns() -> dict[str, re.Pattern[str]]:
 
 
 def structured_key_forbidden_patterns() -> dict[str, re.Pattern[str]]:
-    return python_symbol_forbidden_patterns()
+    patterns = python_symbol_forbidden_patterns()
+    patterns.update(
+        {
+            "retired_json_schema_version": re.compile(r"^schema_version$"),
+            "retired_json_contract_version": re.compile(r"^contract_version$"),
+        }
+    )
+    return patterns
 
 
 def source_tree_forbidden_patterns() -> dict[str, re.Pattern[str]]:
     patterns = stale_governance_truth_patterns()
     patterns.update(retired_public_surface_patterns())
     patterns.update(version_surface_forbidden_patterns())
+    patterns.update(compile_text_rules(RESULT_ARCHITECTURE_RETIRED_TEXT_RULES))
     return patterns
 
 
@@ -1467,7 +1528,41 @@ def iter_structured_key_findings(
                     "rule": rule,
                 }
             )
+    if Path(normalize_repo_path(path)).suffix.lower() == ".json":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        for key_path, value in _schema_id_values(payload):
+            if re.search(r"/(?:v)?\d+(?:\.\d+)+$", value):
+                findings.append(
+                    {
+                        "path": normalize_repo_path(path),
+                        "line": 0,
+                        "key_path": key_path,
+                        "key": "schema_id",
+                        "rule": "versioned_schema_id",
+                    }
+                )
     return findings
+
+
+def _schema_id_values(
+    payload: object,
+    *,
+    key_path: tuple[str, ...] = (),
+) -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            current = (*key_path, str(key))
+            if key == "schema_id" and isinstance(value, str):
+                values.append((".".join(current), value))
+            values.extend(_schema_id_values(value, key_path=current))
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            values.extend(_schema_id_values(value, key_path=(*key_path, str(index))))
+    return values
 
 
 def iter_synthesized_string_findings(
@@ -1730,6 +1825,7 @@ def is_run_output_architecture_negative_test(path: Path | str) -> bool:
 def layer_boundary_import_rules() -> tuple[dict[str, object], ...]:
     return LAYER_BOUNDARY_IMPORT_RULES
 
+
 # Handoff package contract and source-tree scan ownership.
 VALID_STATUSES = set(VALID_STATUS_TOKENS)
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
@@ -1782,7 +1878,7 @@ TASK_CONTROL_KEYS = {
     "handoff_markdown_evidence",
 }
 TASK_METADATA_KEYS = {
-    "schema_version",
+    "schema_id",
     "mode",
     "slug",
     "branch",
@@ -1851,6 +1947,7 @@ BLOCKED_HANDOFF_EVIDENCE_KEYS = (
 )
 VALIDATION_ROW_KEYS = {"name", "status", "evidence"}
 
+
 def source_tree_scan_payload(
     *,
     bundle_path: Path,
@@ -1883,7 +1980,7 @@ def source_tree_scan_from_clone(
         failures.append("source_tree_scan_head_mismatch")
     failures.extend(finding["rule"] for finding in findings)
     return {
-        "schema_version": "handoff-source-tree-scan/0.1",
+        "schema_id": "qrp-source-tree-scan-result",
         "status": "PASS" if not failures else "FAIL",
         "scanned_head": scanned_head,
         "expected_head": final_head,
@@ -2485,6 +2582,12 @@ def source_tree_path_allowed(
         and line_number in rule_definition_lines
     )
     if scan_group in {"retired_text", "synthesized_strings", "retired_terms"}:
+        if (
+            rule is not None
+            and rule.startswith("retired_result_")
+            and relative in RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES
+        ):
+            return True
         allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
         if rule is None or line_text is None:
             return False
@@ -2613,7 +2716,6 @@ def collect_handoff_evidence_blocked_key_failures(
             )
 
 
-
 def status_summary_from_validation(
     status_map: dict[str, str],
     *,
@@ -2622,7 +2724,7 @@ def status_summary_from_validation(
     statuses = dict(status_map)
     statuses["handoff_safety_scan"] = safety_status
     return {
-        "validation": aggregate_status(statuses.values()),
+        "validation": aggregate_component_status(statuses.values()),
         "handoff_verify": statuses.get("handoff_verify", "NOT_RUN"),
         "handoff_safety": safety_status,
         "blocked_count": sum(1 for status in statuses.values() if status == "BLOCKED"),
@@ -2661,6 +2763,8 @@ def enrich_validation_evidence(
 
 
 def validate_validation_evidence_contract(payload: dict[str, object]) -> None:
+    if payload.get("schema_id") != "qrp-handoff-validation-evidence":
+        raise SystemExit("validation_evidence_schema_id_invalid")
     blocked = sorted(set(payload) & BLOCKED_VALIDATION_KEYS)
     if blocked:
         raise SystemExit("validation_evidence_forbidden_field: " + ",".join(blocked))
@@ -2729,7 +2833,7 @@ def verification_matrix_payload(
             }
         )
     return {
-        "schema_version": "handoff-verification-matrix/0.1",
+        "schema_id": "qrp-handoff-verification-matrix",
         "checks": checks,
     }
 
@@ -2747,21 +2851,6 @@ def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
         if isinstance(name, str) and status in VALID_STATUSES:
             result[name] = status
     return result
-
-
-def aggregate_status(statuses: Iterable[str]) -> str:
-    values = tuple(statuses)
-    if not values:
-        return "NOT_RUN"
-    if "FAIL" in values:
-        return "FAIL"
-    if "BLOCKED" in values:
-        return "BLOCKED"
-    if "NOT_RUN" in values:
-        if "PASS" in values:
-            return "FAIL"
-        return "NOT_RUN"
-    return "PASS"
 
 
 def _stable_governance_json(payload: object) -> str:

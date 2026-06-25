@@ -56,8 +56,8 @@ def main() -> int:
             "templates/handoff/task_metadata.template.json",
         ).read_text(encoding="utf-8-sig")
     )
-    if task_template.get("schema_version") != "handoff-task-metadata/0.1":
-        return fail("task_metadata_template_schema_version_invalid")
+    if task_template.get("schema_id") != "qrp-handoff-task-metadata":
+        return fail("task_metadata_template_schema_id_invalid")
     smoke_compare_status = task_template.get("handoff_evidence", {}).get(
         "smoke-compare-status"
     )
@@ -98,7 +98,7 @@ def main() -> int:
         'parser.add_argument("--task", required=True',
         'parser.add_argument("--out-dir"',
         'parser.add_argument("--verify"',
-        '"schema_version": PACKAGE_SCHEMA_VERSION',
+        '"schema_id": PACKAGE_SCHEMA_ID',
         '"zip_filename"',
         '"handoff_package_path"',
         '"handoff_sidecar_path"',

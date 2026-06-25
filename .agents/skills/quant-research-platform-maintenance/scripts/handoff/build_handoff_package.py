@@ -45,7 +45,14 @@ from governance_contract import (  # noqa: E402
     verification_matrix_payload,
 )
 
-PACKAGE_SCHEMA_VERSION = "handoff-sidecar/0.1"
+from quant_research_platform.policy.check_status import (  # noqa: E402
+    aggregate_component_status,
+)
+from quant_research_platform.policy.share_safety import (  # noqa: E402
+    qrp_json_identity_reason,
+)
+
+PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -221,7 +228,7 @@ def build_once(
             zip_filename=zip_path.name,
         )
         manifest = {
-            "schema_version": "handoff-artifact-manifest/0.1",
+            "schema_id": "qrp-handoff-artifact-manifest",
             "tool_source_final_head": final_head,
             "tool_source_repo_paths": HANDOFF_TOOL_SOURCE_PATHS,
             "entries": artifact_entries(stage_root, staged_paths(stage_root)),
@@ -253,8 +260,8 @@ def task_metadata(task: dict[str, object]) -> dict[str, object]:
     mode = handoff_mode(task)
     validate_task_contract(task, mode)
     payload = {key: value for key, value in task.items() if key in TASK_METADATA_KEYS}
-    if "schema_version" not in payload:
-        payload["schema_version"] = "handoff-task-metadata/0.1"
+    if "schema_id" not in payload:
+        payload["schema_id"] = "qrp-handoff-task-metadata"
     mode = handoff_mode(payload)
     payload["mode"] = mode
     if mode == "pr_closure" and not str(payload.get("pr_url") or "").strip():
@@ -315,7 +322,7 @@ def task_validation_evidence(task: dict[str, object]) -> dict[str, object]:
     if payload is not None:
         raise SystemExit("validation_evidence_must_be_object")
     return {
-        "schema_version": "handoff-validation-evidence/0.1",
+        "schema_id": "qrp-handoff-validation-evidence",
         "checks": [
             {
                 "name": "validation_evidence",
@@ -348,6 +355,11 @@ def stage_handoff_evidence(
                 raise SystemExit(f"handoff_evidence_forbidden_path: {name}")
             if not isinstance(payload, Mapping):
                 raise SystemExit(f"handoff_evidence_entry_must_be_object: {name}")
+            identity_reason = qrp_json_identity_reason(payload)
+            if identity_reason is not None:
+                raise SystemExit(
+                    f"handoff_evidence_json_identity_invalid: {name}: {identity_reason}"
+                )
             failures = handoff_evidence_blocked_key_failures(name, payload)
             if failures:
                 raise SystemExit(";".join(failures))
@@ -408,7 +420,7 @@ def generation_payload(
     bundle_path: Path,
 ) -> dict[str, object]:
     return {
-        "schema_version": "handoff-generation/0.1",
+        "schema_id": "qrp-handoff-generation",
         "mode": mode,
         "base": base,
         "final_head": final_head,
@@ -416,43 +428,19 @@ def generation_payload(
         "zip_filename": zip_filename,
         "zip_sha256_source": "sidecar",
         "bundle_sha256": sha256_file(bundle_path),
-        "compare_evidence_path": compare_evidence_path(task),
         "source_tree_scan_path": SOURCE_TREE_SCAN_EVIDENCE,
         "validation_status": validation_status(validation_evidence),
     }
-
-
-def compare_evidence_path(task: dict[str, object]) -> str | None:
-    handoff_evidence = task.get("handoff_evidence")
-    if not isinstance(handoff_evidence, dict):
-        return None
-    for raw_name in handoff_evidence:
-        name = normalize_zip_path(str(raw_name))
-        if not name.startswith("handoff_evidence/"):
-            name = "handoff_evidence/" + name
-        if not name.endswith(".json"):
-            name += ".json"
-        if name == "handoff_evidence/baseline-final-compare.json":
-            return name
-    return None
 
 
 def validation_status(validation_evidence: dict[str, object]) -> str:
     checks = validation_evidence.get("checks")
     if not isinstance(checks, list):
         return "BLOCKED"
-    statuses = {
+    statuses = [
         str(row.get("status") or "").upper() for row in checks if isinstance(row, dict)
-    }
-    if statuses & {"FAIL"}:
-        return "FAIL"
-    if statuses & {"BLOCKED"}:
-        return "BLOCKED"
-    if statuses & {"NOT_RUN"}:
-        return "NOT_RUN"
-    if statuses == {"PASS"}:
-        return "PASS"
-    return "NOT_RUN"
+    ]
+    return aggregate_component_status(statuses)
 
 
 def sidecar_payload(
@@ -481,7 +469,7 @@ def sidecar_payload(
         else handoff_sidecar_path_value(task, json_path)
     )
     return {
-        "schema_version": PACKAGE_SCHEMA_VERSION,
+        "schema_id": PACKAGE_SCHEMA_ID,
         "zip_filename": zip_filename,
         "handoff_package_path": package_logical,
         "handoff_sidecar_path": sidecar_logical,

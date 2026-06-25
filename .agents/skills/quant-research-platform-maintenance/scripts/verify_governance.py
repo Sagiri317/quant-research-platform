@@ -58,7 +58,6 @@ BUSINESS_PREFIXES = (
     "pyproject.toml",
     "environment.yml",
     "data/",
-    "run_outputs/local/",
 )
 
 GOVERNANCE_TEST_PREFIXES = (
@@ -93,7 +92,7 @@ LOCAL_ONLY_ROOTS = (
     "data/interim/",
     "data/processed/",
     "data/research/",
-    "run_outputs/local/",
+    "outputs/",
 )
 
 STRUCTURED_KEY_SUFFIXES = {".json", ".yaml", ".yml", ".toml"}
@@ -689,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     check_markdown_paths(result, repo, paths)
 
     summary = {
+        "schema_id": "qrp-governance-scan-result",
         "status": "PASS" if result.ok else "FAIL",
         "scan_scope": scan_scope,
         "changed_files": changed,

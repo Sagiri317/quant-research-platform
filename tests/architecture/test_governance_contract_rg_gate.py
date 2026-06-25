@@ -74,7 +74,7 @@ ACTIVE_GOVERNANCE_DOC_ROOTS = (
 )
 ACTIVE_DOC_FORBIDDEN_PATTERNS = active_doc_forbidden_patterns()
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUN_OUTPUT_ARTIFACTS = Path("src/quant_research_platform/artifacts/run_outputs.py")
+RUN_OUTPUT_ARTIFACTS = Path("src/quant_research_platform/artifacts/outputs.py")
 RUNTIME_PROFILING = Path("src/quant_research_platform/runtime/profiling.py")
 GOVERNANCE_NEGATIVE_FIXTURE_FILES = (
     Path("tests/agents/test_verify_governance.py"),
@@ -173,6 +173,72 @@ def test_active_doc_contract_covers_historical_narrative_examples() -> None:
     for rule in ACTIVE_DOC_HISTORY_NARRATIVE_RULES:
         assert rule.example
         assert rule.compile().search(rule.example)
+
+
+def test_result_architecture_rules_cover_hard_cut_examples() -> None:
+    from governance_contract import RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
+
+    examples = {
+        "retired_result_run_outputs": "run_outputs/local",
+        "retired_result_outputs_local_layout": "outputs/local",
+        "retired_result_run_output_type": "RunOutputCatalog",
+        "retired_result_review_evidence_root": "review_evidence_root",
+        "retired_result_local_output_root": "--output-root",
+        "retired_result_compare_specialization": "baseline-final-compare.json",
+        "retired_result_run_level_path": "validation_summary.json",
+    }
+
+    patterns = {
+        rule.name: rule.compile() for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
+    }
+    assert set(examples) == set(patterns)
+    for name, example in examples.items():
+        assert patterns[name].search(example)
+
+
+def test_verify_governance_uses_current_local_only_roots() -> None:
+    verify_governance = Path(
+        ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py"
+    ).read_text(encoding="utf-8")
+
+    assert "run_outputs/local/" not in verify_governance
+    assert '"outputs/"' in verify_governance
+
+
+def test_structured_json_identity_rules_reject_retired_keys_and_versions() -> None:
+    from governance_contract import iter_structured_key_findings
+
+    findings = iter_structured_key_findings(
+        "fixture.json",
+        ('{"schema_id":"qrp-run/0.1","schema_version":"0.1","contract_version":"0.1"}'),
+    )
+
+    assert {finding["rule"] for finding in findings} == {
+        "retired_json_schema_version",
+        "retired_json_contract_version",
+        "versioned_schema_id",
+    }
+
+
+def test_status_aggregation_definitions_are_owned_by_policy_check_status() -> None:
+    owner = Path("src/quant_research_platform/policy/check_status.py")
+    forbidden_names = {
+        "aggregate_component_status",
+        "aggregate_validation_matrix_status",
+        "overall_verification_status",
+    }
+    findings: list[str] = []
+    for root in (Path("src"), Path(".agents")):
+        for path in root.rglob("*.py"):
+            if path == owner:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if node.name in forbidden_names:
+                        findings.append(f"{path}:{node.lineno}:{node.name}")
+
+    assert findings == []
 
 
 def test_governance_negative_fixtures_do_not_hardcode_rule_inventory() -> None:
@@ -376,7 +442,7 @@ APPROVED_WRITER_MODULES = {
     Path("src/quant_research_platform/storage/manifests.py"),
     Path("src/quant_research_platform/artifacts/evidence.py"),
     Path("src/quant_research_platform/artifacts/execution_metrics.py"),
-    Path("src/quant_research_platform/artifacts/run_outputs.py"),
+    Path("src/quant_research_platform/artifacts/outputs.py"),
     Path("src/quant_research_platform/runtime/execution_metrics.py"),
 }
 
@@ -1191,9 +1257,9 @@ def test_direct_write_gate_detects_chained_open_write() -> None:
 
 def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> None:
     writer_arg_sets = (
-        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_stage_profile_run_outputs"),
-        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_prediction_run_outputs"),
-        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_evaluation_run_outputs"),
+        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_stage_profile_outputs"),
+        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_prediction_outputs"),
+        _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_evaluation_outputs"),
     )
 
     assert "output_dir" not in _class_field_names(RUNTIME_PROFILING, "ProfileConfig")

@@ -136,7 +136,7 @@ def test_retired_handoff_evidence_input_fields_fail_fast(
             case_root,
             {
                 "custom-note": {
-                    "schema_version": "custom-note/0.1",
+                    "schema_id": "qrp-custom-note",
                     "status": "PASS",
                     forbidden_key: "old input",
                 }

@@ -4,7 +4,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version",
+    "schema_id",
     "mode",
     "slug",
     "branch",
@@ -12,8 +12,8 @@
     "final_head"
   ],
   "properties": {
-    "schema_version": {
-      "const": "handoff-task-metadata/0.1"
+    "schema_id": {
+      "const": "qrp-handoff-task-metadata"
     },
     "mode": {
       "enum": ["evidence", "pr_closure"]
@@ -88,10 +88,10 @@
     "validation_evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "checks"],
+      "required": ["schema_id", "checks"],
       "properties": {
-        "schema_version": {
-          "const": "handoff-validation-evidence/0.1"
+        "schema_id": {
+          "const": "qrp-handoff-validation-evidence"
         },
         "checks": {
           "type": "array",
@@ -125,7 +125,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "schema_version",
+            "schema_id",
             "record_status",
             "overall_smoke_compare_status",
             "results"
@@ -134,8 +134,8 @@
             "required": ["status"]
           },
           "properties": {
-            "schema_version": {
-              "const": "handoff-smoke-compare-status/0.1"
+            "schema_id": {
+              "const": "qrp-status-result"
             },
             "record_status": {
               "const": "PASS"
@@ -171,9 +171,9 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["schema_version", "status"],
+        "required": ["schema_id", "status"],
         "properties": {
-          "schema_version": {
+          "schema_id": {
             "type": "string",
             "minLength": 1
           },

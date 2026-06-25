@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import re
 import subprocess
@@ -44,72 +43,15 @@ from governance_contract import (  # noqa: E402
     package_member_name_failures as shared_package_member_name_failures,
 )
 
-try:
-    from quant_research_platform.policy.check_status import (  # noqa: E402
-        aggregate_component_status,
-        aggregate_validation_matrix_status,
-    )
-    from quant_research_platform.policy.share_safety import (  # noqa: E402
-        unsafe_for_share_reason,
-    )
-except ModuleNotFoundError:  # pragma: no cover - exercised by copied handoff tools.
-    status_policy_path = (
-        SCRIPT_REPO_SRC / "quant_research_platform" / "policy" / "check_status.py"
-    )
-    if status_policy_path.exists():
-        status_policy_spec = importlib.util.spec_from_file_location(
-            "qrp_policy_check_status",
-            status_policy_path,
-        )
-        if status_policy_spec is None or status_policy_spec.loader is None:
-            raise
-        status_policy_module = importlib.util.module_from_spec(status_policy_spec)
-        status_policy_spec.loader.exec_module(status_policy_module)
-        aggregate_component_status = status_policy_module.aggregate_component_status
-        aggregate_validation_matrix_status = (
-            status_policy_module.aggregate_validation_matrix_status
-        )
-    else:
-        def aggregate_component_status(statuses: object) -> str:
-            values = tuple(statuses)
-            if not values:
-                return "NOT_RUN"
-            if "FAIL" in values:
-                return "FAIL"
-            if "BLOCKED" in values:
-                return "BLOCKED"
-            if "NOT_RUN" in values:
-                return "FAIL" if "PASS" in values else "NOT_RUN"
-            return "PASS"
-
-        def aggregate_validation_matrix_status(statuses: object) -> str:
-            values = tuple(statuses)
-            if not values:
-                return "NOT_RUN"
-            if "FAIL" in values:
-                return "FAIL"
-            if "BLOCKED" in values:
-                return "BLOCKED"
-            if "NOT_RUN" in values:
-                return "NOT_RUN"
-            return "PASS"
-    share_policy_path = (
-        SCRIPT_REPO_SRC / "quant_research_platform" / "policy" / "share_safety.py"
-    )
-    if share_policy_path.exists():
-        share_policy_spec = importlib.util.spec_from_file_location(
-            "qrp_policy_share_safety",
-            share_policy_path,
-        )
-        if share_policy_spec is None or share_policy_spec.loader is None:
-            raise
-        share_policy_module = importlib.util.module_from_spec(share_policy_spec)
-        share_policy_spec.loader.exec_module(share_policy_module)
-        unsafe_for_share_reason = share_policy_module.unsafe_for_share_reason
-    else:
-        def unsafe_for_share_reason(text: object) -> str | None:
-            del text
-            return None
+from quant_research_platform.policy.check_status import (  # noqa: E402
+    aggregate_component_status,
+    aggregate_validation_matrix_status,
+)
+from quant_research_platform.policy.share_safety import (  # noqa: E402
+    evidence_json_unsafe_reason,
+    qrp_json_identity_reason,
+    unsafe_for_share_reason,
+)
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_ZIP_ENTRIES = {
@@ -122,21 +64,7 @@ REQUIRED_ZIP_ENTRIES = {
 GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
-BASELINE_FINAL_COMPARE_EVIDENCE = "handoff_evidence/baseline-final-compare.json"
 SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
-EXPECTED_FAILURE_REASON = "stale_rank_ensemble_prediction_baseline"
-RANK_ENSEMBLE_PREDICTION_ARTIFACTS = (
-    "equal_weight_rank_ensemble",
-    "ic_weighted_rank_ensemble",
-)
-OLD_BASELINE_GROUP = "old_baseline"
-REFRESHED_PREDICTION_BASELINE_GROUP = "refreshed_prediction_baseline"
-DIRECT_BASELINE_FINAL_GROUP = "baseline_final"
-BASELINE_FINAL_COMPARE_GROUPS = (
-    OLD_BASELINE_GROUP,
-    REFRESHED_PREDICTION_BASELINE_GROUP,
-    DIRECT_BASELINE_FINAL_GROUP,
-)
 BLOCKED_DUPLICATE_SOURCE_ROOTS = (
     ".agents/",
     "docs/",
@@ -499,7 +427,13 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
         for line in text.splitlines()
         if not is_scanner_definition_line(line, name=name)
     )
-    shared_reason = unsafe_for_share_reason(scan_text)
+    allow_logical_local_only_path = (
+        name.replace("\\", "/") == "handoff_evidence/run.json"
+    )
+    shared_reason = unsafe_for_share_reason(
+        scan_text,
+        allow_logical_local_only_path=allow_logical_local_only_path,
+    )
     if shared_reason in {"local_only_path", "local_path"}:
         return "local_absolute_path"
     if shared_reason == "credential":
@@ -520,6 +454,12 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
         return "runtime_payload"
     if shared_reason == "local_run_path":
         return "local_run_path"
+    if name.lower().endswith(".json"):
+        json_reason = evidence_json_unsafe_reason(scan_text)
+        if json_reason is not None:
+            return (
+                "local_absolute_path" if json_reason == "absolute_path" else json_reason
+            )
     if stale_marker(scan_text) is not None:
         return "stale_marker"
     return None
@@ -640,8 +580,11 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
 
 def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str]:
     failures: list[str] = []
+    identity_reason = qrp_json_identity_reason(sidecar)
+    if identity_reason is not None:
+        failures.append(f"sidecar_identity_invalid: {identity_reason}")
     allowed = {
-        "schema_version",
+        "schema_id",
         "zip_filename",
         "handoff_package_path",
         "handoff_sidecar_path",
@@ -655,8 +598,8 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     }
     extra = sorted(set(sidecar) - allowed)
     failures.extend(f"sidecar_unapproved_field: {key}" for key in extra)
-    if sidecar.get("schema_version") != "handoff-sidecar/0.1":
-        failures.append("sidecar_schema_version_mismatch")
+    if sidecar.get("schema_id") != "qrp-handoff-sidecar":
+        failures.append("sidecar_schema_id_mismatch")
     if sidecar.get("zip_filename") != zip_path.name:
         failures.append("sidecar_zip_filename_mismatch")
     package_path = sidecar.get("handoff_package_path")
@@ -714,10 +657,10 @@ def blocked_package_entries(names: list[str]) -> list[str]:
 
 def verify_sidecar_schema(sidecar: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    if sidecar.get("schema_version") != "handoff-sidecar/0.1":
+    if sidecar.get("schema_id") != "qrp-handoff-sidecar":
         failures.append("sidecar_schema_invalid")
     allowed = {
-        "schema_version",
+        "schema_id",
         "zip_filename",
         "handoff_package_path",
         "handoff_sidecar_path",
@@ -748,6 +691,11 @@ def verify_artifact_manifest(
         failures.append("artifact_manifest_sha256_mismatch")
     if not isinstance(manifest, dict):
         return failures + ["artifact_manifest_must_be_object"]
+    identity_reason = qrp_json_identity_reason(manifest)
+    if identity_reason is not None:
+        failures.append(f"artifact_manifest_identity_invalid: {identity_reason}")
+    if manifest.get("schema_id") != "qrp-handoff-artifact-manifest":
+        failures.append("artifact_manifest_schema_id_mismatch")
     entries = manifest.get("entries")
     if not isinstance(entries, list):
         return failures + ["artifact_manifest_entries_required"]
@@ -786,11 +734,17 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
     if not isinstance(validation_payload, dict):
         failures.append("validation_evidence_must_be_object")
     if isinstance(task_payload, dict):
+        identity_reason = qrp_json_identity_reason(task_payload)
+        if identity_reason is not None:
+            failures.append(f"task_metadata_identity_invalid: {identity_reason}")
         failures.extend(verify_task_metadata_schema(task_payload))
         failures.extend(
             metadata_consistency_failures("task_metadata", task_payload, sidecar)
         )
     if isinstance(validation_payload, dict):
+        identity_reason = qrp_json_identity_reason(validation_payload)
+        if identity_reason is not None:
+            failures.append(f"validation_evidence_identity_invalid: {identity_reason}")
         failures.extend(verify_validation_evidence_schema(validation_payload))
         failures.extend(
             metadata_consistency_failures(
@@ -805,6 +759,8 @@ def verify_metadata_entries(archive: ZipFile, sidecar: dict[str, object]) -> lis
 
 def verify_validation_evidence_schema(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
+    if payload.get("schema_id") != "qrp-handoff-validation-evidence":
+        failures.append("validation_evidence_schema_id_mismatch")
     forbidden = BLOCKED_VALIDATION_KEYS.intersection(payload)
     failures.extend(
         f"validation_evidence_forbidden_field: {key}" for key in sorted(forbidden)
@@ -829,11 +785,11 @@ def verify_validation_evidence_schema(payload: dict[str, object]) -> list[str]:
 
 def verify_task_metadata_schema(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
-    required = {"schema_version", "mode", "slug", "branch", "base", "final_head"}
+    required = {"schema_id", "mode", "slug", "branch", "base", "final_head"}
     missing = sorted(key for key in required if not payload.get(key))
     failures.extend(f"task_metadata_schema_missing: {key}" for key in missing)
-    if payload.get("schema_version") != "handoff-task-metadata/0.1":
-        failures.append("task_metadata_schema_version_mismatch")
+    if payload.get("schema_id") != "qrp-handoff-task-metadata":
+        failures.append("task_metadata_schema_id_mismatch")
     mode = str(payload["mode"]).strip() if "mode" in payload else ""
     if mode not in {"evidence", "pr_closure"}:
         failures.append("task_metadata_mode_invalid")
@@ -929,6 +885,12 @@ def verify_handoff_evidence_json(
         if not isinstance(payload, dict):
             failures.append(f"handoff_evidence_must_be_object: {name}")
             continue
+        identity_reason = qrp_json_identity_reason(payload)
+        if identity_reason is not None:
+            failures.append(
+                f"handoff_evidence_json_identity_invalid: {name}: {identity_reason}"
+            )
+            continue
         failures.extend(handoff_evidence_forbidden_field_failures(name, payload))
         if name == GENERATION_EVIDENCE:
             failures.extend(verify_generation_evidence(payload, sidecar, archive))
@@ -963,7 +925,6 @@ def verify_generation_evidence(
         "zip_filename",
         "zip_sha256_source",
         "bundle_sha256",
-        "compare_evidence_path",
         "source_tree_scan_path",
         "validation_status",
     }
@@ -972,8 +933,8 @@ def verify_generation_evidence(
         for key in sorted(required)
         if key not in payload
     ]
-    if payload.get("schema_version") != "handoff-generation/0.1":
-        failures.append("generation_evidence_schema_version_mismatch")
+    if payload.get("schema_id") != "qrp-handoff-generation":
+        failures.append("generation_evidence_schema_id_mismatch")
     if payload.get("mode") not in {"evidence", "pr_closure"}:
         failures.append("generation_evidence_mode_invalid")
     if payload.get("validation_status") not in VALID_STATUS_TOKENS:
@@ -982,19 +943,6 @@ def verify_generation_evidence(
         failures.append("generation_zip_sha256_source_mismatch")
     if payload.get("source_tree_scan_path") != SOURCE_TREE_SCAN_EVIDENCE:
         failures.append("generation_source_tree_scan_path_mismatch")
-    compare_evidence_path = payload.get("compare_evidence_path")
-    if compare_evidence_path is not None and not isinstance(compare_evidence_path, str):
-        failures.append("generation_compare_evidence_path_invalid")
-    if isinstance(compare_evidence_path, str) and compare_evidence_path:
-        if compare_evidence_path not in archive.namelist():
-            failures.append("generation_compare_evidence_missing")
-        elif compare_evidence_path == BASELINE_FINAL_COMPARE_EVIDENCE:
-            failures.extend(
-                verify_baseline_final_compare(
-                    json_payload_from_archive(archive, compare_evidence_path),
-                    sidecar=sidecar,
-                )
-            )
     for key in ("base", "branch", "final_head", "zip_filename"):
         if payload.get(key) != sidecar.get(key):
             failures.append(f"generation_evidence_sidecar_mismatch: {key}")
@@ -1008,178 +956,16 @@ def verify_generation_evidence(
     return failures
 
 
-def json_payload_from_archive(
-    archive: ZipFile,
-    name: str,
-) -> dict[str, object]:
-    try:
-        payload = json.loads(archive.read(name).decode("utf-8"))
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def verify_baseline_final_compare(
-    payload: dict[str, object],
-    *,
-    sidecar: dict[str, object] | None = None,
-) -> list[str]:
-    failures: list[str] = []
-    if payload.get("schema_version") != "qrp-baseline-final-compare-summary/0.1":
-        failures.append("baseline_final_compare_schema_version_mismatch")
-    for key in (
-        "actual_overall_status",
-        "raw_overall_status",
-        "policy_adjusted_overall_status",
-        "overall_status",
-        "old_baseline_compare_status",
-        "refreshed_prediction_baseline_compare_status",
-        "validation_decision",
-        "final_head_full",
-    ):
-        if key in payload:
-            failures.append(f"baseline_final_compare_flat_alias_present: {key}")
-    status = payload.get("status")
-    if not isinstance(status, dict):
-        failures.append("baseline_final_compare_status_missing")
-        status = {}
-    if status.get("policy_adjusted") != "PASS":
-        failures.append("baseline_final_compare_overall_status_not_pass")
-    if status.get("validation_decision") != "PASS":
-        failures.append("baseline_final_compare_validation_decision_not_pass")
-    if "raw" not in status:
-        failures.append("baseline_final_compare_raw_status_missing")
-    comparison_groups = payload.get("comparison_groups")
-    if not isinstance(comparison_groups, dict):
-        failures.append("baseline_final_compare_groups_missing")
-        comparison_groups = {}
-    direct_group = comparison_groups.get(DIRECT_BASELINE_FINAL_GROUP)
-    direct_mode = isinstance(direct_group, dict)
-    if direct_mode:
-        if direct_group.get("status") != "PASS":
-            failures.append("baseline_final_compare_direct_status_mismatch")
-    else:
-        old_group = comparison_groups.get(OLD_BASELINE_GROUP)
-        if (
-            not isinstance(old_group, dict)
-            or old_group.get("status") != "FAIL_EXPECTED"
-        ):
-            failures.append("baseline_final_compare_old_status_mismatch")
-        refreshed_group = comparison_groups.get(REFRESHED_PREDICTION_BASELINE_GROUP)
-        if (
-            not isinstance(refreshed_group, dict)
-            or refreshed_group.get("status") != "PASS"
-        ):
-            failures.append("baseline_final_compare_refreshed_status_mismatch")
-    if payload.get("contract_failures"):
-        failures.append("baseline_final_compare_contract_failures_present")
-    if not is_full_sha(payload.get("baseline_commit_full")):
-        failures.append("baseline_final_compare_baseline_commit_full_missing")
-    if not is_full_sha(payload.get("final_head")):
-        failures.append("baseline_final_compare_final_head_missing")
-    final_smoke_commit = payload.get("final_smoke_commit")
-    if not is_full_sha(final_smoke_commit):
-        failures.append("baseline_final_compare_final_smoke_commit_missing")
-    if payload.get("git_status_before_smoke") != "clean":
-        failures.append("baseline_final_compare_git_status_before_smoke_not_clean")
-    if payload.get("git_status_after_smoke") != "clean_or_only_ignored_run_outputs":
-        failures.append("baseline_final_compare_git_status_after_smoke_not_clean")
-    if sidecar is not None and final_smoke_commit != sidecar.get("final_head"):
-        failures.append("baseline_final_compare_final_smoke_commit_mismatch")
-    comparisons = payload.get("comparisons")
-    if not isinstance(comparisons, dict):
-        return [*failures, "baseline_final_compare_comparisons_missing"]
-    grouped = comparisons_by_group(comparisons)
-    if direct_mode:
-        if not grouped[DIRECT_BASELINE_FINAL_GROUP]:
-            failures.append("baseline_final_compare_direct_comparisons_missing")
-        for label, comparison in grouped[DIRECT_BASELINE_FINAL_GROUP].items():
-            if comparison.get("status") != "PASS":
-                failures.append(
-                    f"baseline_final_compare_direct_status_not_pass: {label}"
-                )
-        return failures
-    for group in (OLD_BASELINE_GROUP, REFRESHED_PREDICTION_BASELINE_GROUP):
-        if not grouped[group]:
-            failures.append(f"baseline_final_compare_missing_required_group: {group}")
-    for label, comparison in grouped[OLD_BASELINE_GROUP].items():
-        if comparison.get("status") != "FAIL_EXPECTED":
-            failures.append(f"baseline_final_compare_old_status_not_expected: {label}")
-        if comparison.get("reason_code") != EXPECTED_FAILURE_REASON:
-            failures.append(f"baseline_final_compare_old_reason_mismatch: {label}")
-        if comparison.get("failed_artifacts") != sorted(
-            RANK_ENSEMBLE_PREDICTION_ARTIFACTS
-        ):
-            failures.append(f"baseline_final_compare_old_artifacts_mismatch: {label}")
-    for label, comparison in grouped[REFRESHED_PREDICTION_BASELINE_GROUP].items():
-        if comparison.get("status") != "PASS":
-            failures.append(
-                f"baseline_final_compare_refreshed_status_not_pass: {label}"
-            )
-            continue
-        prediction = comparison.get("prediction_summary", {})
-        if not isinstance(prediction, dict):
-            failures.append(f"baseline_final_compare_prediction_missing: {label}")
-            continue
-        for artifact in RANK_ENSEMBLE_PREDICTION_ARTIFACTS:
-            if not artifact_family_present(
-                prediction.get("artifact_ids", ()),
-                artifact,
-            ):
-                failures.append(
-                    "baseline_final_compare_refreshed_missing_artifact: "
-                    f"{label}:{artifact}"
-                )
-        if prediction.get("failed_artifacts"):
-            failures.append(
-                f"baseline_final_compare_refreshed_failed_artifacts: {label}"
-            )
-    return failures
-
-
 def is_full_sha(value: object) -> bool:
     return isinstance(value, str) and bool(FULL_SHA_RE.fullmatch(value))
-
-
-def comparisons_by_group(
-    comparisons: dict[object, object],
-) -> dict[str, dict[str, dict[str, object]]]:
-    grouped: dict[str, dict[str, dict[str, object]]] = {
-        group: {} for group in BASELINE_FINAL_COMPARE_GROUPS
-    }
-    for label, comparison in comparisons.items():
-        if not isinstance(comparison, dict):
-            continue
-        group = comparison.get("comparison_group")
-        if group in grouped:
-            grouped[str(group)][str(label)] = comparison
-    return grouped
-
-
-def artifact_family_present(artifact_ids: object, expected_family: str) -> bool:
-    if not isinstance(artifact_ids, list):
-        return False
-    return any(
-        artifact_matches_family(str(artifact_id), expected_family)
-        for artifact_id in artifact_ids
-    )
-
-
-def artifact_matches_family(artifact_id: str, expected_family: str) -> bool:
-    return bool(
-        re.fullmatch(
-            rf"{re.escape(expected_family)}_[A-Za-z0-9_]+_[0-9]+d_prediction_[0-9]{{4}}",
-            artifact_id,
-        )
-    )
 
 
 def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
     failures: list[str] = []
     if not isinstance(payload, dict):
         return ["smoke_compare_status_must_be_object"]
-    if payload.get("schema_version") != "handoff-smoke-compare-status/0.1":
-        failures.append("smoke_compare_status_schema_version_mismatch")
+    if payload.get("schema_id") != "qrp-status-result":
+        failures.append("smoke_compare_status_schema_id_mismatch")
     if "status" in payload:
         failures.append("smoke_compare_status_top_level_status_present")
     if "record_status" not in payload:
@@ -1218,8 +1004,8 @@ def verify_source_tree_scan_evidence(
     sidecar: dict[str, object],
 ) -> list[str]:
     failures: list[str] = []
-    if payload.get("schema_version") != "handoff-source-tree-scan/0.1":
-        failures.append("source_tree_scan_schema_version_mismatch")
+    if payload.get("schema_id") != "qrp-source-tree-scan-result":
+        failures.append("source_tree_scan_schema_id_mismatch")
     if payload.get("status") not in VALID_STATUS_TOKENS:
         failures.append("source_tree_scan_status_invalid")
     if payload.get("status") != "PASS":
@@ -1291,6 +1077,8 @@ def verify_source_tree_scan_evidence(
 
 
 def verify_verification_matrix(payload: dict[str, object]) -> list[str]:
+    if payload.get("schema_id") != "qrp-handoff-verification-matrix":
+        return ["verification_matrix_schema_id_mismatch"]
     rows = payload.get("checks")
     if not isinstance(rows, list):
         return ["verification_matrix_checks_missing"]
@@ -1374,13 +1162,13 @@ def verify_tracked_handoff_sources(repo: Path) -> list[str]:
         (
             ".agents/skills/quant-research-platform-maintenance/schemas/"
             "handoff/task_metadata.schema.json"
-        ): "handoff-task-metadata/0.1",
+        ): "qrp-handoff-task-metadata",
         (
             ".agents/skills/quant-research-platform-maintenance/schemas/"
             "handoff/sidecar.schema.json"
-        ): "handoff-sidecar/0.1",
+        ): "qrp-handoff-sidecar",
     }
-    for relative, schema_version in schema_expectations.items():
+    for relative, schema_id in schema_expectations.items():
         path = repo / relative
         if not path.is_file():
             continue
@@ -1390,11 +1178,9 @@ def verify_tracked_handoff_sources(repo: Path) -> list[str]:
             failures.append(f"tracked_schema_json_invalid: {relative}")
             continue
         properties = payload.get("properties")
-        version = (
-            properties.get("schema_version") if isinstance(properties, dict) else {}
-        )
-        if not isinstance(version, dict) or version.get("const") != schema_version:
-            failures.append(f"tracked_schema_version_invalid: {relative}")
+        version = properties.get("schema_id") if isinstance(properties, dict) else {}
+        if not isinstance(version, dict) or version.get("const") != schema_id:
+            failures.append(f"tracked_schema_id_invalid: {relative}")
     return failures
 
 

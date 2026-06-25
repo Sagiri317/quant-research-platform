@@ -131,7 +131,7 @@ def test_handoff_package_verifier_scans_json_sidecar_absolute_paths(tmp_path):
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-sidecar/0.1",
+                "schema_id": "qrp-handoff-sidecar",
                 "zip_filename": "handoff.zip",
                 "zip_path": "E:/quant-workspace/private/handoff.zip",
             },

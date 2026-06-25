@@ -59,9 +59,9 @@ def test_model_algorithm_ids_is_the_only_collection_helper() -> None:
 
 
 def test_reports_do_not_branch_on_one_model_algorithm() -> None:
-    from quant_research_platform.artifacts import run_outputs
+    from quant_research_platform.artifacts import outputs
 
-    source = inspect.getsource(run_outputs)
+    source = inspect.getsource(outputs)
     assert 'model_algorithm"] == "linear_regression"' not in source
     assert 'model_algorithm == "linear_regression"' not in source
 

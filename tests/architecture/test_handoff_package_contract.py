@@ -32,7 +32,8 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     builder = (HANDOFF_ROOT / "build_handoff_package.py").read_text(encoding="utf-8")
     verifier = (HANDOFF_ROOT / "verify_handoff_package.py").read_text(encoding="utf-8")
 
-    assert "handoff_evidence/" in builder
+    assert "normalized_handoff_evidence_path" in builder
+    assert "stage_handoff_evidence" in builder
     assert "handoff_evidence/" in verifier
     contract = _load_governance_contract()
     assert contract.GENERATION_EVIDENCE == "handoff_evidence/generation.json"
@@ -57,6 +58,13 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     assert '".run/handoffs"' in builder
     assert '"evidence"' in builder
     assert '"pr_closure"' in builder
+    assert "baseline-final" not in builder
+    assert "baseline-final" not in verifier
+    assert "old_baseline" not in verifier
+    assert "refreshed_prediction_baseline" not in verifier
+    assert "def aggregate_component_status" not in verifier
+    assert "def aggregate_validation_matrix_status" not in verifier
+    assert "def aggregate_status" not in builder
 
 
 def test_pr_closure_only_entries_are_not_required_for_evidence_mode() -> None:
@@ -104,9 +112,7 @@ def test_source_tree_scan_synthesizes_static_string_fragments(tmp_path: Path) ->
 
 def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
     contract = _load_governance_contract()
-    relative = Path(
-        "tests/architecture/test_retired_surface_absent.py"
-    )
+    relative = Path("tests/architecture/test_retired_surface_absent.py")
     rule = next(iter(contract.SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST[relative]))
 
     assert not contract.source_tree_path_allowed(

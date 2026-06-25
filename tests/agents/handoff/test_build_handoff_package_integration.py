@@ -69,7 +69,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     task_path.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-task-metadata/0.1",
+                "schema_id": "qrp-handoff-task-metadata",
                 "mode": "evidence",
                 "slug": slug,
                 "branch": TEST_BRANCH,
@@ -79,7 +79,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                 "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
                 "handoff_evidence": {
                     "custom-note": {
-                        "schema_version": "custom-note/0.1",
+                        "schema_id": "qrp-custom-note",
                         "status": "PASS",
                     },
                 },
@@ -89,7 +89,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                     ),
                 },
                 "validation_evidence": {
-                    "schema_version": "handoff-validation-evidence/0.1",
+                    "schema_id": "qrp-handoff-validation-evidence",
                     "checks": [
                         {
                             "name": "handoff_external_access",
@@ -205,7 +205,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert generation["zip_filename"] == f"{slug}.zip"
     assert generation["zip_sha256_source"] == "sidecar"
     assert generation["bundle_sha256"] == hashlib.sha256(bundle_raw).hexdigest()
-    assert generation["compare_evidence_path"] is None
+    assert "compare_evidence_path" not in generation
     assert generation["source_tree_scan_path"] == (
         "handoff_evidence/source-tree-scan.json"
     )
@@ -330,7 +330,7 @@ def test_build_handoff_package_rejects_reserved_handoff_evidence_path(
 
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
-        {reserved_name: {"schema_version": "custom-note/0.1", "status": "PASS"}},
+        {reserved_name: {"schema_id": "custom-note/0.1", "status": "PASS"}},
     )
 
     assert result.returncode != 0
@@ -346,7 +346,7 @@ def test_build_handoff_package_rejects_internal_handoff_evidence_path(
 
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
-        {internal_name: {"schema_version": "custom-note/0.1", "status": "PASS"}},
+        {internal_name: {"schema_id": "custom-note/0.1", "status": "PASS"}},
     )
 
     assert result.returncode != 0
@@ -384,7 +384,7 @@ def test_build_handoff_package_rejects_one_forbidden_custom_evidence_key(
         tmp_path,
         {
             "custom-note": {
-                "schema_version": "custom-note/0.1",
+                "schema_id": "qrp-custom-note",
                 "status": "PASS",
                 "details": {"check": "forged"},
             }
@@ -425,6 +425,10 @@ def _init_synthetic_repo(repo: Path) -> None:
     shutil.copyfile(
         REPO_ROOT / "src" / "quant_research_platform" / "policy" / "share_safety.py",
         policy_root / "share_safety.py",
+    )
+    shutil.copyfile(
+        REPO_ROOT / "src" / "quant_research_platform" / "policy" / "check_status.py",
+        policy_root / "check_status.py",
     )
     for relative in (
         "contracts/columns.py",
@@ -467,7 +471,7 @@ def _run_builder_with_handoff_evidence(
     task_path.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-task-metadata/0.1",
+                "schema_id": "qrp-handoff-task-metadata",
                 "mode": "evidence",
                 "slug": slug,
                 "branch": TEST_BRANCH,
@@ -477,7 +481,7 @@ def _run_builder_with_handoff_evidence(
                 "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
                 "handoff_evidence": handoff_evidence,
                 "validation_evidence": {
-                    "schema_version": "handoff-validation-evidence/0.1",
+                    "schema_id": "qrp-handoff-validation-evidence",
                     "checks": [
                         {
                             "name": "handoff_builder_contract",

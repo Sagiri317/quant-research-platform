@@ -88,7 +88,7 @@ def _build_test_package(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
         "base": base,
         "final_head": final_head,
         "validation_evidence": {
-            "schema_version": "handoff-validation-evidence/0.1",
+            "schema_id": "qrp-handoff-validation-evidence",
             "checks": [
                 {
                     "name": "handoff_external_access",
@@ -138,7 +138,7 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
             for name in names
         ]
     manifest = {
-        "schema_version": "handoff-artifact-manifest/0.1",
+        "schema_id": "qrp-handoff-artifact-manifest",
         "entries": entries,
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
@@ -146,6 +146,18 @@ def _refresh_manifest_and_sidecar(package: Path, sidecar: Path) -> None:
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     payload["zip_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
     payload["artifact_manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+    sidecar.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _update_sidecar_hashes(
+    package: Path, sidecar: Path, artifact_manifest: bytes
+) -> None:
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    payload["zip_sha256"] = hashlib.sha256(package.read_bytes()).hexdigest()
+    payload["artifact_manifest_sha256"] = hashlib.sha256(artifact_manifest).hexdigest()
     sidecar.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -162,7 +174,7 @@ def _smoke_compare_status_payload(
         "output paths"
     )
     return {
-        "schema_version": "handoff-smoke-compare-status/0.1",
+        "schema_id": "qrp-status-result",
         "record_status": "PASS",
         "overall_smoke_compare_status": overall,
         "results": [
@@ -234,6 +246,67 @@ def test_verifier_rejects_duplicate_required_zip_member(tmp_path: Path) -> None:
     assert "duplicate_zip_member: task_metadata.json" in failures
 
 
+@pytest.mark.parametrize(
+    ("target", "expected_failure"),
+    (
+        (
+            "sidecar",
+            "sidecar_identity_invalid: retired_identity_key:contract_version",
+        ),
+        (
+            "artifact_manifest",
+            "artifact_manifest_identity_invalid: retired_identity_key:contract_version",
+        ),
+        (
+            "task_metadata",
+            "task_metadata_identity_invalid: retired_identity_key:contract_version",
+        ),
+        (
+            "validation_evidence",
+            "validation_evidence_identity_invalid: "
+            "retired_identity_key:contract_version",
+        ),
+    ),
+)
+def test_verifier_rejects_handoff_json_identity_violations(
+    tmp_path: Path,
+    target: str,
+    expected_failure: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    if target == "sidecar":
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        payload["contract_version"] = "0.1"
+        sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    elif target == "artifact_manifest":
+        with zipfile.ZipFile(package) as archive:
+            manifest = json.loads(
+                archive.read("artifact_manifest.json").decode("utf-8")
+            )
+        manifest["contract_version"] = "0.1"
+        manifest_bytes = (
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        ).encode()
+        _rewrite_package_member(package, "artifact_manifest.json", manifest_bytes)
+        _update_sidecar_hashes(package, sidecar, manifest_bytes)
+    else:
+        member = f"{target}.json"
+        with zipfile.ZipFile(package) as archive:
+            payload = json.loads(archive.read(member).decode("utf-8"))
+        payload["contract_version"] = "0.1"
+        _rewrite_package_member(
+            package,
+            member,
+            (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+        )
+        _refresh_manifest_and_sidecar(package, sidecar)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert expected_failure in failures
+
+
 def test_verifier_rejects_tracked_repo_path_copies_in_zip(tmp_path: Path) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
@@ -274,7 +347,7 @@ def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> No
     verifier = _load_handoff_module("verify_handoff_package")
     final_head = "1" * 40
     payload = {
-        "schema_version": "handoff-source-tree-scan/0.1",
+        "schema_id": "qrp-source-tree-scan-result",
         "status": "PASS",
         "scanned_head": final_head,
         "expected_head": final_head,
@@ -387,7 +460,7 @@ def test_handoff_package_verifier_scans_external_json_sidecar(tmp_path: Path) ->
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-sidecar/0.1",
+                "schema_id": "qrp-handoff-sidecar",
                 "zip_filename": "handoff.zip",
                 "handoff_package_path": f"{run_handoffs}/handoff.zip",
                 "handoff_sidecar_path": f"{run_handoffs}/handoff.json",
@@ -465,7 +538,7 @@ def test_task_metadata_rejects_pr_url_in_evidence_mode() -> None:
     with pytest.raises(SystemExit, match="task_metadata_evidence_forbidden_field"):
         builder.task_metadata(
             {
-                "schema_version": "handoff-task-metadata/0.1",
+                "schema_id": "qrp-handoff-task-metadata",
                 "mode": "evidence",
                 "slug": "demo",
                 "branch": "feature/demo",
@@ -488,7 +561,7 @@ def test_builder_requires_pr_url_for_pr_closure_even_without_verify(
             repo_root=repo,
             out_dir=tmp_path / "out",
             task={
-                "schema_version": "handoff-task-metadata/0.1",
+                "schema_id": "qrp-handoff-task-metadata",
                 "mode": "pr_closure",
                 "slug": "demo",
                 "branch": TEST_BRANCH,
@@ -656,6 +729,75 @@ def test_handoff_package_verifier_allows_public_aggregate_evidence_counts() -> N
     assert safety.unsafe_text_reason(text, name="handoff_evidence/summary.md") is None
 
 
+def _safe_run_payload() -> dict[str, object]:
+    return {
+        "schema_id": "qrp-run",
+        "workflow_id": "local_verification",
+        "run_id": "review_run",
+        "root_ownership": {
+            "owner": "local_verification",
+            "workflow_id": "local_verification",
+            "created_by": "quant_research_platform",
+            "created_at": "2026-06-26T00:00:00Z",
+            "replace_safe": True,
+        },
+        "status": {"overall": "PASS"},
+        "config": {},
+        "inputs": {},
+        "data": {"layers": []},
+        "outputs": [],
+        "checks": {},
+        "execution_metrics": {},
+        "logs": {},
+        "summary": {"markdown_path": "summary.md"},
+    }
+
+
+def test_handoff_package_verifier_accepts_safe_complete_run_json(
+    tmp_path: Path,
+) -> None:
+    safety = _load_handoff_module("verify_handoff_package")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "handoff_evidence/run.json",
+            json.dumps(_safe_run_payload()),
+        )
+
+    result = safety.scan_handoff_zip(package)
+
+    assert result.ok
+
+
+@pytest.mark.parametrize(
+    ("section", "value"),
+    (
+        ("config", {"local_path": "C:/Users/name/private/data"}),
+        ("inputs", {"credential_token": "secret-token-value"}),
+        ("data", {"row_samples": [{"asset_id": "sample"}]}),
+        ("checks", {"vendor_marker": "provider-internal"}),
+    ),
+)
+def test_handoff_package_verifier_rejects_unsafe_complete_run_json(
+    tmp_path: Path,
+    section: str,
+    value: dict[str, object],
+) -> None:
+    safety = _load_handoff_module("verify_handoff_package")
+    package = tmp_path / "handoff.zip"
+    payload = _safe_run_payload()
+    payload[section] = value
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(
+            "handoff_evidence/run.json",
+            json.dumps(payload),
+        )
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+
+
 @pytest.mark.parametrize(
     ("text", "reason"),
     [
@@ -692,7 +834,7 @@ def test_verify_fails_when_sidecar_safety_fails(tmp_path: Path) -> None:
     sidecar.write_text(
         json.dumps(
             {
-                "schema_version": "handoff-sidecar/0.1",
+                "schema_id": "qrp-handoff-sidecar",
                 "zip_filename": "handoff.zip",
                 "handoff_package_path": f"{run_handoffs}/handoff.zip",
                 "handoff_sidecar_path": f"{run_handoffs}/handoff.json",
@@ -727,7 +869,7 @@ def test_verify_allows_evidence_task_metadata_without_pr_url() -> None:
 
     failures = verifier.verify_task_metadata_schema(
         {
-            "schema_version": "handoff-task-metadata/0.1",
+            "schema_id": "qrp-handoff-task-metadata",
             "mode": "evidence",
             "slug": "demo",
             "branch": TEST_BRANCH,
@@ -743,7 +885,7 @@ def test_verify_rejects_pr_url_in_evidence_task_metadata() -> None:
 
     failures = verifier.verify_task_metadata_schema(
         {
-            "schema_version": "handoff-task-metadata/0.1",
+            "schema_id": "qrp-handoff-task-metadata",
             "mode": "evidence",
             "slug": "demo",
             "branch": TEST_BRANCH,
@@ -761,7 +903,7 @@ def test_verify_requires_pr_url_in_pr_closure_task_metadata() -> None:
 
     failures = verifier.verify_task_metadata_schema(
         {
-            "schema_version": "handoff-task-metadata/0.1",
+            "schema_id": "qrp-handoff-task-metadata",
             "mode": "pr_closure",
             "slug": "demo",
             "branch": TEST_BRANCH,
@@ -784,7 +926,7 @@ def test_verify_recursively_rejects_forbidden_handoff_evidence_payload_keys() ->
     failures = verifier.handoff_evidence_forbidden_field_failures(
         "handoff_evidence/custom.json",
         {
-            "schema_version": "demo/0.1",
+            "schema_id": "demo/0.1",
             "checks": [{"nested": {forbidden_key: "old-row-key"}}],
         },
     )
@@ -800,7 +942,7 @@ def test_verify_smoke_compare_status_separates_record_and_actual_status() -> Non
     payload = _smoke_compare_status_payload(
         ("3-year smoke", "NOT_RUN"),
         ("6-year smoke", "NOT_RUN"),
-        ("baseline-final compare", "NOT_RUN"),
+        ("generic run compare", "NOT_RUN"),
     )
 
     failures = verifier.verify_smoke_compare_status(payload)
@@ -813,7 +955,7 @@ def test_verify_smoke_compare_status_rejects_top_level_status_alias() -> None:
     payload = _smoke_compare_status_payload(
         ("3-year smoke", "NOT_RUN"),
         ("6-year smoke", "NOT_RUN"),
-        ("baseline-final compare", "NOT_RUN"),
+        ("generic run compare", "NOT_RUN"),
     )
     payload["status"] = "PASS"
 
@@ -840,7 +982,7 @@ def test_verify_smoke_compare_status_enforces_overall_semantics(
     payload = _smoke_compare_status_payload(
         ("3-year smoke", statuses[0]),
         ("6-year smoke", statuses[1]),
-        ("baseline-final compare", statuses[2]),
+        ("generic run compare", statuses[2]),
         overall=overall,
     )
 
@@ -861,13 +1003,13 @@ def test_verify_handoff_package_rejects_old_smoke_compare_status_shape(
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
     old_payload = {
-        "schema_version": "handoff-smoke-compare-status/0.1",
+        "schema_id": "qrp-status-result",
         "status": "PASS",
         "results": [
             {"name": "3-year smoke", "status": "NOT_RUN", "reason": "not run"},
             {"name": "6-year smoke", "status": "NOT_RUN", "reason": "not run"},
             {
-                "name": "baseline-final compare",
+                "name": "generic run compare",
                 "status": "NOT_RUN",
                 "reason": "not run",
             },
@@ -895,7 +1037,7 @@ def test_handoff_evidence_forbidden_keys_are_fast_contract_checks() -> None:
         key: builder.handoff_evidence_blocked_key_failures(
             "handoff_evidence/custom.json",
             {
-                "schema_version": "demo/0.1",
+                "schema_id": "demo/0.1",
                 "status": "PASS",
                 "details": {key: "forged"},
             },
@@ -915,7 +1057,7 @@ def test_handoff_evidence_forbidden_keys_are_fast_contract_checks() -> None:
 def test_verify_rejects_validation_row_extra_fields() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     validation_payload = {
-        "schema_version": "handoff-validation-evidence/0.1",
+        "schema_id": "qrp-handoff-validation-evidence",
         "checks": [
             {
                 "name": "handoff_verify",
@@ -931,180 +1073,21 @@ def test_verify_rejects_validation_row_extra_fields() -> None:
     assert "validation_evidence_row_forbidden_field: 0:command" in failures
 
 
-def test_verify_baseline_final_compare_uses_metadata_groups() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    payload = _baseline_final_compare_payload(
-        {
-            "control_window_alpha": {
-                "comparison_group": "old_baseline",
-                "status": "FAIL_EXPECTED",
-                "reason_code": "stale_rank_ensemble_prediction_baseline",
-                "failed_artifacts": [
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                ],
+def test_handoff_evidence_requires_schema_id() -> None:
+    builder = _load_handoff_module("build_handoff_package")
+
+    with pytest.raises(SystemExit, match="schema_id_required"):
+        builder.stage_handoff_evidence(
+            Path("unused"),
+            {"handoff_evidence": {"run": {"status": {"overall": "PASS"}}}},
+            {
+                "schema_id": "qrp-handoff-validation-evidence",
+                "checks": [],
             },
-            "candidate_window_beta": {
-                "comparison_group": "refreshed_prediction_baseline",
-                "status": "PASS",
-                "prediction_summary": {
-                    "artifact_ids": [
-                        "equal_weight_rank_ensemble_mom_20d_prediction_2020",
-                        "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
-                    ],
-                    "failed_artifacts": [],
-                },
-            },
-        }
-    )
-
-    assert verifier.verify_baseline_final_compare(payload) == []
-
-
-def test_verify_baseline_final_compare_rejects_flat_status_aliases() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    payload = _baseline_final_compare_payload(
-        {
-            "control_window_alpha": {
-                "comparison_group": "old_baseline",
-                "status": "FAIL_EXPECTED",
-                "reason_code": "stale_rank_ensemble_prediction_baseline",
-                "failed_artifacts": [
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                ],
-            },
-            "candidate_window_beta": {
-                "comparison_group": "refreshed_prediction_baseline",
-                "status": "PASS",
-                "prediction_summary": {
-                    "artifact_ids": [
-                        "equal_weight_rank_ensemble_mom_20d_prediction_2020",
-                        "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
-                    ],
-                    "failed_artifacts": [],
-                },
-            },
-        }
-    )
-    payload["overall_status"] = "PASS"
-
-    failures = verifier.verify_baseline_final_compare(payload)
-
-    assert "baseline_final_compare_flat_alias_present: overall_status" in failures
-
-
-def test_verify_baseline_final_compare_requires_refreshed_group() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    payload = _baseline_final_compare_payload(
-        {
-            "control_window_alpha": {
-                "comparison_group": "old_baseline",
-                "status": "FAIL_EXPECTED",
-                "reason_code": "stale_rank_ensemble_prediction_baseline",
-                "failed_artifacts": [
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                ],
-            },
-        }
-    )
-
-    failures = verifier.verify_baseline_final_compare(payload)
-
-    assert (
-        "baseline_final_compare_missing_required_group: refreshed_prediction_baseline"
-        in failures
-    )
-
-
-def test_verify_baseline_final_compare_rejects_loose_rank_artifact_prefix() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    payload = _baseline_final_compare_payload(
-        {
-            "control_window_alpha": {
-                "comparison_group": "old_baseline",
-                "status": "FAIL_EXPECTED",
-                "reason_code": "stale_rank_ensemble_prediction_baseline",
-                "failed_artifacts": [
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                ],
-            },
-            "candidate_window_beta": {
-                "comparison_group": "refreshed_prediction_baseline",
-                "status": "PASS",
-                "prediction_summary": {
-                    "artifact_ids": [
-                        "equal_weight_rank_ensemble_smoke",
-                        "ic_weighted_rank_ensemble_smoke",
-                    ],
-                    "failed_artifacts": [],
-                },
-            },
-        }
-    )
-
-    failures = verifier.verify_baseline_final_compare(payload)
-
-    assert (
-        "baseline_final_compare_refreshed_missing_artifact: "
-        "candidate_window_beta:equal_weight_rank_ensemble"
-    ) in failures
-    assert (
-        "baseline_final_compare_refreshed_missing_artifact: "
-        "candidate_window_beta:ic_weighted_rank_ensemble"
-    ) in failures
-
-
-def _baseline_final_compare_payload(
-    comparisons: dict[str, object],
-) -> dict[str, object]:
-    return {
-        "schema_version": "qrp-baseline-final-compare-summary/0.1",
-        "status": {
-            "raw": "FAIL",
-            "policy_adjusted": "PASS",
-            "validation_decision": "PASS",
-        },
-        "baseline_commit": "0" * 8,
-        "baseline_commit_full": "0" * 40,
-        "final_head": "1" * 40,
-        "final_smoke_commit": "1" * 40,
-        "git_status_before_smoke": "clean",
-        "git_status_after_smoke": "clean_or_only_ignored_run_outputs",
-        "comparison_groups": {
-            "old_baseline": {"status": "FAIL_EXPECTED"},
-            "refreshed_prediction_baseline": {"status": "PASS"},
-        },
-        "contract_failures": [],
-        "comparisons": comparisons,
-    }
-
-
-def test_handoff_verifier_accepts_direct_baseline_final_compare() -> None:
-    verifier = _load_handoff_module("verify_handoff_package")
-    comparisons = {
-        "candidate_window_a": {
-            "comparison_group": "baseline_final",
-            "status": "PASS",
-        },
-        "candidate_window_b": {
-            "comparison_group": "baseline_final",
-            "status": "PASS",
-        },
-    }
-    payload = _baseline_final_compare_payload(comparisons)
-    payload["status"] = {
-        "raw": "PASS",
-        "policy_adjusted": "PASS",
-        "validation_decision": "PASS",
-    }
-    payload["comparison_groups"] = {"baseline_final": {"status": "PASS"}}
-
-    failures = verifier.verify_baseline_final_compare(
-        payload,
-        sidecar={"final_head": "1" * 40},
-    )
-
-    assert failures == []
+            bundle_path=Path("unused.bundle"),
+            branch="feature/test",
+            base="0" * 40,
+            final_head="1" * 40,
+            mode="evidence",
+            zip_filename="handoff.zip",
+        )

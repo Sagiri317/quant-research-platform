@@ -1,5 +1,5 @@
 {
-  "schema_version": "handoff-task-metadata/0.1",
+  "schema_id": "qrp-handoff-task-metadata",
   "mode": "evidence",
   "slug": "<handoff-slug>",
   "branch": "<branch-name>",
@@ -11,12 +11,12 @@
   "fixed_blockers": [],
   "commit_list": [],
   "validation_evidence": {
-    "schema_version": "handoff-validation-evidence/0.1",
+    "schema_id": "qrp-handoff-validation-evidence",
     "checks": []
   },
   "handoff_evidence": {
     "smoke-compare-status": {
-      "schema_version": "handoff-smoke-compare-status/0.1",
+      "schema_id": "qrp-status-result",
       "record_status": "PASS",
       "overall_smoke_compare_status": "NOT_RUN",
       "results": [
@@ -31,7 +31,7 @@
           "reason": "This follow-up changes only governance/safety tooling, handoff evidence schema, tests, and docs. It does not touch research numeric output paths, dataset assembly, factor/model/portfolio calculations, or smoke execution logic."
         },
         {
-          "name": "baseline-final compare",
+          "name": "generic run compare",
           "status": "NOT_RUN",
           "reason": "This follow-up changes only governance/safety tooling, handoff evidence schema, tests, and docs. It does not touch research numeric output paths, dataset assembly, factor/model/portfolio calculations, or smoke execution logic."
         }

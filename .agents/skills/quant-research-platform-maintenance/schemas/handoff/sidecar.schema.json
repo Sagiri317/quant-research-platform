@@ -4,7 +4,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version",
+    "schema_id",
     "zip_filename",
     "handoff_package_path",
     "handoff_sidecar_path",
@@ -17,8 +17,8 @@
     "status_summary"
   ],
   "properties": {
-    "schema_version": {
-      "const": "handoff-sidecar/0.1"
+    "schema_id": {
+      "const": "qrp-handoff-sidecar"
     },
     "zip_filename": {
       "type": "string"
