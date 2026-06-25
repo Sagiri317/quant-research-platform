@@ -1779,6 +1779,7 @@ HANDOFF_TOOL_SOURCE_PATHS = [
 TASK_CONTROL_KEYS = {
     "validation_evidence",
     "handoff_evidence",
+    "handoff_markdown_evidence",
 }
 TASK_METADATA_KEYS = {
     "schema_version",
@@ -2540,9 +2541,10 @@ def is_task_provided_handoff_evidence_blocked_path(name: str) -> bool:
     for part in parts:
         if part in TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS:
             return True
+        suffix = PurePosixPath(part).suffix
         if (
-            part.endswith(".json")
-            and part[:-5] in TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS
+            suffix in {".json", ".md"}
+            and part[: -len(suffix)] in TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS
         ):
             return True
     return False
@@ -2554,6 +2556,15 @@ def normalized_handoff_evidence_path(raw_name: str) -> str:
         name = "handoff_evidence/" + name
     if not name.endswith(".json"):
         name += ".json"
+    return name
+
+
+def normalized_handoff_markdown_evidence_path(raw_name: str) -> str:
+    name = _normalize_governance_zip_path(raw_name)
+    if not name.startswith("handoff_evidence/"):
+        name = "handoff_evidence/" + name
+    if not name.endswith(".md"):
+        name += ".md"
     return name
 
 

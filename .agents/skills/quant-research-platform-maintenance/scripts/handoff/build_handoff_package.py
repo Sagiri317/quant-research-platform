@@ -1,4 +1,4 @@
-"""Build a public-safe QRP handoff package from one task JSON."""
+"""Build a share-safe QRP handoff package from one task JSON."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from governance_contract import (  # noqa: E402
     handoff_evidence_blocked_key_failures,
     is_task_provided_handoff_evidence_blocked_path,
     normalized_handoff_evidence_path,
+    normalized_handoff_markdown_evidence_path,
     source_tree_scan_payload,
     status_summary_from_validation,
     validate_validation_evidence_contract,
@@ -49,9 +50,9 @@ PACKAGE_SCHEMA_VERSION = "handoff-sidecar/0.1"
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Build a public-safe QRP handoff package from one task JSON."
+        description="Build a share-safe QRP handoff package from one task JSON."
     )
-    parser.add_argument("--task", required=True, help="Public-safe task input JSON.")
+    parser.add_argument("--task", required=True, help="Share-safe task input JSON.")
     parser.add_argument("--out-dir", default=".run/handoffs")
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--mode", choices=("evidence", "pr_closure"))
@@ -351,6 +352,19 @@ def stage_handoff_evidence(
             if failures:
                 raise SystemExit(";".join(failures))
             write_text(stage_root / name, stable_json(share_safe_json_clean(payload)))
+    markdown_evidence = task.get("handoff_markdown_evidence")
+    if markdown_evidence is not None and not isinstance(markdown_evidence, Mapping):
+        raise SystemExit("handoff_markdown_evidence_must_be_object")
+    if isinstance(markdown_evidence, Mapping):
+        for raw_name, payload in sorted(markdown_evidence.items()):
+            name = normalized_handoff_markdown_evidence_path(str(raw_name))
+            if is_task_provided_handoff_evidence_blocked_path(name):
+                raise SystemExit(f"handoff_evidence_forbidden_path: {name}")
+            if not isinstance(payload, str):
+                raise SystemExit(
+                    f"handoff_markdown_evidence_entry_must_be_string: {name}"
+                )
+            write_text(stage_root / name, share_safe_text_clean(payload))
     write_text(
         stage_root / VERIFICATION_MATRIX_EVIDENCE,
         stable_json(verification_matrix_payload(validation_evidence)),

@@ -83,6 +83,11 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
                         "status": "PASS",
                     },
                 },
+                "handoff_markdown_evidence": {
+                    "smoke-semantic-parity-compare": (
+                        "# Smoke semantic parity compare\n\nstatus: PASS\n"
+                    ),
+                },
                 "validation_evidence": {
                     "schema_version": "handoff-validation-evidence/0.1",
                     "checks": [
@@ -149,6 +154,9 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         source_tree_scan = json.loads(
             archive.read("handoff_evidence/source-tree-scan.json").decode("utf-8")
         )
+        markdown_evidence = archive.read(
+            "handoff_evidence/smoke-semantic-parity-compare.md"
+        ).decode("utf-8")
 
     required = {
         "final-branch.bundle",
@@ -161,6 +169,8 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert "handoff_evidence/generation.json" in names
     assert "handoff_evidence/source-tree-scan.json" in names
     assert "handoff_evidence/custom-note.json" in names
+    assert "handoff_evidence/smoke-semantic-parity-compare.md" in names
+    assert markdown_evidence == "# Smoke semantic parity compare\n\nstatus: PASS\n"
     assert f"{slug}.json" not in names
     forbidden_prefixes = (
         "run_tools/",

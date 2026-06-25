@@ -183,6 +183,15 @@
         }
       }
     },
+    "handoff_markdown_evidence": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "source_tree_scan": {
       "type": "object",
       "additionalProperties": false,

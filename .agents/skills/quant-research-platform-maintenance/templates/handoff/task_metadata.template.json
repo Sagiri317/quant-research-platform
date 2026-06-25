@@ -7,7 +7,7 @@
   "final_head": "<final-head-sha>",
   "handoff_package_path": ".run/handoffs/<handoff-slug>.zip",
   "handoff_sidecar_path": ".run/handoffs/<handoff-slug>.json",
-  "scope_summary": "<public-safe handoff scope>",
+  "scope_summary": "<share-safe handoff scope>",
   "fixed_blockers": [],
   "commit_list": [],
   "validation_evidence": {
@@ -37,5 +37,6 @@
         }
       ]
     }
-  }
+  },
+  "handoff_markdown_evidence": {}
 }
