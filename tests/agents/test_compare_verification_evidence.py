@@ -2,1045 +2,408 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 
-import pandas as pd
+import pytest
 
-SCRIPT_PATH = (
-    Path(__file__).resolve().parents[2]
-    / ".agents"
-    / "skills"
-    / "quant-research-platform-maintenance"
-    / "scripts"
-    / "compare_verification_evidence.py"
+SCRIPT = Path(
+    ".agents/skills/quant-research-platform-maintenance/scripts/"
+    "compare_verification_evidence.py"
 )
 
 
-def test_compare_verification_evidence_accepts_parameterized_pairs(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "custom-baseline"
-    final = tmp_path / "custom-final"
-    _write_run(baseline)
-    _write_run(final, split_research_partition=True)
-    goal_root = tmp_path / "goal-output"
-    pairs_file = tmp_path / "pairs.json"
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "final_smoke": {
-                        "final_smoke_commit": "NOT_PROVIDED",
-                        "git_status_before_smoke": "NOT_PROVIDED",
-                        "git_status_after_smoke": "NOT_PROVIDED",
-                    }
-                },
-                "pairs": [
-                    {
-                        "label": "tiny",
-                        "baseline": str(baseline),
-                        "final": str(final),
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "compare_verification_evidence.py",
-            "--goal-root",
-            str(goal_root),
-            "--baseline-commit",
-            "base-sha",
-            "--pairs-file",
-            str(pairs_file),
-        ],
-    )
-
-    module.main()
-
-    payload = json.loads(
-        (goal_root / "baseline-final-compare.json").read_text(encoding="utf-8")
-    )
-    assert payload["baseline_commit"] == "base-sha"
-    assert tuple(payload["comparisons"]) == ("tiny",)
-    assert payload["status"]["policy_adjusted"] == "FAIL"
-    assert payload["status"]["validation_decision"] == "FAIL"
-    assert "overall_status" not in payload
-    assert "validation_decision" not in payload
-    assert payload["contract_failures"] == [
-        "missing_required_comparison_group: old_baseline",
-        "missing_required_comparison_group: refreshed_prediction_baseline",
-        "baseline_commit_full_not_full_sha",
-        "final_smoke_commit_not_full_sha",
-        "git_status_before_smoke_not_clean",
-        "git_status_after_smoke_not_clean",
-    ]
-    assert payload["comparisons"]["tiny"]["status"] == "PASS"
-    research = payload["comparisons"]["tiny"]["research_dataset"]
-    assert research["row_count"]["match"] is True
-    assert research["asset_count"]["match"] is True
-    assert research["timestamp_count"]["match"] is True
-    assert "eligible" not in research["numeric_diffs"]
-    assert research["typed_value_hash_match"] is True
-
-
-def test_compare_verification_evidence_marks_missing_required_fields_partial(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final, missing_prediction_score=True)
-
-    comparison = module.compare_run("tiny", baseline, final)
-
-    assert comparison["status"] == "PARTIAL"
-    prediction = comparison["prediction_summary"]
-    assert prediction["status"] == "PARTIAL"
-    assert prediction["missing_required_fields"] == ["prediction_score"]
-
-
-def test_compare_verification_evidence_detects_non_numeric_research_values(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final, flip_research_eligibility=True)
-
-    comparison = module.compare_run("tiny", baseline, final)
-
-    assert comparison["status"] == "FAIL"
-    research = comparison["research_dataset"]
-    assert research["status"] == "FAIL"
-    assert "typed_value_mismatch" in research["failures"]
-    assert research["typed_value_diffs"]["eligible"]["mismatch_count"] == 2
-
-
-def test_compare_verification_evidence_detects_keyed_report_content_mismatch(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final, swap_prediction_assets=True)
-
-    comparison = module.compare_run("tiny", baseline, final)
-
-    assert comparison["status"] == "FAIL"
-    prediction = comparison["prediction_summary"]
-    assert prediction["status"] == "FAIL"
-    assert "keyed_content_mismatch" in prediction["failures"]
-    assert prediction["artifact_content_diffs"]["tiny_model"]["match"] is False
-
-
-def test_compare_verification_evidence_marks_large_research_partition_partial(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final)
-    monkeypatch.setattr(module, "MAX_IN_MEMORY_RESEARCH_PARTITION_ROWS", 1)
-
-    comparison = module.compare_run("tiny", baseline, final)
-
-    assert comparison["status"] == "PARTIAL"
-    assert comparison["partials"] == ["research_dataset"]
-    research = comparison["research_dataset"]
-    assert research["status"] == "PARTIAL"
-    assert research["partial_partitions"] == [
-        {
-            "partition": "year=2020",
-            "baseline_rows": 2,
-            "final_rows": 2,
-            "max_in_memory_rows": 1,
-        }
-    ]
-
-
-def test_compare_verification_evidence_streams_parquet_report_reads(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    module = _load_compare_module()
-    path = tmp_path / "prediction.parquet"
-    pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")],
-            "asset_id": ["asset_a", "asset_b"],
-            "prediction_score": [0.1, 0.2],
-        }
-    ).to_parquet(path, index=False)
-
-    def fail_read_parquet(*args, **kwargs):
-        raise AssertionError("pd.read_parquet should not be used for streaming reads")
-
-    monkeypatch.setattr(module.pd, "read_parquet", fail_read_parquet)
-
-    stats = module.aggregate_column_stats([path], ("prediction_score",))
-    fingerprint = module.run_output_file_content_fingerprint(
-        path,
-        columns=("timestamp", "asset_id", "prediction_score"),
-    )
-
-    assert stats["prediction_score"]["count"] == 2
-    assert fingerprint["row_count"] == 2
-    assert fingerprint["missing_columns"] == []
-
-
-def test_compare_verification_evidence_keyed_content_hash_tolerates_float_noise(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final, tiny_turnover_epsilon=True)
-
-    comparison = module.compare_run("tiny", baseline, final)
-
-    assert comparison["status"] == "PASS"
-    turnover = comparison["portfolio_summary"]["turnover"]
-    assert turnover["status"] == "PASS"
-    assert turnover["artifact_content_diffs"] == {}
-
-
-def test_compare_verification_evidence_pairs_file_is_not_window_specific(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    pairs_file = tmp_path / "pairs.json"
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "pairs": [
-                    {
-                        "label": "18m",
-                        "baseline": "baseline-a",
-                        "final": "final-a",
-                    },
-                    {
-                        "label": "full",
-                        "baseline": "baseline-b",
-                        "final": "final-b",
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    args = type(
-        "Args",
-        (),
-        {
-            "pair": None,
-            "pairs_file": str(pairs_file),
-        },
-    )()
-
-    runs = module.run_pairs_from_args(args)
-
-    assert tuple(runs) == ("18m", "full")
-    assert runs["18m"]["baseline"] == Path("baseline-a")
-    assert runs["full"]["final"] == Path("final-b")
-
-
-def test_compare_verification_evidence_reads_final_smoke_metadata(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    pairs_file = tmp_path / "pairs.json"
-    final_head = "1" * 40
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "final_smoke": {
-                        "final_smoke_commit": final_head,
-                        "git_status_before_smoke": "clean",
-                        "git_status_after_smoke": ("clean_or_only_ignored_run_outputs"),
-                    }
-                },
-                "pairs": [
-                    {
-                        "label": "window",
-                        "baseline": "baseline-a",
-                        "final": "final-a",
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    metadata = module.run_pair_metadata_from_file(pairs_file)
-    smoke = module.final_smoke_evidence_from_metadata(metadata)
-    failures = module.compare_metadata_contract_failures(
-        baseline_commit_full="0" * 40,
-        final_head=final_head,
-        smoke_evidence=smoke,
-    )
-
-    assert smoke["final_smoke_commit"] == final_head
-    assert failures == []
-
-
-def test_compare_verification_evidence_rejects_missing_final_smoke_metadata() -> None:
-    module = _load_compare_module()
-
-    try:
-        module.final_smoke_evidence_from_metadata({})
-    except ValueError as exc:
-        assert str(exc) == "invalid_pairs_file: final_smoke_metadata_required"
-    else:
-        raise AssertionError("missing final_smoke metadata should fail")
-
-
-def test_compare_verification_evidence_accepts_expected_pair_failures(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(
-        baseline,
-        prediction_output_ids=(
-            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
-            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
-        ),
-    )
-    _write_run(
-        final,
-        swap_prediction_assets=True,
-        prediction_output_ids=(
-            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
-            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
-        ),
-    )
-
-    comparison = module.compare_run("control_window_a", baseline, final)
-    comparison = module.apply_pair_expectation(
-        comparison,
-        {
-            "comparison_group": "old_baseline",
-            "expected_status": "FAIL_EXPECTED",
-            "expected_failure_reason": "stale_rank_ensemble_prediction_baseline",
-            "expected_failed_artifacts": [
-                "equal_weight_rank_ensemble",
-                "ic_weighted_rank_ensemble",
-            ],
-        },
-    )
-
-    assert comparison["status"] == "FAIL_EXPECTED"
-    assert comparison["actual_status"] == "FAIL"
-    assert comparison["expected_failure_match"] is True
-    assert comparison["reason_code"] == "stale_rank_ensemble_prediction_baseline"
-    assert comparison["failed_output_ids"] == [
-        "equal_weight_rank_ensemble_mom_20d_prediction_2020",
-        "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
-    ]
-    assert comparison["failed_artifacts"] == [
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    ]
-
-
-def test_compare_verification_evidence_rejects_self_authorized_expected_failures(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final, swap_prediction_assets=True)
-    goal_root = tmp_path / "goal-output"
-    pairs_file = tmp_path / "pairs.json"
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "final_smoke": {
-                        "final_smoke_commit": "NOT_PROVIDED",
-                        "git_status_before_smoke": "NOT_PROVIDED",
-                        "git_status_after_smoke": "NOT_PROVIDED",
-                    }
-                },
-                "pairs": [
-                    {
-                        "label": "control_window_a",
-                        "baseline": str(baseline),
-                        "final": str(final),
-                        "comparison_group": "old_baseline",
-                        "expected_status": "FAIL_EXPECTED",
-                        "expected_failure_reason": "stale_prediction_baseline",
-                        "expected_failed_artifacts": ["tiny_model"],
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "compare_verification_evidence.py",
-            "--goal-root",
-            str(goal_root),
-            "--baseline-commit",
-            "base-sha",
-            "--pairs-file",
-            str(pairs_file),
-        ],
-    )
-
-    module.main()
-
-    payload = json.loads(
-        (goal_root / "baseline-final-compare.json").read_text(encoding="utf-8")
-    )
-    comparison = payload["comparisons"]["control_window_a"]
-    assert payload["status"]["policy_adjusted"] == "FAIL"
-    assert payload["status"]["validation_decision"] == "FAIL"
-    assert (
-        "expected_failure_reason_mismatch"
-        in comparison["expected_failure_policy_failures"]
-    )
-    assert comparison["status"] == "FAIL"
-    assert "expected_failure_policy_mismatch" in comparison["failures"]
-
-
-def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> None:
-    module = _load_compare_module()
-
-    failures = module.compare_contract_failures(
-        {
-            "control_window_a": {
-                "comparison_group": "old_baseline",
-                "status": "FAIL_EXPECTED",
-                "reason_code": "stale_rank_ensemble_prediction_baseline",
-                "failed_artifacts": [
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                ],
-            },
-            "control_window_b": {
-                "comparison_group": "old_baseline",
-                "status": "FAIL_EXPECTED",
-                "reason_code": "stale_rank_ensemble_prediction_baseline",
-                "failed_artifacts": [
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                ],
-            },
-            "candidate_window_a": {
-                "comparison_group": "refreshed_prediction_baseline",
-                "status": "PASS",
-                "prediction_summary": {
-                    "output_ids": [
-                        "equal_weight_rank_ensemble_mom_20d_prediction_2020"
-                    ],
-                    "failed_artifacts": [],
-                },
-            },
-            "candidate_window_b": {
-                "comparison_group": "refreshed_prediction_baseline",
-                "status": "PASS",
-                "prediction_summary": {
-                    "output_ids": [
-                        "equal_weight_rank_ensemble_mom_20d_prediction_2021",
-                        "ic_weighted_rank_ensemble_mom_20d_prediction_2021",
-                    ],
-                    "failed_artifacts": [],
-                },
-            },
-        }
-    )
-
-    assert failures == [
-        (
-            "refreshed_baseline_missing_rank_ensemble_artifact: "
-            "candidate_window_a:ic_weighted_rank_ensemble"
-        )
-    ]
-
-
-def test_compare_verification_evidence_requires_explicit_expected_failure_group(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(
-        baseline,
-        prediction_output_ids=(
-            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
-            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
-        ),
-    )
-    _write_run(
-        final,
-        swap_prediction_assets=True,
-        prediction_output_ids=(
-            "equal_weight_rank_ensemble_mom_20d_prediction_2020",
-            "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
-        ),
-    )
-
-    comparison = module.apply_pair_expectation(
-        module.compare_run("control_window_without_group", baseline, final),
-        {
-            "expected_status": "FAIL_EXPECTED",
-            "expected_failure_reason": "stale_rank_ensemble_prediction_baseline",
-            "expected_failed_artifacts": [
-                "equal_weight_rank_ensemble",
-                "ic_weighted_rank_ensemble",
-            ],
-        },
-    )
-
-    assert comparison["status"] == "FAIL"
-    assert (
-        "expected_failure_group_not_old_baseline"
-        in comparison["expected_failure_policy_failures"]
-    )
-
-
-def test_compare_verification_evidence_rejects_loose_rank_artifact_prefix() -> None:
-    module = _load_compare_module()
-
-    failures = module.compare_contract_failures(
-        {
-            "control_window_a": {
-                "comparison_group": "old_baseline",
-                "status": "FAIL_EXPECTED",
-                "reason_code": "stale_rank_ensemble_prediction_baseline",
-                "failed_artifacts": [
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                ],
-            },
-            "candidate_window_a": {
-                "comparison_group": "refreshed_prediction_baseline",
-                "status": "PASS",
-                "prediction_summary": {
-                    "output_ids": [
-                        "equal_weight_rank_ensemble_smoke",
-                        "ic_weighted_rank_ensemble_smoke",
-                    ],
-                    "failed_artifacts": [],
-                },
-            },
-        }
-    )
-
-    assert failures == [
-        (
-            "refreshed_baseline_missing_rank_ensemble_artifact: "
-            "candidate_window_a:equal_weight_rank_ensemble"
-        ),
-        (
-            "refreshed_baseline_missing_rank_ensemble_artifact: "
-            "candidate_window_a:ic_weighted_rank_ensemble"
-        ),
-    ]
-
-
-def test_compare_verification_evidence_requires_pairs_file() -> None:
-    module = _load_compare_module()
-    args = type(
-        "Args",
-        (),
-        {
-            "pairs_file": None,
-        },
-    )()
-
-    try:
-        module.run_pairs_from_args(args)
-    except ValueError as exc:
-        assert str(exc) == "missing_pairs_file"
-    else:
-        raise AssertionError("missing pairs file should fail")
-
-
-def test_compare_verification_evidence_rejects_duplicate_pair_labels(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    pairs_file = tmp_path / "duplicate-pairs.json"
-    args = type(
-        "Args",
-        (),
-        {
-            "pairs_file": str(pairs_file),
-        },
-    )()
-
-    try:
-        pairs_file.write_text(
-            json.dumps(
-                {
-                    "pairs": [
-                        {
-                            "label": "window",
-                            "baseline": "baseline-a",
-                            "final": "final-a",
-                        },
-                        {
-                            "label": "window",
-                            "baseline": "baseline-b",
-                            "final": "final-b",
-                        },
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        module.run_pairs_from_args(args)
-    except ValueError as exc:
-        assert str(exc) == "duplicate_pair_label: window"
-    else:
-        raise AssertionError("duplicate pair label should fail")
-
-
-def test_compare_verification_evidence_rejects_unapproved_pair_keys(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    pairs_file = tmp_path / "pairs.json"
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "pairs": [
-                    {
-                        "label": "window",
-                        "baseline": "baseline-a",
-                        "final": "final-a",
-                        "unexpected_key": "value",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    try:
-        module.run_pairs_from_file(pairs_file)
-    except ValueError as exc:
-        assert str(exc) == ("invalid_pairs_file: pair_unapproved_key: unexpected_key")
-    else:
-        raise AssertionError("old pair alias key should fail")
-
-
-def test_compare_verification_evidence_rejects_invalid_pairs_file(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    pairs_file = tmp_path / "pairs.json"
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "pairs": [
-                    {
-                        "label": "window",
-                        "baseline": "baseline-a",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    try:
-        module.run_pairs_from_file(pairs_file)
-    except ValueError as exc:
-        assert str(exc) == "invalid_pairs_file: missing_required_key"
-    else:
-        raise AssertionError("missing final path should fail")
-
-
-def test_compare_verification_evidence_detects_run_output_id_collision(
-    tmp_path: Path,
-) -> None:
-    module = _load_compare_module()
-    paths = [
-        tmp_path
-        / "run_outputs"
-        / "local"
-        / "prediction"
-        / "a_share_model"
-        / "prediction.parquet",
-        tmp_path
-        / "run_outputs"
-        / "local"
-        / "prediction"
-        / "model"
-        / "prediction.parquet",
-    ]
-
-    try:
-        module.run_output_files_by_output_id_from_paths(paths)
-    except ValueError as exc:
-        assert str(exc) == "run_output_id_collision: model"
-    else:
-        raise AssertionError("normalized artifact id collision should fail")
-
-
-def test_compare_verification_evidence_requires_baseline_commit(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final)
-    pairs_file = tmp_path / "pairs.json"
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "final_smoke": {
-                        "final_smoke_commit": "NOT_PROVIDED",
-                        "git_status_before_smoke": "NOT_PROVIDED",
-                        "git_status_after_smoke": "NOT_PROVIDED",
-                    }
-                },
-                "pairs": [
-                    {
-                        "label": "tiny",
-                        "baseline": str(baseline),
-                        "final": str(final),
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "compare_verification_evidence.py",
-            "--goal-root",
-            str(tmp_path / "goal-output"),
-            "--pairs-file",
-            str(pairs_file),
-        ],
-    )
-
-    try:
-        module.main()
-    except SystemExit as exc:
-        assert exc.code == 2
-    else:
-        raise AssertionError("missing baseline commit should exit")
-
-
-def test_compare_verification_evidence_records_blocked_pair_without_stopping(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    module = _load_compare_module()
-    baseline = tmp_path / "baseline"
-    final = tmp_path / "final"
-    _write_run(baseline)
-    _write_run(final)
-    goal_root = tmp_path / "goal-output"
-    missing = tmp_path / "missing"
-    pairs_file = tmp_path / "pairs.json"
-    pairs_file.write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "final_smoke": {
-                        "final_smoke_commit": "NOT_PROVIDED",
-                        "git_status_before_smoke": "NOT_PROVIDED",
-                        "git_status_after_smoke": "NOT_PROVIDED",
-                    }
-                },
-                "pairs": [
-                    {
-                        "label": "good",
-                        "baseline": str(baseline),
-                        "final": str(final),
-                    },
-                    {
-                        "label": "bad",
-                        "baseline": str(missing),
-                        "final": str(final),
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "compare_verification_evidence.py",
-            "--goal-root",
-            str(goal_root),
-            "--baseline-commit",
-            "base-sha",
-            "--pairs-file",
-            str(pairs_file),
-        ],
-    )
-
-    module.main()
-
-    payload = json.loads(
-        (goal_root / "baseline-final-compare.json").read_text(encoding="utf-8")
-    )
-    assert payload["status"]["policy_adjusted"] == "FAIL"
-    assert payload["comparisons"]["good"]["status"] == "PASS"
-    assert payload["comparisons"]["bad"]["status"] == "BLOCKED"
-    assert payload["comparisons"]["bad"]["failures"] == ["compare_input_error"]
-
-
-def _load_compare_module():
+def _module():
     spec = importlib.util.spec_from_file_location(
-        "compare_verification_evidence_under_test",
-        SCRIPT_PATH,
+        "compare_verification_evidence", SCRIPT
     )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-def _write_run(
-    root: Path,
-    *,
-    missing_prediction_score: bool = False,
-    prediction_output_ids: tuple[str, ...] = ("tiny_model",),
-    split_research_partition: bool = False,
-    flip_research_eligibility: bool = False,
-    swap_prediction_assets: bool = False,
-    tiny_turnover_epsilon: bool = False,
-) -> None:
-    (root / "config").mkdir(parents=True)
-    _write_json(root / "summary.json", _summary(root.name))
-    _write_json(root / "config" / "run_config.json", _config(root.name))
-    _write_research_dataset(
-        root,
-        split_partition=split_research_partition,
-        flip_eligibility=flip_research_eligibility,
-    )
-    _write_run_outputs(
-        root,
-        missing_prediction_score=missing_prediction_score,
-        prediction_output_ids=prediction_output_ids,
-        swap_prediction_assets=swap_prediction_assets,
-        tiny_turnover_epsilon=tiny_turnover_epsilon,
-    )
-
-
-def _summary(run_id: str) -> dict[str, object]:
-    return {
-        "run_id": run_id,
-        "status": "NOT_RUN",
-        "smoke_status": "PASS",
-        "compare_status": "NOT_RUN",
-        "full_horizon_status": "NOT_RUN",
-        "validation_matrix_status": "NOT_RUN",
-        "manifest_status": {
-            "dataset_count": 1,
-            "layer_count": 1,
-            "report_count": 1,
-            "run_validation_status": "pass",
-        },
-        "timings": {"total_duration_seconds": 1.0},
-        "validation_summary": {
-            "status": "PASS",
-            "date_ranges": [
-                {
-                    "data_id": "price_volume_forward_returns",
-                    "date_min": "2020-01-02",
-                    "date_max": "2020-01-03",
-                    "partition_count": 1,
-                }
-            ],
-            "factor_nan_profile": {},
-            "label_nan_profile": {},
-            "share_safety_scan": {"status": "PASS"},
-        },
-    }
-
-
-def _config(run_id: str) -> dict[str, object]:
-    return {
-        "run_id": run_id,
-        "start_date": "2020-01-01",
-        "end_date": "2020-01-31",
-        "requested_windows": {
-            "evaluation_start_date": "2020-01-01",
-            "evaluation_end_date": "2020-01-31",
-            "prediction_train_end": "2020-01-10",
-            "prediction_test_start": "2020-01-13",
-            "prediction_test_end": "2020-01-31",
-        },
-    }
-
-
-def _write_research_dataset(
-    root: Path,
-    *,
-    split_partition: bool = False,
-    flip_eligibility: bool = False,
-) -> None:
-    path = (
-        root
-        / "data"
-        / "research"
-        / "a_share"
-        / "price_volume_forward_returns"
-        / "data"
-        / "year=2020"
-        / "part-000.parquet"
-    )
-    path.parent.mkdir(parents=True)
-    frame = pd.DataFrame(
-        [
-            {
-                "market_id": "a_share",
-                "asset_id": "asset_a",
-                "timestamp": pd.Timestamp("2020-01-02"),
-                "mom_20d": 1.0,
-                "eligible": True,
-            },
-            {
-                "market_id": "a_share",
-                "asset_id": "asset_b",
-                "timestamp": pd.Timestamp("2020-01-03"),
-                "mom_20d": 2.0,
-                "eligible": False,
-            },
-        ]
-    )
-    if flip_eligibility:
-        frame["eligible"] = ~frame["eligible"]
-    if not split_partition:
-        frame.to_parquet(path, index=False)
-        return
-    frame.iloc[:1].to_parquet(path, index=False)
-    frame.iloc[1:].to_parquet(path.with_name("part-001.parquet"), index=False)
-
-
-def _write_run_outputs(
-    root: Path,
-    *,
-    missing_prediction_score: bool,
-    prediction_output_ids: tuple[str, ...],
-    swap_prediction_assets: bool,
-    tiny_turnover_epsilon: bool,
-) -> None:
-    run_outputs_root = root / "run_outputs" / "local" / "a_share"
-    for output_id in prediction_output_ids:
-        prediction = (
-            run_outputs_root / "prediction" / output_id / "prediction.parquet"
-        )
-        prediction.parent.mkdir(parents=True)
-        prediction_payload = {
-            "timestamp": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")],
-            "asset_id": (
-                ["asset_b", "asset_a"]
-                if swap_prediction_assets
-                else ["asset_a", "asset_b"]
-            ),
-        }
-        if not missing_prediction_score:
-            prediction_payload["prediction_score"] = [0.1, 0.2]
-        pd.DataFrame(prediction_payload).to_parquet(prediction, index=False)
-
-    evaluation = run_outputs_root / "evaluation" / "tiny_eval"
-    evaluation.mkdir(parents=True)
-    pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2020-01-02")],
-            "signal": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "ic": [0.1],
-            "rankic": [0.2],
-            "n_obs": [2],
-        }
-    ).to_parquet(evaluation / "metrics.parquet", index=False)
-    pd.DataFrame(
-        {
-            "signal": ["mom_20d"],
-            "label": ["forward_return_20d"],
-            "mean_ic": [0.1],
-            "mean_rankic": [0.2],
-            "valid_ic_count": [1],
-            "valid_rankic_count": [1],
-        }
-    ).to_parquet(evaluation / "ic_summary.parquet", index=False)
-
-    portfolio = run_outputs_root / "portfolio" / "tiny_portfolio"
-    portfolio.mkdir(parents=True)
-    pd.DataFrame(
-        {
-            "signal": ["mom_20d"],
-            "final_cumulative_net_return": [0.01],
-            "max_drawdown": [-0.02],
-            "mean_turnover": [0.3],
-            "total_cost": [0.001],
-        }
-    ).to_parquet(portfolio / "performance_summary.parquet", index=False)
-    pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2020-01-02")],
-            "signal": ["mom_20d"],
-            "turnover": [0.3 + (1e-12 if tiny_turnover_epsilon else 0.0)],
-        }
-    ).to_parquet(portfolio / "turnover.parquet", index=False)
-    pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2020-01-02")],
-            "signal": ["mom_20d"],
-            "total_cost": [0.001],
-        }
-    ).to_parquet(portfolio / "cost_breakdown.parquet", index=False)
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def test_compare_contract_accepts_direct_pairs_without_window_names() -> None:
-    module = _load_compare_module()
+def _run_payload(
+    run_id: str,
+    *,
+    output_id: str = "prediction_daily",
+    output_definition_id: str = "prediction_outputs",
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_id": "qrp-run",
+        "workflow_id": "local_verification",
+        "run_id": run_id,
+        "root_ownership": {
+            "owner": "local_verification",
+            "workflow_id": "local_verification",
+            "created_by": "quant_research_platform",
+            "created_at": "2026-06-26T00:00:00Z",
+            "replace_safe": True,
+        },
+        "status": {"overall": "PASS"},
+        "created_at": "2026-06-26T00:00:00Z",
+        "completed_at": "2026-06-26T00:00:01Z",
+        "code": {},
+        "config": {},
+        "inputs": {},
+        "data": {
+            "layer_count": 1,
+            "run_validation_status": "pass",
+            "failed_layers": [],
+            "layers": [
+                {
+                    "logical_layer": "research",
+                    "dataset_count": 1,
+                    "datasets": [
+                        {
+                            "data_id": "research_dataset",
+                            "manifest_path": (
+                                "data/research/research_dataset/_manifest/manifest.json"
+                            ),
+                            "manifest_summary": {
+                                "row_count": 3,
+                                "date_min": "2024-01-01",
+                                "date_max": "2024-01-03",
+                                "duplicate_primary_key_count": 0,
+                                "validation_status": "pass",
+                            },
+                        }
+                    ],
+                    "total_rows": 3,
+                    "date_min": "2024-01-01",
+                    "date_max": "2024-01-03",
+                    "missing_dataset_manifests": [],
+                    "failed_dataset_validations": [],
+                    "layer_validation_status": "pass",
+                    "created_at": "2026-06-26T00:00:00Z",
+                }
+            ],
+        },
+        "outputs": [
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_id": output_id,
+                "output_definition_id": output_definition_id,
+                "run_id": run_id,
+                "metadata": metadata or {"row_count": 3, "partition_count": 1},
+                "files": ["prediction.parquet"],
+                "manifest_path": f"outputs/{output_id}/manifest.json",
+            }
+        ],
+        "checks": {},
+        "execution_metrics": {},
+        "logs": {},
+        "summary": {"markdown_path": "summary.md"},
+    }
 
-    failures = module.compare_contract_failures(
-        {
-            "primary_compare": {
-                "comparison_group": "baseline_final",
-                "status": "PASS",
-            },
-            "secondary_compare": {
-                "comparison_group": "baseline_final",
-                "status": "PASS",
-            },
-        }
+
+def _write_run(
+    root: Path,
+    run_id: str,
+    *,
+    output_id: str = "prediction_daily",
+    output_definition_id: str = "prediction_outputs",
+    metadata: dict[str, object] | None = None,
+    file_content: bytes = b"same",
+) -> None:
+    payload = _run_payload(
+        run_id,
+        output_id=output_id,
+        output_definition_id=output_definition_id,
+        metadata=metadata,
+    )
+    _write_json(root / "run.json", payload)
+    manifest = dict(payload["outputs"][0])
+    manifest.pop("manifest_path")
+    _write_json(root / "outputs" / output_id / "manifest.json", manifest)
+    (root / "outputs" / output_id / "prediction.parquet").write_bytes(file_content)
+
+
+def test_compare_pairs_same_output_id_without_historical_path_assumptions(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    compare_root = tmp_path / "compare"
+    _write_run(baseline, "baseline_run")
+    _write_run(current, "current_run")
+
+    payload = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=compare_root,
     )
 
-    assert failures == []
+    assert payload["schema_id"] == "qrp-compare"
+    assert payload["overall_status"] == "PASS"
+    assert payload["pairing"]["mode"] == "output_id"
+    assert payload["pairing"]["pairs"] == [
+        {
+            "baseline_output_id": "prediction_daily",
+            "current_output_id": "prediction_daily",
+        }
+    ]
+    assert payload["output_results"][0]["status"] == "PASS"
+    assert (compare_root / "compare.json").is_file()
+    assert (compare_root / "summary.md").is_file()
+    assert not list(compare_root.glob("*baseline-final*"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing_run", "invalid_json", "missing_schema", "versioned_schema"),
+)
+def test_compare_invalid_run_input_is_blocked(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run(baseline, "baseline_run")
+    _write_run(current, "current_run")
+    run_path = baseline / "run.json"
+    if mutation == "missing_run":
+        run_path.unlink()
+    elif mutation == "invalid_json":
+        run_path.write_text("{", encoding="utf-8")
+    else:
+        payload = json.loads(run_path.read_text(encoding="utf-8"))
+        payload["schema_id"] = None if mutation == "missing_schema" else "qrp-run/0.1"
+        _write_json(run_path, payload)
+
+    result = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+    )
+
+    assert result["overall_status"] == "BLOCKED"
+    assert result["output_results"] == []
+
+
+def test_compare_missing_output_manifest_is_fail(tmp_path: Path) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run(baseline, "baseline_run")
+    _write_run(current, "current_run")
+    (current / "outputs" / "prediction_daily" / "manifest.json").unlink()
+
+    result = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+    )
+
+    assert result["overall_status"] == "FAIL"
+    assert result["output_results"][0]["status"] == "FAIL"
+    assert "output_manifest_missing" in result["output_results"][0]["failures"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_failure"),
+    (
+        (
+            "schema_version",
+            "output_manifest_identity_invalid:retired_identity_key:schema_version",
+        ),
+        (
+            "contract_version",
+            "output_manifest_identity_invalid:retired_identity_key:contract_version",
+        ),
+        (
+            "versioned_schema_id",
+            "output_manifest_schema_id_mismatch",
+        ),
+        ("wrong_output_id", "output_manifest_output_id_mismatch"),
+        ("wrong_run_id", "output_manifest_run_id_mismatch"),
+        ("path_traversal", "output_file_path_invalid"),
+    ),
+)
+def test_compare_rejects_invalid_output_manifest_identity_and_paths(
+    tmp_path: Path,
+    mutation: str,
+    expected_failure: str,
+) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run(baseline, "baseline_run")
+    _write_run(current, "current_run")
+    manifest_path = current / "outputs" / "prediction_daily" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "schema_version":
+        manifest["metadata"]["schema_version"] = "0.1"
+    elif mutation == "contract_version":
+        manifest["metadata"]["contract_version"] = "0.1"
+    elif mutation == "versioned_schema_id":
+        manifest["schema_id"] = "qrp-output-manifest/0.1"
+    elif mutation == "wrong_output_id":
+        manifest["output_id"] = "other_output"
+    elif mutation == "wrong_run_id":
+        manifest["run_id"] = "other_run"
+    elif mutation == "path_traversal":
+        manifest["files"] = ["../outside.parquet"]
+        baseline_manifest_path = (
+            baseline / "outputs" / "prediction_daily" / "manifest.json"
+        )
+        baseline_manifest = json.loads(
+            baseline_manifest_path.read_text(encoding="utf-8")
+        )
+        baseline_manifest["files"] = ["../outside.parquet"]
+        _write_json(baseline_manifest_path, baseline_manifest)
+        (baseline / "outputs" / "outside.parquet").write_bytes(b"same")
+        (current / "outputs" / "outside.parquet").write_bytes(b"same")
+    _write_json(manifest_path, manifest)
+
+    result = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+    )
+
+    assert result["overall_status"] == "FAIL"
+    assert expected_failure in result["output_results"][0]["failures"]
+
+
+@pytest.mark.parametrize(
+    ("baseline_kwargs", "current_kwargs", "failure"),
+    (
+        (
+            {"metadata": {"row_count": 3, "partition_count": 1}},
+            {"metadata": {"row_count": 4, "partition_count": 1}},
+            "metadata_mismatch",
+        ),
+        (
+            {"output_definition_id": "prediction_outputs"},
+            {"output_definition_id": "evaluation_outputs"},
+            "output_definition_id_mismatch",
+        ),
+        (
+            {"file_content": b"left"},
+            {"file_content": b"right"},
+            "file_hash_mismatch",
+        ),
+    ),
+)
+def test_compare_output_contract_mismatch_is_fail(
+    tmp_path: Path,
+    baseline_kwargs: dict[str, object],
+    current_kwargs: dict[str, object],
+    failure: str,
+) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run(baseline, "baseline_run", **baseline_kwargs)
+    _write_run(current, "current_run", **current_kwargs)
+
+    result = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+    )
+
+    assert result["overall_status"] == "FAIL"
+    assert failure in result["output_results"][0]["failures"]
+
+
+def test_compare_pairs_file_maps_output_ids_only(tmp_path: Path) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run(baseline, "baseline_run", output_id="prediction_old")
+    _write_run(current, "current_run", output_id="prediction_new")
+    pairs_file = tmp_path / "pairs.json"
+    _write_json(
+        pairs_file,
+        {
+            "schema_id": "qrp-compare-pairs",
+            "pairs": [
+                {
+                    "baseline_output_id": "prediction_old",
+                    "current_output_id": "prediction_new",
+                }
+            ],
+        },
+    )
+
+    result = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+        pairs_file=pairs_file,
+    )
+
+    assert result["overall_status"] == "PASS"
+    assert result["pairing"]["mode"] == "pairs_file"
+    assert result["output_results"][0]["baseline_output_id"] == "prediction_old"
+    assert result["output_results"][0]["current_output_id"] == "prediction_new"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"pairs": []},
+        {"schema_id": "qrp-compare-pairs/0.1", "pairs": []},
+        {
+            "schema_id": "qrp-compare-pairs",
+            "pairs": [
+                {
+                    "baseline_output_id": "a",
+                    "current_output_id": "b",
+                    "metadata": {},
+                }
+            ],
+        },
+    ),
+)
+def test_compare_invalid_pairs_file_is_blocked(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run(baseline, "baseline_run")
+    _write_run(current, "current_run")
+    pairs_file = tmp_path / "pairs.json"
+    _write_json(pairs_file, payload)
+
+    result = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+        pairs_file=pairs_file,
+    )
+
+    assert result["overall_status"] == "BLOCKED"
+
+
+def test_compare_data_summary_mismatch_is_fail(tmp_path: Path) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    _write_run(baseline, "baseline_run")
+    _write_run(current, "current_run")
+    run_path = current / "run.json"
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    payload["data"]["layers"][0]["datasets"][0]["manifest_summary"]["row_count"] = 4
+    _write_json(run_path, payload)
+
+    result = module.compare_runs(
+        baseline_root=baseline,
+        current_root=current,
+        compare_root=tmp_path / "compare",
+    )
+
+    assert result["overall_status"] == "FAIL"
+    assert result["data_results"][0]["status"] == "FAIL"
