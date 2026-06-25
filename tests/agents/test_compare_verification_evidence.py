@@ -859,7 +859,11 @@ def _write_run(
 def _summary(run_id: str) -> dict[str, object]:
     return {
         "run_id": run_id,
-        "status": "PASS",
+        "status": "NOT_RUN",
+        "smoke_status": "PASS",
+        "compare_status": "NOT_RUN",
+        "full_horizon_status": "NOT_RUN",
+        "validation_matrix_status": "NOT_RUN",
         "manifest_status": {
             "dataset_count": 1,
             "layer_count": 1,

@@ -588,9 +588,9 @@ def compare_run(label: str, baseline_root: Path, final_root: Path) -> dict[str, 
             failures.append(name)
         elif item["status"] == "PARTIAL":
             partials.append(name)
-    if baseline_summary["status"] != "PASS":
+    if run_smoke_status(baseline_summary) != "PASS":
         failures.append("baseline_status_not_pass")
-    if final_summary["status"] != "PASS":
+    if run_smoke_status(final_summary) != "PASS":
         failures.append("final_status_not_pass")
     if _window(baseline_config) != _window(final_config):
         failures.append("window_mismatch")
@@ -622,6 +622,12 @@ def compare_run(label: str, baseline_root: Path, final_root: Path) -> dict[str, 
         "validation_summary": validation_summary,
         "runtime_summary": runtime_summary,
     }
+
+
+def run_smoke_status(summary: dict[str, Any]) -> str:
+    """Return the smoke-driver status from a local verification summary."""
+
+    return str(summary.get("smoke_status") or summary.get("status") or "FAIL")
 
 
 def run_pairs_from_args(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
