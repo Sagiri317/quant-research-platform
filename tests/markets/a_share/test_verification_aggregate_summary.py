@@ -38,7 +38,7 @@ def test_aggregates_summary_is_row_order_and_file_split_insensitive() -> None:
     )
 
 
-def test_aggregates_report_artifact_frames_are_lazy(
+def test_aggregates_run_output_frames_are_lazy(
     monkeypatch,
     tmp_path,
 ) -> None:

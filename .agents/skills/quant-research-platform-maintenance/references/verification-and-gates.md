@@ -19,7 +19,7 @@
 - governance script PASS
 - code-map flow PASS
 - handoff verifier PASS
-- single verifier package-safety scan PASS
+- single handoff verifier safety scan PASS
 - source-tree scan PASS
 - compare PASS
 - sidecar PASS

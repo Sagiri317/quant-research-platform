@@ -38,7 +38,7 @@ templates/     机器输入模板
 - governance gate：检查 active docs、privacy、stale facts、status token。
 - naming gate：检查 retired governance path、文件/路径名、Python symbol 和静态字符串拼接。
 - code-map gate：检查代码地图与当前合同一致。
-- handoff gate：检查 builder、verifier、source-tree scan、single verifier package-safety scan。
+- handoff gate：检查 builder、verifier、source-tree scan、single handoff verifier safety scan。
 - test gate：检查当前合同测试。
 
 ## 返工防护

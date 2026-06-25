@@ -177,7 +177,7 @@ def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
     )
     text = md_path.read_text(encoding="utf-8")
 
-    assert evidence["status"] == "FAIL"
+    assert evidence["status"] == "NOT_RUN"
     assert "verification-output/s1" in text
     assert str(tmp_path) not in text
 
@@ -190,7 +190,7 @@ def test_verification_evidence_summary_and_md_avoid_absolute_paths(tmp_path):
         "source_asset_id",
     ],
 )
-def test_share_safety_scan_rejects_private_markers(tmp_path, text):
+def test_share_safety_scan_rejects_provider_source_markers(tmp_path, text):
     path = tmp_path / "unsafe.md"
     path.write_text(text, encoding="utf-8")
 

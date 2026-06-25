@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from quant_research_platform.policy.share_safety import sanitize_public_text
+from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.reports.schema_inventory import (
     build_schema_inventory_payload,
@@ -65,7 +65,7 @@ def schema_inventory(
     try:
         inventory = build_schema_inventory_payload(project_root)
     except Exception as exc:
-        typer.echo(sanitize_public_text(str(exc)), err=True)
+        typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
     atomic_write_text(
         output,
@@ -165,10 +165,10 @@ def evidence_run(
             )
         )
     except Exception as exc:
-        typer.echo(sanitize_public_text(str(exc)), err=True)
+        typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(
-        sanitize_public_text(
+        sanitize_shared_text(
             f"status={result.status} output_root={result.output_root} "
             f"run_id={result.run_id}"
         )

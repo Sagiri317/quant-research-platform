@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from quant_research_platform.policy.share_safety import PRIVATE_BOUNDARY_ROOTS
+from quant_research_platform.policy.share_safety import LOCAL_ONLY_ROOTS
 
 
 def load_governance_contract() -> Any:
@@ -181,10 +181,10 @@ def structured_value_document(values: Iterable[str]) -> str:
     )
 
 
-def representative_private_paths() -> tuple[str, ...]:
+def representative_local_only_paths() -> tuple[str, ...]:
     """Derive public-unsafe path fixtures from runtime privacy roots."""
 
-    return tuple(f"{root}/negative-fixture" for root in PRIVATE_BOUNDARY_ROOTS)
+    return tuple(f"{root}/negative-fixture" for root in LOCAL_ONLY_ROOTS)
 
 
 def source_tree_sensitive_rule_summary(

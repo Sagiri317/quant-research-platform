@@ -27,7 +27,7 @@ def _summary(**overrides):
 def test_verification_status_allows_first_night_without_smoke_or_full_horizon() -> None:
     summary = _summary()
 
-    assert summary["status"] == "FAIL"
+    assert summary["status"] == "NOT_RUN"
     assert summary["smoke_status"] == "NOT_RUN"
     assert summary["compare_status"] == "NOT_RUN"
     assert summary["full_horizon_status"] == "NOT_RUN"

@@ -26,10 +26,10 @@ def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
-        # Intentional fake private markers for negative safety coverage.
-        ({"path": "data/raw/vendor/file.csv"}, "private_path"),
-        ({"path": "data/research/a_share/demo"}, "private_path"),
-        ({"path": "/workspace/qrp/data/research/a_share/demo"}, "private_path"),
+        # Intentional fake provider/source markers for negative safety coverage.
+        ({"path": "data/raw/vendor/file.csv"}, "local_only_path"),
+        ({"path": "data/research/a_share/demo"}, "local_only_path"),
+        ({"path": "/workspace/qrp/data/research/a_share/demo"}, "local_only_path"),
         ({"file": "daily__vendor__export-20240101.csv"}, "raw_export_filename"),
         ({"row_sample": [{"a": 1}]}, "row_sample"),
     ],
@@ -104,6 +104,6 @@ def test_manifest_logical_path_falls_back_to_posix(tmp_path: Path) -> None:
 
 
 def test_manifest_logical_path_uses_last_generated_marker() -> None:
-    path = Path("sandbox/team/qrp/reports/private_research/run/manifests/run.json")
+    path = Path("sandbox/team/qrp/run_outputs/local/run/manifests/run.json")
 
     assert logical_path(path) == "manifests/run.json"

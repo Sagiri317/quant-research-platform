@@ -17,5 +17,5 @@ def test_prediction_report_errors_use_artifact_semantics() -> None:
     )
 
     assert "prediction_outputs" in source
-    assert "missing_prediction_artifact_columns" in source
-    assert "unregistered_prediction_artifact_columns" in source
+    assert "missing_prediction_output_columns" in source
+    assert "unregistered_prediction_output_columns" in source

@@ -73,7 +73,7 @@ def test_workflow_run_summary_to_public_record_sanitizes_mapping(monkeypatch) ->
         return {"sanitized": True}
 
     summary = _summary(workflow_id="workflow-private-marker")
-    monkeypatch.setattr(workflow_records, "sanitize_public_object", fake_sanitizer)
+    monkeypatch.setattr(workflow_records, "sanitize_shared_object", fake_sanitizer)
 
     assert workflow_run_summary_to_public_record(summary) == {"sanitized": True}
     assert calls == [summary.to_record()]
@@ -86,7 +86,7 @@ def test_workflow_run_summary_to_public_record_rejects_non_mapping(
 
     monkeypatch.setattr(
         workflow_records,
-        "sanitize_public_object",
+        "sanitize_shared_object",
         lambda _value: ["not-a-mapping"],
     )
 

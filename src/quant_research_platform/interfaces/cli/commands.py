@@ -7,7 +7,7 @@ from collections.abc import Callable
 import typer
 
 from quant_research_platform.interfaces import services
-from quant_research_platform.policy.share_safety import sanitize_public_text
+from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import research_profile
 
 app = typer.Typer(add_completion=False)
@@ -22,7 +22,7 @@ app.add_typer(research_datasets_app, name="research-datasets")
 
 
 def _echo_safe(value: object, *, err: bool = False) -> None:
-    typer.echo(sanitize_public_text(value), err=err)
+    typer.echo(sanitize_shared_text(value), err=err)
 
 
 def _run_cli(operation: Callable[[], object]) -> None:

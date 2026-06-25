@@ -8,9 +8,6 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.layout import (
-    LocalVerificationLayout,
-)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -25,6 +22,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios as a_share_research_scenarios,
 )
+from quant_research_platform.policy.share_safety import local_output_root_reason
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.datasets import read_research_dataset
 from quant_research_platform.runtime import resources as resource_module
@@ -35,6 +33,9 @@ from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
     run_local_verification,
+)
+from quant_research_platform.workflows.local_verification_layout import (
+    LocalVerificationLayout,
 )
 from tests.helpers import frequency_ids
 
@@ -77,7 +78,7 @@ def _repo_output_root(
     return repo_root.joinpath(*parts)
 
 
-def test_verification_evidence_workflow_rejects_existing_output_root(
+def test_local_verification_workflow_rejects_existing_output_root(
     tmp_path,
     monkeypatch,
 ):
@@ -95,7 +96,7 @@ def test_verification_evidence_workflow_rejects_existing_output_root(
         run_local_verification(config)
 
 
-def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
+def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
     config = _verification_config(
         output_root=tmp_path / "verification-output" / "s1",
         start_date="2016-12-31",
@@ -107,7 +108,7 @@ def test_verification_evidence_workflow_rejects_invalid_date_range(tmp_path):
         run_local_verification(config)
 
 
-def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_path):
+def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
         run_local_verification(
             _verification_config(
@@ -155,7 +156,7 @@ def test_verification_evidence_workflow_rejects_invalid_override_windows(tmp_pat
     assert not (tmp_path / "verification-output" / "bad-prediction-end").exists()
 
 
-def test_verification_evidence_workflow_rejects_override_windows_outside_evidence_range(
+def test_local_verification_workflow_rejects_override_windows_outside_evidence_range(
     tmp_path,
 ) -> None:
     cases = [
@@ -217,7 +218,7 @@ def test_verification_evidence_workflow_rejects_override_windows_outside_evidenc
         assert not output_root.exists()
 
 
-def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_path):
+def test_local_verification_run_id_can_be_explicit_long_semantic_value(tmp_path):
     config = _verification_config(
         output_root=tmp_path / "verification-output" / "s1",
         start_date="2014-01-01",
@@ -229,7 +230,7 @@ def test_verification_evidence_run_id_can_be_explicit_long_semantic_value(tmp_pa
     assert config.run_id == "verification-evidence-smoke-a-share-2014-2016"
 
 
-def test_verification_evidence_run_id_uses_shared_public_safe_contract(
+def test_local_verification_run_id_uses_shared_public_safe_contract(
     tmp_path: Path,
 ) -> None:
     assert (
@@ -258,59 +259,61 @@ def test_verification_evidence_run_id_uses_shared_public_safe_contract(
             module.resolve_local_verification_run_id(run_id, output_root)
 
 
-def test_verification_evidence_output_root_respects_repo_local_boundary(
+def test_local_verification_output_root_respects_repo_local_boundary(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
-    with pytest.raises(ValueError, match="unignored_local_output_root"):
-        module.validate_local_output_root(
-            repo_root / "verification-output" / "s1",
-            repo_root,
-        )
+    def validate_local_output_root(output_root: Path, root: Path) -> None:
+        reason = local_output_root_reason(output_root, root)
+        if reason is not None:
+            raise ValueError(reason)
 
-    module.validate_local_output_root(
+    with pytest.raises(ValueError, match="unignored_local_output_root"):
+        validate_local_output_root(repo_root / "verification-output" / "s1", repo_root)
+
+    validate_local_output_root(
         repo_root / "run_outputs" / "local" / "a_share" / "s1",
         repo_root,
     )
-    module.validate_local_output_root(
+    validate_local_output_root(
         repo_root / ".run" / "local" / "s1",
         repo_root,
     )
-    module.validate_local_output_root(
+    validate_local_output_root(
         repo_root / ".run" / "smoke" / "s1",
         repo_root,
     )
-    module.validate_local_output_root(
+    validate_local_output_root(
         repo_root / ".run" / "evidence-final" / "commit-sha" / "window-a",
         repo_root,
     )
-    module.validate_local_output_root(
+    validate_local_output_root(
         repo_root / ".run" / "evidence-refreshed-baseline" / "commit-sha" / "window-b",
         repo_root,
     )
-    module.validate_local_output_root(
+    validate_local_output_root(
         repo_root / ".run" / "s86",
         repo_root,
     )
     with pytest.raises(ValueError, match="unignored_local_output_root"):
-        module.validate_local_output_root(
+        validate_local_output_root(
             repo_root / ".run" / "reviews" / "s1",
             repo_root,
         )
     with pytest.raises(ValueError, match="unignored_local_output_root"):
-        module.validate_local_output_root(
+        validate_local_output_root(
             repo_root / "output" / "s1",
             repo_root,
         )
     with pytest.raises(ValueError, match="unignored_local_output_root"):
-        module.validate_local_output_root(
+        validate_local_output_root(
             repo_root / "tmp-output" / "s1",
             repo_root,
         )
     with pytest.raises(ValueError, match="unignored_local_output_root"):
-        module.validate_local_output_root(
+        validate_local_output_root(
             tmp_path / "outside" / "verification-output" / "s1",
             repo_root,
         )
@@ -352,7 +355,7 @@ def test_prepare_output_root_detects_repo_boundary_outside_cwd(
     assert not output_root.exists()
 
 
-def test_verification_evidence_uses_explicit_prediction_windows() -> None:
+def test_local_verification_uses_explicit_prediction_windows() -> None:
     windows = module._resolve_effective_windows(
         _verification_config(
             output_root=Path("unused"),
@@ -371,7 +374,7 @@ def test_verification_evidence_uses_explicit_prediction_windows() -> None:
     }
 
 
-def test_verification_evidence_requires_prediction_window_order() -> None:
+def test_local_verification_requires_prediction_window_order() -> None:
     with pytest.raises(
         ValueError,
         match="prediction_train_end_must_precede_test_start",
@@ -390,7 +393,7 @@ def test_verification_evidence_requires_prediction_window_order() -> None:
         )
 
 
-def test_verification_evidence_workflow_resolves_independent_windows(
+def test_local_verification_workflow_resolves_independent_windows(
     tmp_path,
     monkeypatch,
 ):
@@ -513,7 +516,7 @@ def test_verification_evidence_workflow_resolves_independent_windows(
         (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
     )
 
-    assert result.status == "FAIL"
+    assert result.status == "NOT_RUN"
     assert calls == [
         "interim",
         "processed",
@@ -547,7 +550,7 @@ def test_verification_evidence_workflow_resolves_independent_windows(
     }
 
 
-def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
+def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -651,7 +654,7 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
         (output_root / "config" / "run_config.json").read_text(encoding="utf-8")
     )
 
-    assert result.status == "FAIL"
+    assert result.status == "NOT_RUN"
     assert from_environment_calls == 1
     assert snapshots == [policy] * (5 + expected_prediction_count)
     assert run_config["runtime_resource_policy"] == policy.to_payload()
@@ -681,7 +684,7 @@ def test_verification_evidence_workflow_uses_one_runtime_policy_snapshot(
     assert execution_plan["full_horizon_tiling"]["status"] == "NOT_LANDED"
 
 
-def test_verification_evidence_workflow_runs_injected_generation_and_writes_artifacts(
+def test_local_verification_workflow_runs_injected_generation_and_writes_artifacts(
     tmp_path,
     monkeypatch,
 ):
@@ -813,7 +816,7 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
     assert evaluation_run_ids == ["signal_forward_return_20d"]
     assert prediction_ids == expected_prediction_ids
     assert portfolio_ids == ["signal_forward_return_20d_portfolio"]
-    assert result.status == "FAIL"
+    assert result.status == "NOT_RUN"
     assert result.run_id == "s1"
     assert result.output_root == "s1"
     assert (output_root / "config" / "run_config.json").is_file()
@@ -843,7 +846,7 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
         (output_root / "timings" / "timings.json").read_text(encoding="utf-8")
     )
     timings_csv = (output_root / "timings" / "timings.csv").read_text(encoding="utf-8")
-    assert summary["status"] == "FAIL"
+    assert summary["status"] == "NOT_RUN"
     assert validation["status"] == "PASS"
     assert summary["run_id"] == "s1"
     assert run_config["output_root"] == "s1"
@@ -867,7 +870,7 @@ def test_verification_evidence_workflow_runs_injected_generation_and_writes_arti
     assert LEGACY_RSS_PEAK_FIELD not in validation_record
 
 
-def test_verification_evidence_workflow_preserves_dataset_manifests(
+def test_local_verification_workflow_preserves_dataset_manifests(
     tmp_path,
     monkeypatch,
 ):
@@ -934,11 +937,11 @@ def test_verification_evidence_workflow_preserves_dataset_manifests(
     )
     manifest = inspect_dataset(captured_roots[0]).manifest
 
-    assert result.status == "FAIL"
+    assert result.status == "NOT_RUN"
     assert manifest == captured_manifests[0]
 
 
-def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
+def test_local_verification_workflow_fails_when_dataset_manifest_is_missing(
     tmp_path,
     monkeypatch,
 ):
@@ -1013,7 +1016,7 @@ def test_verification_evidence_workflow_fails_when_dataset_manifest_is_missing(
     assert "`PASS`" not in summary_md
 
 
-def test_verification_evidence_workflow_runs_real_tiny_research_stack(
+def test_local_verification_workflow_runs_real_tiny_research_stack(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1089,7 +1092,7 @@ def test_verification_evidence_workflow_runs_real_tiny_research_stack(
         time_window=TimeWindow("2014-01-02", "2015-01-05"),
     )
 
-    assert result.status == "FAIL"
+    assert result.status == "NOT_RUN"
     assert summary["manifest_status"]["run_output_count"] == len(prediction_ids) + 2
     assert set(metrics["signal"]) == {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert "mom_20d_zscore" in research.columns

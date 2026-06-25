@@ -37,7 +37,7 @@ git branch -a
 
 ## 4. `.agents` 与 `.run`
 
-`.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、single verifier package-safety scan、governance check 等工具必须从这里读取。
+`.agents/skills/quant-research-platform-maintenance/scripts/` 是 tracked governance tooling。handoff builder、verifier、single handoff verifier safety scan、governance check 等工具必须从这里读取。
 
 `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，集中定义 active governance docs、retired governance paths、retired naming、retired path/name/symbol/structured-key/synthesized-string patterns、version surface policy、stale truth、retired public surface、negative-test allowlist、source-tree scan allowlist、package forbidden path parts 和 status token。其他治理 gate 可以分层执行，但不得复制一份平行规则表。
 
@@ -52,7 +52,7 @@ git branch -a
 - `NOT_RUN`：未运行，不得伪装为 PASS。
 - `BLOCKED`：因环境、依赖、权限、超时或边界无法运行，必须说明阻塞条件。
 
-pytest PASS、governance PASS、handoff verifier PASS、single verifier package-safety scan PASS、source-tree scan PASS、compare PASS、sidecar PASS 不能互相替代。每个 PASS 只覆盖对应命令和对应 scope。
+pytest PASS、governance PASS、handoff verifier PASS、single handoff verifier safety scan PASS、source-tree scan PASS、compare PASS、sidecar PASS 不能互相替代。每个 PASS 只覆盖对应命令和对应 scope。
 
 ## 6. 架构职责
 

@@ -50,7 +50,7 @@ from quant_research_platform.research.predictions import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.research.prediction_artifact_helpers import (
+from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
     prediction_frame_from_artifact_frames,
     write_prediction_result,
@@ -1129,13 +1129,13 @@ def test_rank_ensemble_prediction_outputs_are_chunk_boundary_invariant(
     )
     result = fit_model_result(frame, model_spec)
 
-    one_chunk = _prediction_artifact_scores(
+    one_chunk = _prediction_output_scores(
         [frame],
         prediction_spec=prediction_spec,
         model_spec=model_spec,
         result=result,
     )
-    split_chunks = _prediction_artifact_scores(
+    split_chunks = _prediction_output_scores(
         [chunk for _, chunk in frame.groupby("timestamp", sort=True)],
         prediction_spec=prediction_spec,
         model_spec=model_spec,
@@ -1148,7 +1148,7 @@ def test_rank_ensemble_prediction_outputs_are_chunk_boundary_invariant(
     )
 
 
-def _prediction_artifact_scores(
+def _prediction_output_scores(
     frames: list[pd.DataFrame],
     *,
     prediction_spec: PredictionSpec,

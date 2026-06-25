@@ -47,12 +47,14 @@ SCAN_ROOTS = (
 RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
     Path("tests/agents/handoff/test_build_handoff_package_integration.py"),
     Path("tests/agents/handoff/test_handoff_tools.py"),
-    Path("tests/agents/handoff/test_package_safety_check.py"),
+    Path("tests/agents/handoff/test_handoff_package_verifier.py"),
     Path("tests/architecture/test_environment_contract.py"),
     Path("tests/architecture/test_factor_contract_terms.py"),
     Path("tests/architecture/test_handoff_package_contract.py"),
-    Path("tests/workflows/test_verification_evidence.py"),
-    Path("tests/workflows/test_verification_evidence_contract.py"),
+    Path("tests/policy/test_share_safety.py"),
+    Path("tests/policy/test_share_safety_runtime_edges.py"),
+    Path("tests/workflows/test_local_verification.py"),
+    Path("tests/workflows/test_local_verification_contract.py"),
 } | {Path(path) for path in PRIVACY_NEGATIVE_TEST_PATHS}
 RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS = {
     Path("src/quant_research_platform/workflows/local_verification.py"): (
@@ -245,7 +247,7 @@ def test_business_chunk_consumers_do_not_concat_unbounded_research_chunks() -> N
     assert hits == []
 
 
-def test_prediction_artifact_builder_does_not_prederive_oos_end() -> None:
+def test_prediction_output_builder_does_not_prederive_oos_end() -> None:
     text = Path(
         "src/quant_research_platform/research/predictions/outputs.py"
     ).read_text(encoding="utf-8")
@@ -253,7 +255,7 @@ def test_prediction_artifact_builder_does_not_prederive_oos_end() -> None:
     assert '"oos_end"' not in text
 
 
-def test_verification_evidence_replaces_retired_public_names() -> None:
+def test_local_verification_replaces_retired_public_names() -> None:
     expected_files = {
         Path("src/quant_research_platform/workflows/local_verification.py"),
         Path("src/quant_research_platform/reports/verification_evidence.py"),
@@ -452,7 +454,7 @@ DATA_PRODUCT_CURRENT_VOCAB_ALLOWED_NEGATIVE_TESTS = {
         "/api/0.1/catalog/data-products",
         "data-products",
     ),
-    Path("tests/catalog/test_catalog_profiles.py"): ('"data_products"',),
+    Path("tests/catalog/test_profiles_composition_root.py"): ('"data_products"',),
 }
 
 RETIRED_DATA_LAYER_STRUCTURE_PATTERNS = (

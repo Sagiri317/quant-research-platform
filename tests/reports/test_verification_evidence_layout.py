@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from quant_research_platform.artifacts.layout import (
+from quant_research_platform.workflows.local_verification_layout import (
     LocalVerificationLayout,
 )
 
 
-def test_verification_evidence_layout_uses_normal_internal_directory_names() -> None:
+def test_local_verification_layout_uses_normal_internal_directory_names() -> None:
     output_root = Path("verification-output") / "s1"
     layout = LocalVerificationLayout.from_output_root(output_root)
 

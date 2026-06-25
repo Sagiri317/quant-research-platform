@@ -16,7 +16,7 @@ from quant_research_platform.research.models.supervised import (
 from quant_research_platform.research.predictions.outputs import (
     validate_prediction_outputs,
 )
-from tests.research.prediction_artifact_helpers import (
+from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
 )
 
@@ -77,7 +77,7 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
     assert np.isfinite(predictions["prediction_score"]).any()
 
 
-def test_prediction_artifact_helpers_do_not_export_bundle_semantics() -> None:
+def test_prediction_output_helpers_do_not_export_bundle_semantics() -> None:
     frame = _model_frame()
     spec = PredictionSpec(
         prediction_id="prediction_demo",

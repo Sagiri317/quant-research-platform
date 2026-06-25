@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
-    sanitize_public_object,
+    sanitize_shared_object,
 )
 from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage.atomic import atomic_write_text
@@ -25,7 +25,7 @@ def read_manifest(path: Path) -> dict[str, Any]:
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
     text = (
-        json.dumps(sanitize_public_object(payload), ensure_ascii=False, indent=2) + "\n"
+        json.dumps(sanitize_shared_object(payload), ensure_ascii=False, indent=2) + "\n"
     )
     return atomic_write_text(path, text, encoding="utf-8")
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from quant_research_platform.policy.share_safety import public_text_unsafe_reason
+from quant_research_platform.policy.share_safety import unsafe_for_share_reason
 
 _RUN_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SOURCE_PROVIDER_TOKEN_RE = re.compile(
@@ -17,10 +17,15 @@ def unsafe_identifier_reason(value: object) -> str | None:
 
     text = str(value)
     if _SOURCE_PROVIDER_TOKEN_RE.search(text):
-        return "private_marker"
+        return "provider_source_marker"
     tokenized = text.replace("_", " ").replace("-", " ")
-    reason = public_text_unsafe_reason(tokenized)
-    if reason in {"stock_code_sample", "private_marker", "local_path", "private_path"}:
+    reason = unsafe_for_share_reason(tokenized)
+    if reason in {
+        "stock_code_sample",
+        "provider_source_marker",
+        "local_path",
+        "local_only_path",
+    }:
         return reason
     return None
 

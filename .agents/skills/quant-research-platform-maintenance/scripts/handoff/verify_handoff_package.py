@@ -26,18 +26,16 @@ if str(SCRIPT_PARENT) not in sys.path:
 if str(SCRIPT_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPT_REPO_SRC))
 
-from build_handoff_package import (  # noqa: E402
+from governance_contract import (  # noqa: E402
     BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
+    PACKAGE_FORBIDDEN_PATH_PARTS,
+    VALID_STATUS_TOKENS,
     VALIDATION_ROW_KEYS,
     handoff_evidence_blocked_key_failures,
     is_reserved_handoff_evidence_path,
     source_tree_scan_from_clone,
-)
-from governance_contract import (  # noqa: E402
-    PACKAGE_FORBIDDEN_PATH_PARTS,
-    VALID_STATUS_TOKENS,
 )
 from governance_contract import (  # noqa: E402
     is_scanner_definition_line as is_shared_scanner_definition_line,
@@ -47,24 +45,72 @@ from governance_contract import (  # noqa: E402
 )
 
 try:
+    from quant_research_platform.policy.check_status import (  # noqa: E402
+        aggregate_component_status,
+        aggregate_validation_matrix_status,
+    )
     from quant_research_platform.policy.share_safety import (  # noqa: E402
-        public_text_unsafe_reason,
+        unsafe_for_share_reason,
     )
 except ModuleNotFoundError:  # pragma: no cover - exercised by copied handoff tools.
-    policy_path = (
+    status_policy_path = (
+        SCRIPT_REPO_SRC / "quant_research_platform" / "policy" / "check_status.py"
+    )
+    if status_policy_path.exists():
+        status_policy_spec = importlib.util.spec_from_file_location(
+            "qrp_policy_check_status",
+            status_policy_path,
+        )
+        if status_policy_spec is None or status_policy_spec.loader is None:
+            raise
+        status_policy_module = importlib.util.module_from_spec(status_policy_spec)
+        status_policy_spec.loader.exec_module(status_policy_module)
+        aggregate_component_status = status_policy_module.aggregate_component_status
+        aggregate_validation_matrix_status = (
+            status_policy_module.aggregate_validation_matrix_status
+        )
+    else:
+        def aggregate_component_status(statuses: object) -> str:
+            values = tuple(statuses)
+            if not values:
+                return "NOT_RUN"
+            if "FAIL" in values:
+                return "FAIL"
+            if "BLOCKED" in values:
+                return "BLOCKED"
+            if "NOT_RUN" in values:
+                return "FAIL" if "PASS" in values else "NOT_RUN"
+            return "PASS"
+
+        def aggregate_validation_matrix_status(statuses: object) -> str:
+            values = tuple(statuses)
+            if not values:
+                return "NOT_RUN"
+            if "FAIL" in values:
+                return "FAIL"
+            if "BLOCKED" in values:
+                return "BLOCKED"
+            if "NOT_RUN" in values:
+                return "NOT_RUN"
+            return "PASS"
+    share_policy_path = (
         SCRIPT_REPO_SRC / "quant_research_platform" / "policy" / "share_safety.py"
     )
-    policy_spec = importlib.util.spec_from_file_location(
-        "qrp_policy_share_safety",
-        policy_path,
-    )
-    if policy_spec is None or policy_spec.loader is None:
-        raise
-    policy_module = importlib.util.module_from_spec(policy_spec)
-    policy_spec.loader.exec_module(policy_module)
-    public_text_unsafe_reason = policy_module.public_text_unsafe_reason
+    if share_policy_path.exists():
+        share_policy_spec = importlib.util.spec_from_file_location(
+            "qrp_policy_share_safety",
+            share_policy_path,
+        )
+        if share_policy_spec is None or share_policy_spec.loader is None:
+            raise
+        share_policy_module = importlib.util.module_from_spec(share_policy_spec)
+        share_policy_spec.loader.exec_module(share_policy_module)
+        unsafe_for_share_reason = share_policy_module.unsafe_for_share_reason
+    else:
+        def unsafe_for_share_reason(text: object) -> str | None:
+            del text
+            return None
 
-VALID_STATUSES = set(VALID_STATUS_TOKENS)
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_ZIP_ENTRIES = {
     "artifact_manifest.json",
@@ -453,12 +499,12 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
         for line in text.splitlines()
         if not is_scanner_definition_line(line, name=name)
     )
-    shared_reason = public_text_unsafe_reason(scan_text)
-    if shared_reason in {"private_path", "local_path"}:
+    shared_reason = unsafe_for_share_reason(scan_text)
+    if shared_reason in {"local_only_path", "local_path"}:
         return "local_absolute_path"
     if shared_reason == "credential":
         return "credential"
-    if shared_reason == "private_marker":
+    if shared_reason == "provider_source_marker":
         return "vendor_marker"
     if shared_reason == "stock_code_sample":
         return "stock_sample"
@@ -470,10 +516,10 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
         return "vendor_filename"
     if shared_reason == "source_local_key":
         return "source_local_key"
-    if shared_reason == "private_runtime_payload":
-        return "private_runtime_payload"
-    if shared_reason == "private_run_path":
-        return "private_run_path"
+    if shared_reason == "runtime_payload":
+        return "runtime_payload"
+    if shared_reason == "local_run_path":
+        return "local_run_path"
     if stale_marker(scan_text) is not None:
         return "stale_marker"
     return None
@@ -646,7 +692,7 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
     missing = sorted(required_summary - set(summary))
     failures.extend(f"sidecar_status_summary_missing: {key}" for key in missing)
     for key in ("validation", "handoff_verify", "handoff_safety"):
-        if key in summary and summary[key] not in VALID_STATUSES:
+        if key in summary and summary[key] not in VALID_STATUS_TOKENS:
             failures.append(f"sidecar_status_invalid: {key}")
     for key in ("blocked_count", "fail_count"):
         if key in summary and not isinstance(summary[key], int):
@@ -830,7 +876,7 @@ def validation_sidecar_status_failures(
     if not isinstance(status_summary, dict):
         return failures
     row_status = validation_status_map(validation_payload)
-    validation_status = aggregate_status(row_status.values())
+    validation_status = aggregate_component_status(row_status.values())
     if status_summary.get("validation") != validation_status:
         failures.append("validation_status_summary_mismatch")
     pairs = {
@@ -862,21 +908,9 @@ def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
             continue
         name = row.get("name")
         status = str(row.get("status") or "").strip().upper()
-        if isinstance(name, str) and status in VALID_STATUSES:
+        if isinstance(name, str) and status in VALID_STATUS_TOKENS:
             result[name] = status
     return result
-
-
-def aggregate_status(statuses: object) -> str:
-    values = (
-        tuple(statuses) if not isinstance(statuses, dict) else tuple(statuses.values())
-    )
-    if not values:
-        return "NOT_RUN"
-    for status in ("FAIL", "BLOCKED", "NOT_RUN"):
-        if status in values:
-            return status
-    return "PASS"
 
 
 def verify_handoff_evidence_json(
@@ -942,7 +976,7 @@ def verify_generation_evidence(
         failures.append("generation_evidence_schema_version_mismatch")
     if payload.get("mode") not in {"evidence", "pr_closure"}:
         failures.append("generation_evidence_mode_invalid")
-    if payload.get("validation_status") not in VALID_STATUSES:
+    if payload.get("validation_status") not in VALID_STATUS_TOKENS:
         failures.append("generation_evidence_validation_status_invalid")
     if payload.get("zip_sha256_source") != "sidecar":
         failures.append("generation_zip_sha256_source_mismatch")
@@ -1154,7 +1188,7 @@ def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
         failures.append("smoke_compare_status_record_status_invalid")
     if "overall_smoke_compare_status" not in payload:
         failures.append("smoke_compare_status_overall_missing")
-    elif payload.get("overall_smoke_compare_status") not in VALID_STATUSES:
+    elif payload.get("overall_smoke_compare_status") not in VALID_STATUS_TOKENS:
         failures.append("smoke_compare_status_overall_invalid")
     results = payload.get("results")
     if not isinstance(results, list) or not results:
@@ -1166,14 +1200,14 @@ def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
             failures.append(f"smoke_compare_status_result_not_object: {index}")
             continue
         status = row.get("status")
-        if status not in VALID_STATUSES:
+        if status not in VALID_STATUS_TOKENS:
             failures.append(f"smoke_compare_status_result_status_invalid: {index}")
             continue
         result_statuses.append(str(status))
         for key in ("name", "reason"):
             if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
                 failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
-    expected_overall = aggregate_status(result_statuses)
+    expected_overall = aggregate_validation_matrix_status(result_statuses)
     if payload.get("overall_smoke_compare_status") != expected_overall:
         failures.append(f"smoke_compare_status_overall_mismatch: {expected_overall}")
     return failures
@@ -1186,7 +1220,7 @@ def verify_source_tree_scan_evidence(
     failures: list[str] = []
     if payload.get("schema_version") != "handoff-source-tree-scan/0.1":
         failures.append("source_tree_scan_schema_version_mismatch")
-    if payload.get("status") not in VALID_STATUSES:
+    if payload.get("status") not in VALID_STATUS_TOKENS:
         failures.append("source_tree_scan_status_invalid")
     if payload.get("status") != "PASS":
         failures.append("source_tree_scan_not_pass")

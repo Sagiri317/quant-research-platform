@@ -31,7 +31,7 @@ def prediction_frame_from_artifact(
     model_metadata: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     with TemporaryDirectory() as temp_dir:
-        prediction, _, _ = write_prediction_artifact_and_read(
+        prediction, _, _ = write_prediction_output_and_read(
             Path(temp_dir),
             (frame,),
             spec,
@@ -53,7 +53,7 @@ def prediction_frame_from_artifact_frames(
     model_metadata: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     with TemporaryDirectory() as temp_dir:
-        prediction, _, _ = write_prediction_artifact_and_read(
+        prediction, _, _ = write_prediction_output_and_read(
             Path(temp_dir),
             frames,
             spec,
@@ -65,7 +65,7 @@ def prediction_frame_from_artifact_frames(
         return prediction
 
 
-def write_prediction_artifact_and_read(
+def write_prediction_output_and_read(
     project_root: Path,
     frames: tuple[pd.DataFrame, ...],
     spec: PredictionSpec,

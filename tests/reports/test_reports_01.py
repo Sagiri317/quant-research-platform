@@ -25,7 +25,7 @@ from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def test_stage_profile_run_outputs_write_only_inside_private_report_boundary(
+def test_stage_profile_run_outputs_write_only_inside_local_output_boundary(
     tmp_path,
 ):
     with StageProfiler(ProfileConfig(enabled=True)) as profiler:
@@ -149,7 +149,7 @@ def test_stage_profile_run_outputs_sanitize_outputs(tmp_path):
     assert "abcdef123456" not in combined
 
 
-def test_report_artifact_writers_do_not_accept_output_root() -> None:
+def test_run_output_writers_do_not_accept_output_root() -> None:
     writer_signatures = (
         inspect.signature(write_stage_profile_run_outputs),
         inspect.signature(write_prediction_run_outputs),

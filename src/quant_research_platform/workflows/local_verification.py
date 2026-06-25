@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,7 +22,6 @@ from quant_research_platform.artifacts.execution_metrics import (
     write_execution_metrics_csv,
     write_execution_metrics_json,
 )
-from quant_research_platform.artifacts.layout import LocalVerificationLayout
 from quant_research_platform.artifacts.run_outputs import (
     write_evaluation_run_outputs,
     write_portfolio_run_outputs,
@@ -33,6 +31,7 @@ from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.policy.share_safety import local_output_root_reason
 from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.reports.verification_evidence import (
     build_validation_summary,
@@ -53,7 +52,10 @@ from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
-from quant_research_platform.runtime.logical_paths import logical_path
+from quant_research_platform.runtime.logical_paths import (
+    EVIDENCE_LOGICAL_PATH_MARKERS,
+    logical_path,
+)
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
@@ -64,16 +66,9 @@ from quant_research_platform.storage.manifests import (
     write_layer_manifest,
     write_run_manifest,
 )
-
-_LOGICAL_PATH_MARKERS = (
-    "data",
-    "run_outputs",
-    "handoff_evidence",
-    "manifests",
-    "validations",
-    "timings",
+from quant_research_platform.workflows.local_verification_layout import (
+    LocalVerificationLayout,
 )
-_RUN_WORKSPACE_DIR = ".run"
 
 
 @dataclass(frozen=True)
@@ -134,7 +129,10 @@ def run_local_verification(
                 "prediction_test_end": config.prediction_test_end,
             },
             "effective_windows": effective_windows,
-            "output_root": logical_path(output_root, markers=_LOGICAL_PATH_MARKERS),
+            "output_root": logical_path(
+                output_root,
+                markers=EVIDENCE_LOGICAL_PATH_MARKERS,
+            ),
             "replace_output": config.replace_output,
             "runtime_resource_policy": resource_policy.to_payload(),
             "workflow_id": _OWNERSHIP_MARKER,
@@ -385,11 +383,11 @@ def _run_local_verification_with_policy(
         **evidence_summary,
         "validation_summary_path": logical_path(
             layout.validations_root / "validation_summary.json",
-            markers=_LOGICAL_PATH_MARKERS,
+            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
         ),
         "run_manifest_path": logical_path(
             run_manifest_path,
-            markers=_LOGICAL_PATH_MARKERS,
+            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
         ),
     }
     summary_markdown = render_verification_evidence_markdown(summary)
@@ -398,7 +396,10 @@ def _run_local_verification_with_policy(
     return LocalVerificationRunResult(
         status=str(evidence_summary["status"]),
         run_id=run_id,
-        output_root=logical_path(output_root, markers=_LOGICAL_PATH_MARKERS),
+        output_root=logical_path(
+            output_root,
+            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
+        ),
         summary=summary,
     )
 
@@ -447,27 +448,6 @@ def resolve_local_verification_run_id(
     return validate_run_id(run_id)
 
 
-def validate_local_output_root(output_root: Path, repo_root: Path) -> None:
-    root = Path(repo_root).resolve(strict=False)
-    target = Path(output_root).resolve(strict=False)
-    try:
-        relative = target.relative_to(root)
-    except ValueError:
-        raise ValueError("unignored_local_output_root") from None
-    parts = relative.parts
-    if len(parts) >= 2 and parts[0] == "run_outputs":
-        return
-    if len(parts) >= 2 and parts[0] == _RUN_WORKSPACE_DIR:
-        run_root = parts[1]
-        if (
-            run_root in {"local", "smoke"}
-            or re.fullmatch(r"s[0-9]+", run_root)
-            or re.fullmatch(r"evidence-[a-z0-9][a-z0-9-]*", run_root)
-        ):
-            return
-    raise ValueError("unignored_local_output_root")
-
-
 def _resolve_local_output_repo_root(
     output_root: Path,
     explicit_repo_root: Path | None,
@@ -498,10 +478,12 @@ def _prepare_output_root(
     repo_root: Path | None = None,
 ) -> None:
     output_root = Path(path)
-    validate_local_output_root(
+    reason = local_output_root_reason(
         output_root,
         _resolve_local_output_repo_root(output_root, repo_root),
     )
+    if reason is not None:
+        raise ValueError(reason)
     if output_root.exists() and not replace_output:
         raise ValueError("output_root_already_exists")
     if output_root.exists() and replace_output:

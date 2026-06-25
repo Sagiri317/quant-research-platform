@@ -21,7 +21,7 @@ def test_policy_does_not_import_business_layers() -> None:
 def test_contracts_do_not_own_share_safety_or_identifier_regexes() -> None:
     hits: list[str] = []
     blocked_terms = (
-        "private_path",
+        "local_only_path",
         "provider",
         "source marker",
         "stock_code",

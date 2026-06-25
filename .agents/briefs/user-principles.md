@@ -18,7 +18,7 @@ QRP 是本地量化研究平台，不是生产交易系统，不是 live trading
 
 - 未运行写 `NOT_RUN`。
 - 环境、权限、依赖、超时阻塞写 `BLOCKED`。
-- 不允许把 sidecar PASS、single verifier package-safety scan PASS、pytest PASS、compare PASS 互相替代。
+- 不允许把 sidecar PASS、single handoff verifier safety scan PASS、pytest PASS、compare PASS 互相替代。
 - sandbox 或 Codex 环境中，允许在边界内安装缺失依赖进行测试；缺依赖不是默认跳过理由。
 
 ## 文档偏好

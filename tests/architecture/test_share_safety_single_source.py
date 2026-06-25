@@ -27,7 +27,7 @@ def test_report_and_handoff_safety_do_not_own_text_privacy_regexes() -> None:
         expected_delegate = (
             "evidence_text_unsafe_reason"
             if path == REPORT_SAFETY
-            else "public_text_unsafe_reason"
+            else "unsafe_for_share_reason"
         )
         assert expected_delegate in source
 
@@ -38,8 +38,8 @@ def test_policy_owns_required_text_safety_semantics() -> None:
     for semantic in (
         "raw_export_filename",
         "source_local_key",
-        "private_runtime_payload",
-        "private_run_path",
+        "runtime_payload",
+        "local_run_path",
     ):
         assert semantic in source
 

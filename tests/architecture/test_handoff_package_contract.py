@@ -34,13 +34,18 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
 
     assert "handoff_evidence/" in builder
     assert "handoff_evidence/" in verifier
-    assert "handoff_evidence/generation.json" in builder
+    contract = _load_governance_contract()
+    assert contract.GENERATION_EVIDENCE == "handoff_evidence/generation.json"
+    assert contract.SOURCE_TREE_SCAN_EVIDENCE == (
+        "handoff_evidence/source-tree-scan.json"
+    )
+    assert "GENERATION_EVIDENCE" in builder
     assert "handoff_evidence/generation.json" in verifier
-    assert "handoff_evidence/source-tree-scan.json" in builder
+    assert "SOURCE_TREE_SCAN_EVIDENCE" in builder
     assert "handoff_evidence/source-tree-scan.json" in verifier
     assert "handoff_generation.json" not in builder
     assert "handoff_generation.json" not in verifier
-    source_tree_scan = _load_handoff_builder().source_tree_scan_groups(Path("."))
+    source_tree_scan = contract.source_tree_scan_groups(Path("."))
     assert source_tree_scan["retired_text"]["findings"] == []
     assert source_tree_scan["retired_governance_paths"]["findings"] == []
     assert source_tree_scan["retired_path_names"]["findings"] == []
@@ -55,11 +60,11 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
 
 
 def test_pr_closure_only_entries_are_not_required_for_evidence_mode() -> None:
-    builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     verifier = _load_handoff_verifier()
 
     assert verifier.REQUIRED_ZIP_ENTRIES.isdisjoint(
-        builder.RESERVED_HANDOFF_EVIDENCE_STEMS
+        contract.RESERVED_HANDOFF_EVIDENCE_STEMS
     )
 
 
@@ -73,12 +78,12 @@ def test_handoff_negative_token_is_derived_from_governance_contract() -> None:
 
 
 def test_source_tree_scan_synthesizes_static_string_fragments(tmp_path: Path) -> None:
-    builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     sample = tmp_path / "sample.py"
     source = 'VALUE = "al" + "pha"\nADJACENT = "be" "ta"\n'
     sample.write_text(source, encoding="utf-8")
 
-    findings = builder.source_tree_synthesized_string_findings(
+    findings = contract.source_tree_synthesized_string_findings(
         Path("sample.py"),
         sample,
         source.splitlines(),
@@ -98,14 +103,13 @@ def test_source_tree_scan_synthesizes_static_string_fragments(tmp_path: Path) ->
 
 
 def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
-    builder = _load_handoff_builder()
+    contract = _load_governance_contract()
     relative = Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "build_handoff_package.py"
+        "tests/architecture/test_retired_surface_absent.py"
     )
-    rule = next(iter(builder.SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST[relative]))
+    rule = next(iter(contract.SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST[relative]))
 
-    assert not builder.source_tree_path_allowed(
+    assert not contract.source_tree_path_allowed(
         relative,
         scan_group="retired_text",
         rule=rule,
@@ -113,7 +117,7 @@ def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
         line_number=10,
         rule_definition_lines=set(),
     )
-    assert builder.source_tree_path_allowed(
+    assert contract.source_tree_path_allowed(
         relative,
         scan_group="retired_text",
         rule=rule,
@@ -126,7 +130,6 @@ def test_source_tree_scan_rule_allowlist_is_definition_scoped() -> None:
 def test_source_tree_scan_rejects_retired_governance_path_resurrection(
     tmp_path: Path,
 ) -> None:
-    builder = _load_handoff_builder()
     contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -138,7 +141,7 @@ def test_source_tree_scan_rejects_retired_governance_path_resurrection(
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add retired governance path")
 
-    groups = builder.source_tree_scan_groups(repo)
+    groups = contract.source_tree_scan_groups(repo)
 
     assert groups["retired_governance_paths"]["status"] == "FAIL"
     assert groups["retired_governance_paths"]["findings"] == [
@@ -147,7 +150,6 @@ def test_source_tree_scan_rejects_retired_governance_path_resurrection(
 
 
 def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> None:
-    builder = _load_handoff_builder()
     contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -162,7 +164,7 @@ def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> No
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add retired stage path")
 
-    groups = builder.source_tree_scan_groups(repo)
+    groups = contract.source_tree_scan_groups(repo)
 
     assert groups["retired_path_names"]["status"] == "FAIL"
     assert groups["retired_path_names"]["findings"] == [
@@ -174,7 +176,6 @@ def test_source_tree_scan_rejects_retired_stage_path_names(tmp_path: Path) -> No
 
 
 def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> None:
-    builder = _load_handoff_builder()
     contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -192,7 +193,7 @@ def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> Non
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add retired structured key")
 
-    groups = builder.source_tree_scan_groups(repo)
+    groups = contract.source_tree_scan_groups(repo)
 
     assert groups["structured_keys"]["status"] == "FAIL"
     assert groups["structured_keys"]["findings"] == [
@@ -209,7 +210,6 @@ def test_source_tree_scan_rejects_retired_structured_keys(tmp_path: Path) -> Non
 def test_source_tree_scan_independently_rejects_synthesized_strings(
     tmp_path: Path,
 ) -> None:
-    builder = _load_handoff_builder()
     contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -232,7 +232,7 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add retired symbol fixture")
 
-    groups = builder.source_tree_scan_groups(repo)
+    groups = contract.source_tree_scan_groups(repo)
 
     assert groups["python_symbols"]["status"] == "PASS"
     assert groups["synthesized_strings"]["status"] == "FAIL"
@@ -256,7 +256,6 @@ def test_source_tree_scan_independently_rejects_synthesized_strings(
 def test_source_tree_scan_independently_rejects_python_symbols(
     tmp_path: Path,
 ) -> None:
-    builder = _load_handoff_builder()
     contract = _load_governance_contract()
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -282,7 +281,7 @@ def test_source_tree_scan_independently_rejects_python_symbols(
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "add retired symbol fixture")
 
-    groups = builder.source_tree_scan_groups(repo)
+    groups = contract.source_tree_scan_groups(repo)
 
     assert groups["python_symbols"]["status"] == "FAIL"
     assert groups["synthesized_strings"]["status"] == "PASS"
@@ -293,22 +292,21 @@ def test_source_tree_scan_independently_rejects_python_symbols(
 
 
 def test_handoff_source_tree_rules_import_governance_contract() -> None:
-    builder = _load_handoff_builder()
+    builder_source = (HANDOFF_ROOT / "build_handoff_package.py").read_text(
+        encoding="utf-8"
+    )
     contract = _load_governance_contract()
 
     assert (
         tuple(
             path.as_posix() + ("/" if path.is_dir() else "")
-            for path in builder.SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS
+            for path in contract.SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS
         )
         == contract.ACTIVE_GOVERNANCE_DOC_ROOTS
     )
-    assert builder.source_tree_blocked_patterns().keys() == (
-        contract.source_tree_forbidden_patterns().keys()
-    )
-    assert builder.source_tree_sensitive_negative_patterns().keys() == (
-        contract.source_tree_sensitive_negative_patterns().keys()
-    )
+    assert "source_tree_scan_payload" in builder_source
+    assert "source_tree_forbidden_patterns" not in builder_source
+    assert "source_tree_sensitive_negative_patterns" not in builder_source
 
 
 def test_handoff_builder_does_not_own_sensitive_negative_rules() -> None:
@@ -328,7 +326,8 @@ def test_handoff_builder_does_not_own_sensitive_negative_rules() -> None:
                     local_owners.append(target.id)
 
     assert local_owners == []
-    assert "source_tree_sensitive_negative_patterns" in source
+    assert "source_tree_sensitive_negative_patterns" not in source
+    assert "source_tree_scan_payload" in source
     assert "from governance_contract import" in source
 
 
@@ -343,8 +342,8 @@ def test_public_safe_text_checks_use_policy_share_safety_single_source() -> None
         "src/quant_research_platform/reports/verification_evidence.py"
     ).read_text(encoding="utf-8")
 
-    assert "public_text_unsafe_reason" in agent_safety
-    assert "public_text_unsafe_reason" in handoff_safety
+    assert "unsafe_for_share_reason" in agent_safety
+    assert "unsafe_for_share_reason" in handoff_safety
     assert "evidence_text_unsafe_reason" in report_safety
     forbidden_local_fact_sources = {
         "_UNSAFE_TEXT_PATTERNS",

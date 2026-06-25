@@ -57,8 +57,11 @@ def _load_contract_module():
 
 def test_governance_allows_sanitization_negative_fixtures_only() -> None:
     module = _load_governance_module()
-    privacy_fixture_lines = Path("tests/runtime/test_privacy_01.py").read_text(
-        encoding="utf-8"
+    share_safety_runtime_fixture = Path(
+        "tests/policy/test_share_safety_runtime_edges.py"
+    )
+    privacy_fixture_lines = share_safety_runtime_fixture.read_text(
+        encoding="utf-8",
     ).splitlines()
     local_path_line = next(
         line for line in privacy_fixture_lines if "private.csv" in line
@@ -66,11 +69,11 @@ def test_governance_allows_sanitization_negative_fixtures_only() -> None:
     secret_line = next(line for line in privacy_fixture_lines if "token=" in line)
 
     assert module._is_allowed_local_path_fixture(
-        "tests/runtime/test_privacy_01.py",
+        "tests/policy/test_share_safety_runtime_edges.py",
         local_path_line,
     )
     assert module._is_allowed_secret_fixture(
-        "tests/runtime/test_privacy_01.py",
+        "tests/policy/test_share_safety_runtime_edges.py",
         secret_line,
     )
     assert not module._is_allowed_local_path_fixture(
@@ -557,7 +560,7 @@ def test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate(
     legal_doc.write_text(
         "\n".join(
             [
-                "QRP 0.1 是当前合同版本。",
+                "QRP 0.1 is the current contract version.",
                 "GET /api/0.1/catalog/factors",
                 'contract_version = "0.1"',
                 'schema_version = "0.1"',

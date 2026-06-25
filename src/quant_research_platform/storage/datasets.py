@@ -25,7 +25,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.policy.share_safety import is_private_boundary_path
+from quant_research_platform.policy.share_safety import is_local_only_path
 from quant_research_platform.storage.manifests import (
     read_manifest,
     write_internal_artifact_manifest,
@@ -1210,8 +1210,8 @@ def _validate_dataset_spec(spec: DataSpec) -> str | None:
 
 
 def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
-    if not is_private_boundary_path(root):
-        raise ValueError("outside_private_boundary")
+    if not is_local_only_path(root):
+        raise ValueError("outside_local_only_boundary")
     path_parts = _path_parts(root)
     if isinstance(spec, InterimDataSpec):
         if (

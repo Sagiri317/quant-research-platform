@@ -60,8 +60,8 @@ from quant_research_platform.research.predictions.outputs import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.research.prediction_artifact_helpers import (
-    write_prediction_artifact_and_read,
+from tests.research.prediction_output_helpers import (
+    write_prediction_output_and_read,
 )
 
 
@@ -622,7 +622,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],
         model_spec,
     )
-    prediction, run_root, _ = write_prediction_artifact_and_read(
+    prediction, run_root, _ = write_prediction_output_and_read(
         tmp_path,
         (frame,),
         prediction_spec,

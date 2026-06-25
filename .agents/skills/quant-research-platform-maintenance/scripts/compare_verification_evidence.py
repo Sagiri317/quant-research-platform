@@ -314,12 +314,12 @@ def apply_pair_expectation(
     comparison["expected_failure"] = True
     comparison["reason_code"] = reason
     comparison["expected_failed_artifacts"] = expected_artifacts
-    failed_artifact_ids = prediction_failed_artifacts(comparison)
+    failed_output_ids = prediction_failed_artifacts(comparison)
     failed_artifact_families = artifact_families(
-        failed_artifact_ids,
+        failed_output_ids,
         expected_artifacts,
     )
-    comparison["failed_artifact_ids"] = failed_artifact_ids
+    comparison["failed_output_ids"] = failed_output_ids
     comparison["failed_artifacts"] = failed_artifact_families
     policy_failures = expected_failure_policy_failures(
         comparison,
@@ -373,9 +373,9 @@ def expected_failure_matches(
         if comparison.get(key, {}).get("status") != "PASS":
             return False
     prediction = comparison.get("prediction_summary", {})
-    if prediction.get("missing_prediction_artifacts"):
+    if prediction.get("missing_prediction_outputs"):
         return False
-    if prediction.get("extra_prediction_artifacts"):
+    if prediction.get("extra_prediction_outputs"):
         return False
     return sorted(comparison.get("failed_artifacts", ())) == expected_artifacts
 
@@ -411,7 +411,7 @@ def compare_contract_failures(comparisons: dict[str, dict[str, Any]]) -> list[st
         missing_artifacts = sorted(
             artifact
             for artifact in RANK_ENSEMBLE_PREDICTION_ARTIFACTS
-            if not artifact_family_present(prediction.get("artifact_ids", ()), artifact)
+            if not artifact_family_present(prediction.get("output_ids", ()), artifact)
         )
         failures.extend(
             f"refreshed_baseline_missing_rank_ensemble_artifact: {label}:{artifact}"
@@ -466,32 +466,32 @@ def comparisons_by_group(
     return grouped
 
 
-def artifact_family_present(artifact_ids: Iterable[Any], expected_family: str) -> bool:
+def artifact_family_present(output_ids: Iterable[Any], expected_family: str) -> bool:
     return any(
-        artifact_matches_family(str(artifact_id), expected_family)
-        for artifact_id in artifact_ids
+        artifact_matches_family(str(output_id), expected_family)
+        for output_id in output_ids
     )
 
 
 def artifact_families(
-    artifact_ids: Iterable[Any],
+    output_ids: Iterable[Any],
     expected_families: Iterable[str],
 ) -> list[str]:
     families: set[str] = set()
     expected = sorted(str(item) for item in expected_families)
-    for artifact_id in artifact_ids:
-        value = str(artifact_id)
+    for output_id in output_ids:
+        value = str(output_id)
         for family in expected:
             if artifact_matches_family(value, family):
                 families.add(family)
     return sorted(families)
 
 
-def artifact_matches_family(artifact_id: str, expected_family: str) -> bool:
+def artifact_matches_family(output_id: str, expected_family: str) -> bool:
     return bool(
         re.fullmatch(
             rf"{re.escape(expected_family)}_[A-Za-z0-9_]+_[0-9]+d_prediction_[0-9]{{4}}",
-            artifact_id,
+            output_id,
         )
     )
 
@@ -500,8 +500,8 @@ def prediction_failed_artifacts(comparison: dict[str, Any]) -> list[str]:
     prediction = comparison.get("prediction_summary", {})
     artifacts = set(prediction.get("artifact_diffs", {}))
     artifacts.update(prediction.get("artifact_content_diffs", {}))
-    artifacts.update(prediction.get("missing_prediction_artifacts", ()))
-    artifacts.update(prediction.get("extra_prediction_artifacts", ()))
+    artifacts.update(prediction.get("missing_prediction_outputs", ()))
+    artifacts.update(prediction.get("extra_prediction_outputs", ()))
     return sorted(str(artifact) for artifact in artifacts)
 
 
@@ -867,12 +867,12 @@ def compare_research_dataset(baseline_root: Path, final_root: Path) -> dict[str,
 
 
 def compare_prediction_outputs(baseline_root: Path, final_root: Path) -> dict[str, Any]:
-    baseline_files = find_report_files(
+    baseline_files = find_run_output_files(
         baseline_root,
         "prediction",
         "prediction.parquet",
     )
-    final_files = find_report_files(final_root, "prediction", "prediction.parquet")
+    final_files = find_run_output_files(final_root, "prediction", "prediction.parquet")
     baseline_stats = aggregate_column_stats(baseline_files, ("prediction_score",))
     final_stats = aggregate_column_stats(final_files, ("prediction_score",))
     aggregate = compare_required_stats(
@@ -883,19 +883,19 @@ def compare_prediction_outputs(baseline_root: Path, final_root: Path) -> dict[st
             "file_count": {"baseline": len(baseline_files), "final": len(final_files)}
         },
     )
-    baseline_by_id = report_files_by_artifact_id(
+    baseline_by_id = run_output_files_by_output_id(
         baseline_root,
         "prediction",
         "prediction.parquet",
     )
-    final_by_id = report_files_by_artifact_id(
+    final_by_id = run_output_files_by_output_id(
         final_root,
         "prediction",
         "prediction.parquet",
     )
     missing_artifacts = sorted(set(baseline_by_id) - set(final_by_id))
     extra_artifacts = sorted(set(final_by_id) - set(baseline_by_id))
-    content_compare = compare_report_artifact_content(
+    content_compare = compare_run_output_content(
         baseline_by_id,
         final_by_id,
         columns=("timestamp", "asset_id", "prediction_score"),
@@ -903,29 +903,29 @@ def compare_prediction_outputs(baseline_root: Path, final_root: Path) -> dict[st
     artifact_diffs = {}
     artifact_failures: list[str] = []
     artifact_partials: list[str] = []
-    for artifact_id in sorted(set(baseline_by_id) & set(final_by_id)):
+    for output_id in sorted(set(baseline_by_id) & set(final_by_id)):
         artifact_compare = compare_required_stats(
             aggregate_column_stats(
-                [baseline_by_id[artifact_id]],
+                [baseline_by_id[output_id]],
                 ("prediction_score",),
             ),
             aggregate_column_stats(
-                [final_by_id[artifact_id]],
+                [final_by_id[output_id]],
                 ("prediction_score",),
             ),
             required_columns=("prediction_score",),
         )
         if artifact_compare["status"] != "PASS":
-            artifact_diffs[artifact_id] = artifact_compare
+            artifact_diffs[output_id] = artifact_compare
             if artifact_compare["status"] == "FAIL":
-                artifact_failures.append(artifact_id)
+                artifact_failures.append(output_id)
             else:
-                artifact_partials.append(artifact_id)
+                artifact_partials.append(output_id)
     failures = list(aggregate["failures"])
     if missing_artifacts:
-        failures.append("missing_prediction_artifacts")
+        failures.append("missing_prediction_outputs")
     if extra_artifacts:
-        failures.append("extra_prediction_artifacts")
+        failures.append("extra_prediction_outputs")
     if content_compare["status"] == "FAIL":
         failures.append("keyed_content_mismatch")
     failures.extend(sorted(artifact_failures))
@@ -953,7 +953,7 @@ def compare_prediction_outputs(baseline_root: Path, final_root: Path) -> dict[st
         "status": status,
         "failures": failures,
         "partials": artifact_partials,
-        "artifact_ids": sorted(set(baseline_by_id) | set(final_by_id)),
+        "output_ids": sorted(set(baseline_by_id) | set(final_by_id)),
         "artifact_count": {
             "baseline": len(baseline_by_id),
             "final": len(final_by_id),
@@ -977,8 +977,8 @@ def compare_prediction_outputs(baseline_root: Path, final_root: Path) -> dict[st
             "max_diff",
         ),
         "failed_artifacts": failed_artifacts,
-        "missing_prediction_artifacts": missing_artifacts,
-        "extra_prediction_artifacts": extra_artifacts,
+        "missing_prediction_outputs": missing_artifacts,
+        "extra_prediction_outputs": extra_artifacts,
         "artifact_diffs": artifact_diffs,
         "artifact_content_diffs": content_compare["artifact_diffs"],
     }
@@ -1004,7 +1004,12 @@ def compare_evaluation_outputs(baseline_root: Path, final_root: Path) -> dict[st
             ),
         ),
     }
-    payload = compare_report_sections(baseline_root, final_root, "evaluation", sections)
+    payload = compare_run_output_sections(
+        baseline_root,
+        final_root,
+        "evaluation",
+        sections,
+    )
     payload.update(
         {
             "artifact_count": _section_artifact_count(payload, "metrics"),
@@ -1064,7 +1069,12 @@ def compare_portfolio_outputs(baseline_root: Path, final_root: Path) -> dict[str
             ("timestamp", "signal", "total_cost"),
         ),
     }
-    payload = compare_report_sections(baseline_root, final_root, "portfolio", sections)
+    payload = compare_run_output_sections(
+        baseline_root,
+        final_root,
+        "portfolio",
+        sections,
+    )
     payload.update(
         {
             "artifact_count": _section_artifact_count(
@@ -1094,7 +1104,7 @@ def compare_portfolio_outputs(baseline_root: Path, final_root: Path) -> dict[str
     return payload
 
 
-def compare_report_sections(
+def compare_run_output_sections(
     baseline_root: Path,
     final_root: Path,
     category: str,
@@ -1104,8 +1114,8 @@ def compare_report_sections(
     failures: list[str] = []
     partials: list[str] = []
     for section, (filename, required_columns, content_columns) in sections.items():
-        baseline_files = find_report_files(baseline_root, category, filename)
-        final_files = find_report_files(final_root, category, filename)
+        baseline_files = find_run_output_files(baseline_root, category, filename)
+        final_files = find_run_output_files(final_root, category, filename)
         baseline_stats = aggregate_column_stats(baseline_files, required_columns)
         final_stats = aggregate_column_stats(final_files, required_columns)
         comparison = compare_required_stats(
@@ -1119,9 +1129,9 @@ def compare_report_sections(
                 }
             },
         )
-        content_compare = compare_report_artifact_content(
-            report_files_by_artifact_id_from_paths(baseline_files),
-            report_files_by_artifact_id_from_paths(final_files),
+        content_compare = compare_run_output_content(
+            run_output_files_by_output_id_from_paths(baseline_files),
+            run_output_files_by_output_id_from_paths(final_files),
             columns=content_columns,
         )
         section_payload = {
@@ -1493,38 +1503,38 @@ def _normalized_value_series(series: pd.Series) -> pd.Series:
     return series.astype("string").fillna("<NA>")
 
 
-def find_report_files(run_root: Path, category: str, filename: str) -> list[Path]:
-    reports_root = run_root / "reports"
+def find_run_output_files(run_root: Path, category: str, filename: str) -> list[Path]:
+    run_outputs_root = run_root / "run_outputs" / "local"
     return sorted(
         path
-        for path in reports_root.rglob(filename)
-        if category in path.relative_to(reports_root).parts
+        for path in run_outputs_root.rglob(filename)
+        if category in path.relative_to(run_outputs_root).parts
     )
 
 
-def report_files_by_artifact_id(
+def run_output_files_by_output_id(
     run_root: Path,
     category: str,
     filename: str,
 ) -> dict[str, Path]:
-    return report_files_by_artifact_id_from_paths(
-        find_report_files(run_root, category, filename)
+    return run_output_files_by_output_id_from_paths(
+        find_run_output_files(run_root, category, filename)
     )
 
 
-def report_files_by_artifact_id_from_paths(paths: list[Path]) -> dict[str, Path]:
+def run_output_files_by_output_id_from_paths(paths: list[Path]) -> dict[str, Path]:
     files: dict[str, Path] = {}
     for path in paths:
-        artifact_id = path.parent.name
-        if artifact_id.startswith("a_share_"):
-            artifact_id = artifact_id[len("a_share_") :]
-        if artifact_id in files:
-            raise ValueError(f"report_artifact_id_collision: {artifact_id}")
-        files[artifact_id] = path
+        output_id = path.parent.name
+        if output_id.startswith("a_share_"):
+            output_id = output_id[len("a_share_") :]
+        if output_id in files:
+            raise ValueError(f"run_output_id_collision: {output_id}")
+        files[output_id] = path
     return files
 
 
-def compare_report_artifact_content(
+def compare_run_output_content(
     baseline_by_id: dict[str, Path],
     final_by_id: dict[str, Path],
     *,
@@ -1532,24 +1542,24 @@ def compare_report_artifact_content(
 ) -> dict[str, Any]:
     artifact_diffs: dict[str, Any] = {}
     partial_artifacts: list[str] = []
-    for artifact_id in sorted(set(baseline_by_id) & set(final_by_id)):
-        baseline_fingerprint = report_file_content_fingerprint(
-            baseline_by_id[artifact_id],
+    for output_id in sorted(set(baseline_by_id) & set(final_by_id)):
+        baseline_fingerprint = run_output_file_content_fingerprint(
+            baseline_by_id[output_id],
             columns=columns,
         )
-        final_fingerprint = report_file_content_fingerprint(
-            final_by_id[artifact_id],
+        final_fingerprint = run_output_file_content_fingerprint(
+            final_by_id[output_id],
             columns=columns,
         )
         if (
             baseline_fingerprint["missing_columns"]
             or final_fingerprint["missing_columns"]
         ):
-            partial_artifacts.append(artifact_id)
+            partial_artifacts.append(output_id)
             continue
         match = baseline_fingerprint == final_fingerprint
         if not match:
-            artifact_diffs[artifact_id] = {
+            artifact_diffs[output_id] = {
                 "match": False,
                 "baseline": baseline_fingerprint,
                 "final": final_fingerprint,
@@ -1566,7 +1576,7 @@ def compare_report_artifact_content(
     }
 
 
-def report_file_content_fingerprint(
+def run_output_file_content_fingerprint(
     path: Path,
     *,
     columns: tuple[str, ...],
@@ -1585,7 +1595,7 @@ def report_file_content_fingerprint(
     hash_xor = 0
     for frame in parquet_batches(path, columns=tuple(selected_columns)):
         row_count += int(frame.shape[0])
-        hash_frame = normalized_report_hash_frame(frame, tuple(selected_columns))
+        hash_frame = normalized_run_output_hash_frame(frame, tuple(selected_columns))
         hashes = pd.util.hash_pandas_object(hash_frame, index=False).to_numpy(
             dtype=np.uint64
         )
@@ -1599,7 +1609,7 @@ def report_file_content_fingerprint(
     }
 
 
-def normalized_report_hash_frame(
+def normalized_run_output_hash_frame(
     frame: pd.DataFrame,
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
@@ -1741,7 +1751,7 @@ def _markdown(payload: dict[str, Any]) -> str:
                 f"- prediction_status: {prediction['status']}",
                 "- prediction_score_diffs: "
                 f"{prediction['required_field_diffs'].get('prediction_score')}",
-                "- prediction_artifact_failures: "
+                "- prediction_output_failures: "
                 f"{sorted(prediction.get('artifact_diffs', {}))}",
                 f"- evaluation_status: {comparison['evaluation_summary']['status']}",
                 f"- portfolio_status: {comparison['portfolio_summary']['status']}",

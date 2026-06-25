@@ -46,7 +46,7 @@ def test_verification_evidence_unsafe_reason_variants() -> None:
     assert evidence_text_unsafe_reason("source_market_id") == "source_local_key"
     assert (
         evidence_text_unsafe_reason("runtime_payload=private-aggregate")
-        == "private_runtime_payload"
+        == "runtime_payload"
     )
     assert evidence_json_unsafe_reason("{bad") == "invalid_json"
     assert evidence_json_unsafe_reason('{"safe": ["aggregate"]}') is None

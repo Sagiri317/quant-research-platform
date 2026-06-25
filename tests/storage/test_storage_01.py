@@ -64,7 +64,7 @@ def test_dataset_writer_rejects_public_output_before_iterating_chunks(
         iterated = True
         yield _frame()
 
-    with pytest.raises(ValueError, match="outside_private_boundary"):
+    with pytest.raises(ValueError, match="outside_local_only_boundary"):
         write_dataset(tmp_path / "public" / "x", chunks(), spec=_processed_spec())
 
     assert not iterated
@@ -99,7 +99,7 @@ def test_projected_dataset_fingerprint_includes_primary_key_columns(
 
 def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> None:
     manifest = write_manifest(
-        tmp_path / "reports" / "private_research" / "a_share" / "run" / "manifest.json",
+        tmp_path / "run_outputs" / "local" / "a_share" / "run" / "manifest.json",
         {
             "path": "provider-internal-detail",
             "traceback": "Traceback (most recent call last): provider internals",
@@ -117,8 +117,8 @@ def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> Non
 def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     manifest = (
         tmp_path
-        / "reports"
-        / "private_research"
+        / "run_outputs"
+        / "local"
         / "a_share"
         / "run"
         / "manifest.json"

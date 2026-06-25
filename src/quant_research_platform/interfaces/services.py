@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quant_research_platform.policy.share_safety import sanitize_public_object
+from quant_research_platform.policy.share_safety import sanitize_shared_object
 from quant_research_platform.profiles.research import ResearchProfile
 
 API_VERSION = "0.1"
@@ -34,7 +34,7 @@ def describe_research_dataset_requirements(
 
 
 def _response(**payload: object) -> dict[str, object]:
-    return sanitize_public_object({"api_version": API_VERSION, **payload})
+    return sanitize_shared_object({"api_version": API_VERSION, **payload})
 
 
 __all__ = [

@@ -145,12 +145,12 @@ def test_aggregates_area_inputs_and_inventory_helpers(
         "factor_value_parity",
         frequency_ids.full_historical_market_panel_status_area(),
     }
-    report_artifact_area_inputs = {
+    run_output_area_inputs = {
         item.area: item.summary_kind
         for item in area_inputs
         if item.area in {"evaluation_parity", "prediction_oos_smoke_parity"}
     }
-    assert report_artifact_area_inputs == {
+    assert run_output_area_inputs == {
         "evaluation_parity": "run_outputs",
         "prediction_oos_smoke_parity": "run_outputs",
     }

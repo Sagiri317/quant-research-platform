@@ -9,7 +9,7 @@ import pytest
 WORKFLOW_MODULE = "quant_research_platform.workflows.local_verification"
 
 
-def test_verification_evidence_output_root_is_explicit_not_run_workspace(
+def test_local_verification_output_root_is_explicit_not_run_workspace(
     tmp_path: Path,
 ) -> None:
     module = _workflow_module()
@@ -27,7 +27,7 @@ def test_verification_evidence_output_root_is_explicit_not_run_workspace(
     assert module._ownership_marker_path(output_root).is_file()
 
 
-def test_verification_evidence_replace_output_rejects_unowned_directory(
+def test_local_verification_replace_output_rejects_unowned_directory(
     tmp_path: Path,
 ) -> None:
     module = _workflow_module()
@@ -50,7 +50,7 @@ def test_verification_evidence_replace_output_rejects_unowned_directory(
     assert (output_root / "unowned.txt").is_file()
 
 
-def test_verification_evidence_replace_output_allows_owned_directory(
+def test_local_verification_replace_output_allows_owned_directory(
     tmp_path: Path,
 ) -> None:
     module = _workflow_module()
@@ -75,7 +75,7 @@ def test_verification_evidence_replace_output_allows_owned_directory(
     assert module._ownership_marker_path(output_root).is_file()
 
 
-def test_verification_evidence_workflow_removes_run_workspace_guard() -> None:
+def test_local_verification_workflow_removes_run_workspace_guard() -> None:
     module = _workflow_module()
 
     assert not hasattr(module, "_assert_output_root_under_run")

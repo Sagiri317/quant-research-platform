@@ -42,7 +42,7 @@ def test_report_frame_validation_rejects_missing_and_extra_columns() -> None:
         )
 
 
-def test_prediction_report_artifact_validation_rejects_bad_frames(
+def test_prediction_run_output_validation_rejects_bad_frames(
     tmp_path: Path,
 ) -> None:
     spec = _prediction_spec()
@@ -54,14 +54,14 @@ def test_prediction_report_artifact_validation_rejects_bad_frames(
     layout = StorageLayout(project_root=tmp_path)
     valid = _prediction_frame(with_metadata=True)
 
-    with pytest.raises(ValueError, match="missing_prediction_artifact_columns"):
+    with pytest.raises(ValueError, match="missing_prediction_output_columns"):
         run_outputs.write_prediction_run_outputs(
             valid.drop(columns=["prediction_score"]),
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
-    with pytest.raises(ValueError, match="unregistered_prediction_artifact_columns"):
+    with pytest.raises(ValueError, match="unregistered_prediction_output_columns"):
         run_outputs.write_prediction_run_outputs(
             valid.assign(extra=1),
             spec=spec,

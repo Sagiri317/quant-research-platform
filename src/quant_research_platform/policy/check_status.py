@@ -29,6 +29,12 @@ def require_status(value: object) -> str:
 
 
 def aggregate_check_status(statuses: Iterable[object]) -> str:
+    return aggregate_component_status(statuses)
+
+
+def aggregate_component_status(statuses: Iterable[object]) -> str:
+    """Aggregate checks that must all execute and pass."""
+
     values = tuple(require_status(status) for status in statuses)
     if not values:
         return CheckStatus.NOT_RUN.value
@@ -39,6 +45,21 @@ def aggregate_check_status(statuses: Iterable[object]) -> str:
     if CheckStatus.NOT_RUN.value in values:
         if CheckStatus.PASS.value in values:
             return CheckStatus.FAIL.value
+        return CheckStatus.NOT_RUN.value
+    return CheckStatus.PASS.value
+
+
+def aggregate_validation_matrix_status(statuses: Iterable[object]) -> str:
+    """Aggregate independently runnable validation matrix entries."""
+
+    values = tuple(require_status(status) for status in statuses)
+    if not values:
+        return CheckStatus.NOT_RUN.value
+    if CheckStatus.FAIL.value in values:
+        return CheckStatus.FAIL.value
+    if CheckStatus.BLOCKED.value in values:
+        return CheckStatus.BLOCKED.value
+    if CheckStatus.NOT_RUN.value in values:
         return CheckStatus.NOT_RUN.value
     return CheckStatus.PASS.value
 
@@ -84,10 +105,14 @@ def validate_verification_statuses(
             required_fields=FULL_HORIZON_EVIDENCE_FIELDS,
             error_name="full_horizon_evidence_missing_fields",
         )
+    validation_matrix_status = aggregate_validation_matrix_status(
+        (smoke, compare, full_horizon)
+    )
     return {
         "smoke_status": smoke,
         "compare_status": compare,
         "full_horizon_status": full_horizon,
+        "validation_matrix_status": validation_matrix_status,
         "compare_evidence": dict(compare_evidence or {}),
         "full_horizon_evidence": dict(full_horizon_evidence or {}),
     }
@@ -97,12 +122,12 @@ def overall_verification_status(
     validation_status: object,
     statuses: dict[str, object],
 ) -> str:
-    child_statuses = [str(validation_status).upper()]
-    child_statuses.extend(
-        str(statuses[key]) for key in ("smoke_status", "full_horizon_status")
+    return aggregate_validation_matrix_status(
+        (
+            validation_status,
+            statuses["validation_matrix_status"],
+        )
     )
-    child_statuses.append(str(statuses["compare_status"]))
-    return aggregate_check_status(child_statuses)
 
 
 def _require_evidence_fields(
@@ -124,7 +149,9 @@ def _require_evidence_fields(
 __all__ = [
     "CheckStatus",
     "VALID_STATUS_TOKENS",
+    "aggregate_component_status",
     "aggregate_check_status",
+    "aggregate_validation_matrix_status",
     "overall_verification_status",
     "require_status",
     "validate_verification_statuses",

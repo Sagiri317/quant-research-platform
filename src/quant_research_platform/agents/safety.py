@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 from typing import Any
 
-from quant_research_platform.policy.share_safety import public_text_unsafe_reason
+from quant_research_platform.policy.share_safety import unsafe_for_share_reason
 
 
 class ProposalSafetyError(ValueError):
@@ -28,7 +28,7 @@ def assert_proposal_starts_unapproved(proposal: Any) -> None:
 
 
 def assert_public_safe_text(text: str) -> None:
-    reason = public_text_unsafe_reason(text)
+    reason = unsafe_for_share_reason(text)
     if reason is not None:
         raise ProposalSafetyError(f"proposal_contains_public_unsafe_text:{reason}")
 

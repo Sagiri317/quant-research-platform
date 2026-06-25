@@ -22,6 +22,8 @@ TEST_BRANCH = "feature/synthetic-handoff-review"
 
 def _load_handoff_module(name: str):
     script = HANDOFF_TOOL_ROOT / f"{name}.py"
+    if name == "governance_contract":
+        script = HANDOFF_TOOL_ROOT.parent / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, script)
     assert spec is not None
     assert spec.loader is not None
@@ -338,19 +340,21 @@ def test_verify_source_tree_scan_rejects_extra_groups_and_count_mismatch() -> No
 @pytest.mark.parametrize(
     "text",
     [
-        # Intentional fake private markers used to test handoff safety rejection.
+        # Intentional fake local-only markers used to test handoff verifier rejection.
         "E:/repo/data/processed/a_share/factor/demo",
         "E:/repo/data/research/a_share/demo",
+        # intentional legacy-path negative case
         "E:/repo/reports/private_research/a_share/run",
         "/workspace/qrp/data/processed/a_share/factor/demo",
         "/workspaces/qrp/data/research/a_share/demo",
+        # intentional legacy-path negative case
         "/mnt/data/reports/private_research/a_share/run",
     ],
 )
-def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
+def test_source_tree_scan_local_only_path_rules_cover_handoff_bundle_text(
     text: str,
 ) -> None:
-    builder = _load_handoff_module("build_handoff_package")
+    builder = _load_handoff_module("governance_contract")
 
     rules = builder.source_tree_sensitive_negative_patterns()
 
@@ -365,13 +369,15 @@ def test_source_tree_scan_private_path_rules_cover_handoff_bundle_text(
         "C:/handoff_evidence/leak.md",
     ],
 )
-def test_handoff_safety_rejects_tampered_zip_member_paths(member: str) -> None:
+def test_handoff_verifier_rejects_tampered_zip_member_paths(
+    member: str,
+) -> None:
     safety = _load_handoff_module("verify_handoff_package")
 
     assert safety.member_name_failures(member)
 
 
-def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
+def test_handoff_package_verifier_scans_external_json_sidecar(tmp_path: Path) -> None:
     safety = _load_handoff_module("verify_handoff_package")
     run_handoffs = ".run/handoffs"
     package = tmp_path / "handoff.zip"
@@ -385,7 +391,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
                 "zip_filename": "handoff.zip",
                 "handoff_package_path": f"{run_handoffs}/handoff.zip",
                 "handoff_sidecar_path": f"{run_handoffs}/handoff.json",
-                # Intentional fake private markers for handoff safety rejection.
+                # Intentional fake local-only markers for handoff verifier rejection.
                 "leaked_zip_path": "E:/quant-workspace/private/handoff.zip",
                 "also_bad": "/mnt/data/private/handoff.zip",
                 "home_bad": "/home/user/private/handoff.zip",
@@ -401,7 +407,7 @@ def test_handoff_safety_scans_external_json_sidecar(tmp_path: Path) -> None:
     assert any("sidecar_local_absolute_path_text" in item for item in result.failures)
 
 
-def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
+def test_handoff_package_verifier_rejects_data_research_members(tmp_path: Path) -> None:
     safety = _load_handoff_module("verify_handoff_package")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
@@ -413,7 +419,7 @@ def test_handoff_safety_rejects_data_research_members(tmp_path: Path) -> None:
     assert any("forbidden_path_segment" in item for item in result.failures)
 
 
-def test_handoff_safety_rejects_retired_private_report_paths(
+def test_handoff_package_verifier_rejects_retired_local_output_paths(
     tmp_path: Path,
 ) -> None:
     safety = _load_handoff_module("verify_handoff_package")
@@ -431,11 +437,11 @@ def test_handoff_safety_rejects_retired_private_report_paths(
         assert any("forbidden_path_segment" in item for item in result.failures)
 
 
-def test_handoff_safety_rejects_retired_private_report_path_text(
+def test_handoff_package_verifier_rejects_retired_local_output_path_text(
     tmp_path: Path,
 ) -> None:
     safety = _load_handoff_module("verify_handoff_package")
-    retired_private_report_path = next(
+    retired_local_output_path = next(
         segment
         for segment in safety.FORBIDDEN_PATH_SEGMENTS
         if segment.startswith("reports/private_")
@@ -444,7 +450,7 @@ def test_handoff_safety_rejects_retired_private_report_path_text(
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(
             "handoff_evidence/leak.md",
-            f"retired path {retired_private_report_path}/a_share/run\n",
+            f"retired path {retired_local_output_path}/a_share/run\n",
         )
 
     result = safety.scan_handoff_zip(package)
@@ -501,7 +507,7 @@ def test_builder_requires_pr_url_for_pr_closure_even_without_verify(
         ".run/s86/summary.json",
     ],
 )
-def test_handoff_safety_rejects_private_run_members(
+def test_handoff_package_verifier_rejects_local_run_members(
     tmp_path: Path,
     member: str,
 ) -> None:
@@ -520,7 +526,7 @@ def test_handoff_safety_rejects_private_run_members(
     "logical_path",
     [".run/private/s1", ".run\\\\private\\\\s1"],
 )
-def test_handoff_safety_rejects_private_run_path_in_sidecar(
+def test_handoff_package_verifier_rejects_local_run_path_in_sidecar(
     tmp_path: Path,
     logical_path: str,
 ) -> None:
@@ -537,10 +543,12 @@ def test_handoff_safety_rejects_private_run_path_in_sidecar(
     result = safety.scan_handoff_zip(package, json_path=sidecar)
 
     assert not result.ok
-    assert any("private_run_path" in item for item in result.failures)
+    assert any("local_run_path" in item for item in result.failures)
 
 
-def test_handoff_safety_rejects_repo_local_codex_members(tmp_path: Path) -> None:
+def test_handoff_verifier_rejects_repo_local_codex_members(
+    tmp_path: Path,
+) -> None:
     safety = _load_handoff_module("verify_handoff_package")
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
@@ -552,7 +560,7 @@ def test_handoff_safety_rejects_repo_local_codex_members(tmp_path: Path) -> None
     assert any("forbidden_path_segment" in item for item in result.failures)
 
 
-def test_handoff_safety_allows_historical_codex_in_bundle_when_head_is_clean(
+def test_handoff_package_verifier_allows_historical_codex_in_bundle_when_head_is_clean(
     tmp_path: Path,
 ) -> None:
     safety = _load_handoff_module("verify_handoff_package")
@@ -576,7 +584,9 @@ def test_handoff_safety_allows_historical_codex_in_bundle_when_head_is_clean(
     assert result.ok
 
 
-def test_handoff_safety_rejects_codex_in_bundle_head_tree(tmp_path: Path) -> None:
+def test_handoff_verifier_rejects_codex_in_bundle_head_tree(
+    tmp_path: Path,
+) -> None:
     safety = _load_handoff_module("verify_handoff_package")
     repo = tmp_path / "repo"
     _init_handoff_repo(repo)
@@ -600,13 +610,14 @@ def test_handoff_safety_rejects_codex_in_bundle_head_tree(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "text",
     [
-        # Intentional fake private markers used to test handoff safety rejection.
+        # Intentional fake local-only markers used to test handoff verifier rejection.
         "/workspace/qrp/data/research/a_share/demo",
+        # intentional legacy-path negative case
         "/workspaces/qrp/reports/private_research/a_share/run",
         "/opt/qrp/data/processed/a_share/factor/demo",
     ],
 )
-def test_handoff_safety_rejects_absolute_paths_with_private_segments(
+def test_handoff_package_verifier_rejects_absolute_paths_with_local_only_segments(
     tmp_path: Path,
     text: str,
 ) -> None:
@@ -621,9 +632,9 @@ def test_handoff_safety_rejects_absolute_paths_with_private_segments(
     assert any("local_absolute_path_text" in item for item in result.failures)
 
 
-def test_handoff_safety_rejects_local_paths_in_plain_text() -> None:
+def test_handoff_package_verifier_rejects_local_paths_in_plain_text() -> None:
     safety = _load_handoff_module("verify_handoff_package")
-    # Intentional fake private marker used to test sanitizer/package-safety rejection.
+    # Intentional fake local-only marker used to test verifier rejection.
     text = "\n".join(
         [
             "old local example C:/Users/name/private.txt",
@@ -634,7 +645,7 @@ def test_handoff_safety_rejects_local_paths_in_plain_text() -> None:
     assert safety.unsafe_text_reason(text, name="handoff.txt") == "local_absolute_path"
 
 
-def test_handoff_safety_allows_public_aggregate_evidence_counts() -> None:
+def test_handoff_package_verifier_allows_public_aggregate_evidence_counts() -> None:
     safety = _load_handoff_module("verify_handoff_package")
     text = "\n".join(
         [
@@ -653,12 +664,12 @@ def test_handoff_safety_allows_public_aggregate_evidence_counts() -> None:
             "vendor_filename",
         ),
         ("row_samples=[aggregate]", "row_sample"),
-        ("runtime_payload=private-aggregate", "private_runtime_payload"),
+        ("runtime_payload=private-aggregate", "runtime_payload"),
         ("source_asset_id", "source_local_key"),
-        (".run/private/s1/summary.json", "private_run_path"),
+        (".run/private/s1/summary.json", "local_run_path"),
     ],
 )
-def test_handoff_safety_delegates_text_privacy_semantics(
+def test_handoff_package_verifier_delegates_text_privacy_semantics(
     text: str,
     reason: str,
 ) -> None:
@@ -694,11 +705,11 @@ def test_verify_fails_when_sidecar_safety_fails(tmp_path: Path) -> None:
                 "status_summary": {
                     "validation": "NOT_RUN",
                     "handoff_verify": "NOT_RUN",
-                    "handoff_safety": "NOT_RUN",
+                    "handoff_package_verifier": "NOT_RUN",
                     "blocked_count": 0,
                     "fail_count": 0,
                 },
-                # Intentional fake private marker for handoff safety rejection.
+                # Intentional fake local-only marker for handoff verifier rejection.
                 "zip_path": "E:/quant-workspace/private/handoff.zip",
             },
             indent=2,
@@ -763,7 +774,7 @@ def test_verify_requires_pr_url_in_pr_closure_task_metadata() -> None:
 
 def test_verify_recursively_rejects_forbidden_handoff_evidence_payload_keys() -> None:
     verifier = _load_handoff_module("verify_handoff_package")
-    builder = _load_handoff_module("build_handoff_package")
+    builder = _load_handoff_module("governance_contract")
     forbidden_key = next(
         key
         for key in builder.HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES
@@ -878,7 +889,7 @@ def test_verify_handoff_package_rejects_old_smoke_compare_status_shape(
 
 
 def test_handoff_evidence_forbidden_keys_are_fast_contract_checks() -> None:
-    builder = _load_handoff_module("build_handoff_package")
+    builder = _load_handoff_module("governance_contract")
 
     failures_by_key = {
         key: builder.handoff_evidence_blocked_key_failures(

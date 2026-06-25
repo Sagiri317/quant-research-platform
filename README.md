@@ -71,7 +71,7 @@ coding agent 应先读 `AGENTS.md`，再按任务范围读取 `.agents/skills/qu
 - open issues 只保存当前 open 或 deferred 问题。
 - `.agents` 是 tracked tooling source。
 - `.run` 是 output layer 和 evidence layer。
-- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、single verifier package-safety scan 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生；路径名、Python symbol、JSON/YAML/TOML key 和静态字符串合成都由同一规则派生。
+- `.agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py` 是内部治理规则事实源，active-doc gate、handoff source-tree scan、single handoff verifier safety scan 和 tests 的 retired/stale/naming/allowlist 规则只能从这里读取或派生；路径名、Python symbol、JSON/YAML/TOML key 和静态字符串合成都由同一规则派生。
 - retired governance paths 只要复活即 `FAIL`，不靠文本关键词绕过。
 - retired stage naming 不得通过文件名、路径名、Python symbol 或静态字符串拼接复活；合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0` 和 `/api/0.1`，不使用带 `v` 前缀的 `0.1` API 版本路径。
 

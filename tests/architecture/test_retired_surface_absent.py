@@ -80,7 +80,7 @@ def test_retired_constant_fixtures_are_derived_from_governance_contract() -> Non
 
 
 def test_retired_handoff_evidence_names_are_absent() -> None:
-    scan_groups = _load_handoff_builder().source_tree_scan_groups(Path("."))
+    scan_groups = _load_governance_contract().source_tree_scan_groups(Path("."))
 
     assert scan_groups["retired_text"]["findings"] == []
     assert scan_groups["python_symbols"]["findings"] == []
@@ -110,9 +110,9 @@ def test_retired_pr_body_renderer_is_absent() -> None:
 
 
 def test_handoff_source_tree_scan_rejects_retired_pr_body_renderer() -> None:
-    module = _load_handoff_builder()
+    contract = _load_governance_contract()
 
-    patterns = module.source_tree_blocked_patterns()
+    patterns = contract.source_tree_forbidden_patterns()
 
     assert "forbidden_pr_body" in patterns
     assert "forbidden_render_pr_body" in patterns

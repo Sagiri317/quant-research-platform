@@ -19,6 +19,7 @@ HANDOFF_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "build_handoff_package.p
 VERIFY_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "verify_handoff_package.py"
 TEST_BRANCH = "feature/synthetic-handoff-review"
 BUILDER_MODULE = None
+GOVERNANCE_MODULE = None
 
 
 def _load_builder_module():
@@ -34,6 +35,21 @@ def _load_builder_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     BUILDER_MODULE = module
+    return module
+
+
+def _load_governance_module():
+    global GOVERNANCE_MODULE
+    if GOVERNANCE_MODULE is not None:
+        return GOVERNANCE_MODULE
+    path = HANDOFF_ROOT / "scripts" / "governance_contract.py"
+    spec = importlib.util.spec_from_file_location("governance_contract", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["governance_contract"] = module
+    spec.loader.exec_module(module)
+    GOVERNANCE_MODULE = module
     return module
 
 
@@ -299,8 +315,8 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
 def test_build_handoff_package_rejects_reserved_handoff_evidence_path(
     tmp_path: Path,
 ) -> None:
-    builder = _load_builder_module()
-    reserved_name = sorted(builder.RESERVED_HANDOFF_EVIDENCE_STEMS)[0]
+    governance = _load_governance_module()
+    reserved_name = sorted(governance.RESERVED_HANDOFF_EVIDENCE_STEMS)[0]
 
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,
@@ -315,8 +331,8 @@ def test_build_handoff_package_rejects_reserved_handoff_evidence_path(
 def test_build_handoff_package_rejects_internal_handoff_evidence_path(
     tmp_path: Path,
 ) -> None:
-    builder = _load_builder_module()
-    internal_name = sorted(builder.BUILDER_OWNED_HANDOFF_EVIDENCE)[0]
+    governance = _load_governance_module()
+    internal_name = sorted(governance.BUILDER_OWNED_HANDOFF_EVIDENCE)[0]
 
     result, out_dir = _run_builder_with_handoff_evidence(
         tmp_path,

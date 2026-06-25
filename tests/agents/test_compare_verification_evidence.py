@@ -191,7 +191,7 @@ def test_compare_verification_evidence_streams_parquet_report_reads(
     monkeypatch.setattr(module.pd, "read_parquet", fail_read_parquet)
 
     stats = module.aggregate_column_stats([path], ("prediction_score",))
-    fingerprint = module.report_file_content_fingerprint(
+    fingerprint = module.run_output_file_content_fingerprint(
         path,
         columns=("timestamp", "asset_id", "prediction_score"),
     )
@@ -317,7 +317,7 @@ def test_compare_verification_evidence_accepts_expected_pair_failures(
     final = tmp_path / "final"
     _write_run(
         baseline,
-        prediction_artifact_ids=(
+        prediction_output_ids=(
             "equal_weight_rank_ensemble_mom_20d_prediction_2020",
             "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
         ),
@@ -325,7 +325,7 @@ def test_compare_verification_evidence_accepts_expected_pair_failures(
     _write_run(
         final,
         swap_prediction_assets=True,
-        prediction_artifact_ids=(
+        prediction_output_ids=(
             "equal_weight_rank_ensemble_mom_20d_prediction_2020",
             "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
         ),
@@ -349,7 +349,7 @@ def test_compare_verification_evidence_accepts_expected_pair_failures(
     assert comparison["actual_status"] == "FAIL"
     assert comparison["expected_failure_match"] is True
     assert comparison["reason_code"] == "stale_rank_ensemble_prediction_baseline"
-    assert comparison["failed_artifact_ids"] == [
+    assert comparison["failed_output_ids"] == [
         "equal_weight_rank_ensemble_mom_20d_prediction_2020",
         "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
     ]
@@ -452,7 +452,7 @@ def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> No
                 "comparison_group": "refreshed_prediction_baseline",
                 "status": "PASS",
                 "prediction_summary": {
-                    "artifact_ids": [
+                    "output_ids": [
                         "equal_weight_rank_ensemble_mom_20d_prediction_2020"
                     ],
                     "failed_artifacts": [],
@@ -462,7 +462,7 @@ def test_compare_verification_evidence_requires_refreshed_rank_artifacts() -> No
                 "comparison_group": "refreshed_prediction_baseline",
                 "status": "PASS",
                 "prediction_summary": {
-                    "artifact_ids": [
+                    "output_ids": [
                         "equal_weight_rank_ensemble_mom_20d_prediction_2021",
                         "ic_weighted_rank_ensemble_mom_20d_prediction_2021",
                     ],
@@ -488,7 +488,7 @@ def test_compare_verification_evidence_requires_explicit_expected_failure_group(
     final = tmp_path / "final"
     _write_run(
         baseline,
-        prediction_artifact_ids=(
+        prediction_output_ids=(
             "equal_weight_rank_ensemble_mom_20d_prediction_2020",
             "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
         ),
@@ -496,7 +496,7 @@ def test_compare_verification_evidence_requires_explicit_expected_failure_group(
     _write_run(
         final,
         swap_prediction_assets=True,
-        prediction_artifact_ids=(
+        prediction_output_ids=(
             "equal_weight_rank_ensemble_mom_20d_prediction_2020",
             "ic_weighted_rank_ensemble_mom_20d_prediction_2020",
         ),
@@ -539,7 +539,7 @@ def test_compare_verification_evidence_rejects_loose_rank_artifact_prefix() -> N
                 "comparison_group": "refreshed_prediction_baseline",
                 "status": "PASS",
                 "prediction_summary": {
-                    "artifact_ids": [
+                    "output_ids": [
                         "equal_weight_rank_ensemble_smoke",
                         "ic_weighted_rank_ensemble_smoke",
                     ],
@@ -675,19 +675,29 @@ def test_compare_verification_evidence_rejects_invalid_pairs_file(
         raise AssertionError("missing final path should fail")
 
 
-def test_compare_verification_evidence_detects_report_artifact_id_collision(
+def test_compare_verification_evidence_detects_run_output_id_collision(
     tmp_path: Path,
 ) -> None:
     module = _load_compare_module()
     paths = [
-        tmp_path / "reports" / "prediction" / "a_share_model" / "prediction.parquet",
-        tmp_path / "reports" / "prediction" / "model" / "prediction.parquet",
+        tmp_path
+        / "run_outputs"
+        / "local"
+        / "prediction"
+        / "a_share_model"
+        / "prediction.parquet",
+        tmp_path
+        / "run_outputs"
+        / "local"
+        / "prediction"
+        / "model"
+        / "prediction.parquet",
     ]
 
     try:
-        module.report_files_by_artifact_id_from_paths(paths)
+        module.run_output_files_by_output_id_from_paths(paths)
     except ValueError as exc:
-        assert str(exc) == "report_artifact_id_collision: model"
+        assert str(exc) == "run_output_id_collision: model"
     else:
         raise AssertionError("normalized artifact id collision should fail")
 
@@ -823,7 +833,7 @@ def _write_run(
     root: Path,
     *,
     missing_prediction_score: bool = False,
-    prediction_artifact_ids: tuple[str, ...] = ("tiny_model",),
+    prediction_output_ids: tuple[str, ...] = ("tiny_model",),
     split_research_partition: bool = False,
     flip_research_eligibility: bool = False,
     swap_prediction_assets: bool = False,
@@ -837,10 +847,10 @@ def _write_run(
         split_partition=split_research_partition,
         flip_eligibility=flip_research_eligibility,
     )
-    _write_reports(
+    _write_run_outputs(
         root,
         missing_prediction_score=missing_prediction_score,
-        prediction_artifact_ids=prediction_artifact_ids,
+        prediction_output_ids=prediction_output_ids,
         swap_prediction_assets=swap_prediction_assets,
         tiny_turnover_epsilon=tiny_turnover_epsilon,
     )
@@ -933,17 +943,19 @@ def _write_research_dataset(
     frame.iloc[1:].to_parquet(path.with_name("part-001.parquet"), index=False)
 
 
-def _write_reports(
+def _write_run_outputs(
     root: Path,
     *,
     missing_prediction_score: bool,
-    prediction_artifact_ids: tuple[str, ...],
+    prediction_output_ids: tuple[str, ...],
     swap_prediction_assets: bool,
     tiny_turnover_epsilon: bool,
 ) -> None:
-    reports_root = root / "reports" / "private_research" / "a_share"
-    for artifact_id in prediction_artifact_ids:
-        prediction = reports_root / "prediction" / artifact_id / "prediction.parquet"
+    run_outputs_root = root / "run_outputs" / "local" / "a_share"
+    for output_id in prediction_output_ids:
+        prediction = (
+            run_outputs_root / "prediction" / output_id / "prediction.parquet"
+        )
         prediction.parent.mkdir(parents=True)
         prediction_payload = {
             "timestamp": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")],
@@ -957,7 +969,7 @@ def _write_reports(
             prediction_payload["prediction_score"] = [0.1, 0.2]
         pd.DataFrame(prediction_payload).to_parquet(prediction, index=False)
 
-    evaluation = reports_root / "evaluation" / "tiny_eval"
+    evaluation = run_outputs_root / "evaluation" / "tiny_eval"
     evaluation.mkdir(parents=True)
     pd.DataFrame(
         {
@@ -980,7 +992,7 @@ def _write_reports(
         }
     ).to_parquet(evaluation / "ic_summary.parquet", index=False)
 
-    portfolio = reports_root / "portfolio" / "tiny_portfolio"
+    portfolio = run_outputs_root / "portfolio" / "tiny_portfolio"
     portfolio.mkdir(parents=True)
     pd.DataFrame(
         {

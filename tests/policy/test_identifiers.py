@@ -8,7 +8,10 @@ def test_identifier_rejects_stock_like_token() -> None:
 
 
 def test_identifier_rejects_source_or_provider_marker() -> None:
-    assert unsafe_identifier_reason("provider_csmar_daily") == "private_marker"
+    assert (
+        unsafe_identifier_reason("provider_csmar_daily")
+        == "provider_source_marker"
+    )
 
 
 def test_identifier_accepts_scope_oriented_output_name() -> None:

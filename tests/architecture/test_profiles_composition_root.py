@@ -9,7 +9,7 @@ RESEARCH_PROFILE = PROJECT_SRC / "profiles" / "research.py"
 SCAN_ROOTS = (Path("src"), Path("tests"))
 
 
-def test_catalog_profiles_package_init_does_not_export_retired_entrypoints() -> None:
+def test_profiles_root_init_does_not_export_retired_entrypoints() -> None:
     source = CATALOG_INIT.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(CATALOG_INIT))
     all_names = _module_all_names(tree)
@@ -22,7 +22,7 @@ def test_catalog_profiles_package_init_does_not_export_retired_entrypoints() -> 
     assert not [name for name in all_names if name.startswith("default_")]
 
 
-def test_catalog_profiles_retired_entrypoints_are_not_imported_from_root() -> None:
+def test_profiles_root_retired_entrypoints_not_imported_from_root() -> None:
     root_import_hits: list[str] = []
     for path in _python_files(SCAN_ROOTS):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -40,11 +40,12 @@ def test_catalog_profiles_retired_entrypoints_are_not_imported_from_root() -> No
                 root_import_hits.append(f"{path}:{node.lineno}")
 
     assert not root_import_hits, (
-        "catalog_profiles_must_use_explicit_module: " + "; ".join(root_import_hits)
+        "profiles_composition_root_must_use_explicit_module: "
+        + "; ".join(root_import_hits)
     )
 
 
-def test_catalog_profiles_remains_platform_composition_root() -> None:
+def test_profiles_composition_root_remains_platform_composition_root() -> None:
     source = RESEARCH_PROFILE.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(RESEARCH_PROFILE))
     modules = {
@@ -70,13 +71,13 @@ def test_catalog_profiles_remains_platform_composition_root() -> None:
     assert not [name for name in all_names if name.startswith("default_")]
 
 
-def test_catalog_profiles_does_not_call_retired_bootstrap_entrypoint() -> None:
+def test_profiles_composition_root_does_not_call_retired_bootstrap_entrypoint() -> None:
     source = RESEARCH_PROFILE.read_text(encoding="utf-8")
 
     assert ".bootstrap_default(" not in source
 
 
-def test_catalog_profiles_delegates_concrete_definitions_to_owners() -> None:
+def test_profiles_composition_root_delegates_concrete_definitions_to_owners() -> None:
     source = RESEARCH_PROFILE.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(RESEARCH_PROFILE))
     forbidden_names = {

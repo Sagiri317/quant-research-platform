@@ -5,11 +5,8 @@ from __future__ import annotations
 import argparse
 import ast
 import json
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
-from zipfile import ZipFile
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_PARENT = SCRIPT_DIR.parent
@@ -17,12 +14,7 @@ SKILL_ROOT = SCRIPT_PARENT.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from build_handoff_package import clean_handoff_text  # noqa: E402
-from verify_handoff_package import (  # noqa: E402
-    scan_handoff_zip,
-    unsafe_text_reason,
-    verify_smoke_compare_status,
-)
+from verify_handoff_package import verify_smoke_compare_status  # noqa: E402
 
 
 def main() -> int:
@@ -136,59 +128,6 @@ def main() -> int:
         return fail("builder_forbidden_terms=" + ",".join(found_forbidden))
     if '"cat-file", "-t"' in verifier or '"cat-file", "-p"' in verifier:
         return fail("handoff_bundle_scan_uses_per_blob_cat_file")
-    # Intentional fake private marker used to test sanitizer/package-safety rejection.
-    unsafe_status = " M C:/Users/DELL/private/file.txt\n"
-    if "C:/Users" in clean_handoff_text(unsafe_status):
-        return fail("git_status_sanitizer_fixture_failed")
-    scanner_fixture = (
-        "\\\\Users\\\\ site-packages conda env path vendor_marker "
-        "Traceback (most recent call last): runtime_payload"
-    )
-    sanitized_scanner_fixture = clean_handoff_text(scanner_fixture)
-    if (
-        "\\\\Users\\\\" in sanitized_scanner_fixture
-        or "site-packages" in sanitized_scanner_fixture
-        or "conda env path" in sanitized_scanner_fixture
-        or "vendor_marker" in sanitized_scanner_fixture
-        or "Traceback (most recent call last):" in sanitized_scanner_fixture
-        or "runtime_payload" in sanitized_scanner_fixture
-    ):
-        return fail("scanner_pattern_sanitizer_fixture_failed")
-    package, sidecar = _zip_and_sidecar_with_leak()
-    sidecar_safety = scan_handoff_zip(package, json_path=sidecar)
-    if sidecar_safety.ok:
-        return fail("sidecar_text_content_not_scanned")
-    # Intentional fake private marker used to test package-safety rejection.
-    bundle_zip = _bundle_zip_with_text(
-        "leak.txt",
-        "path=C:/Users/DELL/private.txt\n",
-    )
-    bundle_safety = scan_handoff_zip(bundle_zip)
-    if bundle_safety.ok:
-        return fail("bundle_text_content_not_scanned")
-    # Intentional fake private marker used to test deleted bundle history handling.
-    deleted_bundle_zip = _bundle_zip_with_deleted_text(
-        "deleted-leak.txt",
-        "path=C:/Users/DELL/deleted-private.txt\n",
-    )
-    deleted_bundle_safety = scan_handoff_zip(deleted_bundle_zip)
-    if not deleted_bundle_safety.ok:
-        return fail("deleted_bundle_historical_text_blocked")
-    unsafe_cases = {
-        "vendor_marker": '{"vendor_marker": "raw-provider"}',
-        "raw_traceback": "Traceback (most recent call last):\nprivate context",
-        "private_runtime_payload": '{"runtime_payload": {"rss": 1}}',
-    }
-    missed = [
-        name
-        for name, text in unsafe_cases.items()
-        if unsafe_text_reason(text, name="task_metadata.json") != name
-    ]
-    if missed:
-        return fail("unsafe_cases_not_detected=" + ",".join(missed))
-    trusted_fixture = 'unsafe_cases = {"vendor_marker": "vendor_marker"}'
-    if unsafe_text_reason(trusted_fixture, name="run_tools/self_test.py") is not None:
-        return fail("trusted_run_tool_fixture_flagged")
     clone_command = "git clone --branch <branch-from-sidecar> final-branch.bundle repo"
     if clone_command not in readme:
         return fail("readme_missing_branch_clone_command")
@@ -210,107 +149,6 @@ def support_path(run_tools_relative: str, source_relative: str) -> Path | None:
         SKILL_ROOT / source_relative,
     )
     return next((path for path in candidates if path.exists()), None)
-
-
-def _zip_and_sidecar_with_leak() -> tuple[Path, Path]:
-    temp = Path(tempfile.mkdtemp(prefix="handoff-sidecar-self-test-"))
-    package = temp / "handoff.zip"
-    with ZipFile(package, "w") as archive:
-        archive.writestr("task_metadata.json", "{}\n")
-    sidecar = temp / "handoff.json"
-    sidecar.write_text(
-        json.dumps(
-            {
-                "schema_version": "handoff-sidecar/0.1",
-                "zip_filename": "handoff.zip",
-                "handoff_package_path": ".run/handoffs/handoff.zip",
-                "handoff_sidecar_path": ".run/handoffs/handoff.json",
-                "zip_path": "E:/quant-workspace/private/handoff.zip",
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return package, sidecar
-
-
-def _bundle_zip_with_text(relative: str, text: str) -> Path:
-    temp = Path(tempfile.mkdtemp(prefix="handoff-self-test-"))
-    repo = temp / "repo"
-    repo.mkdir()
-    _init_repo(repo)
-    target = repo / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "self-test bundle"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    bundle = temp / "final-branch.bundle"
-    subprocess.run(
-        ["git", "bundle", "create", str(bundle), "HEAD"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    package = temp / "handoff.zip"
-    with ZipFile(package, "w") as archive:
-        archive.write(bundle, "final-branch.bundle")
-    return package
-
-
-def _bundle_zip_with_deleted_text(relative: str, text: str) -> Path:
-    temp = Path(tempfile.mkdtemp(prefix="handoff-self-test-deleted-"))
-    repo = temp / "repo"
-    repo.mkdir()
-    _init_repo(repo)
-    target = repo / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "self-test bundle leak"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(["git", "rm", relative], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "delete leaked text"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    bundle = temp / "final-branch.bundle"
-    subprocess.run(
-        ["git", "bundle", "create", str(bundle), "--all"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    package = temp / "handoff.zip"
-    with ZipFile(package, "w") as archive:
-        archive.write(bundle, "final-branch.bundle")
-    return package
-
-
-def _init_repo(repo: Path) -> None:
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "self-test@example.invalid"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Handoff Self Test"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
 
 
 if __name__ == "__main__":

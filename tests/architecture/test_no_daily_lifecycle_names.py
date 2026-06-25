@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import re
+import sys
 from pathlib import Path
 
 from quant_research_platform.contracts.data import DataFrequency
@@ -22,8 +23,8 @@ SHARED_TEST_HELPER_ROOTS = (
 
 
 def test_daily_lifecycle_names_are_replaced() -> None:
-    builder = _load_handoff_builder()
-    scan_groups = builder.source_tree_scan_groups(Path("."))
+    contract = _load_governance_contract()
+    scan_groups = contract.source_tree_scan_groups(Path("."))
 
     assert scan_groups["retired_text"]["findings"] == []
     assert scan_groups["python_symbols"]["findings"] == []
@@ -92,14 +93,15 @@ def _literal_pattern(value: str) -> re.Pattern[str]:
     return re.compile(r"\b" + re.escape(value) + r"\b")
 
 
-def _load_handoff_builder():
+def _load_governance_contract():
     path = Path(
-        ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-        "build_handoff_package.py"
+        ".agents/skills/quant-research-platform-maintenance/scripts/"
+        "governance_contract.py"
     )
-    spec = importlib.util.spec_from_file_location("handoff_builder_for_test", path)
+    spec = importlib.util.spec_from_file_location("governance_contract_for_test", path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module

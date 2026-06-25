@@ -105,7 +105,7 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     assert annotation["selected_important_column_null_counts"] == {"eligible": 1}
     assert research["row_count_by_year"] == {"2024": 2}
     assert "data/raw" not in combined
-    assert "reports/private_research" not in combined
+    assert "run_outputs/local" not in combined
     assert str(tmp_path) not in combined
     assert "asset_a" not in combined
     assert "source_asset_a" not in combined
@@ -418,7 +418,7 @@ def _write_inventory_fixture(project_root: Path) -> None:
     )
     raw_root = project_root / "data" / "raw" / "vendor" / "ignored"
     report_root = (
-        project_root / "reports" / "private_research" / "a_share" / "evaluation" / "run"
+        project_root / "run_outputs" / "local" / "a_share" / "evaluation" / "run"
     )
 
     write_low_level_parquet_artifact(

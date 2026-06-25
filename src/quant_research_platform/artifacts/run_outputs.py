@@ -26,8 +26,8 @@ from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.policy.share_safety import (
-    sanitize_public_object,
-    sanitize_public_text,
+    sanitize_shared_object,
+    sanitize_shared_text,
 )
 from quant_research_platform.storage.atomic import (
     atomic_write_csv,
@@ -297,13 +297,13 @@ def write_stage_profile_run_outputs(
     )
 
     def _write(temp_root: Path) -> None:
-        safe_rows = sanitize_public_object(frame.to_dict(orient="records"))
+        safe_rows = sanitize_shared_object(frame.to_dict(orient="records"))
         safe_frame = pd.DataFrame.from_records(safe_rows)
         atomic_write_csv(safe_frame, temp_root / "stage_profile.csv", index=False)
         atomic_write_json(temp_root / "stage_profile.json", safe_rows)
         atomic_write_text(
             temp_root / "stage_profile.md",
-            sanitize_public_text(markdown_text),
+            sanitize_shared_text(markdown_text),
             encoding="utf-8",
         )
         write_manifest(
@@ -353,11 +353,11 @@ def write_prediction_run_outputs(
     required = (*spec.primary_key, spec.prediction_column)
     missing = sorted(set(required).difference(frame.columns))
     if missing:
-        raise ValueError(f"missing_prediction_artifact_columns: {', '.join(missing)}")
+        raise ValueError(f"missing_prediction_output_columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(required))
     if extra:
         raise ValueError(
-            f"unregistered_prediction_artifact_columns: {', '.join(extra)}"
+            f"unregistered_prediction_output_columns: {', '.join(extra)}"
         )
     if bool(frame.duplicated(list(spec.primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
@@ -722,7 +722,7 @@ def _evaluation_run_output_manifest_payload(
         "signals": [asdict(signal) for signal in spec.signals],
         "label_columns": list(spec.label_columns),
         "filter_mode": spec.filter_mode,
-        "evaluation_diagnostics": sanitize_public_object(
+        "evaluation_diagnostics": sanitize_shared_object(
             asdict(evaluation_diagnostics)
         ),
         "artifacts": list(_EVALUATION_ARTIFACTS),
@@ -928,7 +928,7 @@ def _sanitize_required_metadata(
 ) -> dict[str, object]:
     if not isinstance(value, Mapping) or not value:
         raise ValueError(error_name)
-    sanitized = sanitize_public_object(dict(value))
+    sanitized = sanitize_shared_object(dict(value))
     if not isinstance(sanitized, dict) or not sanitized:
         raise ValueError(error_name)
     return sanitized
@@ -1573,11 +1573,11 @@ def _prediction_output_chunk_frame(
 ) -> pd.DataFrame:
     missing = sorted(set(required).difference(frame.columns))
     if missing:
-        raise ValueError(f"missing_prediction_artifact_columns: {', '.join(missing)}")
+        raise ValueError(f"missing_prediction_output_columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(required))
     if extra:
         raise ValueError(
-            f"unregistered_prediction_artifact_columns: {', '.join(extra)}"
+            f"unregistered_prediction_output_columns: {', '.join(extra)}"
         )
     selected = frame.loc[:, list(required)]
     if bool(selected.duplicated(list(key_columns)).any()):

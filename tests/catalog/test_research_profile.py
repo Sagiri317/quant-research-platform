@@ -150,7 +150,7 @@ def test_a_share_research_profiles_do_not_import_csmar() -> None:
     ]
 
 
-def test_catalog_profiles_is_only_prod_module_composing_csmar_and_a_share() -> None:
+def test_profiles_root_is_only_prod_module_composing_csmar_and_a_share() -> None:
     composers: list[str] = []
     for path in (PROJECT_SRC).rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))

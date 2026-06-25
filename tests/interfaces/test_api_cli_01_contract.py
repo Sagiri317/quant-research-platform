@@ -101,7 +101,7 @@ def test_openapi_uses_approved_operation_ids_and_no_retired_operations() -> None
         assert fragment not in text
 
 
-def test_api_01_endpoints_respond_without_private_markers() -> None:
+def test_api_01_endpoints_respond_without_provider_source_markers() -> None:
     client = TestClient(create_app())
 
     responses = [
@@ -118,7 +118,7 @@ def test_api_01_endpoints_respond_without_private_markers() -> None:
     combined = "\n".join(str(payload) for payload in payloads)
     assert "planned" not in combined.lower()
     assert "parquet" not in combined.lower()
-    _assert_public_text_has_no_private_markers(combined)
+    _assert_public_text_has_no_provider_source_markers(combined)
 
     assert len(responses[0].json()["items"]) == len(price_volume_factor_columns())
     assert responses[1].json()["items"][0]["definition_version"] == "0.1"
@@ -158,7 +158,7 @@ def test_cli_exposes_only_current_public_commands() -> None:
     for command in commands:
         result = runner.invoke(app, command)
         assert result.exit_code == 0
-        _assert_public_text_has_no_private_markers(result.output)
+        _assert_public_text_has_no_provider_source_markers(result.output)
 
     for command in RETIRED_CLI_COMMANDS:
         assert runner.invoke(app, list(command)).exit_code != 0
@@ -186,7 +186,7 @@ def test_cli_help_exposes_approved_groups_and_no_retired_commands() -> None:
     assert "universes" not in combined
     assert "run-interim" not in combined
     assert "--run-id" not in combined
-    _assert_public_text_has_no_private_markers(combined)
+    _assert_public_text_has_no_provider_source_markers(combined)
 
 
 def test_cli_commands_module_help_invokes_existing_app() -> None:
@@ -210,7 +210,7 @@ def test_cli_commands_module_help_invokes_existing_app() -> None:
     assert "catalog" in result.stdout
     assert "research-datasets" in result.stdout
     assert "run-interim" not in result.stdout
-    _assert_public_text_has_no_private_markers(result.stdout)
+    _assert_public_text_has_no_provider_source_markers(result.stdout)
 
 
 def test_api_and_cli_naming_conventions_are_contractual() -> None:
@@ -391,8 +391,8 @@ def test_rejected_dataset_ids_are_sanitized() -> None:
 
         assert dataset_response.status_code == 404
         assert dataset_result.exit_code != 0
-        _assert_public_text_has_no_private_markers(str(dataset_response.json()))
-        _assert_public_text_has_no_private_markers(dataset_result.output)
+        _assert_public_text_has_no_provider_source_markers(str(dataset_response.json()))
+        _assert_public_text_has_no_provider_source_markers(dataset_result.output)
 
 
 def test_api_error_envelope_sanitizes_private_details() -> None:
@@ -452,7 +452,7 @@ def test_cli_excludes_retired_public_commands() -> None:
         assert runner.invoke(app, command).exit_code != 0
 
 
-def _assert_public_text_has_no_private_markers(text: str) -> None:
+def _assert_public_text_has_no_provider_source_markers(text: str) -> None:
     lowered = text.lower()
     for marker in FORBIDDEN_PUBLIC_MARKERS:
         assert marker.lower() not in lowered

@@ -16,7 +16,6 @@ EXCLUDED_PARTS = {
     (RUNTIME_WORKSPACE_PART,),
     ("__pycache__",),
     ("docs", "archive"),
-    ("reports", "private_research"),
 }
 FORBIDDEN_PATTERNS = {
     "price_volume_56": re.compile(r"price_volume_56"),

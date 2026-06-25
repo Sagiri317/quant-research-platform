@@ -12,8 +12,8 @@ from fastapi.responses import JSONResponse
 
 from quant_research_platform.interfaces.api.models import ApiErrorEnvelope
 from quant_research_platform.policy.share_safety import (
-    sanitize_public_object,
-    sanitize_public_text,
+    sanitize_shared_object,
+    sanitize_shared_text,
 )
 
 
@@ -29,9 +29,9 @@ class ApiError(Exception):
 def api_error_response(error: ApiError) -> JSONResponse:
     envelope = ApiErrorEnvelope.from_error(
         error_code=error.error_code,
-        message=sanitize_public_text(error.message),
-        field=sanitize_public_text(error.field) if error.field is not None else None,
-        details=sanitize_public_object(error.details),
+        message=sanitize_shared_text(error.message),
+        field=sanitize_shared_text(error.field) if error.field is not None else None,
+        details=sanitize_shared_object(error.details),
     )
     return JSONResponse(
         status_code=error.status_code,
@@ -77,8 +77,8 @@ def _validation_error_details(exc: RequestValidationError) -> dict[str, Any]:
     for item in exc.errors():
         sanitized_errors.append(
             {
-                "type": sanitize_public_text(item.get("type", "")),
-                "loc": sanitize_public_object(item.get("loc", ())),
+                "type": sanitize_shared_text(item.get("type", "")),
+                "loc": sanitize_shared_object(item.get("loc", ())),
                 "msg": "validation_error",
             }
         )

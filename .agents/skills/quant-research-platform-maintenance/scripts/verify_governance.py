@@ -58,7 +58,7 @@ BUSINESS_PREFIXES = (
     "pyproject.toml",
     "environment.yml",
     "data/",
-    "reports/private_research/",
+    "run_outputs/local/",
 )
 
 GOVERNANCE_TEST_PREFIXES = (
@@ -88,12 +88,12 @@ RETIRED_DOC_DELETION_PATHS = set(RETIRED_GOVERNANCE_EXACT_PATHS)
 
 RETIRED_DOC_DELETION_PREFIXES = RETIRED_GOVERNANCE_PREFIXES
 
-PRIVATE_ROOTS = (
+LOCAL_ONLY_ROOTS = (
     "data/raw/",
     "data/interim/",
     "data/processed/",
     "data/research/",
-    "reports/private_research/",
+    "run_outputs/local/",
 )
 
 STRUCTURED_KEY_SUFFIXES = {".json", ".yaml", ".yml", ".toml"}
@@ -250,8 +250,8 @@ def check_governance_only(
 ) -> None:
     for path in paths:
         allowed = is_governance_only_allowed_path(repo, path)
-        if path.startswith(PRIVATE_ROOTS):
-            result.errors.append(f"private root changed or included: {path}")
+        if path.startswith(LOCAL_ONLY_ROOTS):
+            result.errors.append(f"local-only root changed or included: {path}")
         if path.startswith(".codex/"):
             result.errors.append(
                 f"repo-local .codex change is not allowed by default: {path}"
@@ -334,7 +334,7 @@ def _should_include_state_path(
         return False
     if any(
         normalized == root.rstrip("/") or normalized.startswith(root)
-        for root in PRIVATE_ROOTS
+        for root in LOCAL_ONLY_ROOTS
     ):
         return False
     if suffixes is not None and Path(normalized).suffix.lower() not in suffixes:
@@ -603,7 +603,7 @@ def check_markdown_paths(result: Result, repo: Path, paths: list[str]) -> None:
                 continue
             if any(
                 candidate == root.rstrip("/") or candidate.startswith(root)
-                for root in PRIVATE_ROOTS
+                for root in LOCAL_ONLY_ROOTS
             ):
                 continue
             if is_retired_governance_path(candidate):
@@ -621,7 +621,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Run QRP governance checks. By default, only Git changed files are "
-            "checked and private data roots are not scanned."
+            "checked and local-only roots are not scanned."
         )
     )
     parser.add_argument("--repo-root", default=".", help="Repository root.")
@@ -633,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--governance-only",
         action="store_true",
-        help="Governance-only mode forbids business code and private roots.",
+        help="Governance-only mode forbids business code and local-only roots.",
     )
     parser.add_argument(
         "--scan-scope",

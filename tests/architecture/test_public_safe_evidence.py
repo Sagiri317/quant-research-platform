@@ -67,7 +67,7 @@ FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS = [
     "data/interim",
     "data/processed",
     "data/research",
-    "reports/private_research",
+    "run_outputs/local",
     "000001",
     "600000",
     "raw row",

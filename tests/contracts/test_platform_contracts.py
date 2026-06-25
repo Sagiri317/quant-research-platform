@@ -28,9 +28,9 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
 )
 from quant_research_platform.policy.share_safety import (
-    PRIVATE_BOUNDARY_ROOTS,
-    is_private_boundary_path,
-    sanitize_public_text,
+    LOCAL_ONLY_ROOTS,
+    is_local_only_path,
+    sanitize_shared_text,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
@@ -206,23 +206,25 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     assert layout.research_dataset_root(MarketId("a_share"), "demo") == Path(
         "/repo/data/research/a_share/demo"
     )
-    assert not hasattr(layout, "private_research_report_root")
-    assert PRIVATE_BOUNDARY_ROOTS == (
+    assert not hasattr(layout, "local_run_output_root")
+    assert LOCAL_ONLY_ROOTS == (
         "data/raw",
         "data/interim",
         "data/processed",
         "data/research",
-        "reports/private_research",
+        "run_outputs/local",
     )
-    assert is_private_boundary_path(Path("/repo/data/raw/csmar/export.csv"))
-    assert is_private_boundary_path(Path("/repo/reports/private_research/a_share/run"))
-    assert not is_private_boundary_path(Path("/repo/docs/data/README.md"))
+    assert is_local_only_path(Path("/repo/data/raw/csmar/export.csv"))
+    assert is_local_only_path(
+        Path("/repo/run_outputs/local/a_share/run")
+    )
+    assert not is_local_only_path(Path("/repo/docs/data/README.md"))
 
 
-def test_sanitizer_removes_local_paths_and_private_markers() -> None:
+def test_sanitizer_removes_local_paths_and_provider_source_markers() -> None:
     text = "failed with data/raw/csmar/export.csv vendor CSMAR row"
 
-    sanitized = sanitize_public_text(text)
+    sanitized = sanitize_shared_text(text)
 
     assert "data/raw/csmar" not in sanitized
     assert "CSMAR" not in sanitized

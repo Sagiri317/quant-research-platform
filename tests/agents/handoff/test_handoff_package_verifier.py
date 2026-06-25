@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 
-def _load_package_safety_module():
+def _load_handoff_package_verifier_module():
     script = (
         Path(".agents")
         / "skills"
@@ -69,15 +69,15 @@ def _load_governance_contract_module():
     return module
 
 
-def test_package_safety_uses_shared_governance_forbidden_path_parts():
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_uses_shared_governance_forbidden_path_parts():
+    module = _load_handoff_package_verifier_module()
     contract = _load_governance_contract_module()
 
     assert module.BLOCKED_PATH_PARTS == contract.PACKAGE_FORBIDDEN_PATH_PARTS
 
 
-def test_package_safety_allows_handoff_final_branch_bundle_by_default(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("final-branch.bundle", b"not a real bundle for path policy")
@@ -96,11 +96,11 @@ def test_package_safety_allows_handoff_final_branch_bundle_by_default(tmp_path):
         "C:/handoff_evidence/leak.md",
     ],
 )
-def test_package_safety_rejects_tampered_zip_member_paths(
+def test_handoff_package_verifier_rejects_tampered_zip_member_paths(
     tmp_path: Path,
     member: str,
 ) -> None:
-    module = _load_package_safety_module()
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "tampered.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(member, "{}\n")
@@ -110,8 +110,8 @@ def test_package_safety_rejects_tampered_zip_member_paths(
     assert not result.ok
 
 
-def test_package_safety_still_rejects_other_nested_packages_by_default(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_verifier_rejects_other_nested_packages_by_default(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/old.bundle", b"opaque package")
@@ -124,10 +124,10 @@ def test_package_safety_still_rejects_other_nested_packages_by_default(tmp_path)
     )
 
 
-def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_scans_json_sidecar_absolute_paths(tmp_path):
+    module = _load_handoff_package_verifier_module()
     sidecar = tmp_path / "handoff.json"
-    # Intentional fake private marker used to test package-safety rejection.
+    # Intentional fake local-only marker used to test handoff verifier rejection.
     sidecar.write_text(
         json.dumps(
             {
@@ -146,11 +146,11 @@ def test_package_safety_scans_json_sidecar_absolute_paths(tmp_path):
     assert any("local absolute path" in error for error in result.errors)
 
 
-def test_package_safety_allows_scanner_pattern_definitions(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_allows_scanner_pattern_definitions(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
-        # Intentional fake private markers in a scanner rule definition fixture.
+        # Intentional fake local-only markers in a scanner rule definition fixture.
         archive.writestr(
             "verify_handoff_package.py",
             'LOCAL_PATH_PATTERN = re.compile(r"E:/|/mnt/data|site-packages")\n',
@@ -161,11 +161,11 @@ def test_package_safety_allows_scanner_pattern_definitions(tmp_path):
     assert result.ok
 
 
-def test_package_safety_still_rejects_regular_evidence_paths(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_still_rejects_regular_evidence_paths(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
-        # Intentional fake private marker used to test package-safety rejection.
+        # Intentional fake local-only marker used to test handoff verifier rejection.
         archive.writestr(
             "handoff_evidence/leak.json",
             '{"path": "E:/private"}\n',
@@ -177,8 +177,8 @@ def test_package_safety_still_rejects_regular_evidence_paths(tmp_path):
     assert any("path" in error for error in result.errors)
 
 
-def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_rejects_data_research_members_and_paths(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("data/research/a_share/demo/manifest.json", "{}\n")
@@ -189,10 +189,10 @@ def test_package_safety_rejects_data_research_members_and_paths(tmp_path):
     assert any("forbidden_path_segment" in error for error in result.errors)
 
 
-def test_package_safety_rejects_retired_private_report_paths(
+def test_handoff_package_verifier_rejects_retired_local_output_paths(
     tmp_path,
 ):
-    module = _load_package_safety_module()
+    module = _load_handoff_package_verifier_module()
     members = []
     for segment in module.BLOCKED_PATH_PARTS:
         if segment.startswith("reports/private_"):
@@ -218,8 +218,8 @@ def test_package_safety_rejects_retired_private_report_paths(
         ".run/s86/summary.json",
     ],
 )
-def test_package_safety_rejects_private_run_members(tmp_path, member):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_rejects_local_run_members(tmp_path, member):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr(member, "{}\n")
@@ -239,11 +239,11 @@ def test_package_safety_rejects_private_run_members(tmp_path, member):
         ".run\\\\private\\\\s1",
     ],
 )
-def test_package_safety_rejects_private_run_paths_in_sidecar(
+def test_handoff_package_verifier_rejects_local_run_paths_in_sidecar(
     tmp_path,
     logical_path,
 ):
-    module = _load_package_safety_module()
+    module = _load_handoff_package_verifier_module()
     sidecar = tmp_path / "handoff.json"
     sidecar.write_text(
         json.dumps({"evidence_root": logical_path}),
@@ -253,11 +253,11 @@ def test_package_safety_rejects_private_run_paths_in_sidecar(
     result = module.scan_target(sidecar, allow_nested_packages=False)
 
     assert not result.ok
-    assert any("private run path" in error for error in result.errors)
+    assert any("local run path" in error for error in result.errors)
 
 
-def test_package_safety_rejects_private_run_paths_in_handoff_evidence(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_rejects_local_run_paths_in_handoff_evidence(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     text = "\n".join(
         [
@@ -271,7 +271,7 @@ def test_package_safety_rejects_private_run_paths_in_handoff_evidence(tmp_path):
     result = module.scan_zip(package, allow_nested_packages=False)
 
     assert not result.ok
-    assert any("private run path" in error for error in result.errors)
+    assert any("local run path" in error for error in result.errors)
 
 
 @pytest.mark.parametrize(
@@ -283,11 +283,11 @@ def test_package_safety_rejects_private_run_paths_in_handoff_evidence(tmp_path):
         "source_asset_id",
     ],
 )
-def test_package_safety_uses_runtime_privacy_for_text_markers(
+def test_handoff_package_verifier_uses_share_safety_for_text_markers(
     tmp_path: Path,
     text: str,
 ) -> None:
-    module = _load_package_safety_module()
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/leak.md", text)
@@ -310,8 +310,8 @@ def test_package_safety_uses_runtime_privacy_for_text_markers(
         "vendor_payload={}",
     ],
 )
-def test_package_safety_rejects_private_provider_markers(tmp_path, text):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_rejects_private_provider_markers(tmp_path, text):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/leak.md", text)
@@ -322,8 +322,8 @@ def test_package_safety_rejects_private_provider_markers(tmp_path, text):
     assert any("vendor marker" in error for error in result.errors)
 
 
-def test_package_safety_large_text_skip_is_fail_closed(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_large_text_skip_is_fail_closed(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     large_text = ("x" * (module.MAX_TEXT_SCAN_BYTES + 1)) + "\nsource_id=raw\n"
     with zipfile.ZipFile(package, "w") as archive:
@@ -338,16 +338,20 @@ def test_package_safety_large_text_skip_is_fail_closed(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
-        # Intentional fake private markers used to test package-safety rejection.
+        # Intentional fake local-only markers used to test handoff verifier rejection.
         "/workspace/qrp/data/research/a_share/demo",
+        # intentional legacy-path negative case
         "/workspaces/qrp/reports/private_research/a_share/run",
         "/home/user/private.txt",
         "/Users/user/private.txt",
         "/mnt/data/private.txt",
     ],
 )
-def test_package_safety_rejects_posix_private_and_workspace_paths(tmp_path, text):
-    module = _load_package_safety_module()
+def test_handoff_verifier_rejects_posix_local_workspace_paths(
+    tmp_path,
+    text,
+):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/leak.md", text)
@@ -358,8 +362,8 @@ def test_package_safety_rejects_posix_private_and_workspace_paths(tmp_path, text
     assert any("path" in error for error in result.errors)
 
 
-def test_package_safety_allows_public_handoff_evidence_text(tmp_path):
-    module = _load_package_safety_module()
+def test_handoff_package_verifier_allows_public_handoff_evidence_text(tmp_path):
+    module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("handoff_evidence/summary.md", "verified aggregate\n")

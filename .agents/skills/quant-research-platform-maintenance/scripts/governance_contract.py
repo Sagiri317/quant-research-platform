@@ -6,14 +6,41 @@ This module is an internal tooling fact source. It is not a public API.
 from __future__ import annotations
 
 import ast
+import importlib
 import io
 import json
 import re
 import subprocess
+import sys
+import tempfile
 import tokenize
 import tomllib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+try:
+    from quant_research_platform.policy.check_status import VALID_STATUS_TOKENS
+except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
+    _policy_path = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "quant_research_platform"
+        / "policy"
+        / "check_status.py"
+    )
+    if _policy_path.exists():
+        _policy_spec = importlib.util.spec_from_file_location(
+            "qrp_policy_check_status",
+            _policy_path,
+        )
+        if _policy_spec is None or _policy_spec.loader is None:
+            raise
+        _policy_module = importlib.util.module_from_spec(_policy_spec)
+        _policy_spec.loader.exec_module(_policy_module)
+        VALID_STATUS_TOKENS = _policy_module.VALID_STATUS_TOKENS
+    else:
+        VALID_STATUS_TOKENS = ("PASS", "FAIL", "NOT_RUN", "BLOCKED")
 
 
 @dataclass(frozen=True)
@@ -537,17 +564,16 @@ PACKAGE_FORBIDDEN_SUFFIXES = (
     ".sqlite3",
 )
 
-VALID_STATUS_TOKENS = ("PASS", "FAIL", "NOT_RUN", "BLOCKED")
-
 RETIRED_PATH_POLICY_MARKERS = tuple(RETIRED_GOVERNANCE_EXACT_PATHS) + (
     "docs/reports/clean-rewrite",
 )
 
 PRIVACY_NEGATIVE_TEST_PATHS = (
-    "tests/runtime/test_privacy_01.py",
+    "tests/policy/test_share_safety.py",
+    "tests/policy/test_share_safety_runtime_edges.py",
     "tests/storage/test_manifest_helper_edges.py",
     "tests/agents/handoff/test_handoff_tools.py",
-    "tests/agents/handoff/test_package_safety_check.py",
+    "tests/agents/handoff/test_handoff_package_verifier.py",
 )
 
 STALE_NEGATIVE_TEST_PATHS = (
@@ -689,10 +715,6 @@ BUILD_HANDOFF_PACKAGE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
     "build_handoff_package.py"
 )
-HANDOFF_SAFETY_SCRIPT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
-    "handoff_safety.py"
-)
 HANDOFF_SELF_TEST_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py"
 )
@@ -700,44 +722,13 @@ VERIFY_HANDOFF_PACKAGE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
     "verify_handoff_package.py"
 )
-PACKAGE_SAFETY_CHECK_SCRIPT = Path(
-    ".agents/skills/quant-research-platform-maintenance/scripts/package_safety_check.py"
-)
 VERIFY_GOVERNANCE_SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/verify_governance.py"
 )
 
 SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
-    HANDOFF_SAFETY_SCRIPT: {
-        "forbidden_diff_patch": {'"diff.patch",'},
-        "forbidden_pr_body": {'"pr_body.md",'},
-        "forbidden_review_threads": {'"review_threads",'},
-        "forbidden_private_real": {'"reports/private_real",'},
-        "forbidden_private_data": {'"reports/private_data",'},
-        "forbidden_review_evidence": {'"review_evidence",'},
-        "forbidden_review_bundle": {'"review_bundle",'},
-        "forbidden_review_package": {'"review_package",'},
-        "forbidden_review_zip_path": {'"review_zip_path",'},
-    },
     VERIFY_HANDOFF_PACKAGE_SCRIPT: {
         "forbidden_final_head_full": {'"final_head_full",'},
-    },
-    PACKAGE_SAFETY_CHECK_SCRIPT: {
-        "forbidden_diff_patch": {'"diff.patch",'},
-        "forbidden_pr_body": {'"pr_body.md",'},
-        "forbidden_review_threads": {'"review_threads",'},
-        "forbidden_private_real": {
-            'for path_name in ("private_research", "private_real", "private_data")',
-            '"reports/private_real",',
-        },
-        "forbidden_private_data": {
-            'for path_name in ("private_research", "private_real", "private_data")',
-            '"reports/private_data",',
-        },
-        "forbidden_review_evidence": {'"review_evidence",'},
-        "forbidden_review_bundle": {'"review_bundle",'},
-        "forbidden_review_package": {'"review_package",'},
-        "forbidden_review_zip_path": {'"review_zip_path",'},
     },
     Path("src/quant_research_platform/runtime/privacy.py"): {
         "forbidden_private_real": {'"private_real",'},
@@ -789,14 +780,6 @@ SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
             '"retired path reports/private_real/a_share/run\\n",',
         },
     },
-    Path("tests/agents/handoff/test_package_safety_check.py"): {
-        "forbidden_private_data": {
-            '"reports/private_data/a_share/run/summary.json",',
-        },
-        "forbidden_private_real": {
-            '"reports/private_real/a_share/run/summary.json",',
-        },
-    },
 }
 
 SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
@@ -812,7 +795,6 @@ SOURCE_TREE_RETIRED_TERM_ROOTS = SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS + (
     Path("src/quant_research_platform/agents"),
     Path("src/quant_research_platform/reports"),
     Path(".agents/skills/quant-research-platform-maintenance/scripts/handoff"),
-    PACKAGE_SAFETY_CHECK_SCRIPT,
 )
 
 SOURCE_TREE_RETIRED_PATH_POLICY_MARKERS = RETIRED_PATH_POLICY_MARKERS
@@ -833,7 +815,6 @@ SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
 }
 
 SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
-    BUILD_HANDOFF_PACKAGE_SCRIPT: {rule.name for rule in RETIRED_PUBLIC_SURFACE_RULES},
     Path("tests/architecture/test_retired_surface_absent.py"): {
         "retired_csmar_source_alias",
         "retired_a_share_market_alias",
@@ -844,8 +825,8 @@ SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST = {
 
 SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
     SourceTreeSensitiveNegativeRule(
-        name="sensitive_local_private_path",
-        category="private_path_text",
+        name="sensitive_local_only_path",
+        category="local_only_path_text",
         scan_group="sensitive_negative_literals",
         pattern=(
             r"(?i)(?:[A-Za-z]:[\\/][^\n]*(?:"
@@ -862,10 +843,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         ),
         allowed_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
-            BUILD_HANDOFF_PACKAGE_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
-            PACKAGE_SAFETY_CHECK_SCRIPT,
-            HANDOFF_SAFETY_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
         ),
@@ -880,10 +858,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         ),
         allowed_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
-            BUILD_HANDOFF_PACKAGE_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
-            PACKAGE_SAFETY_CHECK_SCRIPT,
-            HANDOFF_SAFETY_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
         ),
@@ -899,10 +874,7 @@ SOURCE_TREE_SENSITIVE_NEGATIVE_RULES = (
         ),
         allowed_sources=(
             GOVERNANCE_CONTRACT_SCRIPT,
-            BUILD_HANDOFF_PACKAGE_SCRIPT,
             VERIFY_GOVERNANCE_SCRIPT,
-            PACKAGE_SAFETY_CHECK_SCRIPT,
-            HANDOFF_SAFETY_SCRIPT,
             VERIFY_HANDOFF_PACKAGE_SCRIPT,
             HANDOFF_SELF_TEST_SCRIPT,
         ),
@@ -953,36 +925,11 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "is_allowed_runtime_symbol",
         "is_allowed_version_surface",
     },
-    BUILD_HANDOFF_PACKAGE_SCRIPT: {
-        "RESERVED_HANDOFF_EVIDENCE_STEMS",
-        "BLOCKED_PACKAGE_ENTRY_PARTS",
-        "TASK_CONTROL_KEYS",
-        "TASK_METADATA_KEYS",
-        "TASK_INPUT_KEYS",
-        "BLOCKED_TASK_KEYS",
-        "BLOCKED_VALIDATION_KEYS",
-        "BLOCKED_HANDOFF_EVIDENCE_KEYS",
-        "HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES",
-        "source_tree_blocked_patterns",
-        "source_tree_active_test_literal_patterns",
-        "source_tree_governance_truth_patterns",
-        "clean_handoff_text",
-    },
-    HANDOFF_SAFETY_SCRIPT: {
-        "FORBIDDEN_PATH_SEGMENTS",
-        "PRIVATE_RUN_PATH_RE",
-        "unsafe_text_reason",
-        "is_scanner_definition_line",
-    },
-    HANDOFF_SELF_TEST_SCRIPT: {"main", "_zip_and_sidecar_with_leak"},
+    HANDOFF_SELF_TEST_SCRIPT: {"main"},
     VERIFY_HANDOFF_PACKAGE_SCRIPT: {
         "contains_local_absolute_path_text",
         "unsafe_text_reason",
         "is_scanner_definition_line",
-    },
-    PACKAGE_SAFETY_CHECK_SCRIPT: {
-        "BLOCKED_PATH_PARTS",
-        "_skip_pattern_line",
     },
     VERIFY_GOVERNANCE_SCRIPT: {
         "LOCAL_PATH_PATTERN",
@@ -997,63 +944,48 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
 
 SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST = {
     GOVERNANCE_CONTRACT_SCRIPT: {
-        "sensitive_local_private_path",
+        "sensitive_local_only_path",
         "sensitive_secret",
         "sensitive_provider_marker",
         "sensitive_stock_code_sample",
     },
-    BUILD_HANDOFF_PACKAGE_SCRIPT: {
-        "sensitive_local_private_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
     VERIFY_GOVERNANCE_SCRIPT: {
-        "sensitive_local_private_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
-    PACKAGE_SAFETY_CHECK_SCRIPT: {
-        "sensitive_local_private_path",
-        "sensitive_secret",
-        "sensitive_provider_marker",
-    },
-    HANDOFF_SAFETY_SCRIPT: {
-        "sensitive_local_private_path",
+        "sensitive_local_only_path",
         "sensitive_secret",
         "sensitive_provider_marker",
     },
     VERIFY_HANDOFF_PACKAGE_SCRIPT: {
-        "sensitive_local_private_path",
+        "sensitive_local_only_path",
         "sensitive_secret",
         "sensitive_provider_marker",
     },
     HANDOFF_SELF_TEST_SCRIPT: {
-        "sensitive_local_private_path",
+        "sensitive_local_only_path",
         "sensitive_secret",
         "sensitive_provider_marker",
     },
     Path("tests/agents/handoff/test_handoff_tools.py"): {
-        "sensitive_local_private_path",
+        "sensitive_local_only_path",
         "sensitive_secret",
         "sensitive_provider_marker",
     },
-    Path("tests/agents/handoff/test_package_safety_check.py"): {
-        "sensitive_local_private_path",
+    Path("tests/agents/handoff/test_handoff_package_verifier.py"): {
+        "sensitive_local_only_path",
         "sensitive_secret",
         "sensitive_provider_marker",
     },
     # Intentional policy negative test fixtures for share-safety detection.
     Path("tests/policy/test_share_safety.py"): {
-        "sensitive_local_private_path",
+        "sensitive_local_only_path",
     },
-    Path("tests/runtime/test_privacy_01.py"): {
-        "sensitive_local_private_path",
+    Path("tests/policy/test_share_safety_runtime_edges.py"): {
+        "sensitive_local_only_path",
         "sensitive_secret",
         "sensitive_provider_marker",
         "sensitive_stock_code_sample",
     },
     Path("tests/storage/test_manifest_helper_edges.py"): {
-        "sensitive_local_private_path",
+        "sensitive_local_only_path",
         "sensitive_provider_marker",
     },
 }
@@ -1339,8 +1271,6 @@ def is_scanner_definition_line(path: str | Path, line: str) -> bool:
         or normalized.endswith(
             (
                 "build_handoff_package.py",
-                "handoff_safety.py",
-                "package_safety_check.py",
                 "self_test.py",
                 "verify_handoff_package.py",
                 "verify_governance.py",
@@ -1799,3 +1729,1047 @@ def is_run_output_architecture_negative_test(path: Path | str) -> bool:
 
 def layer_boundary_import_rules() -> tuple[dict[str, object], ...]:
     return LAYER_BOUNDARY_IMPORT_RULES
+
+# Handoff package contract and source-tree scan ownership.
+VALID_STATUSES = set(VALID_STATUS_TOKENS)
+GENERATION_EVIDENCE = "handoff_evidence/generation.json"
+SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
+VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
+BUILDER_OWNED_HANDOFF_EVIDENCE = {
+    GENERATION_EVIDENCE,
+    SOURCE_TREE_SCAN_EVIDENCE,
+    VERIFICATION_MATRIX_EVIDENCE,
+}
+RESERVED_HANDOFF_EVIDENCE_STEMS = {
+    "diff.patch",
+    "external_evidence_json_path",
+    "final_sha",
+    "pr_body",
+    "pr_body.md",
+    "review_threads",
+    "review_threads.json",
+    "review_evidence",
+    "review_bundle",
+    "review_package",
+    "review_sidecar",
+    "review_zip_path",
+    "validation_table",
+}
+TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS = RESERVED_HANDOFF_EVIDENCE_STEMS | {
+    "generation",
+    "source-tree-scan",
+    "task_metadata",
+    "validation_evidence",
+    "verification-matrix",
+}
+BLOCKED_PACKAGE_ENTRY_PARTS = {
+    "diff.patch",
+    "pr_body.md",
+    "review_threads.json",
+}
+HANDOFF_TOOL_SOURCE_PATHS = [
+    ".agents/skills/quant-research-platform-maintenance/scripts/governance_contract.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
+    ".agents/skills/quant-research-platform-maintenance/scripts/handoff/self_test.py",
+    ".agents/skills/quant-research-platform-maintenance/templates/handoff/task_metadata.template.json",
+    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/task_metadata.schema.json",
+    ".agents/skills/quant-research-platform-maintenance/schemas/handoff/sidecar.schema.json",
+]
+TASK_CONTROL_KEYS = {
+    "validation_evidence",
+    "handoff_evidence",
+}
+TASK_METADATA_KEYS = {
+    "schema_version",
+    "mode",
+    "slug",
+    "branch",
+    "base",
+    "final_head",
+    "pr_url",
+    "task_title",
+    "task_id",
+    "generated_at_utc",
+    "handoff_package_path",
+    "handoff_sidecar_path",
+    "scope_summary",
+    "fixed_blockers",
+    "open_issues",
+    "not_run",
+    "blocked",
+    "commit_list",
+    "source_tree_scan",
+}
+TASK_INPUT_KEYS = TASK_METADATA_KEYS | TASK_CONTROL_KEYS
+BLOCKED_TASK_KEYS = {
+    "diff.patch",
+    "external_evidence_json_path",
+    "final_head_full",
+    "final_sha",
+    "goal_status",
+    "pr_body",
+    "review_bundle",
+    "review_evidence",
+    "review_package",
+    "review_sidecar",
+    "review_threads",
+    "review_threads_json",
+    "review_threads_path",
+    "review_zip",
+    "review_zip_path",
+    "sidecar_logical_path",
+    "validation_table",
+    "zip_logical_path",
+}
+TASK_REJECTED_KEYS = BLOCKED_TASK_KEYS
+BLOCKED_VALIDATION_KEYS = {
+    "external_evidence_json_path",
+    "final_head_full",
+    "final_sha",
+    "goal_status",
+    "review_threads",
+    "review_zip_path",
+    "validation_table",
+}
+HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES = (
+    "final_sha",
+    "review_zip_path",
+    "external_evidence_json_path",
+    "validation_table",
+    "check",
+    "pr_body_path",
+    "review_threads_path",
+    "review_threads_json",
+    "goal_status",
+)
+BLOCKED_HANDOFF_EVIDENCE_KEYS = (
+    BLOCKED_TASK_KEYS
+    | {"check", "pr_body_path", "pr_url"}
+    | set(HANDOFF_EVIDENCE_BLOCKED_KEY_COVERAGE_CASES)
+)
+VALIDATION_ROW_KEYS = {"name", "status", "evidence"}
+
+def source_tree_scan_payload(
+    *,
+    bundle_path: Path,
+    branch: str,
+    final_head: str,
+) -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="handoff-source-tree-scan-") as temp:
+        clone_dir = Path(temp) / "repo"
+        subprocess.run(
+            ["git", "clone", "--branch", branch, str(bundle_path), str(clone_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return source_tree_scan_from_clone(clone_dir, final_head=final_head)
+
+
+def source_tree_scan_from_clone(
+    clone_dir: Path,
+    *,
+    final_head: str,
+) -> dict[str, object]:
+    scanned_head = _governance_git_text(clone_dir, "rev-parse", "HEAD").strip()
+    scan_groups = source_tree_scan_groups(clone_dir)
+    findings = [
+        finding for group in scan_groups.values() for finding in group["findings"]
+    ]
+    failures = []
+    if scanned_head != final_head:
+        failures.append("source_tree_scan_head_mismatch")
+    failures.extend(finding["rule"] for finding in findings)
+    return {
+        "schema_version": "handoff-source-tree-scan/0.1",
+        "status": "PASS" if not failures else "FAIL",
+        "scanned_head": scanned_head,
+        "expected_head": final_head,
+        "scanned_tree": "final-branch.bundle clone",
+        "forbidden_rule_count": len(source_tree_forbidden_patterns()),
+        "finding_count": len(findings),
+        "findings": findings[:50],
+        "failures": failures[:50],
+        "scan_groups": {
+            group: {
+                **payload,
+                "findings": payload["findings"][:50],
+            }
+            for group, payload in scan_groups.items()
+        },
+    }
+
+
+def source_tree_findings(clone_dir: Path) -> list[dict[str, object]]:
+    groups = source_tree_scan_groups(clone_dir)
+    return [
+        *groups["retired_text"]["findings"],
+        *groups["python_symbols"]["findings"],
+        *groups["synthesized_strings"]["findings"],
+    ]
+
+
+def source_tree_scan_groups(clone_dir: Path) -> dict[str, dict[str, object]]:
+    retired_text_findings = source_tree_retired_text_findings(clone_dir)
+    retired_governance_path_findings_ = source_tree_retired_governance_path_findings(
+        clone_dir
+    )
+    retired_path_name_findings = source_tree_retired_path_name_findings(clone_dir)
+    python_symbol_findings = source_tree_python_symbol_findings(clone_dir)
+    synthesized_string_findings = source_tree_synthesized_string_scan_findings(
+        clone_dir
+    )
+    active_test_literal_findings = source_tree_active_test_literal_findings(clone_dir)
+    structured_key_findings = source_tree_structured_key_findings(clone_dir)
+    governance_truth_findings = source_tree_governance_truth_findings(clone_dir)
+    sensitive_negative_literal_findings = (
+        source_tree_sensitive_negative_literal_findings(clone_dir)
+    )
+    return {
+        "retired_text": {
+            "status": "PASS" if not retired_text_findings else "FAIL",
+            "finding_count": len(retired_text_findings),
+            "findings": retired_text_findings,
+        },
+        "retired_governance_paths": {
+            "status": "PASS" if not retired_governance_path_findings_ else "FAIL",
+            "finding_count": len(retired_governance_path_findings_),
+            "findings": retired_governance_path_findings_,
+        },
+        "retired_path_names": {
+            "status": "PASS" if not retired_path_name_findings else "FAIL",
+            "finding_count": len(retired_path_name_findings),
+            "findings": retired_path_name_findings,
+        },
+        "python_symbols": {
+            "status": "PASS" if not python_symbol_findings else "FAIL",
+            "finding_count": len(python_symbol_findings),
+            "findings": python_symbol_findings,
+        },
+        "synthesized_strings": {
+            "status": "PASS" if not synthesized_string_findings else "FAIL",
+            "finding_count": len(synthesized_string_findings),
+            "findings": synthesized_string_findings,
+        },
+        "active_test_literals": {
+            "status": "PASS" if not active_test_literal_findings else "FAIL",
+            "finding_count": len(active_test_literal_findings),
+            "findings": active_test_literal_findings,
+        },
+        "structured_keys": {
+            "status": "PASS" if not structured_key_findings else "FAIL",
+            "finding_count": len(structured_key_findings),
+            "findings": structured_key_findings,
+        },
+        "governance_truth": {
+            "status": "PASS" if not governance_truth_findings else "FAIL",
+            "finding_count": len(governance_truth_findings),
+            "findings": governance_truth_findings,
+        },
+        "sensitive_negative_literals": {
+            "status": "PASS" if not sensitive_negative_literal_findings else "FAIL",
+            "finding_count": len(sensitive_negative_literal_findings),
+            "findings": sensitive_negative_literal_findings,
+        },
+    }
+
+
+def source_tree_retired_governance_path_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    tracked = tuple(path.as_posix() for path in source_tree_tracked_paths(clone_dir))
+    return retired_governance_path_findings(clone_dir, tracked_paths=tracked)
+
+
+def source_tree_retired_path_name_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    return iter_path_name_findings(
+        relative.as_posix() for relative in source_tree_tracked_paths(clone_dir)
+    )
+
+
+def source_tree_python_symbol_findings(clone_dir: Path) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.suffix.lower() != ".py":
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        findings.extend(iter_python_symbol_findings(relative, source))
+    return findings
+
+
+def source_tree_structured_key_findings(clone_dir: Path) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.suffix.lower() not in {".json", ".toml", ".yaml", ".yml"}:
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        findings.extend(iter_structured_key_findings(relative, text))
+    return findings
+
+
+def source_tree_retired_text_findings(clone_dir: Path) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if not source_tree_should_scan_retired_text(relative):
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        rule_definition_lines = source_tree_governance_rule_definition_lines(
+            relative,
+            path,
+        )
+        for rule, pattern in source_tree_forbidden_patterns().items():
+            for line_number, line in enumerate(lines, start=1):
+                if line_number in skip_lines:
+                    continue
+                if not pattern.search(line):
+                    continue
+                if source_tree_path_allowed(
+                    relative,
+                    scan_group="retired_text",
+                    rule=rule,
+                    line_text=line.strip(),
+                    line_number=line_number,
+                    rule_definition_lines=rule_definition_lines,
+                ):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "rule": rule,
+                    }
+                )
+    return findings
+
+
+def source_tree_should_scan_retired_text(relative: Path) -> bool:
+    if is_negative_test_allowlisted(relative.as_posix(), "retired_name"):
+        return False
+    return any(
+        relative == root or root in relative.parents
+        for root in SOURCE_TREE_RETIRED_TERM_ROOTS
+    )
+
+
+def source_tree_synthesized_string_scan_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.suffix.lower() != ".py":
+            continue
+        if is_negative_test_allowlisted(
+            relative.as_posix(),
+            "stale_governance_truth",
+        ) or is_negative_test_allowlisted(relative.as_posix(), "retired_name"):
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        rule_definition_lines = source_tree_governance_rule_definition_lines(
+            relative,
+            path,
+        )
+        findings.extend(
+            source_tree_synthesized_string_findings(
+                relative,
+                path,
+                lines,
+                skip_lines,
+                rule_definition_lines,
+                scan_group="synthesized_strings",
+                patterns=source_tree_forbidden_patterns(),
+            )
+        )
+    return findings
+
+
+def source_tree_split_string_findings(
+    relative: Path,
+    path: Path,
+    lines: list[str],
+    skip_lines: set[int],
+    rule_definition_lines: set[int],
+) -> list[dict[str, object]]:
+    return source_tree_synthesized_string_findings(
+        relative,
+        path,
+        lines,
+        skip_lines,
+        rule_definition_lines,
+        scan_group="synthesized_strings",
+        patterns=source_tree_forbidden_patterns(),
+    )
+
+
+def source_tree_synthesized_string_findings(
+    relative: Path,
+    path: Path,
+    lines: list[str],
+    skip_lines: set[int],
+    rule_definition_lines: set[int],
+    *,
+    scan_group: str,
+    patterns: dict[str, re.Pattern[str]],
+) -> list[dict[str, object]]:
+    if path.suffix != ".py":
+        return []
+    source = path.read_text(encoding="utf-8", errors="ignore")
+    findings: list[dict[str, object]] = []
+    for item in iter_synthesized_string_findings(
+        relative,
+        source,
+        patterns=patterns,
+        allow_negative_tests=False,
+        skip_rule_definition=False,
+    ):
+        line_number = int(item["line"])
+        if line_number in skip_lines:
+            continue
+        line_text = lines[line_number - 1].strip() if line_number else ""
+        if source_tree_path_allowed(
+            relative,
+            scan_group=scan_group,
+            rule=str(item["rule"]),
+            line_text=line_text,
+            line_number=line_number,
+            rule_definition_lines=rule_definition_lines,
+        ):
+            continue
+        findings.append(
+            {
+                **item,
+                "path": relative.as_posix(),
+            }
+        )
+    return findings
+
+
+def source_tree_python_synthesized_strings(
+    tree: ast.AST,
+    source: str,
+) -> list[tuple[int, str, str]]:
+    del tree
+    return [
+        (
+            int(finding["line"]),
+            str(finding["synthesized_value"]),
+            str(finding["scan_mode"]),
+        )
+        for finding in iter_synthesized_string_findings(
+            "source_tree_python_synthesized_strings.py",
+            source,
+            allow_negative_tests=False,
+            skip_rule_definition=False,
+        )
+    ]
+
+
+def source_tree_governance_rule_definition_lines(
+    relative: Path,
+    path: Path,
+) -> set[int]:
+    block_names = SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES.get(relative)
+    if not block_names or path.suffix != ".py":
+        return set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except SyntaxError:
+        return set()
+    lines: set[int] = set()
+    for node in ast.iter_child_nodes(tree):
+        name = source_tree_definition_name(node)
+        if name not in block_names:
+            continue
+        start = getattr(node, "lineno", 0)
+        end = getattr(node, "end_lineno", start)
+        if start and end:
+            lines.update(range(start, end + 1))
+    return lines
+
+
+def source_tree_definition_name(node: ast.AST) -> str | None:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                return target.id
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return node.target.id
+    return None
+
+
+def source_tree_allowlist_definition_lines(
+    relative: Path,
+    lines: list[str],
+) -> set[int]:
+    del relative, lines
+    return set()
+
+
+def source_tree_active_test_literal_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.parts[:1] != ("tests",) and relative != Path(
+            ".agents/skills/quant-research-platform-maintenance/scripts/handoff/"
+            "build_handoff_package.py"
+        ):
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        rule_definition_lines = source_tree_governance_rule_definition_lines(
+            relative,
+            path,
+        )
+        for rule, pattern in source_tree_active_test_literal_patterns(
+            clone_dir
+        ).items():
+            for line_number, line in enumerate(lines, start=1):
+                if line_number in skip_lines:
+                    continue
+                if not pattern.search(line):
+                    continue
+                if source_tree_path_allowed(
+                    relative,
+                    scan_group="active_test_literals",
+                    rule=rule,
+                    line_text=line.strip(),
+                    line_number=line_number,
+                    rule_definition_lines=rule_definition_lines,
+                ):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "rule": rule,
+                    }
+                )
+        findings.extend(
+            source_tree_synthesized_string_findings(
+                relative,
+                path,
+                lines,
+                skip_lines,
+                rule_definition_lines,
+                scan_group="active_test_literals",
+                patterns=source_tree_active_test_literal_patterns(clone_dir),
+            )
+        )
+    return findings
+
+
+def source_tree_active_test_literal_path_allowed(relative: Path) -> bool:
+    return bool(SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative))
+
+
+def source_tree_governance_truth_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_active_governance_doc_files(clone_dir):
+        path = clone_dir / relative
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        for rule, pattern in source_tree_governance_truth_patterns().items():
+            for line_number, line in enumerate(lines, start=1):
+                if not pattern.search(line):
+                    continue
+                if source_tree_retired_path_policy_line(relative, line):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "rule": rule,
+                    }
+                )
+    return findings
+
+
+def source_tree_retired_path_policy_line(relative: Path, line: str) -> bool:
+    return is_retired_path_policy_line(relative.as_posix(), line)
+
+
+def source_tree_active_governance_doc_files(clone_dir: Path) -> tuple[Path, ...]:
+    tracked = set(source_tree_tracked_text_files(clone_dir))
+    result: list[Path] = []
+    for root in SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS:
+        path = clone_dir / root
+        if path.is_file() and root in tracked:
+            result.append(root)
+            continue
+        if path.is_dir():
+            result.extend(
+                relative
+                for relative in sorted(tracked)
+                if relative.is_relative_to(root)
+                and relative.suffix.lower() in {".md", ".txt"}
+                and (clone_dir / relative).is_file()
+            )
+    return tuple(sorted(set(result)))
+
+
+def source_tree_governance_truth_patterns() -> dict[str, re.Pattern[str]]:
+    return active_doc_forbidden_patterns()
+
+
+def source_tree_active_test_literal_patterns(
+    repo_root: Path | None = None,
+) -> dict[str, re.Pattern[str]]:
+    ensure_runtime_src_path(repo_root)
+    from quant_research_platform.contracts.data import (
+        DataFrequency,
+        data_frequency_slug,
+    )
+    from quant_research_platform.markets.implementations.a_share.ids import (
+        market_context_data_id,
+        market_panel_data_id,
+    )
+
+    market_bars_data_id = discover_market_bars_data_id_helper(repo_root)
+    frequency = DataFrequency.DAILY
+    daily_slug = re.escape(data_frequency_slug(frequency))
+    return {
+        "active_market_bars_data_id": re.compile(
+            rf"\b{re.escape(market_bars_data_id(frequency))}\b"
+        ),
+        "active_market_panel_data_id": re.compile(
+            rf"\b{re.escape(market_panel_data_id(frequency))}\b"
+        ),
+        "active_market_context_data_id": re.compile(
+            rf"\b{re.escape(market_context_data_id(frequency))}\b"
+        ),
+        "active_frequency_slug": re.compile(
+            rf"(?:[\"']{daily_slug}[\"']|"
+            rf"(?<![A-Za-z0-9_]){daily_slug}(?![A-Za-z0-9_]))"
+        ),
+    }
+
+
+def discover_market_bars_data_id_helper(repo_root: Path | None) -> object:
+    src_root = ensure_runtime_src_path(repo_root)
+    source_root = src_root / "quant_research_platform" / "sources"
+    for path in sorted(source_root.rglob("ids.py")) if source_root.exists() else ():
+        if "market_bars_data_id" not in path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ):
+            continue
+        module_name = ".".join(path.relative_to(src_root).with_suffix("").parts)
+        module = importlib.import_module(module_name)
+        helper = getattr(module, "market_bars_data_id", None)
+        if callable(helper):
+            return helper
+    raise RuntimeError("active market bars data id helper unavailable")
+
+
+def ensure_runtime_src_path(repo_root: Path | None = None) -> Path:
+    search_roots = []
+    if repo_root is not None:
+        search_roots.append(repo_root)
+    script_dir = Path(__file__).resolve().parent
+    search_roots.extend([Path.cwd(), *script_dir.parents])
+    for parent in search_roots:
+        src_root = parent / "src"
+        if (src_root / "quant_research_platform").is_dir():
+            if str(src_root) not in sys.path:
+                sys.path.insert(0, str(src_root))
+            return src_root
+    raise RuntimeError(
+        "active literal source helpers unavailable: "
+        "expected src/quant_research_platform under repo root"
+    )
+
+
+def source_tree_sensitive_negative_literal_findings(
+    clone_dir: Path,
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    for relative in source_tree_tracked_text_files(clone_dir):
+        if relative.parts[:1] not in {(".agents",), ("tests",)}:
+            continue
+        path = clone_dir / relative
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        skip_lines = source_tree_allowlist_definition_lines(relative, lines)
+        rule_definition_lines = source_tree_governance_rule_definition_lines(
+            relative,
+            path,
+        )
+        for rule, pattern in source_tree_sensitive_negative_patterns().items():
+            for line_number, line in enumerate(lines, start=1):
+                if line_number in skip_lines:
+                    continue
+                if not pattern.search(line):
+                    continue
+                if source_tree_path_allowed(
+                    relative,
+                    scan_group="sensitive_negative_literals",
+                    rule=rule,
+                    line_text=line.strip(),
+                    line_number=line_number,
+                    rule_definition_lines=rule_definition_lines,
+                ):
+                    continue
+                findings.append(
+                    {
+                        "path": relative.as_posix(),
+                        "line": line_number,
+                        "rule": rule,
+                    }
+                )
+        findings.extend(
+            source_tree_synthesized_string_findings(
+                relative,
+                path,
+                lines,
+                skip_lines,
+                rule_definition_lines,
+                scan_group="sensitive_negative_literals",
+                patterns=source_tree_sensitive_negative_patterns(),
+            )
+        )
+    return findings
+
+
+def source_tree_tracked_text_files(clone_dir: Path) -> tuple[Path, ...]:
+    result: list[Path] = []
+    for relative in source_tree_tracked_paths(clone_dir):
+        text_suffixes = {".py", ".md", ".json", ".toml", ".yaml", ".yml"}
+        if relative.suffix.lower() not in text_suffixes:
+            continue
+        result.append(relative)
+    return tuple(result)
+
+
+def source_tree_tracked_paths(clone_dir: Path) -> tuple[Path, ...]:
+    raw = _governance_git_text(clone_dir, "ls-files")
+    return tuple(Path(line) for line in raw.splitlines() if line.strip())
+
+
+def source_tree_path_allowed(
+    relative: Path,
+    *,
+    scan_group: str,
+    rule: str | None = None,
+    line_text: str | None = None,
+    line_number: int | None = None,
+    rule_definition_lines: set[int] | None = None,
+) -> bool:
+    in_governance_rule_definition = (
+        line_number is not None
+        and rule_definition_lines is not None
+        and line_number in rule_definition_lines
+    )
+    if scan_group in {"retired_text", "synthesized_strings", "retired_terms"}:
+        allowed_by_rule = SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST.get(relative, {})
+        if rule is None or line_text is None:
+            return False
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line_text):
+            if is_allowed_runtime_symbol(relative, token, rule):
+                return True
+        if is_retired_path_policy_line(relative, line_text):
+            return True
+        if line_text in allowed_by_rule.get(rule, set()):
+            return True
+        allowed_rules = SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST.get(
+            relative,
+            set(),
+        )
+        return rule in allowed_rules and in_governance_rule_definition
+    if scan_group == "active_test_literals":
+        allowed_rules = SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST.get(relative, set())
+        if rule not in allowed_rules:
+            return False
+        if relative in SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS:
+            return True
+        return in_governance_rule_definition
+    if scan_group == "sensitive_negative_literals":
+        allowed = SOURCE_TREE_SENSITIVE_NEGATIVE_LITERAL_ALLOWLIST.get(
+            relative,
+            set(),
+        )
+        if isinstance(allowed, set):
+            if rule not in allowed:
+                return False
+            if relative.parts[:1] == ("tests",):
+                return True
+            return in_governance_rule_definition
+        if rule is None or line_text is None:
+            return False
+        return any(term in line_text for term in allowed.get(rule, set()))
+    raise ValueError(f"unsupported_source_tree_scan_group: {scan_group}")
+
+
+def is_reserved_handoff_evidence_path(name: str) -> bool:
+    parts = PurePosixPath(name).parts
+    for part in parts:
+        if part in RESERVED_HANDOFF_EVIDENCE_STEMS:
+            return True
+        if part.endswith(".json") and part[:-5] in RESERVED_HANDOFF_EVIDENCE_STEMS:
+            return True
+    return False
+
+
+def is_task_provided_handoff_evidence_blocked_path(name: str) -> bool:
+    if name in BUILDER_OWNED_HANDOFF_EVIDENCE:
+        return True
+    parts = PurePosixPath(name).parts
+    for part in parts:
+        if part in TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS:
+            return True
+        if (
+            part.endswith(".json")
+            and part[:-5] in TASK_PROVIDED_HANDOFF_EVIDENCE_RESERVED_STEMS
+        ):
+            return True
+    return False
+
+
+def normalized_handoff_evidence_path(raw_name: str) -> str:
+    name = _normalize_governance_zip_path(raw_name)
+    if not name.startswith("handoff_evidence/"):
+        name = "handoff_evidence/" + name
+    if not name.endswith(".json"):
+        name += ".json"
+    return name
+
+
+def handoff_evidence_blocked_key_failures(
+    evidence_path: str,
+    payload: Mapping[str, object],
+) -> list[str]:
+    failures: list[str] = []
+    collect_handoff_evidence_blocked_key_failures(
+        evidence_path,
+        payload,
+        failures,
+    )
+    return failures
+
+
+def collect_handoff_evidence_blocked_key_failures(
+    evidence_path: str,
+    payload: object,
+    failures: list[str],
+    *,
+    key_path: tuple[str, ...] = (),
+) -> None:
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            key_text = str(key)
+            current_path = (*key_path, key_text)
+            if key_text in BLOCKED_HANDOFF_EVIDENCE_KEYS:
+                dotted = ".".join(current_path)
+                failures.append(
+                    f"handoff_evidence_forbidden_field: {evidence_path}: {dotted}"
+                )
+            collect_handoff_evidence_blocked_key_failures(
+                evidence_path,
+                value,
+                failures,
+                key_path=current_path,
+            )
+    elif isinstance(payload, list):
+        for index, item in enumerate(payload):
+            collect_handoff_evidence_blocked_key_failures(
+                evidence_path,
+                item,
+                failures,
+                key_path=(*key_path, str(index)),
+            )
+
+
+
+def status_summary_from_validation(
+    status_map: dict[str, str],
+    *,
+    safety_status: str,
+) -> dict[str, object]:
+    statuses = dict(status_map)
+    statuses["handoff_safety_scan"] = safety_status
+    return {
+        "validation": aggregate_status(statuses.values()),
+        "handoff_verify": statuses.get("handoff_verify", "NOT_RUN"),
+        "handoff_safety": safety_status,
+        "blocked_count": sum(1 for status in statuses.values() if status == "BLOCKED"),
+        "fail_count": sum(1 for status in statuses.values() if status == "FAIL"),
+    }
+
+
+def validation_with_status_overrides(
+    validation_evidence: dict[str, object],
+    overrides: dict[str, str],
+) -> dict[str, object]:
+    payload = json.loads(_stable_governance_json(validation_evidence))
+    rows = payload.get("checks")
+    if not isinstance(rows, list):
+        raise SystemExit("validation_evidence_checks_must_be_list")
+    validate_validation_evidence_contract(payload)
+    for check_name, status in overrides.items():
+        set_check_status(rows, check_name, status)
+    return payload
+
+
+def enrich_validation_evidence(
+    validation_evidence: dict[str, object],
+    *,
+    handoff_package_path: str,
+    handoff_sidecar_path: str,
+) -> dict[str, object]:
+    payload = json.loads(_stable_governance_json(validation_evidence))
+    validate_validation_evidence_contract(payload)
+    payload["handoff_package_path"] = handoff_package_path
+    payload["handoff_sidecar_path"] = handoff_sidecar_path
+    rows = payload.get("checks")
+    if not isinstance(rows, list):
+        raise SystemExit("validation_evidence_checks_must_be_list")
+    return payload
+
+
+def validate_validation_evidence_contract(payload: dict[str, object]) -> None:
+    blocked = sorted(set(payload) & BLOCKED_VALIDATION_KEYS)
+    if blocked:
+        raise SystemExit("validation_evidence_forbidden_field: " + ",".join(blocked))
+    rows = payload.get("checks")
+    if not isinstance(rows, list):
+        raise SystemExit("validation_evidence_checks_must_be_list")
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise SystemExit(f"validation_evidence_check_not_object: {index}")
+        if "check" in row:
+            raise SystemExit(f"validation_evidence_row_forbidden_field: {index}:check")
+        extra = sorted(set(row) - VALIDATION_ROW_KEYS)
+        if extra:
+            raise SystemExit(
+                f"validation_evidence_row_unapproved_field: {index}:" + ",".join(extra)
+            )
+
+
+def set_check_status(
+    rows: list[object],
+    check_name: str,
+    status: str,
+) -> None:
+    details_key = "evidence"
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        if name == check_name:
+            row["status"] = status
+            row[details_key] = validation_status_evidence(check_name, status)
+            return
+    rows.append(
+        {
+            "name": check_name,
+            "status": status,
+            details_key: validation_status_evidence(check_name, status),
+        }
+    )
+
+
+def validation_status_evidence(check_name: str, status: str) -> str:
+    if check_name == "handoff_verify":
+        return f"verify_handoff_package.py completed with {status}"
+    if check_name == "handoff_safety_scan":
+        return f"verify_handoff_package.py safety scan completed with {status}"
+    return f"{check_name}={status}"
+
+
+def verification_matrix_payload(
+    validation_evidence: dict[str, object],
+) -> dict[str, object]:
+    status_map = validation_status_map(validation_evidence)
+    checks = []
+    for name in ("handoff_verify", "handoff_safety_scan"):
+        checks.append(
+            {
+                "name": name,
+                "required": True,
+                "deterministic": True,
+                "status": status_map.get(name, "NOT_RUN"),
+                "evidence": validation_status_evidence(
+                    name,
+                    status_map.get(name, "NOT_RUN"),
+                ),
+            }
+        )
+    return {
+        "schema_version": "handoff-verification-matrix/0.1",
+        "checks": checks,
+    }
+
+
+def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
+    rows = payload["checks"]
+    if not isinstance(rows, list):
+        raise SystemExit("validation_evidence_checks_must_be_list")
+    result: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        status = str(row.get("status") or "").strip().upper()
+        if isinstance(name, str) and status in VALID_STATUSES:
+            result[name] = status
+    return result
+
+
+def aggregate_status(statuses: Iterable[str]) -> str:
+    values = tuple(statuses)
+    if not values:
+        return "NOT_RUN"
+    if "FAIL" in values:
+        return "FAIL"
+    if "BLOCKED" in values:
+        return "BLOCKED"
+    if "NOT_RUN" in values:
+        if "PASS" in values:
+            return "FAIL"
+        return "NOT_RUN"
+    return "PASS"
+
+
+def _stable_governance_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def _normalize_governance_zip_path(value: str) -> str:
+    result = value.replace("\\", "/").lstrip("/")
+    if not result or ".." in Path(result).parts:
+        raise SystemExit(f"invalid_zip_path: {value}")
+    return result
+
+
+def _governance_git_text(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout
