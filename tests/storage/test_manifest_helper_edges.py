@@ -12,10 +12,18 @@ def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -
     public_path = tmp_path / "public" / "manifest.json"
     internal_path = tmp_path / "internal" / "manifest.json"
 
-    manifests.write_manifest(public_path, {"status": "ok", "rows": [1, 2]})
+    manifests.write_manifest(
+        public_path,
+        {"schema_id": "qrp-output-manifest", "status": "ok", "rows": [1, 2]},
+    )
     manifests.write_internal_artifact_manifest(
         internal_path,
-        {"data_id": "demo", "source_id": "csmar", "row_count": 2},
+        {
+            "schema_id": "qrp-dataset-manifest",
+            "data_id": "demo",
+            "source_id": "csmar",
+            "row_count": 2,
+        },
     )
     loaded = manifests.read_manifest(internal_path)
 
@@ -43,7 +51,10 @@ def test_internal_manifest_rejects_private_or_row_level_metadata(
         ValueError,
         match=f"unsafe_internal_artifact_metadata: {reason}",
     ):
-        manifests.write_internal_artifact_manifest(tmp_path / "manifest.json", payload)
+        manifests.write_internal_artifact_manifest(
+            tmp_path / "manifest.json",
+            {"schema_id": "qrp-dataset-manifest", **payload},
+        )
 
 
 def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> None:
@@ -52,6 +63,7 @@ def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> 
     manifests.write_internal_artifact_manifest(
         manifest_path,
         {
+            "schema_id": "qrp-dataset-manifest",
             "data_id": "daily",
             "row_count": 10,
             "date_min": "2024-01-02",
@@ -65,45 +77,37 @@ def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> 
     manifests.write_internal_artifact_manifest(
         failed_root / "_manifest" / "manifest.json",
         {
+            "schema_id": "qrp-dataset-manifest",
             "data_id": "failed",
             "row_count": 1,
             "validation_status": "fail",
         },
     )
 
-    layer_path = manifests.write_layer_manifest(
+    layer = manifests.build_layer_summary(
         layer_root=tmp_path / "verification-output" / "layers",
         logical_layer="processed",
-        run_id="run_demo",
         dataset_roots=(dataset_root, missing_root, failed_root),
     )
-    layer = manifests.read_manifest(layer_path)
     assert layer["layer_validation_status"] == "fail"
     assert layer["total_rows"] == 11
     assert layer["date_min"] == "2024-01-02"
     assert layer["failed_dataset_validations"] == ["failed"]
     assert layer["missing_dataset_manifests"]
 
-    run_path = manifests.write_run_manifest(
-        manifests_root=tmp_path / "verification-output" / "manifests",
-        run_id="run_demo",
-        output_root=tmp_path / "verification-output" / "output",
-        layer_manifest_paths=(layer_path,),
-    )
-    run = manifests.read_manifest(run_path)
+    run = manifests.build_run_data_summary(layer_summaries=(layer,))
     assert run["run_validation_status"] == "fail"
     assert run["failed_layers"] == ["processed"]
 
 
 def test_manifest_logical_path_falls_back_to_posix(tmp_path: Path) -> None:
     assert (
-        manifests._data_id_from_manifest({}, Path("relative/demo"))
-        == "relative/demo"
+        manifests._data_id_from_manifest({}, Path("relative/demo")) == "relative/demo"
     )
     assert logical_path(Path("plain") / "path") == "plain/path"
 
 
 def test_manifest_logical_path_uses_last_generated_marker() -> None:
-    path = Path("sandbox/team/qrp/run_outputs/local/run/manifests/run.json")
+    path = Path("sandbox/team/qrp/outputs/run/manifest.json")
 
-    assert logical_path(path) == "manifests/run.json"
+    assert logical_path(path) == "outputs/run/manifest.json"

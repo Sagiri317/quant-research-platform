@@ -28,7 +28,6 @@ REQUIRED_AREAS = {
 
 REQUIRED_FIELDS = {
     "area",
-    "contract_version",
     "output_scope",
     "period",
     "row_count",
@@ -67,7 +66,7 @@ FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS = [
     "data/interim",
     "data/processed",
     "data/research",
-    "run_outputs/local",
+    "outputs/prediction_daily",
     "000001",
     "600000",
     "raw row",
@@ -86,7 +85,7 @@ HASH_FIELDS = {
     "aggregate_checksum",
 }
 SUMMARY_TOP_LEVEL_FIELDS = {
-    "contract_version",
+    "schema_id",
     "project_version",
     "verification_kind",
     "generated_at",
@@ -133,7 +132,6 @@ def _synthetic_area(area: str, index: int) -> dict[str, object]:
     )
     return {
         "area": area,
-        "contract_version": "0.1",
         "output_scope": "REVIEW_SAFE",
         "period": period,
         "row_count": index + 1,
@@ -150,9 +148,9 @@ def _synthetic_area(area: str, index: int) -> dict[str, object]:
         "tolerance": 0.0,
         "accepted_explained_delta": False,
         "explanation": "",
-        "verification_kind": "local_run_output_aggregate",
+        "verification_kind": "local_result_aggregate",
         "verification_scope": "aggregate_review_safe_parity",
-        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
+        "evidence_generation_mode": "local_result_review_safe_aggregate",
         "tolerance_owner": "",
         "downstream_impact": "none",
         "generated_by": "synthetic_test_fixture",
@@ -165,13 +163,13 @@ def _synthetic_area(area: str, index: int) -> dict[str, object]:
 
 def _synthetic_review_safe_evidence_payload() -> dict[str, object]:
     return {
-        "contract_version": "0.1",
+        "schema_id": "qrp-a-share-aggregate-evidence",
         "output_scope": "REVIEW_SAFE",
         "artifact_id": "review_safe_aggregate_evidence",
         "market_id": "a_share",
-        "verification_kind": "local_run_output_aggregate",
+        "verification_kind": "local_result_aggregate",
         "verification_scope": "aggregate_review_safe_parity",
-        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
+        "evidence_generation_mode": "local_result_review_safe_aggregate",
         "source_data_visibility": "local_only",
         "row_level_output_committed": False,
         "handoff_ready": False,
@@ -203,9 +201,9 @@ def _synthetic_local_verification_inventory_payload() -> dict[str, object]:
         }
     ]
     return {
-        "contract_version": "0.1",
+        "schema_id": "qrp-a-share-verification-inventory",
         "project_version": "0.1.0",
-        "verification_kind": "local_run_output_aggregate_inventory",
+        "verification_kind": "local_result_aggregate_inventory",
         "generated_at": "2026-01-01T00:00:00+00:00",
         "output_scope": "REVIEW_SAFE",
         "source_data_visibility": "local_only",
@@ -259,7 +257,7 @@ def _synthetic_review_safe_evidence_markdown(payload: dict[str, object]) -> str:
     lines = [
         "# Review-Safe Evidence",
         "",
-        f"- `contract_version | {payload['contract_version']}`",
+        f"- `schema_id | {payload['schema_id']}`",
         f"- `output_scope | {payload['output_scope']}`",
         f"- `status | {payload['status']}`",
         f"- `handoff_ready | {str(payload['handoff_ready']).lower()}`",
@@ -281,7 +279,7 @@ def _synthetic_local_verification_inventory_markdown(
     lines = [
         "# Local Verification Inventory",
         "",
-        f"- `contract_version | {payload['contract_version']}`",
+        f"- `schema_id | {payload['schema_id']}`",
         f"- `output_scope | {payload['output_scope']}`",
         f"- `status | {payload['status']}`",
         f"- `handoff_ready | {str(payload['handoff_ready']).lower()}`",
@@ -303,11 +301,11 @@ def _synthetic_local_verification_inventory_markdown(
 def test_current_review_safe_parity_evidence_json_schema() -> None:
     payload = _synthetic_review_safe_evidence_payload()
 
-    assert payload["contract_version"] == "0.1"
+    assert payload["schema_id"] == "qrp-a-share-aggregate-evidence"
     assert payload["output_scope"] == "REVIEW_SAFE"
     assert payload["artifact_id"] == "review_safe_aggregate_evidence"
     assert payload["market_id"] == "a_share"
-    assert payload["verification_kind"] == "local_run_output_aggregate"
+    assert payload["verification_kind"] == "local_result_aggregate"
     assert payload["verification_scope"] == "aggregate_review_safe_parity"
     assert payload["source_data_visibility"] == "local_only"
     assert payload["row_level_output_committed"] is False
@@ -317,7 +315,7 @@ def test_current_review_safe_parity_evidence_json_schema() -> None:
     for item in payload["areas"]:
         assert REQUIRED_FIELDS.issubset(item)
         assert item["status"] in STATUS_TOKENS
-        assert item["contract_version"] == "0.1"
+        assert "contract_version" not in item
         assert item["output_scope"] == "REVIEW_SAFE"
         for field in HASH_FIELDS:
             value = item[field]
@@ -332,11 +330,9 @@ def test_current_review_safe_parity_evidence_json_schema() -> None:
             else:
                 assert item["max_abs_delta"] == 0
                 assert item["mean_abs_delta"] == 0
-        assert item["verification_kind"] == "local_run_output_aggregate"
+        assert item["verification_kind"] == "local_result_aggregate"
         assert item["verification_scope"] == "aggregate_review_safe_parity"
-        assert (
-            item["evidence_generation_mode"] == "local_run_output_review_safe_aggregate"
-        )
+        assert item["evidence_generation_mode"] == "local_result_review_safe_aggregate"
         assert item["source_data_visibility"] == "local_only"
         assert item["row_level_output_committed"] is False
         assert isinstance(item["human_approval_required"], bool)
@@ -397,10 +393,8 @@ def test_current_review_safe_parity_evidence_is_aggregate_status_payload() -> No
     text = json.dumps(payload, ensure_ascii=False).lower()
 
     assert "metadata verification" not in text
-    assert payload["verification_kind"] == "local_run_output_aggregate"
-    assert payload["evidence_generation_mode"] == (
-        "local_run_output_review_safe_aggregate"
-    )
+    assert payload["verification_kind"] == "local_result_aggregate"
+    assert payload["evidence_generation_mode"] == ("local_result_review_safe_aggregate")
     assert payload["row_level_output_committed"] is False
     assert payload["status"] in STATUS_TOKENS
     assert payload["handoff_ready"] is False
@@ -447,8 +441,8 @@ def test_local_verification_inventory_json_schema_and_coverage() -> None:
     payload = _synthetic_local_verification_inventory_payload()
 
     assert SUMMARY_TOP_LEVEL_FIELDS.issubset(payload)
-    assert payload["contract_version"] == "0.1"
-    assert payload["verification_kind"] == "local_run_output_aggregate_inventory"
+    assert payload["schema_id"] == "qrp-a-share-verification-inventory"
+    assert payload["verification_kind"] == "local_result_aggregate_inventory"
     assert payload["output_scope"] == "REVIEW_SAFE"
     assert payload["source_data_visibility"] == "local_only"
     assert payload["row_level_output_committed"] is False

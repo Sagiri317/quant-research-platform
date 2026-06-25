@@ -20,7 +20,7 @@ def write_low_level_parquet_artifact(
     """Construct low-level parquet fixtures for storage-adjacent tests."""
 
     spec = {
-        "schema_version": "0.1",
+        "schema_id": "qrp-dataset-spec",
         "data_id": Path(artifact_root).name,
         "primary_key": list(primary_key),
         "partition_columns": list(partition_columns),
@@ -67,6 +67,7 @@ def _write_runtime_manifest(root: Path, data_root: Path, paths: list[Path]) -> N
     if any(schema != first_schema for schema in schemas[1:]):
         raise ValueError("dataset_schema_mismatch")
     manifest = {
+        "schema_id": "qrp-dataset-manifest",
         "columns": [name for name, _ in first_schema],
         "schema_hash": _sha256_json(first_schema),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),

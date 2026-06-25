@@ -44,7 +44,7 @@ IMPORTANT_NULL_COUNT_COLUMNS = frozenset(
 )
 
 
-def build_schema_inventory_payload(project_root: Path) -> list[dict[str, Any]]:
+def build_schema_inventory_payload(project_root: Path) -> dict[str, Any]:
     """Build sanitized aggregate schema metadata for private dataset artifacts."""
 
     root = Path(project_root)
@@ -54,17 +54,20 @@ def build_schema_inventory_payload(project_root: Path) -> list[dict[str, Any]]:
     ]
     if not items:
         raise ValueError("schema_inventory_no_datasets_found")
-    return sorted(items, key=lambda item: item["logical_relative_root"])
+    return {
+        "schema_id": "qrp-schema-inventory",
+        "datasets": sorted(items, key=lambda item: item["logical_relative_root"]),
+    }
 
 
-def render_schema_inventory_markdown(payload: list[dict[str, Any]]) -> str:
+def render_schema_inventory_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Schema Inventory",
         "",
         "| Layer | Kind | Artifact | Rows | Columns |",
         "| --- | --- | --- | ---: | ---: |",
     ]
-    for item in payload:
+    for item in payload["datasets"]:
         lines.append(
             "| "
             + " | ".join(

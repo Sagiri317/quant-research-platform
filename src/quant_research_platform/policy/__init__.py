@@ -1,4 +1,4 @@
-"""Shared policy rules for QRP run outputs and handoff evidence."""
+"""Shared policy rules for QRP outputs and handoff evidence."""
 
 from quant_research_platform.policy.check_status import (
     CheckStatus,

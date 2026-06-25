@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -7,6 +8,7 @@ import pytest
 
 from quant_research_platform.markets.implementations.a_share.research_scenarios import (
     build_prediction_specs,
+    default_evaluation_run_id,
     default_prediction_smoke_id,
 )
 from quant_research_platform.markets.implementations.a_share.verification import (
@@ -145,15 +147,21 @@ def test_aggregates_area_inputs_and_inventory_helpers(
         "factor_value_parity",
         frequency_ids.full_historical_market_panel_status_area(),
     }
-    run_output_area_inputs = {
+    output_area_inputs = {
         item.area: item.summary_kind
         for item in area_inputs
         if item.area in {"evaluation_parity", "prediction_oos_smoke_parity"}
     }
-    assert run_output_area_inputs == {
-        "evaluation_parity": "run_outputs",
-        "prediction_oos_smoke_parity": "run_outputs",
+    assert output_area_inputs == {
+        "evaluation_parity": "outputs",
+        "prediction_oos_smoke_parity": "outputs",
     }
+    evaluation_area = next(
+        item for item in area_inputs if item.area == "evaluation_parity"
+    )
+    assert evaluation_area.roots == (
+        tmp_path / "outputs" / default_evaluation_run_id(),
+    )
     prediction_spec = build_prediction_specs(
         train_end="2014-06-30",
         test_start="2014-07-01",
@@ -164,6 +172,9 @@ def test_aggregates_area_inputs_and_inventory_helpers(
     )
     prediction_area = next(
         item for item in area_inputs if item.area == "prediction_oos_smoke_parity"
+    )
+    assert prediction_area.roots == (
+        tmp_path / "outputs" / default_prediction_smoke_id(test_start="2014-07-01"),
     )
     assert prediction_area.expected_period == (
         f"{prediction_spec.test_start} through 2014-12-31"
@@ -205,6 +216,50 @@ def test_aggregates_area_inputs_and_inventory_helpers(
     assert aggregates._dataset_kind_and_artifact_id(
         "research/a_share/demo_dataset"
     ) == ("research_dataset", "demo_dataset")
+
+
+def test_aggregates_output_discovery_rejects_manifest_identity_violations(
+    tmp_path: Path,
+) -> None:
+    outputs_root = tmp_path / "outputs"
+    invalid = outputs_root / "invalid_eval"
+    valid = outputs_root / "valid_eval"
+    invalid.mkdir(parents=True)
+    valid.mkdir(parents=True)
+    (invalid / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_id": "invalid_eval",
+                "output_definition_id": "evaluation_outputs",
+                "run_id": "run",
+                "metadata": {"contract_version": "0.1"},
+                "files": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (valid / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_id": "valid_eval",
+                "output_definition_id": "evaluation_outputs",
+                "run_id": "run",
+                "metadata": {},
+                "files": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    roots = aggregates._output_roots(
+        outputs_root,
+        preferred_id="missing_preferred",
+        output_definition_id="evaluation_outputs",
+    )
+
+    assert roots == (valid,)
 
 
 def test_aggregates_official_roots_use_inspection(

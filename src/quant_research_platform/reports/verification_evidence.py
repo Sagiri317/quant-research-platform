@@ -21,15 +21,13 @@ from quant_research_platform.runtime.logical_paths import (
     logical_path,
 )
 from quant_research_platform.storage.datasets import inspect_dataset
-from quant_research_platform.storage.manifests import read_manifest
 
 
 def build_validation_summary(
     *,
     run_id: str,
-    output_root: Path,
     dataset_roots: tuple[Path, ...],
-    layer_manifest_paths: tuple[Path, ...],
+    layer_summaries: tuple[dict[str, object], ...],
     generated_text_paths: tuple[Path, ...],
 ) -> dict[str, Any]:
     dataset_failures: list[str] = []
@@ -91,17 +89,9 @@ def build_validation_summary(
         _merge_profile(label_nan_profile, manifest.get("label_nan_profile"))
 
     layer_failures: list[str] = []
-    missing_layer_manifests = [
-        logical_path(path, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
-        for path in layer_manifest_paths
-        if not path.is_file()
-    ]
-    for path in layer_manifest_paths:
-        if not path.is_file():
-            continue
-        manifest = read_manifest(path)
-        if manifest.get("layer_validation_status") != "pass":
-            layer_failures.append(str(manifest.get("logical_layer") or path.name))
+    for summary in layer_summaries:
+        if summary.get("layer_validation_status") != "pass":
+            layer_failures.append(str(summary.get("logical_layer") or "unknown"))
 
     safety = _share_safety_scan(generated_text_paths)
     failure_codes: list[str] = []
@@ -117,18 +107,12 @@ def build_validation_summary(
         failure_codes.append("non_finite_values")
     if source_local_leaks:
         failure_codes.append("source_local_key_leakage")
-    if missing_layer_manifests:
-        failure_codes.append("layer_manifest_missing")
     if layer_failures:
         failure_codes.append("layer_validation_failed")
     if safety["status"] != "PASS":
         failure_codes.append("share_safety_scan_failed")
     return {
         "run_id": run_id,
-        "output_root": logical_path(
-            output_root,
-            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
-        ),
         "status": "PASS" if not failure_codes else "FAIL",
         "failure_codes": failure_codes,
         "required_columns_status": "summarized_by_dataset_manifests",
@@ -147,8 +131,8 @@ def build_validation_summary(
             "checked_count": len(dataset_roots),
         },
         "layer_manifest_completeness": {
-            "missing": missing_layer_manifests,
-            "checked_count": len(layer_manifest_paths),
+            "missing": [],
+            "checked_count": len(layer_summaries),
         },
         "share_safety_scan": safety,
         "created_at": _utc_now(),
@@ -162,7 +146,7 @@ def build_verification_evidence_payload(
     manifests: dict[str, object],
     timings: dict[str, object],
     validation_summary: dict[str, object],
-    output_root: Path,
+    run_root: Path,
     smoke_status: str = "NOT_RUN",
     compare_status: str = "NOT_RUN",
     full_horizon_status: str = "NOT_RUN",
@@ -179,14 +163,15 @@ def build_verification_evidence_payload(
         full_horizon_evidence=full_horizon_evidence,
     )
     return {
+        "schema_id": "qrp-verification-evidence",
         "run_id": run_id,
         "status": overall_verification_status(
             validation_summary.get("status", "FAIL"),
             statuses,
         ),
         "date_range": date_range,
-        "output_root": logical_path(
-            output_root,
+        "run_root": logical_path(
+            run_root,
             markers=EVIDENCE_LOGICAL_PATH_MARKERS,
         ),
         **statuses,
@@ -202,18 +187,21 @@ def build_verification_evidence_payload(
     }
 
 
-def render_verification_evidence_markdown(payload: dict[str, Any]) -> str:
+def render_run_summary_markdown(payload: dict[str, Any]) -> str:
+    status = payload["status"]
     lines = [
-        "# Verification Evidence Summary",
+        "# Local Verification Run Summary",
         "",
         f"- run_id: `{payload['run_id']}`",
-        f"- status: `{payload['status']}`",
-        f"- output_root: `{payload['output_root']}`",
-        f"- smoke_status: `{payload['smoke_status']}`",
-        f"- compare_status: `{payload['compare_status']}`",
-        f"- full_horizon_status: `{payload['full_horizon_status']}`",
-        f"- validation_status: `{payload['validation_summary']['status']}`",
-        "- source_level_compare_engine: `false`",
+        f"- overall: `{status['overall']}`",
+        f"- validation: `{status['validation']}`",
+        f"- smoke: `{status['smoke']}`",
+        f"- compare: `{status['compare']}`",
+        f"- share_safety: `{status['share_safety']}`",
+        f"- full_horizon: `{status['full_horizon']}`",
+        f"- validation_matrix: `{status['validation_matrix']}`",
+        f"- data_layers: `{len(payload['data']['layers'])}`",
+        f"- outputs: `{len(payload['outputs'])}`",
         "",
     ]
     return "\n".join(lines)
@@ -265,7 +253,7 @@ def render_review_safe_aggregate_evidence_markdown(payload: dict[str, Any]) -> s
             "Review-safe status:",
             "",
             f"- `output_scope | {payload['output_scope']}`",
-            f"- `contract_version | {payload['contract_version']}`",
+            f"- `schema_id | {payload['schema_id']}`",
             f"- `verification_kind | {payload['verification_kind']}`",
             f"- `verification_scope | {payload['verification_scope']}`",
             f"- `evidence_generation_mode | {payload['evidence_generation_mode']}`",
@@ -319,7 +307,7 @@ def render_local_verification_inventory_markdown(payload: dict[str, Any]) -> str
             "Review-safe status:",
             "",
             f"- `output_scope | {payload['output_scope']}`",
-            f"- `contract_version | {payload['contract_version']}`",
+            f"- `schema_id | {payload['schema_id']}`",
             f"- `verification_kind | {payload['verification_kind']}`",
             f"- `source_data_visibility | {payload['source_data_visibility']}`",
             "- `row_level_output_committed | false`",
@@ -385,5 +373,5 @@ __all__ = [
     "build_validation_summary",
     "render_local_verification_inventory_markdown",
     "render_review_safe_aggregate_evidence_markdown",
-    "render_verification_evidence_markdown",
+    "render_run_summary_markdown",
 ]

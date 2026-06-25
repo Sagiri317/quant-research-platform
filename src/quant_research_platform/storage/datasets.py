@@ -27,7 +27,8 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.share_safety import is_local_only_path
 from quant_research_platform.storage.manifests import (
-    read_manifest,
+    read_qrp_json,
+    require_qrp_json_identity,
     write_internal_artifact_manifest,
 )
 
@@ -81,7 +82,6 @@ _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
 )
 _DATASET_INPUT_FINGERPRINT_KEYS = frozenset(
     {
-        "fingerprint_schema_version",
         "schema_hash",
         "row_count",
         "key_columns",
@@ -114,7 +114,6 @@ class DatasetInspection:
 
 @dataclass(frozen=True)
 class DatasetFingerprint:
-    fingerprint_schema_version: str
     schema_hash: str
     row_count: int
     key_columns: tuple[str, ...]
@@ -126,7 +125,6 @@ class DatasetFingerprint:
 
 @dataclass(frozen=True)
 class DatasetComparison:
-    comparison_schema_version: str
     status: str
     matches: bool
     summary: dict[str, Any]
@@ -329,7 +327,10 @@ def write_dataset(
         write_internal_artifact_manifest(
             temp_root / "_manifest" / "manifest.json",
             _merge_dataset_instance_metadata(
-                accumulator.payload(),
+                {
+                    **accumulator.payload(),
+                    "schema_id": "qrp-dataset-manifest",
+                },
                 instance_metadata,
             ),
         )
@@ -475,7 +476,6 @@ def fingerprint_dataset(
         for partition in sorted(partition_rows)
     )
     return DatasetFingerprint(
-        fingerprint_schema_version="0.1",
         schema_hash=context.schema_hash,
         row_count=row_count,
         key_columns=key_columns,
@@ -548,7 +548,6 @@ def _comparison(
     layout_delta: dict[str, Any] | None = None,
 ) -> DatasetComparison:
     return DatasetComparison(
-        comparison_schema_version="0.1",
         status=status,
         matches=status == "MATCH",
         summary={} if summary is None else summary,
@@ -607,9 +606,6 @@ def _validate_input_fingerprint_payload(value: Any) -> dict[str, Any]:
     if keys != _DATASET_INPUT_FINGERPRINT_KEYS:
         raise ValueError("invalid_input_fingerprints_metadata")
     return {
-        "fingerprint_schema_version": _require_string(
-            value["fingerprint_schema_version"],
-        ),
         "schema_hash": _require_string(value["schema_hash"]),
         "row_count": _require_non_negative_int(value["row_count"]),
         "key_columns": _require_string_list(value["key_columns"]),
@@ -749,10 +745,18 @@ def _build_dataset_read_context(
         raise ValueError("dataset_spec_missing")
     if not data_root.is_dir():
         raise ValueError("dataset_data_dir_missing")
-    spec_payload = read_manifest(spec_path)
+    spec_payload = read_qrp_json(
+        spec_path,
+        expected_schema_id="qrp-dataset-spec",
+        error="dataset_spec_schema_id_invalid",
+    )
     if not manifest_path.is_file():
         raise ValueError("dataset_manifest_missing")
-    manifest = read_manifest(manifest_path)
+    manifest = read_qrp_json(
+        manifest_path,
+        expected_schema_id="qrp-dataset-manifest",
+        error="dataset_manifest_schema_id_invalid",
+    )
     if not _manifest_has_runtime_metadata(manifest):
         raise ValueError("manifest_runtime_metadata_missing")
     all_paths = tuple(_candidate_data_files(data_root, spec=spec_payload))
@@ -1053,8 +1057,16 @@ def _validate_written_artifact(root: Path, accumulator: _WriteStats) -> None:
         raise ValueError("dataset_data_dir_missing")
     if not manifest_path.is_file():
         raise ValueError("dataset_manifest_missing")
-    spec_payload = read_manifest(spec_path)
-    manifest = read_manifest(manifest_path)
+    spec_payload = read_qrp_json(
+        spec_path,
+        expected_schema_id="qrp-dataset-spec",
+        error="dataset_spec_schema_id_invalid",
+    )
+    manifest = read_qrp_json(
+        manifest_path,
+        expected_schema_id="qrp-dataset-manifest",
+        error="dataset_manifest_schema_id_invalid",
+    )
     if not _manifest_has_runtime_metadata(manifest):
         raise ValueError("manifest_runtime_metadata_missing")
     paths = _candidate_data_files(data_root, spec=spec_payload)
@@ -1423,7 +1435,7 @@ def _partition_keys(fingerprint: DatasetFingerprint) -> tuple[str, ...]:
 
 def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "schema_version": spec.schema_version,
+        "schema_id": "qrp-dataset-spec",
         "data_id": spec.data_id,
         "frequency": spec.frequency.value,
         "grain": spec.grain.value,
@@ -1460,6 +1472,19 @@ def _data_spec_payload(spec: DataSpec) -> dict[str, Any]:
             }
         )
     return payload
+
+
+def _require_qrp_json_schema_id(
+    payload: object,
+    *,
+    expected: str,
+    error: str,
+) -> None:
+    require_qrp_json_identity(
+        payload,
+        expected_schema_id=expected,
+        error=error,
+    )
 
 
 def _date_string(value: pd.Timestamp | None) -> str | None:

@@ -81,7 +81,6 @@ def _input_fingerprint_payload(
     extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
-        "fingerprint_schema_version": "0.1",
         "schema_hash": "a" * 64,
         "row_count": 3,
         "key_columns": ["market_id", "asset_id", "timestamp"],
@@ -118,10 +117,14 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     assert (root / "data" / "year=2014" / "part-000.parquet").is_file()
     assert (root / "data" / "year=2015" / "part-000.parquet").is_file()
     assert manifest["columns"] == ["market_id", "asset_id", "timestamp", "value"]
+    assert manifest["schema_id"] == "qrp-dataset-manifest"
     assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
     assert manifest["file_count"] == 2
     assert manifest["row_count"] == 3
     assert spec_payload["data_id"] == "x"
+    assert spec_payload["schema_id"] == "qrp-dataset-spec"
+    assert "schema_version" not in spec_payload
+    assert "contract_version" not in spec_payload
     assert spec_payload["kind"] == "factor"
     assert "category" not in spec_payload
     assert "processed_data_id" not in spec_payload
@@ -232,9 +235,10 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
             drop=True
         ),
     )
-    assert fingerprint_dataset(materialized_root).content_hash == fingerprint_dataset(
-        chunked_root
-    ).content_hash
+    assert (
+        fingerprint_dataset(materialized_root).content_hash
+        == fingerprint_dataset(chunked_root).content_hash
+    )
 
 
 def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None:
@@ -416,6 +420,77 @@ def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="manifest_schema_hash_mismatch"):
+        read_dataset(root)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "replacement", "error"),
+    (
+        ("spec.json", {}, "dataset_spec_schema_id_invalid"),
+        (
+            "spec.json",
+            {"schema_version": "0.1"},
+            "dataset_spec_schema_id_invalid",
+        ),
+        (
+            "spec.json",
+            {"contract_version": "0.1"},
+            "dataset_spec_schema_id_invalid",
+        ),
+        (
+            "spec.json",
+            {"schema_id": "qrp-dataset-spec/0.1"},
+            "dataset_spec_schema_id_invalid",
+        ),
+        (
+            "spec.json",
+            {
+                "schema_id": "qrp-dataset-spec",
+                "metadata": {"contract_version": "0.1"},
+            },
+            "dataset_spec_schema_id_invalid",
+        ),
+        ("_manifest/manifest.json", {}, "dataset_manifest_schema_id_invalid"),
+        (
+            "_manifest/manifest.json",
+            {"schema_version": "0.1"},
+            "dataset_manifest_schema_id_invalid",
+        ),
+        (
+            "_manifest/manifest.json",
+            {"contract_version": "0.1"},
+            "dataset_manifest_schema_id_invalid",
+        ),
+        (
+            "_manifest/manifest.json",
+            {"schema_id": "qrp-dataset-manifest/0.1"},
+            "dataset_manifest_schema_id_invalid",
+        ),
+        (
+            "_manifest/manifest.json",
+            {
+                "schema_id": "qrp-dataset-manifest",
+                "metadata": {"contract_version": "0.1"},
+            },
+            "dataset_manifest_schema_id_invalid",
+        ),
+    ),
+)
+def test_read_dataset_rejects_invalid_qrp_json_schema_id(
+    tmp_path: Path,
+    relative_path: str,
+    replacement: dict[str, str],
+    error: str,
+) -> None:
+    root = _artifact_root(tmp_path)
+    write_dataset(root, _frame(), spec=_spec())
+    path = root / relative_path
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("schema_id", None)
+    payload.update(replacement)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=error):
         read_dataset(root)
 
 

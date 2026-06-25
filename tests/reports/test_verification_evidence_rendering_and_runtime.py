@@ -23,10 +23,10 @@ from tests.helpers import frequency_ids
 def test_review_safe_evidence_markdown_renders_status_rows() -> None:
     payload = {
         "output_scope": "REVIEW_SAFE",
-        "contract_version": "0.1",
-        "verification_kind": "local_run_output_aggregate",
+        "schema_id": "qrp-a-share-aggregate-evidence",
+        "verification_kind": "local_result_aggregate",
         "verification_scope": "aggregate_review_safe_parity",
-        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
+        "evidence_generation_mode": "local_result_review_safe_aggregate",
         "source_data_visibility": "local_only",
         "handoff_ready": False,
         "areas": [
@@ -57,8 +57,8 @@ def test_review_safe_evidence_markdown_renders_status_rows() -> None:
 def test_local_verification_inventory_markdown_renders_inventory() -> None:
     payload = {
         "output_scope": "REVIEW_SAFE",
-        "contract_version": "0.1",
-        "verification_kind": "local_run_output_aggregate_inventory",
+        "schema_id": "qrp-a-share-verification-inventory",
+        "verification_kind": "local_result_aggregate_inventory",
         "source_data_visibility": "local_only",
         "dataset_inventory": [
             {

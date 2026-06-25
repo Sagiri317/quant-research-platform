@@ -11,6 +11,8 @@ from uuid import uuid4
 
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
+    evidence_json_value_unsafe_reason,
+    qrp_json_identity_reason,
     sanitize_shared_object,
 )
 from quant_research_platform.runtime.logical_paths import logical_path
@@ -23,7 +25,23 @@ def read_manifest(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def read_qrp_json(
+    path: Path,
+    *,
+    expected_schema_id: str,
+    error: str,
+) -> dict[str, Any]:
+    payload = read_manifest(path)
+    require_qrp_json_identity(
+        payload,
+        expected_schema_id=expected_schema_id,
+        error=error,
+    )
+    return payload
+
+
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
+    _require_schema_id(payload)
     text = (
         json.dumps(sanitize_shared_object(payload), ensure_ascii=False, indent=2) + "\n"
     )
@@ -38,6 +56,7 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     and row-sample payloads that do not belong in schema metadata.
     """
 
+    _require_schema_id(payload)
     assert_internal_artifact_metadata_safe(payload)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
@@ -46,6 +65,7 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
 def replace_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
     """Atomically replace an existing private artifact manifest."""
 
+    _require_schema_id(payload)
     assert_internal_artifact_metadata_safe(payload)
     final_path = Path(path)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -64,14 +84,36 @@ def replace_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> P
     return final_path
 
 
-def write_layer_manifest(
+def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
+    """Atomically replace a QRP-owned JSON object after share-safety validation."""
+
+    _require_schema_id(payload)
+    unsafe = evidence_json_value_unsafe_reason(payload)
+    if unsafe is not None:
+        raise ValueError(f"unsafe_qrp_json: {unsafe}")
+    final_path = Path(path)
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = final_path.with_name(f".tmp-{uuid4().hex[:12]}")
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(final_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+    return final_path
+
+
+def build_layer_summary(
     *,
     layer_root: Path,
     logical_layer: str,
-    run_id: str,
     dataset_roots: tuple[Path, ...],
-) -> Path:
-    root = Path(layer_root)
+) -> dict[str, Any]:
     datasets: list[dict[str, Any]] = []
     missing: list[str] = []
     failed: list[str] = []
@@ -84,6 +126,9 @@ def write_layer_manifest(
             missing.append(logical_path(path, markers=_LOGICAL_PATH_MARKERS))
             continue
         payload = read_manifest(path)
+        if payload.get("schema_id") != "qrp-dataset-manifest":
+            missing.append(logical_path(path, markers=_LOGICAL_PATH_MARKERS))
+            continue
         summary = {
             "row_count": payload.get("row_count"),
             "date_min": payload.get("date_min"),
@@ -111,7 +156,6 @@ def write_layer_manifest(
             failed.append(_data_id_from_manifest(payload, dataset_root))
     status = "pass" if not missing and not failed else "fail"
     payload = {
-        "run_id": run_id,
         "logical_layer": logical_layer,
         "dataset_count": len(datasets),
         "datasets": datasets,
@@ -123,38 +167,27 @@ def write_layer_manifest(
         "layer_validation_status": status,
         "created_at": _utc_now(),
     }
-    return write_internal_artifact_manifest(
-        root / "_manifests" / "layer_manifest.json",
-        payload,
-    )
+    return payload
 
 
-def write_run_manifest(
+def build_run_data_summary(
     *,
-    manifests_root: Path,
-    run_id: str,
-    output_root: Path,
-    layer_manifest_paths: tuple[Path, ...],
-) -> Path:
-    layers = [read_manifest(path) for path in layer_manifest_paths]
+    layer_summaries: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    layers = [dict(layer) for layer in layer_summaries]
     failed = [
         str(layer.get("logical_layer"))
         for layer in layers
         if layer.get("layer_validation_status") != "pass"
     ]
     payload = {
-        "run_id": run_id,
-        "output_root": logical_path(output_root, markers=_LOGICAL_PATH_MARKERS),
         "layer_count": len(layers),
         "layers": layers,
         "run_validation_status": "pass" if not failed else "fail",
         "failed_layers": failed,
         "created_at": _utc_now(),
     }
-    return write_internal_artifact_manifest(
-        Path(manifests_root) / "run_manifest.json",
-        payload,
-    )
+    return payload
 
 
 def _data_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
@@ -168,11 +201,39 @@ def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _require_schema_id(payload: object) -> None:
+    require_qrp_json_identity(
+        payload,
+        expected_schema_id=None,
+        error="manifest_json_identity_invalid",
+    )
+
+
+def require_qrp_json_identity(
+    payload: object,
+    *,
+    expected_schema_id: str | None,
+    error: str,
+) -> None:
+    reason = qrp_json_identity_reason(payload)
+    if reason is not None:
+        raise ValueError(f"{error}: {reason}")
+    if (
+        expected_schema_id is not None
+        and isinstance(payload, dict)
+        and payload.get("schema_id") != expected_schema_id
+    ):
+        raise ValueError(error)
+
+
 __all__ = [
+    "build_layer_summary",
+    "build_run_data_summary",
     "read_manifest",
+    "read_qrp_json",
+    "replace_qrp_json",
     "replace_internal_artifact_manifest",
+    "require_qrp_json_identity",
     "write_internal_artifact_manifest",
-    "write_layer_manifest",
     "write_manifest",
-    "write_run_manifest",
 ]

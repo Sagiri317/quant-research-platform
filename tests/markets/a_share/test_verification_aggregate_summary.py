@@ -38,7 +38,7 @@ def test_aggregates_summary_is_row_order_and_file_split_insensitive() -> None:
     )
 
 
-def test_aggregates_run_output_frames_are_lazy(
+def test_aggregates_output_frames_are_lazy(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -54,7 +54,7 @@ def test_aggregates_run_output_frames_are_lazy(
         return _base_frame().iloc[:1].copy()
 
     monkeypatch.setattr(aggregates.pd, "read_parquet", fake_read_parquet)
-    frames = aggregates._iter_run_output_frames((report_root,))
+    frames = aggregates._iter_output_frames((report_root,))
 
     assert read_order == []
     next(frames)

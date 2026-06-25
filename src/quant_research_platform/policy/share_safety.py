@@ -13,7 +13,7 @@ LOCAL_ONLY_ROOTS: tuple[str, ...] = (
     "data/interim",
     "data/processed",
     "data/research",
-    "run_outputs/local",
+    "outputs",
 )
 LEGACY_LOCAL_OUTPUT_PATH_NAMES: tuple[str, ...] = (
     "private_real",
@@ -51,7 +51,7 @@ _LEGACY_LOCAL_OUTPUT_PATH_PATTERN = "|".join(
 _ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE = re.compile(
     r"(?i)(?<!\w)(?:[a-z]:[\\/]|/)(?:[^\s,;\"'<>|]+[/\\])*"
     r"(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|run_outputs[/\\]local"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|outputs"
     r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:"
     + _LEGACY_LOCAL_OUTPUT_PATH_PATTERN
     + r")"
@@ -59,8 +59,7 @@ _ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE = re.compile(
 )
 _REPO_LOCAL_ONLY_PATH_RE = re.compile(
     r"(?i)\b(?:data[/\\](?:raw|interim|processed|research|reference_docs)"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|run_outputs[/\\]local"
-    r"(?:[/\\][^\s,;\"'<>|]+)?|reports[/\\](?:"
+    r"(?:[/\\][^\s,;\"'<>|]+)?|outputs[/\\][^\s,;\"'<>|]*|reports[/\\](?:"
     + _LEGACY_LOCAL_OUTPUT_PATH_PATTERN
     + r")"
     r"(?:[/\\][^\s,;\"'<>|]+)?)"
@@ -103,6 +102,9 @@ _CREDENTIAL_RE = re.compile(
     r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
     r"[A-Za-z0-9._~+/=-]{8,}"
 )
+_CREDENTIAL_KEY_RE = re.compile(
+    r"(?i)^(?:.*[_-])?(?:token|secret|credential|password|api[_-]?key)$"
+)
 _TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
 _RAW_EXPORT_FILENAME_RE = re.compile(
     r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
@@ -112,14 +114,14 @@ SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
 JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
     {
         "manifest_path",
-        "output_root",
+        "missing",
+        "missing_dataset_manifests",
+        "run_root",
         "run_manifest_path",
         "validation_summary_path",
     }
 )
-_RUNTIME_PAYLOAD_RE = re.compile(
-    r"(?i)\b(?:runtime_payload|exact_runtime_payload)\b"
-)
+_RUNTIME_PAYLOAD_RE = re.compile(r"(?i)\b(?:runtime_payload|exact_runtime_payload)\b")
 _LOCAL_RUN_PATH_RE = re.compile(
     r"(?i)(?:^|[\s`'\"])\.run[\\/]+(?:private|smoke|s[0-9]+)"
     r"(?:[\\/]+|[\s`'\"]|$)"
@@ -152,39 +154,29 @@ def is_local_only_path(path: Path) -> bool:
         return False
     if "docs" in parts:
         return False
-    for index, part in enumerate(parts[:-1]):
-        if part == "data" and parts[index + 1] in LOCAL_ONLY_DATA_LAYERS:
+    for index, part in enumerate(parts):
+        if part == "outputs":
             return True
-        if part == "run_outputs" and parts[index + 1] == "local":
+        if (
+            index < len(parts) - 1
+            and part == "data"
+            and parts[index + 1] in LOCAL_ONLY_DATA_LAYERS
+        ):
             return True
     return any(
-        parts[index] == "reports"
-        and parts[index + 1] in LEGACY_LOCAL_OUTPUT_PATH_NAMES
+        parts[index] == "reports" and parts[index + 1] in LEGACY_LOCAL_OUTPUT_PATH_NAMES
         for index in range(max(len(parts) - 1, 0))
     )
 
 
-def local_output_root_reason(output_root: Path, repo_root: Path) -> str | None:
-    """Return why a local workflow output root is not repository-owned."""
+def local_run_root_reason(run_root: Path, repo_root: Path) -> str | None:
+    """Return why an explicitly selected local run root is unsafe."""
 
     root = Path(repo_root).resolve(strict=False)
-    target = Path(output_root).resolve(strict=False)
-    try:
-        relative = target.relative_to(root)
-    except ValueError:
-        return "unignored_local_output_root"
-    parts = relative.parts
-    if len(parts) >= 2 and parts[0] == "run_outputs":
-        return None
-    if len(parts) >= 2 and parts[0] == ".run":
-        run_root = parts[1]
-        if (
-            run_root in {"local", "smoke"}
-            or re.fullmatch(r"s[0-9]+", run_root)
-            or re.fullmatch(r"evidence-[a-z0-9][a-z0-9-]*", run_root)
-        ):
-            return None
-    return "unignored_local_output_root"
+    target = Path(run_root).resolve(strict=False)
+    if target == root:
+        return "run_root_must_not_be_repo_root"
+    return None
 
 
 def unsafe_for_share_reason(
@@ -275,7 +267,12 @@ def evidence_json_value_unsafe_reason(
     key: str | None = None,
 ) -> str | None:
     if key is not None:
-        key_reason = evidence_text_unsafe_reason(key)
+        if _CREDENTIAL_KEY_RE.fullmatch(key):
+            return "credential"
+        key_reason = evidence_text_unsafe_reason(
+            key,
+            allow_logical_local_only_path=True,
+        )
         if key_reason is not None:
             return key_reason
     if isinstance(value, Mapping):
@@ -286,7 +283,7 @@ def evidence_json_value_unsafe_reason(
         return None
     if isinstance(value, list | tuple):
         for item in value:
-            reason = evidence_json_value_unsafe_reason(item)
+            reason = evidence_json_value_unsafe_reason(item, key=key)
             if reason is not None:
                 return reason
         return None
@@ -295,6 +292,40 @@ def evidence_json_value_unsafe_reason(
             value,
             allow_logical_local_only_path=key in JSON_LOGICAL_PATH_VALUE_KEYS,
         )
+    return None
+
+
+def qrp_json_identity_reason(value: object) -> str | None:
+    """Return why a QRP-owned JSON value violates the identity contract."""
+
+    if not isinstance(value, Mapping):
+        return "top_level_object_required"
+    schema_id = value.get("schema_id")
+    if not isinstance(schema_id, str) or not schema_id:
+        return "schema_id_required"
+    if "/" in schema_id:
+        return "schema_id_versioned"
+    return _nested_qrp_json_identity_reason(value)
+
+
+def _nested_qrp_json_identity_reason(value: object) -> str | None:
+    if isinstance(value, Mapping):
+        for item_key, item in value.items():
+            key = str(item_key)
+            if key in {"schema_version", "contract_version"}:
+                return f"retired_identity_key:{key}"
+            if key == "schema_id" and (
+                not isinstance(item, str) or not item or "/" in item
+            ):
+                return "schema_id_invalid"
+            reason = _nested_qrp_json_identity_reason(item)
+            if reason is not None:
+                return reason
+    elif isinstance(value, list | tuple):
+        for item in value:
+            reason = _nested_qrp_json_identity_reason(item)
+            if reason is not None:
+                return reason
     return None
 
 
@@ -425,7 +456,7 @@ def internal_artifact_metadata_unsafe_reason(
     logical_path_key = key in {
         "manifest_path",
         "missing_dataset_manifests",
-        "output_root",
+        "run_root",
     }
     if _ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE.search(text):
         return "local_only_path"
@@ -458,7 +489,8 @@ __all__ = [
     "assert_internal_artifact_metadata_safe",
     "internal_artifact_metadata_unsafe_reason",
     "is_local_only_path",
-    "local_output_root_reason",
+    "local_run_root_reason",
+    "qrp_json_identity_reason",
     "sanitize_shared_object",
     "sanitize_shared_text",
     "unsafe_for_share_reason",

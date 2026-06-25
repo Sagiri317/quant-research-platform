@@ -8,22 +8,26 @@ from quant_research_platform.workflows.local_verification_layout import (
 
 
 def test_local_verification_layout_uses_normal_internal_directory_names() -> None:
-    output_root = Path("verification-output") / "s1"
-    layout = LocalVerificationLayout.from_output_root(output_root)
+    run_root = Path("verification-output") / "s1"
+    layout = LocalVerificationLayout.from_run_root(run_root)
 
-    assert layout.output_root == output_root
-    assert layout.config_root == output_root / "config"
-    assert layout.data_root == output_root / "data"
-    assert layout.interim_root == output_root / "data" / "interim"
-    assert layout.processed_root == output_root / "data" / "processed"
-    assert layout.research_root == output_root / "data" / "research"
-    assert layout.evidence_root == output_root / "data" / "evidence"
-    assert layout.manifests_root == output_root / "manifests"
-    assert layout.validations_root == output_root / "validations"
-    assert layout.timings_root == output_root / "timings"
-    assert layout.logs_root == output_root / "logs"
-    assert layout.summary_json_path == output_root / "summary.json"
-    assert layout.summary_md_path == output_root / "summary.md"
+    assert layout.run_root == run_root
+    assert layout.run_json_path == run_root / "run.json"
+    assert layout.data_root == run_root / "data"
+    assert layout.interim_root == run_root / "data" / "interim"
+    assert layout.processed_root == run_root / "data" / "processed"
+    assert layout.research_root == run_root / "data" / "research"
+    assert layout.outputs_root == run_root / "outputs"
+    assert layout.logs_root == run_root / "logs"
+    assert layout.summary_md_path == run_root / "summary.md"
 
-    assert not (layout.output_root / "d" / "i") == layout.interim_root
-    assert not (layout.output_root / "m") == layout.manifests_root
+    for retired_name in (
+        "output_root",
+        "config_root",
+        "evidence_root",
+        "manifests_root",
+        "validations_root",
+        "timings_root",
+        "summary_json_path",
+    ):
+        assert not hasattr(layout, retired_name)

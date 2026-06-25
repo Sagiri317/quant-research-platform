@@ -1,4 +1,4 @@
-"""Review-safe aggregate evidence generation from local run outputs."""
+"""Review-safe aggregate evidence generation from local outputs."""
 
 from __future__ import annotations
 
@@ -45,8 +45,8 @@ from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
 )
+from quant_research_platform.storage.manifests import read_qrp_json
 
-CONTRACT_VERSION = "0.1"
 PROJECT_VERSION = "0.1.0"
 OUTPUT_SCOPE = "REVIEW_SAFE"
 ARTIFACT_ID = "review_safe_aggregate_evidence"
@@ -153,7 +153,7 @@ def build_review_safe_aggregate_evidence_payload(
     generated_at: datetime | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> dict[str, Any]:
-    """Build review-safe aggregate evidence from local run outputs."""
+    """Build review-safe aggregate evidence from local outputs."""
 
     root = Path(project_root)
     generated_at = generated_at or datetime.now(UTC)
@@ -202,9 +202,9 @@ def build_local_verification_inventory_payload(
         and not allowed_unverified_roots
     )
     return {
-        "contract_version": CONTRACT_VERSION,
+        "schema_id": "qrp-a-share-verification-inventory",
         "project_version": PROJECT_VERSION,
-        "verification_kind": "local_run_output_aggregate_inventory",
+        "verification_kind": "local_result_aggregate_inventory",
         "generated_at": generated_at.replace(microsecond=0)
         .isoformat()
         .replace(
@@ -264,7 +264,7 @@ def _build_review_safe_aggregate_evidence_payload_with_cache(
         else ("local aggregate verification completed with human approval required")
     )
     return {
-        "contract_version": CONTRACT_VERSION,
+        "schema_id": "qrp-a-share-aggregate-evidence",
         "project_version": PROJECT_VERSION,
         "output_scope": OUTPUT_SCOPE,
         "artifact_id": ARTIFACT_ID,
@@ -277,9 +277,9 @@ def _build_review_safe_aggregate_evidence_payload_with_cache(
             "+00:00",
             "Z",
         ),
-        "verification_kind": "local_run_output_aggregate",
+        "verification_kind": "local_result_aggregate",
         "verification_scope": "aggregate_review_safe_parity",
-        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
+        "evidence_generation_mode": "local_result_review_safe_aggregate",
         "source_data_visibility": "local_only",
         "row_level_output_committed": False,
         "verification_periods": sorted({area["period"] for area in areas}),
@@ -310,9 +310,9 @@ def _build_local_verification_inventory_payload_with_cache(
         and not allowed_unverified_roots
     )
     return {
-        "contract_version": CONTRACT_VERSION,
+        "schema_id": "qrp-a-share-verification-inventory",
         "project_version": PROJECT_VERSION,
-        "verification_kind": "local_run_output_aggregate_inventory",
+        "verification_kind": "local_result_aggregate_inventory",
         "generated_at": generated_at.replace(microsecond=0)
         .isoformat()
         .replace(
@@ -332,7 +332,7 @@ def _build_local_verification_inventory_payload_with_cache(
 
 def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     processed = root / "data" / "processed" / MARKET_ID
-    run_outputs_root = root / "run_outputs" / "local" / MARKET_ID
+    outputs_root = root / "outputs"
     market_panel_root = processed / "panel" / market_panel_data_id()
     factor = processed / "factor" / PRICE_VOLUME_PROCESSED_DATA_ID
     label = processed / "label" / "forward_returns"
@@ -346,15 +346,15 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     research = (
         root / "data" / "research" / MARKET_ID / PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
-    evaluation_roots = _run_output_category_roots(
-        run_outputs_root,
-        category="evaluation",
+    evaluation_roots = _output_roots(
+        outputs_root,
         preferred_id=default_evaluation_run_id(),
+        output_definition_id="evaluation_outputs",
     )
-    prediction_roots = _run_output_category_roots(
-        run_outputs_root,
-        category="prediction",
+    prediction_roots = _output_roots(
+        outputs_root,
         preferred_id=default_prediction_smoke_id(test_start="2014-07-01"),
+        output_definition_id="prediction_outputs",
     )
     return (
         AggregateInput(
@@ -396,14 +396,14 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
                 evaluation_end="2014-12-31",
             ),
             "evaluation",
-            summary_kind="run_outputs",
+            summary_kind="outputs",
         ),
         AggregateInput(
             "prediction_oos_smoke_parity",
             prediction_roots,
             _prediction_oos_expected_period(),
             "prediction OOS smoke",
-            summary_kind="run_outputs",
+            summary_kind="outputs",
         ),
         AggregateInput(
             "supporting_layers_coverage_2014_2025",
@@ -420,22 +420,41 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     )
 
 
-def _run_output_category_roots(
-    run_outputs_root: Path,
+def _output_roots(
+    outputs_root: Path,
     *,
-    category: str,
     preferred_id: str,
+    output_definition_id: str,
 ) -> tuple[Path, ...]:
-    preferred = run_outputs_root / category / preferred_id
+    preferred = outputs_root / preferred_id
     if preferred.exists():
         return (preferred,)
-    category_root = run_outputs_root / category
-    if not category_root.exists():
-        return (preferred,)
     discovered = tuple(
-        sorted(path for path in category_root.iterdir() if path.is_dir())
+        sorted(
+            path
+            for path in outputs_root.iterdir()
+            if path.is_dir()
+            and (path / "manifest.json").is_file()
+            and _output_manifest_definition_id(path) == output_definition_id
+            and path.name != preferred_id
+        )
+        if outputs_root.exists()
+        else ()
     )
     return discovered if discovered else (preferred,)
+
+
+def _output_manifest_definition_id(output_root: Path) -> str | None:
+    try:
+        payload = read_qrp_json(
+            output_root / "manifest.json",
+            expected_schema_id="qrp-output-manifest",
+            error="output_manifest_schema_id_invalid",
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    value = payload.get("output_definition_id")
+    return value if isinstance(value, str) else None
 
 
 def _prediction_oos_expected_period() -> str:
@@ -542,7 +561,7 @@ def _area_record(
     explanation = (
         (
             f"Exact aggregate parity verified for {area_input.explanation_name} "
-            "from local run outputs, without row-level output."
+            "from local outputs, without row-level output."
         )
         if period_matches
         else (
@@ -553,7 +572,6 @@ def _area_record(
     )
     return {
         "area": area_input.area,
-        "contract_version": CONTRACT_VERSION,
         "output_scope": OUTPUT_SCOPE,
         "period": summary.period,
         "row_count": summary.row_count,
@@ -578,9 +596,9 @@ def _area_record(
                 "not_required" if not human_approval_required else "required"
             ),
         },
-        "verification_kind": "local_run_output_aggregate",
+        "verification_kind": "local_result_aggregate",
         "verification_scope": "aggregate_review_safe_parity",
-        "evidence_generation_mode": "local_run_output_review_safe_aggregate",
+        "evidence_generation_mode": "local_result_review_safe_aggregate",
         "tolerance_owner": "project_contract_0.1",
         "downstream_impact": (
             "no downstream parity impact detected from aggregate fields"
@@ -603,8 +621,8 @@ def _summarize_area_input(
         if len(area_input.roots) != 1:
             raise ValueError("expected_single_project_root")
         return _summarize_generated_full_market_panel(area_input.roots[0])
-    if area_input.summary_kind == "run_outputs":
-        return _summarize_run_output_roots(area_input.roots)
+    if area_input.summary_kind == "outputs":
+        return _summarize_output_roots(area_input.roots)
     return _summarize_roots(
         area_input.roots,
         years=area_input.years,
@@ -772,11 +790,11 @@ def _summarize_roots(
     return _combine_summaries(summaries)
 
 
-def _summarize_run_output_roots(roots: tuple[Path, ...]) -> AggregateSummary:
-    return _summarize_frames(_iter_run_output_frames(roots))
+def _summarize_output_roots(roots: tuple[Path, ...]) -> AggregateSummary:
+    return _summarize_frames(_iter_output_frames(roots))
 
 
-def _iter_run_output_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
+def _iter_output_frames(roots: tuple[Path, ...]) -> Iterator[pd.DataFrame]:
     for root in roots:
         files = tuple(sorted(Path(root).rglob("*.parquet")))
         if not files:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -18,10 +17,10 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.storage.datasets import compare_datasets, write_dataset
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import (
+    build_layer_summary,
+    build_run_data_summary,
     write_internal_artifact_manifest,
-    write_layer_manifest,
     write_manifest,
-    write_run_manifest,
 )
 
 
@@ -99,8 +98,9 @@ def test_projected_dataset_fingerprint_includes_primary_key_columns(
 
 def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> None:
     manifest = write_manifest(
-        tmp_path / "run_outputs" / "local" / "a_share" / "run" / "manifest.json",
+        tmp_path / "outputs" / "run" / "manifest.json",
         {
+            "schema_id": "qrp-output-manifest",
             "path": "provider-internal-detail",
             "traceback": "Traceback (most recent call last): provider internals",
             "credential_hint": "redacted credential detail",
@@ -115,19 +115,12 @@ def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> Non
 
 
 def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
-    manifest = (
-        tmp_path
-        / "run_outputs"
-        / "local"
-        / "a_share"
-        / "run"
-        / "manifest.json"
-    )
+    manifest = tmp_path / "outputs" / "run" / "manifest.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text('{"existing": true}\n', encoding="utf-8")
 
     with pytest.raises(ValueError, match="output_already_exists"):
-        write_manifest(manifest, {"schema_version": "0.1"})
+        write_manifest(manifest, {"schema_id": "qrp-output-manifest"})
 
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
 
@@ -139,7 +132,7 @@ def test_output_already_exists_error_public_summary() -> None:
     }
 
 
-def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> None:
+def test_build_layer_summary_detects_missing_dataset_manifests(tmp_path: Path) -> None:
     layer_root = tmp_path / "data" / "processed"
     present = layer_root / "a_share" / "factor" / "present"
     missing = layer_root / "a_share" / "label" / "missing"
@@ -153,13 +146,11 @@ def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> Non
         ),
     )
 
-    manifest = write_layer_manifest(
+    payload = build_layer_summary(
         layer_root=layer_root,
         logical_layer="processed",
-        run_id="run",
         dataset_roots=(present, missing),
     )
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
 
     assert payload["dataset_count"] == 1
     assert payload["total_rows"] == 3
@@ -169,39 +160,30 @@ def test_layer_manifest_detects_missing_dataset_manifests(tmp_path: Path) -> Non
     assert payload["layer_validation_status"] == "fail"
 
 
-def test_run_manifest_aggregates_layers(tmp_path: Path) -> None:
-    processed = tmp_path / "data" / "processed"
-    evidence = tmp_path / "data" / "evidence"
-    processed.mkdir(parents=True)
-    evidence.mkdir(parents=True)
-    write_layer_manifest(
-        layer_root=processed,
+def test_build_run_data_summary_aggregates_dynamic_layers(tmp_path: Path) -> None:
+    processed = build_layer_summary(
+        layer_root=tmp_path / "data" / "processed",
         logical_layer="processed",
-        run_id="run",
         dataset_roots=(),
     )
-    write_layer_manifest(
-        layer_root=evidence,
-        logical_layer="evidence",
-        run_id="run",
+    research = build_layer_summary(
+        layer_root=tmp_path / "data" / "research",
+        logical_layer="research",
         dataset_roots=(),
     )
 
-    manifest = write_run_manifest(
-        manifests_root=tmp_path / "manifests",
-        run_id="run",
-        output_root=Path("verification-output") / "s1",
-        layer_manifest_paths=(
-            processed / "_manifests" / "layer_manifest.json",
-            evidence / "_manifests" / "layer_manifest.json",
-        ),
+    payload = build_run_data_summary(
+        layer_summaries=(processed, research),
     )
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
 
-    assert payload["run_id"] == "run"
-    assert payload["output_root"] == "verification-output/s1"
     assert payload["layer_count"] == 2
     assert payload["run_validation_status"] == "pass"
+    assert [layer["logical_layer"] for layer in payload["layers"]] == [
+        "processed",
+        "research",
+    ]
+    assert not list(tmp_path.rglob("layer_manifest.json"))
+    assert not list(tmp_path.rglob("run_manifest.json"))
 
 
 def _artifact_manifest_payload(
@@ -212,7 +194,7 @@ def _artifact_manifest_payload(
     date_max: str,
 ) -> dict[str, object]:
     return {
-        "schema_version": "0.1",
+        "schema_id": "qrp-dataset-manifest",
         "data_id": data_id,
         "row_count": row_count,
         "date_min": date_min,
