@@ -847,6 +847,10 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     )
     timings_csv = (output_root / "timings" / "timings.csv").read_text(encoding="utf-8")
     assert summary["status"] == "NOT_RUN"
+    assert summary["smoke_status"] == "PASS"
+    assert summary["compare_status"] == "NOT_RUN"
+    assert summary["full_horizon_status"] == "NOT_RUN"
+    assert summary["validation_matrix_status"] == "NOT_RUN"
     assert validation["status"] == "PASS"
     assert summary["run_id"] == "s1"
     assert run_config["output_root"] == "s1"
@@ -1093,6 +1097,10 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
     )
 
     assert result.status == "NOT_RUN"
+    assert summary["smoke_status"] == "PASS"
+    assert summary["compare_status"] == "NOT_RUN"
+    assert summary["full_horizon_status"] == "NOT_RUN"
+    assert summary["validation_matrix_status"] == "NOT_RUN"
     assert summary["manifest_status"]["run_output_count"] == len(prediction_ids) + 2
     assert set(metrics["signal"]) == {"mom_20d", "rev_1d", "mom_20d_zscore"}
     assert "mom_20d_zscore" in research.columns

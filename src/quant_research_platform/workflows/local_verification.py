@@ -367,6 +367,7 @@ def _run_local_verification_with_policy(
         timings=timings_payload,
         validation_summary=validation_summary,
         output_root=output_root,
+        smoke_status=str(validation_summary.get("status", "FAIL")),
         runtime_resource_policy=resource_policy.to_public_summary_payload(),
         runtime_execution_plan=_runtime_execution_plan_payload(),
     )
