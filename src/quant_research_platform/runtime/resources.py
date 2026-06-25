@@ -145,7 +145,7 @@ class RuntimeResourcePolicy:
         }
 
     def to_public_summary_payload(self) -> dict[str, int | float | str | bool]:
-        """Return coarse resource policy metadata for public-safe summaries."""
+        """Return coarse resource policy metadata for share-safe summaries."""
 
         return {
             "memory_budget_fraction": self.memory_budget_fraction,

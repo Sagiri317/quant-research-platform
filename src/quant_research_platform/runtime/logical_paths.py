@@ -31,7 +31,7 @@ def logical_path(
     output_root: str | Path | None = None,
     markers: Iterable[str] = DEFAULT_GENERATED_MARKERS,
 ) -> str:
-    """Return a public-safe path relative to a generated root when possible."""
+    """Return a share-safe path relative to a generated root when possible."""
 
     item = Path(path)
     if output_root is not None:

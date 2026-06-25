@@ -84,8 +84,8 @@ python -m pytest tests/agents tests/architecture -q
 需要区分 fast 与依赖慢集成测试时，使用：
 
 ```bash
-python -m pytest tests/architecture/test_public_safe_evidence.py -q
-python -m pytest tests/architecture/test_public_safe_evidence_data_contract.py -q -m data_dependency
+python -m pytest tests/architecture/test_share_safe_evidence.py -q
+python -m pytest tests/architecture/test_share_safe_evidence_data_contract.py -q -m data_dependency
 python -m pytest tests/agents/handoff tests/architecture/test_handoff_package_contract.py -q -m "not slow_integration"
 python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py -q -m slow_integration
 ```

@@ -230,7 +230,7 @@ def test_local_verification_run_id_can_be_explicit_long_semantic_value(tmp_path)
     assert config.run_id == "verification-evidence-smoke-a-share-2014-2016"
 
 
-def test_local_verification_run_id_uses_shared_public_safe_contract(
+def test_local_verification_run_id_uses_shared_share_safe_contract(
     tmp_path: Path,
 ) -> None:
     assert (

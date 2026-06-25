@@ -28,7 +28,7 @@ compute 只提供数值计算核心，不持有 market session domain 工具，�
 
 ## 数据安全
 
-研究 evidence 不能泄漏 private row-level data。公开结果只能包含统计摘要、schema、counts、hash、status 和 public-safe path。
+研究 evidence 不能泄漏 row-level local-only data。可交接结果只能包含统计摘要、schema、counts、hash、status 和 share-safe path。
 
 ## 业务扩展边界
 

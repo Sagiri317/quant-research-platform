@@ -331,7 +331,7 @@ def test_handoff_builder_does_not_own_sensitive_negative_rules() -> None:
     assert "from governance_contract import" in source
 
 
-def test_public_safe_text_checks_use_policy_share_safety_single_source() -> None:
+def test_share_safe_text_checks_use_policy_share_safety_single_source() -> None:
     agent_safety = Path("src/quant_research_platform/agents/safety.py").read_text(
         encoding="utf-8"
     )

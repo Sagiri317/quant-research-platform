@@ -361,7 +361,7 @@ class PyArrowBlocker(importlib.abc.MetaPathFinder):
         return None
 
 sys.meta_path.insert(0, PyArrowBlocker())
-import tests.architecture.test_public_safe_evidence
+import tests.architecture.test_share_safe_evidence
 """
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(

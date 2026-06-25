@@ -14,7 +14,7 @@ from quant_research_platform.contracts.workflows import (
 )
 
 
-def test_run_id_accepts_public_safe_lowercase_identifiers() -> None:
+def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
     report = RunOutputSpec(
         output_id="stage_profile",
         output_definition_id="stage_profile_local_diagnostic",

@@ -77,7 +77,7 @@ def test_governance_allows_sanitization_negative_fixtures_only() -> None:
         secret_line,
     )
     assert not module._is_allowed_local_path_fixture(
-        "tests/architecture/test_public_safe_evidence.py",
+        "tests/architecture/test_share_safe_evidence.py",
         '    "/mnt/",',
     )
     assert not module._is_allowed_local_path_fixture(

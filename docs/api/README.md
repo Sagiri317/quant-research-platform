@@ -8,7 +8,7 @@ API 文档只描述当前公开边界。新增 API、CLI、registry、store 或 
 
 ## 接口边界
 
-`src/quant_research_platform/interfaces/api/` 提供 API adapter。interfaces 不写业务算法，不绕过 contracts、privacy、runtime logging 或 public-safe evidence，也不新增未批准 public surface。
+`src/quant_research_platform/interfaces/api/` 提供 API adapter。interfaces 不写业务算法，不绕过 contracts、share-safety、runtime logging 或 share-safe evidence，也不新增未批准 public surface。
 
 当前 public API 只有：
 

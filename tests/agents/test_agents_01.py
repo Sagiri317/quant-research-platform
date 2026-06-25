@@ -16,7 +16,7 @@ from quant_research_platform.agents.proposals import (
 )
 from quant_research_platform.agents.safety import (
     ProposalSafetyError,
-    assert_proposal_is_public_safe,
+    assert_proposal_is_share_safe,
     require_human_approval,
 )
 from quant_research_platform.agents.workflow_planner import plan_workflow
@@ -71,7 +71,7 @@ def test_agent_proposals_start_unapproved() -> None:
         "source marker from CSMAR export table",
     ],
 )
-def test_public_safety_rejects_private_text_markers(unsafe_text: str) -> None:
+def test_share_safety_rejects_local_text_markers(unsafe_text: str) -> None:
     proposal = FactorProposal(
         proposal_id="factor-proposal-unsafe",
         factor_id="unsafe_factor",
@@ -80,10 +80,10 @@ def test_public_safety_rejects_private_text_markers(unsafe_text: str) -> None:
     )
 
     with pytest.raises(ProposalSafetyError):
-        assert_proposal_is_public_safe(proposal)
+        assert_proposal_is_share_safe(proposal)
 
 
-def test_public_safety_rejects_preapproved_proposals() -> None:
+def test_share_safety_rejects_preapproved_proposals() -> None:
     proposal = WorkflowProposal(
         proposal_id="workflow-proposal-preapproved",
         workflow_id="unsafe_workflow",
@@ -92,10 +92,10 @@ def test_public_safety_rejects_preapproved_proposals() -> None:
     )
 
     with pytest.raises(ProposalSafetyError, match="proposal_must_start_unapproved"):
-        assert_proposal_is_public_safe(proposal)
+        assert_proposal_is_share_safe(proposal)
 
 
-def test_factories_return_only_public_safe_unapproved_proposals() -> None:
+def test_factories_return_only_share_safe_unapproved_proposals() -> None:
     factor = propose_factor(
         profile=research_profile(),
         proposal_id="factor-proposal-002",

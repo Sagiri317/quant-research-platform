@@ -182,7 +182,7 @@ def structured_value_document(values: Iterable[str]) -> str:
 
 
 def representative_local_only_paths() -> tuple[str, ...]:
-    """Derive public-unsafe path fixtures from runtime privacy roots."""
+    """Derive share-unsafe path fixtures from share-safety local roots."""
 
     return tuple(f"{root}/negative-fixture" for root in LOCAL_ONLY_ROOTS)
 

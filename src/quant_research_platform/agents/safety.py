@@ -9,7 +9,7 @@ from quant_research_platform.policy.share_safety import unsafe_for_share_reason
 
 
 class ProposalSafetyError(ValueError):
-    """Raised when a proposal contains public-unsafe content."""
+    """Raised when a proposal contains share-unsafe content."""
 
 
 def require_human_approval(proposal_or_approved: Any) -> None:
@@ -27,16 +27,16 @@ def assert_proposal_starts_unapproved(proposal: Any) -> None:
         raise ProposalSafetyError("proposal_must_start_unapproved")
 
 
-def assert_public_safe_text(text: str) -> None:
+def assert_share_safe_text(text: str) -> None:
     reason = unsafe_for_share_reason(text)
     if reason is not None:
-        raise ProposalSafetyError(f"proposal_contains_public_unsafe_text:{reason}")
+        raise ProposalSafetyError(f"proposal_contains_share_unsafe_text:{reason}")
 
 
-def assert_proposal_is_public_safe(proposal: Any) -> None:
+def assert_proposal_is_share_safe(proposal: Any) -> None:
     assert_proposal_starts_unapproved(proposal)
     for text in _iter_text_values(proposal):
-        assert_public_safe_text(text)
+        assert_share_safe_text(text)
 
 
 def _iter_text_values(value: Any) -> tuple[str, ...]:
@@ -63,8 +63,8 @@ def _iter_text_values(value: Any) -> tuple[str, ...]:
 
 __all__ = [
     "ProposalSafetyError",
-    "assert_proposal_is_public_safe",
+    "assert_proposal_is_share_safe",
     "assert_proposal_starts_unapproved",
-    "assert_public_safe_text",
+    "assert_share_safe_text",
     "require_human_approval",
 ]

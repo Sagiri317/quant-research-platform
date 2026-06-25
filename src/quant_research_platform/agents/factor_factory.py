@@ -1,7 +1,7 @@
 """Proposal-only Factor Factory boundary."""
 
 from quant_research_platform.agents.proposals import FactorProposal
-from quant_research_platform.agents.safety import assert_proposal_is_public_safe
+from quant_research_platform.agents.safety import assert_proposal_is_share_safe
 from quant_research_platform.profiles.research import ResearchProfile
 
 
@@ -33,7 +33,7 @@ def propose_factor(
         derived_input_producers=dict(derived_input_producers or {}),
         required_input_data_id=resolved_input_data_id,
     )
-    assert_proposal_is_public_safe(proposal)
+    assert_proposal_is_share_safe(proposal)
     return proposal
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class WriteRejectedError(ValueError):
-    """Base class for public-safe writer rejections."""
+    """Base class for share-safe writer rejections."""
 
     failure_code = "write_rejected"
 

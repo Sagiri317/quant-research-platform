@@ -1,7 +1,7 @@
 """Proposal-only workflow planner boundary."""
 
 from quant_research_platform.agents.proposals import WorkflowProposal
-from quant_research_platform.agents.safety import assert_proposal_is_public_safe
+from quant_research_platform.agents.safety import assert_proposal_is_share_safe
 
 
 def plan_workflow(
@@ -15,7 +15,7 @@ def plan_workflow(
         workflow_id=workflow_id,
         step_ids=tuple(step_ids),
     )
-    assert_proposal_is_public_safe(proposal)
+    assert_proposal_is_share_safe(proposal)
     return proposal
 
 

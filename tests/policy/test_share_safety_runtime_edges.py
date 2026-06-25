@@ -4,7 +4,7 @@ import pytest
 
 from quant_research_platform.agents.safety import (
     ProposalSafetyError,
-    assert_public_safe_text,
+    assert_share_safe_text,
 )
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
@@ -42,9 +42,11 @@ def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:
     [
         # Intentional fake provider/source marker for safety rejection tests.
         "/workspace/qrp/data/research/a_share/demo",
+        # intentional legacy-path negative case
         "/workspaces/qrp/reports/private_research/a_share/run",
         "/opt/qrp/data/processed/a_share/factor/demo",
         r"C:\repo\data\research\a_share\demo",
+        # intentional legacy-path negative case
         r"D:\repo\reports\private_research\a_share\run",
     ],
 )
@@ -124,7 +126,7 @@ def test_provider_source_marker_input_is_rejected_before_row_level_read() -> Non
 
     def guarded_public_output(input_text: str) -> None:
         nonlocal row_reader_called
-        assert_public_safe_text(input_text)
+        assert_share_safe_text(input_text)
         row_reader_called = True
 
     with pytest.raises(ProposalSafetyError):
@@ -145,7 +147,7 @@ def test_provider_source_marker_input_is_rejected_before_row_level_read() -> Non
         ("vendor_name=raw-provider", "provider_source_marker"),
     ],
 )
-def test_unsafe_for_share_reason_covers_public_safety_markers(
+def test_unsafe_for_share_reason_covers_share_safety_markers(
     text: str,
     reason: str,
 ) -> None:

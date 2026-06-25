@@ -1,4 +1,4 @@
-"""Compare private verification evidence runs using public-safe aggregates."""
+"""Compare local verification runs using share-safe aggregates."""
 
 from __future__ import annotations
 
@@ -256,7 +256,7 @@ def main() -> None:
             for status in sorted(set(statuses.values()))
         },
         "comparisons": comparisons,
-        "privacy": "public_safe_aggregate_only_no_row_level_values",
+        "share_safety": "share_safe_aggregate_only_no_row_level_values",
     }
     _write_json(goal_root / "baseline-final-compare.json", payload)
     (goal_root / "baseline-final-compare.md").write_text(
@@ -1717,7 +1717,10 @@ def _markdown(payload: dict[str, Any]) -> str:
         f"- current_head: {payload['current_git']['head']}",
         f"- dirty_worktree: {payload['current_git']['dirty']}",
         f"- currentness_note: {payload['current_git']['currentness_note']}",
-        "- privacy: public-safe aggregate summary only; no row-level values emitted.",
+        (
+            "- share-safety: share-safe aggregate summary only; "
+            "no row-level values emitted."
+        ),
         "",
     ]
     for label, comparison in payload["comparisons"].items():

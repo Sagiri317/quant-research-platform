@@ -1,7 +1,7 @@
 """Proposal-only label factory boundary."""
 
 from quant_research_platform.agents.proposals import LabelProposal
-from quant_research_platform.agents.safety import assert_proposal_is_public_safe
+from quant_research_platform.agents.safety import assert_proposal_is_share_safe
 
 
 def propose_label(
@@ -17,7 +17,7 @@ def propose_label(
         rationale=rationale,
         horizon=horizon,
     )
-    assert_proposal_is_public_safe(proposal)
+    assert_proposal_is_share_safe(proposal)
     return proposal
 
 

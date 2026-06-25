@@ -110,8 +110,8 @@ retired 字段、路径、artifact key 和 execution mode 只允许在 retired-s
 ```text
 tests/agents/test_verify_governance.py
 tests/architecture/test_governance_contract_rg_gate.py
-tests/architecture/test_public_safe_evidence.py
-tests/architecture/test_public_safe_evidence_data_contract.py
+tests/architecture/test_share_safe_evidence.py
+tests/architecture/test_share_safe_evidence_data_contract.py
 tests/architecture/test_platform_topology.py
 tests/contracts/test_platform_contracts.py
 ```

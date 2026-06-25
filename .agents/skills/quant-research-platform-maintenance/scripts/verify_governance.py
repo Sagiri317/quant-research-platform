@@ -447,7 +447,7 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
     if rel in PRIVACY_NEGATIVE_TEST_PATHS and LOCAL_PATH_PATTERN.search(line):
         return True
     if (
-        rel == "tests/architecture/test_public_safe_evidence.py"
+        rel == "tests/architecture/test_share_safe_evidence.py"
         and LOCAL_PATH_PATTERN.search(line)
     ):
         return True
@@ -462,7 +462,7 @@ def _is_allowed_local_path_fixture(rel: str, line: str) -> bool:
 def _is_allowed_secret_fixture(rel: str, line: str) -> bool:
     if rel in PRIVACY_NEGATIVE_TEST_PATHS and SECRET_PATTERN.search(line):
         return True
-    if rel == "tests/architecture/test_public_safe_evidence.py" and '"token="' in line:
+    if rel == "tests/architecture/test_share_safe_evidence.py" and '"token="' in line:
         return True
     if (
         rel

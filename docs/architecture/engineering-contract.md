@@ -45,7 +45,7 @@ Retired governance paths 不能复活；路径本身存在即 `FAIL`，不依赖
 
 Retired stage naming 不能通过文件名、路径名、Python symbol、JSON/YAML/TOML key 或静态字符串拼接复活。合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1` 和 schema/contract `0.1` 字段；带 `v` 前缀的 `0.1` API 版本路径只允许出现在规则定义或 negative tests。
 
-public-safe evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
+share-safe evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
 
 ```bash
 python -m pytest tests/architecture/test_public_safe_evidence.py -q
