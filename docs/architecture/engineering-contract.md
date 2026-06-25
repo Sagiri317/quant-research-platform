@@ -19,7 +19,7 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 ## 状态 token
 
-只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`、`TIMEOUT`。不要写 “looks good”“probably pass” 这类不可验证语义。
+只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`。超时属于 `BLOCKED`。不要写 “looks good”“probably pass” 这类不可验证语义。
 
 ## 文件路径
 
@@ -43,7 +43,13 @@ python .agents/skills/quant-research-platform-maintenance/scripts/verify_code_ma
 
 Retired governance paths 不能复活；路径本身存在即 `FAIL`，不依赖文案关键词。
 
-Retired stage naming 不能通过文件名、路径名、Python symbol、JSON/YAML/TOML key 或静态字符串拼接复活。合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1` 和 schema/contract `0.1` 字段；带 `v` 前缀的 `0.1` API 版本路径只允许出现在规则定义或 negative tests。
+Retired stage naming 不能通过文件名、路径名、Python symbol、JSON/YAML/TOML key 或静态字符串拼接复活。合法版本面使用 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`definition_version` 和 `workflow_version`；QRP-owned JSON 使用不带版本后缀的 `schema_id`。带 `v` 前缀的 `0.1` API 版本路径只允许出现在规则定义或 negative tests。
+
+## 运行结果与 JSON
+
+`<run_root>/run.json` 是运行级机器事实源，`<run_root>/summary.md` 是运行级人读摘要，实例结果位于 `<run_root>/outputs/<output_id>/`。QRP-owned JSON 必须是顶层 object，必须有 `schema_id`，不得把版本编码进 `schema_id`。
+
+compare 按 `output_id` 配对，并使用 `output_definition_id` 与 metadata 做类型和语义校验。状态聚合只由 `policy/check_status.py` 定义。
 
 share-safe evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
 

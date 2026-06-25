@@ -44,7 +44,9 @@ REVIEW_SAFE evidence 不得包含：
 - raw traceback
 - private-derived sample
 
-LOCAL_ONLY run outputs 默认不进入 handoff。原因是共享边界、授权边界、体积边界和本地 path/provider/source 风险，而不是因为所有结果本身都必然是隐私。
+LOCAL_ONLY outputs 默认不进入 handoff。原因是共享边界、授权边界、体积边界和本地 path/provider/source 风险，而不是因为所有结果本身都必然是隐私。
+
+handoff 可以纳入完整 `run.json`，但必须校验 `schema_id` 并通过统一 safety verifier。handoff zip 内机器 evidence 统一放在 `handoff_evidence/`。
 
 ## 4. Sidecar 规则
 

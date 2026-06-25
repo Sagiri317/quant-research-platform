@@ -21,7 +21,7 @@ src/         QRP 源码
 tests/       当前合同测试、治理测试、架构测试
 docs/        当前合同文档和代码地图
 data/        本地数据占位说明，不提交私有数据
-.run/        本地运行输出和 evidence，不作为 tracked tooling source
+.run/        本地运行产物和 evidence，不作为 tracked tooling source
 ```
 
 核心 owner 边界：
@@ -37,9 +37,31 @@ data/        本地数据占位说明，不提交私有数据
 - `storage/`：只负责 dataset IO 与 data/raw、data/interim、data/processed、data/research layout。
 - `runtime/`：resources、logging、workflow records 和 execution metrics payload，不写 report artifact。
 - `reports/`：只 build/render evidence/report 内容，不写文件。
-- `artifacts/`：只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。
+- `artifacts/`：只负责写入 LOCAL_ONLY outputs 和 REVIEW_SAFE evidence。
 - `workflows/`：只编排 research -> reports -> artifacts。
 - `.agents/`：治理、handoff 和 prompt tooling，不承载 runtime 业务逻辑。
+
+## 运行结果合同
+
+运行根由 workflow 或用户显式指定：
+
+```text
+<run_root>/
+  run.json
+  data/
+    interim/
+    processed/
+    research/
+  outputs/
+    <output_id>/
+      manifest.json
+  logs/
+  summary.md
+```
+
+`run.json` 是唯一运行级机器事实源，`summary.md` 是唯一运行级人读摘要。dataset 保留 `spec.json` 与 `_manifest/manifest.json`。所有 QRP-owned JSON 顶层必须是 object，并使用不带版本后缀的 `schema_id`。
+
+compare 默认按 `output_id` 配对，并用 `output_definition_id` 与 metadata 校验语义；特殊映射由 pairs file 显式提供。handoff 可以纳入完整 `run.json`，但必须通过统一 safety verifier。状态聚合唯一 owner 是 `policy/check_status.py`；`governance_contract.py` 只定义治理扫描规则。
 
 ## 当前 public surface
 
@@ -99,4 +121,4 @@ python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py 
 
 ## 数据安全
 
-禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只能包含摘要、schema、计数、hash、命令状态和路径结构；run output 架构主轴是 LOCAL_ONLY / REVIEW_SAFE，不是 private / public。
+禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只能包含摘要、schema、计数、hash、命令状态和路径结构；结果安全边界使用 LOCAL_ONLY / REVIEW_SAFE，不使用 private / public 分类。

@@ -18,7 +18,7 @@ REQUIRED_TERMS = (
     "local research platform",
     "data -> feature -> signal/model -> evaluate -> evidence",
     ".agents tooling",
-    ".run output/evidence",
+    ".run artifacts",
     "private data safety",
     "current contract",
     "current-contract-only",

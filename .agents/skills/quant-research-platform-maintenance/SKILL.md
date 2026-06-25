@@ -54,7 +54,9 @@ references/prompt-patterns.md
 
 ## 3. 当前分层事实
 
-`policy/` 管共享安全、ID 安全和状态聚合。`contracts/` 只管结构合同。`catalog/` 只管 generic registry class。`profiles/` 是 API、CLI、agent、workflow 共用组合根。`research/` 只构建 result，不写文件。`reports/` 只 build/render evidence/report 内容。`artifacts/` 只写 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 文件。`workflows/` 只编排 research -> reports -> artifacts。`storage/` 只管 dataset IO 和 data layout。
+`policy/` 管共享安全、ID 安全和状态聚合。`contracts/` 只管结构合同。`catalog/` 只管 generic registry class。`profiles/` 是 API、CLI、agent、workflow 共用组合根。`research/` 只构建 result，不写文件。`reports/` 只 build/render evidence/report 内容。`artifacts/` 只写 LOCAL_ONLY outputs 和 REVIEW_SAFE evidence 文件。`workflows/` 只编排 research -> reports -> artifacts。`storage/` 只管 dataset IO 和 data layout。
+
+运行结果合同是 `<run_root>/run.json`、`data/`、`outputs/<output_id>/`、`logs/` 和 `summary.md`。QRP-owned JSON 必须是 object，并使用不带版本后缀的 `schema_id`。compare 默认按 `output_id` 配对。状态聚合只由 `policy/check_status.py` 定义；`governance_contract.py` 只拥有扫描规则。
 
 `.agents` 是 tracked tooling source。`.run` 是 output/evidence layer。禁止把 `.run` 作为官方工具入口。
 

@@ -32,12 +32,22 @@ markets/implementations/a_share/  A-share calendar, processed data, masks, resea
 research/        generic research result builders, no file writes
 compute/         dataframe/tensor numeric kernels, portfolio math, performance
 reports/         build/render evidence and report payload/text
-artifacts/       write LOCAL_ONLY run outputs and REVIEW_SAFE evidence files
+artifacts/       write LOCAL_ONLY outputs and REVIEW_SAFE evidence files
 workflows/       orchestrate research -> reports -> artifacts
 storage/         dataset IO, manifest, fingerprint, compare, data layout
 runtime/         resources, logging, workflow records, execution metrics payload
 interfaces/      approved API, CLI, service adapters
 agents/          workflow planning and proposal components
+```
+
+## 运行结果布局
+
+```text
+<run_root>/run.json
+<run_root>/data/{interim,processed,research}/
+<run_root>/outputs/<output_id>/manifest.json
+<run_root>/logs/
+<run_root>/summary.md
 ```
 
 ## 文档分层

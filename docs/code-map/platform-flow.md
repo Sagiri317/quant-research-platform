@@ -47,7 +47,7 @@ src/quant_research_platform/agents
 
 `policy/` owns share safety, identifier safety, and check status aggregation. `contracts/` owns structure only. `catalog/` owns generic registry classes. `profiles/` is the composition root used by API, CLI, agents, and workflows.
 
-`research/` builds results only and does not write files. `reports/` builds and renders evidence/report content only. `artifacts/` writes LOCAL_ONLY run outputs and REVIEW_SAFE evidence files. `workflows/` only orchestrates research -> reports -> artifacts. `storage/` only owns dataset IO and data layout.
+`research/` builds results only and does not write files. `reports/` builds and renders evidence/report content only. `artifacts/` writes LOCAL_ONLY outputs and REVIEW_SAFE evidence files. `workflows/` only orchestrates research -> reports -> artifacts. `storage/` only owns dataset IO and data layout.
 
 ## Interfaces
 
@@ -67,6 +67,6 @@ qrp catalog labels
 qrp research-datasets requirements <dataset_id>
 ```
 
-`.agents tooling` only carries governance, handoff, and prompt tooling. `.run output/evidence` is an output layer, not an architecture or tool source.
+`.agents tooling` only carries governance, handoff, and prompt tooling. `.run artifacts` are generated evidence, not an architecture or tool source.
 
 `private data safety` remains a hard boundary: REVIEW_SAFE evidence must use summaries, counts, hashes, schemas, command status, and sanitized text only.

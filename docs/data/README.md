@@ -17,6 +17,15 @@
 
 `sources/` 负责摄取与 raw/interim 转换；`markets/implementations/a_share/` 负责 A 股 processed data 和市场语义；`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data layout。共享安全检测规则由 `policy/share_safety.py` 提供，storage 不维护平行正则。
 
+每个 QRP dataset 保留：
+
+```text
+data/<layer>/<dataset>/spec.json
+data/<layer>/<dataset>/_manifest/manifest.json
+```
+
+两类 JSON 分别使用 `qrp-dataset-spec` 和 `qrp-dataset-manifest` 作为 `schema_id`。运行级索引只写入 `<run_root>/run.json`。
+
 ## REVIEW_SAFE Evidence
 
 允许写入 REVIEW_SAFE evidence 的内容：

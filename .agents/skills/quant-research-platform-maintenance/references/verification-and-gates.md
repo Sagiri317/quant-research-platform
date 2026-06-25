@@ -97,9 +97,11 @@ active docs current-truth wording
 版本面规则：
 
 ```text
-允许：QRP 0.1、0.1、0.1.0、/api/0.1、contract_version="0.1"、schema_version="0.1"、definition_version、workflow_version、handoff */0.1
+允许：QRP 0.1、0.1、0.1.0、/api/0.1、definition_version、workflow_version、无版本后缀的 schema_id
 禁止：带 `v` 前缀的 `0.1` API 版本路径，除非位于规则定义或 negative tests
 ```
+
+QRP-owned JSON 必须是顶层 object，必须包含 `schema_id`，且 `schema_id` 不编码版本。
 
 ## 5. Retired surface
 

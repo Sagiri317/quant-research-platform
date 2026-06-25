@@ -15,7 +15,7 @@ markets/implementations/a_share -> A 股 calendar、processed、mask、研究绑
 research   -> 通用研究计算，只构建 result
 compute    -> dataframe/tensor、portfolio math、performance 数值核心
 reports    -> build/render evidence/report 内容
-artifacts  -> 写 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 文件
+artifacts  -> 写 LOCAL_ONLY outputs 和 REVIEW_SAFE evidence 文件
 workflows  -> research -> reports -> artifacts 编排
 storage    -> dataset IO、manifest、fingerprint、compare、data layout
 runtime    -> resources、logging、workflow records、metrics payload
@@ -34,7 +34,9 @@ signal 可以不经过 model，直接来自规则或 factor。model 输入应通
 
 ## Evidence 流
 
-LOCAL_ONLY run outputs 和 REVIEW_SAFE handoff evidence 写到 `.run/` 或用户指定输出目录。
+LOCAL_ONLY outputs 写到用户指定或 workflow 生成的 `<run_root>`；REVIEW_SAFE handoff evidence 写入 handoff package。
+
+`run.json` 是唯一运行级机器事实源，`summary.md` 是唯一运行级人读摘要，实例结果位于 `outputs/<output_id>/`。所有 QRP-owned JSON 使用不带版本后缀的 `schema_id`。
 
 `research/` 可以使用 contracts、storage、runtime resources 和 `markets.session_windows`，但不得 import 具体市场实现或 sources。`runtime/` 不 import reports，也不写 report/storage artifact。`reports/` 只 build/render 内容，不写文件，不重算 research、evaluation 或 portfolio 逻辑。`artifacts/` 只写文件，不 build evidence payload，不 import research、reports 或具体市场实现。
 
