@@ -100,9 +100,12 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
             )
     )
     with pytest.raises(ValueError, match="missing_partition_timestamp_column"):
-        datasets._add_partition_columns(
-            frame.drop(columns=["timestamp"]),
-            timestamp_column="timestamp",
+        list(
+            datasets._partition_frames(
+                frame.drop(columns=["timestamp"]),
+                timestamp_column="timestamp",
+                partition_columns=("year",),
+            )
         )
 
     manifest = {

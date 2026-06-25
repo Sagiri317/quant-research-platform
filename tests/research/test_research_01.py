@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+from math import ceil
 from pathlib import Path
 
 import pandas as pd
@@ -457,6 +458,23 @@ def test_research_dataset_forced_tiny_session_chunks_equal_default_output(
     )
     assert (
         inspect_dataset(tiny_root).file_count > inspect_dataset(default_root).file_count
+    )
+
+
+def test_research_dataset_sizing_accounts_for_assembly_peak_memory() -> None:
+    frame = _research_rows_for_dates(["2014-01-02", "2014-01-03"])
+
+    measured = assembler_module._measured_bytes_per_session(
+        frame,
+        sample_sessions=tuple(pd.to_datetime(["2014-01-02", "2014-01-03"])),
+        target_session_count=2,
+    )
+
+    raw_per_session = max(1, ceil(frame.memory_usage(index=True, deep=True).sum() / 2))
+    assert (
+        measured
+        == raw_per_session
+        * assembler_module.RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER
     )
 
 

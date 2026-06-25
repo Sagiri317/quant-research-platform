@@ -130,6 +130,24 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     assert "processed_data_id" not in spec_payload
 
 
+def test_write_dataset_partitions_without_groupby_sort_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_groupby(*args: object, **kwargs: object) -> object:
+        raise AssertionError("partition_write_must_not_groupby_full_frame")
+
+    monkeypatch.setattr(pd.DataFrame, "groupby", fail_groupby)
+    root = _artifact_root(tmp_path, "no_groupby_partition")
+
+    write_dataset(root, _frame(), spec=_spec("no_groupby_partition"))
+
+    manifest = json.loads(
+        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
+
+
 def test_write_dataset_merges_allowed_instance_metadata(tmp_path: Path) -> None:
     root = _artifact_root(tmp_path)
     input_fingerprints = {"demo_input": _input_fingerprint_payload()}

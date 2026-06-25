@@ -40,6 +40,9 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.layout import StorageLayout
 
 SIZING_SAMPLE_SESSION_CAP = 20
+# Research assembly temporarily holds merge/sort/write copies of the joined frame,
+# so session sizing must reserve peak headroom beyond the steady-state frame size.
+RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER = 4
 
 
 def assemble_research_dataset(
@@ -551,7 +554,8 @@ def _measured_bytes_per_session(
     total = int(frame.memory_usage(index=True, deep=True).sum())
     sample_bytes_per_session = total / max(1, len(sample_sessions))
     target_bytes_per_session = total / max(1, target_session_count)
-    return max(1, ceil(max(sample_bytes_per_session, target_bytes_per_session)))
+    measured = max(1, ceil(max(sample_bytes_per_session, target_bytes_per_session)))
+    return max(1, measured * RESEARCH_ASSEMBLY_PEAK_MEMORY_MULTIPLIER)
 
 
 __all__ = ["assemble_research_dataset"]

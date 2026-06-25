@@ -997,19 +997,19 @@ def _read_columns_for_time_window(
     return tuple(dict.fromkeys((*columns, timestamp_column)))
 
 
-def _add_partition_columns(
+def _partition_timestamp_series(
     frame: pd.DataFrame,
     *,
     timestamp_column: str,
-) -> pd.DataFrame:
+) -> pd.Series:
     if timestamp_column not in frame:
         raise ValueError("missing_partition_timestamp_column")
-    result = frame.copy()
-    result["year"] = pd.to_datetime(
-        result[timestamp_column],
-        errors="raise",
-    ).dt.year.astype("int64")
-    return result
+    timestamp = frame[timestamp_column]
+    if not pd.api.types.is_datetime64_any_dtype(timestamp):
+        timestamp = pd.to_datetime(timestamp, errors="raise")
+    if timestamp.isna().any():
+        raise ValueError("missing_partition_timestamp_column")
+    return timestamp
 
 
 def _partition_frames(
@@ -1027,9 +1027,16 @@ def _partition_frames(
         raise ValueError("unsupported_partitioning")
     if timestamp_column is None:
         raise ValueError("missing_partition_timestamp_column")
-    partitioned = _add_partition_columns(frame, timestamp_column=timestamp_column)
-    for year, year_frame in partitioned.groupby("year", sort=True):
-        yield f"year={int(year)}", year_frame.drop(columns=["year"])
+    timestamp = _partition_timestamp_series(frame, timestamp_column=timestamp_column)
+    min_timestamp = timestamp.min()
+    max_timestamp = timestamp.max()
+    timezone = timestamp.dt.tz
+    for year in range(min_timestamp.year, max_timestamp.year + 1):
+        start = pd.Timestamp(year=year, month=1, day=1, tz=timezone)
+        end = pd.Timestamp(year=year + 1, month=1, day=1, tz=timezone)
+        mask = (timestamp >= start) & (timestamp < end)
+        if bool(mask.any()):
+            yield f"year={int(year)}", frame.loc[mask]
 
 
 def _partition_part_path(root: Path, partition: str, part_index: int) -> Path:
