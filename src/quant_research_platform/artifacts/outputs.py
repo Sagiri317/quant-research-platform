@@ -1,4 +1,4 @@
-"""Local run output writers."""
+"""Local output writers."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quant_research_platform.artifacts.definitions import run_output_catalog
-from quant_research_platform.artifacts.layout import local_run_output_root
+from quant_research_platform.artifacts.definitions import output_catalog
+from quant_research_platform.artifacts.layout import output_bundle_root
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -22,9 +22,9 @@ from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.policy.share_safety import (
     sanitize_shared_object,
     sanitize_shared_text,
@@ -280,27 +280,32 @@ class _PredictionOutputWriteSummary:
     effective_test_end: str
 
 
-def write_stage_profile_run_outputs(
+def write_stage_profile_outputs(
     frame: pd.DataFrame,
     *,
-    spec: RunOutputSpec,
+    spec: OutputSpec,
     markdown_text: str,
     layout: StorageLayout,
 ) -> dict[str, Path]:
-    """Write local stage-profile run outputs."""
+    """Write local stage-profile outputs."""
 
-    destination = _derive_run_output_root(
+    destination = _derive_output_bundle_root(
         output_spec=spec,
         layout=layout,
         expected_definition_id="stage_profile_diagnostic",
-        expected_run_id=spec.run_id,
     )
 
     def _write(temp_root: Path) -> None:
         safe_rows = sanitize_shared_object(frame.to_dict(orient="records"))
         safe_frame = pd.DataFrame.from_records(safe_rows)
         atomic_write_csv(safe_frame, temp_root / "stage_profile.csv", index=False)
-        atomic_write_json(temp_root / "stage_profile.json", safe_rows)
+        atomic_write_json(
+            temp_root / "stage_profile.json",
+            {
+                "schema_id": "qrp-stage-profile",
+                "rows": safe_rows,
+            },
+        )
         atomic_write_text(
             temp_root / "stage_profile.md",
             sanitize_shared_text(markdown_text),
@@ -308,7 +313,7 @@ def write_stage_profile_run_outputs(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _stage_profile_run_output_manifest_payload(spec=spec),
+            _stage_profile_output_manifest_payload(spec=spec),
         )
 
     atomic_write_directory(destination, _write)
@@ -318,17 +323,17 @@ def write_stage_profile_run_outputs(
     return {"csv": csv_path, "json": json_path, "markdown": markdown_path}
 
 
-def write_prediction_run_outputs(
+def write_prediction_outputs(
     frame: pd.DataFrame | None = None,
     *,
     spec: PredictionSpec,
-    output_spec: RunOutputSpec,
+    output_spec: OutputSpec,
     layout: StorageLayout,
     output_chunks: Iterable[pd.DataFrame] | None = None,
     model_metadata: Mapping[str, object] | None = None,
     prediction_metadata_factory: Callable[[], Mapping[str, object]] | None = None,
 ) -> Path:
-    """Write local prediction run outputs."""
+    """Write local prediction outputs."""
 
     if output_chunks is not None:
         if model_metadata is None or prediction_metadata_factory is None:
@@ -344,11 +349,10 @@ def write_prediction_run_outputs(
     if frame is None:
         raise ValueError("prediction_output_frame_required")
 
-    run_root = _derive_run_output_root(
+    run_root = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="prediction_outputs",
-        expected_run_id=spec.prediction_id,
     )
     required = (*spec.primary_key, spec.prediction_column)
     missing = sorted(set(required).difference(frame.columns))
@@ -356,9 +360,7 @@ def write_prediction_run_outputs(
         raise ValueError(f"missing_prediction_output_columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(required))
     if extra:
-        raise ValueError(
-            f"unregistered_prediction_output_columns: {', '.join(extra)}"
-        )
+        raise ValueError(f"unregistered_prediction_output_columns: {', '.join(extra)}")
     if bool(frame.duplicated(list(spec.primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
     model_metadata = _validate_model_metadata_shape(
@@ -401,10 +403,14 @@ def write_prediction_run_outputs(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _prediction_run_output_manifest_payload(
-                spec=spec,
-                model_metadata=model_metadata,
-                prediction_metadata=prediction_metadata,
+            _output_manifest_payload(
+                output_spec=output_spec,
+                metadata=_prediction_output_metadata(
+                    spec=spec,
+                    model_metadata=model_metadata,
+                    prediction_metadata=prediction_metadata,
+                ),
+                files=("prediction.parquet",),
             ),
         )
 
@@ -416,16 +422,15 @@ def _write_prediction_output_chunks(
     frames: Iterable[pd.DataFrame],
     *,
     spec: PredictionSpec,
-    output_spec: RunOutputSpec,
+    output_spec: OutputSpec,
     layout: StorageLayout,
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
 ) -> Path:
-    run_root = _derive_run_output_root(
+    run_root = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="prediction_outputs",
-        expected_run_id=spec.prediction_id,
     )
     required = (*spec.primary_key, spec.prediction_column)
     model_metadata_payload = _validate_model_metadata_shape(
@@ -467,10 +472,14 @@ def _write_prediction_output_chunks(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _prediction_run_output_manifest_payload(
-                spec=spec,
-                model_metadata=effective_model_metadata,
-                prediction_metadata=prediction_metadata,
+            _output_manifest_payload(
+                output_spec=output_spec,
+                metadata=_prediction_output_metadata(
+                    spec=spec,
+                    model_metadata=effective_model_metadata,
+                    prediction_metadata=prediction_metadata,
+                ),
+                files=("prediction.parquet",),
             ),
         )
 
@@ -478,7 +487,7 @@ def _write_prediction_output_chunks(
     return run_root
 
 
-def write_evaluation_run_outputs(
+def write_evaluation_outputs(
     metrics: pd.DataFrame,
     grouped_label_values: pd.DataFrame,
     *,
@@ -486,16 +495,15 @@ def write_evaluation_run_outputs(
     group_spread_summary: pd.DataFrame,
     evaluation_diagnostics: EvaluationDiagnostics,
     spec: EvaluationSpec,
-    output_spec: RunOutputSpec,
+    output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write local evaluation run outputs under local output root."""
+    """Write local evaluation outputs under local output root."""
 
-    run_root = _derive_run_output_root(
+    run_root = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="evaluation_outputs",
-        expected_run_id=spec.run_id,
     )
 
     _validate_output_frame(
@@ -566,9 +574,13 @@ def write_evaluation_run_outputs(
         )
         write_manifest(
             temp_root / "manifest.json",
-            _evaluation_run_output_manifest_payload(
-                spec=spec,
-                evaluation_diagnostics=evaluation_diagnostics,
+            _output_manifest_payload(
+                output_spec=output_spec,
+                metadata=_evaluation_output_metadata(
+                    spec=spec,
+                    evaluation_diagnostics=evaluation_diagnostics,
+                ),
+                files=_EVALUATION_ARTIFACTS,
             ),
         )
 
@@ -576,15 +588,15 @@ def write_evaluation_run_outputs(
     return run_root
 
 
-def write_portfolio_run_outputs(
+def write_portfolio_outputs(
     *,
     output_chunks: Iterable[Mapping[str, pd.DataFrame]],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     spec: PortfolioSpec,
-    output_spec: RunOutputSpec,
+    output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write local portfolio run outputs."""
+    """Write local portfolio outputs."""
 
     return _write_portfolio_output_chunks(
         output_chunks,
@@ -600,16 +612,15 @@ def _write_portfolio_output_chunks(
     *,
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     spec: PortfolioSpec,
-    output_spec: RunOutputSpec,
+    output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
     """Write local portfolio row outputs from bounded chunks."""
 
-    run_root = _derive_run_output_root(
+    run_root = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="portfolio_outputs",
-        expected_run_id=spec.portfolio_id,
     )
     required_columns = _portfolio_required_columns()
     row_artifacts = (
@@ -653,9 +664,13 @@ def _write_portfolio_output_chunks(
             row_counts[artifact_name] = int(len(summary_outputs[artifact_name]))
         write_manifest(
             temp_root / "manifest.json",
-            _portfolio_run_output_manifest_payload_from_row_counts(
-                spec=spec,
-                row_counts=row_counts,
+            _output_manifest_payload(
+                output_spec=output_spec,
+                metadata=_portfolio_output_metadata_from_row_counts(
+                    spec=spec,
+                    row_counts=row_counts,
+                ),
+                files=tuple(_PORTFOLIO_ARTIFACTS.values()),
             ),
         )
 
@@ -663,34 +678,56 @@ def _write_portfolio_output_chunks(
     return run_root
 
 
-def _stage_profile_run_output_manifest_payload(
+def _stage_profile_output_manifest_payload(
     *,
-    spec: RunOutputSpec,
+    spec: OutputSpec,
+) -> dict[str, object]:
+    return _output_manifest_payload(
+        output_spec=spec,
+        metadata={
+            "market_id": str(spec.market_id),
+            "run_type": spec.run_type,
+            "scope": spec.scope,
+        },
+        files=("stage_profile.csv", "stage_profile.json", "stage_profile.md"),
+    )
+
+
+def _output_manifest_payload(
+    *,
+    output_spec: OutputSpec,
+    metadata: Mapping[str, object],
+    files: Iterable[str],
 ) -> dict[str, object]:
     return {
-        "contract_version": spec.contract_version,
-        "output_id": spec.output_id,
-        "output_definition_id": spec.output_definition_id,
-        "run_id": spec.run_id,
-        "market_id": str(spec.market_id),
-        "run_type": spec.run_type,
-        "scope": spec.scope,
-        "artifacts": [
-            "stage_profile.csv",
-            "stage_profile.json",
-            "stage_profile.md",
-        ],
+        "schema_id": "qrp-output-manifest",
+        "output_id": output_spec.output_id,
+        "output_definition_id": output_spec.output_definition_id,
+        "run_id": output_spec.run_id,
+        "metadata": _without_json_version_fields(dict(metadata)),
+        "files": list(files),
     }
 
 
-def _prediction_run_output_manifest_payload(
+def _without_json_version_fields(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_json_version_fields(item)
+            for key, item in value.items()
+            if key not in {"schema_version", "contract_version"}
+        }
+    if isinstance(value, list | tuple):
+        return [_without_json_version_fields(item) for item in value]
+    return value
+
+
+def _prediction_output_metadata(
     *,
     spec: PredictionSpec,
     model_metadata: dict[str, object],
     prediction_metadata: dict[str, object],
 ) -> dict[str, object]:
     return {
-        "contract_version": spec.contract_version,
         "prediction_id": spec.prediction_id,
         "model_id": spec.model_id,
         "research_dataset_id": spec.research_dataset_id,
@@ -708,13 +745,12 @@ def _prediction_run_output_manifest_payload(
     }
 
 
-def _evaluation_run_output_manifest_payload(
+def _evaluation_output_metadata(
     *,
     spec: EvaluationSpec,
     evaluation_diagnostics: EvaluationDiagnostics,
 ) -> dict[str, object]:
     return {
-        "contract_version": spec.contract_version,
         "run_id": spec.run_id,
         "run_type": spec.run_type,
         "market_id": str(spec.market_id),
@@ -725,17 +761,15 @@ def _evaluation_run_output_manifest_payload(
         "evaluation_diagnostics": sanitize_shared_object(
             asdict(evaluation_diagnostics)
         ),
-        "artifacts": list(_EVALUATION_ARTIFACTS),
     }
 
 
-def _portfolio_run_output_manifest_payload(
+def _portfolio_output_metadata(
     *,
     spec: PortfolioSpec,
     artifacts: Mapping[str, pd.DataFrame],
 ) -> dict[str, object]:
     return {
-        "contract_version": spec.contract_version,
         "portfolio_id": spec.portfolio_id,
         "market_id": str(spec.market_id),
         "research_dataset_id": spec.research_dataset_id,
@@ -747,19 +781,18 @@ def _portfolio_run_output_manifest_payload(
         "weight_config": asdict(spec.weight_config),
         "tradability_config": asdict(spec.tradability_config),
         "cost_config": asdict(spec.cost_config),
-        "artifacts": list(_PORTFOLIO_ARTIFACTS.values()),
         "row_counts": {
             artifact_name: int(len(frame)) for artifact_name, frame in artifacts.items()
         },
     }
 
 
-def _portfolio_run_output_manifest_payload_from_row_counts(
+def _portfolio_output_metadata_from_row_counts(
     *,
     spec: PortfolioSpec,
     row_counts: Mapping[str, int],
 ) -> dict[str, object]:
-    payload = _portfolio_run_output_manifest_payload(
+    payload = _portfolio_output_metadata(
         spec=spec,
         artifacts={
             artifact_name: pd.DataFrame(index=range(int(row_counts[artifact_name])))
@@ -1463,42 +1496,30 @@ def _validate_output_frame(
         raise ValueError(f"unregistered_{error_name}_columns: {', '.join(extra)}")
 
 
-def _derive_run_output_root(
+def _derive_output_bundle_root(
     *,
-    output_spec: RunOutputSpec,
+    output_spec: OutputSpec,
     layout: StorageLayout,
     expected_definition_id: str,
-    expected_run_id: str,
 ) -> Path:
     try:
-        definition = run_output_catalog().get(output_spec.output_definition_id)
+        definition = output_catalog().get(output_spec.output_definition_id)
     except KeyError as exc:
         raise ValueError("output_spec_mismatch") from exc
     if definition.output_definition_id != expected_definition_id:
-        raise ValueError("output_spec_mismatch")
-    if definition.contract_version != output_spec.contract_version:
-        raise ValueError("output_spec_mismatch")
-    if output_spec.run_id != expected_run_id:
         raise ValueError("output_spec_mismatch")
     if definition.run_type != output_spec.run_type:
         raise ValueError("output_spec_mismatch")
     if definition.scope != output_spec.scope:
         raise ValueError("output_spec_mismatch")
     if output_spec.scope != OutputScope.LOCAL_ONLY:
-        raise ValueError("run_output_scope_must_be_local_only")
-    run_root = (
-        local_run_output_root(
-            layout.project_root,
-            output_spec.market_id,
-            output_spec.run_type,
-        )
-        / output_spec.run_id
-    )
+        raise ValueError("output_scope_must_be_local_only")
+    run_root = output_bundle_root(layout.project_root, output_spec.output_id)
     if any(
         f"data/{layer}" in run_root.as_posix()
         for layer in ("raw", "interim", "processed", "research")
     ):
-        raise ValueError("run_output_must_use_artifact_root")
+        raise ValueError("output_must_use_artifact_root")
     return run_root
 
 
@@ -1576,9 +1597,7 @@ def _prediction_output_chunk_frame(
         raise ValueError(f"missing_prediction_output_columns: {', '.join(missing)}")
     extra = sorted(set(frame.columns).difference(required))
     if extra:
-        raise ValueError(
-            f"unregistered_prediction_output_columns: {', '.join(extra)}"
-        )
+        raise ValueError(f"unregistered_prediction_output_columns: {', '.join(extra)}")
     selected = frame.loc[:, list(required)]
     if bool(selected.duplicated(list(key_columns)).any()):
         raise ValueError("duplicate_prediction_keys")
@@ -1629,8 +1648,8 @@ def _rename_with_transient_permission_retry(
 
 
 __all__ = [
-    "write_evaluation_run_outputs",
-    "write_prediction_run_outputs",
-    "write_portfolio_run_outputs",
-    "write_stage_profile_run_outputs",
+    "write_evaluation_outputs",
+    "write_prediction_outputs",
+    "write_portfolio_outputs",
+    "write_stage_profile_outputs",
 ]

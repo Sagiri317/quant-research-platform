@@ -7,14 +7,14 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.run_outputs import write_prediction_run_outputs
+from quant_research_platform.artifacts.outputs import write_prediction_outputs
 from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
 )
@@ -76,10 +76,10 @@ def write_prediction_output_and_read(
     model_metadata: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, Path, dict[str, object]]:
     layout = StorageLayout(project_root=project_root)
-    output_spec = RunOutputSpec(
-        output_id="prediction_outputs",
+    output_spec = OutputSpec(
+        output_id=spec.prediction_id,
         output_definition_id="prediction_outputs",
-        run_id=spec.prediction_id,
+        run_id="test_run",
         market_id=MarketId("a_share"),
         run_type=spec.run_type,
         scope=OutputScope.LOCAL_ONLY,
@@ -93,7 +93,7 @@ def write_prediction_output_and_read(
         model_metadata=model_metadata
         or synthetic_prediction_model_metadata(spec, input_columns),
     )
-    run_root = write_prediction_run_outputs(
+    run_root = write_prediction_outputs(
         spec=result.spec,
         output_spec=output_spec,
         layout=layout,
@@ -103,21 +103,23 @@ def write_prediction_output_and_read(
     )
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     prediction = pd.read_parquet(run_root / "prediction.parquet")
-    prediction.attrs["model_metadata"] = manifest["model_metadata"]
-    prediction.attrs["prediction_metadata"] = manifest["prediction_metadata"]
+    prediction.attrs["model_metadata"] = manifest["metadata"]["model_metadata"]
+    prediction.attrs["prediction_metadata"] = manifest["metadata"][
+        "prediction_metadata"
+    ]
     return prediction, run_root, manifest
 
 
 def write_prediction_result(layout: StorageLayout, result) -> Path:
-    output_spec = RunOutputSpec(
-        output_id="prediction_outputs",
+    output_spec = OutputSpec(
+        output_id=result.spec.prediction_id,
         output_definition_id="prediction_outputs",
-        run_id=result.spec.prediction_id,
+        run_id="test_run",
         market_id=MarketId("a_share"),
         run_type=result.spec.run_type,
         scope=OutputScope.LOCAL_ONLY,
     )
-    return write_prediction_run_outputs(
+    return write_prediction_outputs(
         spec=result.spec,
         output_spec=output_spec,
         layout=layout,

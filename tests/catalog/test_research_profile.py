@@ -13,13 +13,13 @@ from quant_research_platform.catalog.fields import FieldCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.catalog.models import ModelCatalog
+from quant_research_platform.catalog.outputs import OutputCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
 )
-from quant_research_platform.catalog.run_outputs import RunOutputCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import SourceId
@@ -69,7 +69,7 @@ def test_research_profile_contains_active_catalogs() -> None:
     assert isinstance(profile.labels, LabelCatalog)
     assert isinstance(profile.processed, ProcessedDataCatalog)
     assert isinstance(profile.research_datasets, ResearchDatasetCatalog)
-    assert isinstance(profile.run_outputs, RunOutputCatalog)
+    assert isinstance(profile.outputs, OutputCatalog)
     assert isinstance(profile.evaluations, EvaluationCatalog)
     assert isinstance(profile.models, ModelCatalog)
     assert isinstance(profile.predictions, PredictionCatalog)
@@ -191,13 +191,13 @@ def test_a_share_scenario_specs_are_not_owned_by_catalog_profile() -> None:
     assert all(token in scenario_source for token in forbidden)
 
 
-def test_run_output_writer_uses_local_catalog_not_profile_bundle() -> None:
-    source = (PROJECT_SRC / "artifacts/run_outputs.py").read_text(encoding="utf-8")
+def test_output_writer_uses_local_catalog_not_profile_bundle() -> None:
+    source = (PROJECT_SRC / "artifacts/outputs.py").read_text(encoding="utf-8")
 
     assert "quant_research_platform.profiles.research" not in source
     assert "local_a_share_csmar_catalogs" not in source
     assert "quant_research_platform.artifacts.definitions" in source
-    assert "run_output_catalog(" in source
+    assert "output_catalog(" in source
 
 
 def test_catalog_profile_private_processed_helper_forwards_typed_source_id(

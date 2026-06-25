@@ -96,7 +96,7 @@ def test_local_profile_internal_registries_are_platform_composed() -> None:
     assert market.processed_spec_ids == owner_market.processed_spec_ids
     assert source.provider_id == "csmar"
     assert source.implementation_package == "quant_research_platform.sources.csmar"
-    assert catalogs.run_outputs.get("evaluation_outputs").run_type == "evaluation"
+    assert catalogs.outputs.get("evaluation_outputs").run_type == "evaluation"
 
 
 def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:

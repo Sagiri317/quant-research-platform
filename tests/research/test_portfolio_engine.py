@@ -8,19 +8,19 @@ import pytest
 
 import quant_research_platform.research.portfolios as portfolios_package
 import quant_research_platform.research.portfolios.runner as portfolio_runner
-from quant_research_platform.artifacts.run_outputs import write_portfolio_run_outputs
+from quant_research_platform.artifacts.outputs import write_portfolio_outputs
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
     PortfolioSpec,
     WeightConfig,
 )
-from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios import (
@@ -204,7 +204,7 @@ def test_portfolio_spec_rejects_unsupported_rebalance_frequency() -> None:
         )
 
 
-def test_portfolio_runner_writes_private_run_outputs(tmp_path) -> None:
+def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     dataset_catalog = ResearchDatasetCatalog()
     dataset_catalog.register(_dataset_spec())
@@ -222,9 +222,7 @@ def test_portfolio_runner_writes_private_run_outputs(tmp_path) -> None:
     )
     run_root = _write_portfolio_result(layout, result)
 
-    assert run_root.as_posix().endswith(
-        "run_outputs/local/a_share/portfolio/risk_signal_portfolio"
-    )
+    assert run_root.as_posix().endswith("outputs/risk_signal_portfolio")
     for filename in (
         "positions.parquet",
         "turnover.parquet",
@@ -240,8 +238,11 @@ def test_portfolio_runner_writes_private_run_outputs(tmp_path) -> None:
     ):
         assert (run_root / filename).is_file()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["rebalance_frequency"] == frequency_ids.DAILY_FREQUENCY_SLUG
-    assert manifest["execution_lag_steps"] == 0
+    assert (
+        manifest["metadata"]["rebalance_frequency"]
+        == frequency_ids.DAILY_FREQUENCY_SLUG
+    )
+    assert manifest["metadata"]["execution_lag_steps"] == 0
     returns = pd.read_parquet(run_root / "portfolio_returns.parquet")
     assert "return_source_column" in returns.columns
     assert "label" not in returns.columns
@@ -267,14 +268,7 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     )
     with pytest.raises(ValueError, match="empty_portfolio_input"):
         _write_portfolio_result(layout, result)
-    run_root = (
-        tmp_path
-        / "run_outputs"
-        / "local"
-        / "a_share"
-        / "portfolio"
-        / "risk_signal_portfolio"
-    )
+    run_root = tmp_path / "outputs" / "risk_signal_portfolio"
     assert not run_root.exists()
     assert not list(run_root.parent.glob(".tmp-*"))
 
@@ -393,14 +387,14 @@ def _run_demo_portfolio(project_root) -> Path:
 
 
 def _write_portfolio_result(layout: StorageLayout, result) -> Path:
-    return write_portfolio_run_outputs(
+    return write_portfolio_outputs(
         output_chunks=result.output_chunks,
         summary_factory=result.summary_factory,
         spec=result.spec,
-        output_spec=RunOutputSpec(
-            output_id="portfolio_outputs",
+        output_spec=OutputSpec(
+            output_id=result.spec.portfolio_id,
             output_definition_id="portfolio_outputs",
-            run_id=result.spec.portfolio_id,
+            run_id="test_run",
             market_id=result.spec.market_id,
             run_type=result.spec.run_type,
             scope=OutputScope.LOCAL_ONLY,

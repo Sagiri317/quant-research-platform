@@ -11,9 +11,9 @@ import pytest
 import quant_research_platform.research.datasets.assembler as assembler_module
 import quant_research_platform.research.evaluations.runner as evaluation_runner_module
 import quant_research_platform.research.predictions.runner as prediction_runner_module
-from quant_research_platform.artifacts.run_outputs import (
-    write_evaluation_run_outputs,
-    write_prediction_run_outputs,
+from quant_research_platform.artifacts.outputs import (
+    write_evaluation_outputs,
+    write_prediction_outputs,
 )
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
@@ -33,12 +33,12 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import (
     PREDICTION_PRIMARY_KEY,
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
 )
-from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets import (
@@ -65,17 +65,17 @@ from tests.research.prediction_output_helpers import (
 )
 
 
-def _run_output_spec(
+def _output_spec(
     *,
     output_definition_id: str,
     run_id: str,
     run_type: str,
     market_id: MarketId | None = None,
-) -> RunOutputSpec:
-    return RunOutputSpec(
-        output_id=output_definition_id,
+) -> OutputSpec:
+    return OutputSpec(
+        output_id=run_id,
         output_definition_id=output_definition_id,
-        run_id=run_id,
+        run_id="test_run",
         market_id=market_id or MarketId("a_share"),
         run_type=run_type,
         scope=OutputScope.LOCAL_ONLY,
@@ -83,9 +83,9 @@ def _run_output_spec(
 
 
 def _write_prediction_result(layout: StorageLayout, result) -> Path:
-    return write_prediction_run_outputs(
+    return write_prediction_outputs(
         spec=result.spec,
-        output_spec=_run_output_spec(
+        output_spec=_output_spec(
             output_definition_id="prediction_outputs",
             run_id=result.spec.prediction_id,
             run_type=result.spec.run_type,
@@ -98,14 +98,14 @@ def _write_prediction_result(layout: StorageLayout, result) -> Path:
 
 
 def _write_evaluation_result(layout: StorageLayout, result) -> Path:
-    return write_evaluation_run_outputs(
+    return write_evaluation_outputs(
         result.metrics,
         result.grouped_label_values,
         ic_summary=result.ic_summary,
         group_spread_summary=result.group_spread_summary,
         evaluation_diagnostics=result.diagnostics,
         spec=result.spec,
-        output_spec=_run_output_spec(
+        output_spec=_output_spec(
             output_definition_id="evaluation_outputs",
             run_id=result.spec.run_id,
             market_id=result.spec.market_id,
@@ -638,9 +638,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert prediction_spec.prediction_column in prediction.columns
     assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
     assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
-    assert run_root.as_posix().endswith(
-        "run_outputs/local/a_share/prediction/pred_demo"
-    )
+    assert run_root.as_posix().endswith("outputs/pred_demo")
     assert (
         "output_root"
         not in inspect.signature(build_prediction_result_from_frames).parameters
@@ -691,25 +689,26 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
     )
     run_root = _write_prediction_result(layout, result)
 
-    assert run_root.as_posix().endswith(
-        "run_outputs/local/a_share/prediction/pred_demo"
-    )
+    assert run_root.as_posix().endswith("outputs/pred_demo")
     assert (run_root / "prediction.parquet").is_file()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["is_oos"] is True
-    assert manifest["prediction_mode"] == "minimal_oos"
-    assert manifest["prediction_column"] == PREDICTION_SCORE_COLUMN
-    assert manifest["primary_key"] == list(PREDICTION_PRIMARY_KEY)
-    assert manifest["model_metadata"]["contract_version"] == "0.1"
-    assert manifest["model_metadata"]["input_count"] == 1
-    assert manifest["model_metadata"]["coefficient_count"] == 2
-    assert manifest["model_metadata"]["train_start"] == "2014-01-02"
-    assert manifest["model_metadata"]["train_end"] == "2014-01-02"
-    assert manifest["prediction_metadata"]["contract_version"] == "0.1"
-    assert manifest["prediction_metadata"]["prediction_rows"] == 2
-    assert manifest["prediction_metadata"]["requested_test_end"] == "2014-01-03"
-    assert manifest["prediction_metadata"]["effective_test_end"] == "2014-01-03"
-    assert "metadata" not in manifest
+    assert manifest["metadata"]["is_oos"] is True
+    assert manifest["metadata"]["prediction_mode"] == "minimal_oos"
+    assert manifest["metadata"]["prediction_column"] == PREDICTION_SCORE_COLUMN
+    assert manifest["metadata"]["primary_key"] == list(PREDICTION_PRIMARY_KEY)
+    assert manifest["metadata"]["model_metadata"]["input_count"] == 1
+    assert manifest["metadata"]["model_metadata"]["coefficient_count"] == 2
+    assert manifest["metadata"]["model_metadata"]["train_start"] == "2014-01-02"
+    assert manifest["metadata"]["model_metadata"]["train_end"] == "2014-01-02"
+    assert manifest["metadata"]["prediction_metadata"]["prediction_rows"] == 2
+    assert (
+        manifest["metadata"]["prediction_metadata"]["requested_test_end"]
+        == "2014-01-03"
+    )
+    assert (
+        manifest["metadata"]["prediction_metadata"]["effective_test_end"]
+        == "2014-01-03"
+    )
 
 
 def test_prediction_handoff_writes_prediction_report_without_materialized_bundle(
@@ -908,23 +907,19 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
     )
     run_root = _write_evaluation_result(layout, result)
 
-    assert run_root.as_posix().endswith(
-        "run_outputs/local/a_share/evaluation/eval_demo"
-    )
+    assert run_root.as_posix().endswith("outputs/eval_demo")
     assert (run_root / "metrics.parquet").is_file()
     assert (run_root / "grouped_label_values.parquet").is_file()
     assert (run_root / "ic_summary.parquet").is_file()
     assert (run_root / "group_spread_summary.parquet").is_file()
     assert (run_root / "manifest.json").is_file()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["artifacts"] == [
+    assert manifest["files"] == [
         "metrics.parquet",
         "grouped_label_values.parquet",
         "ic_summary.parquet",
         "group_spread_summary.parquet",
     ]
-    assert manifest["evaluation_diagnostics"]["contract_version"] == "0.1"
-    assert "metadata" not in manifest
 
 
 def test_evaluation_runner_streams_research_chunks(

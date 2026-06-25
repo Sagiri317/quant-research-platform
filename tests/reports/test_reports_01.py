@@ -6,33 +6,33 @@ import json
 import pandas as pd
 import pytest
 
-import quant_research_platform.artifacts.run_outputs as run_outputs_module
-from quant_research_platform.artifacts.run_outputs import (
-    write_evaluation_run_outputs,
-    write_prediction_run_outputs,
-    write_stage_profile_run_outputs,
+import quant_research_platform.artifacts.outputs as outputs_module
+from quant_research_platform.artifacts.outputs import (
+    write_evaluation_outputs,
+    write_prediction_outputs,
+    write_stage_profile_outputs,
 )
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.run_outputs import OutputScope, RunOutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.runtime.profiling import ProfileConfig, StageProfiler
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def test_stage_profile_run_outputs_write_only_inside_local_output_boundary(
+def test_stage_profile_outputs_write_only_inside_local_output_boundary(
     tmp_path,
 ):
     with StageProfiler(ProfileConfig(enabled=True)) as profiler:
         with profiler.stage("evaluation", "ic", sample_memory=False):
             pass
 
-    output_dir = write_stage_profile_run_outputs(
+    output_dir = write_stage_profile_outputs(
         profiler.to_frame(),
         spec=_stage_profile_report_spec(),
         layout=StorageLayout(project_root=tmp_path),
@@ -42,15 +42,7 @@ def test_stage_profile_run_outputs_write_only_inside_local_output_boundary(
     assert output_dir["csv"].is_file()
     assert output_dir["json"].is_file()
     assert output_dir["markdown"].is_file()
-    assert (
-        tmp_path
-        / "run_outputs"
-        / "local"
-        / "a_share"
-        / "diagnostics"
-        / "run"
-        / "manifest.json"
-    ).is_file()
+    assert (tmp_path / "outputs" / "stage_profile" / "manifest.json").is_file()
 
 
 def test_stage_profiler_does_not_expose_artifact_writer() -> None:
@@ -59,7 +51,7 @@ def test_stage_profiler_does_not_expose_artifact_writer() -> None:
     assert not hasattr(StageProfiler, "write_artifacts")
 
 
-def test_stage_profile_run_outputs_require_approved_report_spec(tmp_path):
+def test_stage_profile_outputs_require_approved_report_spec(tmp_path):
     frame = pd.DataFrame.from_records(
         [
             {
@@ -71,9 +63,9 @@ def test_stage_profile_run_outputs_require_approved_report_spec(tmp_path):
         ]
     )
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        write_stage_profile_run_outputs(
+        write_stage_profile_outputs(
             frame,
-            spec=RunOutputSpec(
+            spec=OutputSpec(
                 output_id="stage_profile",
                 output_definition_id="other_report",
                 run_id="run",
@@ -87,18 +79,18 @@ def test_stage_profile_run_outputs_require_approved_report_spec(tmp_path):
 
 
 def test_report_spec_has_no_allowed_output_root_field() -> None:
-    assert "allowed_output_root" not in RunOutputSpec.__dataclass_fields__
+    assert "allowed_output_root" not in OutputSpec.__dataclass_fields__
 
 
-def test_stage_profile_run_outputs_use_run_output_catalog_gate(tmp_path):
+def test_stage_profile_outputs_use_output_catalog_gate(tmp_path):
     frame = pd.DataFrame.from_records(
         [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
     )
 
     with pytest.raises(ValueError, match="output_spec_mismatch"):
-        write_stage_profile_run_outputs(
+        write_stage_profile_outputs(
             frame,
-            spec=RunOutputSpec(
+            spec=OutputSpec(
                 output_id="stage_profile",
                 output_definition_id="stage_profile_diagnostic",
                 run_id="run",
@@ -111,7 +103,7 @@ def test_stage_profile_run_outputs_use_run_output_catalog_gate(tmp_path):
         )
 
 
-def test_stage_profile_run_outputs_sanitize_outputs(tmp_path):
+def test_stage_profile_outputs_sanitize_outputs(tmp_path):
     frame = pd.DataFrame.from_records(
         [
             {
@@ -122,9 +114,9 @@ def test_stage_profile_run_outputs_sanitize_outputs(tmp_path):
             }
         ]
     )
-    paths = write_stage_profile_run_outputs(
+    paths = write_stage_profile_outputs(
         frame,
-        spec=RunOutputSpec(
+        spec=OutputSpec(
             output_id="stage_profile",
             output_definition_id="stage_profile_diagnostic",
             run_id="run",
@@ -135,7 +127,7 @@ def test_stage_profile_run_outputs_sanitize_outputs(tmp_path):
         layout=StorageLayout(project_root=tmp_path),
         markdown_text="CSMAR vendor internal detail",
     )
-    output_dir = tmp_path / "run_outputs" / "local" / "a_share" / "diagnostics" / "run"
+    output_dir = tmp_path / "outputs" / "stage_profile"
 
     combined = (
         paths["csv"].read_text(encoding="utf-8")
@@ -149,11 +141,11 @@ def test_stage_profile_run_outputs_sanitize_outputs(tmp_path):
     assert "abcdef123456" not in combined
 
 
-def test_run_output_writers_do_not_accept_output_root() -> None:
+def test_output_writers_do_not_accept_output_root() -> None:
     writer_signatures = (
-        inspect.signature(write_stage_profile_run_outputs),
-        inspect.signature(write_prediction_run_outputs),
-        inspect.signature(write_evaluation_run_outputs),
+        inspect.signature(write_stage_profile_outputs),
+        inspect.signature(write_prediction_outputs),
+        inspect.signature(write_evaluation_outputs),
     )
 
     assert all(
@@ -163,13 +155,13 @@ def test_run_output_writers_do_not_accept_output_root() -> None:
 
 def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) -> None:
     frame = _two_row_prediction_frame()
-    materialized_root = write_prediction_run_outputs(
+    materialized_root = write_prediction_outputs(
         frame,
         spec=_prediction_spec(),
         output_spec=_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "materialized"),
     )
-    chunked_writer = run_outputs_module._write_prediction_output_chunks
+    chunked_writer = outputs_module._write_prediction_output_chunks
     chunked_root = chunked_writer(
         (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
         spec=_prediction_spec(),
@@ -191,7 +183,7 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
 def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> None:
     frame = _prediction_frame()
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
-        run_outputs_module._write_prediction_output_chunks(
+        outputs_module._write_prediction_output_chunks(
             (frame.copy(), frame.copy()),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
@@ -200,40 +192,38 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> Non
             prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
         )
 
-    assert not (
-        tmp_path / "run_outputs" / "local" / "a_share" / "prediction" / "pred-run"
-    ).exists()
+    assert not (tmp_path / "outputs" / "pred-run").exists()
 
 
 def test_report_manifest_payload_builders_are_private_and_local() -> None:
-    assert hasattr(run_outputs_module, "_stage_profile_run_output_manifest_payload")
-    assert hasattr(run_outputs_module, "_prediction_run_output_manifest_payload")
-    assert hasattr(run_outputs_module, "_evaluation_run_output_manifest_payload")
+    assert hasattr(outputs_module, "_stage_profile_output_manifest_payload")
+    assert hasattr(outputs_module, "_prediction_output_metadata")
+    assert hasattr(outputs_module, "_evaluation_output_metadata")
     private_builders = {
-        "_stage_profile_run_output_manifest_payload",
-        "_prediction_run_output_manifest_payload",
-        "_evaluation_run_output_manifest_payload",
+        "_stage_profile_output_manifest_payload",
+        "_prediction_output_metadata",
+        "_evaluation_output_metadata",
     }
-    assert private_builders.isdisjoint(run_outputs_module.__all__)
-    assert not hasattr(run_outputs_module, "ReportManifest")
-    assert not hasattr(run_outputs_module, "ReportBundle")
+    assert private_builders.isdisjoint(outputs_module.__all__)
+    assert not hasattr(outputs_module, "ReportManifest")
+    assert not hasattr(outputs_module, "ReportBundle")
 
 
-def test_stage_profile_run_outputs_reject_existing_run_root_without_writes(
+def test_stage_profile_outputs_reject_existing_run_root_without_writes(
     tmp_path,
 ):
     frame = pd.DataFrame.from_records(
         [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
     )
-    run_root = tmp_path / "run_outputs" / "local" / "a_share" / "diagnostics" / "run"
+    run_root = tmp_path / "outputs" / "stage_profile"
     run_root.mkdir(parents=True)
     sentinel = run_root / "sentinel.txt"
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="output_already_exists"):
-        write_stage_profile_run_outputs(
+        write_stage_profile_outputs(
             frame,
-            spec=RunOutputSpec(
+            spec=OutputSpec(
                 output_id="stage_profile",
                 output_definition_id="stage_profile_diagnostic",
                 run_id="run",
@@ -251,18 +241,16 @@ def test_stage_profile_run_outputs_reject_existing_run_root_without_writes(
     assert list(run_root.parent.glob("*backup*")) == []
 
 
-def test_prediction_run_outputs_reject_existing_run_root_without_writes(
+def test_prediction_outputs_reject_existing_run_root_without_writes(
     tmp_path,
 ):
-    run_root = (
-        tmp_path / "run_outputs" / "local" / "a_share" / "prediction" / "pred-run"
-    )
+    run_root = tmp_path / "outputs" / "pred-run"
     run_root.mkdir(parents=True)
     sentinel = run_root / "sentinel.txt"
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(OutputAlreadyExistsError):
-        write_prediction_run_outputs(
+        write_prediction_outputs(
             _prediction_frame(),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
@@ -274,18 +262,16 @@ def test_prediction_run_outputs_reject_existing_run_root_without_writes(
     assert not (run_root / "manifest.json").exists()
 
 
-def test_evaluation_run_outputs_reject_existing_run_root_without_writes(
+def test_evaluation_outputs_reject_existing_run_root_without_writes(
     tmp_path,
 ):
-    run_root = (
-        tmp_path / "run_outputs" / "local" / "a_share" / "evaluation" / "eval-run"
-    )
+    run_root = tmp_path / "outputs" / "eval-run"
     run_root.mkdir(parents=True)
     sentinel = run_root / "sentinel.txt"
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(OutputAlreadyExistsError):
-        write_evaluation_run_outputs(
+        write_evaluation_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
@@ -301,24 +287,24 @@ def test_evaluation_run_outputs_reject_existing_run_root_without_writes(
     assert not (run_root / "manifest.json").exists()
 
 
-def test_stage_profile_run_outputs_clean_temp_root_after_mid_write_failure(
+def test_stage_profile_outputs_clean_temp_root_after_mid_write_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     frame = pd.DataFrame.from_records(
         [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
     )
-    run_root = tmp_path / "run_outputs" / "local" / "a_share" / "diagnostics" / "run"
+    run_root = tmp_path / "outputs" / "stage_profile"
 
     def fail_json_write(path, *_args, **_kwargs):
         path.parent.mkdir(parents=True, exist_ok=True)
         (path.parent / "partial.json").write_text("partial\n", encoding="utf-8")
         raise RuntimeError("simulated_stage_profile_failure")
 
-    monkeypatch.setattr(run_outputs_module, "atomic_write_json", fail_json_write)
+    monkeypatch.setattr(outputs_module, "atomic_write_json", fail_json_write)
 
     with pytest.raises(RuntimeError, match="simulated_stage_profile_failure"):
-        write_stage_profile_run_outputs(
+        write_stage_profile_outputs(
             frame,
             spec=_stage_profile_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -329,13 +315,11 @@ def test_stage_profile_run_outputs_clean_temp_root_after_mid_write_failure(
     assert list(run_root.parent.glob(".tmp-*")) == []
 
 
-def test_prediction_run_outputs_clean_temp_root_after_mid_write_failure(
+def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    run_root = (
-        tmp_path / "run_outputs" / "local" / "a_share" / "prediction" / "pred-run"
-    )
+    run_root = tmp_path / "outputs" / "pred-run"
 
     def fail_parquet_write(_frame, path, **_kwargs):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,13 +327,13 @@ def test_prediction_run_outputs_clean_temp_root_after_mid_write_failure(
         raise RuntimeError("simulated_prediction_failure")
 
     monkeypatch.setattr(
-        run_outputs_module,
+        outputs_module,
         "_write_parquet",
         fail_parquet_write,
     )
 
     with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
-        write_prediction_run_outputs(
+        write_prediction_outputs(
             _prediction_frame(),
             spec=_prediction_spec(),
             output_spec=_prediction_report_spec(),
@@ -360,13 +344,11 @@ def test_prediction_run_outputs_clean_temp_root_after_mid_write_failure(
     assert list(run_root.parent.glob(".pred-run.tmp-*")) == []
 
 
-def test_evaluation_run_outputs_clean_temp_root_after_mid_write_failure(
+def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    run_root = (
-        tmp_path / "run_outputs" / "local" / "a_share" / "evaluation" / "eval-run"
-    )
+    run_root = tmp_path / "outputs" / "eval-run"
     call_count = 0
 
     def fail_second_parquet_write(_frame, path, **_kwargs):
@@ -379,13 +361,13 @@ def test_evaluation_run_outputs_clean_temp_root_after_mid_write_failure(
         path.write_text("first\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        run_outputs_module,
+        outputs_module,
         "_write_parquet",
         fail_second_parquet_write,
     )
 
     with pytest.raises(RuntimeError, match="simulated_evaluation_failure"):
-        write_evaluation_run_outputs(
+        write_evaluation_outputs(
             _evaluation_metrics_frame(),
             _evaluation_grouped_label_values_frame(),
             ic_summary=_evaluation_ic_summary_frame(),
@@ -410,8 +392,8 @@ def test_output_already_exists_error_public_summary_is_path_free() -> None:
     assert "csmar" not in str(summary).lower()
 
 
-def _stage_profile_report_spec() -> RunOutputSpec:
-    return RunOutputSpec(
+def _stage_profile_report_spec() -> OutputSpec:
+    return OutputSpec(
         output_id="stage_profile",
         output_definition_id="stage_profile_diagnostic",
         run_id="run",
@@ -432,11 +414,11 @@ def _prediction_spec() -> PredictionSpec:
     )
 
 
-def _prediction_report_spec() -> RunOutputSpec:
-    return RunOutputSpec(
-        output_id="prediction_outputs",
+def _prediction_report_spec() -> OutputSpec:
+    return OutputSpec(
+        output_id="pred-run",
         output_definition_id="prediction_outputs",
-        run_id="pred-run",
+        run_id="test_run",
         market_id=MarketId("a_share"),
         run_type="prediction",
         scope=OutputScope.LOCAL_ONLY,
@@ -534,11 +516,11 @@ def _signal_spec() -> SignalSpec:
     )
 
 
-def _evaluation_outputs_spec() -> RunOutputSpec:
-    return RunOutputSpec(
-        output_id="evaluation_outputs",
+def _evaluation_outputs_spec() -> OutputSpec:
+    return OutputSpec(
+        output_id="eval-run",
         output_definition_id="evaluation_outputs",
-        run_id="eval-run",
+        run_id="test_run",
         market_id=MarketId("a_share"),
         run_type="evaluation",
         scope=OutputScope.LOCAL_ONLY,

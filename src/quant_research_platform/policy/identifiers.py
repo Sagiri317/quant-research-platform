@@ -7,6 +7,17 @@ import re
 from quant_research_platform.policy.share_safety import unsafe_for_share_reason
 
 _RUN_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_OUTPUT_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+)
 _SOURCE_PROVIDER_TOKEN_RE = re.compile(
     r"(?i)(?:^|[._-])(?:source|provider|vendor)(?:$|[._-])"
 )
@@ -40,4 +51,18 @@ def validate_run_identifier(value: str) -> str:
     return value
 
 
-__all__ = ["unsafe_identifier_reason", "validate_run_identifier"]
+def validate_output_identifier(value: str) -> str:
+    if not isinstance(value, str) or not _OUTPUT_IDENTIFIER_RE.fullmatch(value):
+        raise ValueError("invalid_output_id")
+    if value.casefold() in _WINDOWS_RESERVED_NAMES:
+        raise ValueError("invalid_output_id")
+    if unsafe_identifier_reason(value) is not None:
+        raise ValueError("invalid_output_id")
+    return value
+
+
+__all__ = [
+    "unsafe_identifier_reason",
+    "validate_output_identifier",
+    "validate_run_identifier",
+]

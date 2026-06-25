@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.contracts.outputs import OutputScope
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.run_outputs import OutputScope
 
 
 class WorkflowRunPolicy(StrEnum):

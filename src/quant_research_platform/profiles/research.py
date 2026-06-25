@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from quant_research_platform.artifacts.definitions import run_output_catalog
+from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
@@ -14,6 +14,7 @@ from quant_research_platform.catalog.fields import FieldCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.markets import MarketRegistry
 from quant_research_platform.catalog.models import ModelCatalog
+from quant_research_platform.catalog.outputs import OutputCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.predictions import (
     PredictionCatalog,
@@ -22,7 +23,6 @@ from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
 )
-from quant_research_platform.catalog.run_outputs import RunOutputCatalog
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -81,7 +81,7 @@ class ResearchProfile:
     portfolios: PortfolioCatalog
     sources: SourceRegistry
     markets: MarketRegistry
-    run_outputs: RunOutputCatalog
+    outputs: OutputCatalog
     source_interim_catalogs: Mapping[str, InterimDataCatalog]
     source_id: SourceId
     build_prediction_catalog: Callable[..., PredictionCatalog]
@@ -141,7 +141,7 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         portfolios=PortfolioCatalog(),
         sources=_a_share_csmar_source_registry(),
         markets=_a_share_market_registry(),
-        run_outputs=run_output_catalog(),
+        outputs=output_catalog(),
         source_interim_catalogs=_a_share_csmar_source_interim_catalogs(),
         source_id=_active_source_id(),
         build_prediction_catalog=a_share_research_scenarios.build_prediction_catalog,

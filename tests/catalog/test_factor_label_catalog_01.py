@@ -4,13 +4,13 @@ import pytest
 
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.run_outputs import RunOutputCatalog
+from quant_research_platform.catalog.outputs import OutputCatalog
 from quant_research_platform.catalog.workflows import WorkflowCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.run_outputs import (
+from quant_research_platform.contracts.outputs import (
+    OutputDefinition,
     OutputScope,
-    RunOutputDefinition,
 )
 from quant_research_platform.contracts.workflows import WorkflowSpec
 from quant_research_platform.markets.implementations.a_share.factors import (
@@ -112,9 +112,9 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
     assert catalog.list() == (definition,)
 
 
-def test_run_output_catalog_rejects_duplicate_definitions() -> None:
-    catalog = RunOutputCatalog()
-    definition = RunOutputDefinition(
+def test_output_catalog_rejects_duplicate_definitions() -> None:
+    catalog = OutputCatalog()
+    definition = OutputDefinition(
         output_definition_id="evaluation_outputs",
         display_name="Evaluation report",
         run_type="evaluation",

@@ -1369,7 +1369,6 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
 
     assert "metadata" not in prediction.attrs
     assert prediction.attrs["prediction_metadata"] == {
-        "contract_version": "0.1",
         "prediction_mode": "minimal_oos",
         "sample_filter_mode": "eligible",
         "filter_columns_used": ["eligible"],
@@ -1427,20 +1426,26 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     )
     run_root = write_prediction_result(layout, result)
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["model_metadata"]["contract_version"] == "0.1"
-    assert manifest["model_metadata"]["input_count"] == 1
-    assert manifest["model_metadata"]["coefficient_count"] == 2
-    assert manifest["model_metadata"]["sample_filter_mode"] == "eligible"
-    assert manifest["model_metadata"]["rows_after_input_label_dropna"] == 4
-    assert manifest["model_metadata"]["train_start"] == "2024-01-02"
-    assert manifest["model_metadata"]["train_end"] == "2024-01-02"
-    assert manifest["prediction_metadata"]["contract_version"] == "0.1"
-    assert manifest["prediction_metadata"]["prediction_rows"] == 5
-    assert manifest["prediction_metadata"]["sample_filter_mode"] == "eligible"
-    assert manifest["prediction_metadata"]["rows_after_input_dropna"] == 10
-    assert manifest["prediction_metadata"]["train_end"] == "2024-01-02"
-    assert manifest["prediction_metadata"]["requested_test_end"] == "2024-01-03"
-    assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-03"
+    assert manifest["metadata"]["model_metadata"]["input_count"] == 1
+    assert manifest["metadata"]["model_metadata"]["coefficient_count"] == 2
+    assert manifest["metadata"]["model_metadata"]["sample_filter_mode"] == "eligible"
+    assert manifest["metadata"]["model_metadata"]["rows_after_input_label_dropna"] == 4
+    assert manifest["metadata"]["model_metadata"]["train_start"] == "2024-01-02"
+    assert manifest["metadata"]["model_metadata"]["train_end"] == "2024-01-02"
+    assert manifest["metadata"]["prediction_metadata"]["prediction_rows"] == 5
+    assert (
+        manifest["metadata"]["prediction_metadata"]["sample_filter_mode"] == "eligible"
+    )
+    assert manifest["metadata"]["prediction_metadata"]["rows_after_input_dropna"] == 10
+    assert manifest["metadata"]["prediction_metadata"]["train_end"] == "2024-01-02"
+    assert (
+        manifest["metadata"]["prediction_metadata"]["requested_test_end"]
+        == "2024-01-03"
+    )
+    assert (
+        manifest["metadata"]["prediction_metadata"]["effective_test_end"]
+        == "2024-01-03"
+    )
 
 
 def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
@@ -1496,9 +1501,12 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
     run_root = write_prediction_result(layout, result)
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["prediction_metadata"]["requested_test_end"] is None
-    assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-04"
-    assert manifest["model_metadata"]["oos_end"] == "2024-01-04"
+    assert manifest["metadata"]["prediction_metadata"]["requested_test_end"] is None
+    assert (
+        manifest["metadata"]["prediction_metadata"]["effective_test_end"]
+        == "2024-01-04"
+    )
+    assert manifest["metadata"]["model_metadata"]["oos_end"] == "2024-01-04"
 
 
 def test_prediction_forced_tiny_resource_chunks_match_default(
@@ -1610,15 +1618,21 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
     run_root = write_prediction_result(layout, result)
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["train_end"] == "2024-01-02"
-    assert manifest["test_start"] == "2024-01-03"
-    assert manifest["test_end"] == "2024-01-03"
-    assert manifest["model_metadata"]["train_start"] == "2024-01-02"
-    assert manifest["model_metadata"]["train_end"] == "2024-01-02"
-    assert manifest["prediction_metadata"]["train_end"] == "2024-01-02"
-    assert manifest["prediction_metadata"]["test_start"] == "2024-01-03"
-    assert manifest["prediction_metadata"]["requested_test_end"] == "2024-01-03"
-    assert manifest["prediction_metadata"]["effective_test_end"] == "2024-01-03"
+    assert manifest["metadata"]["train_end"] == "2024-01-02"
+    assert manifest["metadata"]["test_start"] == "2024-01-03"
+    assert manifest["metadata"]["test_end"] == "2024-01-03"
+    assert manifest["metadata"]["model_metadata"]["train_start"] == "2024-01-02"
+    assert manifest["metadata"]["model_metadata"]["train_end"] == "2024-01-02"
+    assert manifest["metadata"]["prediction_metadata"]["train_end"] == "2024-01-02"
+    assert manifest["metadata"]["prediction_metadata"]["test_start"] == "2024-01-03"
+    assert (
+        manifest["metadata"]["prediction_metadata"]["requested_test_end"]
+        == "2024-01-03"
+    )
+    assert (
+        manifest["metadata"]["prediction_metadata"]["effective_test_end"]
+        == "2024-01-03"
+    )
 
 
 def test_prediction_handoff_model_fit_does_not_read_test_window_labels(

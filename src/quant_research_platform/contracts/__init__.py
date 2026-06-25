@@ -28,6 +28,11 @@ from quant_research_platform.contracts.ids import (
 )
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.outputs import (
+    OutputDefinition,
+    OutputScope,
+    OutputSpec,
+)
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
     PortfolioSpec,
@@ -38,11 +43,6 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.run_id import (
     RunIdValidationError,
     validate_run_id,
-)
-from quant_research_platform.contracts.run_outputs import (
-    OutputScope,
-    RunOutputDefinition,
-    RunOutputSpec,
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.workflows import WorkflowRunPolicy
@@ -74,8 +74,8 @@ __all__ = [
     "ProcessedDataSpec",
     "ResearchDatasetSpec",
     "OutputScope",
-    "RunOutputDefinition",
-    "RunOutputSpec",
+    "OutputDefinition",
+    "OutputSpec",
     "RunIdValidationError",
     "SignalSpec",
     "SourceAssetId",
