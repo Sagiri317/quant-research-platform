@@ -410,7 +410,7 @@ def test_verification_summary_source_fixture_is_not_public_market_contract(
     aggregates,
 ) -> None:
     source = Path(aggregates.__file__).read_text(encoding="utf-8")
-    public_payloads = "\n".join(
+    review_safe_payloads = "\n".join(
         (
             str(_synthetic_review_safe_evidence_payload()),
             str(_synthetic_local_verification_inventory_payload()),
@@ -421,11 +421,12 @@ def test_verification_summary_source_fixture_is_not_public_market_contract(
     assert 'PRIVATE_INTERIM_SOURCE_ID = "csmar"' not in source
     assert 'LOCAL_VERIFICATION_INTERIM_SOURCE = "csmar"' in source
     assert "not an A-share market contract" in source
-    assert "csmar" not in public_payloads
-    assert "CSMAR" not in public_payloads
+    assert "csmar" not in review_safe_payloads
+    assert "CSMAR" not in review_safe_payloads
 
 
-def test_private_summary_covers_full_historical_panel_synthetic_contract() -> None:
+def test_local_verification_inventory_covers_full_historical_panel_synthetic_contract(
+) -> None:
     payload = _synthetic_local_verification_inventory_payload()
     market_panel_daily = next(
         item

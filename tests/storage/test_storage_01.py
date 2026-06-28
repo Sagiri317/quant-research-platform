@@ -53,7 +53,7 @@ def _frame() -> pd.DataFrame:
     )
 
 
-def test_dataset_writer_rejects_public_output_before_iterating_chunks(
+def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
     tmp_path: Path,
 ) -> None:
     iterated = False
@@ -64,7 +64,11 @@ def test_dataset_writer_rejects_public_output_before_iterating_chunks(
         yield _frame()
 
     with pytest.raises(ValueError, match="outside_local_only_boundary"):
-        write_dataset(tmp_path / "public" / "x", chunks(), spec=_processed_spec())
+        write_dataset(
+            tmp_path / "outside-local-only" / "x",
+            chunks(),
+            spec=_processed_spec(),
+        )
 
     assert not iterated
     assert not (tmp_path / "public" / "x").exists()
@@ -96,7 +100,7 @@ def test_projected_dataset_fingerprint_includes_primary_key_columns(
     assert comparison.matches is False
 
 
-def test_manifest_writer_sanitizes_public_summary_payload(tmp_path: Path) -> None:
+def test_manifest_writer_sanitizes_review_safe_summary_payload(tmp_path: Path) -> None:
     manifest = write_manifest(
         tmp_path / "outputs" / "run" / "manifest.json",
         {
@@ -125,8 +129,8 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
 
 
-def test_output_already_exists_error_public_summary() -> None:
-    assert OutputAlreadyExistsError().to_public_summary() == {
+def test_output_already_exists_error_review_safe_summary() -> None:
+    assert OutputAlreadyExistsError().to_review_safe_summary() == {
         "status": "failed",
         "failure_code": "output_already_exists",
     }

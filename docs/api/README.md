@@ -8,7 +8,9 @@ API 文档只描述当前公开边界。新增 API、CLI、registry、store 或 
 
 ## 接口边界
 
-`src/quant_research_platform/interfaces/api/` 提供 API adapter。interfaces 不写业务算法，不绕过 contracts、share-safety、runtime logging 或 share-safe evidence，也不新增未批准 public surface。
+`src/quant_research_platform/interfaces/api/` 提供 API adapter。interfaces 不写业务算法，不绕过 contracts、share-safety 或 runtime logging。
+REVIEW_SAFE evidence 只使用已批准的摘要产物。
+interfaces 不新增未批准 public surface。
 
 当前 public API 只有：
 
@@ -32,7 +34,7 @@ qrp research-datasets requirements <dataset_id>
 
 ```text
 qrp-private schema-inventory --project-root . --output <path>
-qrp-private evidence run
+qrp-private local-verification run
 private local verification harness
 not a public CLI
 not a public execution mode

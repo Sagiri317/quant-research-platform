@@ -121,4 +121,4 @@ python -m pytest tests/agents/handoff/test_build_handoff_package_integration.py 
 
 ## 数据安全
 
-禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只能包含摘要、schema、计数、hash、命令状态和路径结构；结果安全边界使用 LOCAL_ONLY / REVIEW_SAFE，不使用 private / public 分类。
+禁止提交 private data、vendor marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只能包含摘要、schema、计数、hash、命令状态和路径结构；结果安全边界使用 LOCAL_ONLY / REVIEW_SAFE。

@@ -25,7 +25,7 @@ def logical_path(
     run_root: str | Path | None = None,
     markers: Iterable[str] = DEFAULT_GENERATED_MARKERS,
 ) -> str:
-    """Return a share-safe path relative to a generated root when possible."""
+    """Return a sanitized logical path relative to a generated root when possible."""
 
     item = Path(path)
     if run_root is not None:

@@ -718,7 +718,8 @@ def test_handoff_package_verifier_rejects_local_paths_in_plain_text() -> None:
     assert safety.unsafe_text_reason(text, name="handoff.txt") == "local_absolute_path"
 
 
-def test_handoff_package_verifier_allows_public_aggregate_evidence_counts() -> None:
+def test_handoff_package_verifier_allows_review_safe_aggregate_evidence_counts(
+) -> None:
     safety = _load_handoff_module("verify_handoff_package")
     text = "\n".join(
         [

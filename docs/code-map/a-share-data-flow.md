@@ -24,7 +24,7 @@ storage 层负责 dataset artifact 的读写、manifest、schema、partition、f
 
 research 层只实现通用研究算法。涨跌停、ST、停牌、A 股日历等市场语义由 A 股实现层绑定，research 不直接 import sources 或具体市场实现。
 
-## share-safe evidence
+## REVIEW_SAFE evidence
 
 A-share 验证报告只能公开：
 
@@ -33,7 +33,7 @@ A-share 验证报告只能公开：
 - partition summary
 - command status
 - artifact hash
-- share-safe issue summary
+- REVIEW_SAFE issue summary
 
 禁止公开：
 

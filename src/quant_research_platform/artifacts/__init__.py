@@ -1,3 +1,3 @@
-"""File writers for local outputs and handoff-safe evidence."""
+"""File writers for local outputs and review-safe evidence."""
 
 __all__ = []

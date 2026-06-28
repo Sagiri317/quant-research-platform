@@ -111,14 +111,14 @@ def test_retired_public_profile_names_are_absent() -> None:
         profiles_path.read_text(encoding="utf-8"),
         filename=str(profiles_path),
     )
-    public_names = _module_all_names(tree)
-    assert "ResearchProfile" in public_names
-    assert "research_profile" in public_names
-    assert "CatalogBundle" not in public_names
-    assert "local_a_share_csmar_catalogs" not in public_names
-    assert "PlatformCatalogs" not in public_names
-    assert "default_catalogs" not in public_names
-    assert not [name for name in public_names if name.startswith("default_")]
+    exported_names = _module_all_names(tree)
+    assert "ResearchProfile" in exported_names
+    assert "research_profile" in exported_names
+    assert "CatalogBundle" not in exported_names
+    assert "local_a_share_csmar_catalogs" not in exported_names
+    assert "PlatformCatalogs" not in exported_names
+    assert "default_catalogs" not in exported_names
+    assert not [name for name in exported_names if name.startswith("default_")]
 
 
 def test_source_market_storage_research_import_boundaries_are_closed() -> None:

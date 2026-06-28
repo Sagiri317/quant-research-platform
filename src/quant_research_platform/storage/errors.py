@@ -4,14 +4,14 @@ from __future__ import annotations
 
 
 class WriteRejectedError(ValueError):
-    """Base class for share-safe writer rejections."""
+    """Base class for review-safe writer rejections."""
 
     failure_code = "write_rejected"
 
     def __init__(self, message: str | None = None) -> None:
         super().__init__(message or self.failure_code)
 
-    def to_public_summary(self) -> dict[str, str]:
+    def to_review_safe_summary(self) -> dict[str, str]:
         return {"status": "failed", "failure_code": self.failure_code}
 
 

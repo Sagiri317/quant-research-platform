@@ -264,7 +264,7 @@ def test_handoff_package_verifier_rejects_local_run_paths_in_handoff_evidence(tm
     package = tmp_path / "handoff.zip"
     text = "\n".join(
         [
-            "private evidence path .run/private/s1",
+            "local-only run path .run/private/s1",
             "",
         ]
     )
@@ -365,7 +365,7 @@ def test_handoff_verifier_rejects_posix_local_workspace_paths(
     assert any("path" in error for error in result.errors)
 
 
-def test_handoff_package_verifier_allows_public_handoff_evidence_text(tmp_path):
+def test_handoff_package_verifier_allows_review_safe_handoff_evidence_text(tmp_path):
     module = _load_handoff_package_verifier_module()
     package = tmp_path / "handoff.zip"
     with zipfile.ZipFile(package, "w") as archive:

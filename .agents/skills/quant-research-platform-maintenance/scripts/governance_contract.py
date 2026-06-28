@@ -244,6 +244,72 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
         r"\blocal evidence workflow\b",
         re.IGNORECASE,
     ),
+    TextRule(
+        "retired_api_private_evidence_run_text",
+        r"\bqrp-private evidence run\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_evidence_run_text",
+        r"\bevidence run\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_evidence_artifacts_text",
+        r"\b(?:local )?evidence artifacts\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_private_evidence_text",
+        r"\bprivate evidence\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_handoff_safe_evidence_text",
+        r"\bhandoff-safe\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_share_safe_evidence_text",
+        r"\bshare-safe evidence\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_share_safe_path_text",
+        r"\bshare-safe path\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_public_evidence_symbol",
+        r"\b(?:public_[A-Za-z0-9_]*evidence|evidence[A-Za-z0-9_]*public|"
+        r"allows_public_[A-Za-z0-9_]*evidence)\b",
+    ),
+    TextRule(
+        "retired_public_summary_symbol",
+        r"\b(?:public_summary|to_public_summary(?:_payload)?)\b",
+    ),
+    TextRule(
+        "retired_public_payload_symbol",
+        r"\b(?:public_payload|public_payloads|guarded_public_output)\b",
+    ),
+    TextRule(
+        "retired_private_summary_symbol",
+        r"\bprivate_summary\b",
+    ),
+    TextRule(
+        "retired_public_path_symbol",
+        r"\bpublic_path\b",
+    ),
+    TextRule(
+        "retired_public_output_text",
+        r"\b(?:public output|test_public_output_writers)\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_public_private_axis_text",
+        r"\b(?:private\s*/\s*public|public\s*/\s*private)\b",
+        re.IGNORECASE,
+    ),
 )
 
 RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {

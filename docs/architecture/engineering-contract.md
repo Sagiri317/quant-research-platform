@@ -51,7 +51,7 @@ Retired stage naming 不能通过文件名、路径名、Python symbol、JSON/YA
 
 compare 按 `output_id` 配对，并使用 `output_definition_id` 与 metadata 做类型和语义校验。状态聚合只由 `policy/check_status.py` 定义。
 
-share-safe evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
+REVIEW_SAFE evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
 
 ```bash
 python -m pytest tests/architecture/test_share_safe_evidence.py -q

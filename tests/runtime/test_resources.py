@@ -56,13 +56,13 @@ def test_runtime_resource_policy_private_payload_keeps_exact_bytes() -> None:
     assert all("path" not in key for key in payload)
 
 
-def test_runtime_resource_policy_public_payload_uses_coarse_buckets() -> None:
+def test_runtime_resource_policy_review_safe_payload_uses_coarse_buckets() -> None:
     policy = RuntimeResourcePolicy.from_environment(
         available_memory_bytes=10 * GIB,
         environ={"QRP_MEMORY_BUDGET_MB": "1024"},
     )
 
-    payload = policy.to_public_summary_payload()
+    payload = policy.to_review_safe_summary_payload()
 
     assert payload == {
         "memory_budget_fraction": 0.80,

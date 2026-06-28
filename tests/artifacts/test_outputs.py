@@ -38,12 +38,12 @@ def test_stage_profile_outputs_write_under_output_id_root(
     assert "outputs/stage_profile/stage_profile.md" in paths["markdown"].as_posix()
 
 
-def test_public_output_writers_do_not_expose_from_chunks_names() -> None:
-    public_names = set(outputs.__all__)
+def test_exported_output_writers_do_not_expose_from_chunks_names() -> None:
+    exported_names = set(outputs.__all__)
 
-    assert not [name for name in public_names if "from_chunks" in name]
-    assert "write_prediction_outputs" in public_names
-    assert "write_portfolio_outputs" in public_names
+    assert not [name for name in exported_names if "from_chunks" in name]
+    assert "write_prediction_outputs" in exported_names
+    assert "write_portfolio_outputs" in exported_names
 
 
 def test_output_catalog_definitions_are_local_only() -> None:

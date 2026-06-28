@@ -8,12 +8,14 @@ from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage import manifests
 
 
-def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -> None:
-    public_path = tmp_path / "public" / "manifest.json"
+def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
+    tmp_path: Path,
+) -> None:
+    review_safe_path = tmp_path / "review-safe" / "manifest.json"
     internal_path = tmp_path / "internal" / "manifest.json"
 
     manifests.write_manifest(
-        public_path,
+        review_safe_path,
         {"schema_id": "qrp-output-manifest", "status": "ok", "rows": [1, 2]},
     )
     manifests.write_internal_artifact_manifest(
@@ -27,7 +29,7 @@ def test_manifest_public_and_internal_writes_are_utf8_and_safe(tmp_path: Path) -
     )
     loaded = manifests.read_manifest(internal_path)
 
-    assert public_path.read_text(encoding="utf-8").endswith("\n")
+    assert review_safe_path.read_text(encoding="utf-8").endswith("\n")
     assert loaded["source_id"] == "csmar"
 
 

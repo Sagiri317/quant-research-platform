@@ -129,7 +129,7 @@ class RuntimeResourcePolicy:
         _ = self.effective_chunk_bytes
 
     def to_payload(self) -> dict[str, int | float | None]:
-        """Return exact resource policy metadata for private evidence."""
+        """Return exact runtime resource policy metadata."""
 
         return {
             "available_memory_bytes": self.available_memory_bytes,
@@ -144,8 +144,8 @@ class RuntimeResourcePolicy:
             "min_free_disk_bytes": self.min_free_disk_bytes,
         }
 
-    def to_public_summary_payload(self) -> dict[str, int | float | str | bool]:
-        """Return coarse resource policy metadata for share-safe summaries."""
+    def to_review_safe_summary_payload(self) -> dict[str, int | float | str | bool]:
+        """Return coarse resource policy metadata for review-safe summaries."""
 
         return {
             "memory_budget_fraction": self.memory_budget_fraction,

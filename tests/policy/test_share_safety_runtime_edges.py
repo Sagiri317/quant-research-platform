@@ -124,13 +124,15 @@ def test_sanitizer_recurses_public_objects() -> None:
 def test_provider_source_marker_input_is_rejected_before_row_level_read() -> None:
     row_reader_called = False
 
-    def guarded_public_output(input_text: str) -> None:
+    def guarded_review_safe_output(input_text: str) -> None:
         nonlocal row_reader_called
         assert_share_safe_text(input_text)
         row_reader_called = True
 
     with pytest.raises(ProposalSafetyError):
-        guarded_public_output(r"data\processed\a_share row sample: market_id=asset")
+        guarded_review_safe_output(
+            r"data\processed\a_share row sample: market_id=asset"
+        )
 
     assert row_reader_called is False
 

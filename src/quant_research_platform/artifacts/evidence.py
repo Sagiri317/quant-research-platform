@@ -1,4 +1,4 @@
-"""Writers for already-built handoff-safe evidence payloads and text."""
+"""Writers for already-built review-safe evidence payloads and text."""
 
 from __future__ import annotations
 
