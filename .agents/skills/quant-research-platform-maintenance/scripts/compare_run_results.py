@@ -40,6 +40,13 @@ def compare_runs(
     baseline_root = Path(baseline_root)
     current_root = Path(current_root)
     compare_root = Path(compare_root)
+    compare_root_error = _compare_root_error(compare_root)
+    if compare_root_error is not None:
+        return _blocked_payload(
+            baseline_root=baseline_root,
+            current_root=current_root,
+            reason=compare_root_error,
+        )
     try:
         baseline_run = _read_qrp_json(
             baseline_root / "run.json",
@@ -126,6 +133,19 @@ def _blocked_payload(
         "overall_status": "BLOCKED",
         "blocked_reason": reason,
     }
+
+
+def _compare_root_error(compare_root: Path) -> str | None:
+    if compare_root.exists() and not compare_root.is_dir():
+        return "compare_root_not_directory"
+    try:
+        compare_root.mkdir(parents=True, exist_ok=True)
+        probe = compare_root / ".qrp-compare-write-check"
+        probe.write_text("ok\n", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return f"compare_root_unwritable:{exc.__class__.__name__}"
+    return None
 
 
 def _read_qrp_json(path: Path, *, expected_schema_id: str) -> dict[str, Any]:
@@ -396,15 +416,20 @@ def _run_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_compare_artifacts(compare_root: Path, payload: dict[str, Any]) -> None:
-    compare_root.mkdir(parents=True, exist_ok=True)
-    (compare_root / "compare.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    (compare_root / "summary.md").write_text(
-        _render_summary(payload),
-        encoding="utf-8",
-    )
+    try:
+        compare_root.mkdir(parents=True, exist_ok=True)
+        (compare_root / "compare.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (compare_root / "summary.md").write_text(
+            _render_summary(payload),
+            encoding="utf-8",
+        )
+    except OSError:
+        if payload.get("overall_status") == "BLOCKED":
+            return
+        raise
 
 
 def _render_summary(payload: dict[str, Any]) -> str:

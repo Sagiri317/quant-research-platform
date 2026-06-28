@@ -224,11 +224,11 @@ def test_local_verification_run_id_can_be_explicit_long_semantic_value(tmp_path)
         run_root=tmp_path / "verification-output" / "s1",
         start_date="2014-01-01",
         end_date="2016-12-31",
-        run_id="verification-evidence-smoke-a-share-2014-2016",
+        run_id="local_verification_smoke_a_share_2014_2016",
         profile=research_profile(),
     )
 
-    assert config.run_id == "verification-evidence-smoke-a-share-2014-2016"
+    assert config.run_id == "local_verification_smoke_a_share_2014_2016"
 
 
 def test_local_verification_run_id_uses_shared_share_safe_contract(
@@ -780,12 +780,24 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     }
     assert run_payload["run_id"] == "s1"
     assert run_payload["root_ownership"]["replace_safe"] is True
-    assert len(run_payload["data"]["layers"]) == 3
-    assert {layer["logical_layer"] for layer in run_payload["data"]["layers"]} == {
-        "interim",
-        "processed",
-        "research",
+    dataset_manifest_paths = sorted((run_root / "data").rglob("_manifest/manifest.json"))
+    expected_layers = {
+        path.relative_to(run_root).parts[1] for path in dataset_manifest_paths
     }
+    actual_layers = {
+        layer["logical_layer"] for layer in run_payload["data"]["layers"]
+    }
+    represented_manifests = {
+        dataset["manifest_path"]
+        for layer in run_payload["data"]["layers"]
+        for dataset in layer["datasets"]
+    }
+    expected_manifests = {
+        path.relative_to(run_root).as_posix() for path in dataset_manifest_paths
+    }
+    assert actual_layers == expected_layers
+    assert "evidence" not in actual_layers
+    assert represented_manifests == expected_manifests
     assert len(run_payload["outputs"]) == expected_prediction_count + 2
     assert all(
         output["schema_id"] == "qrp-output-manifest"
@@ -802,22 +814,13 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     assert "validation_summary" in timing_steps
     assert "rss_start_end_max_mb" in validation_record
     assert LEGACY_RSS_PEAK_FIELD not in validation_record
-    retired_paths = (
-        ".qrp-local-verification.json",
-        "config",
-        "manifests",
-        "validations",
-        "timings",
-        "data/evidence",
-        "summary.json",
-        "timings.csv",
-        "run_outputs",
-        "data/index.json",
-        "outputs/index.json",
-    )
-    for relative in retired_paths:
-        assert not (run_root / relative).exists()
-    assert not list(run_root.rglob("layer_manifest.json"))
+    assert {path.name for path in run_root.iterdir()} == {
+        "data",
+        "logs",
+        "outputs",
+        "run.json",
+        "summary.md",
+    }
 
 
 def test_local_verification_workflow_preserves_dataset_manifests(
@@ -1122,7 +1125,7 @@ def test_no_comparison_engine_is_introduced_in_src():
     hits = [
         str(path)
         for path in Path("src").rglob("*comparison*.py")
-        if "verification_evidence" not in str(path)
+        if "verification_summary" not in str(path)
     ]
 
     assert hits == []

@@ -4,7 +4,7 @@ import ast
 from pathlib import Path
 
 POLICY_SHARE_SAFETY = Path("src/quant_research_platform/policy/share_safety.py")
-REPORT_SAFETY = Path("src/quant_research_platform/reports/verification_evidence.py")
+REPORT_SAFETY = Path("src/quant_research_platform/reports/verification_summary.py")
 HANDOFF_SAFETY = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/"
     "handoff/verify_handoff_package.py"

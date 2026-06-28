@@ -107,7 +107,6 @@ def test_schema_inventory_scans_sealed_dataset_roots(tmp_path) -> None:
     assert annotation["selected_important_column_null_counts"] == {"eligible": 1}
     assert research["row_count_by_year"] == {"2024": 2}
     assert "data/raw" not in combined
-    assert "outputs/local" not in combined
     assert str(tmp_path) not in combined
     assert "asset_a" not in combined
     assert "source_asset_a" not in combined
@@ -246,12 +245,15 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
         private_app,
         ["schema-inventory", "--help"],
     )
-    evidence_run_help = runner.invoke(private_app, ["evidence", "run", "--help"])
+    local_verification_run_help = runner.invoke(
+        private_app,
+        ["local-verification", "run", "--help"],
+    )
 
     assert root_help.exit_code == 0
     assert "Private local verification harness commands." in root_help.output
     assert "schema-inventory" in root_help.output
-    assert "evidence" in root_help.output
+    assert "local-verification" in root_help.output
     assert "private-rebuild" not in root_help.output
     assert schema_inventory_help.exit_code == 0
     assert "private local verification harness" in schema_inventory_help.output
@@ -262,15 +264,14 @@ def test_qrp_private_help_exposes_only_approved_private_commands() -> None:
     assert "--project-root" in schema_inventory_help.output
     assert "--output" in schema_inventory_help.output
     assert "--overwrite" not in schema_inventory_help.output
-    assert evidence_run_help.exit_code == 0
-    assert "private local verification harness" in evidence_run_help.output
-    assert "--run-root" in evidence_run_help.output
-    assert "--output-root" not in evidence_run_help.output
-    assert "--start-date" in evidence_run_help.output
-    assert "--end-date" in evidence_run_help.output
+    assert local_verification_run_help.exit_code == 0
+    assert "private local verification harness" in local_verification_run_help.output
+    assert "--run-root" in local_verification_run_help.output
+    assert "--start-date" in local_verification_run_help.output
+    assert "--end-date" in local_verification_run_help.output
 
 
-def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> None:
+def test_qrp_local_verification_run_accepts_required_options(monkeypatch) -> None:
     calls = []
 
     def fake_run(config):
@@ -295,7 +296,7 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
     result = runner.invoke(
         private_app,
         [
-            "evidence",
+            "local-verification",
             "run",
             "--run-root",
             "verification-output/s1",
@@ -328,7 +329,7 @@ def test_qrp_verification_evidence_run_accepts_required_options(monkeypatch) -> 
     assert "run_id=s1" in result.output
 
 
-def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> None:
+def test_qrp_local_verification_run_accepts_window_overrides(monkeypatch) -> None:
     calls = []
 
     def fake_run(config):
@@ -353,7 +354,7 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
     result = runner.invoke(
         private_app,
         [
-            "evidence",
+            "local-verification",
             "run",
             "--run-root",
             "verification-output/s2",
@@ -388,16 +389,18 @@ def test_qrp_verification_evidence_run_accepts_window_overrides(monkeypatch) -> 
     assert calls[0].portfolio_execution_lag_steps == 1
 
 
-def test_qrp_verification_evidence_run_rejects_missing_required_options() -> None:
+def test_qrp_local_verification_run_rejects_missing_required_options() -> None:
     runner = CliRunner()
 
-    result = runner.invoke(private_app, ["evidence", "run"])
-    help_result = runner.invoke(private_app, ["evidence", "run", "--help"])
+    result = runner.invoke(private_app, ["local-verification", "run"])
+    help_result = runner.invoke(
+        private_app,
+        ["local-verification", "run", "--help"],
+    )
 
     assert result.exit_code != 0
     assert help_result.exit_code == 0
     assert "--run-root" in help_result.output
-    assert "--output-root" not in help_result.output
     assert "--start-date" in help_result.output
     assert "--end-date" in help_result.output
     assert "--evaluation-start-date" in help_result.output

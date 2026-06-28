@@ -69,11 +69,12 @@ GOVERNANCE_TEST_PREFIXES = (
 )
 
 GOVERNANCE_CONFIG_EXCEPTIONS = {
+    ".gitignore",
     "pyproject.toml",
 }
 
 REPORTS_EVIDENCE_RENDERER_EXCEPTIONS = {
-    "src/quant_research_platform/reports/verification_evidence.py",
+    "src/quant_research_platform/reports/verification_summary.py",
 }
 
 GOVERNANCE_ONLY_SOURCE_TEXT_EXCEPTIONS = {
@@ -126,7 +127,7 @@ SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|cookie)\s*[:=]\s*['\"]?[^\s'\"]+"
 )
 
-TEXT_SUFFIXES = {".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
+TEXT_SUFFIXES = {"", ".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
 
 IGNORED_STATE_PATH_PARTS = {
     ".git",

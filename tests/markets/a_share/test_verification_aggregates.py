@@ -233,7 +233,7 @@ def test_aggregates_output_discovery_rejects_manifest_identity_violations(
                 "output_id": "invalid_eval",
                 "output_definition_id": "evaluation_outputs",
                 "run_id": "run",
-                "metadata": {"contract_version": "0.1"},
+                "metadata": {"schema_id": "nested/version"},
                 "files": [],
             }
         ),
@@ -253,13 +253,13 @@ def test_aggregates_output_discovery_rejects_manifest_identity_violations(
         encoding="utf-8",
     )
 
-    roots = aggregates._output_roots(
+    bundles = aggregates._output_bundles(
         outputs_root,
         preferred_id="missing_preferred",
         output_definition_id="evaluation_outputs",
     )
 
-    assert roots == (valid,)
+    assert bundles == (valid,)
 
 
 def test_aggregates_official_roots_use_inspection(

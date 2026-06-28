@@ -1240,7 +1240,7 @@ def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
             )
             is None
         ):
-            raise ValueError("invalid_interim_output_root")
+            raise ValueError("invalid_interim_dataset_root")
         return
     if isinstance(spec, ProcessedDataSpec):
         if (
@@ -1250,7 +1250,7 @@ def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
             )
             is None
         ):
-            raise ValueError("invalid_processed_output_root")
+            raise ValueError("invalid_processed_dataset_root")
         return
     if isinstance(spec, ResearchDatasetSpec):
         if (
@@ -1260,7 +1260,7 @@ def _validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
             )
             is None
         ):
-            raise ValueError("invalid_research_dataset_output_root")
+            raise ValueError("invalid_research_dataset_root")
         return
     raise ValueError("unsupported_data_spec_type")
 

@@ -209,7 +209,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
     assert generation["source_tree_scan_path"] == (
         "handoff_evidence/source-tree-scan.json"
     )
-    assert generation["validation_status"] == "BLOCKED"
+    assert generation["validation_status"] == "PASS"
     assert sidecar["zip_sha256"]
     assert source_tree_scan["status"] == "PASS"
     assert source_tree_scan["scanned_head"] == final_head
@@ -259,6 +259,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         for row in validation_evidence["checks"]
         if isinstance(row, dict) and "name" in row
     }
+    assert checks["handoff_external_access"]["status"] == "BLOCKED"
     assert checks["handoff_verify"]["status"] == "PASS"
     assert checks["handoff_safety_scan"] == {
         "name": "handoff_safety_scan",

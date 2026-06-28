@@ -256,7 +256,7 @@ def test_generated_panel_generation_uses_runtime_resource_policy(
     assert sum(len(chunk) for chunk in chunks) == len(sessions)
 
 
-def test_verification_evidence_does_not_keep_legacy_chunk_policy_helpers(
+def test_verification_summary_does_not_keep_legacy_chunk_policy_helpers(
     aggregates,
 ) -> None:
     for name in (
@@ -406,7 +406,7 @@ def test_low_level_parquet_fixture_summary_reads_dataset_artifact(
     assert summary.period == "2025-01-02 through 2025-01-03"
 
 
-def test_verification_evidence_source_fixture_is_not_public_market_contract(
+def test_verification_summary_source_fixture_is_not_public_market_contract(
     aggregates,
 ) -> None:
     source = Path(aggregates.__file__).read_text(encoding="utf-8")

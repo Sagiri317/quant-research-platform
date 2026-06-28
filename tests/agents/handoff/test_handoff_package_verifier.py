@@ -25,7 +25,7 @@ def _load_handoff_package_verifier_module():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    module.BLOCKED_PATH_PARTS = module.FORBIDDEN_PATH_SEGMENTS
+    module.BLOCKED_PATH_PARTS = module.PACKAGE_FORBIDDEN_PATH_PARTS
     module.MAX_TEXT_SCAN_BYTES = module.BUNDLE_TEXT_SIZE_CAP_BYTES
     module.HandoffSafetyResult.errors = property(
         lambda self: (
@@ -74,6 +74,9 @@ def test_handoff_package_verifier_uses_shared_governance_forbidden_path_parts():
     contract = _load_governance_contract_module()
 
     assert module.BLOCKED_PATH_PARTS == contract.PACKAGE_FORBIDDEN_PATH_PARTS
+    assert module.BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES == (
+        contract.BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES
+    )
 
 
 def test_handoff_verifier_allows_final_branch_bundle_by_default(tmp_path):

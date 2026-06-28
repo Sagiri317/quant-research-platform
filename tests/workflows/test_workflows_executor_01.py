@@ -192,10 +192,10 @@ def test_workflow_runner_requires_output_spec_for_spec_driven_writer() -> None:
         run_workflow(spec, registry=workflow_node_registry())
 
 
-def test_workflow_runner_does_not_accept_arbitrary_output_root() -> None:
-    assert "output_root" not in inspect.signature(run_workflow).parameters
+def test_workflow_runner_uses_current_execution_signature() -> None:
+    assert "spec" in inspect.signature(run_workflow).parameters
     service_params = inspect.signature(run_registered_workflow).parameters
-    assert "output_root" not in service_params
+    assert {"spec", "registry", "run_id"}.issubset(service_params)
 
 
 def test_workflow_runner_rejects_arbitrary_handler_injection() -> None:

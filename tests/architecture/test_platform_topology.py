@@ -107,7 +107,7 @@ def test_platform_target_files_exist() -> None:
         "agents/safety.py",
         "reports/execution_metrics.py",
         "reports/schema_inventory.py",
-        "reports/verification_evidence.py",
+        "reports/verification_summary.py",
         "artifacts/definitions.py",
         "artifacts/evidence.py",
         "artifacts/layout.py",

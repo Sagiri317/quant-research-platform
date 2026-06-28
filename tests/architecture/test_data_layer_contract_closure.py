@@ -18,7 +18,7 @@ NEGATIVE_GATE_FILES = {
     Path("tests/architecture/test_data_layer_boundaries.py"),
 }
 # Only local/verification evidence fixture residue may name the source here.
-LOCAL_VERIFICATION_EVIDENCE_FIXTURE_SOURCE_LITERAL = (
+LOCAL_verification_summary_FIXTURE_SOURCE_LITERAL = (
     'LOCAL_EVIDENCE_INTERIM_SOURCE = "csmar"'
 )
 A_SHARE_CSMAR_ID_IMPORTS = {
@@ -337,7 +337,7 @@ def test_deleted_panel_helper_names_only_appear_in_negative_gates() -> None:
     assert hits == []
 
 
-def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> None:
+def test_a_share_csmar_residue_is_limited_to_verification_summary_fixture() -> None:
     a_share_root = PROJECT_SRC / "markets/implementations/a_share"
     hits: list[str] = []
     csmar_hits: list[tuple[Path, str]] = []
@@ -374,7 +374,7 @@ def test_a_share_csmar_residue_is_limited_to_verification_evidence_fixture() -> 
             *A_SHARE_CSMAR_ID_RESIDUE_LINES,
             (
                 Path("verification/aggregates.py"),
-                LOCAL_VERIFICATION_EVIDENCE_FIXTURE_SOURCE_LITERAL,
+                LOCAL_verification_summary_FIXTURE_SOURCE_LITERAL,
             ),
         }
     )

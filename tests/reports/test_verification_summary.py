@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from quant_research_platform.reports.verification_evidence import (
+from quant_research_platform.reports.verification_summary import (
     build_validation_summary,
     render_run_summary_markdown,
 )
@@ -20,7 +20,7 @@ def test_build_validation_summary_consumes_embedded_layer_summaries() -> None:
     )
 
     assert summary["status"] == "PASS"
-    assert summary["layer_manifest_completeness"] == {
+    assert summary["data_layer_summary_completeness"] == {
         "missing": [],
         "checked_count": 1,
     }

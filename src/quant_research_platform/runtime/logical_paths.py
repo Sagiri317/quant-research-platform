@@ -8,19 +8,13 @@ from pathlib import Path, PurePosixPath
 DEFAULT_GENERATED_MARKERS: tuple[str, ...] = (
     "data",
     "outputs",
-    "manifests",
-    "validations",
-    "timings",
-    "config",
     "logs",
     "handoff_evidence",
 )
-EVIDENCE_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
+RUN_RESULT_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
     "data",
-    "manifests",
-    "validations",
-    "timings",
     "outputs",
+    "logs",
     "handoff_evidence",
 )
 
@@ -63,7 +57,7 @@ def dataset_layer_from_path(path: str | Path) -> str | None:
     for index in range(len(parts) - 2, -1, -1):
         if parts[index] == "data":
             layer = parts[index + 1]
-            if layer in {"raw", "interim", "processed", "research", "evidence"}:
+            if layer in {"raw", "interim", "processed", "research"}:
                 return layer
     return None
 
@@ -77,7 +71,7 @@ def _posix_parts(path: Path) -> tuple[str, ...]:
 
 __all__ = [
     "DEFAULT_GENERATED_MARKERS",
-    "EVIDENCE_LOGICAL_PATH_MARKERS",
+    "RUN_RESULT_LOGICAL_PATH_MARKERS",
     "dataset_layer_from_path",
     "logical_path",
 ]

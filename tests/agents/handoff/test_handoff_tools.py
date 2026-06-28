@@ -496,7 +496,7 @@ def test_handoff_package_verifier_rejects_retired_local_output_paths(
     tmp_path: Path,
 ) -> None:
     safety = _load_handoff_module("verify_handoff_package")
-    members = _retired_private_member_paths(safety.FORBIDDEN_PATH_SEGMENTS)
+    members = _retired_private_member_paths(safety.PACKAGE_FORBIDDEN_PATH_PARTS)
 
     assert members
     for index, member in enumerate(members):
@@ -516,7 +516,7 @@ def test_handoff_package_verifier_rejects_retired_local_output_path_text(
     safety = _load_handoff_module("verify_handoff_package")
     retired_local_output_path = next(
         segment
-        for segment in safety.FORBIDDEN_PATH_SEGMENTS
+        for segment in safety.PACKAGE_FORBIDDEN_PATH_PARTS
         if segment.startswith("reports/private_")
     )
     package = tmp_path / "handoff.zip"

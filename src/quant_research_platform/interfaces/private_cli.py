@@ -23,13 +23,13 @@ app = typer.Typer(
     add_completion=False,
     help="Private local verification harness commands.",
 )
-evidence_app = typer.Typer(
+local_verification_app = typer.Typer(
     add_completion=False,
-    help="Private local verification harness evidence commands.",
+    help="Private local verification harness commands.",
 )
 PROJECT_ROOT_DEFAULT = Path(".")
 
-app.add_typer(evidence_app, name="evidence")
+app.add_typer(local_verification_app, name="local-verification")
 
 
 @app.callback()
@@ -74,8 +74,8 @@ def schema_inventory(
     )
 
 
-@evidence_app.command("run")
-def evidence_run(
+@local_verification_app.command("run")
+def local_verification_run(
     run_root: Annotated[
         Path,
         typer.Option("--run-root", help="Explicit verification run root."),
@@ -141,7 +141,7 @@ def evidence_run(
         bool,
         typer.Option(
             "--replace-output",
-            help="Replace an owned verification evidence output root.",
+            help="Replace an owned local verification run root.",
         ),
     ] = False,
 ) -> None:

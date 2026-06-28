@@ -8,14 +8,12 @@ import pytest
 
 SCRIPT = Path(
     ".agents/skills/quant-research-platform-maintenance/scripts/"
-    "compare_verification_evidence.py"
+    "compare_run_results.py"
 )
 
 
 def _module():
-    spec = importlib.util.spec_from_file_location(
-        "compare_verification_evidence", SCRIPT
-    )
+    spec = importlib.util.spec_from_file_location("compare_run_results", SCRIPT)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -187,6 +185,37 @@ def test_compare_invalid_run_input_is_blocked(
 
     assert result["overall_status"] == "BLOCKED"
     assert result["output_results"] == []
+
+
+def test_compare_root_file_is_blocked_json_on_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _module()
+    baseline = tmp_path / "baseline"
+    current = tmp_path / "current"
+    compare_root = tmp_path / "compare-as-file"
+    _write_run(baseline, "baseline_run")
+    _write_run(current, "current_run")
+    compare_root.write_text("not a directory\n", encoding="utf-8")
+
+    exit_code = module.main(
+        [
+            "--baseline-root",
+            str(baseline),
+            "--current-root",
+            str(current),
+            "--compare-root",
+            str(compare_root),
+        ]
+    )
+
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout)
+    assert exit_code == 1
+    assert payload["schema_id"] == "qrp-compare"
+    assert payload["overall_status"] == "BLOCKED"
+    assert "compare_root_not_directory" in payload["blocked_reason"]
 
 
 def test_compare_missing_output_manifest_is_fail(tmp_path: Path) -> None:

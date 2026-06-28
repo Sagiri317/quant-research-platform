@@ -29,7 +29,7 @@ from quant_research_platform.policy.check_status import (
 )
 from quant_research_platform.policy.share_safety import local_run_root_reason
 from quant_research_platform.profiles.research import ResearchProfile
-from quant_research_platform.reports.verification_evidence import (
+from quant_research_platform.reports.verification_summary import (
     build_validation_summary,
     render_run_summary_markdown,
 )
@@ -48,7 +48,7 @@ from quant_research_platform.research.predictions.runner import (
 )
 from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
 from quant_research_platform.runtime.logical_paths import (
-    EVIDENCE_LOGICAL_PATH_MARKERS,
+    RUN_RESULT_LOGICAL_PATH_MARKERS,
     logical_path,
 )
 from quant_research_platform.runtime.resources import (
@@ -183,7 +183,7 @@ def _run_local_verification_with_policy(
             time_window=time_window,
             resource_policy=resource_policy,
         )
-    with recorder.record("evaluation_generation", logical_layer="evidence"):
+    with recorder.record("evaluation_generation"):
         evaluation_result = build_evaluation_result_from_research_dataset(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
@@ -207,7 +207,7 @@ def _run_local_verification_with_policy(
             ),
             layout=storage_layout,
         )
-    with recorder.record("prediction_generation", logical_layer="evidence"):
+    with recorder.record("prediction_generation"):
         prediction_roots = tuple(
             _write_prediction_result(
                 build_prediction_result_from_research_dataset(
@@ -226,7 +226,7 @@ def _run_local_verification_with_policy(
             )
             for prediction_spec in prediction_catalog.list()
         )
-    with recorder.record("portfolio_generation", logical_layer="evidence"):
+    with recorder.record("portfolio_generation"):
         portfolio_result = build_portfolio_result_from_research_dataset(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
@@ -254,7 +254,7 @@ def _run_local_verification_with_policy(
         processed_roots=tuple(item.root for item in processed_result.values()),
         research_roots=(Path(research_root),),
     )
-    output_roots = (
+    output_bundles = (
         Path(evaluation_root),
         *(Path(prediction_root) for prediction_root in prediction_roots),
         Path(portfolio_root),
@@ -318,7 +318,7 @@ def _run_local_verification_with_policy(
             }
         },
         "data": build_run_data_summary(layer_summaries=layer_summaries),
-        "outputs": [_output_index(root, run_root) for root in output_roots],
+        "outputs": [_output_index(root, run_root) for root in output_bundles],
         "checks": {"validation": validation_summary},
         "execution_metrics": recorder.payload(run_id=run_id),
         "logs": {},
@@ -332,7 +332,7 @@ def _run_local_verification_with_policy(
         run_id=run_id,
         run_root=logical_path(
             run_root,
-            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
+            markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
         ),
         summary=run_payload,
     )

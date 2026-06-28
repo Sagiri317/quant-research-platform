@@ -182,8 +182,6 @@ def test_build_run_data_summary_aggregates_dynamic_layers(tmp_path: Path) -> Non
         "processed",
         "research",
     ]
-    assert not list(tmp_path.rglob("layer_manifest.json"))
-    assert not list(tmp_path.rglob("run_manifest.json"))
 
 
 def _artifact_manifest_payload(

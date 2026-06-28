@@ -64,7 +64,7 @@ pytest PASS、governance PASS、handoff verifier PASS、single handoff verifier 
 
 `profiles/` 是 API、CLI、agent 和 workflow 共用的组合根，可以组装 catalog、source、market implementation 和 materializer。`research/` 是通用研究计算层，只构建 result，不写文件，不依赖具体市场实现或 sources。`compute/` 是 dataframe/tensor、portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data/raw、data/interim、data/processed、data/research layout，不定义 run output、report 或 evidence root。
 
-`runtime/` 只提供 resources、logging、workflow records 和 execution metrics payload，不写 report artifact。`reports/` 只 build/render evidence/report 内容，不写文件，不重算研究逻辑。`artifacts/` 只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。`workflows/` 只编排 research -> reports -> artifacts，不定义 policy regex，不直接写底层文件。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`agents/` 保持 proposal-only。`.agents/` 只承载治理、handoff 和 prompt tooling。
+`runtime/` 只提供 resources、logging、workflow records 和 execution metrics payload，不写报告内容。`reports/` 只 build/render evidence/report 内容，不写文件，不重算研究逻辑。`artifacts/` 只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。`workflows/` 只编排 research -> reports -> artifacts，不定义 policy regex，不直接写底层文件。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`agents/` 保持 proposal-only。`.agents/` 只承载治理、handoff 和 prompt tooling。
 
 ## 7. current-contract-only
 
@@ -74,7 +74,7 @@ QRP 采用 current-contract-only。普通 tests 只保护当前合同。retired 
 
 Retired governance paths 不得复活。`PROJECT_STATUS.md`、`.agents/briefs/current-qrp-status.md`、`docs/architecture/open-issues-register.md` 和 `docs/reports/clean-rewrite-0.1-*` 只要在 tracked tree 或 working tree 中存在，治理 gate 必须 `FAIL`。
 
-Retired stage naming 不得以文件名、路径名、Python function/class/fixture/常量名、JSON/YAML/TOML key 或静态字符串拼接形式复活。合法版本面包括 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`contract_version="0.1"`、`schema_version="0.1"`、`definition_version`、`workflow_version` 和 handoff `0.1` schema；带 `v` 前缀的 `0.1` API 版本路径不是当前 API 形式，只能出现在规则定义或 negative tests 中。
+Retired stage naming 不得以文件名、路径名、Python function/class/fixture/常量名、JSON/YAML/TOML key 或静态字符串拼接形式复活。合法版本面包括 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`definition_version`、`workflow_version` 和 handoff `0.1` schema；带 `v` 前缀的 `0.1` API 版本路径不是当前 API 形式，只能出现在规则定义或 negative tests 中。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
 
 ## 8. private safety
 

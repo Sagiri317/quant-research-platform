@@ -20,10 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 try:
-    from quant_research_platform.policy.check_status import (
-        VALID_STATUS_TOKENS,
-        aggregate_component_status,
-    )
+    from quant_research_platform.policy.check_status import VALID_STATUS_TOKENS
 except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit src.
     _policy_path = (
         Path(__file__).resolve().parents[4]
@@ -42,7 +39,6 @@ except ModuleNotFoundError:  # pragma: no cover - copied handoff tools may omit 
         _policy_module = importlib.util.module_from_spec(_policy_spec)
         _policy_spec.loader.exec_module(_policy_module)
         VALID_STATUS_TOKENS = _policy_module.VALID_STATUS_TOKENS
-        aggregate_component_status = _policy_module.aggregate_component_status
     else:
         raise
 
@@ -89,6 +85,7 @@ ACTIVE_GOVERNANCE_DOC_ROOTS = (
     "docs/api/",
     "docs/data/",
     "data/README.md",
+    ".gitignore",
 )
 
 RETIRED_GOVERNANCE_EXACT_PATHS = (
@@ -112,7 +109,7 @@ RUN_OUTPUT_ARCHITECTURE_RETIRED_PATHS = (
     "src/quant_research_platform/reports/report_artifacts.py",
     "src/quant_research_platform/reports/execution_metrics_artifacts.py",
     "src/quant_research_platform/research/predictions/artifacts.py",
-    "src/quant_research_platform/workflows/verification_evidence.py",
+    "src/quant_research_platform/workflows/verification_summary.py",
     (
         "src/quant_research_platform/markets/implementations/a_share/"
         "verification/private_aggregate.py"
@@ -169,14 +166,32 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
         (
             r"(?:run_config\.json|run_manifest\.json|validation_summary\.json|"
             r"evidence_summary\.json|timings\.json|timings\.csv|summary\.json|"
-            r"data/evidence|layer_manifest\.json)"
+            r"data/evidence|layer_manifest\.json|config/run_config\.json|"
+            r"manifests/run_manifest\.json|validations/validation_summary\.json|"
+            r"timings/timings\.json|\.qrp-local-verification\.json)"
         ),
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_result_verification_evidence",
+        r"\bverification[ _-]evidence\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_result_verification_evidence_symbol",
+        r"\b(?:verification_evidence|build_verification_evidence_payload|"
+        r"compare_verification_evidence|evidence_run|evidence_app)\b",
+    ),
+    TextRule("retired_result_layer_manifest", r"\blayer_manifest\b"),
+    TextRule(
+        "retired_result_review_safe_evidence",
+        r"\b(?:public_safe_evidence|runtime privacy|report artifact)\b",
         re.IGNORECASE,
     ),
 )
 
 RESULT_ARCHITECTURE_NEGATIVE_TEST_SOURCES = {
-    Path("tests/agents/test_compare_verification_evidence.py"),
+    Path("tests/agents/test_compare_run_results.py"),
     Path("tests/agents/test_verify_governance.py"),
     Path("tests/agents/handoff/test_handoff_package_verifier.py"),
     Path("tests/agents/handoff/test_handoff_tools.py"),
@@ -597,6 +612,16 @@ PACKAGE_FORBIDDEN_PATH_PARTS = (
     "auth.json",
     ".codex",
     "vendor raw",
+)
+
+BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES = (
+    ".agents/",
+    "docs/",
+    "run_tools/",
+    "schemas/",
+    "src/",
+    "templates/",
+    "tests/",
 )
 
 PACKAGE_FORBIDDEN_SUFFIXES = (
@@ -2714,22 +2739,6 @@ def collect_handoff_evidence_blocked_key_failures(
                 failures,
                 key_path=(*key_path, str(index)),
             )
-
-
-def status_summary_from_validation(
-    status_map: dict[str, str],
-    *,
-    safety_status: str,
-) -> dict[str, object]:
-    statuses = dict(status_map)
-    statuses["handoff_safety_scan"] = safety_status
-    return {
-        "validation": aggregate_component_status(statuses.values()),
-        "handoff_verify": statuses.get("handoff_verify", "NOT_RUN"),
-        "handoff_safety": safety_status,
-        "blocked_count": sum(1 for status in statuses.values() if status == "BLOCKED"),
-        "fail_count": sum(1 for status in statuses.values() if status == "FAIL"),
-    }
 
 
 def validation_with_status_overrides(

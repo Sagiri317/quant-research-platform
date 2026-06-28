@@ -346,12 +346,12 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     research = (
         root / "data" / "research" / MARKET_ID / PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
     )
-    evaluation_roots = _output_roots(
+    evaluation_bundles = _output_bundles(
         outputs_root,
         preferred_id=default_evaluation_run_id(),
         output_definition_id="evaluation_outputs",
     )
-    prediction_roots = _output_roots(
+    prediction_bundles = _output_bundles(
         outputs_root,
         preferred_id=default_prediction_smoke_id(test_start="2014-07-01"),
         output_definition_id="prediction_outputs",
@@ -390,7 +390,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         ),
         AggregateInput(
             "evaluation_parity",
-            evaluation_roots,
+            evaluation_bundles,
             default_evaluation_period(
                 evaluation_start="2014-01-29",
                 evaluation_end="2014-12-31",
@@ -400,7 +400,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
         ),
         AggregateInput(
             "prediction_oos_smoke_parity",
-            prediction_roots,
+            prediction_bundles,
             _prediction_oos_expected_period(),
             "prediction OOS smoke",
             summary_kind="outputs",
@@ -420,7 +420,7 @@ def _area_inputs(root: Path) -> tuple[AggregateInput, ...]:
     )
 
 
-def _output_roots(
+def _output_bundles(
     outputs_root: Path,
     *,
     preferred_id: str,
@@ -444,10 +444,10 @@ def _output_roots(
     return discovered if discovered else (preferred,)
 
 
-def _output_manifest_definition_id(output_root: Path) -> str | None:
+def _output_manifest_definition_id(output_bundle: Path) -> str | None:
     try:
         payload = read_qrp_json(
-            output_root / "manifest.json",
+            output_bundle / "manifest.json",
             expected_schema_id="qrp-output-manifest",
             error="output_manifest_schema_id_invalid",
         )
@@ -622,7 +622,7 @@ def _summarize_area_input(
             raise ValueError("expected_single_project_root")
         return _summarize_generated_full_market_panel(area_input.roots[0])
     if area_input.summary_kind == "outputs":
-        return _summarize_output_roots(area_input.roots)
+        return _summarize_output_bundles(area_input.roots)
     return _summarize_roots(
         area_input.roots,
         years=area_input.years,
@@ -701,7 +701,7 @@ def _iter_generated_full_market_panel_session_chunks(
         lookahead_sessions=1,
     ).windows(
         time_window,
-        reason="verification_evidence_generated_panel",
+        reason="verification_summary_generated_panel",
     )
     market_bars_columns = tuple(inspect_dataset(market_bars_root).columns)
     for window in windows:
@@ -790,7 +790,7 @@ def _summarize_roots(
     return _combine_summaries(summaries)
 
 
-def _summarize_output_roots(roots: tuple[Path, ...]) -> AggregateSummary:
+def _summarize_output_bundles(roots: tuple[Path, ...]) -> AggregateSummary:
     return _summarize_frames(_iter_output_frames(roots))
 
 

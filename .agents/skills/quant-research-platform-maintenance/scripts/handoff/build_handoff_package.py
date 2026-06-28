@@ -38,7 +38,6 @@ from governance_contract import (  # noqa: E402
     normalized_handoff_evidence_path,
     normalized_handoff_markdown_evidence_path,
     source_tree_scan_payload,
-    status_summary_from_validation,
     validate_validation_evidence_contract,
     validation_status_map,
     validation_with_status_overrides,
@@ -53,6 +52,16 @@ from quant_research_platform.policy.share_safety import (  # noqa: E402
 )
 
 PACKAGE_SCHEMA_ID = "qrp-handoff-sidecar"
+MANDATORY_VALIDATION_CHECKS = {
+    "tests",
+    "smoke",
+    "compare",
+    "handoff_verify",
+    "handoff_safety_scan",
+    "governance",
+    "code_map",
+}
+ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -434,11 +443,11 @@ def generation_payload(
 
 
 def validation_status(validation_evidence: dict[str, object]) -> str:
-    checks = validation_evidence.get("checks")
-    if not isinstance(checks, list):
-        return "BLOCKED"
+    status_map = validation_status_map(validation_evidence)
     statuses = [
-        str(row.get("status") or "").upper() for row in checks if isinstance(row, dict)
+        status
+        for name, status in status_map.items()
+        if name in MANDATORY_VALIDATION_CHECKS
     ]
     return aggregate_component_status(statuses)
 
@@ -486,6 +495,7 @@ def sidecar_payload(
             status_map,
             safety_status="PASS" if safety.ok else "FAIL",
         ),
+        "advisory_reviews": advisory_reviews_from_validation(status_map),
     }
 
 
@@ -493,6 +503,34 @@ def handoff_zip_scan(zip_path: Path, *, json_path: Path | None = None):
     from verify_handoff_package import scan_handoff_zip
 
     return scan_handoff_zip(zip_path, json_path=json_path)
+
+
+def status_summary_from_validation(
+    status_map: dict[str, str],
+    *,
+    safety_status: str,
+) -> dict[str, object]:
+    statuses = {
+        name: status
+        for name, status in status_map.items()
+        if name in MANDATORY_VALIDATION_CHECKS
+    }
+    statuses["handoff_safety_scan"] = safety_status
+    return {
+        "validation": aggregate_component_status(statuses.values()),
+        "handoff_verify": statuses.get("handoff_verify", "NOT_RUN"),
+        "handoff_safety": safety_status,
+        "blocked_count": sum(1 for status in statuses.values() if status == "BLOCKED"),
+        "fail_count": sum(1 for status in statuses.values() if status == "FAIL"),
+    }
+
+
+def advisory_reviews_from_validation(status_map: dict[str, str]) -> dict[str, str]:
+    return {
+        name: status
+        for name, status in sorted(status_map.items())
+        if name in ADVISORY_REVIEW_CHECKS
+    }
 
 
 def artifact_entries(root: Path, paths: Iterable[str]) -> list[dict[str, object]]:

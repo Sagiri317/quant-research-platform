@@ -123,8 +123,6 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     assert manifest["row_count"] == 3
     assert spec_payload["data_id"] == "x"
     assert spec_payload["schema_id"] == "qrp-dataset-spec"
-    assert "schema_version" not in spec_payload
-    assert "contract_version" not in spec_payload
     assert spec_payload["kind"] == "factor"
     assert "category" not in spec_payload
     assert "processed_data_id" not in spec_payload
@@ -341,7 +339,7 @@ def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -
 def test_write_dataset_rejects_generic_tmp_artifact_root_fail_closed(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="invalid_processed_output_root"):
+    with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
         write_dataset(
             tmp_path / "data" / "processed" / "a_share" / "factor" / ".tmp-user",
             _frame(),
@@ -447,12 +445,7 @@ def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
         ("spec.json", {}, "dataset_spec_schema_id_invalid"),
         (
             "spec.json",
-            {"schema_version": "0.1"},
-            "dataset_spec_schema_id_invalid",
-        ),
-        (
-            "spec.json",
-            {"contract_version": "0.1"},
+            {"schema_id": ""},
             "dataset_spec_schema_id_invalid",
         ),
         (
@@ -464,19 +457,14 @@ def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
             "spec.json",
             {
                 "schema_id": "qrp-dataset-spec",
-                "metadata": {"contract_version": "0.1"},
+                "metadata": {"schema_id": "nested/version"},
             },
             "dataset_spec_schema_id_invalid",
         ),
         ("_manifest/manifest.json", {}, "dataset_manifest_schema_id_invalid"),
         (
             "_manifest/manifest.json",
-            {"schema_version": "0.1"},
-            "dataset_manifest_schema_id_invalid",
-        ),
-        (
-            "_manifest/manifest.json",
-            {"contract_version": "0.1"},
+            {"schema_id": ""},
             "dataset_manifest_schema_id_invalid",
         ),
         (
@@ -488,7 +476,7 @@ def test_read_dataset_manifest_failures_are_closed(tmp_path: Path) -> None:
             "_manifest/manifest.json",
             {
                 "schema_id": "qrp-dataset-manifest",
-                "metadata": {"contract_version": "0.1"},
+                "metadata": {"schema_id": "nested/version"},
             },
             "dataset_manifest_schema_id_invalid",
         ),

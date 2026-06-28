@@ -65,6 +65,10 @@ def test_handoff_package_contract_uses_evidence_mode_outputs() -> None:
     assert "def aggregate_component_status" not in verifier
     assert "def aggregate_validation_matrix_status" not in verifier
     assert "def aggregate_status" not in builder
+    assert "BLOCKED_DUPLICATE_SOURCE_ROOTS =" not in verifier
+    assert "FORBIDDEN_PATH_SEGMENTS =" not in verifier
+    assert "PACKAGE_FORBIDDEN_PATH_PARTS" in verifier
+    assert "BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES" in verifier
 
 
 def test_pr_closure_only_entries_are_not_required_for_evidence_mode() -> None:
@@ -345,7 +349,7 @@ def test_share_safe_text_checks_use_policy_share_safety_single_source() -> None:
         encoding="utf-8"
     )
     report_safety = Path(
-        "src/quant_research_platform/reports/verification_evidence.py"
+        "src/quant_research_platform/reports/verification_summary.py"
     ).read_text(encoding="utf-8")
 
     assert "unsafe_for_share_reason" in agent_safety

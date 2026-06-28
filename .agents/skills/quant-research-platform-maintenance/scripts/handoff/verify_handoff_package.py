@@ -27,6 +27,7 @@ if str(SCRIPT_REPO_SRC) not in sys.path:
 
 from governance_contract import (  # noqa: E402
     BLOCKED_PACKAGE_ENTRY_PARTS,
+    BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES,
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
     PACKAGE_FORBIDDEN_PATH_PARTS,
@@ -65,15 +66,16 @@ GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
-BLOCKED_DUPLICATE_SOURCE_ROOTS = (
-    ".agents/",
-    "docs/",
-    "run_tools/",
-    "schemas/",
-    "src/",
-    "templates/",
-    "tests/",
-)
+MANDATORY_VALIDATION_CHECKS = {
+    "tests",
+    "smoke",
+    "compare",
+    "handoff_verify",
+    "handoff_safety_scan",
+    "governance",
+    "code_map",
+}
+ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 TRACKED_HANDOFF_SOURCE_PATHS = (
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/verify_handoff_package.py",
@@ -109,7 +111,6 @@ BUNDLE_CONTENT_SCAN_EXEMPT_FILES = {
     "environment.yml",
     "pyproject.toml",
 }
-FORBIDDEN_PATH_SEGMENTS = PACKAGE_FORBIDDEN_PATH_PARTS
 STALE_MARKERS: tuple[str, ...] = ()
 BUNDLE_TEXT_SIZE_CAP_BYTES = 2 * 1024 * 1024
 
@@ -556,7 +557,7 @@ def verify_handoff_package(zip_path: Path, json_path: Path) -> list[str]:
             duplicate_source = sorted(
                 name
                 for name in names
-                if name.startswith(BLOCKED_DUPLICATE_SOURCE_ROOTS)
+                if name.startswith(BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES)
             )
             failures.extend(
                 f"duplicate_tracked_source_in_zip: {name}" for name in duplicate_source
@@ -595,6 +596,7 @@ def verify_sidecar_shape(sidecar: dict[str, object], zip_path: Path) -> list[str
         "final_head",
         "generated_at_utc",
         "status_summary",
+        "advisory_reviews",
     }
     extra = sorted(set(sidecar) - allowed)
     failures.extend(f"sidecar_unapproved_field: {key}" for key in extra)
@@ -671,6 +673,7 @@ def verify_sidecar_schema(sidecar: dict[str, object]) -> list[str]:
         "final_head",
         "generated_at_utc",
         "status_summary",
+        "advisory_reviews",
     }
     if set(sidecar) - allowed:
         failures.append("sidecar_schema_invalid")
@@ -832,7 +835,12 @@ def validation_sidecar_status_failures(
     if not isinstance(status_summary, dict):
         return failures
     row_status = validation_status_map(validation_payload)
-    validation_status = aggregate_component_status(row_status.values())
+    mandatory_statuses = {
+        name: status
+        for name, status in row_status.items()
+        if name in MANDATORY_VALIDATION_CHECKS
+    }
+    validation_status = aggregate_component_status(mandatory_statuses.values())
     if status_summary.get("validation") != validation_status:
         failures.append("validation_status_summary_mismatch")
     pairs = {
@@ -841,16 +849,30 @@ def validation_sidecar_status_failures(
     }
     for summary_key, check_name in pairs.items():
         if (
-            check_name in row_status
-            and status_summary.get(summary_key) != row_status[check_name]
+            check_name in mandatory_statuses
+            and status_summary.get(summary_key) != mandatory_statuses[check_name]
         ):
             failures.append(f"status_summary_{summary_key}_mismatch")
-    blocked_count = sum(1 for status in row_status.values() if status == "BLOCKED")
-    fail_count = sum(1 for status in row_status.values() if status == "FAIL")
+    blocked_count = sum(
+        1 for status in mandatory_statuses.values() if status == "BLOCKED"
+    )
+    fail_count = sum(1 for status in mandatory_statuses.values() if status == "FAIL")
     if status_summary.get("blocked_count") != blocked_count:
         failures.append("status_summary_blocked_count_mismatch")
     if status_summary.get("fail_count") != fail_count:
         failures.append("status_summary_fail_count_mismatch")
+    advisory_reviews = sidecar.get("advisory_reviews")
+    if advisory_reviews is not None:
+        if not isinstance(advisory_reviews, dict):
+            failures.append("advisory_reviews_invalid")
+        else:
+            expected_advisory = {
+                name: status
+                for name, status in row_status.items()
+                if name in ADVISORY_REVIEW_CHECKS
+            }
+            if advisory_reviews != expected_advisory:
+                failures.append("advisory_reviews_mismatch")
     return failures
 
 

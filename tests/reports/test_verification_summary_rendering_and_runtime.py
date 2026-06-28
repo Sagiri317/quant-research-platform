@@ -7,7 +7,7 @@ from quant_research_platform.reports.execution_metrics import (
     format_optional_mb,
     render_stage_profile_report,
 )
-from quant_research_platform.reports.verification_evidence import (
+from quant_research_platform.reports.verification_summary import (
     render_local_verification_inventory_markdown,
     render_review_safe_aggregate_evidence_markdown,
 )

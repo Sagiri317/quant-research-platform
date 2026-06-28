@@ -1,4 +1,4 @@
-"""Execution metrics helpers for verification evidence runs."""
+"""Execution metrics helpers for local verification runs."""
 
 from __future__ import annotations
 

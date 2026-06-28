@@ -1,4 +1,4 @@
-"""Aggregate verification evidence payload builders and renderers."""
+"""Local verification run summary builders and renderers."""
 
 from __future__ import annotations
 
@@ -6,17 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from quant_research_platform.policy.check_status import (
-    overall_verification_status,
-    validate_verification_statuses,
-)
 from quant_research_platform.policy.share_safety import (
     contains_source_local_key,
     evidence_json_unsafe_reason,
     evidence_text_unsafe_reason,
 )
 from quant_research_platform.runtime.logical_paths import (
-    EVIDENCE_LOGICAL_PATH_MARKERS,
+    RUN_RESULT_LOGICAL_PATH_MARKERS,
     dataset_layer_from_path,
     logical_path,
 )
@@ -44,18 +40,18 @@ def build_validation_summary(
             inspection = inspect_dataset(root)
         except ValueError:
             missing_dataset_manifests.append(
-                logical_path(root, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
+                logical_path(root, markers=RUN_RESULT_LOGICAL_PATH_MARKERS)
             )
             continue
         manifest = inspection.manifest
         if not manifest:
             missing_dataset_manifests.append(
-                logical_path(root, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
+                logical_path(root, markers=RUN_RESULT_LOGICAL_PATH_MARKERS)
             )
             continue
         data_id = str(
             manifest.get("data_id")
-            or logical_path(root, markers=EVIDENCE_LOGICAL_PATH_MARKERS)
+            or logical_path(root, markers=RUN_RESULT_LOGICAL_PATH_MARKERS)
         )
         validation_status = manifest.get("validation_status")
         if validation_status is not None and str(validation_status).lower() not in {
@@ -130,59 +126,11 @@ def build_validation_summary(
             "missing": missing_dataset_manifests,
             "checked_count": len(dataset_roots),
         },
-        "layer_manifest_completeness": {
+        "data_layer_summary_completeness": {
             "missing": [],
             "checked_count": len(layer_summaries),
         },
         "share_safety_scan": safety,
-        "created_at": _utc_now(),
-    }
-
-
-def build_verification_evidence_payload(
-    *,
-    run_id: str,
-    date_range: dict[str, str],
-    manifests: dict[str, object],
-    timings: dict[str, object],
-    validation_summary: dict[str, object],
-    run_root: Path,
-    smoke_status: str = "NOT_RUN",
-    compare_status: str = "NOT_RUN",
-    full_horizon_status: str = "NOT_RUN",
-    compare_evidence: dict[str, object] | None = None,
-    full_horizon_evidence: dict[str, object] | None = None,
-    runtime_resource_policy: dict[str, object] | None = None,
-    runtime_execution_plan: dict[str, object] | None = None,
-) -> dict[str, Any]:
-    statuses = validate_verification_statuses(
-        smoke_status=smoke_status,
-        compare_status=compare_status,
-        full_horizon_status=full_horizon_status,
-        compare_evidence=compare_evidence,
-        full_horizon_evidence=full_horizon_evidence,
-    )
-    return {
-        "schema_id": "qrp-verification-evidence",
-        "run_id": run_id,
-        "status": overall_verification_status(
-            validation_summary.get("status", "FAIL"),
-            statuses,
-        ),
-        "date_range": date_range,
-        "run_root": logical_path(
-            run_root,
-            markers=EVIDENCE_LOGICAL_PATH_MARKERS,
-        ),
-        **statuses,
-        "manifest_status": manifests,
-        "runtime_resource_policy": runtime_resource_policy or {},
-        "runtime_execution_plan": runtime_execution_plan or {},
-        "timings": timings,
-        "validation_summary": validation_summary,
-        "output_scope": "REVIEW_SAFE",
-        "row_level_output_committed": False,
-        "source_level_compare_engine": False,
         "created_at": _utc_now(),
     }
 
@@ -338,7 +286,7 @@ def _share_safety_scan(paths: tuple[Path, ...]) -> dict[str, object]:
                 {
                     "path": logical_path(
                         path,
-                        markers=EVIDENCE_LOGICAL_PATH_MARKERS,
+                    markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
                     ),
                     "reason": reason,
                 }
@@ -369,7 +317,6 @@ def _utc_now() -> str:
 
 
 __all__ = [
-    "build_verification_evidence_payload",
     "build_validation_summary",
     "render_local_verification_inventory_markdown",
     "render_review_safe_aggregate_evidence_markdown",

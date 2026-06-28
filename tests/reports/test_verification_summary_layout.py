@@ -21,13 +21,4 @@ def test_local_verification_layout_uses_normal_internal_directory_names() -> Non
     assert layout.logs_root == run_root / "logs"
     assert layout.summary_md_path == run_root / "summary.md"
 
-    for retired_name in (
-        "output_root",
-        "config_root",
-        "evidence_root",
-        "manifests_root",
-        "validations_root",
-        "timings_root",
-        "summary_json_path",
-    ):
-        assert not hasattr(layout, retired_name)
+    assert set(layout.__dataclass_fields__) == {"run_root"}

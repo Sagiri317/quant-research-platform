@@ -186,6 +186,10 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
         "retired_result_local_output_root": "--output-root",
         "retired_result_compare_specialization": "baseline-final-compare.json",
         "retired_result_run_level_path": "validation_summary.json",
+        "retired_result_verification_evidence": "verification evidence",
+        "retired_result_verification_evidence_symbol": "verification_evidence",
+        "retired_result_layer_manifest": "layer_manifest",
+        "retired_result_review_safe_evidence": "report artifact",
     }
 
     patterns = {
@@ -203,6 +207,19 @@ def test_verify_governance_uses_current_local_only_roots() -> None:
 
     assert "run_outputs/local/" not in verify_governance
     assert '"outputs/"' in verify_governance
+
+
+def test_gitignore_is_active_doc_scanned_for_retired_result_paths(
+    tmp_path: Path,
+) -> None:
+    import verify_governance
+
+    (tmp_path / ".gitignore").write_text("run_outputs/local/\n", encoding="utf-8")
+    result = verify_governance.Result()
+
+    verify_governance.check_text_safety(result, tmp_path, [".gitignore"])
+
+    assert any("retired_result_run_outputs" in error for error in result.errors)
 
 
 def test_structured_json_identity_rules_reject_retired_keys_and_versions() -> None:
@@ -324,7 +341,7 @@ def test_prediction_output_builder_does_not_prederive_oos_end() -> None:
 def test_local_verification_replaces_retired_public_names() -> None:
     expected_files = {
         Path("src/quant_research_platform/workflows/local_verification.py"),
-        Path("src/quant_research_platform/reports/verification_evidence.py"),
+        Path("src/quant_research_platform/reports/verification_summary.py"),
     }
     retired_files = {
         Path("src/quant_research_platform/workflows/" + "private" + "_evidence.py"),
@@ -435,7 +452,7 @@ APPROVED_WRITER_MODULES = {
     ),
     Path(
         ".agents/skills/quant-research-platform-maintenance/scripts/"
-        "compare_verification_evidence.py"
+        "compare_run_results.py"
     ),
     Path("src/quant_research_platform/storage/atomic.py"),
     Path("src/quant_research_platform/storage/datasets.py"),

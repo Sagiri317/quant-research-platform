@@ -18,7 +18,7 @@ from quant_research_platform.policy.share_safety import (
 from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage.atomic import atomic_write_text
 
-_LOGICAL_PATH_MARKERS = ("data", "manifests", "validations", "timings")
+_DATASET_LOGICAL_PATH_MARKERS = ("data",)
 
 
 def read_manifest(path: Path) -> dict[str, Any]:
@@ -123,11 +123,11 @@ def build_layer_summary(
     for dataset_root in dataset_roots:
         path = Path(dataset_root) / "_manifest" / "manifest.json"
         if not path.is_file():
-            missing.append(logical_path(path, markers=_LOGICAL_PATH_MARKERS))
+            missing.append(logical_path(path, markers=_DATASET_LOGICAL_PATH_MARKERS))
             continue
         payload = read_manifest(path)
         if payload.get("schema_id") != "qrp-dataset-manifest":
-            missing.append(logical_path(path, markers=_LOGICAL_PATH_MARKERS))
+            missing.append(logical_path(path, markers=_DATASET_LOGICAL_PATH_MARKERS))
             continue
         summary = {
             "row_count": payload.get("row_count"),
@@ -139,7 +139,10 @@ def build_layer_summary(
         datasets.append(
             {
                 "data_id": _data_id_from_manifest(payload, dataset_root),
-                "manifest_path": logical_path(path, markers=_LOGICAL_PATH_MARKERS),
+                "manifest_path": logical_path(
+                    path,
+                    markers=_DATASET_LOGICAL_PATH_MARKERS,
+                ),
                 "manifest_summary": summary,
             }
         )
@@ -194,7 +197,7 @@ def _data_id_from_manifest(payload: dict[str, Any], dataset_root: Path) -> str:
     value = payload.get("data_id")
     if value:
         return str(value)
-    return logical_path(Path(dataset_root), markers=_LOGICAL_PATH_MARKERS)
+    return logical_path(Path(dataset_root), markers=_DATASET_LOGICAL_PATH_MARKERS)
 
 
 def _utc_now() -> str:
