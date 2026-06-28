@@ -6,7 +6,7 @@
 
 QRP 是本地量化研究平台，目标是支持数据合同、因子研究、特征处理、模型训练、预测、评估、组合构建、报告和 evidence 管理。QRP 不是生产交易系统，不是 paper trading 系统，不是 live trading 系统，不接 broker，不接 exchange，不提供 investment advice。
 
-未经用户明确批准，禁止新增 public API、CLI、registry、store、facade、scheduler、worker、deployment、external LLM API、vendor API、broker connector、exchange connector。未经用户明确批准，禁止访问 private data 或生成 row-level private-derived public output。
+未经用户明确批准，禁止新增 public API、CLI、registry、store、facade、scheduler、worker、deployment、external LLM API、vendor API、broker connector、exchange connector。未经用户明确批准，禁止访问 private data 或生成 row-level private-derived review-safe output。
 
 ## 2. live git baseline
 
@@ -78,7 +78,7 @@ Retired stage naming 不得以文件名、路径名、Python function/class/fixt
 
 ## 8. private safety
 
-禁止把 private data、vendor marker、本地绝对路径、股票代码样本、raw traceback、row-level sample 写入 REVIEW_SAFE docs、handoff、reports、logs 或 final response。需要引用本地验证时，只写摘要、计数、hash、schema、command status 和 REVIEW_SAFE evidence。run output 主轴是 `LOCAL_ONLY` 和 `REVIEW_SAFE`，不要把 private/public 作为 run output 架构主轴。
+禁止把 private data、vendor marker、本地绝对路径、股票代码样本、raw traceback、row-level sample 写入 REVIEW_SAFE docs、handoff、reports、logs 或 final response。需要引用本地验证时，只写摘要、计数、hash、schema、command status 和 REVIEW_SAFE evidence。run output 主轴是 `LOCAL_ONLY` 和 `REVIEW_SAFE`。
 
 ## 9. 修改边界
 

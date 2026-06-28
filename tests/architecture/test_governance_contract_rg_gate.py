@@ -179,7 +179,7 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
     from governance_contract import RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
 
     examples = {
-        "retired_result_public_safe_evidence_tests": (
+        "retired_result_review_safety_tests": (
             "tests/architecture/test_public_safe_evidence.py"
         ),
         "retired_result_run_outputs": "run_outputs/local",
@@ -196,6 +196,20 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
         ),
         "retired_result_layer_manifest": "layer_manifest",
         "retired_result_review_safe_evidence": "report artifact",
+        "retired_review_safe_public_wording": "public-safe",
+        "retired_review_safe_public_record": "public_record",
+        "retired_review_safe_private_public_axis": "private/public",
+        "retired_review_safe_public_evidence_patterns": (
+            "FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS"
+        ),
+        "retired_local_verification_evidence_window": "evidence_start",
+        "retired_local_verification_evidence_range": "out_of_evidence_range",
+        "retired_local_verification_evidence_output": "evidence-output",
+        "retired_output_artifact_root_error": "output_must_use_artifact_root",
+        "retired_verification_summary_contract_version_text": (
+            "contract version `0.1`"
+        ),
+        "retired_local_evidence_workflow_text": "local evidence workflow",
     }
 
     patterns = {
@@ -241,7 +255,7 @@ def test_gitignore_rejects_outputs_local_layout(tmp_path: Path) -> None:
     )
 
 
-def test_active_docs_reject_retired_public_safe_evidence_names(
+def test_active_docs_reject_retired_review_safety_names(
     tmp_path: Path,
 ) -> None:
     import verify_governance
@@ -250,6 +264,21 @@ def test_active_docs_reject_retired_public_safe_evidence_names(
         "tests/architecture/test_public_safe_evidence.py",
         "tests/architecture/test_public_safe_evidence_data_contract.py",
         "public_safe_evidence",
+        "public-safe",
+        "public_record",
+        "public evidence",
+        "private/public",
+        "private-derived public",
+        "FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS",
+        "evidence_start",
+        "evidence_end",
+        "out_of_evidence_range",
+        "evidence_years",
+        "evidence-output",
+        "evidence_output",
+        "output_must_use_artifact_root",
+        "contract version `0.1`",
+        "local evidence workflow",
         "runtime privacy",
         "report artifact",
     )

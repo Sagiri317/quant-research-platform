@@ -8,7 +8,7 @@ from quant_research_platform.contracts.workflows import (
     WorkflowRunSummary,
 )
 from quant_research_platform.runtime.workflow_records import (
-    workflow_run_summary_to_public_record,
+    workflow_run_summary_to_review_safe_record,
 )
 
 
@@ -62,7 +62,9 @@ def test_workflow_run_summary_to_record_includes_failure_code_when_present() -> 
     assert failed_summary.to_record()["failure_code"] == "unknown_workflow_node"
 
 
-def test_workflow_run_summary_to_public_record_sanitizes_mapping(monkeypatch) -> None:
+def test_workflow_run_summary_to_review_safe_record_sanitizes_mapping(
+    monkeypatch,
+) -> None:
     import quant_research_platform.runtime.workflow_records as workflow_records
 
     calls: list[dict[str, object]] = []
@@ -75,11 +77,11 @@ def test_workflow_run_summary_to_public_record_sanitizes_mapping(monkeypatch) ->
     summary = _summary(workflow_id="workflow-private-marker")
     monkeypatch.setattr(workflow_records, "sanitize_shared_object", fake_sanitizer)
 
-    assert workflow_run_summary_to_public_record(summary) == {"sanitized": True}
+    assert workflow_run_summary_to_review_safe_record(summary) == {"sanitized": True}
     assert calls == [summary.to_record()]
 
 
-def test_workflow_run_summary_to_public_record_rejects_non_mapping(
+def test_workflow_run_summary_to_review_safe_record_rejects_non_mapping(
     monkeypatch,
 ) -> None:
     import quant_research_platform.runtime.workflow_records as workflow_records
@@ -90,5 +92,8 @@ def test_workflow_run_summary_to_public_record_rejects_non_mapping(
         lambda _value: ["not-a-mapping"],
     )
 
-    with pytest.raises(TypeError, match="workflow_public_record_must_be_mapping"):
-        workflow_run_summary_to_public_record(_summary())
+    with pytest.raises(
+        TypeError,
+        match="workflow_review_safe_record_must_be_mapping",
+    ):
+        workflow_run_summary_to_review_safe_record(_summary())

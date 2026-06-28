@@ -44,7 +44,7 @@ def test_local_verification_replace_output_rejects_unowned_directory(
     module = _workflow_module()
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    run_root = repo_root / ".run" / "local" / "evidence-output"
+    run_root = repo_root / ".run" / "local" / "local-verification-output"
     run_root.mkdir(parents=True)
     (run_root / "unowned.txt").write_text("do not replace\n", encoding="utf-8")
 
@@ -54,7 +54,7 @@ def test_local_verification_replace_output_rejects_unowned_directory(
     ):
         module._prepare_run_root(
             run_root,
-            run_id="evidence_output",
+            run_id="local_verification_output",
             replace_output=True,
             repo_root=repo_root,
         )

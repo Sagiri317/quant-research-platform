@@ -54,7 +54,7 @@ REQUIRED_FIELDS = {
     "human_approval_required",
 }
 
-FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS = [
+FORBIDDEN_REVIEW_SAFE_EVIDENCE_PATTERNS = [
     "csmar",
     "CSMAR",
     "C:/",
@@ -419,13 +419,13 @@ def test_review_safe_parity_evidence_has_no_local_samples(tmp_path: Path) -> Non
     paths = _write_review_safe_evidence_files(tmp_path)
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
-    for term in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS:
+    for term in FORBIDDEN_REVIEW_SAFE_EVIDENCE_PATTERNS:
         assert term not in combined
 
 
 def test_review_safe_evidence_forbids_physical_research_root_not_logical_root() -> None:
-    assert "data/research" in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS
-    assert "research/a_share/demo" not in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS
+    assert "data/research" in FORBIDDEN_REVIEW_SAFE_EVIDENCE_PATTERNS
+    assert "research/a_share/demo" not in FORBIDDEN_REVIEW_SAFE_EVIDENCE_PATTERNS
 
 
 def test_review_safe_parity_evidence_uses_lf_newlines(tmp_path: Path) -> None:
@@ -489,7 +489,7 @@ def test_local_verification_inventory_has_no_local_samples(tmp_path: Path) -> No
     paths = _write_local_inventory_files(tmp_path)
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
-    for term in FORBIDDEN_PUBLIC_EVIDENCE_PATTERNS:
+    for term in FORBIDDEN_REVIEW_SAFE_EVIDENCE_PATTERNS:
         assert term not in combined
 
 

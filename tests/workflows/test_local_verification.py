@@ -167,7 +167,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
                 "evaluation_start_date": "2013-12-31",
                 "evaluation_end_date": "2014-01-02",
             },
-            "evaluation_window_out_of_evidence_range",
+            "evaluation_window_out_of_run_range",
         ),
         (
             "bad-evaluation-end",
@@ -175,7 +175,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
                 "evaluation_start_date": "2014-01-02",
                 "evaluation_end_date": "2017-01-01",
             },
-            "evaluation_window_out_of_evidence_range",
+            "evaluation_window_out_of_run_range",
         ),
         (
             "bad-prediction-train",
@@ -183,7 +183,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
                 "prediction_train_end": "2013-12-31",
                 "prediction_test_start": "2014-01-02",
             },
-            "prediction_window_out_of_evidence_range",
+            "prediction_window_out_of_run_range",
         ),
         (
             "bad-prediction-test-start",
@@ -191,7 +191,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
                 "prediction_train_end": "2014-01-02",
                 "prediction_test_start": "2017-01-01",
             },
-            "prediction_window_out_of_evidence_range",
+            "prediction_window_out_of_run_range",
         ),
         (
             "bad-prediction-test-end",
@@ -200,7 +200,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
                 "prediction_test_start": "2014-01-03",
                 "prediction_test_end": "2017-01-01",
             },
-            "prediction_window_out_of_evidence_range",
+            "prediction_window_out_of_run_range",
         ),
     ]
 
@@ -635,7 +635,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     monkeypatch,
 ):
     calls: list[str] = []
-    evidence_years: list[tuple[int, ...]] = []
+    run_years: list[tuple[int, ...]] = []
     evaluation_run_ids: list[str] = []
     prediction_ids: list[str] = []
     portfolio_ids: list[str] = []
@@ -709,7 +709,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         "build_evaluation_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("evaluation")
-            or evidence_years.append((kwargs["time_window"].start.year,))
+            or run_years.append((kwargs["time_window"].start.year,))
             or evaluation_run_ids.append(kwargs["run_id"])
             or _fake_evaluation_result(kwargs)
         ),
@@ -719,7 +719,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         "build_prediction_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("prediction")
-            or evidence_years.append((kwargs["time_window"].start.year,))
+            or run_years.append((kwargs["time_window"].start.year,))
             or prediction_ids.append(kwargs["prediction_id"])
             or _fake_prediction_result(kwargs)
         ),
@@ -729,7 +729,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         "build_portfolio_result_from_research_dataset",
         lambda **kwargs: (
             calls.append("portfolio")
-            or evidence_years.append((kwargs["time_window"].start.year,))
+            or run_years.append((kwargs["time_window"].start.year,))
             or portfolio_ids.append(kwargs["portfolio_id"])
             or _fake_portfolio_result(kwargs)
         ),
@@ -758,7 +758,7 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
         *(["prediction"] * expected_prediction_count),
         "portfolio",
     ]
-    assert evidence_years == [(2014,)] * (expected_prediction_count + 2)
+    assert run_years == [(2014,)] * (expected_prediction_count + 2)
     assert evaluation_run_ids == ["signal_forward_return_20d"]
     assert prediction_ids == expected_prediction_ids
     assert portfolio_ids == ["signal_forward_return_20d_portfolio"]

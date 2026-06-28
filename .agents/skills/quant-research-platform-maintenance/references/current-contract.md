@@ -20,7 +20,7 @@ QRP 是本地量化研究平台。它支持 research workflow，不支持 live e
 
 ## 3. 数据合同
 
-公开仓库不得包含 private data、vendor marker、row-level sample、本地绝对路径、股票代码样本或 raw traceback。REVIEW_SAFE evidence 应只包含摘要、schema、计数、hash、命令状态和路径结构。结果安全边界使用 `LOCAL_ONLY` 和 `REVIEW_SAFE`，不使用 private/public 分类。
+公开仓库不得包含 private data、vendor marker、row-level sample、本地绝对路径、股票代码样本或 raw traceback。REVIEW_SAFE evidence 应只包含摘要、schema、计数、hash、命令状态和路径结构。结果安全边界使用 `LOCAL_ONLY` 和 `REVIEW_SAFE`。
 
 ## 4. current-contract-only
 

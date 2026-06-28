@@ -440,14 +440,14 @@ def _resolve_effective_windows(
 ) -> dict[str, str | None]:
     evaluation_start_date = config.evaluation_start_date or config.start_date
     evaluation_end_date = config.evaluation_end_date or config.end_date
-    evidence_start = pd.Timestamp(config.start_date)
-    evidence_end = pd.Timestamp(config.end_date)
+    run_start = pd.Timestamp(config.start_date)
+    run_end = pd.Timestamp(config.end_date)
     evaluation_start = pd.Timestamp(evaluation_start_date)
     evaluation_end = pd.Timestamp(evaluation_end_date)
     if evaluation_start > evaluation_end:
         raise ValueError("evaluation_start_date_after_end_date")
-    if evaluation_start < evidence_start or evaluation_end > evidence_end:
-        raise ValueError("evaluation_window_out_of_evidence_range")
+    if evaluation_start < run_start or evaluation_end > run_end:
+        raise ValueError("evaluation_window_out_of_run_range")
 
     prediction_train_end = config.prediction_train_end
     prediction_test_start = config.prediction_test_start
@@ -458,13 +458,13 @@ def _resolve_effective_windows(
         pd.Timestamp(prediction_test_end) if prediction_test_end is not None else None
     )
     if (
-        train_end < evidence_start
-        or train_end > evidence_end
-        or test_start < evidence_start
-        or test_start > evidence_end
-        or (test_end is not None and test_end > evidence_end)
+        train_end < run_start
+        or train_end > run_end
+        or test_start < run_start
+        or test_start > run_end
+        or (test_end is not None and test_end > run_end)
     ):
-        raise ValueError("prediction_window_out_of_evidence_range")
+        raise ValueError("prediction_window_out_of_run_range")
     if train_end >= test_start:
         raise ValueError("prediction_train_end_must_precede_test_start")
     if test_end is not None and test_end < test_start:

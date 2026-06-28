@@ -142,7 +142,7 @@ RUN_OUTPUT_ARCHITECTURE_RETIRED_NAME_RULES = (
 
 RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
     TextRule(
-        "retired_result_public_safe_evidence_tests",
+        "retired_result_review_safety_tests",
         (
             r"(?<![A-Za-z0-9_])(?:test_public_safe_evidence"
             r"(?:_data_contract)?(?:\.py)?|public_safe_evidence)"
@@ -198,6 +198,50 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
     TextRule(
         "retired_result_review_safe_evidence",
         r"\b(?:public_safe_evidence|runtime privacy|report artifact)\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_review_safe_public_wording",
+        r"\bpublic[-_ ]safe\b|\bpublic evidence\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_review_safe_public_record",
+        r"\bpublic_record\b",
+    ),
+    TextRule(
+        "retired_review_safe_private_public_axis",
+        r"\b(?:private/public|private-derived public)\b",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_review_safe_public_evidence_patterns",
+        r"\bFORBIDDEN_PUBLIC_EVIDENCE_PATTERNS\b",
+    ),
+    TextRule(
+        "retired_local_verification_evidence_window",
+        r"\b(?:evidence_start|evidence_end|evidence_years)\b",
+    ),
+    TextRule(
+        "retired_local_verification_evidence_range",
+        r"\bout_of_evidence_range\b",
+    ),
+    TextRule(
+        "retired_local_verification_evidence_output",
+        r"\b(?:evidence-output|evidence_output)\b",
+    ),
+    TextRule(
+        "retired_output_artifact_root_error",
+        r"\boutput_must_use_artifact_root\b",
+    ),
+    TextRule(
+        "retired_verification_summary_contract_version_text",
+        r"contract version `0\.1`",
+        re.IGNORECASE,
+    ),
+    TextRule(
+        "retired_local_evidence_workflow_text",
+        r"\blocal evidence workflow\b",
         re.IGNORECASE,
     ),
 )

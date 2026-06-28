@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from quant_research_platform.contracts.workflows import WorkflowRunPolicy, WorkflowSpec
 from quant_research_platform.runtime.workflow_records import (
-    workflow_run_summary_to_public_record,
+    workflow_run_summary_to_review_safe_record,
 )
 from quant_research_platform.workflows.executor import run_workflow
 from quant_research_platform.workflows.registry import (
@@ -30,9 +30,9 @@ def run_registered_workflow(
         run_policy=policy,
         run_id=run_id,
     )
-    public_record = workflow_run_summary_to_public_record(summary)
+    review_safe_record = workflow_run_summary_to_review_safe_record(summary)
     return {
-        **public_record,
+        **review_safe_record,
         "status": (
             "artifact_writing_not_implemented"
             if policy is WorkflowRunPolicy.WRITE_ARTIFACTS

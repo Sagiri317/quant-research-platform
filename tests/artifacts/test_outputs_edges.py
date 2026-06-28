@@ -463,7 +463,7 @@ def test_output_bundle_root_rejects_dataset_roots(
         lambda _root, _output_id: tmp_path / "data" / data_layer / "report",
     )
 
-    with pytest.raises(ValueError, match="output_must_use_artifact_root"):
+    with pytest.raises(ValueError, match="output_bundle_must_not_be_dataset_root"):
         outputs._derive_output_bundle_root(
             output_spec=_report_spec(
                 "prediction_outputs",

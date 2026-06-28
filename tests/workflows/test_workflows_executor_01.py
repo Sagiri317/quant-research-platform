@@ -15,7 +15,7 @@ from quant_research_platform.contracts.workflows import (
     WorkflowSpec,
 )
 from quant_research_platform.runtime.workflow_records import (
-    workflow_run_summary_to_public_record,
+    workflow_run_summary_to_review_safe_record,
 )
 from quant_research_platform.workflows.checkpoints import InMemoryCheckpointStore
 from quant_research_platform.workflows.executor import (
@@ -231,9 +231,9 @@ def test_workflow_summary_is_sanitized() -> None:
     )
 
     assert isinstance(summary, WorkflowRunSummary)
-    public_record = workflow_run_summary_to_public_record(summary)
-    assert "vendor" not in str(public_record).lower()
-    assert "source" not in str(public_record).lower()
+    review_safe_record = workflow_run_summary_to_review_safe_record(summary)
+    assert "vendor" not in str(review_safe_record).lower()
+    assert "source" not in str(review_safe_record).lower()
 
 
 def test_registered_workflow_rejects_unknown_node() -> None:

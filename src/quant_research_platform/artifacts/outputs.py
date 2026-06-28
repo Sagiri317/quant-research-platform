@@ -349,7 +349,7 @@ def write_prediction_outputs(
     if frame is None:
         raise ValueError("prediction_output_frame_required")
 
-    run_root = _derive_output_bundle_root(
+    output_bundle = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="prediction_outputs",
@@ -414,8 +414,8 @@ def write_prediction_outputs(
             ),
         )
 
-    atomic_write_directory(run_root, _write)
-    return run_root
+    atomic_write_directory(output_bundle, _write)
+    return output_bundle
 
 
 def _write_prediction_output_chunks(
@@ -427,7 +427,7 @@ def _write_prediction_output_chunks(
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
 ) -> Path:
-    run_root = _derive_output_bundle_root(
+    output_bundle = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="prediction_outputs",
@@ -483,8 +483,8 @@ def _write_prediction_output_chunks(
             ),
         )
 
-    atomic_write_directory(run_root, _write)
-    return run_root
+    atomic_write_directory(output_bundle, _write)
+    return output_bundle
 
 
 def write_evaluation_outputs(
@@ -500,7 +500,7 @@ def write_evaluation_outputs(
 ) -> Path:
     """Write local evaluation outputs under local output root."""
 
-    run_root = _derive_output_bundle_root(
+    output_bundle = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="evaluation_outputs",
@@ -584,8 +584,8 @@ def write_evaluation_outputs(
             ),
         )
 
-    atomic_write_directory(run_root, _write)
-    return run_root
+    atomic_write_directory(output_bundle, _write)
+    return output_bundle
 
 
 def write_portfolio_outputs(
@@ -617,7 +617,7 @@ def _write_portfolio_output_chunks(
 ) -> Path:
     """Write local portfolio row outputs from bounded chunks."""
 
-    run_root = _derive_output_bundle_root(
+    output_bundle = _derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
         expected_definition_id="portfolio_outputs",
@@ -674,8 +674,8 @@ def _write_portfolio_output_chunks(
             ),
         )
 
-    atomic_write_directory(run_root, _write)
-    return run_root
+    atomic_write_directory(output_bundle, _write)
+    return output_bundle
 
 
 def _stage_profile_output_manifest_payload(
@@ -1514,13 +1514,13 @@ def _derive_output_bundle_root(
         raise ValueError("output_spec_mismatch")
     if output_spec.scope != OutputScope.LOCAL_ONLY:
         raise ValueError("output_scope_must_be_local_only")
-    run_root = output_bundle_root(layout.project_root, output_spec.output_id)
+    output_bundle = output_bundle_root(layout.project_root, output_spec.output_id)
     if any(
-        f"data/{layer}" in run_root.as_posix()
+        f"data/{layer}" in output_bundle.as_posix()
         for layer in ("raw", "interim", "processed", "research")
     ):
-        raise ValueError("output_must_use_artifact_root")
-    return run_root
+        raise ValueError("output_bundle_must_not_be_dataset_root")
+    return output_bundle
 
 
 def _write_parquet_chunks(

@@ -52,6 +52,8 @@ def test_review_safe_evidence_markdown_renders_status_rows() -> None:
     assert "factor value parity" in markdown
     assert "human approval required before final review status" in markdown
     assert "`handoff_ready | false`" in markdown
+    assert "`schema_id=qrp-a-share-aggregate-evidence`" in markdown
+    assert "Machine-readable run facts are recorded in run.json" in markdown
 
 
 def test_local_verification_inventory_markdown_renders_inventory() -> None:
@@ -86,6 +88,7 @@ def test_local_verification_inventory_markdown_renders_inventory() -> None:
 
     assert "processed/a_share/other/demo | uncovered" in markdown
     assert "uncovered dataset roots require review" in markdown
+    assert "Machine-readable run facts are recorded in run.json" in markdown
 
 
 def test_stage_profiler_records_and_renders() -> None:
