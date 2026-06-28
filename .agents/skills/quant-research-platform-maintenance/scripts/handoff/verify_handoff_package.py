@@ -71,6 +71,10 @@ GENERATION_EVIDENCE = "handoff_evidence/generation.json"
 SOURCE_TREE_SCAN_EVIDENCE = "handoff_evidence/source-tree-scan.json"
 VERIFICATION_MATRIX_EVIDENCE = "handoff_evidence/verification-matrix.json"
 SMOKE_COMPARE_STATUS_EVIDENCE = "handoff_evidence/smoke-compare-status.json"
+PORTABLE_STATUS_SUMMARY_SCHEMA_ID = "qrp-portable-status-summary"
+PORTABLE_STATUS_SUMMARY_TYPES = frozenset(
+    {"smoke", "compare", "local_verification", "run_compare"}
+)
 ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 TRACKED_HANDOFF_SOURCE_PATHS = (
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
@@ -1115,12 +1119,20 @@ def verify_pass_smoke_compare_result(
 
 
 def valid_source_artifact_path(value: str) -> bool:
-    if "\\" in value or not value.startswith(".run/"):
+    if evidence_json_value_unsafe_reason(value) is not None:
+        return False
+    if "\\" in value or not value.startswith(".run/") or value.endswith("/"):
         return False
     if value.startswith("/") or (len(value) >= 3 and value[1] == ":"):
         return False
-    parts = PurePosixPath(value).parts
-    return ".." not in parts
+    parts = value.split("/")
+    if len(parts) != 3 or parts[0] != ".run":
+        return False
+    if any(part == "" for part in parts):
+        return False
+    if any(part in {".", ".."} for part in parts[1:]):
+        return False
+    return parts[2].endswith(".json")
 
 
 def raw_artifact_policy_valid(value: str) -> bool:
@@ -1137,16 +1149,33 @@ def verify_smoke_compare_portable_summary(
     failures: list[str] = []
     if not isinstance(summary, dict):
         return [f"smoke_compare_status_portable_summary_invalid: {index}"]
-    for key in ("schema_id", "status"):
-        if not isinstance(summary.get(key), str) or not str(summary.get(key)).strip():
-            failures.append(
-                f"smoke_compare_status_portable_summary_missing: {index}:{key}"
-            )
-    if "summary_type" not in summary and "kind" not in summary:
+    schema_id = summary.get("schema_id")
+    if not isinstance(schema_id, str) or not schema_id.strip():
+        failures.append(
+            f"smoke_compare_status_portable_summary_missing: {index}:schema_id"
+        )
+    elif schema_id != PORTABLE_STATUS_SUMMARY_SCHEMA_ID:
+        failures.append(
+            f"smoke_compare_status_portable_summary_schema_id_invalid: {index}"
+        )
+    status = summary.get("status")
+    if not isinstance(status, str) or not status.strip():
+        failures.append(
+            f"smoke_compare_status_portable_summary_missing: {index}:status"
+        )
+    if "kind" in summary:
+        failures.append(
+            f"smoke_compare_status_portable_summary_kind_present: {index}"
+        )
+    summary_type = summary.get("summary_type")
+    if not isinstance(summary_type, str) or not summary_type.strip():
         failures.append(
             f"smoke_compare_status_portable_summary_missing: {index}:summary_type"
         )
-    status = summary.get("status")
+    elif summary_type not in PORTABLE_STATUS_SUMMARY_TYPES:
+        failures.append(
+            f"smoke_compare_status_portable_summary_type_invalid: {index}"
+        )
     if isinstance(status, str):
         normalized_status = status.strip().upper()
         if normalized_status not in VALID_STATUS_TOKENS:

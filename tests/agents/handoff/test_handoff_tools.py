@@ -1475,9 +1475,28 @@ def test_verify_smoke_compare_pass_requires_portable_artifact_evidence(
     (
         ("ok", "smoke_compare_status_portable_summary_invalid: 0"),
         ([], "smoke_compare_status_portable_summary_invalid: 0"),
+        ({}, "smoke_compare_status_portable_summary_missing: 0:schema_id"),
         (
             {"status": "PASS", "public_safe": True, "summary_type": "smoke"},
             "smoke_compare_status_portable_summary_missing: 0:schema_id",
+        ),
+        (
+            {
+                "schema_id": "",
+                "status": "PASS",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_missing: 0:schema_id",
+        ),
+        (
+            {
+                "schema_id": "x",
+                "status": "PASS",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_schema_id_invalid: 0",
         ),
         (
             {
@@ -1499,6 +1518,23 @@ def test_verify_smoke_compare_pass_requires_portable_artifact_evidence(
         (
             {
                 "schema_id": "qrp-portable-status-summary",
+                "status": "BROKEN",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS",
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_public_safe_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
                 "status": "PASS",
                 "public_safe": False,
                 "summary_type": "smoke",
@@ -1512,6 +1548,43 @@ def test_verify_smoke_compare_pass_requires_portable_artifact_evidence(
                 "public_safe": True,
             },
             "smoke_compare_status_portable_summary_missing: 0:summary_type",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS",
+                "public_safe": True,
+                "summary_type": "",
+            },
+            "smoke_compare_status_portable_summary_missing: 0:summary_type",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS",
+                "public_safe": True,
+                "summary_type": "unknown",
+            },
+            "smoke_compare_status_portable_summary_type_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS",
+                "public_safe": True,
+                "kind": "run_compare",
+            },
+            "smoke_compare_status_portable_summary_kind_present: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS",
+                "public_safe": True,
+                "summary_type": "smoke",
+                "kind": "smoke",
+            },
+            "smoke_compare_status_portable_summary_kind_present: 0",
         ),
     ),
 )
@@ -1528,6 +1601,37 @@ def test_verify_smoke_compare_rejects_weak_portable_summary_shape(
     failures = verifier.verify_smoke_compare_status(payload)
 
     assert failure in failures
+
+
+@pytest.mark.parametrize(
+    "source_artifact_path",
+    (
+        ".run/",
+        ".run//",
+        ".run/.",
+        ".run/foo",
+        ".run/foo/",
+        ".run/foo/.",
+        ".run/foo/..",
+        ".run/foo/run.txt",
+        "../run.json",
+        "C:/private/run.json",
+        r"E:\private\run.json",
+        r".run\foo\run.json",
+    ),
+)
+def test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes(
+    source_artifact_path: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _portable_smoke_compare_status_payload()
+    result = payload["results"][0]
+    assert isinstance(result, dict)
+    result["source_artifact_path"] = source_artifact_path
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert "smoke_compare_status_source_artifact_path_invalid: 0" in failures
 
 
 @pytest.mark.parametrize(
@@ -1591,16 +1695,47 @@ def test_verify_smoke_compare_rejects_unsafe_portable_result_fields(
     assert failure in failures
 
 
-def test_verify_smoke_compare_accepts_relative_run_source_artifact_path() -> None:
+@pytest.mark.parametrize(
+    "source_artifact_path",
+    (
+        ".run/foo/run.json",
+        ".run/local-verification-3y/run.json",
+        ".run/compare-3y-self/run.json",
+        ".run/smoke-20260628/run.json",
+    ),
+)
+def test_verify_smoke_compare_accepts_concrete_run_source_artifact_path(
+    source_artifact_path: str,
+) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     payload = _portable_smoke_compare_status_payload()
     result = payload["results"][0]
     assert isinstance(result, dict)
-    result["source_artifact_path"] = ".run/local-verification-3y/run.json"
+    result["source_artifact_path"] = source_artifact_path
 
     failures = verifier.verify_smoke_compare_status(payload)
 
     assert "smoke_compare_status_source_artifact_path_invalid: 0" not in failures
+
+
+@pytest.mark.parametrize(
+    "summary_type",
+    ("smoke", "compare", "local_verification", "run_compare"),
+)
+def test_verify_smoke_compare_accepts_fixed_portable_summary_type(
+    summary_type: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _portable_smoke_compare_status_payload()
+    result = payload["results"][0]
+    assert isinstance(result, dict)
+    portable_summary = result["portable_summary"]
+    assert isinstance(portable_summary, dict)
+    portable_summary["summary_type"] = summary_type
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert "smoke_compare_status_portable_summary_type_invalid: 0" not in failures
 
 
 @pytest.mark.parametrize(
