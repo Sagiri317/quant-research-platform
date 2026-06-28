@@ -18,13 +18,6 @@ HANDOFF_ROOT = REPO_ROOT / ".agents" / "skills" / "quant-research-platform-maint
 HANDOFF_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "build_handoff_package.py"
 VERIFY_SCRIPT = HANDOFF_ROOT / "scripts" / "handoff" / "verify_handoff_package.py"
 TEST_BRANCH = "feature/synthetic-handoff-review"
-MANDATORY_VALIDATION_CHECKS = (
-    "tests",
-    "smoke",
-    "compare",
-    "governance",
-    "code_map",
-)
 BUILDER_MODULE = None
 GOVERNANCE_MODULE = None
 
@@ -260,7 +253,7 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
         for row in validation_evidence["checks"]
         if isinstance(row, dict) and "name" in row
     }
-    for check_name in MANDATORY_VALIDATION_CHECKS:
+    for check_name in _mandatory_validation_checks():
         assert checks[check_name]["status"] == "PASS"
     assert checks["handoff_verify"]["status"] == "PASS"
     assert checks["handoff_safety_scan"] == {
@@ -323,6 +316,82 @@ def test_build_handoff_package_evidence_only_zip_contract(tmp_path: Path) -> Non
 
     verifier = _load_verify_module()
     assert verifier.verify_handoff_package(package, sidecar_path) == []
+
+
+def test_build_handoff_package_generates_missing_validation_evidence_mandatory_rows(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "synthetic-repo"
+    _init_synthetic_repo(repo)
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "evidence.txt").write_text("final\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "final evidence change")
+    final_head = _git(repo, "rev-parse", "HEAD").strip()
+
+    out_dir = tmp_path / "out"
+    task_path = tmp_path / "task-input.json"
+    slug = "synthetic-missing-validation"
+    run_handoffs = ".run/handoffs"
+    task_path.write_text(
+        json.dumps(
+            {
+                "schema_id": "qrp-handoff-task-metadata",
+                "mode": "evidence",
+                "slug": slug,
+                "branch": TEST_BRANCH,
+                "base": base,
+                "final_head": final_head,
+                "handoff_package_path": f"{run_handoffs}/{slug}.zip",
+                "handoff_sidecar_path": f"{run_handoffs}/{slug}.json",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(HANDOFF_SCRIPT),
+            "--repo-root",
+            str(repo),
+            "--task",
+            str(task_path),
+            "--out-dir",
+            str(out_dir),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    package = out_dir / f"{slug}.zip"
+    sidecar_path = out_dir / f"{slug}.json"
+    with zipfile.ZipFile(package) as archive:
+        validation_evidence = json.loads(
+            archive.read("validation_evidence.json").decode("utf-8")
+        )
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    checks = {row["name"]: row for row in validation_evidence["checks"]}
+
+    assert set(checks) == set(_mandatory_validation_checks())
+    assert "validation_evidence" not in checks
+    assert {row["status"] for row in checks.values()} == {"NOT_RUN"}
+    assert all(
+        "task validation_evidence missing; generated mandatory NOT_RUN row"
+        in row["evidence"]
+        for row in checks.values()
+    )
+    assert sidecar["status_summary"]["validation"] == "NOT_RUN"
+    failures = _load_verify_module().verify_handoff_package(package, sidecar_path)
+    assert not any(
+        failure.startswith("validation_evidence_mandatory_check_missing")
+        for failure in failures
+    )
 
 
 def test_build_handoff_package_rejects_reserved_handoff_evidence_path(
@@ -521,8 +590,12 @@ def _validation_checks(status: str) -> list[dict[str, str]]:
             "status": status,
             "evidence": f"{name} {status}",
         }
-        for name in MANDATORY_VALIDATION_CHECKS
+        for name in _mandatory_validation_checks()
     ]
+
+
+def _mandatory_validation_checks() -> tuple[str, ...]:
+    return tuple(sorted(_load_governance_module().MANDATORY_VALIDATION_CHECKS))
 
 
 def _git(repo: Path, *args: str) -> str:

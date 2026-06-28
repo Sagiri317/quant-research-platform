@@ -318,19 +318,29 @@ def handoff_sidecar_path_value(task: dict[str, object], json_path: Path) -> str:
 def task_validation_evidence(task: dict[str, object]) -> dict[str, object]:
     payload = task.get("validation_evidence")
     if isinstance(payload, dict):
+        if "checks" not in payload:
+            return missing_validation_evidence_payload()
         result = share_safe_json_clean(payload)
         validate_validation_evidence_contract(result, require_mandatory=False)
         return result
     if payload is not None:
         raise SystemExit("validation_evidence_must_be_object")
+    return missing_validation_evidence_payload()
+
+
+def missing_validation_evidence_payload() -> dict[str, object]:
     return {
         "schema_id": "qrp-handoff-validation-evidence",
         "checks": [
             {
-                "name": "validation_evidence",
+                "name": name,
                 "status": "NOT_RUN",
-                "evidence": "task validation_evidence was missing",
+                "evidence": (
+                    "task validation_evidence missing; "
+                    "generated mandatory NOT_RUN row"
+                ),
             }
+            for name in sorted(MANDATORY_VALIDATION_CHECKS)
         ],
     }
 

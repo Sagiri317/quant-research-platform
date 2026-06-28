@@ -18,15 +18,6 @@ HANDOFF_TOOL_ROOT = (
     / "handoff"
 )
 TEST_BRANCH = "feature/synthetic-handoff-review"
-MANDATORY_VALIDATION_CHECKS = (
-    "tests",
-    "smoke",
-    "compare",
-    "handoff_verify",
-    "handoff_safety_scan",
-    "governance",
-    "code_map",
-)
 
 
 def _load_handoff_module(name: str):
@@ -40,6 +31,11 @@ def _load_handoff_module(name: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+MANDATORY_VALIDATION_CHECKS = tuple(
+    sorted(_load_handoff_module("governance_contract").MANDATORY_VALIDATION_CHECKS)
+)
 
 
 def _retired_private_member_paths(
@@ -202,6 +198,8 @@ def _portable_smoke_compare_result_fields(index: int) -> dict[str, object]:
         "portable_summary": {
             "schema_id": "qrp-portable-status-summary",
             "status": "PASS",
+            "public_safe": True,
+            "summary_type": "local_verification" if index != 2 else "run_compare",
             "record_count": index + 1,
         },
         "raw_artifact_policy": (
@@ -285,6 +283,37 @@ def _replace_validation_evidence(
     )
 
 
+def _replace_generation_evidence(
+    package: Path,
+    sidecar: Path,
+    payload: dict[str, object],
+) -> None:
+    _rewrite_package_member(
+        package,
+        "handoff_evidence/generation.json",
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    _refresh_manifest_and_sidecar(package, sidecar)
+
+
+def _generation_evidence(package: Path) -> dict[str, object]:
+    with zipfile.ZipFile(package) as archive:
+        payload = json.loads(
+            archive.read("handoff_evidence/generation.json").decode("utf-8")
+        )
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _set_sidecar_validation_status(sidecar: Path, status: str) -> None:
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    payload["status_summary"]["validation"] = status
+    sidecar.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_tracked_handoff_tool_source_of_truth_exists() -> None:
     required = {
         "README.md",
@@ -346,6 +375,48 @@ def test_verifier_rejects_duplicate_required_zip_member(tmp_path: Path) -> None:
     failures = verifier.verify_handoff_package(package, sidecar)
 
     assert "duplicate_zip_member: task_metadata.json" in failures
+
+
+@pytest.mark.parametrize(
+    "member",
+    (
+        "artifact_manifest.json",
+        "handoff_evidence/generation.json",
+    ),
+)
+def test_verifier_rejects_duplicate_package_members(
+    tmp_path: Path,
+    member: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(package, "a") as archive:
+            archive.writestr(member, archive.read(member))
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert f"duplicate_zip_member: {member}" in failures
+
+
+def test_verifier_rejects_duplicate_artifact_manifest_entries(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    with zipfile.ZipFile(package) as archive:
+        manifest = json.loads(archive.read("artifact_manifest.json").decode("utf-8"))
+    manifest["entries"].append(dict(manifest["entries"][0]))
+    manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+    _rewrite_package_member(package, "artifact_manifest.json", manifest_bytes)
+    _update_sidecar_hashes(package, sidecar, manifest_bytes)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert (
+        f"artifact_manifest_duplicate_entry: {manifest['entries'][0]['path']}"
+        in failures
+    )
 
 
 @pytest.mark.parametrize(
@@ -1272,6 +1343,87 @@ def test_verify_handoff_package_rejects_validation_summary_mismatch(
     assert "validation_status_summary_mismatch" in failures
 
 
+def test_verify_handoff_package_rejects_generation_validation_status_sidecar_mismatch(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    generation = _generation_evidence(package)
+    generation["validation_status"] = "PASS"
+    _replace_generation_evidence(package, sidecar, generation)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "generation_validation_status_sidecar_mismatch" in failures
+
+
+def test_verify_handoff_package_rejects_generation_validation_status_aggregate_mismatch(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    generation = _generation_evidence(package)
+    generation["validation_status"] = "PASS"
+    _replace_generation_evidence(package, sidecar, generation)
+    _set_sidecar_validation_status(sidecar, "PASS")
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "generation_validation_status_validation_evidence_mismatch" in failures
+
+
+def test_verify_handoff_package_rejects_sidecar_validation_status_aggregate_mismatch(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    _set_sidecar_validation_status(sidecar, "PASS")
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "validation_status_summary_mismatch" in failures
+
+
+def test_verify_handoff_package_accepts_consistent_generation_validation_status(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "generation_validation_status_sidecar_mismatch" not in failures
+    assert "generation_validation_status_validation_evidence_mismatch" not in failures
+
+
+def test_verify_handoff_package_rejects_missing_generation_validation_status(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    generation = _generation_evidence(package)
+    generation.pop("validation_status")
+    _replace_generation_evidence(package, sidecar, generation)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "generation_evidence_missing: validation_status" in failures
+
+
+def test_verify_handoff_package_rejects_invalid_generation_validation_status(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
+    generation = _generation_evidence(package)
+    generation["validation_status"] = "BROKEN"
+    _replace_generation_evidence(package, sidecar, generation)
+
+    failures = verifier.verify_handoff_package(package, sidecar)
+
+    assert "generation_evidence_validation_status_invalid" in failures
+
+
 def test_verify_handoff_package_accepts_all_mandatory_validation_checks_pass(
     tmp_path: Path,
 ) -> None:
@@ -1316,6 +1468,139 @@ def test_verify_smoke_compare_pass_requires_portable_artifact_evidence(
     failures = verifier.verify_smoke_compare_status(payload)
 
     assert failure in failures
+
+
+@pytest.mark.parametrize(
+    ("summary", "failure"),
+    (
+        ("ok", "smoke_compare_status_portable_summary_invalid: 0"),
+        ([], "smoke_compare_status_portable_summary_invalid: 0"),
+        (
+            {"status": "PASS", "public_safe": True, "summary_type": "smoke"},
+            "smoke_compare_status_portable_summary_missing: 0:schema_id",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_missing: 0:status",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "NOT_RUN",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_mismatch: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS",
+                "public_safe": False,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_public_safe_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS",
+                "public_safe": True,
+            },
+            "smoke_compare_status_portable_summary_missing: 0:summary_type",
+        ),
+    ),
+)
+def test_verify_smoke_compare_rejects_weak_portable_summary_shape(
+    summary: object,
+    failure: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _portable_smoke_compare_status_payload()
+    result = payload["results"][0]
+    assert isinstance(result, dict)
+    result["portable_summary"] = summary
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert failure in failures
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "failure"),
+    (
+        (
+            "source_artifact_sha256",
+            "not-a-sha",
+            "smoke_compare_status_source_artifact_sha256_invalid: 0",
+        ),
+        (
+            "included_in_handoff",
+            True,
+            "smoke_compare_status_included_in_handoff_invalid: 0",
+        ),
+        (
+            "source_artifact_path",
+            "C:/private/run.json",
+            "smoke_compare_status_source_artifact_path_invalid: 0",
+        ),
+        (
+            "source_artifact_path",
+            "../run.json",
+            "smoke_compare_status_source_artifact_path_invalid: 0",
+        ),
+        (
+            "source_artifact_path",
+            ".run\\foo\\run.json",
+            "smoke_compare_status_source_artifact_path_invalid: 0",
+        ),
+        (
+            "command",
+            "python verify.py --input C:/private/run.json",
+            "smoke_compare_status_field_unsafe: 0:command:absolute_path",
+        ),
+        (
+            "scope",
+            "provider_name=raw-provider",
+            "smoke_compare_status_field_unsafe: 0:scope:vendor_marker",
+        ),
+        (
+            "raw_artifact_policy",
+            "row_samples=[aggregate]",
+            "smoke_compare_status_field_unsafe: 0:raw_artifact_policy:row_sample",
+        ),
+    ),
+)
+def test_verify_smoke_compare_rejects_unsafe_portable_result_fields(
+    field: str,
+    value: object,
+    failure: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _portable_smoke_compare_status_payload()
+    result = payload["results"][0]
+    assert isinstance(result, dict)
+    result[field] = value
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert failure in failures
+
+
+def test_verify_smoke_compare_accepts_relative_run_source_artifact_path() -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    payload = _portable_smoke_compare_status_payload()
+    result = payload["results"][0]
+    assert isinstance(result, dict)
+    result["source_artifact_path"] = ".run/local-verification-3y/run.json"
+
+    failures = verifier.verify_smoke_compare_status(payload)
+
+    assert "smoke_compare_status_source_artifact_path_invalid: 0" not in failures
 
 
 @pytest.mark.parametrize(

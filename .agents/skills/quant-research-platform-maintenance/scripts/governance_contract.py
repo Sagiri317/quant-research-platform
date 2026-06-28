@@ -997,26 +997,54 @@ SOURCE_TREE_ALLOWLIST_ENTRIES = (
         ),
     ),
     _source_tree_allowlist_entry(
-        path=Path("src/quant_research_platform/runtime/privacy.py"),
+        path=VERIFY_HANDOFF_PACKAGE_SCRIPT,
+        scan_group="retired_occurrence",
+        rule_name="retired_review_safe_public_wording",
+        literal='if summary.get("public_safe") is not True:',
+        owner="handoff-package-verifier",
+        rationale=(
+            "verifier enforces the user-required portable_summary public_safe "
+            "boolean contract"
+        ),
+        lifecycle="remove only if portable_summary public_safe field is renamed",
+        covered_by=(
+            "tests/agents/handoff/test_handoff_tools.py::"
+            "test_verify_smoke_compare_rejects_weak_portable_summary_shape",
+        ),
+    ),
+    _source_tree_allowlist_entry(
+        path=Path("src/quant_research_platform/policy/share_safety.py"),
         scan_group="retired_occurrence",
         rule_name="forbidden_private_real",
         literal='"private_real",',
-        owner="share-safety-runtime-policy",
-        rationale="runtime privacy inventory rejects retired local-only report paths",
-        lifecycle="current safety inventory; private to policy/runtime safety",
+        owner="share-safety-policy",
+        rationale=(
+            "share-safety policy keeps retired local-only report path names as "
+            "private rejection inventory"
+        ),
+        lifecycle=(
+            "remove only if retired local-only path rejection inventory is "
+            "removed or renamed"
+        ),
         covered_by=(
             "tests/architecture/test_retired_surface_absent.py::"
             "test_retired_local_only_report_paths_remain_share_unsafe",
         ),
     ),
     _source_tree_allowlist_entry(
-        path=Path("src/quant_research_platform/runtime/privacy.py"),
+        path=Path("src/quant_research_platform/policy/share_safety.py"),
         scan_group="retired_occurrence",
         rule_name="forbidden_private_data",
         literal='"private_data",',
-        owner="share-safety-runtime-policy",
-        rationale="runtime privacy inventory rejects retired local-only report paths",
-        lifecycle="current safety inventory; private to policy/runtime safety",
+        owner="share-safety-policy",
+        rationale=(
+            "share-safety policy keeps retired local-only report path names as "
+            "private rejection inventory"
+        ),
+        lifecycle=(
+            "remove only if retired local-only path rejection inventory is "
+            "removed or renamed"
+        ),
         covered_by=(
             "tests/architecture/test_retired_surface_absent.py::"
             "test_retired_local_only_report_paths_remain_share_unsafe",
@@ -1260,6 +1288,7 @@ SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS = tuple(
 SOURCE_TREE_RETIRED_TERM_ROOTS = SOURCE_TREE_GOVERNANCE_TRUTH_ROOTS + (
     Path("src/quant_research_platform/interfaces"),
     Path("src/quant_research_platform/agents"),
+    Path("src/quant_research_platform/policy"),
     Path("src/quant_research_platform/reports"),
     Path("tests/workflows"),
     Path(".agents/skills/quant-research-platform-maintenance/scripts/handoff"),
@@ -1390,6 +1419,7 @@ SOURCE_TREE_GOVERNANCE_RULE_BLOCK_NAMES = {
         "SCANNER_DEFINITION_MARKERS",
         "SCANNER_SCRIPT_DEFINITION_MARKERS",
         "CODE_MAP_FORBIDDEN_TERMS",
+        "SOURCE_TREE_ALLOWLIST_ENTRIES",
         "SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST",
         "SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST",
         "SOURCE_TREE_RETIRED_RULE_DEFINITION_ALLOWLIST",
@@ -3372,8 +3402,14 @@ def set_check_status(
             continue
         name = row.get("name")
         if name == check_name:
+            current_status = str(row.get("status") or "").strip().upper()
+            current_evidence = str(row.get(details_key) or "")
             row["status"] = status
-            row[details_key] = validation_status_evidence(check_name, status)
+            generated_missing_evidence = current_evidence.startswith(
+                "task validation_evidence missing; "
+            )
+            if current_status != status or not generated_missing_evidence:
+                row[details_key] = validation_status_evidence(check_name, status)
             return
     rows.append(
         {

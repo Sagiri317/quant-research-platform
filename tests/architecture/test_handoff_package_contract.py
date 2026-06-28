@@ -145,6 +145,7 @@ def test_source_tree_allowlist_entries_have_owner_metadata_and_coverage() -> Non
 
     assert entries
     for entry in entries:
+        assert Path(entry.path).is_file(), entry.path
         assert str(entry.owner).strip()
         assert str(entry.rationale).strip()
         assert str(entry.lifecycle).strip()
@@ -156,6 +157,68 @@ def test_source_tree_allowlist_entries_have_owner_metadata_and_coverage() -> Non
             if test_name:
                 text = Path(test_path).read_text(encoding="utf-8")
                 assert f"def {test_name}" in text
+
+
+def test_source_tree_allowlist_does_not_reference_retired_runtime_privacy_path(
+) -> None:
+    contract = _load_governance_contract()
+
+    assert not any(
+        entry.path == Path("src/quant_research_platform/runtime/privacy.py")
+        for entry in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+    )
+
+
+def test_share_safety_retired_inventory_is_owner_allowlisted() -> None:
+    contract = _load_governance_contract()
+    share_safety = Path("src/quant_research_platform/policy/share_safety.py")
+    entries = {
+        (entry.path, entry.rule_name, entry.owner)
+        for entry in contract.SOURCE_TREE_ALLOWLIST_ENTRIES
+    }
+
+    assert (
+        share_safety,
+        "forbidden_private_real",
+        "share-safety-policy",
+    ) in entries
+    assert (
+        share_safety,
+        "forbidden_private_data",
+        "share-safety-policy",
+    ) in entries
+
+
+def test_source_tree_scan_rejects_retired_literal_in_ordinary_src_file(
+    tmp_path: Path,
+) -> None:
+    contract = _load_governance_contract()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "governance-contract@example.invalid")
+    _git(repo, "config", "user.name", "Governance Contract Test")
+    bad_source = repo / "src" / "quant_research_platform" / "policy" / "bad.py"
+    bad_source.parent.mkdir(parents=True)
+    retired_literal = rule_form(
+        contract.RETIRED_PUBLIC_SURFACE_RULES,
+        "forbidden_private_real",
+    )
+    bad_source.write_text(f"VALUE = {retired_literal!r}\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add retired source literal")
+
+    groups = contract.source_tree_scan_groups(repo)
+
+    assert {
+        (finding["path"], finding["rule"])
+        for finding in groups["retired_text"]["findings"]
+    } == {
+        (
+            "src/quant_research_platform/policy/bad.py",
+            "forbidden_private_real",
+        )
+    }
 
 
 def test_source_tree_allowlist_facts_are_structured_not_bare_dicts() -> None:

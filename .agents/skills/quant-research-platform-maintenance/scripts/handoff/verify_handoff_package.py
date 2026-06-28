@@ -711,11 +711,16 @@ def verify_artifact_manifest(
     if not isinstance(entries, list):
         return failures + ["artifact_manifest_entries_required"]
     expected: dict[str, dict[str, object]] = {}
+    seen_paths: set[str] = set()
     for item in entries:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             failures.append("artifact_manifest_entry_invalid")
             continue
-        expected[item["path"]] = item
+        path = item["path"]
+        if path in seen_paths:
+            failures.append(f"artifact_manifest_duplicate_entry: {path}")
+        seen_paths.add(path)
+        expected[path] = item
     name_set = set(archive.namelist())
     if set(expected) | {"artifact_manifest.json"} != name_set:
         failures.append("artifact_manifest_zip_entries_mismatch")
@@ -965,6 +970,19 @@ def verify_generation_evidence(
         failures.append("generation_evidence_mode_invalid")
     if payload.get("validation_status") not in VALID_STATUS_TOKENS:
         failures.append("generation_evidence_validation_status_invalid")
+    else:
+        status_summary = sidecar.get("status_summary")
+        if (
+            isinstance(status_summary, dict)
+            and payload.get("validation_status") != status_summary.get("validation")
+        ):
+            failures.append("generation_validation_status_sidecar_mismatch")
+        validation_status = validation_status_from_archive(archive)
+        if (
+            validation_status is not None
+            and payload.get("validation_status") != validation_status
+        ):
+            failures.append("generation_validation_status_validation_evidence_mismatch")
     if payload.get("zip_sha256_source") != "sidecar":
         failures.append("generation_zip_sha256_source_mismatch")
     if payload.get("source_tree_scan_path") != SOURCE_TREE_SCAN_EVIDENCE:
@@ -980,6 +998,19 @@ def verify_generation_evidence(
         if payload.get("bundle_sha256") != bundle_sha256:
             failures.append("generation_bundle_sha256_mismatch")
     return failures
+
+
+def validation_status_from_archive(archive: ZipFile) -> str | None:
+    try:
+        payload = json.loads(archive.read("validation_evidence.json").decode("utf-8"))
+    except (KeyError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return aggregate_mandatory_validation_status(payload)
+    except SystemExit:
+        return None
 
 
 def is_full_sha(value: object) -> bool:
@@ -1021,6 +1052,15 @@ def verify_smoke_compare_status(payload: dict[str, object]) -> list[str]:
                 failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
         if status == "PASS":
             failures.extend(verify_pass_smoke_compare_result(row, index))
+        elif "portable_summary" in row:
+            summary_reason = evidence_json_value_unsafe_reason(
+                row["portable_summary"]
+            )
+            if summary_reason is not None:
+                failures.append(
+                    f"smoke_compare_status_portable_summary_unsafe: "
+                    f"{index}:{summary_reason}"
+                )
     expected_overall = aggregate_validation_matrix_status(result_statuses)
     if payload.get("overall_smoke_compare_status") != expected_overall:
         failures.append(f"smoke_compare_status_overall_mismatch: {expected_overall}")
@@ -1042,22 +1082,91 @@ def verify_pass_smoke_compare_result(
     for key in required_strings:
         if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
             failures.append(f"smoke_compare_status_result_missing: {index}:{key}")
+            continue
+        reason = evidence_json_value_unsafe_reason(row[key])
+        if reason is not None:
+            failures.append(
+                f"smoke_compare_status_field_unsafe: {index}:{key}:{reason}"
+            )
     sha = row.get("source_artifact_sha256")
     if isinstance(sha, str) and not re.fullmatch(r"[0-9a-f]{64}", sha):
         failures.append(f"smoke_compare_status_source_artifact_sha256_invalid: {index}")
+    source_path = row.get("source_artifact_path")
+    if isinstance(source_path, str) and not valid_source_artifact_path(source_path):
+        failures.append(f"smoke_compare_status_source_artifact_path_invalid: {index}")
     if row.get("included_in_handoff") is not False:
         failures.append(f"smoke_compare_status_included_in_handoff_invalid: {index}")
+    raw_policy = row.get("raw_artifact_policy")
+    if isinstance(raw_policy, str) and not raw_artifact_policy_valid(raw_policy):
+        failures.append(f"smoke_compare_status_raw_artifact_policy_invalid: {index}")
     if "portable_summary" not in row:
         failures.append(
             f"smoke_compare_status_result_missing: {index}:portable_summary"
         )
     else:
-        summary_reason = evidence_json_value_unsafe_reason(row["portable_summary"])
-        if summary_reason is not None:
-            failures.append(
-                f"smoke_compare_status_portable_summary_unsafe: "
-                f"{index}:{summary_reason}"
+        failures.extend(
+            verify_smoke_compare_portable_summary(
+                row["portable_summary"],
+                row_status=str(row.get("status")),
+                index=index,
             )
+        )
+    return failures
+
+
+def valid_source_artifact_path(value: str) -> bool:
+    if "\\" in value or not value.startswith(".run/"):
+        return False
+    if value.startswith("/") or (len(value) >= 3 and value[1] == ":"):
+        return False
+    parts = PurePosixPath(value).parts
+    return ".." not in parts
+
+
+def raw_artifact_policy_valid(value: str) -> bool:
+    normalized = value.lower()
+    return "raw .run artifact" in normalized and "not included" in normalized
+
+
+def verify_smoke_compare_portable_summary(
+    summary: object,
+    *,
+    row_status: str,
+    index: int,
+) -> list[str]:
+    failures: list[str] = []
+    if not isinstance(summary, dict):
+        return [f"smoke_compare_status_portable_summary_invalid: {index}"]
+    for key in ("schema_id", "status"):
+        if not isinstance(summary.get(key), str) or not str(summary.get(key)).strip():
+            failures.append(
+                f"smoke_compare_status_portable_summary_missing: {index}:{key}"
+            )
+    if "summary_type" not in summary and "kind" not in summary:
+        failures.append(
+            f"smoke_compare_status_portable_summary_missing: {index}:summary_type"
+        )
+    status = summary.get("status")
+    if isinstance(status, str):
+        normalized_status = status.strip().upper()
+        if normalized_status not in VALID_STATUS_TOKENS:
+            failures.append(
+                f"smoke_compare_status_portable_summary_status_invalid: {index}"
+            )
+        elif normalized_status != row_status:
+            failures.append(
+                f"smoke_compare_status_portable_summary_status_mismatch: {index}"
+            )
+    if summary.get("public_safe") is not True:
+        failures.append(
+            f"smoke_compare_status_portable_summary_public_safe_invalid: {index}"
+        )
+    summary_reason = evidence_json_value_unsafe_reason(summary)
+    if summary_reason is not None:
+        failures.append(
+            f"smoke_compare_status_portable_summary_unsafe: "
+            f"{index}:{summary_reason}"
+        )
     return failures
 
 
