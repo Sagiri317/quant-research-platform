@@ -1424,8 +1424,8 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
         prediction_catalog=prediction_catalog,
         prediction_id="pred_eligible",
     )
-    run_root = write_prediction_result(layout, result)
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    output_bundle = write_prediction_result(layout, result)
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["metadata"]["model_metadata"]["input_count"] == 1
     assert manifest["metadata"]["model_metadata"]["coefficient_count"] == 2
     assert manifest["metadata"]["model_metadata"]["sample_filter_mode"] == "eligible"
@@ -1498,8 +1498,8 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
         prediction_catalog=prediction_catalog,
         prediction_id="pred_open_ended",
     )
-    run_root = write_prediction_result(layout, result)
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    output_bundle = write_prediction_result(layout, result)
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
 
     assert manifest["metadata"]["prediction_metadata"]["requested_test_end"] is None
     assert (
@@ -1615,8 +1615,8 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
         prediction_test_start="2024-01-03",
         prediction_test_end="2024-01-03",
     )
-    run_root = write_prediction_result(layout, result)
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    output_bundle = write_prediction_result(layout, result)
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
 
     assert manifest["metadata"]["train_end"] == "2024-01-02"
     assert manifest["metadata"]["test_start"] == "2024-01-03"
@@ -1690,8 +1690,8 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
         prediction_catalog=prediction_catalog,
         prediction_id="pred_no_leakage",
     )
-    run_root = write_prediction_result(layout, result)
-    prediction = pd.read_parquet(run_root / "prediction.parquet").sort_values(
+    output_bundle = write_prediction_result(layout, result)
+    prediction = pd.read_parquet(output_bundle / "prediction.parquet").sort_values(
         "asset_id",
         kind="mergesort",
     )

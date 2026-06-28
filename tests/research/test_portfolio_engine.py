@@ -220,9 +220,9 @@ def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
         portfolio_id="risk_signal_portfolio",
         time_window=TimeWindow("2024-01-02", "2024-02-02"),
     )
-    run_root = _write_portfolio_result(layout, result)
+    output_bundle = _write_portfolio_result(layout, result)
 
-    assert run_root.as_posix().endswith("outputs/risk_signal_portfolio")
+    assert output_bundle.as_posix().endswith("outputs/risk_signal_portfolio")
     for filename in (
         "positions.parquet",
         "turnover.parquet",
@@ -236,14 +236,14 @@ def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
         "diagnostics.parquet",
         "manifest.json",
     ):
-        assert (run_root / filename).is_file()
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+        assert (output_bundle / filename).is_file()
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
     assert (
         manifest["metadata"]["rebalance_frequency"]
         == frequency_ids.DAILY_FREQUENCY_SLUG
     )
     assert manifest["metadata"]["execution_lag_steps"] == 0
-    returns = pd.read_parquet(run_root / "portfolio_returns.parquet")
+    returns = pd.read_parquet(output_bundle / "portfolio_returns.parquet")
     assert "return_source_column" in returns.columns
     assert "label" not in returns.columns
 
@@ -268,9 +268,9 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     )
     with pytest.raises(ValueError, match="empty_portfolio_input"):
         _write_portfolio_result(layout, result)
-    run_root = tmp_path / "outputs" / "risk_signal_portfolio"
-    assert not run_root.exists()
-    assert not list(run_root.parent.glob(".tmp-*"))
+    output_bundle = tmp_path / "outputs" / "risk_signal_portfolio"
+    assert not output_bundle.exists()
+    assert not list(output_bundle.parent.glob(".tmp-*"))
 
 
 def test_portfolio_runner_chunked_output_matches_single_chunk_path(

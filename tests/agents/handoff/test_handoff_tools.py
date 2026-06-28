@@ -718,6 +718,34 @@ def test_handoff_package_verifier_rejects_local_paths_in_plain_text() -> None:
     assert safety.unsafe_text_reason(text, name="handoff.txt") == "local_absolute_path"
 
 
+@pytest.mark.parametrize(
+    ("member", "text"),
+    [
+        ("task_metadata.json", '{"scope_summary":"public evidence"}\n'),
+        ("validation_evidence.json", '{"evidence":"evidence run"}\n'),
+        (
+            "handoff_evidence/custom.json",
+            '{"note":"contract version `0.1`"}\n',
+        ),
+        ("artifact_manifest.json", '{"summary":"handoff-safe"}\n'),
+    ],
+)
+def test_handoff_package_verifier_rejects_retired_metadata_text(
+    tmp_path: Path,
+    member: str,
+    text: str,
+) -> None:
+    safety = _load_handoff_module("verify_handoff_package")
+    package = tmp_path / "handoff.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr(member, text)
+
+    result = safety.scan_handoff_zip(package)
+
+    assert not result.ok
+    assert any("retired_surface_text" in item for item in result.failures)
+
+
 def test_handoff_package_verifier_allows_review_safe_aggregate_evidence_counts(
 ) -> None:
     safety = _load_handoff_module("verify_handoff_package")

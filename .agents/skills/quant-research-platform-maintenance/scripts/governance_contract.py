@@ -240,6 +240,14 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
         re.IGNORECASE,
     ),
     TextRule(
+        "retired_generated_json_schema_version_identity_text",
+        r"\bschema_version\s*=\s*\"0\.1\"",
+    ),
+    TextRule(
+        "retired_generated_json_contract_version_identity_text",
+        r"\bcontract_version\s*=\s*\"0\.1\"",
+    ),
+    TextRule(
         "retired_local_evidence_workflow_text",
         r"\blocal evidence workflow\b",
         re.IGNORECASE,

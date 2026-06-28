@@ -209,6 +209,12 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
         "retired_verification_summary_contract_version_text": (
             "contract version `0.1`"
         ),
+        "retired_generated_json_schema_version_identity_text": (
+            'schema_version = "0.1"'
+        ),
+        "retired_generated_json_contract_version_identity_text": (
+            'contract_version = "0.1"'
+        ),
         "retired_local_evidence_workflow_text": "local evidence workflow",
         "retired_api_private_evidence_run_text": "qrp-private evidence run",
         "retired_evidence_run_text": "evidence run",
@@ -292,6 +298,8 @@ def test_active_docs_reject_retired_review_safety_names(
         "evidence_output",
         "output_must_use_artifact_root",
         "contract version `0.1`",
+        'schema_version = "0.1"',
+        'contract_version = "0.1"',
         "local evidence workflow",
         "qrp-private evidence run",
         "evidence run",

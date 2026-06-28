@@ -205,15 +205,15 @@ def test_report_manifest_payload_builders_are_private_and_local() -> None:
     assert not hasattr(outputs_module, "ReportBundle")
 
 
-def test_stage_profile_outputs_reject_existing_run_root_without_writes(
+def test_stage_profile_outputs_reject_existing_output_bundle_without_writes(
     tmp_path,
 ):
     frame = pd.DataFrame.from_records(
         [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
     )
-    run_root = tmp_path / "outputs" / "stage_profile"
-    run_root.mkdir(parents=True)
-    sentinel = run_root / "sentinel.txt"
+    output_bundle = tmp_path / "outputs" / "stage_profile"
+    output_bundle.mkdir(parents=True)
+    sentinel = output_bundle / "sentinel.txt"
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="output_already_exists"):
@@ -232,17 +232,17 @@ def test_stage_profile_outputs_reject_existing_run_root_without_writes(
         )
 
     assert sentinel.read_text(encoding="utf-8") == "existing\n"
-    assert not (run_root / "stage_profile.csv").exists()
-    assert not (run_root / "manifest.json").exists()
-    assert list(run_root.parent.glob("*backup*")) == []
+    assert not (output_bundle / "stage_profile.csv").exists()
+    assert not (output_bundle / "manifest.json").exists()
+    assert list(output_bundle.parent.glob("*backup*")) == []
 
 
-def test_prediction_outputs_reject_existing_run_root_without_writes(
+def test_prediction_outputs_reject_existing_output_bundle_without_writes(
     tmp_path,
 ):
-    run_root = tmp_path / "outputs" / "pred-run"
-    run_root.mkdir(parents=True)
-    sentinel = run_root / "sentinel.txt"
+    output_bundle = tmp_path / "outputs" / "pred-run"
+    output_bundle.mkdir(parents=True)
+    sentinel = output_bundle / "sentinel.txt"
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(OutputAlreadyExistsError):
@@ -254,16 +254,16 @@ def test_prediction_outputs_reject_existing_run_root_without_writes(
         )
 
     assert sentinel.read_text(encoding="utf-8") == "existing\n"
-    assert not (run_root / "prediction.parquet").exists()
-    assert not (run_root / "manifest.json").exists()
+    assert not (output_bundle / "prediction.parquet").exists()
+    assert not (output_bundle / "manifest.json").exists()
 
 
-def test_evaluation_outputs_reject_existing_run_root_without_writes(
+def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
     tmp_path,
 ):
-    run_root = tmp_path / "outputs" / "eval-run"
-    run_root.mkdir(parents=True)
-    sentinel = run_root / "sentinel.txt"
+    output_bundle = tmp_path / "outputs" / "eval-run"
+    output_bundle.mkdir(parents=True)
+    sentinel = output_bundle / "sentinel.txt"
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(OutputAlreadyExistsError):
@@ -279,8 +279,8 @@ def test_evaluation_outputs_reject_existing_run_root_without_writes(
         )
 
     assert sentinel.read_text(encoding="utf-8") == "existing\n"
-    assert not (run_root / "metrics.parquet").exists()
-    assert not (run_root / "manifest.json").exists()
+    assert not (output_bundle / "metrics.parquet").exists()
+    assert not (output_bundle / "manifest.json").exists()
 
 
 def test_stage_profile_outputs_clean_temp_root_after_mid_write_failure(
@@ -290,7 +290,7 @@ def test_stage_profile_outputs_clean_temp_root_after_mid_write_failure(
     frame = pd.DataFrame.from_records(
         [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
     )
-    run_root = tmp_path / "outputs" / "stage_profile"
+    output_bundle = tmp_path / "outputs" / "stage_profile"
 
     def fail_json_write(path, *_args, **_kwargs):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -307,15 +307,15 @@ def test_stage_profile_outputs_clean_temp_root_after_mid_write_failure(
             markdown_text="safe",
         )
 
-    assert not run_root.exists()
-    assert list(run_root.parent.glob(".tmp-*")) == []
+    assert not output_bundle.exists()
+    assert list(output_bundle.parent.glob(".tmp-*")) == []
 
 
 def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    run_root = tmp_path / "outputs" / "pred-run"
+    output_bundle = tmp_path / "outputs" / "pred-run"
 
     def fail_parquet_write(_frame, path, **_kwargs):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -336,15 +336,15 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
             layout=StorageLayout(project_root=tmp_path),
         )
 
-    assert not run_root.exists()
-    assert list(run_root.parent.glob(".pred-run.tmp-*")) == []
+    assert not output_bundle.exists()
+    assert list(output_bundle.parent.glob(".pred-run.tmp-*")) == []
 
 
 def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    run_root = tmp_path / "outputs" / "eval-run"
+    output_bundle = tmp_path / "outputs" / "eval-run"
     call_count = 0
 
     def fail_second_parquet_write(_frame, path, **_kwargs):
@@ -374,8 +374,8 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
             layout=StorageLayout(project_root=tmp_path),
         )
 
-    assert not run_root.exists()
-    assert list(run_root.parent.glob(".eval-run.tmp-*")) == []
+    assert not output_bundle.exists()
+    assert list(output_bundle.parent.glob(".eval-run.tmp-*")) == []
 
 
 def test_output_already_exists_error_review_safe_summary_is_path_free() -> None:

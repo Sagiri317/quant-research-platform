@@ -93,7 +93,7 @@ def write_prediction_output_and_read(
         model_metadata=model_metadata
         or synthetic_prediction_model_metadata(spec, input_columns),
     )
-    run_root = write_prediction_outputs(
+    output_bundle = write_prediction_outputs(
         spec=result.spec,
         output_spec=output_spec,
         layout=layout,
@@ -101,13 +101,13 @@ def write_prediction_output_and_read(
         model_metadata=result.model_metadata,
         prediction_metadata_factory=result.prediction_metadata_factory,
     )
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
-    prediction = pd.read_parquet(run_root / "prediction.parquet")
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
+    prediction = pd.read_parquet(output_bundle / "prediction.parquet")
     prediction.attrs["model_metadata"] = manifest["metadata"]["model_metadata"]
     prediction.attrs["prediction_metadata"] = manifest["metadata"][
         "prediction_metadata"
     ]
-    return prediction, run_root, manifest
+    return prediction, output_bundle, manifest
 
 
 def write_prediction_result(layout: StorageLayout, result) -> Path:

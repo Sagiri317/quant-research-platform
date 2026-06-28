@@ -31,6 +31,7 @@ from governance_contract import (  # noqa: E402
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
     PACKAGE_FORBIDDEN_PATH_PARTS,
+    RESULT_ARCHITECTURE_RETIRED_TEXT_RULES,
     VALID_STATUS_TOKENS,
     VALIDATION_ROW_KEYS,
     handoff_evidence_blocked_key_failures,
@@ -455,6 +456,8 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
         return "runtime_payload"
     if shared_reason == "local_run_path":
         return "local_run_path"
+    if retired_surface_marker(scan_text) is not None:
+        return "retired_surface"
     if name.lower().endswith(".json"):
         json_reason = evidence_json_unsafe_reason(scan_text)
         if json_reason is not None:
@@ -468,6 +471,13 @@ def unsafe_text_reason(text: str, *, name: str = "") -> str | None:
 
 def stale_marker(text: str) -> str | None:
     return next((marker for marker in STALE_MARKERS if marker in text), None)
+
+
+def retired_surface_marker(text: str) -> str | None:
+    for rule in RESULT_ARCHITECTURE_RETIRED_TEXT_RULES:
+        if rule.compile().search(text):
+            return rule.name
+    return None
 
 
 def is_scanner_definition_line(line: str, *, name: str = "") -> bool:

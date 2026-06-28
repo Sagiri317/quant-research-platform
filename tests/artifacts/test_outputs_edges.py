@@ -690,7 +690,7 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
     )
     report_spec = _report_spec("evaluation_outputs", spec.run_id, "evaluation")
 
-    run_root = outputs.write_evaluation_outputs(
+    output_bundle = outputs.write_evaluation_outputs(
         _evaluation_metrics_frame(),
         _evaluation_grouped_label_values_frame(),
         ic_summary=_evaluation_ic_summary_frame(),
@@ -700,12 +700,12 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
         output_spec=report_spec,
         layout=StorageLayout(project_root=tmp_path),
     )
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
 
-    assert (run_root / "grouped_label_values.parquet").is_file()
-    assert (run_root / "ic_summary.parquet").is_file()
-    assert (run_root / "group_spread_summary.parquet").is_file()
-    assert not (run_root / "grouped_returns.parquet").exists()
+    assert (output_bundle / "grouped_label_values.parquet").is_file()
+    assert (output_bundle / "ic_summary.parquet").is_file()
+    assert (output_bundle / "group_spread_summary.parquet").is_file()
+    assert not (output_bundle / "grouped_returns.parquet").exists()
     assert manifest["schema_id"] == "qrp-output-manifest"
     assert manifest["files"] == [
         "metrics.parquet",
@@ -720,7 +720,7 @@ def test_portfolio_outputs_write_manifest_and_local_scope(
 ) -> None:
     spec = _portfolio_spec()
     artifacts = _portfolio_artifacts()
-    run_root = _write_portfolio_chunks_for_test(
+    output_bundle = _write_portfolio_chunks_for_test(
         artifacts,
         spec=spec,
         output_spec=_report_spec(
@@ -730,9 +730,9 @@ def test_portfolio_outputs_write_manifest_and_local_scope(
         ),
         layout=StorageLayout(project_root=tmp_path),
     )
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
 
-    assert run_root.as_posix().endswith("outputs/portfolio_demo_report")
+    assert output_bundle.as_posix().endswith("outputs/portfolio_demo_report")
     assert manifest["schema_id"] == "qrp-output-manifest"
     assert manifest["output_id"] == "portfolio_demo_report"
     assert manifest["output_definition_id"] == "portfolio_outputs"
@@ -787,7 +787,7 @@ def test_portfolio_outputs_write_row_artifacts_from_chunks(
             for artifact_name in row_artifacts
         },
     )
-    run_root = outputs._write_portfolio_output_chunks(
+    output_bundle = outputs._write_portfolio_output_chunks(
         chunks,
         summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
@@ -802,12 +802,12 @@ def test_portfolio_outputs_write_row_artifacts_from_chunks(
         ),
         layout=StorageLayout(project_root=tmp_path),
     )
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
 
     assert manifest["metadata"]["row_counts"]["positions"] == 2
     assert manifest["metadata"]["row_counts"]["turnover"] == 1
-    assert len(pd.read_parquet(run_root / "positions.parquet")) == 2
-    assert len(pd.read_parquet(run_root / "portfolio_returns.parquet")) == 1
+    assert len(pd.read_parquet(output_bundle / "positions.parquet")) == 2
+    assert len(pd.read_parquet(output_bundle / "portfolio_returns.parquet")) == 1
 
 
 def test_portfolio_outputs_reject_bad_frames(tmp_path: Path) -> None:

@@ -562,8 +562,6 @@ def test_version_surface_policy_keeps_legal_tokens_out_of_retired_gate(
             [
                 "QRP 0.1 is the current contract version.",
                 "GET /api/0.1/catalog/factors",
-                'contract_version = "0.1"',
-                'schema_version = "0.1"',
                 'definition_version = "0.1"',
                 'workflow_version = "0.1"',
                 'package = "handoff-sidecar/0.1"',

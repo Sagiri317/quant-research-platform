@@ -637,7 +637,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],
         model_spec,
     )
-    prediction, run_root, _ = write_prediction_output_and_read(
+    prediction, output_bundle, _ = write_prediction_output_and_read(
         tmp_path,
         (frame,),
         prediction_spec,
@@ -653,7 +653,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert prediction_spec.prediction_column in prediction.columns
     assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
     assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
-    assert run_root.as_posix().endswith("outputs/pred_demo")
+    assert output_bundle.as_posix().endswith("outputs/pred_demo")
 
 
 def test_prediction_handoff_reads_research_dataset_and_writes_report(
@@ -698,11 +698,11 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
     )
-    run_root = _write_prediction_result(layout, result)
+    output_bundle = _write_prediction_result(layout, result)
 
-    assert run_root.as_posix().endswith("outputs/pred_demo")
-    assert (run_root / "prediction.parquet").is_file()
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert output_bundle.as_posix().endswith("outputs/pred_demo")
+    assert (output_bundle / "prediction.parquet").is_file()
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["metadata"]["is_oos"] is True
     assert manifest["metadata"]["prediction_mode"] == "minimal_oos"
     assert manifest["metadata"]["prediction_column"] == PREDICTION_SCORE_COLUMN
@@ -765,9 +765,9 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
     )
-    run_root = _write_prediction_result(layout, result)
+    output_bundle = _write_prediction_result(layout, result)
 
-    assert (run_root / "prediction.parquet").is_file()
+    assert (output_bundle / "prediction.parquet").is_file()
 
 
 def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
@@ -872,9 +872,9 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         prediction_catalog=prediction_catalog,
         prediction_id="pred_demo",
     )
-    run_root = _write_prediction_result(layout, result)
+    output_bundle = _write_prediction_result(layout, result)
 
-    assert (run_root / "prediction.parquet").is_file()
+    assert (output_bundle / "prediction.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1
     assert max(read_chunk_rows) < len(frame)
     assert len(fit_chunk_rows) > 1
@@ -916,15 +916,15 @@ def test_evaluation_runner_reads_research_dataset_and_writes_report(
         evaluation_catalog=evaluation_catalog,
         run_id="eval_demo",
     )
-    run_root = _write_evaluation_result(layout, result)
+    output_bundle = _write_evaluation_result(layout, result)
 
-    assert run_root.as_posix().endswith("outputs/eval_demo")
-    assert (run_root / "metrics.parquet").is_file()
-    assert (run_root / "grouped_label_values.parquet").is_file()
-    assert (run_root / "ic_summary.parquet").is_file()
-    assert (run_root / "group_spread_summary.parquet").is_file()
-    assert (run_root / "manifest.json").is_file()
-    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    assert output_bundle.as_posix().endswith("outputs/eval_demo")
+    assert (output_bundle / "metrics.parquet").is_file()
+    assert (output_bundle / "grouped_label_values.parquet").is_file()
+    assert (output_bundle / "ic_summary.parquet").is_file()
+    assert (output_bundle / "group_spread_summary.parquet").is_file()
+    assert (output_bundle / "manifest.json").is_file()
+    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["files"] == [
         "metrics.parquet",
         "grouped_label_values.parquet",
@@ -988,9 +988,9 @@ def test_evaluation_runner_streams_research_chunks(
         evaluation_catalog=evaluation_catalog,
         run_id="eval_demo",
     )
-    run_root = _write_evaluation_result(layout, result)
+    output_bundle = _write_evaluation_result(layout, result)
 
-    assert (run_root / "metrics.parquet").is_file()
+    assert (output_bundle / "metrics.parquet").is_file()
     assert len([rows for rows in read_chunk_rows if rows]) > 1
     assert max(read_chunk_rows) < len(frame)
 
