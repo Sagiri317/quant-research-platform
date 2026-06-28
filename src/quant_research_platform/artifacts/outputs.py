@@ -498,7 +498,7 @@ def write_evaluation_outputs(
     output_spec: OutputSpec,
     layout: StorageLayout,
 ) -> Path:
-    """Write local evaluation outputs under local output root."""
+    """Write local evaluation outputs into an output bundle."""
 
     output_bundle = _derive_output_bundle_root(
         output_spec=output_spec,

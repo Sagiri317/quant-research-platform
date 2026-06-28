@@ -58,8 +58,9 @@ RUNTIME_WORKSPACE_TEST_ALLOWLIST = {
 } | {Path(path) for path in PRIVACY_NEGATIVE_TEST_PATHS}
 RUNTIME_WORKSPACE_SOURCE_ALLOWLIST_REASONS = {
     Path("src/quant_research_platform/workflows/local_verification.py"): (
-        "Owner: workflows. Rationale: verification output layout. "
-        "Lifecycle: current workflow contract. Test coverage: workflow evidence tests."
+        "Owner: workflows. Rationale: local verification run layout. "
+        "Lifecycle: current workflow contract. "
+        "Test coverage: workflow local verification tests."
     ),
     Path("src/quant_research_platform/policy/share_safety.py"): (
         "Owner: policy share safety. "
