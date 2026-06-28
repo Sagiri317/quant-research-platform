@@ -75,6 +75,8 @@ PORTABLE_STATUS_SUMMARY_SCHEMA_ID = "qrp-portable-status-summary"
 PORTABLE_STATUS_SUMMARY_TYPES = frozenset(
     {"smoke", "compare", "local_verification", "run_compare"}
 )
+PORTABLE_SOURCE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+PORTABLE_SOURCE_ARTIFACT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.json$")
 ADVISORY_REVIEW_CHECKS = {"review_subagent"}
 TRACKED_HANDOFF_SOURCE_PATHS = (
     ".agents/skills/quant-research-platform-maintenance/scripts/handoff/build_handoff_package.py",
@@ -1132,7 +1134,11 @@ def valid_source_artifact_path(value: str) -> bool:
         return False
     if any(part in {".", ".."} for part in parts[1:]):
         return False
-    return parts[2].endswith(".json")
+    run_id, artifact_file = parts[1], parts[2]
+    return (
+        PORTABLE_SOURCE_RUN_ID_RE.fullmatch(run_id) is not None
+        and PORTABLE_SOURCE_ARTIFACT_RE.fullmatch(artifact_file) is not None
+    )
 
 
 def raw_artifact_policy_valid(value: str) -> bool:
@@ -1159,7 +1165,7 @@ def verify_smoke_compare_portable_summary(
             f"smoke_compare_status_portable_summary_schema_id_invalid: {index}"
         )
     status = summary.get("status")
-    if not isinstance(status, str) or not status.strip():
+    if not isinstance(status, str) or status == "":
         failures.append(
             f"smoke_compare_status_portable_summary_missing: {index}:status"
         )
@@ -1176,13 +1182,12 @@ def verify_smoke_compare_portable_summary(
         failures.append(
             f"smoke_compare_status_portable_summary_type_invalid: {index}"
         )
-    if isinstance(status, str):
-        normalized_status = status.strip().upper()
-        if normalized_status not in VALID_STATUS_TOKENS:
+    if isinstance(status, str) and status != "":
+        if status not in VALID_STATUS_TOKENS:
             failures.append(
                 f"smoke_compare_status_portable_summary_status_invalid: {index}"
             )
-        elif normalized_status != row_status:
+        elif status != row_status:
             failures.append(
                 f"smoke_compare_status_portable_summary_status_mismatch: {index}"
             )

@@ -3375,8 +3375,8 @@ def validation_evidence_contract_failures(
                 )
             seen.add(normalized_name)
         if "status" in row:
-            status = str(row.get("status") or "").strip().upper()
-            if status not in VALID_STATUSES:
+            status = row.get("status")
+            if not isinstance(status, str) or status not in VALID_STATUSES:
                 failures.append(
                     f"validation_evidence_status_invalid: {index}:{row.get('status')}"
                 )
@@ -3402,7 +3402,8 @@ def set_check_status(
             continue
         name = row.get("name")
         if name == check_name:
-            current_status = str(row.get("status") or "").strip().upper()
+            raw_status = row.get("status")
+            current_status = raw_status if isinstance(raw_status, str) else ""
             current_evidence = str(row.get(details_key) or "")
             row["status"] = status
             generated_missing_evidence = current_evidence.startswith(
@@ -3460,7 +3461,7 @@ def validation_status_map(payload: dict[str, object]) -> dict[str, str]:
     result: dict[str, str] = {}
     for row in rows:
         name = str(row["name"]).strip()
-        status = str(row.get("status") or "").strip().upper()
+        status = str(row["status"])
         result[name] = status
     return result
 

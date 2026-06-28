@@ -250,11 +250,13 @@ def _replace_validation_evidence(
     )
     _refresh_manifest_and_sidecar(package, sidecar)
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
-    status_map = {
-        str(row["name"]): str(row["status"]).strip().upper()
-        for row in payload.get("checks", [])
-        if isinstance(row, dict) and "name" in row and "status" in row
-    }
+    status_map = {}
+    for row in payload.get("checks", []):
+        if not isinstance(row, dict) or "name" not in row or "status" not in row:
+            continue
+        status = row["status"]
+        if isinstance(status, str):
+            status_map[str(row["name"])] = status
     mandatory_statuses = [
         status_map[name] for name in MANDATORY_VALIDATION_CHECKS if name in status_map
     ]
@@ -1309,18 +1311,20 @@ def test_verify_handoff_package_rejects_duplicate_validation_check_override(
     assert "validation_evidence_duplicate_check: tests" in failures
 
 
+@pytest.mark.parametrize("status", ("BROKEN", "pass", "Pass", " PASS ", "PASS "))
 def test_verify_handoff_package_rejects_invalid_validation_status(
     tmp_path: Path,
+    status: str,
 ) -> None:
     verifier = _load_handoff_module("verify_handoff_package")
     _repo, package, sidecar, _base, _final_head = _build_test_package(tmp_path)
     checks = _validation_checks("PASS")
-    checks[0]["status"] = "BROKEN"
+    checks[0]["status"] = status
     _replace_validation_evidence(package, sidecar, _validation_payload(checks))
 
     failures = verifier.verify_handoff_package(package, sidecar)
 
-    assert "validation_evidence_status_invalid: 0:BROKEN" in failures
+    assert f"validation_evidence_status_invalid: 0:{status}" in failures
 
 
 def test_verify_handoff_package_rejects_validation_summary_mismatch(
@@ -1518,6 +1522,87 @@ def test_verify_smoke_compare_pass_requires_portable_artifact_evidence(
         (
             {
                 "schema_id": "qrp-portable-status-summary",
+                "status": "pass",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "Pass",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": " PASS ",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "PASS ",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": " PASS",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_invalid: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "FAIL",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_mismatch: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "NOT_RUN",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_mismatch: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": "BLOCKED",
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_status_mismatch: 0",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
+                "status": None,
+                "public_safe": True,
+                "summary_type": "smoke",
+            },
+            "smoke_compare_status_portable_summary_missing: 0:status",
+        ),
+        (
+            {
+                "schema_id": "qrp-portable-status-summary",
                 "status": "BROKEN",
                 "public_safe": True,
                 "summary_type": "smoke",
@@ -1618,6 +1703,17 @@ def test_verify_smoke_compare_rejects_weak_portable_summary_shape(
         "C:/private/run.json",
         r"E:\private\run.json",
         r".run\foo\run.json",
+        ".run/foo bar/run.json",
+        ".run/foo:bar/run.json",
+        ".run/foo/run\n.json",
+        ".run/foo/run\t.json",
+        ".run/.hidden/run.json",
+        ".run/foo/.hidden.json",
+        ".run/foo/ run.json",
+        ".run/foo/run .json",
+        ".run/foo/ru:n.json",
+        ".run/foo/run.json/",
+        ".run//run.json",
     ),
 )
 def test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes(
@@ -1632,6 +1728,28 @@ def test_verify_smoke_compare_rejects_invalid_source_artifact_path_shapes(
     failures = verifier.verify_smoke_compare_status(payload)
 
     assert "smoke_compare_status_source_artifact_path_invalid: 0" in failures
+
+
+@pytest.mark.parametrize("status", ("PASS", "FAIL", "NOT_RUN", "BLOCKED"))
+def test_verify_smoke_compare_portable_summary_accepts_exact_status_token(
+    status: str,
+) -> None:
+    verifier = _load_handoff_module("verify_handoff_package")
+    summary = {
+        "schema_id": "qrp-portable-status-summary",
+        "status": status,
+        "public_safe": True,
+        "summary_type": "smoke",
+    }
+
+    failures = verifier.verify_smoke_compare_portable_summary(
+        summary,
+        row_status=status,
+        index=0,
+    )
+
+    assert "smoke_compare_status_portable_summary_status_invalid: 0" not in failures
+    assert "smoke_compare_status_portable_summary_status_mismatch: 0" not in failures
 
 
 @pytest.mark.parametrize(
