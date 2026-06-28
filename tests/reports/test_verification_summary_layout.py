@@ -8,7 +8,7 @@ from quant_research_platform.workflows.local_verification_layout import (
 
 
 def test_local_verification_layout_uses_normal_internal_directory_names() -> None:
-    run_root = Path("verification-output") / "s1"
+    run_root = Path("local-verification-output") / "s1"
     layout = LocalVerificationLayout.from_run_root(run_root)
 
     assert layout.run_root == run_root

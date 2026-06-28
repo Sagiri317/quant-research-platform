@@ -227,8 +227,21 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
         r"\bout_of_evidence_range\b",
     ),
     TextRule(
+        "retired_local_verification_evidence_range_surface",
+        r"\b(?:outside_evidence_range|evidence_range)\b",
+    ),
+    TextRule(
         "retired_local_verification_evidence_output",
         r"\b(?:evidence-output|evidence_output)\b",
+    ),
+    TextRule(
+        "retired_local_verification_output_surface",
+        r"\b(?:(?<!local-)verification-output|(?<!local_)verification_output)\b",
+    ),
+    TextRule(
+        "retired_result_evidence_root_text",
+        r"\bevidence root\b",
+        re.IGNORECASE,
     ),
     TextRule(
         "retired_output_artifact_root_error",
@@ -982,6 +995,7 @@ SOURCE_TREE_RETIRED_OCCURRENCE_ALLOWLIST = {
 }
 
 SOURCE_TREE_ACTIVE_TEST_LITERAL_PATHS = {
+    Path("tests/architecture/test_governance_contract_rg_gate.py"),
     Path("tests/architecture/test_frequency_vocabulary_vs_active_support.py"),
 }
 
@@ -1010,6 +1024,11 @@ SOURCE_TREE_ACTIVE_TEST_LITERAL_ALLOWLIST = {
         "active_market_panel_data_id",
         "active_market_context_data_id",
         "active_frequency_slug",
+    },
+    Path("tests/architecture/test_governance_contract_rg_gate.py"): {
+        "retired_local_verification_evidence_range_surface",
+        "retired_local_verification_output_surface",
+        "retired_result_evidence_root_text",
     },
 }
 
@@ -2612,6 +2631,16 @@ def source_tree_active_test_literal_patterns(
         "active_frequency_slug": re.compile(
             rf"(?:[\"']{daily_slug}[\"']|"
             rf"(?<![A-Za-z0-9_]){daily_slug}(?![A-Za-z0-9_]))"
+        ),
+        "retired_local_verification_evidence_range_surface": re.compile(
+            r"\b(?:outside_evidence_range|evidence_range)\b"
+        ),
+        "retired_local_verification_output_surface": re.compile(
+            r"\b(?:(?<!local-)verification-output|(?<!local_)verification_output)\b"
+        ),
+        "retired_result_evidence_root_text": re.compile(
+            r"\bevidence root\b",
+            re.IGNORECASE,
         ),
     }
 

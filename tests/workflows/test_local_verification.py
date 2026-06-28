@@ -99,7 +99,7 @@ def test_local_verification_workflow_rejects_existing_run_root(
 
 def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
     config = _verification_config(
-        run_root=tmp_path / "verification-output" / "s1",
+        run_root=tmp_path / "local-verification-output" / "s1",
         start_date="2016-12-31",
         end_date="2014-01-01",
         profile=research_profile(),
@@ -113,7 +113,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     with pytest.raises(ValueError, match="evaluation_start_date_after_end_date"):
         run_local_verification(
             _verification_config(
-                run_root=tmp_path / "verification-output" / "bad-evaluation",
+                run_root=tmp_path / "local-verification-output" / "bad-evaluation",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
                 evaluation_start_date="2016-12-31",
@@ -121,7 +121,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
                 profile=research_profile(),
             )
         )
-    assert not (tmp_path / "verification-output" / "bad-evaluation").exists()
+    assert not (tmp_path / "local-verification-output" / "bad-evaluation").exists()
 
     with pytest.raises(
         ValueError,
@@ -129,7 +129,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     ):
         run_local_verification(
             _verification_config(
-                run_root=tmp_path / "verification-output" / "bad-prediction",
+                run_root=tmp_path / "local-verification-output" / "bad-prediction",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
                 prediction_train_end="2015-01-02",
@@ -137,7 +137,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
                 profile=research_profile(),
             )
         )
-    assert not (tmp_path / "verification-output" / "bad-prediction").exists()
+    assert not (tmp_path / "local-verification-output" / "bad-prediction").exists()
 
     with pytest.raises(
         ValueError,
@@ -145,7 +145,7 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
     ):
         run_local_verification(
             _verification_config(
-                run_root=tmp_path / "verification-output" / "bad-prediction-end",
+                run_root=tmp_path / "local-verification-output" / "bad-prediction-end",
                 start_date="2014-01-01",
                 end_date="2016-12-31",
                 prediction_train_end="2015-01-01",
@@ -154,10 +154,10 @@ def test_local_verification_workflow_rejects_invalid_override_windows(tmp_path):
                 profile=research_profile(),
             )
         )
-    assert not (tmp_path / "verification-output" / "bad-prediction-end").exists()
+    assert not (tmp_path / "local-verification-output" / "bad-prediction-end").exists()
 
 
-def test_local_verification_workflow_rejects_override_windows_outside_evidence_range(
+def test_local_verification_workflow_rejects_override_windows_outside_run_range(
     tmp_path,
 ) -> None:
     cases = [
@@ -205,7 +205,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
     ]
 
     for run_name, overrides, match in cases:
-        run_root = tmp_path / "verification-output" / run_name
+        run_root = tmp_path / "local-verification-output" / run_name
         with pytest.raises(ValueError, match=match):
             run_local_verification(
                 _verification_config(
@@ -221,7 +221,7 @@ def test_local_verification_workflow_rejects_override_windows_outside_evidence_r
 
 def test_local_verification_run_id_can_be_explicit_long_semantic_value(tmp_path):
     config = _verification_config(
-        run_root=tmp_path / "verification-output" / "s1",
+        run_root=tmp_path / "local-verification-output" / "s1",
         start_date="2014-01-01",
         end_date="2016-12-31",
         run_id="local_verification_smoke_a_share_2014_2016",
@@ -237,23 +237,23 @@ def test_local_verification_run_id_uses_shared_share_safe_contract(
     assert (
         module.resolve_local_verification_run_id(
             None,
-            tmp_path / "verification-output" / "run_202606",
+            tmp_path / "local-verification-output" / "run_202606",
         )
         == "run_202606"
     )
     assert (
         module.resolve_local_verification_run_id(
             "run_2026_06",
-            tmp_path / "verification-output" / "ignored",
+            tmp_path / "local-verification-output" / "ignored",
         )
         == "run_2026_06"
     )
 
     invalid_cases = (
-        (None, tmp_path / "verification-output" / "run_000001"),
-        (None, tmp_path / "verification-output" / "688001"),
-        ("csmar_run", tmp_path / "verification-output" / "safe"),
-        ("source_run", tmp_path / "verification-output" / "safe"),
+        (None, tmp_path / "local-verification-output" / "run_000001"),
+        (None, tmp_path / "local-verification-output" / "688001"),
+        ("csmar_run", tmp_path / "local-verification-output" / "safe"),
+        ("source_run", tmp_path / "local-verification-output" / "safe"),
     )
     for run_id, run_root in invalid_cases:
         with pytest.raises(ValueError, match="invalid_run_id"):
@@ -272,11 +272,11 @@ def test_local_verification_run_root_accepts_explicit_locations(
             raise ValueError(reason)
 
     for run_root in (
-        repo_root / "verification-output" / "s1",
+        repo_root / "local-verification-output" / "s1",
         repo_root / "outputs" / "local" / "a_share" / "s1",
         repo_root / ".run" / "smoke" / "s1",
         repo_root / ".run" / "reviews" / "s1",
-        tmp_path / "outside" / "verification-output" / "s1",
+        tmp_path / "outside" / "local-verification-output" / "s1",
     ):
         validate_local_run_root(run_root, repo_root)
 
@@ -289,7 +289,7 @@ def test_prepare_run_root_creates_explicit_repo_internal_output(
 ) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    run_root = repo_root / "verification-output" / "s1"
+    run_root = repo_root / "local-verification-output" / "s1"
 
     module._prepare_run_root(
         run_root,
@@ -312,7 +312,7 @@ def test_prepare_run_root_uses_git_boundary_outside_cwd(
     (repo_root / ".git").write_text("gitdir: ../repo.git\n", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
-    run_root = repo_root / "verification-output" / "s1"
+    run_root = repo_root / "local-verification-output" / "s1"
 
     monkeypatch.chdir(outside)
 

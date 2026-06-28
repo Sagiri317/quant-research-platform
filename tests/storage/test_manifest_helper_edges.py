@@ -87,7 +87,7 @@ def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> 
     )
 
     layer = manifests.build_layer_summary(
-        layer_root=tmp_path / "verification-output" / "layers",
+        layer_root=tmp_path / "local-verification-output" / "layers",
         logical_layer="processed",
         dataset_roots=(dataset_root, missing_root, failed_root),
     )

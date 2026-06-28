@@ -282,8 +282,11 @@ def test_qrp_local_verification_run_accepts_required_options(monkeypatch) -> Non
             {
                 "status": "PASS",
                 "run_id": "s1",
-                "run_root": "verification-output/s1",
-                "summary": {"status": "PASS", "run_root": "verification-output/s1"},
+                "run_root": "local-verification-output/s1",
+                "summary": {
+                    "status": "PASS",
+                    "run_root": "local-verification-output/s1",
+                },
             },
         )()
 
@@ -299,7 +302,7 @@ def test_qrp_local_verification_run_accepts_required_options(monkeypatch) -> Non
             "local-verification",
             "run",
             "--run-root",
-            "verification-output/s1",
+            "local-verification-output/s1",
             "--start-date",
             "2014-01-01",
             "--end-date",
@@ -316,7 +319,7 @@ def test_qrp_local_verification_run_accepts_required_options(monkeypatch) -> Non
     )
 
     assert result.exit_code == 0
-    assert calls[0].run_root == Path("verification-output/s1")
+    assert calls[0].run_root == Path("local-verification-output/s1")
     assert calls[0].start_date == "2014-01-01"
     assert calls[0].end_date == "2016-12-31"
     assert calls[0].prediction_train_end == "2014-06-30"
@@ -340,8 +343,11 @@ def test_qrp_local_verification_run_accepts_window_overrides(monkeypatch) -> Non
             {
                 "status": "PASS",
                 "run_id": "s2",
-                "run_root": "verification-output/s2",
-                "summary": {"status": "PASS", "run_root": "verification-output/s2"},
+                "run_root": "local-verification-output/s2",
+                "summary": {
+                    "status": "PASS",
+                    "run_root": "local-verification-output/s2",
+                },
             },
         )()
 
@@ -357,7 +363,7 @@ def test_qrp_local_verification_run_accepts_window_overrides(monkeypatch) -> Non
             "local-verification",
             "run",
             "--run-root",
-            "verification-output/s2",
+            "local-verification-output/s2",
             "--start-date",
             "2014-01-01",
             "--end-date",

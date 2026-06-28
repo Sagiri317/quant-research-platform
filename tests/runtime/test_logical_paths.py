@@ -32,11 +32,14 @@ def test_dataset_layer_from_path_uses_dataset_root_segments() -> None:
     )
     assert (
         dataset_layer_from_path(
-            Path("verification-output/s1/data/processed/a_share/factor/demo")
+            Path("local-verification-output/s1/data/processed/a_share/factor/demo")
         )
         == "processed"
     )
-    assert dataset_layer_from_path(Path("verification-output/s1/data/unknown")) is None
+    assert (
+        dataset_layer_from_path(Path("local-verification-output/s1/data/unknown"))
+        is None
+    )
 
 
 def test_generated_markers_only_include_current_run_tree() -> None:

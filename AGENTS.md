@@ -62,7 +62,7 @@ pytest PASS、governance PASS、handoff verifier PASS、single handoff verifier 
 
 `policy/` 只负责共享安全规则、ID 安全判断和 PASS/FAIL/NOT_RUN/BLOCKED 状态聚合，不 import QRP 业务层。`contracts/` 只定义结构合同、枚举、ID、时间窗口和基础校验，不保存共享安全规则事实。`catalog/` 只负责 generic registry class。
 
-`profiles/` 是 API、CLI、agent 和 workflow 共用的组合根，可以组装 catalog、source、market implementation 和 materializer。`research/` 是通用研究计算层，只构建 result，不写文件，不依赖具体市场实现或 sources。`compute/` 是 dataframe/tensor、portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data/raw、data/interim、data/processed、data/research layout，不定义 run output、report 或 evidence root。
+`profiles/` 是 API、CLI、agent 和 workflow 共用的组合根，可以组装 catalog、source、market implementation 和 materializer。`research/` 是通用研究计算层，只构建 result，不写文件，不依赖具体市场实现或 sources。`compute/` 是 dataframe/tensor、portfolio math 和 performance 数值核心。`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data/raw、data/interim、data/processed、data/research layout，不定义 run outputs、reports 或 review-safe file writers。
 
 `runtime/` 只提供 resources、logging、workflow records 和 execution metrics payload，不写报告内容。`reports/` 只 build/render evidence/report 内容，不写文件，不重算研究逻辑。`artifacts/` 只负责把 LOCAL_ONLY run outputs 和 REVIEW_SAFE evidence 写成文件。`workflows/` 只编排 research -> reports -> artifacts，不定义 policy regex，不直接写底层文件。`interfaces/` 只提供已批准的 API、CLI 和 service adapter。`agents/` 保持 proposal-only。`.agents/` 只承载治理、handoff 和 prompt tooling。
 

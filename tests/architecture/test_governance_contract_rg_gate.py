@@ -205,7 +205,12 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
         ),
         "retired_local_verification_evidence_window": "evidence_start",
         "retired_local_verification_evidence_range": "out_of_evidence_range",
+        "retired_local_verification_evidence_range_surface": (
+            "outside_evidence_range"
+        ),
         "retired_local_verification_evidence_output": "evidence-output",
+        "retired_local_verification_output_surface": "verification-output",
+        "retired_result_evidence_root_text": "evidence root",
         "retired_output_artifact_root_error": "output_must_use_artifact_root",
         "retired_verification_summary_contract_version_text": (
             "contract version `0.1`"
@@ -294,9 +299,14 @@ def test_active_docs_reject_retired_review_safety_names(
         "evidence_start",
         "evidence_end",
         "out_of_evidence_range",
+        "outside_evidence_range",
+        "evidence_range",
         "evidence_years",
         "evidence-output",
         "evidence_output",
+        "verification-output",
+        "verification_output",
+        "evidence root",
         "output_must_use_artifact_root",
         "contract version `0.1`",
         'schema_version = "0.1"',
@@ -336,6 +346,42 @@ def test_active_docs_reject_retired_review_safety_names(
         verify_governance.check_text_safety(result, tmp_path, [path.name])
 
         assert result.errors, sample
+
+
+def test_source_tree_rejects_retired_local_verification_surface_terms(
+    tmp_path: Path,
+) -> None:
+    from governance_contract import source_tree_active_test_literal_findings
+
+    repo = tmp_path / "repo"
+    test_file = repo / "tests" / "ordinary" / "test_local_verification_surface.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "",
+                "def test_ordinary_path_sample():",
+                "    run_root = Path('verification-output/s1')",
+                "    run_id = 'verification_output'",
+                "",
+                "def test_window_outside_evidence_range():",
+                "    label = 'evidence_range'",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+
+    findings = source_tree_active_test_literal_findings(repo)
+
+    assert {
+        "retired_local_verification_output_surface",
+        "retired_local_verification_evidence_range_surface",
+    }.issubset({str(finding["rule"]) for finding in findings})
 
 
 def test_retired_result_allowlist_does_not_cover_active_docs() -> None:
