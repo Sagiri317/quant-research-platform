@@ -78,10 +78,6 @@ def test_stage_profile_outputs_require_approved_report_spec(tmp_path):
         )
 
 
-def test_report_spec_has_no_allowed_output_root_field() -> None:
-    assert "allowed_output_root" not in OutputSpec.__dataclass_fields__
-
-
 def test_stage_profile_outputs_use_output_catalog_gate(tmp_path):
     frame = pd.DataFrame.from_records(
         [{"category": "evaluation", "stage": "ic", "seconds": 0.1, "n_calls": 1}]
@@ -141,7 +137,7 @@ def test_stage_profile_outputs_sanitize_outputs(tmp_path):
     assert "abcdef123456" not in combined
 
 
-def test_output_writers_do_not_accept_output_root() -> None:
+def test_output_writers_do_not_accept_output_dir() -> None:
     writer_signatures = (
         inspect.signature(write_stage_profile_outputs),
         inspect.signature(write_prediction_outputs),
@@ -149,7 +145,7 @@ def test_output_writers_do_not_accept_output_root() -> None:
     )
 
     assert all(
-        "output_root" not in signature.parameters for signature in writer_signatures
+        "output_dir" not in signature.parameters for signature in writer_signatures
     )
 
 

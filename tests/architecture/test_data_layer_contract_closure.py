@@ -17,9 +17,9 @@ NEGATIVE_GATE_FILES = {
     Path("tests/architecture/test_governance_contract_rg_gate.py"),
     Path("tests/architecture/test_data_layer_boundaries.py"),
 }
-# Only local/verification evidence fixture residue may name the source here.
-LOCAL_verification_summary_FIXTURE_SOURCE_LITERAL = (
-    'LOCAL_EVIDENCE_INTERIM_SOURCE = "csmar"'
+# Only local verification run fixture residue may name the source here.
+LOCAL_VERIFICATION_SUMMARY_FIXTURE_SOURCE_LITERAL = (
+    'LOCAL_VERIFICATION_INTERIM_SOURCE = "csmar"'
 )
 A_SHARE_CSMAR_ID_IMPORTS = {
     (
@@ -374,7 +374,7 @@ def test_a_share_csmar_residue_is_limited_to_verification_summary_fixture() -> N
             *A_SHARE_CSMAR_ID_RESIDUE_LINES,
             (
                 Path("verification/aggregates.py"),
-                LOCAL_verification_summary_FIXTURE_SOURCE_LITERAL,
+                LOCAL_VERIFICATION_SUMMARY_FIXTURE_SOURCE_LITERAL,
             ),
         }
     )

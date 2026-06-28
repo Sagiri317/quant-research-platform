@@ -96,9 +96,9 @@ RETIRED_GOVERNANCE_EXACT_PATHS = (
 
 RETIRED_GOVERNANCE_PREFIXES = ("docs/reports/clean-rewrite-0.1-",)
 
-# Intentional retired-surface negative rules for the run-output architecture
-# migration. These legacy paths and names must not reappear outside explicit
-# governance rules or negative tests.
+# Intentional retired-surface negative rules for the run-output architecture.
+# These paths and names must not reappear outside explicit governance rules or
+# negative tests.
 RUN_OUTPUT_ARCHITECTURE_RETIRED_PATHS = (
     "src/quant_research_platform/runtime/privacy.py",
     "src/quant_research_platform/contracts/privacy.py",
@@ -141,6 +141,14 @@ RUN_OUTPUT_ARCHITECTURE_RETIRED_NAME_RULES = (
 )
 
 RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
+    TextRule(
+        "retired_result_public_safe_evidence_tests",
+        (
+            r"(?<![A-Za-z0-9_])(?:test_public_safe_evidence"
+            r"(?:_data_contract)?(?:\.py)?|public_safe_evidence)"
+            r"(?![A-Za-z0-9_])"
+        ),
+    ),
     TextRule("retired_result_run_outputs", r"\brun_outputs\b", re.IGNORECASE),
     TextRule(
         "retired_result_outputs_local_layout",
@@ -154,7 +162,7 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
     ),
     TextRule(
         "retired_result_local_output_root",
-        r"(?:LocalVerificationRunConfig\.output_root|_prepare_output_root|--output-root)",
+        r"(?:\boutput_root\b|--output-root)",
     ),
     TextRule(
         "retired_result_compare_specialization",
@@ -181,6 +189,10 @@ RESULT_ARCHITECTURE_RETIRED_TEXT_RULES = (
         "retired_result_verification_evidence_symbol",
         r"\b(?:verification_evidence|build_verification_evidence_payload|"
         r"compare_verification_evidence|evidence_run|evidence_app)\b",
+    ),
+    TextRule(
+        "retired_result_local_evidence_interim_source",
+        r"\bLOCAL_EVIDENCE_INTERIM_SOURCE\b",
     ),
     TextRule("retired_result_layer_manifest", r"\blayer_manifest\b"),
     TextRule(
@@ -580,10 +592,6 @@ NEGATIVE_TEST_LITERAL_ALLOWLIST = {
         "tests/agents/test_verify_governance.py",
         "tests/architecture/test_governance_contract_rg_gate.py",
         "tests/architecture/test_handoff_package_contract.py",
-    ),
-    "retired_path_policy_docs": (
-        "AGENTS.md",
-        ".agents/skills/quant-research-platform-maintenance/references/verification-and-gates.md",
     ),
 }
 

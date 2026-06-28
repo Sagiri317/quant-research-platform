@@ -72,7 +72,7 @@ QRP 采用 current-contract-only。普通 tests 只保护当前合同。retired 
 
 新实现应替代旧实现，不应并行保留两个语义相同的入口。确需并行时，必须说明语义差异、生命周期、owner layer 和未来收敛方式。
 
-Retired governance paths 不得复活。`PROJECT_STATUS.md`、`.agents/briefs/current-qrp-status.md`、`docs/architecture/open-issues-register.md` 和 `docs/reports/clean-rewrite-0.1-*` 只要在 tracked tree 或 working tree 中存在，治理 gate 必须 `FAIL`。
+Retired governance path rules are owned by `governance_contract.py` and enforced by `verify_governance`.
 
 Retired stage naming 不得以文件名、路径名、Python function/class/fixture/常量名、JSON/YAML/TOML key 或静态字符串拼接形式复活。合法版本面包括 `QRP 0.1`、`0.1`、`0.1.0`、`/api/0.1`、`definition_version`、`workflow_version` 和 handoff `0.1` schema；带 `v` 前缀的 `0.1` API 版本路径不是当前 API 形式，只能出现在规则定义或 negative tests 中。QRP-owned generated JSON 顶层身份只使用 `schema_id`；Python internal model version 字段不能作为 generated JSON identity。
 

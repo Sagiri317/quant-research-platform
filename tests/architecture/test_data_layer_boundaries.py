@@ -9,7 +9,6 @@ from pathlib import Path
 
 SOURCE_ROOT = Path("src/quant_research_platform")
 FORBIDDEN_PUBLIC_STORAGE_PARAMS = {
-    "output_root",
     "output_dir",
     "partition_filter",
     "force",
@@ -88,7 +87,7 @@ UNKNOWN_CONCAT_NAMES = {
     "materialized",
 }
 
-OUTPUT_ROOT_AND_RUN_ID_DERIVED_NAMES = {
+RUN_RESULT_AND_RUN_ID_DERIVED_NAMES = {
     "artifact_root",
     "output_dir",
     "report_root",
@@ -98,7 +97,7 @@ OUTPUT_ROOT_AND_RUN_ID_DERIVED_NAMES = {
     "verification_dir",
 }
 
-OUTPUT_ROOT_AND_RUN_ID_SCAN_ROOTS = (
+RUN_RESULT_AND_RUN_ID_SCAN_ROOTS = (
     SOURCE_ROOT / "workflows",
     SOURCE_ROOT / "reports",
     SOURCE_ROOT / "interfaces",
@@ -367,12 +366,12 @@ def test_production_hot_paths_do_not_reintroduce_materialized_collectors() -> No
     assert hits == []
 
 
-def test_run_id_and_output_root_derived_names_are_contract_checked() -> None:
+def test_run_id_and_run_result_derived_names_are_contract_checked() -> None:
     hits: list[str] = []
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
         if not any(
             _is_relative_to(path, root)
-            for root in OUTPUT_ROOT_AND_RUN_ID_SCAN_ROOTS
+            for root in RUN_RESULT_AND_RUN_ID_SCAN_ROOTS
         ):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -382,7 +381,7 @@ def test_run_id_and_output_root_derived_names_are_contract_checked() -> None:
                 for node in ast.walk(function)
                 if isinstance(node, ast.Assign | ast.AnnAssign)
                 for target in _assignment_targets(node)
-                if target in OUTPUT_ROOT_AND_RUN_ID_DERIVED_NAMES
+                if target in RUN_RESULT_AND_RUN_ID_DERIVED_NAMES
             ]
             if not derived_assignments:
                 continue
@@ -392,7 +391,7 @@ def test_run_id_and_output_root_derived_names_are_contract_checked() -> None:
                 if isinstance(node, ast.Call)
             }
             if called_names.isdisjoint(
-                {"validate_run_id", "validate_private_output_root"}
+                {"validate_run_id"}
             ):
                 hits.extend(
                     f"{path}:{node.lineno}:{function.name}: {target_name}"

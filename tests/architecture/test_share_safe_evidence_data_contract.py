@@ -417,9 +417,9 @@ def test_verification_summary_source_fixture_is_not_public_market_contract(
         )
     )
 
-    assert aggregates.LOCAL_EVIDENCE_INTERIM_SOURCE == "csmar"
+    assert aggregates.LOCAL_VERIFICATION_INTERIM_SOURCE == "csmar"
     assert 'PRIVATE_INTERIM_SOURCE_ID = "csmar"' not in source
-    assert 'LOCAL_EVIDENCE_INTERIM_SOURCE = "csmar"' in source
+    assert 'LOCAL_VERIFICATION_INTERIM_SOURCE = "csmar"' in source
     assert "not an A-share market contract" in source
     assert "csmar" not in public_payloads
     assert "CSMAR" not in public_payloads

@@ -66,8 +66,8 @@ FULL_HISTORY_END_YEAR = 2025
 FULL_HISTORY_START_DATE = "2014-01-01"
 FULL_HISTORY_END_DATE = "2025-12-31"
 GENERATED_PANEL_MEMORY_EXPANSION_FACTOR = 8
-# Local verification evidence runner source fixture; not an A-share market contract.
-LOCAL_EVIDENCE_INTERIM_SOURCE = "csmar"
+# Local verification run source fixture; not an A-share market contract.
+LOCAL_VERIFICATION_INTERIM_SOURCE = "csmar"
 
 PROCESSED_ROOT_AREA_COVERAGE = {
     f"processed/a_share/panel/{market_panel_data_id()}": (
@@ -727,7 +727,7 @@ def _iter_generated_full_market_panel_session_chunks(
 def _local_interim_root(
     project_root: Path,
 ) -> Path:
-    return Path(project_root) / "data" / "interim" / LOCAL_EVIDENCE_INTERIM_SOURCE
+    return Path(project_root) / "data" / "interim" / LOCAL_VERIFICATION_INTERIM_SOURCE
 
 
 def _estimate_generated_full_panel_memory_bytes(

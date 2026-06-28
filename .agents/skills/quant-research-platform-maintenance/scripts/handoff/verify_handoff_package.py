@@ -26,8 +26,8 @@ if str(SCRIPT_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPT_REPO_SRC))
 
 from governance_contract import (  # noqa: E402
-    BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_DUPLICATE_SOURCE_ROOT_PREFIXES,
+    BLOCKED_PACKAGE_ENTRY_PARTS,
     BLOCKED_TASK_KEYS,
     BLOCKED_VALIDATION_KEYS,
     PACKAGE_FORBIDDEN_PATH_PARTS,
@@ -650,6 +650,9 @@ def blocked_package_entries(names: list[str]) -> list[str]:
     for name in names:
         parts = PurePosixPath(name.replace("\\", "/")).parts
         if any(part in BLOCKED_PACKAGE_ENTRY_PARTS for part in parts):
+            entries.append(name)
+            continue
+        if name.replace("\\", "/") in PACKAGE_FORBIDDEN_PATH_PARTS:
             entries.append(name)
             continue
         if is_reserved_handoff_evidence_path(name):

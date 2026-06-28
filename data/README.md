@@ -14,6 +14,6 @@
 REVIEW_SAFE evidence 的 fast synthetic gate 和 data/parquet contract gate 分别位于：
 
 ```text
-tests/architecture/test_public_safe_evidence.py
-tests/architecture/test_public_safe_evidence_data_contract.py
+tests/architecture/test_share_safe_evidence.py
+tests/architecture/test_share_safe_evidence_data_contract.py
 ```

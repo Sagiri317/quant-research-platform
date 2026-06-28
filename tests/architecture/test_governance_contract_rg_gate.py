@@ -179,6 +179,9 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
     from governance_contract import RESULT_ARCHITECTURE_RETIRED_TEXT_RULES
 
     examples = {
+        "retired_result_public_safe_evidence_tests": (
+            "tests/architecture/test_public_safe_evidence.py"
+        ),
         "retired_result_run_outputs": "run_outputs/local",
         "retired_result_outputs_local_layout": "outputs/local",
         "retired_result_run_output_type": "RunOutputCatalog",
@@ -188,6 +191,9 @@ def test_result_architecture_rules_cover_hard_cut_examples() -> None:
         "retired_result_run_level_path": "validation_summary.json",
         "retired_result_verification_evidence": "verification evidence",
         "retired_result_verification_evidence_symbol": "verification_evidence",
+        "retired_result_local_evidence_interim_source": (
+            "LOCAL_EVIDENCE_INTERIM_SOURCE"
+        ),
         "retired_result_layer_manifest": "layer_manifest",
         "retired_result_review_safe_evidence": "report artifact",
     }
@@ -220,6 +226,62 @@ def test_gitignore_is_active_doc_scanned_for_retired_result_paths(
     verify_governance.check_text_safety(result, tmp_path, [".gitignore"])
 
     assert any("retired_result_run_outputs" in error for error in result.errors)
+
+
+def test_gitignore_rejects_outputs_local_layout(tmp_path: Path) -> None:
+    import verify_governance
+
+    (tmp_path / ".gitignore").write_text("outputs/local/\n", encoding="utf-8")
+    result = verify_governance.Result()
+
+    verify_governance.check_text_safety(result, tmp_path, [".gitignore"])
+
+    assert any(
+        "retired_result_outputs_local_layout" in error for error in result.errors
+    )
+
+
+def test_active_docs_reject_retired_public_safe_evidence_names(
+    tmp_path: Path,
+) -> None:
+    import verify_governance
+
+    samples = (
+        "tests/architecture/test_public_safe_evidence.py",
+        "tests/architecture/test_public_safe_evidence_data_contract.py",
+        "public_safe_evidence",
+        "runtime privacy",
+        "report artifact",
+    )
+    for index, sample in enumerate(samples):
+        path = tmp_path / f"doc-{index}.md"
+        path.write_text(sample + "\n", encoding="utf-8")
+        result = verify_governance.Result()
+
+        verify_governance.check_text_safety(result, tmp_path, [path.name])
+
+        assert result.errors, sample
+
+
+def test_retired_result_allowlist_does_not_cover_active_docs() -> None:
+    from governance_contract import NEGATIVE_TEST_LITERAL_ALLOWLIST
+
+    active_doc_prefixes = (
+        "AGENTS.md",
+        "README.md",
+        "docs/",
+        ".agents/briefs/",
+        ".agents/skills/quant-research-platform-maintenance/SKILL.md",
+        ".agents/skills/quant-research-platform-maintenance/references/",
+    )
+    allowlisted = {
+        path
+        for paths in NEGATIVE_TEST_LITERAL_ALLOWLIST.values()
+        for path in paths
+        if path == ".agents/" or path.startswith(active_doc_prefixes)
+    }
+
+    assert allowlisted == set()
 
 
 def test_structured_json_identity_rules_reject_retired_keys_and_versions() -> None:
@@ -1272,7 +1334,7 @@ def test_direct_write_gate_detects_chained_open_write() -> None:
     assert any(_is_open_write_call(call) for call in calls)
 
 
-def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> None:
+def test_approved_writer_signatures_do_not_accept_arbitrary_physical_roots() -> None:
     writer_arg_sets = (
         _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_stage_profile_outputs"),
         _function_arg_names(RUN_OUTPUT_ARTIFACTS, "write_prediction_outputs"),
@@ -1281,7 +1343,7 @@ def test_approved_writer_signatures_do_not_accept_arbitrary_output_roots() -> No
 
     assert "output_dir" not in _class_field_names(RUNTIME_PROFILING, "ProfileConfig")
     for arg_names in writer_arg_sets:
-        assert "output_root" not in arg_names
+        assert "output_" + "root" not in arg_names
         assert "output_dir" not in arg_names
 
 

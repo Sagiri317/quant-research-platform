@@ -54,8 +54,8 @@ compare 按 `output_id` 配对，并使用 `output_definition_id` 与 metadata �
 share-safe evidence tests 分为纯 synthetic fast gate 和 data/parquet contract gate：
 
 ```bash
-python -m pytest tests/architecture/test_public_safe_evidence.py -q
-python -m pytest tests/architecture/test_public_safe_evidence_data_contract.py -q -m data_dependency
+python -m pytest tests/architecture/test_share_safe_evidence.py -q
+python -m pytest tests/architecture/test_share_safe_evidence_data_contract.py -q -m data_dependency
 ```
 
 handoff tests 分为 fast contract gate 和 slow integration gate；具体命令记录在 `README.md`、maintenance skill 和 verification reference 中。

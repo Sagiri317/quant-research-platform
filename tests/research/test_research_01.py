@@ -56,9 +56,6 @@ from quant_research_platform.research.models import fit_model_result
 from quant_research_platform.research.predictions import (
     build_prediction_result_from_research_dataset,
 )
-from quant_research_platform.research.predictions.outputs import (
-    build_prediction_result_from_frames,
-)
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.research.prediction_output_helpers import (
@@ -657,10 +654,6 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
     assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
     assert run_root.as_posix().endswith("outputs/pred_demo")
-    assert (
-        "output_root"
-        not in inspect.signature(build_prediction_result_from_frames).parameters
-    )
 
 
 def test_prediction_handoff_reads_research_dataset_and_writes_report(

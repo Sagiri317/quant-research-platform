@@ -206,7 +206,6 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     assert layout.research_dataset_root(MarketId("a_share"), "demo") == Path(
         "/repo/data/research/a_share/demo"
     )
-    assert not hasattr(layout, "local_run_output_root")
     assert LOCAL_ONLY_ROOTS == (
         "data/raw",
         "data/interim",

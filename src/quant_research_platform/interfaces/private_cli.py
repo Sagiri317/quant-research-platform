@@ -82,11 +82,11 @@ def local_verification_run(
     ] = ...,
     start_date: Annotated[
         str,
-        typer.Option("--start-date", help="Inclusive evidence start date."),
+        typer.Option("--start-date", help="Inclusive local verification start date."),
     ] = ...,
     end_date: Annotated[
         str,
-        typer.Option("--end-date", help="Inclusive evidence end date."),
+        typer.Option("--end-date", help="Inclusive local verification end date."),
     ] = ...,
     evaluation_start_date: Annotated[
         str | None,

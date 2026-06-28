@@ -780,7 +780,9 @@ def test_local_verification_workflow_runs_injected_generation_and_writes_artifac
     }
     assert run_payload["run_id"] == "s1"
     assert run_payload["root_ownership"]["replace_safe"] is True
-    dataset_manifest_paths = sorted((run_root / "data").rglob("_manifest/manifest.json"))
+    dataset_manifest_paths = sorted(
+        (run_root / "data").rglob("_manifest/manifest.json")
+    )
     expected_layers = {
         path.relative_to(run_root).parts[1] for path in dataset_manifest_paths
     }
